@@ -19,7 +19,11 @@ import numpy as np
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
-from modelopt.onnx.export._dynamo_adapter import normalize_dynamo_weight_paths
+from modelopt.onnx.export._dynamo_adapter import (
+    finalize_dynamo_export,
+    normalize_dynamo_weight_paths,
+)
+from modelopt.onnx.export.int4_exporter import INT4QuantExporter
 
 
 def _tensor(name, values, dtype=np.float32):
@@ -459,6 +463,58 @@ def test_normalize_splits_shared_int4_scale_without_mutating_source():
         )
 
 
+def test_int4_packer_ignores_standard_int8_qdq_in_dynamo_graph():
+    weight = _tensor("weight", np.ones((4, 2)))
+    int4_scale = _tensor("int4_scale", np.ones((4, 1)))
+    int8_scale = _tensor("int8_scale", 0.25)
+    int8_zero = _tensor("int8_zero", 0, np.int8)
+    model = _model(
+        [
+            helper.make_node(
+                "DequantizeLinear",
+                ["weight", "int4_scale"],
+                ["weight_dq"],
+                name="int4_weight_dq",
+                axis=1,
+                block_size=2,
+            ),
+            helper.make_node("MatMul", ["input", "weight_dq"], ["matmul_output"], name="matmul"),
+            helper.make_node(
+                "QuantizeLinear",
+                ["matmul_output", "int8_scale", "int8_zero"],
+                ["int8_q"],
+                name="int8_q",
+            ),
+            helper.make_node(
+                "DequantizeLinear",
+                ["int8_q", "int8_scale", "int8_zero"],
+                ["output"],
+                name="int8_dq",
+            ),
+        ],
+        initializers=[
+            weight,
+            int4_scale,
+            int8_scale,
+            int8_zero,
+        ],
+        inputs=[_value("input")],
+        outputs=[_value("output", shape=(2, 2))],
+    )
+
+    normalize_dynamo_weight_paths(model)
+    INT4QuantExporter.process_model(model)
+
+    int8_dq = next(node for node in model.graph.node if node.output[0] == "output")
+    assert int8_dq.op_type == "DequantizeLinear" and len(int8_dq.input) == 3
+    int4_dq = next(
+        node
+        for node in model.graph.node
+        if node.op_type == "DequantizeLinear" and len(node.input) == 2
+    )
+    assert next(attr.i for attr in int4_dq.attribute if attr.name == "block_size") == 2
+
+
 def test_normalize_leaves_standard_int8_conv_weight_qdq_intact():
     model = _model(
         [
@@ -482,3 +538,90 @@ def test_normalize_leaves_standard_int8_conv_weight_qdq_intact():
         "DequantizeLinear",
         "Conv",
     ]
+
+
+@pytest.mark.parametrize(
+    ("domain", "op_type", "name"),
+    [
+        ("tensorrt", "quantize_op", ""),
+        ("", "dynamic_block_quantize_op", ""),
+        ("trt", "TRT_FP4QDQ", ""),
+        ("trt", "DequantizeLinear", ""),
+        ("trt", "UnsupportedQuantize", ""),
+        ("custom", "QuantizeLinear", ""),
+        ("", "TRT_FP4DynamicQuantize", ""),
+        ("", "DequantizeLinear", "__modelopt_dynamo_int4__weight"),
+        ("trt", "TRT_MXFP8DequantizeLinear", "__modelopt_dynamo_mxfp8__weight"),
+    ],
+)
+def test_finalize_rejects_unresolved_or_unapproved_operators(domain, op_type, name):
+    model = _model(
+        [helper.make_node(op_type, ["input"], ["output"], domain=domain, name=name)],
+        inputs=[_value("input")],
+        outputs=[_value("output")],
+        trt_opset=1,
+    )
+
+    with pytest.raises(RuntimeError, match="unresolved quantization operators"):
+        finalize_dynamo_export(model, 23)
+
+
+def test_finalize_synchronizes_initializer_and_dq_metadata_and_drops_unused_trt_import():
+    weight = _tensor("weight", np.ones((2, 4)), np.uint8)
+    scale = _tensor("scale", 0.5)
+    model = _model(
+        [
+            helper.make_node("DequantizeLinear", ["weight", "scale"], ["weight_dq"]),
+            helper.make_node("Cast", ["weight_dq"], ["weight_half"], to=TensorProto.FLOAT16),
+        ],
+        initializers=[weight, scale],
+        inputs=[_value("weight", TensorProto.FLOAT, (9,))],
+        outputs=[_value("weight_half", TensorProto.FLOAT, (9,))],
+        value_info=[
+            _value("weight", TensorProto.FLOAT, (9,)),
+            _value("weight_dq", TensorProto.FLOAT, (9,)),
+        ],
+        trt_opset=1,
+    )
+
+    finalize_dynamo_export(model, 23)
+
+    assert [(item.domain, item.version) for item in model.opset_import] == [("", 23)]
+    weight_type = model.graph.input[0].type.tensor_type
+    duplicate_weight_type = model.graph.value_info[0].type.tensor_type
+    dq_type = model.graph.value_info[1].type.tensor_type
+    output_type = model.graph.output[0].type.tensor_type
+    assert weight_type.elem_type == TensorProto.UINT8
+    assert [dim.dim_value for dim in weight_type.shape.dim] == [2, 4]
+    assert duplicate_weight_type.elem_type == TensorProto.UINT8
+    assert [dim.dim_value for dim in duplicate_weight_type.shape.dim] == [2, 4]
+    assert dq_type.elem_type == TensorProto.FLOAT
+    assert [dim.dim_value for dim in dq_type.shape.dim] == [2, 4]
+    assert output_type.elem_type == TensorProto.FLOAT16
+    assert [dim.dim_value for dim in output_type.shape.dim] == [2, 4]
+
+
+@pytest.mark.parametrize(
+    ("model_opset", "trt_opset", "message"),
+    [
+        (24, None, "Expected ONNX opset 23; found 24"),
+        (23, None, "TensorRT-domain operators require trt opset 1"),
+        (23, 2, "TensorRT-domain operators require trt opset 1"),
+    ],
+)
+def test_finalize_requires_exact_opset_imports(model_opset, trt_opset, message):
+    nodes = []
+    if model_opset == 23:
+        nodes.append(
+            helper.make_node("TRT_FP4DynamicQuantize", ["input"], ["output"], domain="trt")
+        )
+    model = _model(
+        nodes,
+        inputs=[_value("input")],
+        outputs=[_value("output")],
+        opset=model_opset,
+        trt_opset=trt_opset,
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        finalize_dynamo_export(model, 23)

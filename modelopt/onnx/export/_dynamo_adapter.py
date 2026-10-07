@@ -28,6 +28,13 @@ from modelopt.onnx.quantization.graph_indexing import (
 
 __all__ = []
 
+_CARRIER_OPS = {"quantize_op", "dynamic_block_quantize_op"}
+_STATIC_MARKERS = {"TRT_FP4QDQ", "TRT_FP8QuantizeLinear", "TRT_FP8DequantizeLinear"}
+_ALLOWED_TRT_OPS = {
+    "TRT_FP4DynamicQuantize",
+    "TRT_MXFP8DynamicQuantize",
+    "TRT_MXFP8DequantizeLinear",
+}
 _DYNAMO_INT4_NODE_PREFIX = "__modelopt_dynamo_int4__"
 _DYNAMO_MXFP8_NODE_PREFIX = "__modelopt_dynamo_mxfp8__"
 
@@ -64,6 +71,47 @@ def _replace_initializer(graph: onnx.GraphProto, tensor: onnx.TensorProto) -> No
         graph.initializer.append(tensor)
     else:
         existing.CopyFrom(tensor)
+
+
+def _sync_initializer_metadata(graph: onnx.GraphProto) -> None:
+    declarations = {}
+    for value in (*graph.input, *graph.value_info, *graph.output):
+        declarations.setdefault(value.name, []).append(value)
+    for tensor in graph.initializer:
+        for value in declarations.get(tensor.name, []):
+            value.type.CopyFrom(
+                onnx.helper.make_tensor_value_info(tensor.name, tensor.data_type, tensor.dims).type
+            )
+
+    initializers = {tensor.name: tensor for tensor in graph.initializer}
+    synchronized_outputs = set()
+    for node in graph.node:
+        if node.domain != "" or node.op_type != "DequantizeLinear":
+            continue
+        weight = initializers.get(node.input[0])
+        values = declarations.get(node.output[0], [])
+        if weight is None or not values:
+            continue
+        scale = initializers.get(node.input[1])
+        elem_type = scale.data_type if scale is not None else values[0].type.tensor_type.elem_type
+        for value in values:
+            value.CopyFrom(
+                onnx.helper.make_tensor_value_info(node.output[0], elem_type, weight.dims)
+            )
+        synchronized_outputs.add(node.output[0])
+
+    for node in graph.node:
+        if node.domain != "" or node.op_type != "Cast" or node.input[0] not in synchronized_outputs:
+            continue
+        input_values = declarations.get(node.input[0], [])
+        output_values = declarations.get(node.output[0], [])
+        output_dtype = _attribute(node, "to")
+        if not input_values or not output_values or output_dtype is None:
+            continue
+        for output_value in output_values:
+            output_value.type.CopyFrom(input_values[0].type)
+            output_value.type.tensor_type.elem_type = output_dtype
+        synchronized_outputs.add(node.output[0])
 
 
 def _remove_nodes(graph: onnx.GraphProto, nodes: Iterable[onnx.NodeProto]) -> None:
@@ -490,4 +538,55 @@ def normalize_dynamo_weight_paths(model: onnx.ModelProto) -> onnx.ModelProto:
         elif kind == "nvfp4":
             _normalize_nvfp4_path(graph, marker, weight, prefix_reshape, path, terminal, producers)
 
+    return model
+
+
+def finalize_dynamo_export(model: onnx.ModelProto, expected_opset: int) -> onnx.ModelProto:
+    """Normalize final domains and reject unresolved Dynamo export artifacts."""
+    producers = get_tensor_producer_nodes(model.graph)
+    initializers = {tensor.name: tensor for tensor in model.graph.initializer}
+    for node in model.graph.node:
+        if node.domain == "trt" and node.op_type == "QuantizeLinear":
+            node.domain = ""
+        elif node.domain == "trt" and node.op_type == "DequantizeLinear":
+            producer = producers.get(node.input[0])
+            initializer = initializers.get(node.input[0])
+            if (isinstance(producer, onnx.NodeProto) and producer.op_type == "QuantizeLinear") or (
+                initializer is not None and initializer.data_type == onnx.TensorProto.FLOAT8E4M3FN
+            ):
+                node.domain = ""
+
+    unresolved = [
+        f"{node.domain}::{node.op_type}"
+        for node in model.graph.node
+        if node.domain == "tensorrt"
+        or node.op_type in _CARRIER_OPS
+        or node.op_type in _STATIC_MARKERS
+        or node.name.startswith((_DYNAMO_INT4_NODE_PREFIX, _DYNAMO_MXFP8_NODE_PREFIX))
+        or node.domain not in {"", "ai.onnx", "trt"}
+        or (node.op_type in _ALLOWED_TRT_OPS and node.domain != "trt")
+        or (node.domain == "trt" and node.op_type not in _ALLOWED_TRT_OPS)
+    ]
+    if unresolved:
+        raise RuntimeError(
+            "Dynamo ONNX export left unresolved quantization operators: "
+            + ", ".join(sorted(set(unresolved)))
+        )
+    if model.functions:
+        raise RuntimeError("Dynamo ONNX export left local ONNX functions in the model.")
+
+    default_opset = next(
+        (item for item in model.opset_import if item.domain in {"", "ai.onnx"}), None
+    )
+    if default_opset is None or default_opset.version != expected_opset:
+        actual = None if default_opset is None else default_opset.version
+        raise RuntimeError(f"Expected ONNX opset {expected_opset}; found {actual}.")
+    trt_nodes = [node for node in model.graph.node if node.domain == "trt"]
+    trt_import = next((item for item in model.opset_import if item.domain == "trt"), None)
+    if trt_nodes and (trt_import is None or trt_import.version != 1):
+        raise RuntimeError("TensorRT-domain operators require trt opset 1.")
+    if not trt_nodes and trt_import is not None:
+        model.opset_import.remove(trt_import)
+
+    _sync_initializer_metadata(model.graph)
     return model

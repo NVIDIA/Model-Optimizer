@@ -100,6 +100,19 @@ def test_build_engine_dynamic_shapes(setup_mocks):
     _assert_engine_saved(tmp_path, dummy_hash, engine_bytes, out)
 
 
+def test_build_engine_decomposable_attentions(setup_mocks):
+    tmp_path, mock_run, mock_onnx, dummy_hash = setup_mocks
+    engine_bytes, out = build_engine(
+        onnx_bytes=mock_onnx,
+        decomposable_attentions=True,
+        output_dir=tmp_path,
+    )
+
+    command = mock_run.call_args.args[0]
+    assert "--decomposableAttentions=*" in command
+    _assert_engine_saved(tmp_path, dummy_hash, engine_bytes, out)
+
+
 @pytest.mark.parametrize("enable_layerwise", [False, True])
 @pytest.mark.parametrize("profiling_runs", [1, 2])
 def test_profile_engine_variants(setup_mocks, enable_layerwise, profiling_runs):

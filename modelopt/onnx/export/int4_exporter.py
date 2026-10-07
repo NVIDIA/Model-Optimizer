@@ -23,7 +23,14 @@ from modelopt.onnx.quantization.graph_indexing import get_tensor_producer_nodes
 from modelopt.onnx.quantization.qdq_utils import cast_initializer_to_dtype
 from modelopt.onnx.quantization.quant_utils import pack_weights_to_int4
 
+from ._dynamo_adapter import _DYNAMO_INT4_NODE_PREFIX
 from .base_exporter import ONNXQuantExporter
+
+
+def _get_weight_dq_nodes(graph: onnx.GraphProto) -> list[onnx.NodeProto]:
+    nodes = [node for node in graph.node if node.op_type == "DequantizeLinear"]
+    dynamo_nodes = [node for node in nodes if node.name.startswith(_DYNAMO_INT4_NODE_PREFIX)]
+    return dynamo_nodes or nodes
 
 
 class INT4QuantExporter(ONNXQuantExporter):
@@ -34,11 +41,15 @@ class INT4QuantExporter(ONNXQuantExporter):
         """Pre-processes the ONNX model for INT4 quantization."""
         graph = onnx_model.graph
         value_info_map = {value_info.name: value_info for value_info in graph.value_info}
-        weight_dq_nodes = [node for node in graph.node if node.op_type == "DequantizeLinear"]
+        weight_dq_nodes = _get_weight_dq_nodes(graph)
         tensor_producer_map = get_tensor_producer_nodes(graph, get_initializer_producers=True)
 
         nodes_to_remove = []
         for node in weight_dq_nodes:
+            if node.name.startswith(_DYNAMO_INT4_NODE_PREFIX) and any(
+                attr.name == "_target_shape" for attr in node.attribute
+            ):
+                continue
             weight_name = node.input[0]
             logger.debug(f"Restructuring graph for weight {weight_name}")
 
@@ -73,11 +84,10 @@ class INT4QuantExporter(ONNXQuantExporter):
             # Check if there's an optional Cast node between Reshape and Transpose/MatMul/Gemm
             next_node = reshape_child_nodes[0]
             if next_node.op_type == "Cast":
-                # Remove unnecessary Cast node
                 cast_node = next_node
-                nodes_to_remove.append(cast_node.name)
                 cast_child_nodes = [n for n in graph.node if cast_node.output[0] in n.input]
                 next_node = cast_child_nodes[0]
+                nodes_to_remove.append(cast_node.name)
 
             # Store transpose permutation if present
             if next_node.op_type == "Transpose":
@@ -125,7 +135,7 @@ class INT4QuantExporter(ONNXQuantExporter):
         """Computes the scales for the weights in the ONNX model for INT4 quantization."""
         graph = onnx_model.graph
         initializer_map = {initializer.name: initializer for initializer in graph.initializer}
-        weight_dq_nodes = [node for node in graph.node if node.op_type == "DequantizeLinear"]
+        weight_dq_nodes = _get_weight_dq_nodes(graph)
         tensor_producer_map = get_tensor_producer_nodes(graph, get_initializer_producers=True)
 
         for node in weight_dq_nodes:
@@ -207,7 +217,7 @@ class INT4QuantExporter(ONNXQuantExporter):
         """Compresses the weights in the ONNX model for INT4 quantization."""
         graph = onnx_model.graph
         initializer_map = {initializer.name: initializer for initializer in graph.initializer}
-        weight_dq_nodes = [node for node in graph.node if node.op_type == "DequantizeLinear"]
+        weight_dq_nodes = _get_weight_dq_nodes(graph)
 
         for node in weight_dq_nodes:
             weight_name = node.input[0]
@@ -231,6 +241,9 @@ class INT4QuantExporter(ONNXQuantExporter):
             return node.op_type == "Mul" and has_pqs_input
 
         graph = onnx_model.graph
+        is_dynamo_export = any(
+            node.name.startswith(_DYNAMO_INT4_NODE_PREFIX) for node in graph.node
+        )
         initializer_map = {initializer.name: initializer for initializer in graph.initializer}
         nodes_to_remove = []
 
@@ -253,6 +266,10 @@ class INT4QuantExporter(ONNXQuantExporter):
         for node in graph.node:
             if is_pre_quant_scale_node(node):
                 pqs_child_nodes = [n for n in graph.node if node.output[0] in n.input]
+                if is_dynamo_export and not (
+                    len(pqs_child_nodes) == 1 and pqs_child_nodes[0].op_type == "Cast"
+                ):
+                    continue
                 assert len(pqs_child_nodes) == 1, f"Expected exactly one child node for {node.name}"
                 cast_node = pqs_child_nodes[0]
                 assert cast_node.op_type == "Cast", f"Expected Cast node for {node.name}"
@@ -279,5 +296,9 @@ class INT4QuantExporter(ONNXQuantExporter):
                 )
             ):
                 cast_initializer_to_dtype(node, "Half", initializer_map)
+
+        for node in graph.node:
+            if node.name.startswith(_DYNAMO_INT4_NODE_PREFIX):
+                node.name = node.name.removeprefix(_DYNAMO_INT4_NODE_PREFIX)
 
         return onnx_model
