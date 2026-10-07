@@ -10,9 +10,84 @@ with a differentiable Torch adjoint. The recipes select ordinary token-state INT
 or INT8 with Hadamard rotation and optional ReplaySSM. This workflow quantizes
 recurrent state only.
 
-See [State quantization alignment](STATE_QUANTIZATION.md) for the numerical
-contract and validation results. Native kernel equivalence and successful training
-steps do not establish model-quality recovery or training throughput.
+## Training/serving mismatch and solution
+
+### Why chunk-only state QAT can disagree with serving
+
+GDN and KDA training normally process many tokens with chunked prefill kernels.
+Serving processes the prompt with prefill, then updates the recurrent state for
+each generated token. Applying state quantize/dequantize (QDQ) once per training
+chunk does not reproduce the state consumed by each decode token.
+
+Let `F_t` be the state update for token `t`, and `Q` be QDQ. Starting from the same
+state `S`, even a two-token example gives different rounded states in general:
+
+```text
+QDQ only at the chunk boundary: Q(F_2(F_1(S)))
+QDQ after each decode update:   Q(F_2(Q(F_1(S))))
+```
+
+The second decode update consumes the first update's rounded state. The chunked
+computation consumes its unrounded state, so it follows a different trajectory.
+A straight-through estimator (STE) changes the backward rule; it cannot repair
+this forward mismatch.
+
+Matching the QDQ boundaries is also insufficient if the arithmetic differs.
+Prefill and recurrent kernels can use different BF16 casts, reduction orders,
+normalization, and gate calculations. Small differences can cross INT8 rounding
+thresholds and affect later tokens. ReplaySSM additionally reconstructs state
+from a quantized checkpoint and a weighted BF16 key/update ring; an ordinary FP32
+recurrence does not reproduce that arithmetic.
+
+### Match each training phase to its serving phase
+
+The solution is **a native chunked prefix followed by a serving-aligned recurrent
+suffix**. `--prefill-tokens` selects the split in this example;
+`linear_attention_training_phase(model, prefill_lengths)` supplies it to the
+converted layers. All tokens still come from the training batch through teacher
+forcing; no generation loop or running vLLM server is required.
+
+```text
+prompt tokens                   completion tokens
+[native chunked prefill] -> QDQ handoff -> [native token/replay updates]
+       training prefix                       training suffix
+```
+
+1. **Prefix:** use the selected serving prefill arithmetic. A fresh prefix has
+   no internal state QDQ; native floating-point rounding still applies. A
+   continuation prefix encodes its incoming nonzero state according to the cache
+   policy. Keeping the prefix chunked matches serving prefill.
+2. **Handoff:** encode the prefix's final state before the first suffix token.
+   Ordinary state QDQ uses TensorQuantizer; the ReplaySSM profile uses its native
+   INT8 + Hadamard checkpoint encoding. An empty suffix performs no handoff QDQ.
+3. **Suffix:** use the native recurrent arithmetic and cache schedule. Token mode
+   quantizes each next-token state; replay mode retains BF16 key/update entries
+   and quantizes at checkpoint refreshes. Both read the current output from the
+   working state before checkpoint rounding. KDA's per-key-channel decay follows
+   the selected native implementation as well.
+
+For the ordinary state-only serving plugin, QDQ happens **before** each native
+decode call; training retains QDQ values **after** each update. These placements
+give the next token the same input when the same deterministic QDQ is applied once:
+if serving retains working state `W_t`, training retains `Q(W_t)`, and the next
+serving call also consumes `Q(W_t)`. Raw stored tensors need not be identical;
+compare the states consumed by the recurrence and the resulting outputs.
+
+The native kernels supply forward values. ModelOpt attaches a differentiable
+Torch computation for backward and uses identity STE through casts and QDQ.
+The example applies QAT or QAD loss to the suffix, with gradients flowing through the
+handoff into the prefix. This lets training observe the cache rounding used by
+the selected serving policy.
+
+Native-cache checks compare outputs, checkpoint values/scales, and replay entries;
+training checks verify suffix-to-prefix gradients and optimizer updates. The
+reproduced mismatch is resolved for the tested profiles and runtime settings.
+See [State quantization alignment](STATE_QUANTIZATION.md) for the tests, earlier
+failed approaches, and results. Exact kernel/cache matches do not establish
+full-model quality recovery or training throughput. Match the serving version,
+quantizer settings, initial state, and phase boundaries when evaluating; engine
+scheduling and prompts split across multiple prefill calls still need integration
+validation.
 
 ## Run the example
 
@@ -185,12 +260,8 @@ grouping still comes from `TensorQuantizer.block_sizes`.
 
 Both profiles fix working-state readout, QDQ at handoff, and no internal prefix
 QDQ. These are native arithmetic requirements, not separate configuration knobs.
-Supported older nested `state`/`decode`/`replay` configs migrate on load; newly
-saved policies use the flat schema. The old nested classes are retained only as
-pickle deserialization names and are not part of the public API.
-Reference training (`backend="reference"` or `precision="full"`) is retired.
-Older `backend="matmul"` policies load only if they already select a native
-serving precision; configurations are never silently switched to different arithmetic.
+Use the flat schema above. Earlier unpublished nested `state`/`decode`/`replay`
+configs and reference-training policies are unsupported.
 
 Each `linear_attention` rule assigns the policy to matching modules. ModelOpt saves
 it with the registered quantizers. Batch prefix lengths remain runtime metadata.
@@ -296,10 +367,9 @@ To customize the CLI, copy a recipe YAML and pass `--recipe /path/to/recipe.yaml
 
 ### Migrating chunk-only state QAT
 
-Chunk-only state QAT is retired. An old configuration can be loaded for inspection,
-but executing enabled state quantization with `backend="fla"` raises a migration
-error. Select a serving recipe and supply explicit prefix lengths; no automatic
-conversion guesses a different QDQ schedule.
+Chunk-only state QAT is retired. Enabling GDN or KDA state quantization without
+`backend="serving"` fails during conversion. Select a serving recipe and supply
+explicit prefix lengths; conversion does not infer a different QDQ schedule.
 
 W-only QAT is also retired: enabled `gdn_w_quantizer` configurations or checkpoints
 raise an error. The disabled handle remains loadable for checkpoint compatibility.
@@ -341,7 +411,7 @@ optimizer.step()
 
 The shared recipe selects both GDN and KDA state quantizers. State quantization is dynamic, so the recipe uses
 `algorithm=None` without a calibration pass. The native replay profile retains
-BF16 factors; keep legacy replay key/update quantizer handles disabled.
+BF16 key/update entries without separate factor quantizers.
 
 Policies persist through ModelOpt save/restore. Per-batch prefix lengths are
 runtime metadata and must be supplied for each workload. The context restores
