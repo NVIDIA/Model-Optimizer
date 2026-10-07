@@ -15,16 +15,10 @@ Use WebSearch to find the model card (HuggingFace, build.nvidia.com). Read it ca
     best source of a default when the card is silent. Pre-2026 releases are out
     of scope there — read their cards.
 - Context length (`deployment.extra_args: "--max-model-len <value>"`)
-- **Output length (`max_new_tokens`) — mandatory extraction.** Use a card value
-  only if it is explicitly tied to the applicable evaluation; cite the source.
-  Do not take the highest number, generic output-length recommendations,
-  quickstart/OpenCode examples, or `generation_config.json` defaults. Cross-check
-  `nvfp4-modelcard-sampling.md` for the evaluated model and applicable evaluation,
-  not a same-family output-budget fallback. If neither source discloses an
-  applicable evaluation budget, retain **65536** (reasoning) / **16384**
-  (non-reasoning) and note the missing guidance. Apply one top-level ceiling
-  (no per-task overrides); see SKILL.md Step 3
-  "`max_new_tokens` — mandatory model-card lookup".
+- **Output length (`max_new_tokens`) — mandatory extraction.** Record any budget
+  explicitly tied to the applicable evaluation, with its source. Follow the
+  [launcher workflow's token-budget rule](launcher-workflow.md#max_new_tokens--mandatory-model-card-lookup)
+  for selecting the value and fallback.
 - TP/DP settings (to set them appropriately, AskUserQuestion on how many GPUs the model will be deployed)
 - Reasoning config (if applicable):
   - reasoning on/off: use either:

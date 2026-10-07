@@ -15,11 +15,6 @@ is silent or ambiguous. It does not replace reading the card — see
 
 ## Lookup
 
-**For output budgets, use only values explicitly tied to the evaluated model's
-applicable evaluation.** The recommended-sampling and same-family fallbacks below
-apply to `temperature` / `top_p`, not `max_new_tokens`. Without an applicable
-evaluation budget, retain SKILL.md's **65536** / **16384** fallback.
-
 **The card is the source of truth; this table is a reference, not a constraint.**
 Use it to confirm what you read, to fill a gap when the card is silent, and as a
 sanity check when you are unsure — never to override a value the card states.
@@ -28,9 +23,11 @@ sanity check when you are unsure — never to override a value the card states.
    it, but note in the config comment that it is recommended sampling, not a
    stated eval setting; if a same-family `eval` row disagrees, surface both.
    `—` → that field is unpublished; resolve **it alone** via step 2.
-   For `max_num_tokens`, verify the source ties the value to the applicable
-   evaluation. Task-specific notes apply only to that task; do not choose the
-   highest value or use another benchmark's budget.
+   `max_num_tokens` is the card's *headline* cap — where a note names a higher
+   per-task cap (GLM-5.2 GPQA `100000`, Qwen3.5-397B-V2 τ²-Telecom `128000`,
+   Kimi-K3 uncapped for Terminal-Bench) and that task is in your suite, SKILL.md
+   Step 3's take-the-highest rule governs the single top-level value, not the
+   column.
 2. **No row** (new or unreleased variant, non-NVIDIA baseline, pre-2026) → take
    the nearest same-family rows as the expected value.
 3. **Card vs. table.** Agree → proceed. Card silent + family consistent → adopt
@@ -107,9 +104,9 @@ that tie. `max_num_tokens` is the max generation length, i.e.
   `384000` is a long-context outlier.
 - **Per-task overrides are narrow** — SciCode (lower temperature), τ²-Bench
   Telecom (greedy or larger cap), GPQA Diamond (larger cap), Terminal-Bench
-  (uncapped). SKILL.md Step 3 forbids per-task `max_new_tokens`; only a budget
-  explicitly tied to the applicable evaluation can override the fallback,
-  not the maximum across unrelated benchmarks.
+  (uncapped). SKILL.md Step 3 forbids per-task `max_new_tokens`, so when a card
+  lists two caps **take the maximum** as the single top-level value and note the
+  split in a comment.
 
 ## Refreshing
 
