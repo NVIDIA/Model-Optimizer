@@ -43,6 +43,11 @@ from modelopt.onnx.export import (
     NVFP4QuantExporter,
     ONNXQuantExporter,
 )
+from modelopt.onnx.export._dynamo_adapter import (
+    _sync_initializer_metadata,
+    finalize_dynamo_export,
+    normalize_dynamo_weight_paths,
+)
 from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_with_smallest_nonzero
 from modelopt.onnx.utils import (
     change_casts_to_fp16,
@@ -584,7 +589,11 @@ def get_onnx_bytes_and_metadata(
     autocast = torch.autocast("cuda") if use_torch_autocast else nullcontext()
 
     if dynamo_export and not onnx_load_path:
-        from modelopt.torch.quantization._dynamo_onnx import _validate_dynamo_quantization
+        # ONNXScript is an optional Dynamo dependency; legacy export must not import it.
+        from modelopt.torch.quantization._dynamo_onnx import (
+            _get_dynamo_onnx_translation_table,
+            _validate_dynamo_quantization,
+        )
 
         dynamo_validation = _validate_dynamo_quantization(model)
     else:
@@ -640,8 +649,6 @@ def get_onnx_bytes_and_metadata(
     with torch.inference_mode(), autocast, quantizer_context, conv_wq_context:
         additional_kwargs = {}
         if dynamo_export:
-            from modelopt.torch.quantization._dynamo_onnx import _get_dynamo_onnx_translation_table
-
             additional_kwargs["custom_translation_table"] = _get_dynamo_onnx_translation_table()
             if "fallback" in inspect.signature(torch.onnx.export).parameters:
                 additional_kwargs["fallback"] = False
@@ -680,12 +687,6 @@ def get_onnx_bytes_and_metadata(
     )
 
     if dynamo_export:
-        from modelopt.onnx.export._dynamo_adapter import (
-            _sync_initializer_metadata,
-            finalize_dynamo_export,
-            normalize_dynamo_weight_paths,
-        )
-
         onnx_opt_graph = normalize_dynamo_weight_paths(onnx_opt_graph)
 
     onnx_opt_graph = quantize_weights(model, onnx_opt_graph)

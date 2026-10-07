@@ -126,6 +126,7 @@ def _quantize_impl(
     if num_bits == 8 and exponent_bits == 4:
         return scaled_e4m3_impl(inputs=inputs, amax=amax)
     elif isinstance(num_bits, int):
+        # CPU export executes this carrier directly; use the same math as the eager CPU fallback.
         quantize_impl = fake_quant_impl if inputs.is_cuda else _tensor_quant
         return quantize_impl(
             inputs=inputs,

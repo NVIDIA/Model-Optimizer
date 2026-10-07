@@ -84,16 +84,11 @@ class INT4QuantExporter(ONNXQuantExporter):
 
             # Check if there's an optional Cast node between Reshape and Transpose/MatMul/Gemm
             next_node = reshape_child_nodes[0]
-            weight_output = node.output[0]
             if next_node.op_type == "Cast":
                 cast_node = next_node
                 cast_child_nodes = [n for n in graph.node if cast_node.output[0] in n.input]
                 next_node = cast_child_nodes[0]
-                if node.name.startswith(_DYNAMO_NODE_PREFIX):
-                    weight_output = cast_node.output[0]
-                else:
-                    # Preserve the legacy path, which removes this cast.
-                    nodes_to_remove.append(cast_node.name)
+                nodes_to_remove.append(cast_node.name)
 
             # Store transpose permutation if present
             if next_node.op_type == "Transpose":
@@ -127,7 +122,7 @@ class INT4QuantExporter(ONNXQuantExporter):
                 f"Expected MatMul or Gemm node for {node.name}"
             )
             # Rewire MatMul to use DequantizeLinear output directly
-            matmul_node.input[1] = weight_output
+            matmul_node.input[1] = node.output[0]
 
         # Remove transpose, reshape, and constant nodes
         new_nodes = [node for node in graph.node if node.name not in nodes_to_remove]

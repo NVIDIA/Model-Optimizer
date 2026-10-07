@@ -26,6 +26,8 @@ from modelopt.onnx.quantization.graph_indexing import (
     get_tensor_producer_nodes,
 )
 
+__all__ = []
+
 _CARRIER_OPS = {"quantize_op", "dynamic_block_quantize_op"}
 _STATIC_MARKERS = {"TRT_FP4QDQ", "TRT_FP8QuantizeLinear", "TRT_FP8DequantizeLinear"}
 _ALLOWED_TRT_OPS = {
@@ -338,21 +340,13 @@ def _normalize_int4_path(
             )
     else:
         blocked_shape = [-1, block_size]
+    _validate_restoring_reshape(path, weight, producers, "INT4")
     blocked_weight = numpy_helper.to_array(weight).reshape(blocked_shape)
     _replace_initializer(graph, numpy_helper.from_array(blocked_weight, weight.name))
     marker.input[0] = weight.name
 
     path = _remove_identity(graph, path, marker.output[0])
     reshape = next((node for node in path if node.op_type == "Reshape"), None)
-    if reshape is not None:
-        restored_shape = [
-            int(dim) for dim in numpy_helper.to_array(_constant_tensor(producers, reshape.input[1]))
-        ]
-        if restored_shape != original_shape:
-            raise NotImplementedError(
-                f"Unsupported Dynamo INT4 weight '{weight.name}': restoring Reshape does not "
-                "match the source initializer shape."
-            )
 
     block_axis = len(original_shape) - 1
     marker.attribute.append(onnx.helper.make_attribute("_target_shape", original_shape))
@@ -411,14 +405,7 @@ def _normalize_nvfp4_path(
             raise NotImplementedError(
                 f"Unsupported Dynamo NVFP4 weight '{weight.name}': missing restoring Reshape."
             )
-        restored_shape = [
-            int(dim) for dim in numpy_helper.to_array(_constant_tensor(producers, reshape.input[1]))
-        ]
-        if restored_shape != list(weight.dims):
-            raise NotImplementedError(
-                f"Unsupported Dynamo NVFP4 weight '{weight.name}': restoring Reshape does not "
-                "match the source initializer shape."
-            )
+        _validate_restoring_reshape(path, weight, producers, "NVFP4")
         marker.input[0] = weight.name
         prefix_nodes.append(prefix_reshape)
         removable.append(reshape)
