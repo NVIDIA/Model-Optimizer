@@ -1,0 +1,21 @@
+# scale_type shorthand merges into block_sizes.type
+_test:
+  description: "scale_type override merges into block_sizes preserving existing values"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_config:
+      quantize_config:
+        quant_cfg:
+          "*weight_quantizer":
+            block_sizes:
+              type: dynamic
+
+version: "1.0"
+quantization:
+  preset: nvfp4_local_hessian
+  overrides:
+    - pattern: "*weight_quantizer"
+      scale_type: dynamic
