@@ -223,7 +223,7 @@ def test_trtexec_run_returns_remote_safety_latency(tmp_path):
     """Remote safety autotuning benchmarks the built engine on the target."""
     remote_url = (
         '"ssh://alice@10.0.0.5:2222?'
-        'remote_exec_path=/opt/trt/bin/trtexec&remote_lib_path=/opt/trt/lib"'
+        'remote_exec_path=/opt/trt/bin/timing_server&remote_lib_path=/opt/trt/lib"'
     )
     with patch.object(bm, "_check_for_trtexec"):
         benchmark = TrtExecBenchmark(
@@ -261,12 +261,12 @@ def test_trtexec_run_returns_remote_safety_latency(tmp_path):
     local_command = run_mock.call_args_list[0].args[0]
     assert (
         "--remoteAutoTuningConfig=ssh://alice@10.0.0.5:2222?"
-        "remote_exec_path=/opt/trt/bin/trtexec&remote_lib_path=/opt/trt/lib"
+        "remote_exec_path=/opt/trt/bin/timing_server&remote_lib_path=/opt/trt/lib"
     ) in local_command
     assert "GPU Compute Time" in log_file.read_text()
     remote_command = run_mock.call_args_list[2].args[0]
     assert remote_command[0] == "ssh"
-    assert "trtexec_safe" in remote_command[-1]
+    assert "/opt/trt/bin/trtexec_safe" in remote_command[-1]
     assert "--useCudaGraph" in remote_command[-1]
     assert "--warmUp=2" in remote_command[-1]
     assert "--iterations=4" in remote_command[-1]
