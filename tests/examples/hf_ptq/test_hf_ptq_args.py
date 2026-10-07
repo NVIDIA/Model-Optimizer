@@ -885,3 +885,64 @@ def test_post_quantize_export_survives_a_failed_sanity_generate(monkeypatch):
         )
 
     assert len(export_calls) == 1
+
+
+@pytest.mark.usefixtures("clean_env")
+def test_main_makes_a_hub_checkpoint_local_before_loading(monkeypatch, tmp_path):
+    """--pyt_ckpt_path keeps the Hub ID; the model loads from the local copy resolved first."""
+    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "org/model")
+    calls = []
+
+    def ensure_local_checkpoint(model_name_or_path):
+        calls.append(("ensure_local_checkpoint", model_name_or_path))
+        return "org/model", str(tmp_path)
+
+    class _LoadReachedError(Exception):
+        pass
+
+    def load_model(args):
+        calls.append(
+            ("load_model", args.pyt_ckpt_path, args.hub_model_id, args.local_checkpoint_path)
+        )
+        raise _LoadReachedError
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.compiler, "set_stance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hf_ptq, "launch_memory_monitor", lambda: None)
+    monkeypatch.setattr(hf_ptq, "ensure_local_checkpoint", ensure_local_checkpoint)
+    monkeypatch.setattr(hf_ptq, "load_model", load_model)
+
+    with pytest.raises(_LoadReachedError):
+        hf_ptq.main(args)
+
+    assert calls == [
+        ("ensure_local_checkpoint", "org/model"),
+        ("load_model", "org/model", "org/model", str(tmp_path)),
+    ]
+
+
+def test_tensorrt_llm_export_copies_non_model_files_from_the_local_copy(monkeypatch, tmp_path):
+    """The deprecated TensorRT-LLM exporter does not copy them itself; hf_ptq does, from disk."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "org/model",
+        "--export_path",
+        str(tmp_path / "export"),
+        "--sparsity_fmt",
+        "sparsegpt",
+    )
+    args.hub_model_id, args.local_checkpoint_path = "org/model", str(tmp_path / "local")
+    args.dist_state = SimpleNamespace(is_main=True)
+    copies = []
+    monkeypatch.setattr(hf_ptq, "has_spec_opt", lambda model: False)
+    monkeypatch.setattr(hf_ptq, "is_multimodal_model", lambda model: False)
+    monkeypatch.setattr(hf_ptq, "is_trtllm_enc_dec_export", lambda model_type: False)
+    monkeypatch.setattr(hf_ptq, "remove_hook_from_module", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hf_ptq, "export_tensorrt_llm_checkpoint", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hf_ptq, "copy_non_model_files", lambda *args: copies.append(args))
+
+    model = torch.nn.Linear(1, 1)
+    hf_ptq.export_quantized(args, model, model, "llama")
+
+    assert copies == [(str(tmp_path / "local"), str(tmp_path / "export"))]
