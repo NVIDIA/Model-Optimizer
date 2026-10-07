@@ -363,6 +363,36 @@ def test_fsdp2_kv_autoquant_rejected_before_model_load(monkeypatch):
         hf_ptq.load_model(SimpleNamespace(use_fsdp2=True, recipe="autoquant"))
 
 
+@pytest.mark.parametrize("has_mtp", [False, True])
+@pytest.mark.parametrize("declared", [False, True])
+def test_fsdp2_rejects_mtp_before_distributed_loading(monkeypatch, tmp_path, has_mtp, declared):
+    """MTP tensors cannot reach FSDP2's unquantized-tail passthrough, even without metadata."""
+    native = pytest.importorskip("transformers.models.nemotron_h.configuration_nemotron_h")
+    native.NemotronHConfig(
+        architectures=["NemotronHForCausalLM"],
+        num_nextn_predict_layers=int(declared),
+    ).save_pretrained(tmp_path)
+    monkeypatch.setenv("RANK", "0")
+    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", str(tmp_path), "--use_fsdp2")
+    args.dist_state = SimpleNamespace(device="cpu", rank=0, world_size=1)
+    keys = ["mtp.layers.0.eh_proj.weight", "mtp.layers.1.final_layernorm.weight"] if has_mtp else []
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": dict.fromkeys(keys, "model-00001.safetensors")})
+    )
+
+    def distributed_load(*args, **kwargs):
+        raise RuntimeError("distributed loader reached")
+
+    monkeypatch.setattr(hf_ptq, "parallel_load_and_prepare_fsdp2", distributed_load)
+    error, message = (
+        (NotImplementedError, "Nemotron-H MTP")
+        if has_mtp
+        else (RuntimeError, "distributed loader reached")
+    )
+    with pytest.raises(error, match=message):
+        hf_ptq.load_model(args)
+
+
 def test_mlflow_flag_defaults_the_experiment_name(monkeypatch):
     monkeypatch.setattr(getpass, "getuser", lambda: "tester")
     hf_ptq, args = _parse_hf_ptq_args(

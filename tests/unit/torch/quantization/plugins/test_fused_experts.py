@@ -839,9 +839,11 @@ class TestForceEagerExpertsImpl:
         vision_cfg = _StubConfig(impl="bmm")
         root_cfg = _StubConfig(text_config=text_cfg, vision_config=vision_cfg)
         model = _TinyMoEModelWithConfig(root_cfg)
+        model.moe.experts.config = _StubConfig(impl="grouped_mm")
         force_eager_experts_impl_on_the_fly(model)
         assert text_cfg._experts_implementation == "eager"
         assert vision_cfg._experts_implementation == "eager"
+        assert model.moe.experts.config._experts_implementation == "eager"
 
     def test_skips_model_without_fused_experts(self):
         """Non-MoE models must not have their config silently mutated."""
@@ -1372,6 +1374,13 @@ class TestNonGatedFusedExperts:
         try:
             mtq.quantize(model, self._nongated_fp8_cfg(), forward_loop=forward_loop)
             converted = model.moe.experts
+            expected_up_input_scale = (
+                converted.up_proj_input_quantizer.amax / converted.up_proj_input_quantizer.maxbound
+            ).squeeze()
+            expected_down_input_scale = (
+                converted.down_proj_input_quantizer.amax
+                / converted.down_proj_input_quantizer.maxbound
+            ).squeeze()
             _export_fused_experts(converted, torch.float16)
 
             for idx in range(NUM_EXPERTS):
@@ -1385,6 +1394,10 @@ class TestNonGatedFusedExperts:
                 )
                 assert expert_mod.up_proj.weight.shape == (INTERMEDIATE_DIM, HIDDEN_DIM)
                 assert expert_mod.down_proj.weight.shape == (HIDDEN_DIM, INTERMEDIATE_DIM)
+                torch.testing.assert_close(expert_mod.up_proj.input_scale, expected_up_input_scale)
+                torch.testing.assert_close(
+                    expert_mod.down_proj.input_scale, expected_down_input_scale
+                )
 
             # Fused params and per-expert quantizer lists are removed.
             assert not hasattr(converted, "up_proj")

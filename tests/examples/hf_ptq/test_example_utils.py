@@ -20,6 +20,7 @@ storage layouts, so there is no convention matrix left to enumerate. What remain
 recording path, checkpoint-path resolution, and the sidecar copy.
 """
 
+import warnings
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -27,11 +28,86 @@ from unittest.mock import patch
 import pytest
 import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
+from _test_utils.torch.transformers_models import get_tiny_nemotron_h
 from safetensors.torch import save_file
+from transformers import AutoModelForCausalLM, LlamaConfig
 
 
 def _write_safetensors(path, tensors):
     save_file(tensors, str(path), metadata={"format": "pt"})
+
+
+@pytest.mark.parametrize("loader", ["native", "auto"])
+@pytest.mark.parametrize("trust_remote_code", [False, True])
+def test_mtp_preparation_matches_loader(tmp_path, loader, trust_remote_code):
+    """A native architecture and a remote auto_map must prepare the class actually loaded."""
+    native = pytest.importorskip("transformers.models.nemotron_h.modeling_nemotron_h")
+    mtp_adapter = pytest.importorskip("modelopt.torch.models.nemotron_h.mtp")
+    source = get_tiny_nemotron_h(
+        layers_block_type=["attention" if "attention" in native.MIXER_TYPES else "full_attention"],
+        num_hidden_layers=1,
+        hybrid_override_pattern="*",
+        use_mamba_kernels=False,
+        attn_implementation="eager",
+        dtype=torch.float32,
+        num_nextn_predict_layers=1,
+        mtp_layers_block_type=["attention", "moe"],
+    )
+    source.mtp = mtp_adapter._NemotronHMTP(source.config)
+    with torch.no_grad():
+        for parameter in source.parameters():
+            parameter.uniform_(-0.1, 0.1)
+    source.config.architectures = ["NemotronHForCausalLM"]
+    source.config.auto_map = {"AutoModelForCausalLM": "modeling_remote.RemoteNemotronH"}
+    source.config.save_pretrained(tmp_path)
+    _write_safetensors(tmp_path / "model.safetensors", source.state_dict())
+    (tmp_path / "modeling_remote.py").write_text(
+        "from transformers import NemotronHForCausalLM\n"
+        "class RemoteNemotronH(NemotronHForCausalLM):\n"
+        "    pass\n"
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if loader == "native":
+            model = example_utils.get_model(
+                str(tmp_path), device="cpu", trust_remote_code=trust_remote_code
+            )
+        else:
+            model = example_utils._from_pretrained_recording(
+                AutoModelForCausalLM,
+                str(tmp_path),
+                model_type=source.config.model_type,
+                trust_remote_code=trust_remote_code,
+            )
+    expected_class = (
+        "RemoteNemotronH" if loader == "auto" and trust_remote_code else "NemotronHForCausalLM"
+    )
+    assert type(model).__name__ == expected_class
+    assert model.state_dict().keys() == source.state_dict().keys()
+    for name, value in source.state_dict().items():
+        torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
+    assert not any("MTP weights may remain unquantized" in str(w.message) for w in caught)
+
+
+@pytest.mark.parametrize("failure_at", [1, 2])
+def test_get_model_preserves_preparation_error(monkeypatch, tmp_path, failure_at):
+    config = LlamaConfig(architectures=["LlamaForCausalLM"])
+    monkeypatch.setattr(example_utils.AutoConfig, "from_pretrained", lambda *a, **k: config)
+    calls = 0
+
+    def prepare(*args, model_class):
+        nonlocal calls
+        calls += 1
+        assert args == (config.model_type, str(tmp_path), False)
+        assert model_class.__name__ == "LlamaForCausalLM"
+        if calls == failure_at:
+            raise ValueError("MTP preparation failed")
+        return nullcontext()
+
+    monkeypatch.setattr(example_utils, "prepare_model_for_loading", prepare)
+    with pytest.raises(ValueError, match="MTP preparation failed"):
+        example_utils.get_model(str(tmp_path), device="cpu")
+    assert calls == failure_at
 
 
 def test_copy_custom_model_files_preserves_non_weight_sidecars(tmp_path):
