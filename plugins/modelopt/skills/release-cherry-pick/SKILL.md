@@ -18,7 +18,7 @@ Set `VERSION=<version>` for use in subsequent steps.
 Before fetching the labeled queue, audit for missing bug fixes:
 
 - **Non-final RC:** audit release NVBugs and recent merged PRs.
-- **Final RC:** audit only fixes tied to NVBugs with the exact keyword `Committed_ModelOpt_<VERSION>`. Skip the general recent-PR audit; do not introduce general bug-fix PRs or fixes tied only to NVBugs committed for another release.
+- **Final RC:** audit only fixes tied to NVBugs with the exact keyword `Committed_ModelOpt_<VERSION>` and QA-verification evidence for the fix. Verify that evidence in the NVBug or linked QA results before recommending **Needs label**; if missing or unclear, classify as **Unknown** and ask for confirmation. Skip the general recent-PR audit; do not introduce general bug-fix PRs or fixes tied only to NVBugs committed for another release.
 
 ### Audit release NVBugs
 
