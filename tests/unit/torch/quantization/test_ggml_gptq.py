@@ -15,6 +15,7 @@
 """GPTQ for GGML block formats: the group update, the helper, and the payload pin."""
 
 import copy
+import dataclasses
 import io
 from types import SimpleNamespace
 
@@ -44,11 +45,11 @@ def _problem(rows=6, cols=16, seed=0):
     return weight, hessian, compute_hessian_inverse(hessian, weight, 0.01)
 
 
-def _round_to_tenths(weight):
+def _round_to_tenths(weight, columns=None):
     return torch.round(weight * 10) / 10
 
 
-def _round_in_groups_of_4(group):
+def _round_in_groups_of_4(group, columns=None):
     scale = group.abs().amax(dim=-1, keepdim=True) / 2
     return torch.round(group / scale) * scale
 
@@ -143,6 +144,35 @@ def test_gptq_on_a_ggml_format_pins_the_payload_it_chose():
         return ((weight - original.weight) @ inputs.T).square().sum()
 
     assert weighted_error(model.weight) < weighted_error(plain.weight_quantizer(plain.weight))
+
+
+@pytest.mark.parametrize(("num_bits", "weighted"), [("iq2_xxs", True), ("iq1_s", False)])
+def test_gptq_weights_the_search_by_the_root_of_the_hessian_diagonal(
+    monkeypatch, num_bits, weighted
+):
+    ggml_format = GGML_FORMAT_REGISTRY[num_bits]
+    calls = []
+
+    def recording_quantize(weight, **kwargs):
+        calls.append(kwargs.get("importance"))
+        return ggml_format.quantize(weight, **kwargs)
+
+    monkeypatch.setitem(
+        GGML_FORMAT_REGISTRY,
+        num_bits,
+        dataclasses.replace(ggml_format, quantize=recording_quantize),
+    )
+    model = torch.nn.Linear(512, 8, bias=False)
+    inputs = _inputs()
+    mtq.quantize(model, _iq_config(GPTQ, num_bits), forward_loop=lambda m: m(inputs))
+
+    gptq_calls = calls[-2:]  # one call per 256-column group
+    if not weighted:
+        assert gptq_calls == [None, None]
+        return
+    root = inputs.square().sum(dim=0).sqrt()
+    importance = torch.cat(gptq_calls)
+    torch.testing.assert_close(importance / importance.mean(), root / root.mean())
 
 
 def test_pin_outlives_the_weight_tensor():
