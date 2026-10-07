@@ -146,42 +146,35 @@ def _has_static_weight_source(producers, name: str) -> bool:
         and isinstance(producers.get(producer.input[0]), onnx.TensorProto)
     ):
         return True
-    if _is_static_value(producers, name):
-        raise NotImplementedError(
-            f"Unsupported Dynamo quantized weight '{name}': unsupported static transformation "
-            "before the quantization marker."
-        )
-    return False
-
-
-def _feeds_compute_weight(consumers, name: str) -> bool:
-    pending = [name]
+    # Shape and index inputs can be dynamic; only input 0 carries the weight data.
+    data_name = name
     seen = set()
-    while pending:
-        value_name = pending.pop()
-        if value_name in seen:
-            continue
-        seen.add(value_name)
-        for node in consumers.get(value_name, []):
-            if (
-                node.op_type in {"MatMul", "Gemm"}
-                and len(node.input) > 1
-                and node.input[1] == value_name
-            ):
-                return True
-            if node.op_type in {"MatMul", "Gemm"}:
-                continue
-            pending.extend(node.output)
-    return False
-
-
-def _is_supported_weight_marker(producers, consumers, marker: onnx.NodeProto) -> bool:
-    if _has_static_weight_source(producers, marker.input[0]):
-        return True
-    if _feeds_compute_weight(consumers, marker.output[0]):
+    while (
+        isinstance(producer, onnx.NodeProto)
+        and producer.op_type
+        in {
+            "Identity",
+            "Reshape",
+            "Cast",
+            "Transpose",
+            "Slice",
+            "Gather",
+            "GatherElements",
+            "GatherND",
+            "Expand",
+            "Squeeze",
+            "Unsqueeze",
+            "Flatten",
+        }
+        and producer.input[0] not in seen
+    ):
+        data_name = producer.input[0]
+        seen.add(data_name)
+        producer = producers.get(data_name)
+    if _is_static_value(producers, data_name):
         raise NotImplementedError(
-            f"Unsupported Dynamo quantized weight '{marker.input[0]}': unsupported static or "
-            "dynamic transformation before the quantization marker."
+            f"Unsupported Dynamo quantized weight '{name}': unsupported static or dynamic transformation "
+            "before the quantization marker."
         )
     return False
 
@@ -275,7 +268,7 @@ def _normalize_int4_path(
 ) -> None:
     original_shape = list(weight.dims)
     block_size = int(_attribute(marker, "block_size") or 0)
-    if block_size <= 0 or np.prod(original_shape) % block_size:
+    if block_size <= 0 or not original_shape or original_shape[-1] % block_size:
         raise NotImplementedError(
             f"Unsupported Dynamo INT4 weight '{weight.name}': invalid block size {block_size}."
         )
@@ -292,6 +285,12 @@ def _normalize_int4_path(
             )
     else:
         blocked_shape = [-1, block_size]
+    marker_rank = len(blocked_shape if prefix_reshape is not None else original_shape)
+    marker_axis = _attribute(marker, "axis")
+    if (1 if marker_axis is None else marker_axis) not in {-1, marker_rank - 1}:
+        raise NotImplementedError(
+            f"Unsupported Dynamo INT4 weight '{weight.name}': only last-axis blocks are supported."
+        )
     _validate_restoring_reshape(path, weight, producers, "INT4")
     blocked_weight = numpy_helper.to_array(weight).reshape(blocked_shape)
     _replace_initializer(graph, numpy_helper.from_array(blocked_weight, weight.name))
@@ -390,6 +389,14 @@ def _normalize_nvfp4_path(
         _remove_nodes(graph, [transpose])
 
 
+def _validate_marker_domain(marker: onnx.NodeProto, expected_domain: str) -> None:
+    if marker.domain != expected_domain:
+        raise NotImplementedError(
+            f"Unsupported Dynamo quantization marker '{marker.op_type}': unexpected domain "
+            f"'{marker.domain}'."
+        )
+
+
 def normalize_dynamo_weight_paths(model: onnx.ModelProto) -> onnx.ModelProto:
     """Normalize supported Dynamo static-weight paths for the legacy format packers."""
     graph = model.graph
@@ -400,20 +407,12 @@ def normalize_dynamo_weight_paths(model: onnx.ModelProto) -> onnx.ModelProto:
         kind = None
         marker_output = marker.output[0]
         if marker.op_type == "TRT_FP4QDQ":
-            if marker.domain != "trt":
-                raise NotImplementedError(
-                    f"Unsupported Dynamo quantization marker '{marker.op_type}': unexpected domain "
-                    f"'{marker.domain}'."
-                )
+            _validate_marker_domain(marker, "trt")
             kind = "nvfp4"
-        elif marker.op_type == "TRT_MXFP8DequantizeLinear" and _is_supported_weight_marker(
-            producers, consumers, marker
+        elif marker.op_type == "TRT_MXFP8DequantizeLinear" and _has_static_weight_source(
+            producers, marker.input[0]
         ):
-            if marker.domain != "trt":
-                raise NotImplementedError(
-                    f"Unsupported Dynamo quantization marker '{marker.op_type}': unexpected domain "
-                    f"'{marker.domain}'."
-                )
+            _validate_marker_domain(marker, "trt")
             kind = "mxfp8"
         elif marker.op_type == "DequantizeLinear" and (_attribute(marker, "block_size") or 0) > 0:
             producer = producers.get(marker.input[0])
@@ -421,22 +420,14 @@ def normalize_dynamo_weight_paths(model: onnx.ModelProto) -> onnx.ModelProto:
                 not isinstance(producer, onnx.NodeProto)
                 or producer.op_type != "TRT_FP4DynamicQuantize"
             ):
-                if marker.domain != "":
-                    raise NotImplementedError(
-                        f"Unsupported Dynamo quantization marker '{marker.op_type}': unexpected "
-                        f"domain '{marker.domain}'."
-                    )
+                _validate_marker_domain(marker, "")
                 kind = "int4"
         elif marker.op_type in {
             "TRT_FP8QuantizeLinear",
             "QuantizeLinear",
-        } and _is_supported_weight_marker(producers, consumers, marker):
+        } and _has_static_weight_source(producers, marker.input[0]):
             expected_domain = "trt" if marker.op_type == "TRT_FP8QuantizeLinear" else ""
-            if marker.domain != expected_domain:
-                raise NotImplementedError(
-                    f"Unsupported Dynamo quantization marker '{marker.op_type}': unexpected domain "
-                    f"'{marker.domain}'."
-                )
+            _validate_marker_domain(marker, expected_domain)
             dq = _single_consumer(consumers, marker.output[0], marker.input[0])
             expected_dq = (
                 "TRT_FP8DequantizeLinear"

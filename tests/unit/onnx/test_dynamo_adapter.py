@@ -128,8 +128,11 @@ def test_normalize_rejects_mismatched_qdq_parameters():
         normalize_dynamo_weight_paths(model)
 
 
-@pytest.mark.parametrize("view_order", ["reshape_cast", "cast_reshape"])
-def test_normalize_canonical_nvfp4_path_removes_export_only_views(view_order):
+@pytest.mark.parametrize(
+    ("view_order", "trans_b"),
+    [("reshape_cast", None), ("cast_reshape", 0), ("cast_reshape", 1)],
+)
+def test_normalize_canonical_nvfp4_path_removes_export_only_views(view_order, trans_b):
     weight = _tensor("weight", np.ones((2, 4)))
     blocked_shape = _tensor("blocked_shape", [1, 2, 4], np.int64)
     restored_shape = _tensor("restored_shape", [2, 4], np.int64)
@@ -151,11 +154,16 @@ def test_normalize_canonical_nvfp4_path_removes_export_only_views(view_order):
             helper.make_node("Identity", ["marked"], ["identity"]),
             *views,
             helper.make_node("Transpose", [view_output], ["transposed"], perm=[1, 0]),
-            helper.make_node("Gemm", ["input", "transposed"], ["output"]),
+            helper.make_node(
+                "Gemm",
+                ["input", "transposed"],
+                ["output"],
+                **({} if trans_b is None else {"transB": trans_b}),
+            ),
         ],
         initializers=[weight, blocked_shape, restored_shape],
-        inputs=[_value("input", TensorProto.FLOAT16, (1, 4))],
-        outputs=[_value("output", TensorProto.FLOAT16, (1, 2))],
+        inputs=[_value("input", TensorProto.FLOAT16, (1, 2 if trans_b else 4))],
+        outputs=[_value("output", TensorProto.FLOAT16, (1, 4 if trans_b else 2))],
         trt_opset=1,
     )
 
@@ -165,14 +173,23 @@ def test_normalize_canonical_nvfp4_path_removes_export_only_views(view_order):
     marker, gemm = model.graph.node
     assert marker.input[0] == "weight"
     assert gemm.input[1] == marker.output[0]
-    assert (
-        helper.get_attribute_value(next(attr for attr in gemm.attribute if attr.name == "transB"))
-        == 1
-    )
+    assert helper.get_attribute_value(
+        next(attr for attr in gemm.attribute if attr.name == "transB")
+    ) == 1 - (trans_b or 0)
 
 
-@pytest.mark.parametrize("view_op", ["Slice", "Transpose", "Expand", "Gather"])
-def test_normalize_rejects_static_view_before_quantizer(view_op):
+@pytest.mark.parametrize(
+    ("view_op", "weight_source"),
+    [
+        ("Slice", "initializer"),
+        ("Transpose", "initializer"),
+        ("Expand", "initializer"),
+        ("Gather", "initializer"),
+        ("GatherND", "initializer"),
+        ("GatherND", "constant"),
+    ],
+)
+def test_normalize_rejects_static_view_before_quantizer(view_op, weight_source):
     if view_op == "Slice":
         view = helper.make_node("Slice", ["weight"], ["view"])
     elif view_op == "Transpose":
@@ -180,19 +197,27 @@ def test_normalize_rejects_static_view_before_quantizer(view_op):
     elif view_op == "Expand":
         view = helper.make_node("Expand", ["weight", "expanded_shape"], ["view"])
     else:
-        view = helper.make_node("Gather", ["weight", "runtime_indices"], ["view"])
+        view = helper.make_node(view_op, ["weight", "runtime_indices"], ["view"])
+    weight = _tensor("weight", np.ones((4, 4)))
+    weight_nodes = (
+        [helper.make_node("Constant", [], ["weight"], value=weight)]
+        if weight_source == "constant"
+        else []
+    )
     inputs = [_value("input")]
-    if view_op == "Gather":
-        inputs.append(_value("runtime_indices", TensorProto.INT64, (4,)))
+    if view_op in {"Gather", "GatherND"}:
+        shape = (4, 1) if view_op == "GatherND" else (4,)
+        inputs.append(_value("runtime_indices", TensorProto.INT64, shape))
     model = _model(
         [
+            *weight_nodes,
             view,
             helper.make_node("QuantizeLinear", ["view", "scale", "zero"], ["weight_q"]),
             helper.make_node("DequantizeLinear", ["weight_q", "scale", "zero"], ["weight_dq"]),
             helper.make_node("MatMul", ["input", "weight_dq"], ["output"]),
         ],
         initializers=[
-            _tensor("weight", np.ones((4, 4))),
+            *([weight] if weight_source == "initializer" else []),
             _tensor("scale", 0.25),
             _tensor("zero", 0, np.uint8),
             _tensor("expanded_shape", [4, 4], np.int64),
@@ -347,7 +372,129 @@ def test_normalize_rejects_unsupported_weight_topologies(kind):
         normalize_dynamo_weight_paths(_unsupported_nvfp4_model(kind))
 
 
-def test_normalize_rejects_unmatched_int4_restoring_reshape():
+@pytest.mark.parametrize(
+    ("prefix_shape", "transpose", "axis"),
+    [
+        (None, False, -1),
+        (None, False, 1),
+        (None, False, None),
+        ((2, 2, 2), False, 2),
+        ((2, 2, 2), True, -1),
+    ],
+)
+def test_normalize_int4_path_preserves_values_and_layout(prefix_shape, transpose, axis):
+    values = np.arange(-4, 4, dtype=np.float32).reshape(2, 4)
+    scale_shape = (*prefix_shape[:-1], 1) if prefix_shape else (2, 2)
+    initializers = [_tensor("weight", values), _tensor("scale", np.ones(scale_shape))]
+    nodes = []
+    if prefix_shape:
+        initializers.extend(
+            [
+                _tensor("blocked_shape", prefix_shape, np.int64),
+                _tensor("restored_shape", values.shape, np.int64),
+            ]
+        )
+        nodes.append(helper.make_node("Reshape", ["weight", "blocked_shape"], ["blocked"]))
+    nodes.append(
+        helper.make_node(
+            "DequantizeLinear",
+            ["blocked" if prefix_shape else "weight", "scale"],
+            ["weight_dq"],
+            name="weight_dequantizer",
+            block_size=2,
+            **({} if axis is None else {"axis": axis}),
+        )
+    )
+    output = "weight_dq"
+    if prefix_shape:
+        nodes.extend(
+            [
+                helper.make_node("Reshape", [output, "restored_shape"], ["restored"]),
+                helper.make_node("Cast", ["restored"], ["cast"], to=TensorProto.FLOAT16),
+            ]
+        )
+        output = "cast"
+    if transpose:
+        nodes.append(helper.make_node("Transpose", [output], ["transposed"], perm=[1, 0]))
+        output = "transposed"
+    nodes.append(helper.make_node("MatMul", ["input", output], ["output"]))
+    dtype = TensorProto.FLOAT16 if prefix_shape else TensorProto.FLOAT
+    model = _model(
+        nodes,
+        initializers=initializers,
+        inputs=[_value("input", dtype, (1, 4 if transpose else 2))],
+        outputs=[_value("output", dtype, (1, 2 if transpose else 4))],
+    )
+
+    normalize_dynamo_weight_paths(model)
+
+    assert [node.op_type for node in model.graph.node] == [
+        "DequantizeLinear",
+        *(["Cast"] if prefix_shape else []),
+        "MatMul",
+    ]
+    marker = model.graph.node[0]
+    assert marker.name == "__modelopt_dynamo_int4__weight_dequantizer"
+    assert marker.input[0] == "weight"
+    attributes = {attr.name: helper.get_attribute_value(attr) for attr in marker.attribute}
+    assert attributes["_target_shape"] == [2, 4]
+    assert attributes["axis"] == (0 if transpose else 1)
+    if transpose:
+        assert attributes["_transpose_perm"] == [1, 0]
+    else:
+        assert "_transpose_perm" not in attributes
+    tensors = {tensor.name: tensor for tensor in model.graph.initializer}
+    np.testing.assert_array_equal(
+        numpy_helper.to_array(tensors["weight"]), values.reshape(prefix_shape or (4, 2))
+    )
+    np.testing.assert_array_equal(numpy_helper.to_array(tensors[marker.input[1]]), np.ones((4, 1)))
+    if prefix_shape:
+        assert model.graph.node[1].input[0] == marker.output[0]
+    assert model.graph.node[-1].input[1] == ("cast" if prefix_shape else marker.output[0])
+
+
+@pytest.mark.parametrize(
+    ("weight_shape", "prefix_shape", "axis", "message"),
+    [
+        ((2, 4), None, 0, "axis"),
+        ((2, 4), (2, 2, 2), 0, "axis"),
+        ((2, 4), (2, 2, 2), 1, "axis"),
+        ((2, 4), (2, 2, 2), None, "axis"),
+        ((2, 3), None, -1, "block size"),
+        ((2, 3), (3, 2), -1, "block size"),
+    ],
+)
+def test_normalize_rejects_unsupported_int4_blocks(weight_shape, prefix_shape, axis, message):
+    initializers = [_tensor("weight", np.ones(weight_shape)), _tensor("scale", 1.0)]
+    nodes = []
+    if prefix_shape:
+        initializers.append(_tensor("blocked_shape", prefix_shape, np.int64))
+        nodes.append(helper.make_node("Reshape", ["weight", "blocked_shape"], ["blocked"]))
+    nodes.extend(
+        [
+            helper.make_node(
+                "DequantizeLinear",
+                ["blocked" if prefix_shape else "weight", "scale"],
+                ["weight_dq"],
+                block_size=2,
+                **({} if axis is None else {"axis": axis}),
+            ),
+            helper.make_node("MatMul", ["input", "weight_dq"], ["output"]),
+        ]
+    )
+    model = _model(
+        nodes,
+        initializers=initializers,
+        inputs=[_value("input", shape=(1, weight_shape[0]))],
+        outputs=[_value("output", shape=(1, weight_shape[1]))],
+    )
+
+    with pytest.raises(NotImplementedError, match=message):
+        normalize_dynamo_weight_paths(model)
+
+
+@pytest.mark.parametrize("format_name", ["int4", "nvfp4"])
+def test_normalize_rejects_unmatched_restoring_reshape(format_name):
     weight = _tensor("weight", np.ones((2, 4)))
     scale = _tensor("scale", np.ones((1, 2)))
     blocked_shape = _tensor("blocked_shape", [2, 2, 2], np.int64)
@@ -355,12 +502,16 @@ def test_normalize_rejects_unmatched_int4_restoring_reshape():
     model = _model(
         [
             helper.make_node("Reshape", ["weight", "blocked_shape"], ["blocked"]),
-            helper.make_node(
-                "DequantizeLinear",
-                ["blocked", "scale"],
-                ["weight_dq"],
-                axis=-1,
-                block_size=2,
+            (
+                helper.make_node(
+                    "DequantizeLinear",
+                    ["blocked", "scale"],
+                    ["weight_dq"],
+                    axis=-1,
+                    block_size=2,
+                )
+                if format_name == "int4"
+                else _nvfp4_marker("blocked")
             ),
             helper.make_node("Reshape", ["weight_dq", "wrong_shape"], ["restored"]),
             helper.make_node("MatMul", ["input", "restored"], ["output"]),
@@ -368,27 +519,7 @@ def test_normalize_rejects_unmatched_int4_restoring_reshape():
         initializers=[weight, scale, blocked_shape, wrong_shape],
         inputs=[_value("input")],
         outputs=[_value("output")],
-    )
-
-    with pytest.raises(NotImplementedError, match="restoring Reshape does not match"):
-        normalize_dynamo_weight_paths(model)
-
-
-def test_normalize_rejects_unmatched_nvfp4_restoring_reshape():
-    weight = _tensor("weight", np.ones((2, 4)))
-    blocked_shape = _tensor("blocked_shape", [1, 2, 4], np.int64)
-    wrong_shape = _tensor("wrong_shape", [4, 2], np.int64)
-    model = _model(
-        [
-            helper.make_node("Reshape", ["weight", "blocked_shape"], ["blocked"]),
-            _nvfp4_marker("blocked", "marked"),
-            helper.make_node("Reshape", ["marked", "wrong_shape"], ["restored"]),
-            helper.make_node("MatMul", ["input", "restored"], ["output"]),
-        ],
-        initializers=[weight, blocked_shape, wrong_shape],
-        inputs=[_value("input")],
-        outputs=[_value("output")],
-        trt_opset=1,
+        trt_opset=1 if format_name == "nvfp4" else None,
     )
 
     with pytest.raises(NotImplementedError, match="restoring Reshape does not match"):
@@ -415,11 +546,13 @@ def test_normalize_rejects_unpaired_nvfp4_restoring_reshape():
         normalize_dynamo_weight_paths(model)
 
 
-def test_normalize_splits_shared_int4_scale_without_mutating_source():
+@pytest.mark.parametrize("format_name", ["int4", "mxfp8"])
+def test_normalize_splits_shared_scale_without_mutating_source(format_name):
+    marker_op = "DequantizeLinear" if format_name == "int4" else "TRT_MXFP8DequantizeLinear"
     source_scale = np.asarray([[0.25, 0.5], [0.75, 1.0]], dtype=np.float32)
     initializers = [
-        _tensor("weight_a", np.ones((2, 4))),
-        _tensor("weight_b", np.ones((2, 4))),
+        _tensor("weight_a", np.ones((2, 64))),
+        _tensor("weight_b", np.ones((2, 64))),
         _tensor("shared_scale", source_scale),
     ]
     nodes = []
@@ -427,11 +560,13 @@ def test_normalize_splits_shared_int4_scale_without_mutating_source():
         nodes.extend(
             [
                 helper.make_node(
-                    "DequantizeLinear",
+                    marker_op,
                     [f"weight_{suffix}", "shared_scale"],
                     [f"weight_{suffix}_dq"],
+                    name=f"dequantize_{suffix}",
+                    domain="" if format_name == "int4" else "trt",
                     axis=-1,
-                    block_size=2,
+                    block_size=32,
                 ),
                 helper.make_node(
                     "MatMul", [f"input_{suffix}", f"weight_{suffix}_dq"], [f"output_{suffix}"]
@@ -441,22 +576,94 @@ def test_normalize_splits_shared_int4_scale_without_mutating_source():
     model = _model(
         nodes,
         initializers=initializers,
-        inputs=[_value("input_a"), _value("input_b")],
-        outputs=[_value("output_a"), _value("output_b")],
+        inputs=[_value("input_a", shape=(1, 2)), _value("input_b", shape=(1, 2))],
+        outputs=[_value("output_a", shape=(1, 64)), _value("output_b", shape=(1, 64))],
+        trt_opset=1 if format_name == "mxfp8" else None,
     )
 
     normalize_dynamo_weight_paths(model)
 
-    dequantizers = [node for node in model.graph.node if node.op_type == "DequantizeLinear"]
+    dequantizers = [node for node in model.graph.node if node.op_type == marker_op]
+    assert [node.name for node in dequantizers] == [
+        f"__modelopt_dynamo_{format_name}__dequantize_{suffix}" for suffix in ("a", "b")
+    ]
     split_names = [node.input[1] for node in dequantizers]
     assert len(set(split_names)) == 2
     assert "shared_scale" not in split_names
     tensors = {tensor.name: tensor for tensor in model.graph.initializer}
     np.testing.assert_array_equal(numpy_helper.to_array(tensors["shared_scale"]), source_scale)
+    constants = {
+        node.output[0]: helper.get_attribute_value(node.attribute[0])
+        for node in model.graph.node
+        if node.op_type == "Constant"
+    }
     for name in split_names:
-        np.testing.assert_array_equal(
-            numpy_helper.to_array(tensors[name]), source_scale.reshape(-1, 1)
+        if format_name == "int4":
+            np.testing.assert_array_equal(
+                numpy_helper.to_array(tensors[name]), source_scale.reshape(-1, 1)
+            )
+        else:
+            assert name not in tensors
+            np.testing.assert_array_equal(numpy_helper.to_array(constants[name]), source_scale)
+
+
+@pytest.mark.parametrize("domain", ["", "trt"])
+@pytest.mark.parametrize("operand", ["query", "key", "value", "projected_key"])
+def test_normalize_leaves_fp8_attention_activation_qdq_intact(domain, operand):
+    transposed = operand in {"key", "projected_key"}
+    activation_shape = (2, 8, 4) if operand == "value" else (2, 4, 8)
+    other_shape = (2, 8, 4) if operand == "query" else (2, 4, 8)
+    initializers = [
+        _tensor("scale", 0.25),
+        helper.make_tensor("zero", TensorProto.FLOAT8E4M3FN, [], [0]),
+    ]
+    nodes = []
+    quantizer_input = "activation"
+    if operand == "projected_key":
+        initializers.append(_tensor("projection_weight", np.ones((8, 8))))
+        nodes.extend(
+            [
+                helper.make_node("MatMul", ["activation", "projection_weight"], ["projected"]),
+                helper.make_node("Identity", ["projected"], ["prepared"]),
+            ]
         )
+        quantizer_input = "prepared"
+    prefix = "TRT_FP8" if domain else ""
+    nodes.extend(
+        [
+            helper.make_node(
+                f"{prefix}QuantizeLinear",
+                [quantizer_input, "scale", "zero"],
+                ["activation_q"],
+                domain=domain,
+            ),
+            helper.make_node(
+                f"{prefix}DequantizeLinear",
+                ["activation_q", "scale", "zero"],
+                ["activation_dq"],
+                domain=domain,
+            ),
+        ]
+    )
+    activation_output = "activation_dq"
+    if transposed:
+        nodes.append(
+            helper.make_node("Transpose", [activation_output], ["transposed"], perm=[0, 2, 1])
+        )
+        activation_output = "transposed"
+    operands = [activation_output, "other"] if operand == "query" else ["other", activation_output]
+    nodes.append(helper.make_node("MatMul", operands, ["output"]))
+    model = _model(
+        nodes,
+        initializers=initializers,
+        inputs=[_value("activation", shape=activation_shape), _value("other", shape=other_shape)],
+        outputs=[_value("output", shape=(2, 4, 4))],
+        trt_opset=1 if domain else None,
+    )
+    original = model.SerializeToString()
+
+    assert normalize_dynamo_weight_paths(model) is model
+    assert model.SerializeToString() == original
 
 
 def test_normalize_leaves_standard_int8_conv_weight_qdq_intact():
