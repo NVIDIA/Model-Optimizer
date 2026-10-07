@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# QuantizeConfig preset for IQ2_XXS weight-only quantization.
+# QuantizeConfig preset for IQ2_XXS weight-only quantization of MLP/MoE layers with GPTQ.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:
@@ -22,11 +22,19 @@ imports:
   iq2_xxs: configs/numerics/iq2_xxs
 
 algorithm:
+  method: gptq
+  # GGML encodes 256-weight blocks jointly, so GPTQ updates one block at a time.
+  block_size: 256
+  # Heavier than GPTQ's usual 0.01: low damping overfits the calibration Hessian at these bit widths.
+  perc_damp: 0.3
+  layerwise:
+    enable: true
 quant_cfg:
   - $import: base_disable_all
-  - quantizer_name: '*weight_quantizer'
+  - quantizer_name: '*mlp*weight_quantizer'
     cfg:
       $import: iq2_xxs
-  - quantizer_name: '*input_quantizer'
-    enable: false
+  - quantizer_name: '*block_sparse_moe*weight_quantizer'
+    cfg:
+      $import: iq2_xxs
   - $import: default_disabled_quantizers

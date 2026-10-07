@@ -53,7 +53,6 @@ MODEL_NAME_TO_DECODER_TYPE = {
     "MixtralForCausalLM": "llama",
     "ArcticForCausalLM": "llama",
     "StarCoder": "gpt",
-    "Dbrx": "dbrx",
     "T5": "t5",
     "Bart": "bart",
     "GLM": "glm",

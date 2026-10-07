@@ -185,17 +185,9 @@ def name_shards_and_write_index(
 def _parse_shard_size(size: int | str) -> int:
     """Convert a shard-size string (e.g. ``"10GB"``, ``"500MB"``) to bytes.
 
-    Mirrors transformers' ``convert_file_size_to_int``, which reads ``GB``/``MB``/``KB``
-    as decimal and only ``GiB``/``MiB``/``KiB`` as binary. That helper was removed from
-    ``transformers.utils`` in transformers 5.x, so the fallback below is the live path
-    there, not a rarely-taken branch.
+    Mirrors transformers 4.x's ``convert_file_size_to_int`` (removed in 5.x), which reads
+    ``GB``/``MB``/``KB`` as decimal and only ``GiB``/``MiB``/``KiB`` as binary.
     """
-    try:
-        from transformers.utils import convert_file_size_to_int
-
-        return convert_file_size_to_int(size)
-    except ImportError:
-        pass
     if isinstance(size, int):
         return size
     s = size.strip().upper()
@@ -257,9 +249,9 @@ def _undeclared_tied_aliases(model: nn.Module) -> set[str]:
     goes, so the shared address is gone by then. Take the same information up front, off the
     live model, and drop by name instead.
 
-    Needed on transformers <5.0, where ``all_tied_weights_keys`` does not exist and the tie map
-    is empty; without this the alias ships as a second full copy of the same weight. Walk order
-    matches ``state_dict()``, so the tensor kept here is the one the resident path keeps.
+    Covers ties missing from ``all_tied_weights_keys`` (or a model without it); without this the
+    alias ships as a second full copy of the same weight. Walk order matches ``state_dict()``, so
+    the tensor kept here is the one the resident path keeps.
     """
     seen: dict[int, str] = {}
     aliases: set[str] = set()
