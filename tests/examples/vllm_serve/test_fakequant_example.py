@@ -26,6 +26,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+import yaml
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 
 import modelopt.torch.quantization as mtq
@@ -153,6 +154,8 @@ def test_quantizer_state_disables_only_missing_weight_quantizers(
     assert model.input_quantizer.is_enabled
     assert not model.missing_input_quantizer.is_enabled
     assert torch.equal(restored["input_quantizer._amax"], torch.tensor(13.0))
+
+
 @pytest.mark.parametrize(
     "setting",
     [
@@ -224,6 +227,34 @@ def test_fakequant_launcher_autodetects_megatron_sidecars(
     assert "fakequant_worker.FakeQuantWorker" in sys.argv
     vllm_main.assert_called_once_with()
     ray_registration.assert_called_once_with()
+
+
+@pytest.mark.parametrize("conflicting_field", ["quant_cfg", "kv_quant_cfg"])
+def test_recipe_path_rejects_manual_quant_config(conflicting_field):
+    ptq_utils = _load_example_module("vllm_ptq_utils")
+    config = {"recipe_path": "/missing/recipe.yaml", "quant_cfg": None, "kv_quant_cfg": None}
+    config[conflicting_field] = "FP8_DEFAULT_CFG"
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ptq_utils.get_quant_config(config, model=None)
+
+
+@pytest.mark.parametrize(
+    ("contents", "error"),
+    [
+        ("", ValueError),
+        ("quantize: [", yaml.YAMLError),
+        ("- not\n- a mapping\n", ValueError),
+    ],
+)
+def test_invalid_recipe_yaml_is_rejected(tmp_path, contents, error):
+    ptq_utils = _load_example_module("vllm_ptq_utils")
+    recipe_path = tmp_path / "recipe.yaml"
+    recipe_path.write_text(contents)
+    config = {"recipe_path": str(recipe_path), "quant_cfg": None, "kv_quant_cfg": None}
+
+    with pytest.raises(error):
+        ptq_utils.get_quant_config(config, model=None)
 
 
 def _calibration_worker(
