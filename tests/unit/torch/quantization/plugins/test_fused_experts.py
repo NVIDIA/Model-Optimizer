@@ -839,9 +839,11 @@ class TestForceEagerExpertsImpl:
         vision_cfg = _StubConfig(impl="bmm")
         root_cfg = _StubConfig(text_config=text_cfg, vision_config=vision_cfg)
         model = _TinyMoEModelWithConfig(root_cfg)
+        model.moe.experts.config = _StubConfig(impl="grouped_mm")
         force_eager_experts_impl_on_the_fly(model)
         assert text_cfg._experts_implementation == "eager"
         assert vision_cfg._experts_implementation == "eager"
+        assert model.moe.experts.config._experts_implementation == "eager"
 
     def test_skips_model_without_fused_experts(self):
         """Non-MoE models must not have their config silently mutated."""
@@ -1372,6 +1374,13 @@ class TestNonGatedFusedExperts:
         try:
             mtq.quantize(model, self._nongated_fp8_cfg(), forward_loop=forward_loop)
             converted = model.moe.experts
+            expected_up_input_scale = (
+                converted.up_proj_input_quantizer.amax / converted.up_proj_input_quantizer.maxbound
+            ).squeeze()
+            expected_down_input_scale = (
+                converted.down_proj_input_quantizer.amax
+                / converted.down_proj_input_quantizer.maxbound
+            ).squeeze()
             _export_fused_experts(converted, torch.float16)
 
             for idx in range(NUM_EXPERTS):
@@ -1385,6 +1394,10 @@ class TestNonGatedFusedExperts:
                 )
                 assert expert_mod.up_proj.weight.shape == (INTERMEDIATE_DIM, HIDDEN_DIM)
                 assert expert_mod.down_proj.weight.shape == (HIDDEN_DIM, INTERMEDIATE_DIM)
+                torch.testing.assert_close(expert_mod.up_proj.input_scale, expected_up_input_scale)
+                torch.testing.assert_close(
+                    expert_mod.down_proj.input_scale, expected_down_input_scale
+                )
 
             # Fused params and per-expert quantizer lists are removed.
             assert not hasattr(converted, "up_proj")
@@ -1478,8 +1491,8 @@ def _make_qwen3_vl_moe_experts():
         num_key_value_heads=2,
         vocab_size=128,
     )
-    # The fused forward of transformers>=5.12 dispatches on this; ``eager`` is the only
-    # backend that routes through ``F.linear`` and therefore through the quantizer hooks.
+    # The fused forward dispatches on this; ``eager`` is the only backend that routes
+    # through ``F.linear`` and therefore through the quantizer hooks.
     config._experts_implementation = "eager"
     experts = Qwen3VLMoeTextExperts(config)
     # Weights are created with ``torch.empty``; fill them so comparisons are meaningful.
@@ -1490,36 +1503,18 @@ def _make_qwen3_vl_moe_experts():
     return experts
 
 
-def _qwen3_vl_moe_is_new_layout():
-    """True when transformers>=5.12 moved the experts onto the generic fused layout."""
-    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextExperts
-
-    return hasattr(Qwen3VLMoeTextExperts, "_apply_gate")
-
-
 def _qwen3_vl_moe_forward_args():
-    """Routing inputs for the installed layout, sized so every expert is hit.
-
-    The two layouts disagree on both argument order and routing-weight shape, and the
-    pre-5.12 eval-mode forward computes a dense weighted sum over all experts. Zeroing the
-    weights outside the top-k keeps that dense path equal to the sparse per-expert loop.
-    """
+    """Routing inputs sized so every expert is hit."""
     seq_len = QWEN_NUM_EXPERTS // QWEN_TOP_K
     torch.manual_seed(0)
     hidden_states = torch.randn(seq_len, QWEN_HIDDEN_DIM)
     router_indices = torch.arange(QWEN_NUM_EXPERTS, dtype=torch.long).reshape(seq_len, QWEN_TOP_K)
     top_k_weights = torch.softmax(torch.randn(seq_len, QWEN_TOP_K), dim=-1)
-
-    if _qwen3_vl_moe_is_new_layout():
-        return hidden_states, router_indices, top_k_weights
-
-    routing_weights = torch.zeros(seq_len, QWEN_NUM_EXPERTS)
-    routing_weights.scatter_(1, router_indices, top_k_weights)
-    return hidden_states.unsqueeze(0), routing_weights, router_indices
+    return hidden_states, router_indices, top_k_weights
 
 
 class TestQwen3VLMoeTextExperts:
-    """The registered wrapper must match the installed transformers layout (nvbug 6518551)."""
+    """Qwen3-VL MoE text experts must quantize through the generic fused-experts wrapper."""
 
     @staticmethod
     def _experts_type():
@@ -1527,21 +1522,11 @@ class TestQwen3VLMoeTextExperts:
 
         return Qwen3VLMoeTextExperts
 
-    def test_registration_matches_installed_layout(self):
-        """transformers>=5.12 experts must be left to the generic fused-experts wrapper."""
-        from modelopt.torch.quantization.plugins.huggingface import _QuantQwen3VLMoeTextExperts
-
-        registered = QuantModuleRegistry.get(self._experts_type())
-        if _qwen3_vl_moe_is_new_layout():
-            # Statically registering the legacy wrapper here would shadow on-the-fly
-            # detection and crash on ``self.hidden_size`` during conversion.
-            assert registered is None
-            assert _fused_experts_wrapper_class(_make_qwen3_vl_moe_experts()) is _QuantFusedExperts
-        else:
-            # The pre-5.12 forward uses ``torch.bmm``, which the generic wrapper cannot
-            # intercept, so the explicit registration must stay in place.
-            assert registered is not None
-            assert issubclass(registered, _QuantQwen3VLMoeTextExperts)
+    def test_left_to_generic_fused_experts_wrapper(self):
+        """The experts must be left to the generic fused-experts wrapper."""
+        # A static registration would shadow on-the-fly detection.
+        assert QuantModuleRegistry.get(self._experts_type()) is None
+        assert _fused_experts_wrapper_class(_make_qwen3_vl_moe_experts()) is _QuantFusedExperts
 
     def test_convert_and_forward_matches_reference(self):
         """Conversion must succeed and stay numerically transparent before calibration."""

@@ -46,7 +46,7 @@ checkpoint wastes disk. Use ``--copy`` if the output dir must be portable.
 
 Usage::
 
-    python export_diffusers_qwen_image.py \\
+    python examples/diffusers/fastgen/dmd2/export_qwen_image.py \\
         --student_path     /path/to/checkpoint/epoch_0_step_500/model/consolidated \\
         --base_pipeline_path Qwen/Qwen-Image \\
         --output_dir       /path/to/output/qwen_image_dmd2 \\

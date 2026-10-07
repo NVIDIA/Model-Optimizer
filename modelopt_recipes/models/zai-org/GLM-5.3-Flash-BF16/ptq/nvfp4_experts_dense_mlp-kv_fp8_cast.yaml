@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Recipe for zai-org/GLM-5.3-Flash: NVFP4 on the routed experts and the dense MLP, FP8 KV cache.
+# Recipe for zai-org/GLM-5.3-Flash-BF16: NVFP4 on the routed experts and the dense MLP, FP8 KV cache.
 #
-# GLM-5.3-Flash is a `glm5_next` VLM
+# GLM-5.3-Flash-BF16 is a `glm5_next` VLM
 # MoE -- 45 decoder layers, 288 routed experts, and HYBRID attention: KDA (linear-attention)
 # layers interleaved with NoPE sparse-MLA layers. It needs transformers >= 5.16.1 (earlier
 # releases cannot parse the config).
@@ -61,7 +61,7 @@ imports:
 
 metadata:
   description: >-
-    GLM-5.3-Flash: NVFP4 (W4A4) on the routed experts and on the dense MLP of layers 0-2,
+    GLM-5.3-Flash-BF16: NVFP4 (W4A4) on the routed experts and on the dense MLP of layers 0-2,
     plus an FP8 KV cache in cast mode using constant amax; max calibration. Shared experts,
     router gate, KDA and MLA attention, vision tower, embeddings and lm_head stay BF16. The
     MTP layer is not built at num_hidden_layers=45, so it is neither quantized nor exported.

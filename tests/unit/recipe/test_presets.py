@@ -149,16 +149,21 @@ def test_mlp_weight_only_recipe_matches_its_mtq_cfg(recipe_name, cfg_name):
 )
 def test_iq_recipe_matches_packing_contract(qformat, block_size, effective_bits):
     recipe = load_recipe(f"general/ptq/{qformat}")
-    quant_cfg = recipe.quantize.model_dump(exclude_unset=True)["quant_cfg"]
-    weight_cfg = next(
-        entry["cfg"] for entry in quant_cfg if entry.get("quantizer_name") == "*weight_quantizer"
-    )
+    quantize = recipe.quantize.model_dump(exclude_unset=True)
+    weight_cfgs = {
+        entry["quantizer_name"]: entry["cfg"]
+        for entry in quantize["quant_cfg"]
+        if isinstance(entry.get("cfg"), dict) and entry["cfg"].get("num_bits") == qformat
+    }
 
     assert qformat in presets.QUANT_CFG_CHOICES
-    assert weight_cfg["backend"] == "ggml"
-    assert weight_cfg["num_bits"] == qformat
-    assert weight_cfg["block_sizes"][-1] == block_size
-    assert weight_cfg["effective_bits"] == effective_bits
+    assert set(weight_cfgs) == {"*mlp*weight_quantizer", "*block_sparse_moe*weight_quantizer"}
+    for weight_cfg in weight_cfgs.values():
+        assert weight_cfg["backend"] == "ggml"
+        assert weight_cfg["block_sizes"][-1] == block_size
+        assert weight_cfg["effective_bits"] == effective_bits
+    assert quantize["algorithm"]["method"] == "gptq"
+    assert quantize["algorithm"]["block_size"] % block_size == 0
 
 
 # --- RecipeSupersededAction: the flags --recipe replaces ----------------------------------------

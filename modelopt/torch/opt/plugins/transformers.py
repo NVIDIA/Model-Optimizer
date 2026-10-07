@@ -30,7 +30,6 @@ from typing import Any
 import torch
 import torch.nn as nn
 import transformers
-from packaging.version import Version
 from transformers import HfArgumentParser, PreTrainedModel, Trainer, TrainerCallback
 from transformers import modeling_utils as tf_modeling_utils
 
@@ -55,10 +54,6 @@ __all__ = [
     "ModelOptTrainerArguments",
 ]
 
-# transformers 5.0 changed `_tied_weights_keys` from a list to a {target: source} dict and added
-# the `load_config` parameter to `_load_state_dict_into_zero3_model`.
-_TRANSFORMERS_GE_5_0 = Version(transformers.__version__) >= Version("5.0")
-
 
 def is_liger_available():
     try:
@@ -66,31 +61,6 @@ def is_liger_available():
     except ImportError:
         return False
     return True
-
-
-@contextmanager
-def _undo_torch_init_override_by_transformers():
-    if not hasattr(tf_modeling_utils, "TORCH_INIT_FUNCTIONS"):
-        yield
-        return
-    # transformers override weight initialization during model instantiation for faster loading;
-    # this leads to a secondary bug causing fx symbolic tracing to fail (torch does not allow
-    # overriding torch.nn.init functions - fx tracing asserts that this does not happen and fails)
-    # correct fx symbolic tracing is needed for NAS/Pruned model restoration
-    # lets restore the original init functions before modelopt restore so that tracing works during nas restore
-    # weight initialization is anyways done, so this wont affect performance
-    modelopt_reverted_torch_init_funcs = {}
-    for name, init_func in tf_modeling_utils.TORCH_INIT_FUNCTIONS.items():
-        torch_init_func = getattr(torch.nn.init, name)
-        # Check if the init function has been overridden by transformers
-        if id(torch_init_func) != id(init_func):
-            modelopt_reverted_torch_init_funcs[name] = torch_init_func
-            setattr(torch.nn.init, name, init_func)
-
-    yield
-
-    for name, init_func in modelopt_reverted_torch_init_funcs.items():
-        setattr(torch.nn.init, name, init_func)
 
 
 def _restore_qtensor_wrappers(model, model_path):
@@ -146,9 +116,7 @@ def _restore_qtensor_wrappers(model, model_path):
 
 def _new_from_pretrained(cls, /, pretrained_model_name_or_path, *args, **kwargs):
     """Patch for `cls.from_pretrained` method to restore ModelOpt state."""
-    with _patch_model_init_for_modelopt(
-        cls, pretrained_model_name_or_path, extra_context=_undo_torch_init_override_by_transformers
-    ):
+    with _patch_model_init_for_modelopt(cls, pretrained_model_name_or_path):
         model = types.MethodType(cls._modelopt_cache["from_pretrained"].__func__, cls)(
             pretrained_model_name_or_path, *args, **kwargs
         )
@@ -160,9 +128,7 @@ def _new_from_pretrained(cls, /, pretrained_model_name_or_path, *args, **kwargs)
 
 def _new_from_config(cls, /, config, **kwargs):
     """Patch for `cls.from_config` method to restore ModelOpt state."""
-    with _patch_model_init_for_modelopt(
-        cls, config._name_or_path, extra_context=_undo_torch_init_override_by_transformers
-    ):
+    with _patch_model_init_for_modelopt(cls, config._name_or_path):
         model = types.MethodType(cls._modelopt_cache["_from_config"].__func__, cls)(
             config, **kwargs
         )
@@ -184,10 +150,6 @@ def _legacy_tied_weights_keys_as_dict(model: nn.Module):
     the dedup patterns ``_get_tied_weight_keys`` is expected to return. The original attribute
     is restored on exit so the shim stays invisible to the rest of the model's lifetime.
     """
-    if not _TRANSFORMERS_GE_5_0:
-        yield
-        return
-
     patched = []
     try:
         for module in model.modules():
@@ -222,9 +184,7 @@ def _load_params_and_buffers_into_zero3_model(model_to_load, state_dict, load_co
     buffer_state_dict = {k: v for k, v in state_dict.items() if k in buffer_names}
     model_to_load.load_state_dict(buffer_state_dict, strict=False)
     cached_fn = tf_modeling_utils._modelopt_cache["_load_state_dict_into_zero3_model"]
-    if _TRANSFORMERS_GE_5_0:
-        return cached_fn(model_to_load, state_dict, load_config)
-    return cached_fn(model_to_load, state_dict)
+    return cached_fn(model_to_load, state_dict, load_config)
 
 
 pretrained_model_patch_methods = [
@@ -312,20 +272,10 @@ class ModelOptTrainerArguments(ModelOptHFArguments):
 
 
 def _translate_warmup_keys(config: dict, actions) -> None:
-    """Accept either warmup spelling across transformers versions.
-
-    transformers 5.15 removed ``warmup_ratio``; from 5.0, a ``warmup_steps`` below 1 is a ratio.
-    """
-    types = {a.dest: a.type for a in actions}
-    if "warmup_steps" not in types:
-        return
-    if "warmup_ratio" in config and "warmup_ratio" not in types:
-        ratio = config.pop("warmup_ratio")
-        config.setdefault("warmup_steps", ratio)
-    elif "warmup_ratio" in types and types["warmup_steps"] is int:
-        steps = config.get("warmup_steps")
-        if isinstance(steps, float) and 0 < steps < 1:
-            config["warmup_ratio"] = config.pop("warmup_steps")
+    """Map ``warmup_ratio``, removed in transformers 5.15, to ``warmup_steps`` (below 1 it is a ratio)."""
+    dests = {a.dest for a in actions}
+    if "warmup_ratio" in config and "warmup_ratio" not in dests and "warmup_steps" in dests:
+        config.setdefault("warmup_steps", config.pop("warmup_ratio"))
 
 
 class ModelOptArgParser(HfArgumentParser):

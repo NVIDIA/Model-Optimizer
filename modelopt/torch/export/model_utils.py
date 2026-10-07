@@ -245,11 +245,11 @@ class TiedWeightMap:
     """
 
     def __init__(self, model: nn.Module) -> None:
-        """Source the tie map from HF's ``all_tied_weights_keys`` (transformers >=5.0).
+        """Source the tie map from HF's ``all_tied_weights_keys``.
 
         HF's ``{target: source}`` == our ``{alias: canonical}``, resolved at load, config-gated,
-        ``torch.equal``-pruned, and name-based so it survives FSDP shard / offload. Absent on
-        transformers <5.0 -> empty map (the ``data_ptr`` backstop in postprocess is the net).
+        ``torch.equal``-pruned, and name-based so it survives FSDP shard / offload. Absent on a
+        non-``PreTrainedModel`` -> empty map (the ``data_ptr`` backstop in postprocess is the net).
         """
         all_tied = getattr(model, "all_tied_weights_keys", None)
         # Warn whenever a tie is declared (embedding tie or any ``_tied_weights_keys`` entry, e.g.
@@ -259,12 +259,8 @@ class TiedWeightMap:
         ) or bool(getattr(model, "_tied_weights_keys", None))
         if all_tied is None and declares_tie:
             warnings.warn(
-                "This model may contain tied/shared weights, but deduplicating them on export "
-                "requires transformers>=5.0 (it uses model.all_tied_weights_keys, which is only "
-                "supported in newer versions). On older versions the exported checkpoint may keep "
-                "duplicate copies of the tied weights (larger files), and tied weights may not be "
-                "deduplicated correctly during export. Upgrade to transformers>=5.0 for correct "
-                "tied-weight export."
+                "This model declares tied weights but has no model.all_tied_weights_keys, so the "
+                "exported checkpoint may keep duplicate copies of the tied weights."
             )
         # Drop any self-entry (alias == canonical): HF should not emit one, but a target==source
         # pair would schedule the kept canonical for deletion, so filter it out defensively.
