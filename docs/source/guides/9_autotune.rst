@@ -257,6 +257,34 @@ To use remote autotuning during Q/DQ placement optimization, run with ``trtexec`
 
 Replace ``<remote autotuning config>`` with an actual remote autotuning configuration string (see ``trtexec --help`` for more details). Other TensorRT benchmark options (e.g. ``--timing_cache``, ``--warmup_runs``, ``--timing_runs``, ``--plugin_libraries``) are also available; run ``--help`` for details.
 
+**Connectivity checks:**
+
+When ``--remoteAutoTuningConfig`` is detected, the autotuner guards against remote board failures in two ways:
+
+1. **Pre-check** — Before each trtexec invocation, a TCP connectivity test is performed.
+   If the board is unreachable after retries, the autotuner saves state and exits cleanly
+   before trtexec is launched.
+2. **Post-failure re-check** — If trtexec itself fails (non-zero exit, unparseable output, or
+   an unexpected exception), the autotuner re-tests connectivity. If the board has become
+   unreachable, the failure is treated as a transient network event (state is saved and the
+   run exits) rather than being recorded as an error against the current scheme.
+
+Both checks use the same retry count configured via ``--remote_connection_retries`` (default: 3).
+Each retry attempts a TCP connection with a 5-second timeout followed by a 2-second back-off,
+so a post-failure re-check on a genuinely unreachable board adds up to
+``retries * 7 s`` (21 s at the default) to the failure path.
+
+.. code-block:: bash
+
+   python -m modelopt.onnx.quantization.autotune \
+       --onnx_path model.onnx \
+       --output_dir ./model_remote_autotuned \
+       --use_trtexec \
+       --trtexec_benchmark_args "--remoteAutoTuningConfig=\"ssh://admin@192.168.1.100\" --safe --skipInference" \
+       --remote_connection_retries 5
+
+Each failed attempt is logged as a warning. If all retries fail, the process exits with an error message and preserved state. On restart (same ``--output_dir``), autotuning resumes from the last committed checkpoint: regions whose patterns were fully profiled before the interruption are skipped. The *active* region (the one being profiled when the connection was lost) is re-profiled from scratch — its in-progress candidates and measurements are not serialized. Pattern-cache seeding may pre-populate the region with known schemes, but their latencies are reset so every scheme is re-measured.
+
 Low-Level API Usage
 ===================
 

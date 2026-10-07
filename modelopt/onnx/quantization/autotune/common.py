@@ -47,6 +47,10 @@ class InvalidSchemeError(AutotunerError):
     """Exception raised when an invalid scheme is referenced."""
 
 
+class RemoteConnectionError(AutotunerError):
+    """Exception raised when the remote autotuning board is unreachable."""
+
+
 class RegionType(Enum):
     """Region type enumeration for hierarchical graph structure.
 
