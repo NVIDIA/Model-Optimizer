@@ -14,7 +14,8 @@ State QAT now selects `backend="serving"`: imported serving forward kernels plus
 an explicit differentiable Torch adjoint. Plain TensorQuantizer state QDQ targets
 public vLLM 0.15.1; INT8/Hadamard and ReplaySSM target a compatible
 quantized-ReplaySSM fork. Neither training path needs a running server.
-Chunk-only state QAT is retired; W-only QAT continues to use FLA.
+Chunk-only state QAT and W-only QAT are retired. Keep `gdn_w_quantizer` disabled;
+state QAT imports serving kernels without a copied FLA W-QAT implementation.
 
 The latest validation covers both GDN and KDA, including native checkpoint scales,
 BF16 replay rings, prefix-to-suffix gradients, and short training runs. See
@@ -89,8 +90,8 @@ Training prefix must match serving **prefill**; training suffix must match servi
 
 For a fresh prompt handled by one native prefill call, the current state-only
 adapter quantizes the zero incoming state and then runs native prefill without
-additional internal state QDQ. The training prefix should therefore use
-`prefill_state_qdq=False`. Enabling QDQ after every 64-token training chunk would
+additional internal state QDQ. Both native precision profiles keep this same
+prefix behavior. Applying QDQ after every 64-token training chunk would
 introduce boundaries absent from this serving path.
 
 A prompt split across multiple native prefill calls, or resumed from nonzero
@@ -146,13 +147,15 @@ tolerances and sufficiently long trajectories.
 
 Both policies use working-state readout, initial-state quantization, and no
 internal prefix QDQ. TensorQuantizer selects the state format and enablement;
-the execution policy selects the serving arithmetic and state-write schedule.
+the single `LinearAttentionConfig` selects the serving arithmetic (`precision`)
+and checkpoint frequency (`replay_window`). The precision profile determines the
+codec, including Hadamard for `replayssm`; there are no separate decode/replay configs.
 
 | Recipe | Forward target | State writes |
 | --- | --- | --- |
 | `linear_attention_state_int8_block32_dynamic` | Public vLLM 0.15.1, `precision="vllm_0_15"` | Handoff and every decode token, dynamic INT8 per 32 values |
-| `linear_attention_state_int8_dynamic` | Compatible native fork, `precision="replayssm"` | H32 + INT8 checkpoint at handoff and every token (`window=1`) |
-| Hadamard recipe with `mode="replay"` | Same native fork | H32 + INT8 at handoff/refresh; BF16 key/update ring between refreshes |
+| `linear_attention_state_int8_dynamic` | Compatible native fork, `precision="replayssm"` | H32 + INT8 checkpoint at handoff and every token (`replay_window=1`) |
+| Hadamard recipe with `replay_window=8` | Same native fork | H32 + INT8 at handoff/refresh; BF16 key/update ring between refreshes |
 
 ```python
 import modelopt.torch.quantization as mtq
@@ -160,8 +163,8 @@ from modelopt.recipe import load_recipe
 from modelopt.torch.quantization.linear_attention import linear_attention_training_phase
 
 cfg = load_recipe("general/ptq/linear_attention_state_int8_dynamic").quantize.model_dump()
-# Omit this update for Hadamard token mode.
-cfg["linear_attention"][0]["cfg"]["decode"].update(mode="replay", replay={"window": 8})
+# The unified execution config defaults to replay_window=1 (every-token refresh).
+cfg["linear_attention"][0]["cfg"]["replay_window"] = 8
 mtq.quantize(model, cfg)
 with linear_attention_training_phase(model, prefill_lengths):
     loss = compute_suffix_loss(model, batch)
@@ -192,9 +195,9 @@ Public vLLM 0.15.1 does not contain the ReplaySSM/Hadamard kernels. The native f
 must provide `vllm.model_executor.layers.fla.ops.fused_recurrent_replayssm`,
 including its KDA vector-gate support. The state-only plugin in #2541 continues
 to target ordinary TensorQuantizer state QDQ; these results do not add ReplaySSM
-to that plugin. `backend="reference"` retains mathematical experiments and makes
-no serving-equivalence claim. Legacy `backend="matmul"` loads without changing its
-saved precision; enabled chunk-only state QAT raises a migration error.
+to that plugin. Reference training is retired; mathematical oracles live under
+`tests/`. Legacy `backend="matmul"` loads only with an explicit native serving
+precision; reference and enabled chunk-only state QAT require migration.
 
 ### Hadamard and ReplaySSM validation on 2026-10-06
 
@@ -224,6 +227,14 @@ Permanent coverage stays small: two native ReplaySSM cases, plus the existing tw
 public-vLLM prefix/suffix checks. Compilation runs in fixtures. The broader matrix
 is a local validation artifact, not a large CI test matrix.
 
+After retiring the production reference backend and unifying the execution config,
+44 focused CPU tests and six GPU tests passed. The two Megatron GDN/KDA tests now use native vLLM INT8 block32
+training, including checkpoint restore, backward, and optimizer updates; the other
+four cover native prefix/suffix QDQ and Hadamard/ReplaySSM. Old nested policy and
+QuantizeConfig pickles created before unification also load with `weights_only=True`;
+both state recipes load into the flat config. The broader receipt above records
+its original source snapshot.
+
 ## Recorded numerical results
 
 The sections below retain earlier successes and failures for provenance. Their
@@ -232,7 +243,7 @@ the current policy and results are above.
 
 ### CPU state schedule check on 2026-10-05
 
-The [reproduction script](check_state_quantization.py) runs the actual Torch
+The [historical reproduction script](https://github.com/NVIDIA/Model-Optimizer/blob/df561fd5894f4522fcb4403c09d1681be5fa8538/examples/llm_qat/linear_attention/check_state_quantization.py) ran the then-current Torch
 `recurrent_decode` implementation against a small CPU recurrence that applies
 `TensorQuantizer` before each update. The reference uses the same key-reduction
 order to isolate QDQ placement and grouping. It does not load vLLM, run native
@@ -270,15 +281,9 @@ identify the tested implementation; use the recorded source hashes. The vLLM
 source review used `864973e890b092216aa6094ae7ce9c5aa0083262` and was read-only.
 The example branch has not been rebased onto those local training changes.
 
-To repeat the check with the intended training checkout, run from the repository
-root containing this example, using an environment with ModelOpt dependencies:
-
-```bash
-PYTHONPATH=/path/to/pr2519-checkout python \
-  examples/llm_qat/linear_attention/check_state_quantization.py \
-  --output /tmp/state_quantization_results.json
-```
-
+The CPU reference training backend and its example script have since been removed.
+Reproducing these historical results requires the linked example and the recorded
+ModelOpt source snapshot, rather than the current serving-only training API.
 Confirm that the source hashes match before comparing with the recorded row.
 Once the stack contains the same implementation, use `PYTHONPATH="$PWD"`.
 The script reports differences; native runtime equivalence must be checked

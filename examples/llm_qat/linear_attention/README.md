@@ -7,8 +7,8 @@ gradient accumulation, logging, and checkpoints. Training adapters support Megat
 `GatedDeltaNet` and `KimiDeltaAttention`; FLA supplies kernels, not model-layer adapters.
 State QAT uses serving forward kernels for a chunked prefix and a recurrent suffix,
 with a differentiable Torch adjoint. The recipes select ordinary token-state INT8
-or INT8 with Hadamard rotation and optional ReplaySSM. W quantization remains a
-separate GDN/FLA feature.
+or INT8 with Hadamard rotation and optional ReplaySSM. This workflow quantizes
+recurrent state only.
 
 See [State quantization alignment](STATE_QUANTIZATION.md) for the numerical
 contract and validation results. Native kernel equivalence and successful training
@@ -40,7 +40,7 @@ torchrun --standalone --nproc-per-node=1 examples/llm_qat/linear_attention/train
 ```
 
 The default example recipe uses `backend="serving"` and
-`decode.precision="vllm_0_15"`, importing kernels directly from
+`precision="vllm_0_15"`, importing kernels directly from
 [vLLM 0.15.1](https://github.com/vllm-project/vllm/tree/v0.15.1).
 Install its optional dependency in an environment compatible with that release:
 
@@ -53,7 +53,7 @@ training uses ModelOpt's Torch adjoint and does not launch a vLLM server. The ex
 requirements own the version pin. The ReplaySSM profile requires its compatible serving fork instead.
 The block32 recipe
 `general/ptq/linear_attention_state_int8_block32_dynamic` selects this profile;
-the Hadamard recipe selects `decode.precision="replayssm"`.
+the Hadamard recipe selects `precision="replayssm"`.
 
 For both serving profiles, launch training and evaluation with
 [`with_vllm_defaults.sh`](with_vllm_defaults.sh). It explicitly sets
@@ -162,13 +162,35 @@ uses three separate inputs:
 | Input | Purpose | Supplied through |
 | --- | --- | --- |
 | `TensorQuantizer` settings | Enable a quantization site and choose its numerical format, scales, and gradient behavior | Recipe `quant_cfg`, such as dynamic INT8 with identity STE |
-| Execution policy | Choose token or replay mode, Hadamard rotation, handoff quantization, and the execution backend | Recipe `linear_attention` entries |
+| Execution policy | Choose the native precision profile and checkpoint refresh window | Recipe `linear_attention` entries |
 | Batch metadata | Specify where each sequence switches from prefill to decode | `linear_attention_training_phase(model, prefill_lengths)` |
 
-`backend="serving"` selects native forward arithmetic and requires an explicit
-`decode` policy. `decode.precision` selects the serving implementation. The
-`reference` backend is for mathematical experiments, not serving-equivalence claims.
-Older `backend="matmul"` policies retain their numerical settings through an alias.
+`LinearAttentionConfig` is the single execution config for both phases:
+
+```yaml
+linear_attention:
+  - module_name: "*"
+    cfg:
+      backend: serving
+      precision: replayssm
+      replay_window: 8
+```
+
+`backend="serving"` selects native forward arithmetic; `precision` selects the
+serving implementation and its codec. `replay_window=1` (the default) refreshes
+state every token. Values from 2 to 64 enable replay and require `replayssm`.
+This profile includes Hadamard rotation; `vllm_0_15` uses ordinary state QDQ.
+`state_block_v` is the legacy per-tile scale width, defaulting to 64; blockwise
+grouping still comes from `TensorQuantizer.block_sizes`.
+
+Both profiles fix working-state readout, QDQ at handoff, and no internal prefix
+QDQ. These are native arithmetic requirements, not separate configuration knobs.
+Supported older nested `state`/`decode`/`replay` configs migrate on load; newly
+saved policies use the flat schema. The old nested classes are retained only as
+pickle deserialization names and are not part of the public API.
+Reference training (`backend="reference"` or `precision="full"`) is retired.
+Older `backend="matmul"` policies load only if they already select a native
+serving precision; configurations are never silently switched to different arithmetic.
 
 Each `linear_attention` rule assigns the policy to matching modules. ModelOpt saves
 it with the registered quantizers. Batch prefix lengths remain runtime metadata.
@@ -179,8 +201,7 @@ State quantizers start disabled. The shared state recipe enables `*gdn_state_qua
 with signed narrow-range INT8, dynamic scales, and `axis=(0, 1)`. Use
 `*gdn_state_quantizer` or `*kda_state_quantizer` to select just one layer type. For E4M3, set the quantizer config to
 `{"num_bits": [4, 3], "type": "dynamic", "axis": [0, 1]}` and set
-`decode.state_codec="tile"`.
-Setting `prefill_state_qdq=True` alone does not enable a quantizer.
+`precision="vllm_0_15"`. The execution config alone does not enable a quantizer.
 
 Start with the token-state recipe and select one of the schedules below **before**
 calling `mtq.quantize`:
@@ -191,11 +212,10 @@ from modelopt.recipe import load_recipe
 
 recipe = load_recipe("general/ptq/linear_attention_state_int8_dynamic").quantize.model_dump()
 policy = recipe["linear_attention"][0]["cfg"]
-decode = policy["decode"]
 ```
 
 The complete recipe composes both INT8 state quantizers with the Hadamard
-execution policy and uses the Torch decode implementation. Use the phase context
+execution policy and uses native forward kernels with a Torch adjoint. Use the phase context
 shown below for each forward/backward. Importing only
 `configs/ptq/units/linear_attention_state_int8_dynamic` configures the quantizers
 without selecting Hadamard.
@@ -212,15 +232,15 @@ the prompt portion.
 For a 128-token sequence with `prefill_lengths=[96]`, the default token-state
 recipe runs these steps:
 
-1. **Prefill:** process tokens 0–95 with `prefill_state_qdq=False`, leaving state
+1. **Prefill:** process tokens 0–95 with native chunked arithmetic, leaving state
    unquantized during the prefix.
 2. **Handoff:** carry the resulting state into decode, rotate its value dimension
-   into the Hadamard basis, and apply INT8 QDQ because `quantize_initial=True`.
+   into the Hadamard basis, and apply INT8 QDQ.
 3. **Decode:** process tokens 96–127 recurrently, applying INT8 QDQ after every
    state update. Later tokens consume the rounded state; outputs are transformed
    back to the original value basis.
 
-The boundary is independent of `chunk_size=64`: this 96-token prefix contains a
+The boundary is independent of the fixed 64-token prefill chunk size: this 96-token prefix contains a
 full 64-token chunk and a partial 32-token chunk. The phase switches after token
 95, not after each chunk.
 
@@ -242,7 +262,7 @@ leave a nonempty suffix and apply the loss there so training observes cache roun
 | --- | --- | --- |
 | `linear_attention_state_int8_block32_dynamic` | QDQ at handoff and every token write, one scale per key row and 32 value channels | Public vLLM 0.15.1 |
 | `linear_attention_state_int8_dynamic` | INT8 + H32 at handoff and every token write | Compatible quantized-ReplaySSM fork, window 1 |
-| Same Hadamard recipe with `mode="replay"` | INT8 + H32 at handoff and each window refresh; BF16 key/update ring between refreshes | Compatible quantized-ReplaySSM fork |
+| Same Hadamard recipe with `replay_window=8` | INT8 + H32 at handoff and each window refresh; BF16 key/update ring between refreshes | Compatible quantized-ReplaySSM fork |
 
 All three read the current token's output from the working state, before checkpoint
 rounding. A fresh prefill has no internal state QDQ. Continuation prefill consumes
@@ -259,15 +279,14 @@ Load the Hadamard recipe and optionally enable an eight-token replay window:
 
 ```python
 recipe = load_recipe("general/ptq/linear_attention_state_int8_dynamic").quantize.model_dump()
-decode = recipe["linear_attention"][0]["cfg"]["decode"]
-decode.update(mode="replay", replay={"window": 8})
+recipe["linear_attention"][0]["cfg"]["replay_window"] = 8
 ```
 
 The serving ReplaySSM profile stores BF16 key/update vectors once. Additional factor
 FP8 QDQ, repeated factor encoding, stored-state readout, and internal-prefix QDQ are
-not part of this serving contract. They remain explicit reference experiments.
+unsupported. Mathematical reference implementations live only under `tests/`.
 
-`chunk_size=64` counts prefill tokens. A replay `window=8` counts suffix tokens
+The fixed chunk size of 64 counts prefill tokens. `replay_window=8` counts suffix tokens
 between checkpoint refreshes. H32 uses one scale per key channel and 32 value
 channels, with FP16 scale metadata. The ordinary block32 recipe instead uses
 standard `TensorQuantizer(block_sizes={-1: 32})` grouping.
@@ -280,8 +299,11 @@ To customize the CLI, copy a recipe YAML and pass `--recipe /path/to/recipe.yaml
 Chunk-only state QAT is retired. An old configuration can be loaded for inspection,
 but executing enabled state quantization with `backend="fla"` raises a migration
 error. Select a serving recipe and supply explicit prefix lengths; no automatic
-conversion guesses a different QDQ schedule. The FLA path remains available for
-W-only QAT, using upstream FLA state forward/backward kernels.
+conversion guesses a different QDQ schedule.
+
+W-only QAT is also retired: enabled `gdn_w_quantizer` configurations or checkpoints
+raise an error. The disabled handle remains loadable for checkpoint compatibility.
+State QAT imports serving kernels and does not quantize WY operands.
 
 ## Integrate with a training loop
 
@@ -319,7 +341,7 @@ optimizer.step()
 
 The shared recipe selects both GDN and KDA state quantizers. State quantization is dynamic, so the recipe uses
 `algorithm=None` without a calibration pass. The native replay profile retains
-BF16 factors; factor-quantization experiments use the explicit reference backend.
+BF16 factors; keep legacy replay key/update quantizer handles disabled.
 
 Policies persist through ModelOpt save/restore. Per-batch prefix lengths are
 runtime metadata and must be supplied for each workload. The context restores
