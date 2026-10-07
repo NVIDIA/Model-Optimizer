@@ -31,9 +31,10 @@ _MXFP8_ARGS = (8, 4, 9, 8, "Float")
 
 
 class _StrictQuantOp(nn.Module):
-    def __init__(self, quant_format):
+    def __init__(self, quant_format, axis=0):
         super().__init__()
         self.quant_format = quant_format
+        self.axis = axis
 
     def forward(self, x, amax):
         if self.quant_format.startswith("fp8"):
@@ -48,7 +49,11 @@ class _StrictQuantOp(nn.Module):
             )
         if self.quant_format in {"int8", "uint8"}:
             return torch.ops.tensorrt.quantize_op.default(
-                x, amax, 8, 0, self.quant_format == "uint8", False, "Float", None, 0
+                x, amax, 8, 0, self.quant_format == "uint8", False, "Float", None, self.axis
+            )
+        if self.quant_format == "int4":
+            return torch.ops.tensorrt.quantize_op.default(
+                x, amax, 4, 0, False, True, "Float", 16, -1
             )
         if self.quant_format.startswith("nvfp4"):
             return torch.ops.tensorrt.dynamic_block_quantize_op.default(
@@ -105,33 +110,83 @@ def _constant(model, name):
 _STRICT_CASES = [
     ("fp8_none", ("trt", "TRT_FP8QuantizeLinear")),
     ("fp8", ("trt", "TRT_FP8QuantizeLinear")),
+    ("int8", ("", "QuantizeLinear")),
     ("uint8", ("", "QuantizeLinear")),
+    ("int4", ("trt", "DequantizeLinear")),
+    ("nvfp4_static", ("trt", "TRT_FP4QDQ")),
     ("mxfp8_static", ("trt", "TRT_MXFP8DequantizeLinear")),
+    ("mxfp8_dynamic", ("trt", "TRT_MXFP8DynamicQuantize")),
 ]
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 @pytest.mark.parametrize(("quant_format", "expected_node"), _STRICT_CASES)
-def test_private_table_strict_formats(tmp_path, quant_format, expected_node):
-    sample_input = torch.randn(4, 32)
-    amax = torch.ones(4, 1) if quant_format == "uint8" else torch.tensor(1.0)
+def test_private_table_strict_formats(tmp_path, quant_format, expected_node, dtype):
+    sample_input = torch.randn(4, 32, dtype=dtype)
+    if quant_format in {"int8", "uint8"}:
+        amax = torch.ones(4, 1)
+    elif quant_format == "int4":
+        amax = torch.ones(4, 2)
+    else:
+        amax = torch.tensor(1.0)
     exported_program = torch.export.export(
         _StrictQuantOp(quant_format), (sample_input, amax), strict=True
     )
     exported = _raw_export(exported_program, (), tmp_path / f"{quant_format}.onnx")
     assert expected_node in {(node.domain, node.op_type) for node in exported.graph.node}
-    if quant_format == "uint8":
+    expected_dtype = onnx.TensorProto.FLOAT if dtype == torch.float32 else onnx.TensorProto.FLOAT16
+    assert exported.graph.output[0].type.tensor_type.elem_type == expected_dtype
+    tensor_types = {
+        value.name: value.type.tensor_type.elem_type
+        for value in (*exported.graph.input, *exported.graph.value_info, *exported.graph.output)
+    }
+    if quant_format in {"int8", "uint8"}:
         quantizer = next(node for node in exported.graph.node if node.op_type == "QuantizeLinear")
-        tensor_types = {
-            value.name: value.type.tensor_type.elem_type
-            for value in (*exported.graph.input, *exported.graph.value_info, *exported.graph.output)
-        }
         assert _attribute(quantizer, "axis") == 0
-        assert tensor_types[quantizer.input[2]] == onnx.TensorProto.UINT8
+        unsigned = quant_format == "uint8"
+        assert tensor_types[quantizer.input[2]] == (
+            onnx.TensorProto.UINT8 if unsigned else onnx.TensorProto.INT8
+        )
         divisor = next(node for node in exported.graph.node if node.op_type == "Div").input[1]
-        assert _constant(exported, divisor).item() == 255.0
+        assert _constant(exported, divisor).item() == (255.0 if unsigned else 127.0)
+    elif quant_format == "int4":
+        dequantizer = next(
+            node for node in exported.graph.node if node.op_type == "DequantizeLinear"
+        )
+        assert _attribute(dequantizer, "axis") == -1
+        assert _attribute(dequantizer, "block_size") == 16
+        assert tensor_types[dequantizer.output[0]] == onnx.TensorProto.FLOAT
+        divisor = next(node for node in exported.graph.node if node.op_type == "Div").input[1]
+        assert _constant(exported, divisor).item() == 7.0
     elif quant_format == "fp8":
         divisor = next(node for node in exported.graph.node if node.op_type == "Div").input[1]
         assert _constant(exported, divisor).item() == 448.0
+
+
+@pytest.mark.parametrize("amax_shape", [(), (1,), (1, 1)])
+@pytest.mark.parametrize("axis", [0, -1])
+def test_private_table_int8_singleton_amax_is_per_tensor(tmp_path, amax_shape, axis):
+    inputs = torch.randn(4, 32)
+    exported_program = torch.export.export(
+        _StrictQuantOp("int8", axis), (inputs, torch.ones(amax_shape)), strict=True
+    )
+    exported = _raw_export(exported_program, (), tmp_path / "int8_per_tensor.onnx")
+    tensor_shapes = {
+        value.name: value.type.tensor_type.shape
+        for value in (*exported.graph.input, *exported.graph.value_info, *exported.graph.output)
+    }
+    for node in exported.graph.node:
+        if node.op_type in {"QuantizeLinear", "DequantizeLinear"}:
+            assert len(tensor_shapes[node.input[1]].dim) == 0
+            assert len(tensor_shapes[node.input[2]].dim) == 0
+
+
+def test_private_table_rejects_int4_without_amax(tmp_path):
+    exported_program = torch.export.export(
+        _StrictQuantOp("int4"), (torch.randn(4, 32), None), strict=True
+    )
+    with pytest.raises(torch.onnx.OnnxExporterError, match="INT4 ONNX export requires amax"):
+        _raw_export(exported_program, (), tmp_path / "int4_without_amax.onnx")
 
 
 def test_private_table_preserves_nvfp4_carrier_dtype(tmp_path):

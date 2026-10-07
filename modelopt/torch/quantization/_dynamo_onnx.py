@@ -36,6 +36,11 @@ def _fp8_qdq(inputs: TFloat, scale: TFloat) -> TFloat:
 
 
 @onnxscript.script(_TRT_OPSET)
+def _int4_dq(inputs: TFloat, scale: TFloat, axis: int, block_size: int) -> TFloat:
+    return _TRT_OPSET.DequantizeLinear(inputs, scale, axis=axis, block_size=block_size)
+
+
+@onnxscript.script(_TRT_OPSET)
 def _fp4_qdq(inputs: TFloat, block_size: int) -> TFloat:
     return _TRT_OPSET.TRT_FP4QDQ(inputs, block_size=block_size)
 
@@ -143,40 +148,34 @@ def _translate_quantize_op(
         inputs = _cast(inputs, output_dtype)
         input_rank = len(input_shape)
         amax_shape = _static_shape(amax)
+        quantized_axes = [index for index, dim in enumerate(amax_shape) if dim != 1]
+        if len(quantized_axes) > 1:
+            raise AssertionError("ONNX does not support multi-axis quantization.")
         if axis is not None:
             if not -input_rank <= axis < input_rank:
                 raise ValueError(f"INT8 axis {axis} is out of bounds for input rank {input_rank}.")
             axis %= input_rank
-            quantized_axes = [index for index, dim in enumerate(amax_shape) if dim != 1]
-            if len(quantized_axes) > 1:
-                raise AssertionError("ONNX does not support multi-axis quantization.")
-            if len(amax_shape) == input_rank and quantized_axes and quantized_axes[0] != axis:
-                inferred_axis = quantized_axes[0]
-                raise ValueError(f"INT8 axis {axis} does not match amax axis {inferred_axis}.")
-        elif not amax_shape:
+        if not quantized_axes:
             axis = None
-        elif len(amax_shape) == input_rank:
-            quantized_axes = [index for index, dim in enumerate(amax_shape) if dim != 1]
-            if len(quantized_axes) > 1:
-                raise AssertionError("ONNX does not support multi-axis quantization.")
-            axis = quantized_axes[0] if quantized_axes else None
-        elif len(amax_shape) == 1 and input_rank == 1:
-            axis = 0
-        else:
-            raise ValueError("INT8 per-channel amax requires an explicit input axis.")
-        quantized_axis = axis
+        elif axis is None:
+            if len(amax_shape) != input_rank:
+                raise ValueError("INT8 per-channel amax requires an explicit input axis.")
+            axis = quantized_axes[0]
+        elif len(amax_shape) == input_rank and quantized_axes[0] != axis:
+            inferred_axis = quantized_axes[0]
+            raise ValueError(f"INT8 axis {axis} does not match amax axis {inferred_axis}.")
         amax = _OPSET.Cast(amax, to=output_dtype)
-        amax = _OPSET.Squeeze(amax) if quantized_axis is None else _OPSET.Reshape(amax, [-1])
+        amax = _OPSET.Squeeze(amax) if axis is None else _OPSET.Reshape(amax, [-1])
         scale = _OPSET.Div(amax, float((1 << (7 + int(unsigned))) - 1))
         scale = _OPSET.Where(_OPSET.Equal(scale, 0.0), _OPSET.CastLike(1.0, scale), scale)
         zero_point_dtype = onnx.TensorProto.UINT8 if unsigned else onnx.TensorProto.INT8
         zero_point = _OPSET.Cast(_OPSET.Mul(amax, 0.0), to=zero_point_dtype)
-        if quantized_axis is None:
+        if axis is None:
             quantized = _OPSET.QuantizeLinear(inputs, scale, zero_point)
             output = _OPSET.DequantizeLinear(quantized, scale, zero_point)
         else:
-            quantized = _OPSET.QuantizeLinear(inputs, scale, zero_point, axis=quantized_axis)
-            output = _OPSET.DequantizeLinear(quantized, scale, zero_point, axis=quantized_axis)
+            quantized = _OPSET.QuantizeLinear(inputs, scale, zero_point, axis=axis)
+            output = _OPSET.DequantizeLinear(quantized, scale, zero_point, axis=axis)
         return output if output_dtype == source_dtype else _OPSET.Cast(output, to=source_dtype)
 
     if num_bits == 4 and exponent_bits == 0:
@@ -184,11 +183,15 @@ def _translate_quantize_op(
             raise NotImplementedError("Dynamo ONNX export supports signed INT4 only.")
         if block_size is None or axis is None:
             raise ValueError("INT4 ONNX export requires block_size and axis.")
+        if amax is None:
+            raise ValueError("INT4 ONNX export requires amax.")
         source_dtype = int(inputs.dtype)
-        output_dtype = _resolve_dtype(inputs, high_precision_dtype)
         amax = _OPSET.Cast(amax, to=output_dtype)
         scale = _OPSET.Div(amax, _OPSET.CastLike(7.0, amax))
-        output = _OPSET.DequantizeLinear(inputs, scale, axis=axis, block_size=block_size)
+        output = _int4_dq(inputs, scale, axis, block_size)
+        # The TRT carrier has no schema to infer metadata when input and scale dtypes differ.
+        output.dtype = onnxscript.ir.DataType(output_dtype)
+        output.shape = inputs.shape
         return output if output_dtype == source_dtype else _OPSET.Cast(output, to=source_dtype)
 
     raise NotImplementedError(
