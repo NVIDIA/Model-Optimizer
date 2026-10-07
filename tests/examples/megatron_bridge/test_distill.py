@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from _test_utils.examples.megatron_example_runner import _load_example_module
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model
 from _test_utils.torch.transformers_models import (
@@ -31,7 +32,6 @@ from _test_utils.torch.transformers_models import (
 )
 from transformers import AutoModelForImageTextToText
 
-import modelopt.torch.export
 from modelopt.torch.puzzletron.anymodel import convert_model
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "examples" / "megatron_bridge"))
@@ -166,7 +166,7 @@ def test_distill_hf_export_reads_the_resolved_local_checkpoint(tmp_path, monkeyp
     A Hub ID cannot run end to end here (get_args() loads the tokenizers from --student_hf_path),
     so the resolver reports a Hub ID and returns a different local copy holding a marker file: the
     marker reaching the export shows which copy the export read. One rank, so the step runs in
-    this process and sees the patch.
+    this process, on the module the runner caches -- the one patched here.
     """
     if model == "llm":
         student_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
@@ -183,7 +183,8 @@ def test_distill_hf_export_reads_the_resolved_local_checkpoint(tmp_path, monkeyp
         resolved_from.append(str(model_name_or_path))
         return "org/tiny-student", str(resolved)
 
-    monkeypatch.setattr(modelopt.torch.export, "ensure_local_checkpoint", ensure_local_checkpoint)
+    distill = _load_example_module("distill.py", "megatron_bridge")
+    monkeypatch.setattr(distill, "ensure_local_checkpoint", ensure_local_checkpoint)
     distilled_hf_path = tmp_path / "distilled_hf"
     distill_cmd_parts = extend_cmd_parts(
         ["torchrun", "--nproc_per_node=1", "distill.py", "--use_mock_data"],
