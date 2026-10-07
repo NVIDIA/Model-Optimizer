@@ -76,15 +76,15 @@ def test_ptq_whisper(command):
         PTQCommand(quant="int8_weight_only", kv_cache_quant="none"),
         PTQCommand(quant="int4_awq", kv_cache_quant="none"),
         PTQCommand(quant="w4a8_awq_beta", kv_cache_quant="none"),
-        # GGML weight-only, recipe-driven. The IQ encoders require every weight's input
-        # dimension to be a multiple of 256; Q8_0 requires 32. TinyLlama's 2048 and 5632
-        # satisfy both. These recipes set algorithm: null, so the format-specific cost is
-        # packing each weight once and decoding it on each forward.
+        # GGML IQ weight-only, recipe-driven: the five formats between 1.56 and 2.56 bits per
+        # weight, on the MLP layers with layerwise GPTQ. These encoders require every weight's
+        # input dimension to be a multiple of 256; TinyLlama's 2048 and 5632 both are.
         PTQCommand(recipe="general/ptq/iq1_s", kv_cache_quant="none"),
         PTQCommand(recipe="general/ptq/iq1_m", kv_cache_quant="none"),
         PTQCommand(recipe="general/ptq/iq2_xxs", kv_cache_quant="none"),
         PTQCommand(recipe="general/ptq/iq2_xs", kv_cache_quant="none"),
         PTQCommand(recipe="general/ptq/iq2_s", kv_cache_quant="none"),
+        # Q8_0 has 32-value blocks and needs no calibration forward pass.
         PTQCommand(recipe="general/ptq/q8_0", kv_cache_quant="none"),
         PTQCommand(quant="nvfp4"),
         PTQCommand(quant="nvfp4_awq_lite"),

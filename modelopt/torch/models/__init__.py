@@ -70,6 +70,7 @@ from . import (  # isort: skip
     deepseek,
     deepseek_v3,
     deepseek_v4,
+    falcon,
     gemma,
     gemma2,
     gemma3,
@@ -77,6 +78,7 @@ from . import (  # isort: skip
     gemma4_text,
     gpt_oss,
     llama,
+    llama4,
     minimax,
     mixtral,
     phimoe,
@@ -87,4 +89,7 @@ from . import (  # isort: skip
     qwen3_5_moe,
     qwen3_moe,
     qwen3_next,
+    qwen3_vl_moe,
+    step3p5,
+    step3p7,
 )

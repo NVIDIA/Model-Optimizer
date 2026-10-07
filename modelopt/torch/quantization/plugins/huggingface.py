@@ -1646,7 +1646,8 @@ def force_eager_experts_impl_on_the_fly(model):
     recursively on ``text_config`` / ``vision_config`` / ``audio_config`` /
     ``speech_config``) whenever a fused-experts module is present.
     """
-    if not any(_is_fused_experts_module(m) for m in model.modules()):
+    fused_experts = [module for module in model.modules() if _is_fused_experts_module(module)]
+    if not fused_experts:
         return
 
     nested_cfg_attrs = ("text_config", "vision_config", "audio_config", "speech_config")
@@ -1662,6 +1663,12 @@ def force_eager_experts_impl_on_the_fly(model):
 
     if hasattr(model, "config"):
         _force(model.config)
+
+    # Some models construct auxiliary blocks from a deep copy of the root config.
+    # Nemotron-H MTP does this, so updating only ``model.config`` leaves its fused
+    # experts on grouped_mm/batched_mm and bypasses the F.linear quantizer hooks.
+    for module in fused_experts:
+        _force(getattr(module, "config", None))
 
 
 def _is_supported_hf_model(model):

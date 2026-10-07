@@ -106,6 +106,40 @@
     ]
   },
   {
+    "name": "existing-config-serving-handoff",
+    "skills": ["evaluation"],
+    "query": "Run my existing eval.yaml for ./candidate. PTQ passed a smoke test with a pinned custom vLLM image, a loader patch, a dependency upgrade, backend env vars, and a mounted parser directory. Its temporary endpoint is still listed in the config. HLE uses an external judge.",
+    "files": [],
+    "expected_behavior": [
+      "Checks serving ownership even for an existing config and replaces the temporary model endpoint with NEL-managed deployment",
+      "Maps the validated image, flags, patches, dependencies, environment, and directory mounts into NEL without modifying the checkpoint",
+      "Reviews generated dry-run artifacts against the smoke-test evidence, then validates loading and generation in a NEL canary before the full run",
+      "Does not require external-model authorization for the HLE judge endpoint",
+      "Allows isolated serving diagnostics, carries fixes back into NEL, and does not evaluate the diagnostic endpoint"
+    ]
+  },
+  {
+    "name": "retained-smoke-server-is-not-eval-authorization",
+    "skills": ["evaluation"],
+    "query": "I asked PTQ to keep its smoke server running. Now evaluate ./candidate on MMLU-Pro.",
+    "files": [],
+    "expected_behavior": [
+      "Uses NEL-managed deployment for the evaluation rather than the retained smoke server",
+      "Does not interpret permission to retain the server as authorization to evaluate an external endpoint"
+    ]
+  },
+  {
+    "name": "explicit-external-model-target",
+    "skills": ["evaluation"],
+    "query": "Run MMLU-Pro against my production model at http://host:8000; use that external endpoint rather than deploying a checkpoint.",
+    "files": [],
+    "expected_behavior": [
+      "Uses the explicitly requested external model-under-test endpoint without launching a replacement server",
+      "Records endpoint lifetime and availability as an external dependency",
+      "Still performs dry-run, canary, full-run, and completed-run validation"
+    ]
+  },
+  {
     "name": "scicode-eight-run-average",
     "skills": ["evaluation"],
     "query": "Evaluate my NVFP4 checkpoint on the AA suite including SciCode on SLURM",

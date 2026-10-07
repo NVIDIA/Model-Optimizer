@@ -14,6 +14,7 @@ Changelog
 *Quantization*
 
 - Add Q8_0 weight-only quantization with 32-value GGML blocks, packed unified HF and Megatron export, and a built-in ``q8_0`` PTQ recipe.
+- Add Hugging Face PTQ calibration and export support for Nemotron-H MTP modules, preserving calibrated expert input scales.
 - Backfill checkpoint aliases for nine more published NVFP4 releases, so each is reachable from its source model's hub path: ``zai-org/GLM-5.1`` and ``GLM-5.2``, ``MiniMaxAI/MiniMax-M2.5`` and ``MiniMax-M3``, ``deepseek-ai/DeepSeek-V3.1`` and ``DeepSeek-V3.2``, ``Qwen/Qwen3-235B-A22B-Instruct-2507`` and ``-Thinking-2507``, and ``Qwen/Qwen3.6-27B``. Each imports an existing general or architecture recipe wholesale rather than copying its body.
 - Add composed Hugging Face AutoQuantize recipes that run fixed PTQ or weight AutoQuantize before
   a separate KV-cache AutoQuantize stage, with independent resumable checkpoints for the weight and
@@ -23,6 +24,7 @@ Changelog
 - Add ``iq2_xxs`` weight-only quantization with a CUDA encoder and a ``general/ptq`` recipe, at 2.0625 bits per weight between ``iq1_s`` and ``iq2_xs``. The same 256-value block constraint applies.
 - Add ``iq2_s`` weight-only quantization with a CUDA encoder and a ``general/ptq`` recipe, at 2.5625 bits per weight above ``iq2_xs``. The same 256-value block constraint applies.
 - Add ``iq1_m`` weight-only quantization with a CUDA encoder and a ``general/ptq`` recipe, at 1.75 bits per weight between ``iq1_s`` and ``iq2_xxs``. The same 256-value block constraint applies.
+- GPTQ (``algorithm: {method: gptq}``) now supports the GGML formats (``iq1_s``, ``iq1_m``, ``iq2_xxs``, ``iq2_xs``, ``iq2_s``, ``q8_0``). Each GGML block is quantized as a whole and its error compensated in the later columns, and export writes exactly the codes GPTQ chose. ``block_size`` must be a multiple of the format's block size (256 for the IQ formats). The built-in ``iq1_s``, ``iq1_m``, ``iq2_xxs``, ``iq2_xs`` and ``iq2_s`` recipes now quantize only the MLP/MoE weights and calibrate them with GPTQ, so they need calibration data.
 - A recipe can now **delegate its whole body to another recipe** with a top-level ``$import``; any top-level key given alongside it overrides the imported one. ``metadata.recipe_type`` became optional along with it: a recipe states its kind with a ``# modelopt-schema:`` comment, with ``metadata.recipe_type``, or by delegating to a recipe that does, and only a recipe that another file imports has to carry the schema comment. Whatever a recipe does state must be true: a schema comment and a ``recipe_type`` must agree, and so must a recipe and the recipe it delegates to. ``modelopt_recipes/models/`` uses this for checkpoint entries that a portable recipe already reproduces: the entry aliases that recipe instead of copying it.
 - Backfill the recipes behind NVIDIA's already-published checkpoints under ``modelopt_recipes/models/``, so a released checkpoint's quantization scheme is reachable from its own model-hub path rather than only from the general tier. For example, ``moonshotai/Kimi-K2.6`` (published as ``nvidia/Kimi-K2.6-NVFP4``) and ``Qwen/Qwen3.5-397B-A17B`` (published as ``nvidia/Qwen3.5-397B-A17B-NVFP4-V2``) each alias a portable recipe wholesale -- the general expert-only NVFP4 recipe and the ``qwen3_5_moe`` architecture recipe respectively -- rather than copying its body; other checkpoints follow in separate changes.
 - Add ``layerwise.export_dir``: layerwise calibration writes each decoder layer to its own quantized checkpoint shard as it finishes, so no separate ``export_hf_checkpoint()`` pass is needed and, with ``layerwise.checkpoint_dir``, an interrupted run resumes without redoing finished layers. Calibration writes the layer shards; ``finalize()`` on the exporter left on the model adds the tail shard, the index and the config artifacts, and the checkpoint does not load until it runs. ``examples/hf_ptq`` does this for you. Supports FP8 and NVFP4 on single-process models, resident or offloaded, including multimodal models and models with MTP layers; other formats and placements raise ``NotImplementedError`` before calibration starts.
@@ -34,7 +36,7 @@ Changelog
 - Add the ``configs/ptq/units/kv_nvfp4_mla`` recipe unit for fake quantization of the MLA KV cache (DeepSeek-V3, GLM-5.3-Flash, ...) in vLLM fake-quant serving: NVFP4 for the latent and FP8 for the RoPE key. See `examples/vllm_serve/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/vllm_serve>`_ for an example recipe.
 - vLLM fake-quant serving now runs on pre-quantized checkpoints such as FP8 when the recipe leaves those layers unquantized (for example a KV-cache-only recipe), and on MLA models with an FP8 KV cache; both previously failed during quantization.
 - ``KV_QUANT_CFG`` presets in vLLM fake-quant serving now quantize the MLA KV cache; on vLLM 0.16 and later they silently quantized nothing for MLA models.
-- vLLM fake-quant serving of NVFP4 and cast-mode KV-cache configs no longer needs ``--enforce-eager``. ``examples/vllm_serve/vllm_serve_fakequant.py`` now sets ``VLLM_DISABLE_COMPILE_CACHE=1`` by default, because a cached torch.compile graph of the same model without the fake quant would otherwise be reused.
+- vLLM fake-quant serving of NVFP4 and cast-mode KV-cache configs no longer needs ``--enforce-eager``. ``examples/vllm_serve/vllm_serve_fakequant.py`` now sets ``VLLM_DISABLE_COMPILE_CACHE=1`` for fake-quant serves by default, because a cached torch.compile graph of the same model without the fake quant would otherwise be reused.
 
 *Speculative Decoding*
 
@@ -52,12 +54,17 @@ Changelog
 
 *Misc*
 
+- Add ``--modelopt-*`` options to the ``examples/vllm_serve`` launcher for fakequant calibration and checkpoint reload. Pass a quantization config or recipe with a quantizer-state file, or use ``--modelopt-state-path`` to restore a full ModelOpt state.
 - A tracked ``examples/hf_ptq/hf_ptq.py`` run now writes ``.experiment.json`` into ``--export_path`` and uploads the same file with the run, so a checkpoint on disk names the experiment and MLflow run id that produced it. The pointer is written only once the export completes, and an export that is not tracked removes one it would otherwise inherit from a reused ``--export_path`` or from a quantized source checkpoint.
+- ``export_hf_checkpoint`` and the vLLM fake-quant export now copy the source checkpoint's non-model files (tokenizer, processor, remote code, chat templates, ...) into the export unchanged. They read the source from local disk only: get a local copy of a Hugging Face Hub model with ``modelopt.torch.export.ensure_local_checkpoint`` and load it from there.
+
+- Add Parallel Decoding Distillation (PDD) to ``modelopt.torch.fastgen`` with Qwen-Image training, distributed-checkpoint export, and PDD-2/4/8 inference. AutoModel remains an unmodified pinned runtime dependency.
 
 **Backward Breaking Changes**
 
 - ``modelopt.torch.distill.plugins.megatron.TopKLogitsKLLoss`` (``logit_kl_topk`` in ``DistillationConfig``) is renamed to ``TopLogitsKLLoss``, keeping the old name as a deprecated alias. It now normalizes both distributions over the full vocabulary instead of re-normalizing over the Top-K entries, and always appends a "ghost" token holding the probability mass outside the Top-K to both student and teacher (matching Megatron-LM's offline cached-logits KD loss). Loss values change for existing ``logit_kl_topk`` runs.
 - ``LogitsAndIntermediatesLossBalancer`` (Megatron distillation plugin) no longer rescales the distillation loss to the magnitude of the LM loss when the LM loss is included. The total is now the fixed convex combination ``(1 - alpha) * lm_loss + alpha * kd_loss`` with ``DistillationConfig.kd_loss_alpha`` (in [0, 1]), matching Megatron-LM's offline cached-logits KD. The default ``kd_loss_alpha=1.0`` skips the LM loss, as before. ``DistillationConfig.skip_lm_loss`` and ``kd_loss_scale`` are removed and raise ``ValueError`` if passed; set ``kd_loss_alpha`` instead. In ``examples/megatron_bridge/distill.py``, ``--kd_loss_alpha`` replaces ``--no_skip_lm_loss`` and ``--kd_loss_scale``.
+- The ``examples/vllm_serve`` fakequant launcher no longer supports vLLM 0.9.0. Upgrade to a version listed as tested in the example README.
 - The Megatron-Core DeepSeek-V4 indexer (``CSAIndexer``) is now a quantization module and persists its quantizer state in the checkpoint as ``indexer._extra_state``. A DeepSeek-V4 model quantized with an earlier release resumes from its ``torch_dist`` checkpoint only with a non-strict load (``--dist-ckpt-strictness log_unexpected`` in Megatron-LM) until it is saved again.
 - ``examples/hf_ptq`` no longer detects MTP layers by name. Weights the loader could not place -- an MTP head, an auxiliary tower -- are identified from Transformers' own accounting: the model is loaded with ``from_pretrained(..., output_loading_info=True)`` and the reported ``unexpected_keys`` (present in the checkpoint, not in the model's architecture) are recorded on the model and carried into the export unchanged. Everything the loader *did* place goes through the normal export path. This removes ``load_mtp_weights``, ``mtp_layer_prefixes_from_checkpoint`` and their support matrix of MTP storage conventions, along with ``_add_mtp_exclusions`` and the pre-quantization ``enable: False`` entries ``hf_ptq`` appended to the recipe's ``quant_cfg``. Two consequences: MTP layers now follow the recipe like any other module instead of being force-excluded by the script -- matching ``examples/megatron_bridge``, which has no MTP-specific code at all -- and ``quantization_config.ignore`` can no longer claim a layer is unquantized that the export in fact quantized. Recipes importing ``configs/ptq/units/default_disabled_quantizers`` still disable ``mtp.*``, so their behaviour is unchanged; a recipe omitting that unit will now quantize an MTP the model actually built.
 
@@ -95,6 +102,10 @@ Changelog
 
 **Deprecations**
 
+- The ``examples/vllm_serve`` ``QUANT_CFG`` / ``KV_QUANT_CFG`` environment variables and their
+  ``--modelopt-quant-cfg`` / ``--modelopt-kv-quant-cfg`` flags will be deprecated in a future release.
+  For new runs, use a PTQ recipe via ``RECIPE_PATH`` or ``--modelopt-recipe-path``; unset the old
+  variables when switching because the launcher rejects mixing them with a recipe.
 - KV-domain searches in ``examples/hf_ptq`` now use ``--kv_auto_quantize_checkpoint``;
   ``--auto_quantize_checkpoint`` remains a deprecated fallback for a KV-primary recipe for one
   release.
@@ -108,9 +119,17 @@ Changelog
 
 **Bug Fixes**
 
+- Fix calibration silently dropping samples when an out-of-memory error forces the batch to be
+  split and a smaller working batch size is already known: the slices stopped tiling the batch,
+  so the rows between the old and the new width never reached the model and the collected
+  statistics covered fewer samples than requested. Splitting a batch that holds a ``None`` entry
+  no longer raises ``TypeError`` either, and a batch holding a value under
+  ``allowed_non_tensor_keys`` now reports that its rows cannot be split instead.
 - Fix Megatron unified HF export of MoE models with grouped-GEMM experts when only the experts are quantized (e.g. ``nvfp4_experts_only-*`` recipes): ``hf_quant_config.json`` and the ``quantization_config`` in ``config.json`` were not written, so the quantized experts were served as unquantized weights. Re-export such checkpoints.
 - Fix DFlash conversion on NoPE targets whose config leaves ``rope_theta`` unset.
 - Fix offline DFlash training failing to reconstruct the target logits when the captured hidden states are stored in a different dtype than the target's weights.
+- Fix ``hf_ptq`` overwriting a model's existing ``pad_token`` with ``eos_token`` when the model already has a valid padding token. The exported tokenizer now preserves the source model's padding configuration.
+- Fix Hugging Face exports dropping off-index safetensors such as GLM-4.7's ``mtp.safetensors``.
 - Fix Megatron-Core checkpoint saving for quantized grouped MoE experts when tensor and expert parallelism are both enabled.
 - Fix unified HuggingFace export of RADIO-based VLMs retaining post-conversion vision and
   projector names instead of restoring the hub layout; deployment loaders could skip those weights.

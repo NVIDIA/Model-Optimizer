@@ -48,6 +48,7 @@ from transformers import (
 from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
 from modelopt.torch.models import hf_model_type
+from modelopt.torch.models.hf import checkpoint_has_mtp, prepare_model_for_loading
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_safetensor_files_from_ckpt,
     copy_off_index_safetensors,
@@ -160,6 +161,8 @@ def validate_fsdp2_supported(args, config):
         issues.append("speculative decoding (--specdec_offline_dataset)")
     if getattr(args, "low_memory_mode", False):
         issues.append("--low_memory_mode (redundant with FSDP2)")
+    if not issues and checkpoint_has_mtp(config.model_type, args.pyt_ckpt_path):
+        issues.append("Nemotron-H MTP (auxiliary modules are not constructed by the FSDP2 loader)")
 
     if issues:
         raise NotImplementedError(
@@ -376,8 +379,7 @@ def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTok
         ckpt_path, trust_remote_code=trust_remote_code, **kwargs
     )
 
-    # can't set attribute 'pad_token' for "<unk>"
-    if tokenizer.pad_token != "<unk>" or tokenizer.pad_token is None:
+    if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     assert tokenizer.pad_token is not None, f"Pad token for {ckpt_path} cannot be set!"
@@ -617,7 +619,7 @@ def _resolved_local_dir(ckpt_path: str) -> str:
         return str(ckpt_path)
 
 
-def _from_pretrained_recording(auto_class, ckpt_path, **kwargs):
+def _from_pretrained_recording(auto_class, ckpt_path, *, model_type=None, **kwargs):
     """``from_pretrained`` that records what the loader could not place.
 
     ``output_loading_info=True`` makes Transformers return its own accounting of the load;
@@ -627,7 +629,15 @@ def _from_pretrained_recording(auto_class, ckpt_path, **kwargs):
     accounts for on-the-fly key conversion, which a set re-derived afterwards would have to
     replay to avoid mistaking a renamed key for an unplaced one.
     """
-    model, loading_info = auto_class.from_pretrained(ckpt_path, output_loading_info=True, **kwargs)
+    with prepare_model_for_loading(
+        model_type,
+        ckpt_path,
+        kwargs.get("trust_remote_code", False),
+        model_class=None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class,
+    ):
+        model, loading_info = auto_class.from_pretrained(
+            ckpt_path, output_loading_info=True, **kwargs
+        )
     unexpected = loading_info.get("unexpected_keys") or []
     record_unplaced_source_keys(model, _resolved_local_dir(ckpt_path), unexpected)
     if unexpected:
@@ -750,6 +760,7 @@ def get_model(
         model = _from_pretrained_recording(
             AutoModelForCausalLM,
             ckpt_path,
+            model_type=hf_config.model_type,
             device_map=device_map,
             **model_kwargs,
         )
@@ -760,6 +771,7 @@ def get_model(
             model = _from_pretrained_recording(
                 AutoModelForCausalLM,
                 ckpt_path,
+                model_type=hf_config.model_type,
                 device_map="auto",
                 trust_remote_code=trust_remote_code,
                 dtype="auto",
@@ -785,6 +797,7 @@ def get_model(
         model = _from_pretrained_recording(
             AutoModelForCausalLM,
             ckpt_path,
+            model_type=hf_config.model_type,
             device_map="cpu" if device == "cpu" else "sequential",
             **model_kwargs,
         )
@@ -821,7 +834,19 @@ def get_model(
             hf_config, auto_model_module, ckpt_path, config_kwargs
         )
 
-        with init_empty_weights(include_buffers=True):
+        with (
+            prepare_model_for_loading(
+                hf_config.model_type,
+                ckpt_path,
+                trust_remote_code,
+                model_class=(
+                    None
+                    if auto_model_module in (AutoModel, AutoModelForCausalLM)
+                    else auto_model_module
+                ),
+            ),
+            init_empty_weights(include_buffers=True),
+        ):
             # When computing the device_map, assuming bfloat16 precision by default,
             # unless specified by the hf_config.
             config_dtype = _get_config_dtype(config_for_init)
@@ -872,6 +897,7 @@ def get_model(
         model = _from_pretrained_recording(
             auto_model_module,
             ckpt_path,
+            model_type=hf_config.model_type,
             device_map=device_map,
             **model_kwargs2,
         )

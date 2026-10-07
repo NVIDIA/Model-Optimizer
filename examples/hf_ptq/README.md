@@ -572,6 +572,8 @@ ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for 
 
 > *KV-cache AutoQuantize recipes are not supported with `--use_fsdp2` and are rejected before model loading. Distributed KV sensitivity scoring, selection, and checkpoint writes must be synchronized before this combination can be enabled safely. Existing weight AutoQuantize recipes retain their previous experimental warning with FSDP2.*
 
+> *Nemotron-H checkpoints containing MTP weights are not supported with `--use_fsdp2` and are rejected before distributed model loading. Remove `--use_fsdp2` to load and calibrate the MTP modules; the distributed loader does not construct them.*
+
 ### Usage
 
 #### Slurm (recommended)
