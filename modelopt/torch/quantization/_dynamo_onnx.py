@@ -15,11 +15,14 @@
 
 """Private ONNXScript translations for quantized Dynamo export."""
 
+import contextlib
+
 import onnx
 import onnxscript
 import torch
 from onnxscript.function_libs.torch_lib.tensor_typing import TFloat
 from onnxscript.onnx_types import FLOAT4E2M1, FLOAT8E4M3FN
+from torch import nn
 
 from .export_onnx import onnx_dtype_map
 
@@ -90,6 +93,145 @@ def _static_shape(value) -> list[int]:
         return [int(dim) for dim in value.shape]
     except (AttributeError, TypeError, ValueError):
         raise NotImplementedError("Dynamo ONNX export does not support dynamic shapes.") from None
+
+
+def _classify_quantizer(quantizer, name: str) -> str | None:
+    if quantizer is None or not quantizer.is_enabled:
+        return None
+
+    num_bits = quantizer._num_bits
+    block_sizes = quantizer.block_sizes or {}
+    if not block_sizes and num_bits in {(4, 3), 8}:
+        quant_format = "fp8" if num_bits == (4, 3) else "int8"
+    elif (
+        num_bits == 4
+        and block_sizes.get(-1) == 128
+        and block_sizes.get("type", "static") == "static"
+        and "scale_bits" not in block_sizes
+    ):
+        quant_format = "int4"
+    elif (
+        num_bits == (2, 1)
+        and block_sizes.get(-1) == 16
+        and block_sizes.get("type") == "dynamic"
+        and block_sizes.get("scale_bits") == (4, 3)
+    ):
+        quant_format = "nvfp4"
+    elif (
+        num_bits == (4, 3)
+        and block_sizes.get(-1) == 32
+        and block_sizes.get("type") == "dynamic"
+        and block_sizes.get("scale_bits") == (8, 0)
+    ):
+        quant_format = "mxfp8"
+    else:
+        raise NotImplementedError(
+            f"Dynamo ONNX export does not support quantizer '{name}' with "
+            f"num_bits={num_bits!r} and block_sizes={block_sizes!r}."
+        )
+
+    if quant_format == "int4" and quantizer._unsigned:
+        raise NotImplementedError("Dynamo ONNX export supports signed INT4 only.")
+    if quant_format == "int8" and not quantizer._unsigned and quantizer._narrow_range:
+        raise NotImplementedError("ONNX does not support signed narrow-range INT8.")
+    if quant_format != "mxfp8":
+        amax = getattr(quantizer, "_amax", None)
+        if amax is None:
+            raise ValueError(
+                f"Quantizer '{name}' has not been calibrated. Calibrate it before Dynamo export."
+            )
+        if not torch.isfinite(amax).all() or (amax < 0).any():
+            raise ValueError(f"Quantizer '{name}' has an invalid amax tensor.")
+        if quant_format == "fp8" and amax.numel() != 1:
+            raise NotImplementedError("Dynamo FP8 export requires per-tensor scalar amax.")
+        if quant_format == "int8" and amax.squeeze().ndim > 1:
+            raise NotImplementedError("Dynamo ONNX export does not support multi-axis INT8.")
+    if quantizer._if_calib:
+        raise ValueError(f"Quantizer '{name}' is still in calibration mode.")
+    return quant_format
+
+
+@contextlib.contextmanager
+def _validate_dynamo_quantization(model: nn.Module):
+    """Validate the helper-owned Dynamo contract and observe block-quantized ranks."""
+    formats = set()
+    block_quantizers = {}
+    quantized_weights = {}
+    block_formats = {"int4", "nvfp4", "mxfp8"}
+    for module_name, module in model.named_modules():
+        input_quantizer = getattr(module, "input_quantizer", None)
+        weight_quantizer = getattr(module, "weight_quantizer", None)
+        if input_quantizer is None and weight_quantizer is None:
+            continue
+        input_format = _classify_quantizer(input_quantizer, f"{module_name}.input_quantizer")
+        weight_format = _classify_quantizer(weight_quantizer, f"{module_name}.weight_quantizer")
+        if input_format is None and weight_format is None:
+            continue
+        is_conv = isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d))
+        if input_format is None and (
+            weight_format == "int4" or (is_conv and weight_format == "fp8")
+        ):
+            module_format = weight_format
+        elif input_format == weight_format and input_format in {
+            "fp8",
+            "int8",
+            "nvfp4",
+            "mxfp8",
+        }:
+            module_format = input_format
+        else:
+            raise NotImplementedError(
+                f"Dynamo ONNX export does not support the quantizer combination on '{module_name}': "
+                f"input={input_format}, weight={weight_format}."
+            )
+
+        if module_format in block_formats and is_conv:
+            raise NotImplementedError("Dynamo ONNX export does not support block-quantized Conv.")
+        weight = getattr(module, "weight", None)
+        if weight is not None:
+            previous = quantized_weights.setdefault(id(weight), module_name)
+            if previous != module_name:
+                raise NotImplementedError(
+                    "Dynamo ONNX export does not support shared quantized weights: "
+                    f"'{previous}' and '{module_name}'."
+                )
+        if not is_conv:
+            formats.add(module_format)
+        for suffix, quantizer, quant_format in (
+            ("input_quantizer", input_quantizer, input_format),
+            ("weight_quantizer", weight_quantizer, weight_format),
+        ):
+            if quant_format in block_formats:
+                assert quantizer is not None
+                block_quantizers[id(quantizer)] = (quantizer, f"{module_name}.{suffix}")
+
+    if len(formats) > 1 and formats != {"fp8", "nvfp4"}:
+        raise NotImplementedError(
+            "Dynamo ONNX export supports mixed AutoQuant only for FP8 with NVFP4."
+        )
+
+    hooks = []
+    for quantizer, name in block_quantizers.values():
+        block_size = quantizer.block_sizes[-1]
+
+        def check_shape(_module, args, *, block_size=block_size, name=name):
+            inputs = args[0]
+            if inputs.ndim not in (2, 3):
+                raise NotImplementedError(
+                    f"Dynamo ONNX block quantizer '{name}' supports rank 2 or 3 only."
+                )
+            if inputs.shape[-1] % block_size:
+                raise NotImplementedError(
+                    f"Dynamo ONNX block size {block_size} must divide the last dimension "
+                    f"{inputs.shape[-1]} for '{name}'."
+                )
+
+        hooks.append(quantizer.register_forward_pre_hook(check_shape))
+    try:
+        yield
+    finally:
+        for hook in hooks:
+            hook.remove()
 
 
 def _block_activation_shape(
