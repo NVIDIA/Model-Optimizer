@@ -138,6 +138,9 @@ It produces an ONNX model without Q/DQ nodes, a calibration cache, and layer
 precision settings for a TensorRT release that supports legacy implicit-quantization
 DLA deployment. The translator remains a separate step; ``iq`` does not emit an
 implicit-quantization model itself.
+Set the translator's ``--trt_calib_version`` to the deployment TensorRT version
+(for example, ``--trt_calib_version 100700`` for TensorRT 10.7) so the generated
+cache header matches the target runtime.
 
 Direct explicit quantization (EQ)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
