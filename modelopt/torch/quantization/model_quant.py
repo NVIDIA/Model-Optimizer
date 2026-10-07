@@ -27,11 +27,13 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch.opt import apply_mode
 from modelopt.torch.opt.searcher import ConstraintsDict, ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import (
+    _validate_linear_attention_quantizers,
     preserve_quantizer_attributes_context,
     set_quantizer_attributes_partial,
     set_quantizer_by_cfg,
@@ -39,10 +41,14 @@ from modelopt.torch.quantization.conversion import (
 from modelopt.torch.utils import atomic_print
 
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
-from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
+from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
-from .kv_cache_auto_quant import AutoQuantizeKVSearcher, get_kv_cache_auto_quantize_config
+from .kv_cache_auto_quant import (
+    _KV_QUANTIZER_ATTRS,
+    AutoQuantizeKVSearcher,
+    get_kv_cache_auto_quantize_config,
+)
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, SequentialQuantizer, TensorQuantizer
@@ -226,6 +232,63 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
     )
 
 
+def _check_indexer_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
+    """Raise when a config enables an indexer quantizer that quantizes no indexer.
+
+    ``indexer_q_quantizer`` and ``indexer_k_quantizer`` only exist on indexers that a framework
+    plugin (vLLM, Megatron-Core) converted. When a plugin does not recognize the installed
+    framework's indexer class, or the patterns match none of the indexers, the indexer silently
+    stays unquantized. Intent is read like in :func:`_check_weight_quantization_took_effect`, but
+    only from patterns naming the quantizer, so catch-all patterns do not count. A model without an
+    ``*Indexer`` module (another architecture) is skipped. Under ``torch.distributed`` the check
+    covers the whole model: a pipeline stage may hold none of the indexers a layer-selective recipe
+    selects. All ranks then raise together instead of some waiting in calibration for the others.
+    """
+    last_entry_per_pattern = {entry.quantizer_name: entry for entry in config.quant_cfg}
+    for quantizer_name in ("indexer_q_quantizer", "indexer_k_quantizer"):
+        if not any(
+            entry.enable and quantizer_name in pattern
+            for pattern, entry in last_entry_per_pattern.items()
+        ):
+            continue
+        quantizers = [
+            module
+            for name, module in model.named_modules()
+            # A list-valued ``cfg`` turns the quantizer into a SequentialQuantizer container.
+            if isinstance(module, (TensorQuantizer, SequentialQuantizer))
+            and name.endswith(quantizer_name)
+        ]
+        indexers = {
+            type(module).__name__
+            for module in model.modules()
+            if type(module).__name__.endswith("Indexer")
+        }
+        # (unconverted indexer classes, has the quantizer, has an enabled one)
+        local = (
+            [] if quantizers else sorted(indexers),
+            bool(quantizers),
+            any(quantizer.is_enabled for quantizer in quantizers),
+        )
+        per_rank: list[Any] = [local]
+        if dist.size() > 1:  # every rank calls quantize() with the same indexer patterns
+            per_rank = [None] * dist.size()
+            torch.distributed.all_gather_object(per_rank, local)
+        unsupported = sorted({name for names, _, _ in per_rank for name in names})
+        if unsupported:
+            raise RuntimeError(
+                f"The quantization config enables {quantizer_name}, but no sparse-attention "
+                f"indexer of this model ({', '.join(unsupported)}) has one: the ModelOpt indexer "
+                "plugins do not support this model or the installed vLLM / Megatron-Core version "
+                "(supported models: see the configs/ptq/units/indexer_*_nvfp4 recipe units)."
+            )
+        if any(has for _, has, _ in per_rank) and not any(on for _, _, on in per_rank):
+            raise RuntimeError(
+                f"The quantization config enables {quantizer_name}, but no sparse-attention "
+                "indexer has an enabled one: the patterns naming it match none of them, or a "
+                "later config entry disabled it."
+            )
+
+
 def quantize(
     model: nn.Module,
     config: dict[str, Any | QuantizeConfig],
@@ -329,8 +392,10 @@ def quantize(
     else:
         # Already quantized, so lets apply the quant_cfg from the config
         set_quantizer_by_cfg(model, quantize_config.quant_cfg)
+        _validate_linear_attention_quantizers(model)
     # Fail before calibration rather than after exporting an unquantized checkpoint.
     _check_weight_quantization_took_effect(model, quantize_config)
+    _check_indexer_quantization_took_effect(model, quantize_config)
     return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
 
 
@@ -378,6 +443,24 @@ def _process_quantization_formats(formats, custom_name_prefix):
     return processed
 
 
+def _parse_auto_quantize_method(
+    method: str | dict[str, Any] | None,
+) -> tuple[str | None, dict[str, Any]]:
+    """Split an AutoQuantize method config into its name and method-specific options."""
+    if method is None or isinstance(method, str):
+        return method, {}
+    if not isinstance(method, dict):
+        raise TypeError(f"`method` must be a string or dict, got {type(method).__name__}.")
+    if "method" not in method:
+        raise ValueError("An AutoQuantize method dictionary must contain a 'method' key.")
+
+    method_config = dict(method)
+    method_name = method_config.pop("method")
+    if not isinstance(method_name, str):
+        raise TypeError("The 'method' value in an AutoQuantize method dictionary must be a string.")
+    return method_name, method_config
+
+
 def _auto_quantize_kv_cache(
     model: nn.Module,
     constraints: dict[str, Any],
@@ -406,11 +489,6 @@ def _auto_quantize_kv_cache(
             "KV-cache AutoQuantize is single-process only; distributed scoring, selection, "
             "and checkpoint writes are not synchronized."
         )
-    if is_quantized(model):
-        raise NotImplementedError(
-            "KV-cache AutoQuantize requires an unquantized model; composing it after GEMM "
-            "PTQ or AutoQuantize is not supported yet."
-        )
     if method not in (None, "kl_div"):
         raise ValueError("cost_model='kv_cache' requires method='kl_div'.")
     if fixed_quantization_config is not None or module_search_spaces:
@@ -427,6 +505,20 @@ def _auto_quantize_kv_cache(
         raise ValueError("cost_model='kv_cache' requires a non-empty quantization_formats list.")
     if data_loader is None or forward_step is None:
         raise ValueError("data_loader and forward_step must be provided for KV-cache AutoQuantize.")
+
+    converted_for_search = not is_quantized(model)
+    if not converted_for_search:
+        enabled_kv_quantizers = [
+            name
+            for name, module in model.named_modules(remove_duplicate=False)
+            if name.endswith(_KV_QUANTIZER_ATTRS) and getattr(module, "is_enabled", False)
+        ]
+        if enabled_kv_quantizers:
+            raise ValueError(
+                "The preceding quantization stage left K/V quantizers enabled: "
+                f"{enabled_kv_quantizers}. Disable them before running KV-cache AutoQuantize; "
+                "clearing them now would not undo prior calibration or sensitivity measurements."
+            )
 
     processed_kv_formats: list[tuple[dict[str, Any], str | None]] = []
     for candidate in quantization_formats:
@@ -456,8 +548,9 @@ def _auto_quantize_kv_cache(
         num_calib_steps,
         num_score_steps,
     )
-    model = apply_mode(model, mode="auto_quantize", registry=QuantizeModeRegistry)
-    set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
+    if converted_for_search:
+        model = apply_mode(model, mode="auto_quantize", registry=QuantizeModeRegistry)
+        set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
     searcher = AutoQuantizeKVSearcher()
     searcher.search(
         model,
@@ -488,7 +581,7 @@ def auto_quantize(
     num_calib_steps: int = 512,
     num_score_steps: int = 128,
     verbose: bool = False,
-    method: str | None = None,
+    method: str | dict[str, Any] | None = None,
     checkpoint: str | None = None,
     module_search_spaces: list[dict[str, Any]] | None = None,
     fixed_quantization_config: dict[str, Any] | str | None = None,
@@ -496,8 +589,9 @@ def auto_quantize(
     r"""Perform optimal per-layer quantization by searching for the best quantization formats per-layer.
 
     ``auto_quantize`` uses sensitivity scores to rank the per-layer quantization formats and search
-    for the best quantization formats per-layer. The sensitivity score can be computed using gradient-based
-    methods (default) or KL divergence loss, controlled by the ``method`` parameter.
+    for the best quantization formats per-layer. The sensitivity score can be computed with
+    gradient-based methods (default), KL divergence loss, or Aumann-Shapley path-integral
+    attributions, controlled by the ``method`` parameter.
 
     Internally this API runs two main phases:
 
@@ -652,11 +746,21 @@ def auto_quantize(
             A higher value could increase the time taken for performing ``auto_quantize``; reducing it speeds up the
             sensitivity score estimation phase and typically affects accuracy less than lowering ``num_calib_steps``.
         verbose: If True, prints the search progress/intermediate results.
-        method: Method to use for estimating sensitivity loss. Higher loss indicates greater sensitivity
-            to quantization. Options are ``"gradient"`` (default; uses gradient-based loss estimation,
-            linear programming search, and requires ``loss_func`` or ``forward_backward_step``) and
-            ``"kl_div"`` (uses KL divergence between unquantized and quantized outputs, relies on
-            threshold-based binary search, and only requires ``forward_step`` returning logits).
+        method: Method to use for estimating sensitivity loss, either as a string or a dictionary
+            whose ``"method"`` entry selects the method and whose remaining entries configure it.
+            Higher loss indicates greater sensitivity to quantization. Options are ``"gradient"``
+            (default; uses gradient-based loss estimation, linear programming search, and requires
+            ``loss_func`` or ``forward_backward_step``), ``"kl_div"`` (uses KL divergence between
+            unquantized and quantized outputs, relies on threshold-based binary search, and only
+            requires ``forward_step`` returning logits), and ``"aumann_shapley"`` (path-integral
+            damage attributions, calibrated against a directly measured reference point; label-free
+            like ``"kl_div"``, and additionally reports a ``predicted_damage`` estimate for the
+            selected recipe). For example, use
+            ``{"method": "aumann_shapley", "num_path_nodes": 2}`` or
+            ``{"method": "aumann_shapley", "max_predicted_damage": 1e-3}``. Scoring passes grow
+            with the number of candidate formats and path nodes, not with the number of whole-model
+            configurations the search considers -- see
+            :mod:`modelopt.torch.quantization._auto_quantize_shapley`.
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
             expensive score estimation step.
@@ -726,10 +830,13 @@ def auto_quantize(
             raise TypeError("`quantization_formats` must be a sequence of formats.")
         quantization_formats = list(quantization_formats)
 
+    method_name, method_config = _parse_auto_quantize_method(method)
     is_kv_search = constraints is not None and constraints.get("cost_model") == COST_MODEL_KV_CACHE
     if is_kv_search:
         assert constraints is not None
         assert quantization_formats is not None
+        if method_config:
+            raise ValueError("cost_model='kv_cache' does not accept method-specific options.")
         return _auto_quantize_kv_cache(
             model,
             constraints,
@@ -742,13 +849,13 @@ def auto_quantize(
             num_calib_steps=num_calib_steps,
             num_score_steps=num_score_steps,
             verbose=verbose,
-            method=method,
+            method=method_name,
             checkpoint=checkpoint,
             module_search_spaces=module_search_spaces,
             fixed_quantization_config=fixed_quantization_config,
         )
 
-    method = method or "gradient"
+    method_name = method_name or "gradient"
 
     if fixed_quantization_config is None and quantization_formats is None:
         quantization_formats = [mtq.NVFP4_AWQ_LITE_CFG, mtq.FP8_DEFAULT_CFG]
@@ -843,18 +950,12 @@ def auto_quantize(
             )
 
     # Select the appropriate searcher based on method
-    if method == "gradient":
-        searcher = AutoQuantizeGradientSearcher()
-    elif method == "kl_div":
-        searcher = AutoQuantizeKLDivSearcher()
-    else:
-        raise ValueError(f"Invalid method: {method}. Valid options are 'gradient' or 'kl_div'.")
+    if method_name not in AUTO_QUANTIZE_SEARCHERS:
+        raise ValueError(
+            f"Invalid method: {method_name}. Valid options are {sorted(AUTO_QUANTIZE_SEARCHERS)}."
+        )
+    searcher = AUTO_QUANTIZE_SEARCHERS[method_name]()
 
-    model = apply_mode(
-        model,
-        mode="auto_quantize",
-        registry=QuantizeModeRegistry,
-    )
     search_config = {
         "quantization_formats": processed_quantization_formats,
         "fixed_quantization_config": processed_fixed_quantization_config,
@@ -869,13 +970,35 @@ def auto_quantize(
         "verbose": verbose,
         "checkpoint": checkpoint,
     }
+    if method_config:
+        # Only the selected method's declared options are accepted; core inputs (loaders,
+        # steps, checkpoint, ...) cannot be overridden here.
+        invalid = set(method_config) - searcher.method_config_keys
+        if invalid:
+            raise ValueError(
+                f"Invalid options {sorted(invalid)} for method={method_name!r}. "
+                f"Supported options: {sorted(searcher.method_config_keys)}."
+            )
+        search_config.update(method_config)
+    # Validate the full search config (including method-option values and cross-field
+    # consistency with the constraints) before the model is converted, so a rejected
+    # configuration leaves the model untouched. The searcher re-sanitizes the
+    # already-sanitized config inside search(), which is a no-op.
+    search_config = searcher.sanitize_search_config(search_config)
+    search_constraints = cast("ConstraintsDict", constraints or {})
+    searcher.validate_search_input(search_constraints, search_config)
+
+    model = apply_mode(
+        model,
+        mode="auto_quantize",
+        registry=QuantizeModeRegistry,
+    )
     # Disable all quantizers; AutoQuantize will enable the needed ones
     set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
     if processed_fixed_quantization_config is not None:
         fixed_cfg, fixed_name = processed_fixed_quantization_config
         fixed_recipe = QuantRecipe(fixed_cfg, name=fixed_name)
         set_quantizer_by_cfg(model, fixed_recipe.config.quant_cfg)
-    search_constraints = cast("ConstraintsDict", constraints or {})
     searcher.search(model, search_constraints, config=search_config)
 
     return model, searcher.state_dict()

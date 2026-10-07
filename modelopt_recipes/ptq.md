@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 26 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 31 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -58,6 +58,11 @@ supported combinations.
 | `int4_blockwise_weight_only` | INT4 W4A16, block 128, weights only | none | max |
 | `nvfp4_mlp_weight_only` | NVFP4 W4A16 (block 32), MLP + MoE weights only | none | max |
 | `mxfp4_mlp_weight_only` | MXFP4 W4A16, MLP + MoE weights only | none | none (no calibration) |
+| `iq1_s` | IQ1_S W1A16, MLP + MoE weights only | none | GPTQ (layerwise) |
+| `iq1_m` | IQ1_M W1A16 (1.75 bpw), MLP + MoE weights only | none | GPTQ (layerwise) |
+| `iq2_xxs` | IQ2_XXS W2A16 (2.06 bpw), MLP + MoE weights only | none | GPTQ (layerwise) |
+| `iq2_xs` | IQ2_XS W2A16 (2.31 bpw), MLP + MoE weights only | none | GPTQ (layerwise) |
+| `iq2_s` | IQ2_S W2A16 (2.56 bpw), MLP + MoE weights only | none | GPTQ (layerwise) |
 
 </details>
 
@@ -113,11 +118,12 @@ activations are quantized too** (W4A4/W8A8 vs weight-only W4A16).
 > keeps that sensitive path at a safer precision than NVFP4 while still halving those
 > weights vs. BF16.
 
-#### Weight-only schemes (W4A16 — activations stay BF16)
+#### Weight-only schemes (activations stay BF16)
 
 Quantize weights only; activations run in BF16. This shrinks the model
-(memory-bound decode win) with much lower accuracy risk than W4A4, and **needs no
-calibration forward pass**.
+(memory-bound decode win) with much lower accuracy risk than W4A4. Most of these
+**need no calibration forward pass**; the IQ recipes are the exception, since they
+calibrate with GPTQ.
 
 These are usually recommended for **low-concurrency deployments** — edge and
 on-device/client use cases — where the workload is memory-bandwidth-bound and
@@ -136,6 +142,16 @@ activations and tensor-core math are what deliver the throughput.
 - **`mxfp4_mlp_weight_only`** — MXFP4 weights on MLP/MoE layers only, BF16
   activations. Needs no calibration forward pass; the QAT starting point for the
   GPT-OSS family (see `examples/gpt-oss`).
+- **`iq1_s` / `iq1_m` / `iq2_xxs` / `iq2_xs` / `iq2_s`** — GGML-compatible IQ weights
+  on the MLP/MoE layers, with BF16 activations; attention, `lm_head`, MoE routers,
+  `conv1d` and the vision branch stay in BF16. The formats trade size against
+  accuracy in order: 1.56, 1.75, 2.06, 2.31 and 2.56 bits per weight. Weights are
+  calibrated with layerwise GPTQ (`block_size: 256`, `perc_damp: 0.3`), so calibration
+  data is required; fused-MoE experts are quantized without the GPTQ update. Quantized
+  weights must have a final dimension divisible by 256.
+  Unified HF export writes the packed GGML blocks; Megatron export additionally
+  requires tensor and pipeline parallel sizes of 1, and does not support
+  fused-MoE experts.
 
 ---
 
@@ -152,6 +168,12 @@ of the body scheme. Quantizing the KV cache reduces memory at long context.
   compression (4-bit); combines with any body scheme. Blackwell+.
 - **`kv_fp8`** — FP8 E4M3 KV cache with **calibrated** per-tensor amax. The KV
   scales are measured during the calibration pass. Hopper+.
+
+- **`kv_fp16`** — the KV cache is **not** quantized; it stays at the model's
+  activation dtype (BF16/FP16). Combine with any body scheme when the deployment
+  stack does not consume an FP8 KV cache, or when long-context memory is not the
+  binding constraint. Some published checkpoints ship this way, so a body scheme
+  gains a `-kv_fp16` variant when one of them needs it.
 
 > **`kv_fp8_cast` vs `kv_fp8`:** both produce an FP8 KV cache. `_cast` uses a
 > fixed scale and skips the KV calibration step (faster, no extra data
@@ -269,7 +291,7 @@ The general recipes above are **model-agnostic**: they select layers by wildcard
 (`*mlp*`, `*self_attn*`, `*[kv]_bmm_quantizer`) and lean on the shared
 `default_disabled_quantizers` exclusions, so the same file works on any
 architecture whose module names follow the usual conventions. A recipe only
-earns a place under `model_type/<model_type>/` or
+earns a **body** under `model_type/<model_type>/` or
 `models/<org>/<checkpoint>/` when a model has to **deviate** from
 that baseline. The deviations come in four kinds:
 
@@ -287,6 +309,15 @@ that baseline. The deviations come in four kinds:
 The numerics and standard exclusions are still inherited from `configs/`
 wherever possible — the model folder captures *only* the delta. Each `<task>/`
 folder may carry a `README.md` spelling out that delta.
+
+> **Not every `models/<org>/<checkpoint>/` folder holds a deviation.** When a
+> general (or `model_type/<model_type>`) recipe already produces a released
+> checkpoint's scheme, the folder holds a thin **alias** that imports that recipe
+> wholesale and overrides only `metadata` — no duplicated `quant_cfg` — so the
+> recipe is reachable from the checkpoint's own hub path. [Checkpoint
+> mirrors](#checkpoint-mirrors--modelsorgcheckpoint) covers the folders that
+> genuinely deviate and aliases the ones that don't; see
+> [`models/README.md`](models/README.md) for the alias format and when to write one.
 
 ### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama`
 
@@ -484,8 +515,8 @@ checkpoint's** quant config verbatim:
   source ships as native block-FP8 (`weight_block_size [128, 128]`); the loader
   dequantizes it to BF16 before quantizers are inserted, so the scales are
   calibrated against BF16 weights, not the shipped FP8.
-- **`models/zai-org/GLM-5.3-Flash/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`** is
-  the NVFP4 config for `zai-org/GLM-5.3-Flash`, a `glm5_next` VLM MoE with
+- **`models/zai-org/GLM-5.3-Flash-BF16/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`** is
+  the NVFP4 config for `zai-org/GLM-5.3-Flash-BF16`, a `glm5_next` VLM MoE with
   **hybrid attention** — KDA (linear-attention) layers interleaved with NoPE
   sparse-MLA layers. Routed experts **and** the dense MLP → NVFP4 W4A4; KV cache
   → FP8 cast; everything else stays BF16 (shared experts, router gate, both
@@ -509,6 +540,45 @@ Megatron-Core module names) rather than a portable wildcard scheme. GLM-5.3-Flas
 is the exception: its deviation is a model-specific *scope* — a wildcard scheme
 plus a load-bearing vision-tower exclusion and the VLM-required
 `layerwise.enable=false` — rather than a per-component precision map.
+
+### Checkpoint aliases — `models/<org>/<checkpoint>`
+
+Some published checkpoints use a scheme a portable recipe already produces, so their
+entry is a thin **alias** that imports that recipe wholesale and overrides only
+`metadata` (see [`models/README.md`](models/README.md) for the format):
+
+- **`models/moonshotai/Kimi-K2.6/ptq/nvfp4_experts_only_mse-kv_fp8_cast`** aliases the general
+  `general/ptq/nvfp4_experts_only_mse-kv_fp8_cast` — expert-only NVFP4 with MSE-swept static
+  weight scales and dynamic inputs, plus an FP8 KV cache in cast mode — as published in
+  `nvidia/Kimi-K2.6-NVFP4`.
+- **`models/Qwen/Qwen3.5-397B-A17B/ptq/nvfp4_experts_mse-fp8_rest-kv_fp8`** aliases the
+  `qwen3_5_moe` architecture recipe
+  `model_type/qwen3_5_moe/ptq/nvfp4_experts_mse-fp8_rest-kv_fp8` — NVFP4 (MSE static weights)
+  on the routed experts, ModelOpt-default FP8 elsewhere, and an FP8 KV cache — as published in
+  `nvidia/Qwen3.5-397B-A17B-NVFP4-V2`.
+- **`models/zai-org/GLM-5.1/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast`** and
+  **`models/zai-org/GLM-5.2/ptq/...`** alias
+  `general/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast` — expert-only NVFP4 with the
+  expert `input_scale` pinned to 1.0 and an FP8 KV cache in cast mode — as published in
+  `nvidia/GLM-5.1-NVFP4` and `nvidia/GLM-5.2-NVFP4`.
+- **`models/MiniMaxAI/MiniMax-M2.5/ptq/nvfp4_experts_only-kv_fp8_cast`** aliases
+  `general/ptq/nvfp4_experts_only-kv_fp8_cast` — expert-only NVFP4 with an FP8 KV cache in
+  cast mode — as published in `nvidia/MiniMax-M2.5-NVFP4`.
+- **`models/deepseek-ai/DeepSeek-V3.1/ptq/nvfp4_omlp_only-kv_fp8_cast`**,
+  **`models/deepseek-ai/DeepSeek-V3.2/ptq/...`**,
+  **`models/Qwen/Qwen3-235B-A22B-Instruct-2507/ptq/...`** and
+  **`models/Qwen/Qwen3-235B-A22B-Thinking-2507/ptq/...`** all alias
+  `general/ptq/nvfp4_omlp_only-kv_fp8_cast` — NVFP4 on the attention `o_proj` and the
+  MLP/MoE layers, FP8 KV cache in cast mode — as published in the matching
+  `nvidia/<model>-NVFP4` releases.
+- **`models/Qwen/Qwen3.6-27B/ptq/w4a16_nvfp4_mse-fp8_attn-kv_fp8_cast`** aliases the
+  `qwen3_5` architecture recipe — W4A16 NVFP4 with MSE weight scales, FP8 attention and an
+  FP8 KV cache in cast mode — as published in `nvidia/Qwen3.6-27B-NVFP4`. The release also
+  carries `input_scale` parameters on its W4A16 layers from a separate calibration pass;
+  the recipe reproduces the evaluated W4A16 scheme, not those extra scales.
+- **`models/MiniMaxAI/MiniMax-M3/ptq/mxfp8_nvfp4_experts`** aliases the `minimax_m3_vl`
+  architecture recipe — MXFP8 language-model linears with MSE-calibrated NVFP4 routed
+  experts at `input_scale` 1.0 — as published in `nvidia/MiniMax-M3-NVFP4`.
 
 ---
 

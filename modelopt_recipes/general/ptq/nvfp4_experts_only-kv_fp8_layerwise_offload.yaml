@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -20,7 +21,6 @@ imports:
   kv_fp8: configs/ptq/units/kv_fp8
 
 metadata:
-  recipe_type: ptq
   description: >
     NVFP4 static weight and dynamic activation for expert layers only (W4A4), FP8 KV cache,
     max layerwise calibration with calib_mutates_weights=False for disk-offloaded single-GPU

@@ -36,7 +36,7 @@ from ..extensions import get_cuda_ext_ggml
 from .codebooks import iq2_xs_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
-    fake_quantize_with_cache,
+    IQFormat,
     narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
@@ -60,8 +60,17 @@ _IQ2_XS_NATIVE_MAX = 43 * 31 / 8
 _IQ2_XS_SCALE_ANCHOR_MIN = 0.65
 _IQ2_XS_SCALE_ANCHOR_MAX = 0.92
 _IQ2_XS_PEAK_TO_RMS_TAPER = 0.035
-# At 256 blocks, the largest IQ2_XS search temporary is about 16 MiB in FP32.
+# Bounds the torch encode fallback, whose codebook search holds the large temporaries: at
+# 256 blocks the largest is about 16 MiB in FP32. The CUDA encoder ignores this entirely.
+# This is four times smaller than the IQ1_S bound because the IQ2_XS search sweeps sixteen
+# local scales per grid tile.
 _DEFAULT_BLOCK_CHUNK_SIZE = 256
+# The decode's temporaries are far smaller, so it is launch-bound rather than memory-bound
+# and wants a bigger chunk -- and unlike packing it is not cached, so it runs on every
+# forward. Sharing the encode bound above is what made IQ2_XS four times slower end to end
+# than IQ1_S. Measured decoding a 2048x5632 weight: 91.4 ms at 256 blocks, 22.9 ms at 1024,
+# 5.8 ms at 4096, where the transient peak is +56 MiB.
+_DEFAULT_DECODE_CHUNK_SIZE = 4096
 _SCALE_BLOCK_CHUNK_SIZE = 4096
 
 
@@ -204,7 +213,7 @@ def dequantize_iq2_xs(
     weight_shape: torch.Tensor,
     *,
     dtype: torch.dtype = torch.bfloat16,
-    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
+    block_chunk_size: int = _DEFAULT_DECODE_CHUNK_SIZE,
 ) -> torch.Tensor:
     """Decode GGML-compatible IQ2_XS payload bytes."""
     shape = validate_packed_weights(
@@ -213,6 +222,11 @@ def dequantize_iq2_xs(
     validate_block_chunk_size(block_chunk_size)
 
     blocks = packed_weights.contiguous().reshape(-1, IQ2_XS_BLOCK_BYTES)
+    if blocks.is_cuda:
+        extension = get_cuda_ext_ggml()
+        if extension is not None:
+            grid = iq2_xs_grid(blocks.device)
+            return extension.iq2_xs_unpack(blocks, grid, dtype).reshape(shape)
     bit_positions = torch.arange(8, dtype=torch.int64, device=blocks.device)
     grid = iq2_xs_grid(blocks.device)
     decoded = torch.empty((blocks.shape[0], IQ2_XS_BLOCK_SIZE), dtype=dtype, device=blocks.device)
@@ -225,10 +239,13 @@ def dequantize_iq2_xs(
         )
         entries = codes & 0x1FF
         sign_index = codes >> 9
-        parity = torch.zeros_like(sign_index)
-        for bit in range(7):
-            parity ^= (sign_index >> bit) & 1
-        sign_mask = sign_index | (parity << 7)
+        # XOR-fold the seven payload bits down to bit 0 to recover the eighth sign bit.
+        # The loop this replaces cost seven elementwise passes per chunk, and unlike packing
+        # the decode is not cached -- it runs again on every forward.
+        folded = sign_index ^ (sign_index >> 4)
+        folded ^= folded >> 2
+        folded ^= folded >> 1
+        sign_mask = sign_index | ((folded & 1) << 7)
         signs = 1.0 - 2.0 * ((sign_mask.unsqueeze(-1) >> bit_positions) & 1).float()
 
         scale_bytes = block_chunk[:, 66:].to(torch.int64)
@@ -243,20 +260,17 @@ def dequantize_iq2_xs(
     return decoded.reshape(shape)
 
 
-def iq2_xs_fake_quant(
-    inputs: torch.Tensor,
-    quantizer,
-    *,
-    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
-) -> torch.Tensor:
-    """IQ2_XS weight backend for TensorQuantizer, with pass-through backward."""
-    if getattr(quantizer, "num_bits", None) != "iq2_xs":
-        raise ValueError("The ggml IQ2_XS backend requires num_bits='iq2_xs'")
-    return fake_quantize_with_cache(
-        inputs,
-        quantizer,
-        format_name="iq2_xs",
-        block_chunk_size=block_chunk_size,
-        quantize=quantize_iq2_xs,
-        dequantize=dequantize_iq2_xs,
-    )
+IQ2_XS_FORMAT = IQFormat(
+    name="iq2_xs",
+    block_size=IQ2_XS_BLOCK_SIZE,
+    block_bytes=IQ2_XS_BLOCK_BYTES,
+    quantize=quantize_iq2_xs,
+    dequantize=dequantize_iq2_xs,
+    block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
+    decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+)
+
+# Kept for callers of the per-format entry point. The record captured quantize_iq2_xs and
+# dequantize_iq2_xs when it was built, so patching those module functions changes neither backend
+# dispatch nor this alias; substitute a format's encoder or decoder in GGML_FORMAT_REGISTRY.
+iq2_xs_fake_quant = IQ2_XS_FORMAT.fake_quant

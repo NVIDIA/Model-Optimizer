@@ -417,6 +417,49 @@ class TensorQuantizerTester:
         amax = quantizer.export_amax()
         assert amax.shape == (1,)
 
+    # One config per ``export_amax`` branch.
+    UNUSABLE_AMAX_CFGS = {
+        "dynamic_nvfp4": QuantizerAttributeConfig(
+            num_bits=(2, 1), block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)}
+        ),
+        "static_per_tensor": QuantizerAttributeConfig(num_bits=4),
+    }
+
+    @pytest.mark.parametrize("cfg_name", [*UNUSABLE_AMAX_CFGS])
+    @pytest.mark.parametrize("bad_value", [0.0, float("nan")])
+    def test_amax_export_unusable_amax(self, bad_value, cfg_name):
+        """An unusable amax must export as a positive scale without mutating the quantizer.
+
+        Regression test for NVBug 6768300. The NaN case pins the ``nan_to_num`` half, which the
+        zero case alone would not catch.
+        """
+        quantizer = TensorQuantizer(self.UNUSABLE_AMAX_CFGS[cfg_name]).to(self.device)
+        quantizer.amax = torch.full((1,), bad_value).to(self.device)
+
+        amax = quantizer.export_amax()
+
+        assert torch.all(amax > 0), amax
+        assert torch.all(amax == quantizer.maxbound), amax
+        # export must leave the calibrated state alone
+        stored = quantizer.amax
+        if bad_value == 0.0:
+            assert torch.all(stored == 0), stored
+        else:
+            assert torch.all(torch.isnan(stored)), stored
+
+    @pytest.mark.parametrize("cfg_name", [*UNUSABLE_AMAX_CFGS])
+    def test_amax_export_meta_amax(self, cfg_name):
+        """``export_amax()`` must stay usable when amax is on the meta device."""
+        quantizer = TensorQuantizer(self.UNUSABLE_AMAX_CFGS[cfg_name])
+        quantizer.amax = torch.zeros(1, device="meta")
+
+        amax = quantizer.export_amax()
+
+        # Shape differs per branch (the per-tensor path unsqueezes), so pin only that it stays
+        # meta instead of raising.
+        assert amax.is_meta, amax
+        assert amax.numel() == 1, amax.shape
+
     def test_save_restore(self):
         ref_quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=4, axis=0))
 

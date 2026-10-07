@@ -33,6 +33,18 @@ from modelopt.recipe import load_recipe, presets
 from modelopt.recipe.presets import RecipeSupersededAction
 from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT
 from modelopt.torch.quantization.config import LocalHessianCalibConfig, QuantizeConfig
+from modelopt.torch.quantization.ggml import (
+    IQ1_M_BLOCK_SIZE,
+    IQ1_M_EFFECTIVE_BITS,
+    IQ1_S_BLOCK_SIZE,
+    IQ1_S_EFFECTIVE_BITS,
+    IQ2_S_BLOCK_SIZE,
+    IQ2_S_EFFECTIVE_BITS,
+    IQ2_XS_BLOCK_SIZE,
+    IQ2_XS_EFFECTIVE_BITS,
+    IQ2_XXS_BLOCK_SIZE,
+    IQ2_XXS_EFFECTIVE_BITS,
+)
 
 
 def _yaml_basenames(subdir: str) -> set[str]:
@@ -123,6 +135,35 @@ def test_mlp_weight_only_recipe_matches_its_mtq_cfg(recipe_name, cfg_name):
     recipe_cfg = load_recipe(recipe_name).quantize.model_dump(exclude_unset=True)
     mtq_cfg = QuantizeConfig(**getattr(mtq, cfg_name)).model_dump(exclude_unset=True)
     assert recipe_cfg == mtq_cfg
+
+
+@pytest.mark.parametrize(
+    ("qformat", "block_size", "effective_bits"),
+    [
+        ("iq1_s", IQ1_S_BLOCK_SIZE, IQ1_S_EFFECTIVE_BITS),
+        ("iq1_m", IQ1_M_BLOCK_SIZE, IQ1_M_EFFECTIVE_BITS),
+        ("iq2_xxs", IQ2_XXS_BLOCK_SIZE, IQ2_XXS_EFFECTIVE_BITS),
+        ("iq2_xs", IQ2_XS_BLOCK_SIZE, IQ2_XS_EFFECTIVE_BITS),
+        ("iq2_s", IQ2_S_BLOCK_SIZE, IQ2_S_EFFECTIVE_BITS),
+    ],
+)
+def test_iq_recipe_matches_packing_contract(qformat, block_size, effective_bits):
+    recipe = load_recipe(f"general/ptq/{qformat}")
+    quantize = recipe.quantize.model_dump(exclude_unset=True)
+    weight_cfgs = {
+        entry["quantizer_name"]: entry["cfg"]
+        for entry in quantize["quant_cfg"]
+        if isinstance(entry.get("cfg"), dict) and entry["cfg"].get("num_bits") == qformat
+    }
+
+    assert qformat in presets.QUANT_CFG_CHOICES
+    assert set(weight_cfgs) == {"*mlp*weight_quantizer", "*block_sparse_moe*weight_quantizer"}
+    for weight_cfg in weight_cfgs.values():
+        assert weight_cfg["backend"] == "ggml"
+        assert weight_cfg["block_sizes"][-1] == block_size
+        assert weight_cfg["effective_bits"] == effective_bits
+    assert quantize["algorithm"]["method"] == "gptq"
+    assert quantize["algorithm"]["block_size"] % block_size == 0
 
 
 # --- RecipeSupersededAction: the flags --recipe replaces ----------------------------------------

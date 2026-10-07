@@ -16,52 +16,41 @@
  */
 
 // Every GGML IQ format shares common.cuh, the same CUDA version gate, and the same build flags,
-// so they compile into one extension and bind here. Each format keeps its kernels in its own
-// translation unit and exposes a single host entry point.
+// so they compile into one extension and bind here. Each IQ format keeps its block layout in its
+// own translation unit, on the encoder its family shares (iq1_family.cuh or iq2_family.cuh), and
+// exposes a packer and an unpacker.
 
 #include "common.cuh"
 
 at::Tensor iq1_s_pack_cuda(at::Tensor input, at::Tensor grid);
 at::Tensor iq2_xs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales);
+at::Tensor iq2_xxs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales);
+at::Tensor iq2_s_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales);
+at::Tensor iq1_m_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales);
+at::Tensor q8_0_pack_cuda(at::Tensor input);
+at::Tensor iq1_s_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
+at::Tensor iq1_m_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
+at::Tensor iq2_xxs_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
+at::Tensor iq2_xs_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
+at::Tensor iq2_s_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
 
 namespace {
 
-at::Tensor iq1_s_pack(at::Tensor input, at::Tensor grid) {
-  TORCH_CHECK(input.is_cuda(), "IQ1_S packing requires a CUDA input");
-  TORCH_CHECK(grid.is_cuda(), "IQ1_S packing requires a CUDA grid");
-  modelopt::ggml::check_pack_inputs("IQ1_S", input, grid, modelopt::ggml::kIq1sEntries);
-  return iq1_s_pack_cuda(input.contiguous(), grid.contiguous());
-}
-
-at::Tensor iq2_xs_pack(at::Tensor input, at::Tensor grid, at::Tensor scales) {
-  TORCH_CHECK(input.is_cuda(), "IQ2_XS packing requires a CUDA input");
-  TORCH_CHECK(grid.is_cuda(), "IQ2_XS packing requires a CUDA grid");
-  TORCH_CHECK(scales.is_cuda(), "IQ2_XS packing requires CUDA scales");
-  modelopt::ggml::check_pack_inputs("IQ2_XS", input, grid, modelopt::ggml::kIq2xsEntries);
-  const auto num_blocks = input.numel() / modelopt::ggml::kBlockSize;
-  TORCH_CHECK(scales.scalar_type() == at::kHalf && scales.dim() == 1 &&
-                  scales.numel() == num_blocks,
-              "scales must be float16 [numel / 256]");
-  // The kernel copies these bits straight into the GGML block scale field. A non-finite entry
-  // would produce a payload that decodes to garbage, and a negative one inverts the sign of every
-  // decoded element while still packing cleanly -- GGML's own encoders assert a non-negative block
-  // scale. One fused reduction, so the synchronization is paid once per packed tensor, on an
-  // export path.
-  TORCH_CHECK((scales.isfinite() & (scales >= 0)).all().item<bool>(),
-              "scales must be finite and non-negative");
-  TORCH_CHECK(input.get_device() == scales.get_device(), "input and scales must share a device");
-  return iq2_xs_pack_cuda(input.contiguous(), grid.contiguous(), scales.contiguous());
+at::Tensor q8_0_pack(at::Tensor input) {
+  TORCH_CHECK(input.is_cuda(), "Q8_0 packing requires a CUDA input");
+  modelopt::ggml::check_scalar_pack_input("Q8_0", input, 32);
+  return q8_0_pack_cuda(input.contiguous());
 }
 
 } // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
-  module.def("iq1_s_pack", &iq1_s_pack,
+  module.def("iq1_s_pack", &iq1_s_pack_cuda,
              "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
              "dimension is a multiple of 256. The grid must be float32 [2048, 8]. Returns uint8 "
              "[numel / 256, 50] on the input device. Non-finite input elements are treated as "
              "zero during packing, and finite elements outside the float32 range saturate.");
-  module.def("iq2_xs_pack", &iq2_xs_pack,
+  module.def("iq2_xs_pack", &iq2_xs_pack_cuda,
              "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
              "dimension is a multiple of 256. The grid must be float32 [512, 8] holding "
              "non-negative codebook magnitudes, and scales must be finite non-negative float16 "
@@ -69,4 +58,53 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              "Returns uint8 [numel / 256, 74] on the input device. Non-finite input elements are "
              "treated as zero during packing, and finite elements outside the float32 range "
              "saturate.");
+  module.def("iq2_xxs_pack", &iq2_xxs_pack_cuda,
+             "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
+             "dimension is a multiple of 256. The grid must be float32 [256, 8] holding "
+             "non-negative codebook magnitudes, and scales must be finite non-negative float16 "
+             "[numel / 256]. "
+             "Returns uint8 [numel / 256, 66] on the input device. Non-finite input elements are "
+             "treated as zero during packing, and finite elements outside the float32 range "
+             "saturate.");
+  module.def("iq2_s_pack", &iq2_s_pack_cuda,
+             "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
+             "dimension is a multiple of 256. The grid must be float32 [1024, 8] holding "
+             "non-negative codebook magnitudes, and scales must be finite non-negative float16 "
+             "[numel / 256]. "
+             "Returns uint8 [numel / 256, 82] on the input device. Non-finite input elements are "
+             "treated as zero during packing, and finite elements outside the float32 range "
+             "saturate.");
+  module.def("iq1_m_pack", &iq1_m_pack_cuda,
+             "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
+             "dimension is a multiple of 256. The grid must be float32 [2048, 8], and scales must "
+             "be finite non-negative float16 [numel / 256]; IQ1_M carries that scale in the four "
+             "packed scale words rather than a leading field. "
+             "Returns uint8 [numel / 256, 56] on the input device. Non-finite input elements are "
+             "treated as zero during packing, and finite elements outside the float32 range "
+             "saturate.");
+  module.def("q8_0_pack", &q8_0_pack,
+             "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
+             "dimension is a multiple of 32. Returns uint8 [numel / 32, 34] on the input device. "
+             "Non-finite input elements are treated as zero during packing, and finite elements "
+             "outside the float32 range saturate.");
+  module.def("iq1_s_unpack", &iq1_s_unpack_cuda,
+             "Decode uint8 [blocks, 50] IQ1_S payloads on CUDA into [blocks, 256] of the given "
+             "floating-point dtype, bit-identical to the PyTorch decoder. The grid must be "
+             "float32 [2048, 8].");
+  module.def("iq1_m_unpack", &iq1_m_unpack_cuda,
+             "Decode uint8 [blocks, 56] IQ1_M payloads on CUDA into [blocks, 256] of the given "
+             "floating-point dtype, bit-identical to the PyTorch decoder. The grid must be "
+             "float32 [2048, 8].");
+  module.def("iq2_xxs_unpack", &iq2_xxs_unpack_cuda,
+             "Decode uint8 [blocks, 66] IQ2_XXS payloads on CUDA into [blocks, 256] of the given "
+             "floating-point dtype, bit-identical to the PyTorch decoder. The grid must be "
+             "float32 [256, 8].");
+  module.def("iq2_xs_unpack", &iq2_xs_unpack_cuda,
+             "Decode uint8 [blocks, 74] IQ2_XS payloads on CUDA into [blocks, 256] of the given "
+             "floating-point dtype, bit-identical to the PyTorch decoder. The grid must be "
+             "float32 [512, 8].");
+  module.def("iq2_s_unpack", &iq2_s_unpack_cuda,
+             "Decode uint8 [blocks, 82] IQ2_S payloads on CUDA into [blocks, 256] of the given "
+             "floating-point dtype, bit-identical to the PyTorch decoder. The grid must be "
+             "float32 [1024, 8].");
 }

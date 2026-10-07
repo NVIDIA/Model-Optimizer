@@ -13,8 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 metadata:
-  recipe_type: ptq
+  description: >-
+    ViT image classifiers: FP8 W8A8 on every linear plus the attention BMM and
+    softmax-P quantizers, so the whole attention block runs in FP8 and Torch-TRT can
+    compile it end to end; output quantizers disabled. Uses max calibration.
 imports:
   w8a8_fp8_fp8: configs/ptq/units/w8a8_fp8_fp8
   attention_qkv_fp8: configs/ptq/units/attention_qkv_fp8

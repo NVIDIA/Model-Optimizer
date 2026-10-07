@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import contextlib
+import json
 import re
 from collections import defaultdict
 from functools import partial
@@ -636,6 +637,147 @@ def create_tiny_deepseek_v3_dir(
         with_tokenizer=with_tokenizer,
         **config_kwargs,
     )
+
+
+##### GLM-5.3-FLASH / DEEPSEEK-V4 (config-only, for vLLM ``load_format="dummy"``) #####
+def _write_config_dir(dir_path: Path, config: dict) -> Path:
+    dir_path.mkdir(parents=True, exist_ok=True)
+    (dir_path / "config.json").write_text(json.dumps(config, indent=2))
+    return dir_path
+
+
+def create_tiny_glm5_next_config_dir(tmp_path: Path | str, **config_kwargs) -> Path:
+    """Text-only zai-org/GLM-5.3-Flash config with one KDA and one sparse-attention layer, 8 experts.
+
+    Hidden and attention shapes stay at the released values because vLLM's sparse-attention and
+    k-pool indexer kernels only support those. There are no weights: boot vLLM with dummy weights.
+    """
+    config = {
+        "architectures": ["Glm5NextForCausalLM"],
+        "model_type": "glm5_next",
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "first_k_dense_replace": 1,
+        "hc_eps": 1e-06,
+        "hc_mult": 4,
+        "hc_sinkhorn_iters": 20,
+        "head_dim": 0,
+        "hidden_act": "silu",
+        "hidden_size": 4096,
+        "index_head_dim": 128,
+        "index_kpool": 4,
+        "index_kpool_always_select_tail": True,
+        "index_kpool_compress": True,
+        "index_n_heads": 32,
+        "index_topk": 2048,
+        "index_share_for_mtp_iteration": True,
+        "indexer_rope_interleave": True,
+        "indexer_types": ["full", "full"],
+        "initializer_range": 0.02,
+        "intermediate_size": 12288,
+        "kv_lora_rank": 512,
+        "layer_types": ["linear_attention", "deepseek_sparse_attention"],
+        "linear_attn_config": {
+            "num_heads": 64,
+            "gate_lower_bound": -5.0,
+            "head_dim": 128,
+            "short_conv_kernel_size": 4,
+            "kda_layers": [0],
+            "full_attn_layers": [1],
+        },
+        "max_position_embeddings": 1048576,
+        "mhc": True,
+        "mla_use_nope": True,
+        "mlp_layer_types": ["dense", "sparse"],
+        "moe_intermediate_size": 2048,
+        "moe_router_dtype": "float32",
+        "n_group": 1,
+        "n_routed_experts": 8,
+        "n_shared_experts": 1,
+        "norm_topk_prob": True,
+        "num_attention_heads": 64,
+        "num_experts_per_tok": 2,
+        "num_hidden_layers": 2,
+        "num_key_value_heads": 64,
+        "num_nextn_predict_layers": 0,
+        "q_lora_rank": 1536,
+        "qk_head_dim": 256,
+        "qk_nope_head_dim": 256,
+        "qk_rope_head_dim": 0,
+        "rms_norm_eps": 1e-05,
+        "routed_scaling_factor": 2.5,
+        "scoring_func": "sigmoid",
+        "swiglu_limit": 10.0,
+        "tie_word_embeddings": False,
+        "topk_group": 1,
+        "topk_method": "noaux_tc",
+        "v_head_dim": 256,
+        "vocab_size": 154880,
+        **config_kwargs,
+    }
+    return _write_config_dir(Path(tmp_path) / "tiny_glm5_next", config)
+
+
+def create_tiny_deepseek_v4_config_dir(tmp_path: Path | str, **config_kwargs) -> Path:
+    """deepseek-ai/DeepSeek-V4-Pro config with two layers (compress ratios 128 and 4) and 8 experts.
+
+    The ratio-4 layer carries the lightning indexer. Shapes stay at the released values because
+    vLLM's sparse-attention kernels only support those. There are no weights: boot vLLM with dummy
+    weights. The released FP8/FP4 checkpoint quantization is dropped, so weights are bf16.
+    """
+    config = {
+        "architectures": ["DeepseekV4ForCausalLM"],
+        "model_type": "deepseek_v4",
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": 0,
+        "eos_token_id": 1,
+        "compress_ratios": [128, 4],
+        "compress_rope_theta": 160000,
+        "hc_eps": 1e-06,
+        "hc_mult": 4,
+        "hc_sinkhorn_iters": 20,
+        "head_dim": 512,
+        "hidden_act": "silu",
+        "hidden_size": 7168,
+        "index_head_dim": 128,
+        "index_n_heads": 64,
+        "index_topk": 1024,
+        "initializer_range": 0.02,
+        "max_position_embeddings": 1048576,
+        "moe_intermediate_size": 3072,
+        "n_routed_experts": 8,
+        "n_shared_experts": 1,
+        "norm_topk_prob": True,
+        "num_attention_heads": 128,
+        "num_experts_per_tok": 2,
+        "num_hash_layers": 1,
+        "num_hidden_layers": 2,
+        "num_key_value_heads": 1,
+        "num_nextn_predict_layers": 0,
+        "o_groups": 16,
+        "o_lora_rank": 1024,
+        "q_lora_rank": 1536,
+        "qk_rope_head_dim": 64,
+        "rms_norm_eps": 1e-06,
+        "rope_scaling": {
+            "beta_fast": 32,
+            "beta_slow": 1,
+            "factor": 16,
+            "original_max_position_embeddings": 65536,
+            "type": "yarn",
+        },
+        "rope_theta": 10000,
+        "routed_scaling_factor": 2.5,
+        "scoring_func": "sqrtsoftplus",
+        "sliding_window": 128,
+        "swiglu_limit": 10.0,
+        "tie_word_embeddings": False,
+        "topk_method": "noaux_tc",
+        "vocab_size": 129280,
+        **config_kwargs,
+    }
+    return _write_config_dir(Path(tmp_path) / "tiny_deepseek_v4", config)
 
 
 ##### GPT-OSS #####
