@@ -190,6 +190,13 @@ def _test_gdn_qat_helper(rank, size, checkpoint_path):
     optimizer.step()
     assert not torch.equal(restored_gdn[0].in_proj.weight, before)
 
+    fused_model = _make_model(size)
+    for module in fused_model.modules():
+        if isinstance(module, GatedDeltaNet):
+            module.gdn_pre_gated_delta_rule_fusion = True
+    with pytest.raises(NotImplementedError, match="unfused input-preparation hook"):
+        mtq.quantize(fused_model, _gdn_config())
+
 
 def _compile_gdn_qat_kernels(rank, size):
     initialize_for_megatron(

@@ -22,7 +22,10 @@ import torch.nn as nn
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import QuantizeConfig
-from modelopt.torch.quantization.linear_attention import linear_attention_training_phase
+from modelopt.torch.quantization.linear_attention import (
+    LinearAttentionConfig,
+    linear_attention_training_phase,
+)
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins import gdn
 from modelopt.torch.quantization.plugins.gdn import GatedDeltaNetStateQuantMixin
@@ -215,6 +218,36 @@ def test_quantizer_roundtrip_and_hybrid_selection(tmp_path):
         assert quantizer._dynamic == original._dynamic
         assert not hasattr(restored[1], name)
     torch.testing.assert_close(restored[0].gdn_state_quantizer(sample), expected)
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["fp8-to-replay", "replay-to-fp8"])
+def test_restore_changed_policy_and_quantizer_together(tmp_path, reverse):
+    states = [
+        (GDN_STATE_FP8_DYNAMIC, LinearAttentionConfig(backend="serving")),
+        (
+            {"num_bits": 8, "axis": (0, 1), "type": "dynamic", "narrow_range": True},
+            LinearAttentionConfig(backend="serving", precision="replayssm"),
+        ),
+    ]
+    if reverse:
+        states.reverse()
+    (original_quantizer, original_policy), (saved_quantizer, saved_policy) = states
+    cfg = quant_cfg()
+    cfg["algorithm"] = None
+    cfg["quant_cfg"][-1]["cfg"] = original_quantizer
+    cfg["linear_attention"][0]["cfg"] = original_policy.model_dump()
+    model = mtq.quantize(TinyGatedDeltaNet(), cfg)
+    model.gdn_state_quantizer.set_from_attribute_config(saved_quantizer)
+    model.linear_attention_config = saved_policy
+    model.validate_linear_attention()
+
+    path = tmp_path / "changed-policy.pth"
+    mto.save(model, path)
+    restored = mto.restore(TinyGatedDeltaNet(), path)
+    assert restored.linear_attention_config == saved_policy
+    assert restored.gdn_state_quantizer.num_bits == saved_quantizer["num_bits"]
+    assert restored.gdn_state_quantizer.is_enabled
+    restored.validate_linear_attention()
 
 
 def test_quant_cfg_refinement_updates_and_validates_existing_quantized_module():
