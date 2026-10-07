@@ -260,7 +260,6 @@ def _apply_linear_attention_policy(model, config, saved_policies=None):
         for name, policy in saved_policies.items():
             modules[name].linear_attention_config = LinearAttentionConfig(**policy)
     for name, module in modules.items():
-        module._migrate_legacy_replay_quantizers()
         module.validate_linear_attention()
         if getattr(config, "linear_attention", []):
             print_rank_0(

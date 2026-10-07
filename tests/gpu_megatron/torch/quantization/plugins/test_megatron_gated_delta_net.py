@@ -31,16 +31,11 @@ from modelopt.torch.quantization.linear_attention import (
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
 
-pytest.importorskip("fla")  # Megatron-Core GatedDeltaNet and the state QDQ kernel need fla
+pytest.importorskip("fla")  # Megatron-Core GatedDeltaNet needs FLA for its baseline kernels.
 GatedDeltaNet = pytest.importorskip("megatron.core.ssm.gated_delta_net").GatedDeltaNet
+pytest.importorskip("vllm.model_executor.layers.fla.ops.kda", exc_type=ModuleNotFoundError)
 
-from modelopt.torch.quantization.plugins.gdn import _w_qdq_chunk_gated_delta_rule
 from modelopt.torch.quantization.plugins.megatron import _QuantGatedDeltaNet
-
-try:
-    _w_qdq_chunk_gated_delta_rule()
-except RuntimeError as e:
-    pytest.skip(str(e), allow_module_level=True)
 
 SEED = 1234
 
@@ -63,7 +58,7 @@ def _make_model(tp_size):
         .cuda()
         .eval()
     )
-    # Retain enough history for chunk-boundary state rounding to affect the next chunk.
+    # Retain enough history for recurrent-state rounding to affect later tokens.
     with torch.no_grad():
         for module in model.modules():
             if isinstance(module, GatedDeltaNet):
@@ -72,38 +67,33 @@ def _make_model(tp_size):
     return model
 
 
-def _gdn_config(sites):
+def _gdn_config():
     return {
-        "quant_cfg": [{"quantizer_name": "*", "enable": False}]
-        + [
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
             {
-                "quantizer_name": f"*gdn_{site}_quantizer",
+                "quantizer_name": "*gdn_state_quantizer",
                 "cfg": {
-                    "num_bits": (4, 3),
-                    "axis": (0, 1) if site == "state" else (0, 1, 2),
+                    "num_bits": 8,
+                    "block_sizes": {-1: 32},
                     "type": "dynamic",
+                    "unsigned": False,
+                    "narrow_range": True,
                 },
-            }
-            for site in sites
+            },
         ],
         "algorithm": None,
         "linear_attention": [
-            {"module_name": "decoder.layers.*.self_attention", "cfg": {"state": {"block_v": 16}}}
+            {
+                "module_name": "decoder.layers.*.self_attention",
+                "cfg": {
+                    "backend": "serving",
+                    "state_block_v": 16,
+                    "precision": "vllm_0_15",
+                },
+            }
         ],
     }
-
-
-def _config_for_mode(mode):
-    sites = ("w",)
-    if mode == "decode_replay_int8":
-        sites = ("state",)
-    cfg = _gdn_config(sites)
-    if mode == "decode_replay_int8":
-        cfg["quant_cfg"][1]["cfg"].update(num_bits=8, unsigned=False, narrow_range=True)
-        cfg["linear_attention"][0]["cfg"].update(
-            backend="matmul", decode={"mode": "replay", "replay": {"window": 8}}
-        )
-    return cfg, sites
 
 
 def _gdn_forward(model):
@@ -111,7 +101,7 @@ def _gdn_forward(model):
 
     def forward(m):
         enabled = any(
-            getattr(getattr(layer, "linear_attention_config", None), "decode", None) is not None
+            getattr(getattr(layer, "linear_attention_config", None), "backend", None) == "serving"
             for layer in m.modules()
         )
         with linear_attention_training_phase(m, [64, 64]) if enabled else nullcontext():
@@ -120,7 +110,7 @@ def _gdn_forward(model):
     return forward
 
 
-def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
+def _test_gdn_qat_helper(rank, size, checkpoint_path):
     initialize_for_megatron(
         tensor_model_parallel_size=size, pipeline_model_parallel_size=1, seed=SEED
     )
@@ -140,17 +130,16 @@ def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
     gdn_ref = outputs.copy()
     outputs.clear()
 
-    cfg, sites = _config_for_mode(mode)
-    mtq.quantize(model, cfg)
+    mtq.quantize(model, _gdn_config())
     gdn_modules = [m for m in model.modules() if isinstance(m, _QuantGatedDeltaNet)]
     assert gdn_modules, "no GatedDeltaNet layer was wrapped"
     for module in gdn_modules:
         assert module.gdn_state_qdq_block_v == 16
-        assert module.gdn_state_quantizer.is_enabled == ("state" in sites)
-        assert module.gdn_w_quantizer.is_enabled == ("w" in sites)
+        assert module.gdn_state_quantizer.is_enabled
+        assert not module.gdn_w_quantizer.is_enabled
         # Checkpointing must save the resolved policy, including edits after conversion.
         module.linear_attention_config = LinearAttentionConfig(
-            **{**module.linear_attention_config.model_dump(), "state": {"block_v": 32}}
+            **{**module.linear_attention_config.model_dump(), "state_block_v": 32}
         )
 
     with torch.no_grad():
@@ -188,8 +177,8 @@ def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
     assert len(restored_gdn) == len(gdn_modules)
     for module, original in zip(restored_gdn, gdn_modules):
         assert module.linear_attention_config == original.linear_attention_config
-        assert module.gdn_state_quantizer.is_enabled == ("state" in sites)
-        assert module.gdn_w_quantizer.is_enabled == ("w" in sites)
+        assert module.gdn_state_quantizer.is_enabled
+        assert not module.gdn_w_quantizer.is_enabled
         assert module.gdn_state_quantizer.num_bits == original.gdn_state_quantizer.num_bits
         assert module.gdn_state_qdq_block_v == 32
         assert module.in_proj.weight.grad is not None
@@ -202,7 +191,7 @@ def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
     assert not torch.equal(restored_gdn[0].in_proj.weight, before)
 
 
-def _compile_gdn_qat_kernels(rank, size, mode):
+def _compile_gdn_qat_kernels(rank, size):
     initialize_for_megatron(
         tensor_model_parallel_size=size, pipeline_model_parallel_size=1, seed=SEED
     )
@@ -210,9 +199,9 @@ def _compile_gdn_qat_kernels(rank, size, mode):
     forward = _gdn_forward(model)
     with torch.no_grad():
         forward(model)
-    cfg, _ = _config_for_mode(mode)
+    cfg = _gdn_config()
     # The functional case switches state tiles before running inference.
-    cfg["linear_attention"][0]["cfg"]["state"]["block_v"] = 32
+    cfg["linear_attention"][0]["cfg"]["state_block_v"] = 32
     mtq.quantize(model, cfg)
     with torch.no_grad():
         forward(model)
@@ -221,14 +210,13 @@ def _compile_gdn_qat_kernels(rank, size, mode):
     torch.cuda.synchronize()
 
 
-@pytest.fixture(params=["chunk", "decode_replay_int8"])
-def compiled_gdn_workers(request, dist_workers_size_1):
+@pytest.fixture
+def compiled_gdn_workers(dist_workers_size_1):
     """Warm one small QAT model in the same worker, outside the test-call budget."""
-    dist_workers_size_1.run(_compile_gdn_qat_kernels, request.param)
-    return dist_workers_size_1, request.param
+    dist_workers_size_1.run(_compile_gdn_qat_kernels)
+    return dist_workers_size_1
 
 
 def test_gdn_qat_and_sharded_restore(compiled_gdn_workers, tmp_path):
     """Train through QDQ after a Megatron distributed-checkpoint round trip."""
-    workers, mode = compiled_gdn_workers
-    workers.run(_test_gdn_qat_helper, mode, tmp_path)
+    compiled_gdn_workers.run(_test_gdn_qat_helper, tmp_path)

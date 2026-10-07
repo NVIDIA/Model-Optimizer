@@ -15,8 +15,6 @@
 
 """Batched differentiable GDN prefill with materialized numerical boundaries."""
 
-import torch.nn.functional as F
-
 from .config import LinearAttentionConfig
 from .training import _prefill_decode_forward, _prepare_prefill_inputs
 
@@ -55,28 +53,21 @@ def matmul_gdn(
 ):
     """Normalize GDN inputs and run a chunked prefix plus configured suffix recurrence.
 
-    Uses FP32 working arithmetic (FP64 for double inputs), with floating QDQ state.
-    The optional serving precision profile supplies matching native forward values
+    Uses FP32 working arithmetic with floating QDQ state.
+    The serving precision profile supplies matching native forward values
     and a Torch adjoint through the rounded state trajectory.
     """
     if cp_context is not None:
         raise NotImplementedError("GDN matmul emulation does not support context parallelism")
     output_dtype = q.dtype
     beta_dtype = beta.dtype
-    q, k, v, g, beta, serving = _prepare_prefill_inputs(
-        q, k, v, g, beta, policy=policy, chunk_size=chunk_size, normalize=use_qk_l2norm_in_kernel
+    q, k, v, g, beta = _prepare_prefill_inputs(
+        q, k, v, g, beta, policy=policy, chunk_size=chunk_size
     )
-    dtype = q.dtype
-    if serving and (use_gate_in_kernel or use_beta_sigmoid_in_kernel):
+    if use_gate_in_kernel or use_beta_sigmoid_in_kernel:
         raise ValueError(
             "Serving GDN expects prepared log gates and beta from the Megatron adapter"
         )
-    if use_gate_in_kernel:
-        if A_log is None or dt_bias is None:
-            raise ValueError("Fused GDN gate requires A_log and dt_bias")
-        g = -A_log.to(dtype).exp() * F.softplus(g + dt_bias.to(dtype))
-    if use_beta_sigmoid_in_kernel:
-        beta = beta.sigmoid() * (2.0 if allow_neg_eigval else 1.0)
     if g.ndim != 3:
         raise ValueError("matmul_gdn requires scalar GDN log gates")
     return _prefill_decode_forward(
@@ -101,5 +92,5 @@ def matmul_gdn(
         beta_dtype=beta_dtype,
         prefill_lengths=prefill_lengths,
         replay_gate_inputs=replay_gate_inputs,
-        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel if serving else False,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )

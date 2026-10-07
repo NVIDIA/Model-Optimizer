@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Linear-attention quantization adapters for optional FLA and serving kernels.
+"""Linear-attention quantization adapters for optional serving kernels.
 
-FLA supplies the state kernels used by W QAT. Serving adapters import forward
-kernels only when selected; this package initializer has no kernel dependencies.
+Serving adapters import forward kernels only when selected; this package
+initializer has no kernel dependencies.
 """

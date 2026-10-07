@@ -33,9 +33,4 @@ quantize:
     - module_name: '*'
       cfg:
         backend: serving
-        decode:
-          mode: token
-          precision: replayssm
-          readout: working
-          state_codec: int8_hadamard32
-          prefill_state_qdq: false
+        precision: replayssm

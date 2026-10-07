@@ -17,7 +17,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 from _test_utils.torch.quantization.linear_attention_reference import (
-    chunk_gdn_reference,
+    chunk_delta_rule_reference,
     recurrent_delta_rule_reference,
     state_qdq_reference,
 )
@@ -34,10 +34,11 @@ def inputs(length=7, kda=False):
     return [x.requires_grad_() for x in (q, k, v, g, beta)]
 
 
-@pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("state_v_first", [False, True])
-def test_chunk_recurrence_output_state_and_gradients(packed, state_v_first):
-    args = inputs()
+@pytest.mark.parametrize(
+    ("kda", "packed", "state_v_first"), [(False, True, True), (True, False, False)]
+)
+def test_chunk_recurrence_output_state_and_gradients(kda, packed, state_v_first):
+    args = inputs(kda=kda)
     state = torch.randn(2 if packed else 1, 2, 3, 4, dtype=torch.float64)
     if state_v_first:
         state = state.transpose(-1, -2).contiguous()
@@ -47,7 +48,7 @@ def test_chunk_recurrence_output_state_and_gradients(packed, state_v_first):
         "state_v_first": state_v_first,
         "cu_seqlens": torch.tensor([0, 2, 7]) if packed else None,
     }
-    actual = chunk_gdn_reference(*args, chunk_size=3, **kwargs)
+    actual = chunk_delta_rule_reference(*args, chunk_size=3, **kwargs)
     expected = recurrent_delta_rule_reference(*args, **kwargs)
     for a, e in zip(actual, expected):
         torch.testing.assert_close(a, e, rtol=1e-10, atol=1e-10)

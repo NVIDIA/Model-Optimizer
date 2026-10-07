@@ -21,10 +21,7 @@
 import pytest
 import torch
 
-from modelopt.torch.quantization.linear_attention import (
-    LinearAttentionDecodeConfig,
-    recurrent_decode,
-)
+from modelopt.torch.quantization.linear_attention import LinearAttentionConfig, recurrent_decode
 
 
 @pytest.fixture(scope="module", params=[False, True], ids=["gdn-token", "kda-replay"])
@@ -53,12 +50,10 @@ def compiled_replay(request):
     beta = raw_beta.float().sigmoid()
     args = tuple(x.detach().requires_grad_() for x in (q, k, v, g, beta))
     initial = (torch.randn(1, 64, 64, device="cuda") * 0.1).requires_grad_()
-    config = LinearAttentionDecodeConfig(
+    config = LinearAttentionConfig(
+        backend="serving",
         precision="replayssm",
-        state_codec="int8_hadamard32",
-        readout="working",
-        mode="replay" if channel else "token",
-        replay={"window": window} if channel else None,
+        replay_window=window,
     )
     kwargs = {
         "config": config,
@@ -80,7 +75,7 @@ def test_replay_matches_persistent_serving_cache(compiled_replay):
     native, args, initial, kwargs, forward = compiled_replay
     output, carry = forward()
     channel = args[3].ndim == 3
-    window = kwargs["config"].replay.window if channel else 1
+    window = kwargs["config"].replay_window
     state = torch.zeros(2, 1, 64, 64, device="cuda", dtype=torch.int8)
     scales = torch.zeros(2, 1, 2, 64, device="cuda", dtype=torch.float16)
     updates = torch.zeros(2, 1, window, 64, device="cuda", dtype=torch.bfloat16)
