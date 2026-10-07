@@ -22,13 +22,11 @@ import torch.nn as nn
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import QuantizeConfig
-from modelopt.torch.quantization.linear_attention import (
-    LinearAttentionConfig,
-    linear_attention_training_phase,
-)
+from modelopt.torch.quantization.linear_attention import linear_attention_training_phase
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins import gdn
 from modelopt.torch.quantization.plugins.gdn import GatedDeltaNetStateQuantMixin
+from modelopt.torch.quantization.plugins.kda import KimiDeltaAttentionStateQuantMixin
 
 GDN_STATE_FP8_DYNAMIC = {"num_bits": (4, 3), "axis": (0, 1), "type": "dynamic"}
 
@@ -75,6 +73,7 @@ def quant_cfg():
             {"quantizer_name": "*", "enable": False},
             {"quantizer_name": "*gdn_state_quantizer", "cfg": GDN_STATE_FP8_DYNAMIC},
         ],
+        "linear_attention": [{"module_name": "*", "cfg": {"backend": "serving"}}],
         "algorithm": "max",
     }
 
@@ -109,8 +108,6 @@ def test_dynamic_export_removes_linear_attention_attributes():
     for name in (
         "gdn_state_quantizer",
         "gdn_w_quantizer",
-        "replay_key_quantizer",
-        "replay_update_quantizer",
         "linear_attention_config",
         "_linear_attention_prefill_lengths",
     ):
@@ -131,19 +128,29 @@ def test_disabled_state_quantizer_calls_original_kernel():
     assert model.gated_delta_rule is chunk_gated_delta_rule, "the kernel swap must be undone"
 
 
-def test_state_qat_requires_explicit_serving_policy(monkeypatch):
-    model = mtq.quantize(TinyGatedDeltaNet(), {**quant_cfg(), "algorithm": None})
+@pytest.mark.parametrize("mixin", [GatedDeltaNetStateQuantMixin, KimiDeltaAttentionStateQuantMixin])
+def test_state_qat_requires_explicit_serving_policy(mixin):
+    model = mixin.convert(TinyGatedDeltaNet())
+    model._linear_attn_state.set_from_attribute_config(GDN_STATE_FP8_DYNAMIC)
+    model._linear_attn_state.enable()
+    with pytest.raises(ValueError, match="requires backend='serving'"):
+        model.validate_linear_attention()
+
+
+def test_training_phase_routes_prefill_lengths(monkeypatch):
+    cfg = {**quant_cfg(), "algorithm": None}
+    missing_policy = {key: value for key, value in cfg.items() if key != "linear_attention"}
+    with pytest.raises(ValueError, match="requires backend='serving'"):
+        mtq.quantize(TinyGatedDeltaNet(), missing_policy)
+    model = mtq.quantize(TinyGatedDeltaNet(), cfg)
     x = torch.randn(2, 8, 3, 4)
-    with pytest.raises(ValueError, match="Chunk-only state QAT is retired"):
-        model(x)
     calls = []
 
     def forward(*args, **kwargs):
         calls.append(kwargs)
         return chunk_gated_delta_rule(*args)
 
-    monkeypatch.setattr(gdn, "matmul_gdn", forward)
-    model.linear_attention_config = LinearAttentionConfig(backend="serving")
+    monkeypatch.setattr(gdn, "gdn_state_qat", forward)
     with linear_attention_training_phase(model, [4, 4]):
         model(x)
     assert calls[-1]["prefill_lengths"] == (4, 4)
@@ -184,8 +191,8 @@ def test_quantizer_roundtrip_and_hybrid_selection(tmp_path):
         num_bits=8, axis=None, block_sizes={-1: 32}, unsigned=False, narrow_range=True
     )
     cfg["linear_attention"] = [
-        {"module_name": "*", "cfg": {"state_block_v": 128}},
-        {"module_name": "0", "cfg": {"state_block_v": 32}},
+        {"module_name": "*", "cfg": {"backend": "serving", "state_block_v": 128}},
+        {"module_name": "0", "cfg": {"backend": "serving", "state_block_v": 32}},
     ]
     mtq.quantize(model, cfg)
     assert model[0].gdn_state_qdq_block_v == 32
@@ -194,21 +201,6 @@ def test_quantizer_roundtrip_and_hybrid_selection(tmp_path):
     expected = model[0].gdn_state_quantizer(sample)
     path = tmp_path / "gdn.pth"
     mto.save(model, path)
-    # Load policies saved before fixed, non-configurable fields were removed.
-    checkpoint = torch.load(path)
-    for _, mode_state in checkpoint["modelopt_state"]["modelopt_state_dict"]:
-        for policy in mode_state["metadata"]["linear_attention"].values():
-            policy["schema_version"] = 2
-            policy["state"] = {
-                "block_v": policy.pop("state_block_v"),
-                "mode": "chunk",
-                "quantize_initial": True,
-            }
-            policy["decode"] = None
-            policy.pop("precision")
-            policy.pop("replay_window")
-            policy["solve"] = {"method": "exact"}
-    torch.save(checkpoint, path)
     restored = nn.Sequential(TinyGatedDeltaNet(), nn.Linear(4, 4))
     mto.restore(restored, path)
     assert restored[0].linear_attention_config == model[0].linear_attention_config
@@ -234,10 +226,12 @@ def test_quant_cfg_refinement_updates_and_validates_existing_quantized_module():
 
     cfg = deepcopy(quant_cfg())
     cfg["algorithm"] = None
-    cfg["linear_attention"] = [{"module_name": "", "cfg": {"state_block_v": 32}}]
+    cfg["linear_attention"] = [
+        {"module_name": "", "cfg": {"backend": "serving", "state_block_v": 32}}
+    ]
     mtq.quantize(model, cfg)
     assert model.gdn_state_qdq_block_v == 32
-    cfg["linear_attention"].append({"module_name": "", "cfg": {}})
+    cfg["linear_attention"].append({"module_name": "", "cfg": {"backend": "serving"}})
     mtq.quantize(model, cfg)
     assert model.gdn_state_qdq_block_v == 64
     assert model.gdn_state_quantizer.is_enabled
@@ -274,20 +268,6 @@ def test_standard_projection_recipe_leaves_gdn_emulation_disabled():
     )
     assert not model.gdn_state_quantizer.is_enabled
     assert not model.gdn_w_quantizer.is_enabled
-    assert not model.replay_key_quantizer.is_enabled
-    assert not model.replay_update_quantizer.is_enabled
-
-
-@pytest.mark.parametrize("name", ["replay_key_quantizer", "replay_update_quantizer"])
-def test_enabled_legacy_replay_quantizer_is_rejected(name):
-    cfg = {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": None}
-    model = mtq.quantize(TinyGatedDeltaNet(), cfg)
-    getattr(model, name).enable()
-    with pytest.raises(ValueError, match=f"{name} is no longer supported"):
-        mto.restore_from_modelopt_state(TinyGatedDeltaNet(), mto.modelopt_state(model))
-    cfg["quant_cfg"].append({"quantizer_name": f"*{name}", "enable": True})
-    with pytest.raises(ValueError, match=f"{name} is no longer supported"):
-        mtq.quantize(TinyGatedDeltaNet(), cfg)
 
 
 def test_policy_rejects_unmatched_and_unimplemented_modes():

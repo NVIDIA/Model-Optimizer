@@ -146,17 +146,7 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
         # QuantModule.set_extra_state().
         return model
 
-    # Optional plugins import conversion during initialization, so defer this import.
-    from .plugins.kda import _discard_legacy_w_quantizer_state
-
     quantizer_state_dict = dict(metadata["quantizer_state"])
-    _discard_legacy_w_quantizer_state(quantizer_state_dict)
-    for name, module in _linear_attention_modules(model).items():
-        policy = metadata.get("linear_attention", {}).get(name, {})
-        if policy.get("schema_version", 1) < 2:
-            for handle in module.replay_quantizer_names:
-                key = f"{name}.{handle}" if name else handle
-                quantizer_state_dict.setdefault(key, getattr(module, handle).get_modelopt_state())
     if "linear_attention" not in metadata:
         # Older checkpoints predate these disabled handles; preserve their baseline path.
         for name, module in _linear_attention_modules(model).items():

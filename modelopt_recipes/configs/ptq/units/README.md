@@ -41,5 +41,4 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `moe_dispatch_nvfp4.yaml` | NVFP4 fake quantization of the MoE expert-parallel dispatch (`*dispatch_quantizer`, vLLM); Blackwell+ GPUs |
 | `moe_combine_nvfp4.yaml` | NVFP4 fake quantization of the MoE expert-parallel combine (`*combine_quantizer`, vLLM); Blackwell+ GPUs |
 
-Native ReplaySSM uses BF16 key/update vectors. Legacy `replay_key_quantizer` and
-`replay_update_quantizer` handles must remain disabled; factor QDQ is unsupported.
+Native ReplaySSM uses BF16 key/update vectors; they are not independently quantized.

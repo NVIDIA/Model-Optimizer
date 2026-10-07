@@ -13,15 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Batched differentiable GDN prefill with materialized numerical boundaries."""
+"""GDN adapter for serving-aligned recurrent-state QAT."""
 
 from .config import LinearAttentionConfig
 from .training import _prefill_decode_forward, _prepare_prefill_inputs
 
-__all__ = ["matmul_gdn"]
+__all__ = ["gdn_state_qat", "matmul_gdn"]
 
 
-def matmul_gdn(
+def gdn_state_qat(
     q,
     k,
     v,
@@ -32,8 +32,6 @@ def matmul_gdn(
     state_qdq=False,
     state_format="fp8_e4m3",
     state_quantizer=None,
-    replay_key_quantizer=None,
-    replay_update_quantizer=None,
     scale=None,
     initial_state=None,
     output_final_state=False,
@@ -51,14 +49,14 @@ def matmul_gdn(
     prefill_lengths=None,
     replay_gate_inputs=None,
 ):
-    """Normalize GDN inputs and run a chunked prefix plus configured suffix recurrence.
+    """Adapt Megatron's FLA-style GDN call to serving-aligned state QAT.
 
-    Uses FP32 working arithmetic with floating QDQ state.
-    The serving precision profile supplies matching native forward values
-    and a Torch adjoint through the rounded state trajectory.
+    Validate prepared scalar log gates and promote inputs to FP32 working values.
+    The shared training forward runs the chunked prefix and recurrent suffix with
+    native forward values, configured state QDQ, and a differentiable Torch adjoint.
     """
     if cp_context is not None:
-        raise NotImplementedError("GDN matmul emulation does not support context parallelism")
+        raise NotImplementedError("GDN state QAT does not support context parallelism")
     output_dtype = q.dtype
     beta_dtype = beta.dtype
     q, k, v, g, beta = _prepare_prefill_inputs(
@@ -69,7 +67,7 @@ def matmul_gdn(
             "Serving GDN expects prepared log gates and beta from the Megatron adapter"
         )
     if g.ndim != 3:
-        raise ValueError("matmul_gdn requires scalar GDN log gates")
+        raise ValueError("gdn_state_qat requires scalar GDN log gates")
     return _prefill_decode_forward(
         q,
         k,
@@ -80,8 +78,6 @@ def matmul_gdn(
         state_qdq=state_qdq,
         state_format=state_format,
         state_quantizer=state_quantizer,
-        replay_key_quantizer=replay_key_quantizer,
-        replay_update_quantizer=replay_update_quantizer,
         scale=scale,
         initial_state=initial_state,
         output_final_state=output_final_state,
@@ -94,3 +90,7 @@ def matmul_gdn(
         replay_gate_inputs=replay_gate_inputs,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
+
+
+# Compatibility name for callers using the original adapter API.
+matmul_gdn = gdn_state_qat

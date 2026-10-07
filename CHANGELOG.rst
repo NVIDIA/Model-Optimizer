@@ -68,7 +68,6 @@ Changelog
 **Backward Breaking Changes**
 
 - Bump minimum transformers version to ``5.5`` instead of ``4.57``; transformers 4.x is no longer supported. Upgrade with ``pip install -U "nvidia-modelopt[hf]"``.
-- Experimental linear-attention reference training is removed, including ``precision="full"`` and replay-factor QDQ; select ``backend="serving"`` with a native precision profile. Mathematical reference implementations are available only in tests.
 - Experimental GDN W quantization and its ``gdn_w_fp8_dynamic`` recipe unit are removed; keep ``gdn_w_quantizer`` disabled when using state QAT or restoring existing checkpoints.
 
 - ``modelopt.torch.distill.plugins.megatron.TopKLogitsKLLoss`` (``logit_kl_topk`` in ``DistillationConfig``) is renamed to ``TopLogitsKLLoss``, keeping the old name as a deprecated alias. It now normalizes both distributions over the full vocabulary instead of re-normalizing over the Top-K entries, and always appends a "ghost" token holding the probability mass outside the Top-K to both student and teacher (matching Megatron-LM's offline cached-logits KD loss). Loss values change for existing ``logit_kl_topk`` runs.

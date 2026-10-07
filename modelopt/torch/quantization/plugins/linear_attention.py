@@ -25,10 +25,9 @@ __all__ = []
 
 class _LinearAttentionQuantMixin(QuantModule):
     linear_attention_quantizer_names: tuple[str, ...] = ()
-    replay_quantizer_names = ("replay_key_quantizer", "replay_update_quantizer")
 
     def _setup(self):
-        for name in (*self.linear_attention_quantizer_names, *self.replay_quantizer_names):
+        for name in self.linear_attention_quantizer_names:
             self._register_temp_attribute(
                 name, TensorQuantizer(QuantizerAttributeConfig(enable=False))
             )
@@ -41,28 +40,24 @@ class _LinearAttentionQuantMixin(QuantModule):
 
     @property
     def linear_attention_is_enabled(self):
-        """Whether an operand, state, or arithmetic policy changes the computation."""
+        """Whether state quantization or the serving arithmetic policy is enabled."""
         return (
-            any(
-                getattr(self, name).is_enabled
-                for name in (*self.linear_attention_quantizer_names, *self.replay_quantizer_names)
-            )
+            any(getattr(self, name).is_enabled for name in self.linear_attention_quantizer_names)
             or self.linear_attention_config.backend == "serving"
         )
 
     def validate_linear_attention(self):
         """Validate quantizer contracts shared by GDN and KDA."""
-        for name in self.replay_quantizer_names:
-            quantizer = getattr(self, name)
-            if quantizer.is_enabled:
-                raise ValueError(
-                    f"{name} is no longer supported; native ReplaySSM stores BF16 factors"
-                )
         if self._linear_attn_state.is_enabled:
             state_format, group_size = state_quantizer_config(
                 self._linear_attn_state,
                 name=self.linear_attention_quantizer_names[0],
             )
+            if self.linear_attention_config.backend != "serving":
+                raise ValueError(
+                    "GDN/KDA state QAT requires backend='serving' and prefill lengths "
+                    "through linear_attention_training_phase"
+                )
             if self.linear_attention_config.state_codec == "int8_hadamard32":
                 if state_format != "int8":
                     raise ValueError("int8_hadamard32 requires INT8 state quantization")

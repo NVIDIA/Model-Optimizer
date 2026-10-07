@@ -999,12 +999,9 @@ class TensorQuantizer(nn.Module):
             if amax_shape:
                 self._amax_shape_for_export = amax_shape
 
-        # Static scales require fixed groups; dynamic scales allow changing input shapes.
-        if hasattr(self, "_block_reshape_size") and not self._dynamic:
+        # Reshape size have already been set
+        if hasattr(self, "_block_reshape_size"):
             return
-        for attribute in ("_padding", "_slices"):
-            if hasattr(self, attribute):
-                delattr(self, attribute)
 
         reshape_size, quantize_axis, paddings, slices = [], [], [], []
 

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Differentiable KDA prefill with stable per-channel decay interactions."""
+"""KDA adapter for serving-aligned recurrent-state QAT."""
 
 import torch
 import torch.nn.functional as F
@@ -21,10 +21,10 @@ import torch.nn.functional as F
 from .training import _prefill_decode_forward, _prepare_prefill_inputs
 from .utils import forward_value
 
-__all__ = ["matmul_kda"]
+__all__ = ["kda_state_qat", "matmul_kda"]
 
 
-def matmul_kda(
+def kda_state_qat(
     q,
     k,
     v,
@@ -35,8 +35,6 @@ def matmul_kda(
     state_qdq=False,
     state_format="fp8_e4m3",
     state_quantizer=None,
-    replay_key_quantizer=None,
-    replay_update_quantizer=None,
     scale=None,
     initial_state=None,
     output_final_state=False,
@@ -57,15 +55,15 @@ def matmul_kda(
     return_intermediate_states=False,
     prefill_lengths=None,
 ):
-    """Normalize KDA inputs and run a chunked prefix plus configured suffix recurrence.
+    """Adapt Megatron's FLA-style KDA call to serving-aligned state QAT.
 
-    Gates follow FLA's kernel activation formula and per-key log retention.
-    The serving precision profile supplies matching native forward values
-    and a Torch adjoint through the rounded state trajectory.
+    Prepare per-key-channel gates and optional beta activation using FLA's formula.
+    The shared training forward runs the chunked prefix and recurrent suffix with
+    native forward values, configured state QDQ, and a differentiable Torch adjoint.
     """
     if cp_context is not None or disable_recompute or return_intermediate_states:
         raise NotImplementedError(
-            "KDA matmul does not support CP or FLA recompute/intermediate flags"
+            "KDA state QAT does not support CP or FLA recompute/intermediate flags"
         )
     if allow_neg_eigval and not use_beta_sigmoid_in_kernel:
         raise ValueError("allow_neg_eigval requires use_beta_sigmoid_in_kernel")
@@ -78,7 +76,7 @@ def matmul_kda(
     )
     dtype = q.dtype
     if g.ndim != 4:
-        raise ValueError("matmul_kda requires per-key-channel KDA log gates")
+        raise ValueError("kda_state_qat requires per-key-channel KDA log gates")
     if use_gate_in_kernel:
         raw_gate = g
         if A_log is None:
@@ -107,8 +105,6 @@ def matmul_kda(
         state_qdq=state_qdq,
         state_format=state_format,
         state_quantizer=state_quantizer,
-        replay_key_quantizer=replay_key_quantizer,
-        replay_update_quantizer=replay_update_quantizer,
         scale=scale,
         initial_state=initial_state,
         output_final_state=output_final_state,
@@ -120,3 +116,7 @@ def matmul_kda(
         prefill_lengths=prefill_lengths,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
+
+
+# Compatibility name for callers using the original adapter API.
+matmul_kda = kda_state_qat
