@@ -1179,6 +1179,70 @@ class TestQdqToDqValidation:
             qdq_to_dq(model)
 
 
+def create_test_model_with_qdq_matmul_weight(scale_shape, zero_point_shape=None):
+    """Create a QDQ model whose weight feeds a MatMul through a QuantizeLinear/DequantizeLinear pair.
+
+    The scale and zero point take the shapes given, so callers can build per-tensor (scalar or
+    single-element) and per-axis (one entry per input channel) quantization graphs."""
+    weight = np.random.RandomState(3).randn(16, 32).astype(np.float32)
+    amax = np.abs(weight).max() / 127.0
+    scale = np.full(scale_shape, amax, dtype=np.float32)
+    if zero_point_shape is None:
+        zero_point = np.zeros(scale_shape, dtype=np.int8)
+    else:
+        zero_point = np.full(zero_point_shape, 0, dtype=np.int8)
+
+    graph = helper.make_graph(
+        nodes=[
+            helper.make_node("QuantizeLinear", ["W", "s", "z"], ["wq"], name="q"),
+            helper.make_node("DequantizeLinear", ["wq", "s", "z"], ["wdq"], name="dq"),
+            helper.make_node("MatMul", ["x", "wdq"], ["y"], name="mm"),
+        ],
+        name="test_graph",
+        inputs=[helper.make_tensor_value_info("x", TensorProto.FLOAT, [4, 16])],
+        outputs=[helper.make_tensor_value_info("y", TensorProto.FLOAT, [4, 32])],
+        initializer=[
+            numpy_helper.from_array(weight, "W"),
+            numpy_helper.from_array(scale, "s"),
+            numpy_helper.from_array(zero_point, "z"),
+        ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
+    model.ir_version = 10
+    return model
+
+
+def run_matmul_model(model):
+    """Run a MatMul model and return its output."""
+    session = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    inputs = np.random.RandomState(7).randn(4, 16).astype(np.float32)
+    return session.run(None, {"x": inputs})[0]
+
+
+class TestQdqToDqPerTensorScale:
+    """Per-tensor quantized weights must survive qdq_to_dq and stay numerically equivalent."""
+
+    @pytest.mark.parametrize("scale_shape", [(), (1,)], ids=["scalar", "single_element"])
+    def test_per_tensor_scale_matches_qdq_output(self, scale_shape):
+        model = create_test_model_with_qdq_matmul_weight(scale_shape)
+        expected = run_matmul_model(model)
+
+        converted = qdq_to_dq(model)
+
+        assert "QuantizeLinear" not in [node.op_type for node in converted.graph.node]
+        converted_weight = numpy_helper.to_array(
+            next(init for init in converted.graph.initializer if init.name == "W")
+        )
+        assert converted_weight.dtype == np.int8
+        np.testing.assert_allclose(run_matmul_model(converted), expected, atol=1e-5)
+
+    def test_per_axis_scale_still_rejected_when_axis_length_mismatches(self):
+        model = create_test_model_with_qdq_matmul_weight((8,))
+
+        with pytest.raises(RuntimeError, match=r"Scale shape \(8,\) does not match weight shape"):
+            qdq_to_dq(model)
+
+
 class TestLegacyEdgeLLMShims:
     """Smoke tests for the deprecated top-level shims kept for TensorRT-Edge-LLM 0.6.1.
 
