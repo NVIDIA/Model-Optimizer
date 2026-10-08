@@ -64,6 +64,7 @@ from pathlib import Path
 import vllm
 from packaging import version
 from vllm.entrypoints.cli.main import main as vllm_main
+from vllm_deepgemm_utils import add_deepgemm_args, resolve_deepgemm_args
 from vllm_mlflow_utils import MLFLOW_ENV_VARS, add_mlflow_args, resolve_mlflow_args
 
 
@@ -284,6 +285,7 @@ def main():
     modelopt_parser = FlexibleArgumentParser(add_help=False)
     _add_fakequant_args(modelopt_parser)
     add_mlflow_args(modelopt_parser)
+    add_deepgemm_args(modelopt_parser)
     modelopt_args, rest_argv = modelopt_parser.parse_known_args(sys.argv[1:])
     rest_argv = _default_to_serve(rest_argv)
     if rest_argv and rest_argv[0] != "serve":
@@ -347,6 +349,8 @@ def main():
             if not _has_flag(rest_argv, "--moe-backend"):
                 rest_argv = [*rest_argv, "--moe-backend", "triton"]
 
+    # Before vLLM starts the workers, which import deep_gemm from the Python path it sets.
+    resolve_deepgemm_args(modelopt_args)
     _run_vllm_cli(rest_argv)
 
 
