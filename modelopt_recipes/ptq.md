@@ -563,6 +563,15 @@ entry is a thin **alias** that imports that recipe wholesale and overrides only
   `model_type/qwen3_5_moe/ptq/nvfp4_experts_mse-fp8_rest-kv_fp8` — NVFP4 (MSE static weights)
   on the routed experts, ModelOpt-default FP8 elsewhere, and an FP8 KV cache — as published in
   `nvidia/Qwen3.5-397B-A17B-NVFP4-V2`.
+- **`models/moonshotai/Kimi-K2.7-Code/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast`**
+  aliases `general/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast` — expert-only NVFP4 with
+  the expert `input_scale` pinned to 1.0 (no activation calibration) and an FP8 KV cache in
+  cast mode — as published in `nvidia/Kimi-K2.7-Code-NVFP4`.
+- **`models/google/gemma-4-26B-A4B-it/ptq/nvfp4_experts_only-kv_fp8_cast`** and
+  **`models/google/diffusiongemma-26B-A4B-it/ptq/...`** alias
+  `general/ptq/nvfp4_experts_only-kv_fp8_cast` — expert-only NVFP4 with max calibration and an
+  FP8 KV cache in cast mode — as published in `nvidia/Gemma-4-26B-A4B-NVFP4` and
+  `nvidia/diffusiongemma-26B-A4B-it-NVFP4`.
 - **`models/zai-org/GLM-5.1/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast`** and
   **`models/zai-org/GLM-5.2/ptq/...`** alias
   `general/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast` — expert-only NVFP4 with the
