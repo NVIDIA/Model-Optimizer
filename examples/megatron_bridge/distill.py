@@ -49,6 +49,8 @@ from megatron.bridge.training.post_training.checkpointing import has_modelopt_st
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
 
+# DirectHFSFTDatasetConfig landed in Megatron-Bridge on 2026-07-09; an older Bridge still runs every
+# other data mode, and --sft_hf_dataset reports why it is unavailable.
 try:
     from megatron.bridge.data.builders import DirectHFSFTDatasetConfig
     from megatron.bridge.data.sft_processing import ChatSFTPreprocessingConfig
@@ -124,6 +126,20 @@ def _nonnegative_int(value: str) -> int:
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be a non-negative integer")
     return parsed
+
+
+def _is_local_json(spec: str) -> bool:
+    return spec.endswith((".json", ".jsonl"))
+
+
+def _hf_source(spec: str) -> "HFDatasetSourceConfig":
+    """``<file>.json[l]`` -> local chat jsonl; otherwise ``<hub_id>[:<split>]`` (split defaults to train)."""
+    if _is_local_json(spec):
+        return HFDatasetSourceConfig(
+            path_or_dataset="json", split="train", load_kwargs={"data_files": spec}
+        )
+    dataset, _, split = spec.partition(":")
+    return HFDatasetSourceConfig(path_or_dataset=dataset, split=split or "train")
 
 
 def get_args():
@@ -205,31 +221,17 @@ def get_args():
         "--sft_hf_dataset",
         type=str,
         default=None,
-        help="Chat dataset to distill on (used with --sft): a Hub dataset id, or 'json' together "
-        "with --sft_hf_data_files for a local chat jsonl. Each conversation is rendered by the "
+        help="Chat dataset to distill on (used with --sft): a local chat '<file>.jsonl', or "
+        "'<hub_id>[:<split>]' (split defaults to train). Each conversation is rendered by the "
         "model's own chat template. Alternative to --sft_dataset_root, which expects "
         '{"input", "output"} records already preprocessed into a dataset root.',
     )
     parser.add_argument(
-        "--sft_hf_split", type=str, default="train", help="Split for --sft_hf_dataset"
-    )
-    parser.add_argument(
-        "--sft_hf_data_files",
+        "--sft_hf_validation",
         type=str,
         default=None,
-        help="Local chat jsonl for --sft_hf_dataset json (HuggingFace load_kwargs.data_files)",
-    )
-    parser.add_argument(
-        "--sft_hf_validation_split",
-        type=str,
-        default=None,
-        help="Validation split for --sft_hf_dataset (required when --eval_iters > 0)",
-    )
-    parser.add_argument(
-        "--sft_hf_validation_data_files",
-        type=str,
-        default=None,
-        help="Local chat jsonl for the validation split of --sft_hf_dataset json",
+        help="Validation data for --sft_hf_dataset, in the same format (required when "
+        "--eval_iters > 0), e.g. '<hub_id>:test' or '<hub_id>:train[:1000]'.",
     )
     parser.add_argument(
         "--sft_loss_mode",
@@ -417,10 +419,18 @@ def get_args():
                 "--sft_hf_dataset needs a Megatron-Bridge providing DirectHFSFTDatasetConfig "
                 "(added 2026-07-09). Use a newer Bridge or --sft_dataset_root."
             )
-        if args.eval_iters > 0 and not args.sft_hf_validation_split:
-            raise ValueError(
-                "--sft_hf_dataset with --eval_iters > 0 needs --sft_hf_validation_split."
-            )
+        if args.eval_iters > 0 and not args.sft_hf_validation:
+            raise ValueError("--sft_hf_dataset with --eval_iters > 0 needs --sft_hf_validation.")
+        # Fail on a mistyped path here rather than after both checkpoints have loaded onto GPUs.
+        absent = [
+            spec
+            for spec in (args.sft_hf_dataset, args.sft_hf_validation)
+            if spec and _is_local_json(spec) and not os.path.isfile(spec)
+        ]
+        if absent:
+            raise ValueError(f"--sft_hf_dataset / --sft_hf_validation files missing: {absent}.")
+    elif args.sft_hf_validation or args.sft_loss_mode != "assistant":
+        raise ValueError("--sft_hf_validation and --sft_loss_mode require --sft_hf_dataset.")
     if args.sft and (args.data_paths or args.use_mock_data):
         raise ValueError(
             "--sft is mutually exclusive with --data_paths / --use_mock_data: the SFT branch wins "
@@ -622,20 +632,11 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     if args.sft and args.sft_hf_dataset:
         # Chat rows rendered by the model's own chat template, with the loss covering every
         # assistant turn, so multi-round records train all of their responses rather than the last.
-        def _hf_source(split, data_files=None):
-            return HFDatasetSourceConfig(
-                path_or_dataset=args.sft_hf_dataset,
-                split=split,
-                load_kwargs={"data_files": data_files} if data_files else None,
-            )
-
         dataset_config = DirectHFSFTDatasetConfig(
             seq_length=args.seq_length,
-            source=_hf_source(args.sft_hf_split, args.sft_hf_data_files),
+            source=_hf_source(args.sft_hf_dataset),
             validation_source=(
-                _hf_source(args.sft_hf_validation_split, args.sft_hf_validation_data_files)
-                if args.sft_hf_validation_split
-                else None
+                _hf_source(args.sft_hf_validation) if args.sft_hf_validation else None
             ),
             preprocessing=ChatSFTPreprocessingConfig(loss_mode=args.sft_loss_mode),
             dataloader_type="batch",
