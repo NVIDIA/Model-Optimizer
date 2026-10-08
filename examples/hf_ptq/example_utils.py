@@ -217,6 +217,25 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
     # Import here to avoid circular dependency
     from nemotron_vl_calib import safe_nemotron_vl_forward
 
+    # Check if model is encoder-decoder (needs decoder_input_ids instead of input_ids)
+    is_enc_dec = getattr(full_model.config, "is_encoder_decoder", False)
+
+    # Which batches go through safe_nemotron_vl_forward:
+    #   - Nano VL and other InternVL-style wrappers, recognised by `img_context_token_id`, need
+    #     its embedding-injection path.
+    #   - The omni wrappers define neither `img_context_token_id` nor `extract_feature`; they
+    #     merge vision inside their own forward. They need the helper's fallback, which carries
+    #     the dtype-cast `pixel_values` and sets `use_cache=False`. Requiring `extract_feature`
+    #     to be absent keeps a Nemotron VL model that has the helper but no `img_context_token_id`
+    #     out of the InternVL branch.
+    # Encoder-decoder VL models (Nemotron-Parse) keep the plain forward: their batch carries
+    # `decoder_input_ids`, which the helper does not recognise, so routing them through it would
+    # return without a forward pass and silently skip calibration.
+    use_safe_forward = not is_enc_dec and (
+        hasattr(full_model, "img_context_token_id")
+        or (is_nemotron_vl(full_model) and not hasattr(full_model, "extract_feature"))
+    )
+
     def calibrate_loop(_model):
         # Inspect model's forward signature to determine what parameters it accepts
         forward_params = inspect.signature(full_model.forward).parameters
@@ -224,9 +243,6 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
             p.kind == inspect.Parameter.VAR_KEYWORD for p in forward_params.values()
         )
         allowed_keys = set(forward_params.keys())
-
-        # Check if model is encoder-decoder (needs decoder_input_ids instead of input_ids)
-        is_enc_dec = getattr(full_model.config, "is_encoder_decoder", False)
 
         full_model.eval()
         with torch.no_grad():
@@ -247,9 +263,7 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
                 # Remove None values
                 call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
 
-                # Use safe_nemotron_vl_forward for Nemotron Nano VL (embedding-injection style)
-                # For other VLMs (like Nemotron-Parse), use standard forward
-                if hasattr(full_model, "img_context_token_id"):
+                if use_safe_forward:
                     safe_nemotron_vl_forward(full_model, call_kwargs)
                 else:
                     full_model(**call_kwargs)
