@@ -76,9 +76,20 @@ def safe_nemotron_vl_forward(full_model: torch.nn.Module, batch: dict[str, Any])
     flat_ids = input_ids.reshape(b * n)
     selected = flat_ids == full_model.img_context_token_id
 
-    # Vision embeddings
+    # Vision embeddings. InternVL-style Nemotron VL exposes `extract_feature(pixel_values)`, but
+    # newer omni wrappers (e.g. NemotronH_Omni_Reasoning_V3 / nemotron_h_omni) do not: they merge the
+    # vision embeddings via masked_scatter inside their own forward. Calling the helper
+    # unconditionally raises AttributeError on those, aborting calibration. Fall back to the model's
+    # own forward when the helper is absent.
+    if not hasattr(full_model, "extract_feature"):
+        full_model(**{k: v for k, v in batch.items() if v is not None})
+        return
     vit_embeds = full_model.extract_feature(pixel_values)
     vit_embeds = vit_embeds[image_flags_s == 1]
+    # Under a multi-GPU device_map the vision tower and the LLM embedding table can live on
+    # different devices, so the merge below would raise a cross-device error. Align explicitly.
+    if vit_embeds.device != flat_embeds.device:
+        vit_embeds = vit_embeds.to(flat_embeds.device)
     try:
         flat_embeds[selected] = flat_embeds[selected] * 0.0 + vit_embeds.reshape(-1, c)
     except Exception:
@@ -87,6 +98,14 @@ def safe_nemotron_vl_forward(full_model: torch.nn.Module, batch: dict[str, Any])
         flat_embeds[selected] = flat_embeds[selected] * 0.0 + vit_embeds[:n_token]
 
     inputs_embeds = flat_embeds.reshape(b, n, c)
+
+    # Under a sharded device_map the LLM's first block may not sit on the embedding device.
+    _lm_dev = getattr(full_model.language_model.get_input_embeddings().weight, "device", None)
+    if _lm_dev is not None:
+        if attention_mask is not None and attention_mask.device != _lm_dev:
+            attention_mask = attention_mask.to(_lm_dev)
+        if position_ids is not None and position_ids.device != _lm_dev:
+            position_ids = position_ids.to(_lm_dev)
 
     # LLM forward (drives activation stats)
     full_model.language_model(
