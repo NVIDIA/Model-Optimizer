@@ -638,7 +638,6 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
                 else None
             ),
             preprocessing=ChatSFTPreprocessingConfig(loss_mode=args.sft_loss_mode),
-            seed=args.seed,
             dataloader_type="batch",
             do_validation=args.eval_iters > 0,
             do_test=False,
