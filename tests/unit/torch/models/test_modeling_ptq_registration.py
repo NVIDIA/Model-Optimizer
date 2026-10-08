@@ -30,6 +30,7 @@ pytest.importorskip("transformers")
 
 FIRST_IMPORTS = [
     "modelopt.torch.models.falcon.modeling_ptq",
+    "modelopt.torch.models.gpt_oss.modeling_ptq",
     "modelopt.torch.models.llama4.modeling_ptq",
     "modelopt.torch.models.nemotron_h.modeling_ptq",
     "modelopt.torch.quantization",
@@ -62,6 +63,13 @@ except ImportError:
     pass
 else:
     assert Llama4TextExperts in QuantModuleRegistry, "Llama4TextExperts not registered"
+
+try:
+    from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts
+except ImportError:
+    pass
+else:
+    assert GptOssExperts in QuantModuleRegistry, "GptOssExperts not registered"
 
 assert register_falcon_linears_on_the_fly in CUSTOM_MODEL_PLUGINS, "Falcon callback missing"
 
