@@ -49,8 +49,6 @@ from megatron.bridge.training.post_training.checkpointing import has_modelopt_st
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
 
-# DirectHFSFTDatasetConfig landed in Megatron-Bridge on 2026-07-09; an older Bridge still runs every
-# other data mode, and --sft_hf_dataset reports why it is unavailable.
 try:
     from megatron.bridge.data.builders import DirectHFSFTDatasetConfig
     from megatron.bridge.data.sft_processing import ChatSFTPreprocessingConfig
@@ -128,13 +126,9 @@ def _nonnegative_int(value: str) -> int:
     return parsed
 
 
-def _is_local_json(spec: str) -> bool:
-    return spec.endswith((".json", ".jsonl"))
-
-
 def _hf_source(spec: str) -> "HFDatasetSourceConfig":
     """``<file>.json[l]`` -> local chat jsonl; otherwise ``<hub_id>[:<split>]`` (split defaults to train)."""
-    if _is_local_json(spec):
+    if spec.endswith((".json", ".jsonl")):
         return HFDatasetSourceConfig(
             path_or_dataset="json", split="train", load_kwargs={"data_files": spec}
         )
@@ -416,21 +410,10 @@ def get_args():
             raise ValueError("--sft_hf_dataset requires --sft.")
         if not HAS_DIRECT_HF_SFT:
             raise ValueError(
-                "--sft_hf_dataset needs a Megatron-Bridge providing DirectHFSFTDatasetConfig "
-                "(added 2026-07-09). Use a newer Bridge or --sft_dataset_root."
+                "--sft_hf_dataset needs a newer Megatron-Bridge (DirectHFSFTDatasetConfig)."
             )
         if args.eval_iters > 0 and not args.sft_hf_validation:
             raise ValueError("--sft_hf_dataset with --eval_iters > 0 needs --sft_hf_validation.")
-        # Fail on a mistyped path here rather than after both checkpoints have loaded onto GPUs.
-        absent = [
-            spec
-            for spec in (args.sft_hf_dataset, args.sft_hf_validation)
-            if spec and _is_local_json(spec) and not os.path.isfile(spec)
-        ]
-        if absent:
-            raise ValueError(f"--sft_hf_dataset / --sft_hf_validation files missing: {absent}.")
-    elif args.sft_hf_validation or args.sft_loss_mode != "assistant":
-        raise ValueError("--sft_hf_validation and --sft_loss_mode require --sft_hf_dataset.")
     if args.sft and (args.data_paths or args.use_mock_data):
         raise ValueError(
             "--sft is mutually exclusive with --data_paths / --use_mock_data: the SFT branch wins "
