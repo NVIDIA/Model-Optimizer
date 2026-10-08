@@ -22,7 +22,9 @@ uses float32 here (real checkpoints use float8_e4m3, whose CPU ops are not porta
 across platforms) — only shapes and the scalar-vs-blocked distinction matter.
 """
 
+import copy
 import json
+import re
 import types
 import warnings
 from fnmatch import fnmatchcase
@@ -54,6 +56,7 @@ from modelopt.torch.export.unified_export_hf import (
 from modelopt.torch.export.unified_export_hf_streaming import (
     _assert_no_split_rules,
     _build_reverse_name_mapper_or_none,
+    _export_fsdp2_checkpoint_streaming,
     _export_transformers_checkpoint_streaming,
     _make_tensor_sink,
     _StreamingShardWriter,
@@ -883,6 +886,80 @@ def test_reverse_conversion_rejects_collision_with_carried_tensor():
         revert_weight_conversion_quant_aware(model, state)
     assert list(state) == ["head.weight", "original.head.weight"]
     assert torch.equal(state["original.head.weight"], torch.zeros(2, 2))
+
+
+@pytest.mark.parametrize(
+    "export_mode",
+    [
+        "resident",
+        "streaming-buffered",
+        "streaming-flushed",
+        "fsdp2",
+        "layerwise",
+        "layerwise-resume",
+    ],
+)
+@pytest.mark.parametrize("module_name", ["lm_head", "model.layers.0.self_attn.q_proj"])
+def test_export_rejects_collision_with_carried_tensor(tmp_path, export_mode, module_name):
+    """A carried key must not replace a converted live weight, even in an earlier shard."""
+    model = _fp8_llama("model.layers.0.mlp.gate_proj.*quantizer")
+    # Local import: _fp8_llama guards the optional Transformers dependency.
+    from transformers.core_model_loading import WeightRenaming
+
+    model._weight_conversions = [WeightRenaming(f"original.{module_name}", module_name)]
+    source_name = f"original.{module_name}.weight"
+    original = model.get_submodule(module_name).weight.detach().clone()
+    carried = {source_name: torch.zeros_like(original)}
+    source = tmp_path / "source"
+    source.mkdir()
+    save_file(carried, str(source / "model.safetensors"))
+    model._modelopt_source_checkpoint = str(source)
+    model._modelopt_unplaced_source_keys = [source_name]
+    export = tmp_path / "export"
+    export.mkdir()
+
+    if export_mode.startswith("layerwise"):
+        resumed_model = copy.deepcopy(model) if export_mode == "layerwise-resume" else None
+        exporter = LayerwiseExporter(model, export)
+        exporter.bind(list(model.model.layers))
+        exporter.export_layer(0, model.model.layers[0])
+        if resumed_model is not None:
+            model = resumed_model
+            exporter = LayerwiseExporter(model, export)
+            exporter.bind(list(model.model.layers))
+            exporter.assert_shards_present(1)
+    elif export_mode.startswith("streaming"):
+        accelerate = pytest.importorskip("accelerate")
+        accelerate.cpu_offload(model.lm_head, execution_device=torch.device("cpu"))
+
+    expected = (
+        pytest.warns(UserWarning, match=r"reverse weight conversion skipped.*collision")
+        if export_mode == "resident"
+        else pytest.raises(ValueError, match=rf"collision.*{re.escape(source_name)}")
+    )
+    with expected:
+        if export_mode == "fsdp2":
+            model._modelopt_carried_over_names = [source_name]
+            _export_fsdp2_checkpoint_streaming(model, export_dir=export, extra_state_dict=carried)
+        else:
+            export_hf_checkpoint(
+                model,
+                export_dir=export,
+                save_modelopt_state=False,
+                max_shard_size=1 if export_mode == "streaming-flushed" else "10GB",
+            )
+
+    if export_mode == "resident":
+        # Resident export can roll back the rename atomically and preserve both values.
+        written = _load_shards(export)
+        torch.testing.assert_close(written[f"{module_name}.weight"], original)
+        torch.testing.assert_close(written[source_name], carried[source_name])
+    else:
+        assert not (export / "model.safetensors.index.json").exists()
+        assert not (export / "model.safetensors").exists()
+        if export_mode.startswith("layerwise") and module_name.startswith("model.layers."):
+            written_layer = load_file(export / "model-layer-00000.safetensors")
+            torch.testing.assert_close(written_layer[source_name], original)
 
 
 @pytest.mark.parametrize("quantized_merge", [False, True])

@@ -363,8 +363,8 @@ class LayerwiseExporter:
 
         ``extra_state_dict`` carries tensors with no slot in ``model.state_dict()`` -- MTP
         weights, whichever convention the checkpoint uses. They are already in export form,
-        so only the hub-name reversal applies, and they win on a name clash exactly as they
-        do in ``export_hf_checkpoint``.
+        so only the hub-name reversal applies, except to carried source names. Final tensor
+        names must be unique across the tail and all previously written layer shards.
         """
         if not self._bound:
             raise RuntimeError(
@@ -440,6 +440,8 @@ class LayerwiseExporter:
             key = name
             if name not in carried_names and self._tensor_name_mapper is not None:
                 key = self._tensor_name_mapper(name)
+            if key in tail:
+                raise ValueError(f"Export tensor name collision in tail: {key!r}")
             tail[key] = tensor.detach().contiguous().cpu()
 
         save_file(tail, str(self._export_dir / _TAIL_SHARD))
@@ -522,6 +524,11 @@ class LayerwiseExporter:
         for shard in shards:
             with safe_open(str(shard), framework="pt") as f:
                 for key in f.keys():  # noqa: SIM118 -- safe_open has no __iter__
+                    if key in weight_map:
+                        raise ValueError(
+                            f"Export tensor name collision: {key!r} in "
+                            f"{weight_map[key]!r} and {shard.name!r}"
+                        )
                     weight_map[key] = shard.name
             total_size += _shard_data_bytes(shard)
         index = {"metadata": {"total_size": total_size}, "weight_map": weight_map}

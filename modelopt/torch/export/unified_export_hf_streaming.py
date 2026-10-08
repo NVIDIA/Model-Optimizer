@@ -117,6 +117,8 @@ class _StreamingShardWriter:
         survive. ``data_ptr()`` only has to hold within one buffer, whose entries stay
         alive until :meth:`_flush`.
         """
+        if key in self._buffer or key in self._key_to_part:
+            raise ValueError(f"Export tensor name collision: {key!r}")
         if tensor.data_ptr() in self._buffer_storage:
             tensor = tensor.clone()
 
@@ -160,6 +162,8 @@ def name_shards_and_write_index(
         offset = len(part_names)
         part_names.extend(names)
         for key, part_idx in keys.items():
+            if key in key_to_part:
+                raise ValueError(f"Export tensor name collision across writers: {key!r}")
             key_to_part[key] = offset + part_idx
         total_size += nbytes
 
