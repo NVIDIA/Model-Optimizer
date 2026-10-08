@@ -506,7 +506,7 @@ def get_amax(weight: np.ndarray, quant_axis: int, block_size: int) -> np.ndarray
             assert d0 % block_size == 0, (
                 f"Weight dimension {d0} must be divisible by block size {block_size}"
             )
-            amax = np.abs(weight.reshape(block_size, d0 * d1 // block_size)).max(axis=0)
+            amax = np.abs(weight.reshape(d0 // block_size, block_size, d1)).max(axis=1).reshape(-1)
         else:
             raise ValueError(f"Unsupported weight axis: {quant_axis}")
     return amax
