@@ -26,9 +26,12 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 import transformers
-from packaging import version
 from torch import Tensor
 from torch.nn.functional import linear
+from transformers.integrations.finegrained_fp8 import FP8Linear
+from transformers.models.falcon.modeling_falcon import FalconLinear
+from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts
+from transformers.models.llama4.modeling_llama4 import Llama4TextExperts
 from transformers.models.t5.modeling_t5 import T5Attention
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_FA_AVAILABLE
@@ -37,6 +40,7 @@ from modelopt.torch.kernels.common.attention import (
     validate_triton_attention_envelope,
 )
 from modelopt.torch.kernels.quantization.gemm import IS_AVAILABLE as IS_TRITON_AVAILABLE
+from modelopt.torch.models import hf_model_type
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils.distributed import ParallelState
 
@@ -73,11 +77,9 @@ if TYPE_CHECKING:
 
 __all__ = ["register_hf_attentions_on_the_fly"]
 
-TRANSFORMERS_VERSION_GE_5_0 = version.parse(transformers.__version__) >= version.parse("5.0.0")
-
 
 class _QuantAttention(QuantModule):
-    """Attention class for KV Cache quantization compatible with new_attention_interface in transformers >= 4.48.0."""
+    """Attention class for KV Cache quantization of modules using transformers' attention interface."""
 
     def _setup(self):
         self.q_bmm_quantizer = TensorQuantizer()
@@ -296,12 +298,12 @@ class _QuantAttention(QuantModule):
         return attn_out.contiguous(), None
 
     def forward(self, *args, **kwargs):
-        """Forward method for KV cache quantization compatible with new_attention_interface in transformers >= 4.48.0.
+        """Forward method for KV cache quantization of modules using transformers' attention interface.
 
         The forward method is used to patch the attention interface with _quantized_attention.
         Once output tensors are generated, it restores the original attention interface.
         """
-        # In transformers>=5.0 some attention classes (e.g. BertAttention) no longer store
+        # Some attention classes (e.g. BertAttention) do not store
         # `self.config` directly; fall back to searching child modules for a config attribute.
         _config = getattr(self, "config", None)
         if _config is None:
@@ -351,9 +353,8 @@ class _QuantAttention(QuantModule):
 
     @staticmethod
     def is_compatible_attention(attn):
-        # The new_attention_interface is only available in transformers >= 4.48.0
-        # In addition, the new attention interface is not available for some models such as T5
-        # Hence lets do a crude check here to see if the attention module is using the new_attention_interface
+        # Some models (e.g. T5 before transformers 5.15) do not use the attention interface,
+        # hence lets do a crude check here to see if the attention module is using it
         # This is not foolproof but should work for most cases
         module = inspect.getmodule(attn)
         return getattr(module, "ALL_ATTENTION_FUNCTIONS", None) is not None
@@ -468,7 +469,7 @@ def register_hf_attentions_on_the_fly(model):
     if registered_attn_module or not attention_cls:
         return
 
-    # this is the case for models that do not use the new_attention_interface or transformers version < 4.48.0
+    # this is the case for models that do not use the attention interface
     # Register the attention class for KV Cache quantization
     success = any(register_attention_for_kv_quant(cls) for cls in attention_cls)
     if not success:
@@ -485,26 +486,43 @@ class HFParallelLinear(torch.nn.Linear, DynamicModule):
     shard = None
 
     def _setup(self):
-        if isinstance(self.weight, torch.distributed.tensor.DTensor):  # transformers<5.0
+        # transformers>=5.16 keeps the sharded weight as a DTensor
+        if isinstance(self.weight, torch.distributed.tensor.DTensor):
             assert self.weight.placements == self.shard, (
                 f"Received unexpected shard {self.weight.placements} for {self}"
             )
             device_mesh = self.weight.device_mesh
-        else:  # transformers>=5.0: weights are plain Parameters, mesh is on the module
+            # Keep HF's TP wrapper on its local-tensor path (also in training),
+            # so the quantized linear sees this rank's plain weight shard.
+            self._hf_quantized_needs_local_tp = True
+        else:  # transformers<5.16: weights are plain Parameters, mesh is on the module
             device_mesh = self._hf_device_mesh
         tp_group = device_mesh.get_group()
         self._parallel_state = ParallelState(data_parallel_group=-1, tensor_parallel_group=tp_group)
 
     @classmethod
-    def is_compatible(cls, linear) -> bool:
+    def is_compatible(cls, linear, tp_mesh=None) -> bool:
         if not isinstance(linear, torch.nn.Linear):
             return False
-        if not hasattr(linear, "_hf_tp_plan"):
-            return False
-        return linear._hf_tp_plan in cls.supported_hf_tp_plans
+        if hasattr(linear, "_hf_tp_plan"):  # transformers<5.16
+            return linear._hf_tp_plan in cls.supported_hf_tp_plans
+        # transformers>=5.16 marks nothing on the module: the weight is a DTensor on the model's TP
+        # mesh, sharded along the TP style's dim. Matching the mesh keeps FSDP2 shards out.
+        weight = linear.weight
+        return (
+            tp_mesh is not None
+            and isinstance(weight, torch.distributed.tensor.DTensor)
+            and weight.device_mesh == tp_mesh
+            and tuple(weight.placements) == cls.shard
+        )
 
-    # This is hack for now, otherwise DMRegistry treats this class same as nn.Linear
+    # Defined so DMRegistry does not treat this class the same as nn.Linear.
     def forward(self, x):
+        # transformers>=5.16 installs its TP input/output transforms as an instance forward, which
+        # DynamicModule.convert keeps as _forward_pre_dm; it wraps the unconverted nn.Linear.forward.
+        pre_fwd = getattr(self, "_forward_pre_dm", None)
+        if pre_fwd is not None:
+            return pre_fwd(x)
         return super().forward(x)
 
 
@@ -527,7 +545,7 @@ class _QuantHFParallelLinear(_ParallelLinear):
 
     @contextmanager
     def enable_weight_access_and_writeback(self):
-        if isinstance(self.weight, torch.distributed.tensor.DTensor):  # transformers<5.0
+        if isinstance(self.weight, torch.distributed.tensor.DTensor):  # transformers>=5.16
             assert self.weight.placements == self.shard, (
                 f"Received unexpected shard {self.weight.placements} for {self}"
             )
@@ -538,7 +556,7 @@ class _QuantHFParallelLinear(_ParallelLinear):
                 yield
             finally:
                 self.weight = weight
-        else:  # transformers>=5.0: weights are already plain Parameters
+        else:  # transformers<5.16: weights are already plain Parameters
             yield
 
 
@@ -559,11 +577,24 @@ def convert_hf_parallel_linears_on_the_fly(model):
     This method converts them to `HFColumnParallelLinear` and `HFRowParallelLinear` so that they
     can be treated as TP sharded layers and not like regular nn.Linear layers.
     """
-    for name, module in model.named_modules():
-        if HFColumnParallelLinear.is_compatible(module):
+    # transformers>=5.16 keeps the TP mesh on the PreTrainedModel, which may sit inside a wrapper.
+    tp_mesh = next(
+        (m._device_mesh for m in model.modules() if getattr(m, "_device_mesh", None) is not None),
+        None,
+    )
+    converted = False
+    for module in model.modules():
+        if HFColumnParallelLinear.is_compatible(module, tp_mesh):
             HFColumnParallelLinear.convert(module)
-        elif HFRowParallelLinear.is_compatible(module):
+            converted = True
+        elif HFRowParallelLinear.is_compatible(module, tp_mesh):
             HFRowParallelLinear.convert(module)
+            converted = True
+    if tp_mesh is not None and not converted:
+        warnings.warn(
+            "Found a transformers tensor-parallel mesh but no TP-sharded linear layer; they will be"
+            " quantized as unsharded layers."
+        )
 
 
 if transformers.pytorch_utils.Conv1D not in QuantModuleRegistry:
@@ -633,8 +664,8 @@ class _TransposedExpertsCalibMixin:
 class _QuantSparseSequentialMoe(QuantModule):
     """Quantization wrapper for HuggingFace sparse MoE blocks.
 
-    This base class is for Sequential MoEs (i.e each experts are implemented as standalone modules).
-    Transformers>=5.0 has batched experts, no per-expert quantizers.
+    This base class is for Sequential MoEs (i.e each experts are implemented as standalone modules),
+    e.g. remote-code models; native transformers MoEs use fused experts instead.
 
     Supports ``layer_sync_moe_local_experts_amax`` to sync input quantizer amax across experts.
 
@@ -649,19 +680,18 @@ class _QuantSparseSequentialMoe(QuantModule):
         self._moe_calib_experts_ratio = None
         self._token_counting_initialized = False
 
+    def _num_experts(self) -> int:
+        """Expert count from the gate, the block or the experts container (0 if unknown)."""
+        for obj in [getattr(self, "gate", None), self, getattr(self, "experts", None)]:
+            for attr in ("num_experts", "n_routed_experts"):
+                if getattr(obj, attr, None):
+                    return getattr(obj, attr)
+        return len(self.experts) if hasattr(self.experts, "__len__") else 0
+
     def _init_token_counting(self):
         """Lazy-init token counting infra (buffer + gate hook). Called once from forward."""
         self._token_counting_initialized = True
-        num_experts = 0
-        for obj in [getattr(self, "gate", None), self, getattr(self, "experts", None)]:
-            if obj is not None:
-                for attr in ("num_experts", "n_routed_experts"):
-                    if hasattr(obj, attr):
-                        num_experts = getattr(obj, attr)
-                        break
-            if num_experts:
-                break
-
+        num_experts = self._num_experts()
         if num_experts == 0:
             warnings.warn(
                 f"{self.__class__.__name__}: could not resolve num_experts; "
@@ -683,10 +713,10 @@ class _QuantSparseSequentialMoe(QuantModule):
             return
         with torch.no_grad():
             if isinstance(output, tuple) and len(output) >= 3:
-                # v5.x TopKRouter: returns (logits, scores, indices)
+                # TopKRouter: returns (logits, scores, indices)
                 indices = output[2]
             else:
-                # v4.x nn.Linear gate: returns logits tensor
+                # nn.Linear-style gate (e.g. remote code): returns logits tensor
                 logits = output if not isinstance(output, tuple) else output[0]
                 top_k = self.gate.top_k if hasattr(self.gate, "top_k") else self.top_k
                 _, indices = torch.topk(logits.float(), top_k, dim=-1)
@@ -702,42 +732,21 @@ class _QuantSparseSequentialMoe(QuantModule):
         # During calibration, forward all tokens to a larger fraction of experts to improve
         # calibration coverage, then re-run with the original top_k for actual outputs.
         if is_calib:
-            # Skip counting when all experts are calibrated (ratio == 1.0).
-            self._count_expert_tokens = self._moe_calib_experts_ratio < 1.0
-            if self._count_expert_tokens and not self._token_counting_initialized:
+            # Skip counting when all experts are calibrated (ratio == 1.0). Init first: it resets
+            # the counting flag, which would otherwise drop the first batch's counts.
+            count_tokens = self._moe_calib_experts_ratio < 1.0
+            if count_tokens and not self._token_counting_initialized:
                 self._init_token_counting()
-            if TRANSFORMERS_VERSION_GE_5_0:
-                assert hasattr(self, "gate") and hasattr(self.gate, "top_k")
-                original_top_k = self.gate.top_k
-                self.gate.top_k = max(
-                    original_top_k, round(self.gate.num_experts * self._moe_calib_experts_ratio)
-                )
+            self._count_expert_tokens = count_tokens
+            # top_k lives on the router gate, or on the block itself (e.g. remote-code MoEs)
+            top_k_owner = self.gate if hasattr(getattr(self, "gate", None), "top_k") else self
+            original_top_k = top_k_owner.top_k
+            top_k_owner.top_k = max(
+                original_top_k, round(self._num_experts() * self._moe_calib_experts_ratio)
+            )
+            try:
                 super().forward(hidden_states)
-                self.gate.top_k = original_top_k
-            else:
-                # Path for transformers<5.0
-                if hasattr(self, "gate") and hasattr(self.gate, "top_k"):
-                    top_k_owner = self.gate
-                else:
-                    top_k_owner = self
-                original_top_k = top_k_owner.top_k
-                if hasattr(self, "num_experts"):
-                    top_k_owner.top_k = max(
-                        original_top_k, round(self.num_experts * self._moe_calib_experts_ratio)
-                    )
-                elif hasattr(self, "experts"):
-                    num_experts = (
-                        self.experts.num_experts
-                        if hasattr(self.experts, "num_experts")
-                        else len(self.experts)
-                    )
-                    top_k_owner.top_k = max(
-                        original_top_k,
-                        round(num_experts * self._moe_calib_experts_ratio),
-                    )
-                else:
-                    raise ValueError(f"Could not find num_experts in module {self}")
-                super().forward(hidden_states)
+            finally:
                 top_k_owner.top_k = original_top_k
             self._count_expert_tokens = False
 
@@ -779,196 +788,6 @@ class _QuantLlama4TextExperts(_TransposedExpertsCalibMixin, QuantModule):
             _transposed_quantize(self.down_proj, self.down_proj_weight_quantizer),
         )
         next_states = next_states.view(-1, self.hidden_size)
-        return next_states
-
-
-# For more information on DbrxExpert, see https://github.com/huggingface/transformers/blob/dcdda532/src/transformers/models/dbrx/modeling_dbrx.py#L756
-class _QuantDbrxExperts(QuantModule):
-    def _setup(self):
-        """Modify the DbrxExpert."""
-        # No setup is needed for DbrxExpert, we only need to update DbrxExpertGLU
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        top_experts: torch.LongTensor,
-        top_weights: torch.Tensor,
-    ) -> torch.Tensor:
-        bsz, q_len, hidden_size = x.shape
-        x = x.view(-1, hidden_size)
-        out = torch.zeros_like(x)
-
-        expert_mask = nn.functional.one_hot(top_experts, num_classes=self.num_experts).permute(
-            2, 1, 0
-        )
-        for expert_idx in range(self.num_experts):
-            topk_idx, token_idx = torch.where(expert_mask[expert_idx])
-            if token_idx.shape[0] == 0:
-                continue
-
-            token_list = token_idx.tolist()
-            topk_list = topk_idx.tolist()
-
-            expert_tokens = x[None, token_list].reshape(-1, hidden_size)
-            expert_out = (
-                self.mlp(expert_tokens, expert_idx) * top_weights[token_list, topk_list, None]
-            )
-
-            out.index_add_(0, token_idx, expert_out)
-
-        out = out.reshape(bsz, q_len, hidden_size)
-        return out
-
-
-class _QuantDbrxExpertGLU(QuantModule):
-    def _setup(self):
-        """Modify the DbrxExpertGLU by using nn.Linear layers."""
-        dtype, device = self.w1.dtype, self.w1.device
-
-        def _copy_weights(modules, weights):
-            modules.to(dtype=dtype, device=device)
-            for expert_idx, module in enumerate(modules):
-                with torch.no_grad():
-                    module.weight.copy_(weights[expert_idx].detach())
-
-        # In transformers 5.0, DbrxExpertGLU.forward uses raw matmul: x @ w1[i] where
-        # w1[i] has shape (ffn_hidden_size, hidden_size). To match via F.linear (which
-        # computes x @ W.T), we store weights transposed: W = w1[i].T.
-        self.w1_linear = nn.ModuleList(
-            [
-                nn.Linear(self.ffn_hidden_size, self.hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.w1_linear,
-            self.w1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size).transpose(
-                1, 2
-            ),
-        )
-        delattr(self, "w1")
-
-        self.v1_linear = nn.ModuleList(
-            [
-                nn.Linear(self.ffn_hidden_size, self.hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.v1_linear,
-            self.v1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size).transpose(
-                1, 2
-            ),
-        )
-        delattr(self, "v1")
-
-        # w2: down_proj uses intermediate.matmul(w2[i].t()) = F.linear(intermediate, w2[i])
-        # so W = w2[i] directly (no extra transpose needed).
-        self.w2_linear = nn.ModuleList(
-            [
-                nn.Linear(self.hidden_size, self.ffn_hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.w2_linear,
-            self.w2.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size),
-        )
-        delattr(self, "w2")
-
-    def forward(self, x: torch.Tensor, expert_idx: int) -> torch.Tensor:
-        x1 = self.w1_linear[expert_idx](x)
-        x2 = self.v1_linear[expert_idx](x)
-        x1 = self.activation_fn(x1)
-        x1 = x1 * x2
-        return self.w2_linear[expert_idx](x1)
-
-
-class _QuantQwen3VLMoeTextExperts(QuantModule):
-    """Quantized wrapper for the pre-transformers-5.12 ``Qwen3VLMoeTextExperts`` layout.
-
-    That layout stores ``gate_up_proj`` as (num_experts, hidden_size, 2*expert_dim) and runs
-    the experts through ``torch.bmm``/``@``, so it is unrolled into ``nn.Linear`` modules here.
-    transformers>=5.12 moved this module to the standard fused layout handled by
-    :class:`_QuantFusedExperts`; see the registration site below.
-    """
-
-    def _setup(self):
-        """Modify the Qwen3VLMoeTextExperts by using nn.Linear layers."""
-        from accelerate import init_empty_weights
-
-        dtype, device = self.gate_up_proj.dtype, self.gate_up_proj.device
-
-        def _copy_weight(module, weight):
-            module.to_empty(device=device)
-            with torch.no_grad():
-                module.weight.data = weight.detach().data.to(dtype=dtype, device=device)
-
-        # The attribute name was changed from `intermediate_size` to `intermediate_dim` in
-        # https://github.com/huggingface/transformers/commit/0642963ba13f2dae0596fe489415569e1d91fbda
-        if hasattr(self, "intermediate_size"):
-            expert_dim = self.intermediate_size
-        elif hasattr(self, "intermediate_dim"):
-            expert_dim = self.intermediate_dim
-        else:
-            raise AttributeError("Could not find intermediate dimension size in model")
-
-        with init_empty_weights():
-            gate_proj = nn.ModuleList(
-                [
-                    nn.Linear(self.hidden_size, expert_dim, bias=False)
-                    for _ in range(self.num_experts)
-                ]
-            )
-            up_proj = nn.ModuleList(
-                [
-                    nn.Linear(self.hidden_size, expert_dim, bias=False)
-                    for _ in range(self.num_experts)
-                ]
-            )
-            down_proj = nn.ModuleList(
-                [
-                    nn.Linear(expert_dim, self.hidden_size, bias=False)
-                    for _ in range(self.num_experts)
-                ]
-            )
-
-        for idx in range(self.num_experts):
-            _copy_weight(gate_proj[idx], self.gate_up_proj[idx, :, :expert_dim].T)
-            _copy_weight(up_proj[idx], self.gate_up_proj[idx, :, expert_dim:].T)
-            _copy_weight(down_proj[idx], self.down_proj[idx, :].T)
-
-        delattr(self, "gate_up_proj")
-        delattr(self, "down_proj")
-        self.gate_proj = gate_proj
-        self.up_proj = up_proj
-        self.down_proj = down_proj
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        routing_weights: torch.Tensor,
-        router_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        batch_size = hidden_states.shape[0]
-        hidden_states = hidden_states.reshape(-1, self.hidden_size)
-        next_states = torch.zeros_like(hidden_states)
-        with torch.no_grad():
-            expert_mask = torch.nn.functional.one_hot(router_indices, num_classes=self.num_experts)
-            expert_mask = expert_mask.permute(2, 1, 0)
-            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
-        for expert_idx in expert_hit:
-            with torch.no_grad():
-                _, token_idx = torch.where(expert_mask[expert_idx[0]])
-            current_state = hidden_states[token_idx]
-            gate = self.gate_proj[expert_idx](current_state)
-            up = self.up_proj[expert_idx](current_state)
-            gated_output = up * self.act_fn(gate)
-            out = self.down_proj[expert_idx](gated_output)
-            weighted_output = out * routing_weights[token_idx, expert_idx, None]
-            next_states.index_add_(0, token_idx, weighted_output.to(hidden_states.dtype))
-        next_states = next_states.view(batch_size, -1, self.hidden_size)
-
         return next_states
 
 
@@ -1168,27 +987,6 @@ def _get_fused_experts_quantizer_attr_names(module):
 def _is_quant_fused_experts_module(module):
     """Return True for a converted HF fused-MoE-experts quantization wrapper."""
     return isinstance(module, _QuantFusedExperts)
-
-
-class _QuantDbrxFFN(_QuantSparseSequentialMoe):
-    @property
-    def num_experts(self):
-        return self.router.moe_num_experts
-
-    @property
-    def top_k(self):
-        # In older transformers, top_k was stored on DbrxRouter as moe_top_k.
-        # In transformers 5.0, DbrxFFN stores it as a plain attribute (top_k).
-        if hasattr(self.router, "moe_top_k"):
-            return self.router.moe_top_k
-        return self.__dict__.get("top_k", 1)
-
-    @top_k.setter
-    def top_k(self, value):
-        if hasattr(self.router, "moe_top_k"):
-            self.router.moe_top_k = value
-        else:
-            self.__dict__["top_k"] = value
 
 
 @contextmanager
@@ -1417,37 +1215,13 @@ class _QuantFP8Linear(QuantModule):
             del self.weight_scale_inv
 
 
-try:
-    from transformers.models.llama4.modeling_llama4 import Llama4TextExperts
+if Llama4TextExperts not in QuantModuleRegistry:
+    QuantModuleRegistry.register({Llama4TextExperts: "hf.Llama4TextExperts"})(
+        _QuantLlama4TextExperts
+    )
 
-    if Llama4TextExperts not in QuantModuleRegistry:
-        QuantModuleRegistry.register({Llama4TextExperts: "hf.Llama4TextExperts"})(
-            _QuantLlama4TextExperts
-        )
-except ImportError:
-    pass
-
-try:
-    from transformers.models.dbrx.modeling_dbrx import DbrxExpertGLU, DbrxExperts, DbrxFFN
-
-    if DbrxExperts not in QuantModuleRegistry:
-        QuantModuleRegistry.register({DbrxExperts: "hf.DbrxExperts"})(_QuantDbrxExperts)
-
-    if DbrxExpertGLU not in QuantModuleRegistry:
-        QuantModuleRegistry.register({DbrxExpertGLU: "hf.DbrxExpertGLU"})(_QuantDbrxExpertGLU)
-
-    if DbrxFFN not in QuantModuleRegistry:
-        QuantModuleRegistry.register({DbrxFFN: "hf.DbrxFFN"})(_QuantDbrxFFN)
-except ImportError:
-    pass
-
-try:
-    from transformers.models.falcon.modeling_falcon import FalconLinear
-
-    if FalconLinear not in QuantModuleRegistry:
-        QuantModuleRegistry.register({FalconLinear: "hf.FalconLinear"})(_QuantLinear)
-except ImportError:
-    pass
+if FalconLinear not in QuantModuleRegistry:
+    QuantModuleRegistry.register({FalconLinear: "hf.FalconLinear"})(_QuantLinear)
 
 try:
     from compressed_tensors.linear.compressed_linear import CompressedLinear
@@ -1459,37 +1233,8 @@ try:
 except ImportError:
     pass
 
-try:
-    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextExperts
-
-    # transformers>=5.12 rewrote Qwen3VLMoeTextExperts onto the standard
-    # ``@use_experts_implementation`` fused layout: ``hidden_size``/``expert_dim`` became
-    # ``hidden_dim``/``intermediate_dim``, ``gate_up_proj`` was transposed to
-    # (num_experts, 2*intermediate_dim, hidden_dim), and the forward now calls ``F.linear``
-    # twice per expert. ``_QuantQwen3VLMoeTextExperts`` only understands the older layout,
-    # so registering it against the new one crashes on ``self.hidden_size`` (nvbug 6518551).
-    # The decorator sets ``_apply_gate`` on the class; use it to detect the new layout and
-    # leave those modules to ``register_fused_experts_on_the_fly``, which claims them with
-    # the generic ``_QuantFusedExperts``. The old layout must stay explicitly registered:
-    # it is structurally indistinguishable from a generic fused-experts module, yet its
-    # forward uses ``torch.bmm``/``@`` rather than ``F.linear``, so the generic wrapper
-    # would silently quantize nothing.
-    if Qwen3VLMoeTextExperts not in QuantModuleRegistry and not hasattr(
-        Qwen3VLMoeTextExperts, "_apply_gate"
-    ):
-        QuantModuleRegistry.register({Qwen3VLMoeTextExperts: "hf.Qwen3VLMoeTextExperts"})(
-            _QuantQwen3VLMoeTextExperts
-        )
-except ImportError:
-    pass
-
-try:
-    from transformers.integrations.finegrained_fp8 import FP8Linear
-
-    if FP8Linear not in QuantModuleRegistry:
-        QuantModuleRegistry.register({FP8Linear: "hf.FP8Linear"})(_QuantFP8Linear)
-except ImportError:
-    pass
+if FP8Linear not in QuantModuleRegistry:
+    QuantModuleRegistry.register({FP8Linear: "hf.FP8Linear"})(_QuantFP8Linear)
 
 
 class _QuantGptOssExperts(_TransposedExpertsCalibMixin, _QuantFunctionalMixin):
@@ -1578,25 +1323,8 @@ class _QuantGptOssExperts(_TransposedExpertsCalibMixin, _QuantFunctionalMixin):
             return super().forward(hidden_states, router_indices, routing_weights)
 
 
-try:
-    from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts
-
-    if GptOssExperts not in QuantModuleRegistry:
-        QuantModuleRegistry.register({GptOssExperts: "hf.GptOssExperts"})(_QuantGptOssExperts)
-except ImportError:
-    pass
-
-
-def register_dbrx_moe_on_the_fly(model):
-    """Register DBRX MoE modules as QUANT_MODULE.
-
-    The MoE class in DBRX is `transformers_modules.modeling_dbrx.DbrxExpertGLU`, which loads dynamically.
-    """
-    if type(model).__name__ == "DbrxForCausalLM":
-        moe_type = type(model.transformer.blocks[0].ffn.experts.mlp)
-        # Create a QuantDbrxExpertGLU class on the fly
-        if QuantModuleRegistry.get(moe_type) is None:
-            QuantModuleRegistry.register({moe_type: moe_type.__name__})(_QuantDbrxExpertGLU)
+if GptOssExperts not in QuantModuleRegistry:
+    QuantModuleRegistry.register({GptOssExperts: "hf.GptOssExperts"})(_QuantGptOssExperts)
 
 
 def register_falcon_linears_on_the_fly(model):
@@ -1632,7 +1360,7 @@ def _is_sparse_sequaential_moe_block(module):
         return False
 
     if not hasattr(module.experts, "__iter__"):
-        # transformers>=5.0 has batched experts, no per-expert quantizers
+        # Fused (batched) experts, no per-expert quantizers
         return False
 
     # Primary: gate sub-module has topk/top_k + num_experts (standard TopKRouter pattern)
@@ -1641,7 +1369,7 @@ def _is_sparse_sequaential_moe_block(module):
         if hasattr(gate, "top_k") and _has_num_experts(gate):
             return True
 
-    # Fallback: top_k + num_experts on the block itself (older transformers, e.g. v4.x Qwen3Next)
+    # Fallback: top_k + num_experts on the block itself (e.g. remote-code MoE blocks)
     if hasattr(module, "top_k"):
         if not _has_num_experts(module) and hasattr(module.experts, "__len__"):
             module.num_experts = len(module.experts)
@@ -1690,7 +1418,7 @@ def _fused_experts_wrapper_class(module):
     * non-gated (``_QuantNonGatedFusedExperts``): a 3-D ``up_proj`` with no
       ``gate_proj`` and no ``gate_up_proj``. Matches NemotronH ``NemotronHExperts``.
 
-    Returns ``None`` for non-standard layouts (DBRX, GptOss, GraniteMoE,
+    Returns ``None`` for non-standard layouts (GptOss, GraniteMoE,
     Llama4TextExperts) which have their own explicit registrations.
 
     ``act_fn`` is not required: these wrappers only intercept the two ``F.linear``
@@ -1764,7 +1492,8 @@ def force_eager_experts_impl_on_the_fly(model):
     recursively on ``text_config`` / ``vision_config`` / ``audio_config`` /
     ``speech_config``) whenever a fused-experts module is present.
     """
-    if not any(_is_fused_experts_module(m) for m in model.modules()):
+    fused_experts = [module for module in model.modules() if _is_fused_experts_module(module)]
+    if not fused_experts:
         return
 
     nested_cfg_attrs = ("text_config", "vision_config", "audio_config", "speech_config")
@@ -1780,6 +1509,12 @@ def force_eager_experts_impl_on_the_fly(model):
 
     if hasattr(model, "config"):
         _force(model.config)
+
+    # Some models construct auxiliary blocks from a deep copy of the root config.
+    # Nemotron-H MTP does this, so updating only ``model.config`` leaves its fused
+    # experts on grouped_mm/batched_mm and bypasses the F.linear quantizer hooks.
+    for module in fused_experts:
+        _force(getattr(module, "config", None))
 
 
 def _is_supported_hf_model(model):
@@ -2061,7 +1796,7 @@ def _is_step_family_model(model: nn.Module) -> bool:
     Step revisions apart without a class-name allowlist, rather than distinguishing Step
     from arbitrary third-party MoE code.
     """
-    model_type = str(getattr(getattr(model, "config", None), "model_type", "") or "")
+    model_type = hf_model_type(model) or ""
     return bool(_STEP_FAMILY_RE.match(model_type) or _STEP_FAMILY_RE.match(type(model).__name__))
 
 
@@ -2133,7 +1868,6 @@ def _reconstruct_fused_moe_linear(model: nn.Module) -> None:
 CUSTOM_MODEL_PLUGINS.update(
     [
         register_falcon_linears_on_the_fly,
-        register_dbrx_moe_on_the_fly,
         register_moe_linear_on_the_fly,
         register_fused_experts_on_the_fly,
         force_eager_experts_impl_on_the_fly,

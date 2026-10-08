@@ -13,16 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import pytest
-import transformers
 from _test_utils.examples.hf_ptq_utils import PTQCommand
-from _test_utils.examples.models import (
-    BART_PATH,
-    MIXTRAL_PATH,
-    T5_PATH,
-    TINY_LLAMA_PATH,
-    WHISPER_PATH,
-)
-from packaging.version import Version
+from _test_utils.examples.models import BART_PATH, MIXTRAL_PATH, T5_PATH, TINY_LLAMA_PATH
 
 
 @pytest.mark.parametrize(
@@ -52,22 +44,6 @@ def test_ptq_mixtral(command):
     command.run(MIXTRAL_PATH)
 
 
-@pytest.mark.skipif(
-    Version(transformers.__version__) >= Version("5.0"),
-    reason="Whisper requires torchcodec and other system packages for transformers>=5.0",
-)
-@pytest.mark.parametrize(
-    "command",
-    [
-        # Auto-batch-size computation seems to take >10mins for Whisper hence using a fixed batch size
-        PTQCommand(quant="fp8", calib_batch_size=16, calib_dataset="peoples_speech", min_sm=89),
-    ],
-    ids=PTQCommand.param_str,
-)
-def test_ptq_whisper(command):
-    command.run(WHISPER_PATH)
-
-
 @pytest.mark.parametrize(
     "command",
     [
@@ -76,15 +52,16 @@ def test_ptq_whisper(command):
         PTQCommand(quant="int8_weight_only", kv_cache_quant="none"),
         PTQCommand(quant="int4_awq", kv_cache_quant="none"),
         PTQCommand(quant="w4a8_awq_beta", kv_cache_quant="none"),
-        # GGML IQ weight-only, recipe-driven: three formats between 1.56 and 2.31 bits
-        # per weight. These encoders require every weight's input dimension to be a
-        # multiple of 256; TinyLlama's 2048 and 5632 both are. None of them calibrates --
-        # every recipe sets algorithm: null -- so the only IQ-specific cost is packing each
-        # weight once on a CUDA encoder and decoding it on each forward, which fits the
-        # 300s tests/examples default.
+        # GGML IQ weight-only, recipe-driven: the five formats between 1.56 and 2.56 bits per
+        # weight, on the MLP layers with layerwise GPTQ. These encoders require every weight's
+        # input dimension to be a multiple of 256; TinyLlama's 2048 and 5632 both are.
         PTQCommand(recipe="general/ptq/iq1_s", kv_cache_quant="none"),
+        PTQCommand(recipe="general/ptq/iq1_m", kv_cache_quant="none"),
         PTQCommand(recipe="general/ptq/iq2_xxs", kv_cache_quant="none"),
         PTQCommand(recipe="general/ptq/iq2_xs", kv_cache_quant="none"),
+        PTQCommand(recipe="general/ptq/iq2_s", kv_cache_quant="none"),
+        # Q8_0 has 32-value blocks and needs no calibration forward pass.
+        PTQCommand(recipe="general/ptq/q8_0", kv_cache_quant="none"),
         PTQCommand(quant="nvfp4"),
         PTQCommand(quant="nvfp4_awq_lite"),
         # autoquant (recipe-driven)

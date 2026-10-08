@@ -41,7 +41,7 @@ from ..extensions import get_cuda_ext_ggml
 from .codebooks import iq2_xxs_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
-    IQFormat,
+    GGMLFormat,
     narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
@@ -237,6 +237,11 @@ def dequantize_iq2_xxs(
     validate_block_chunk_size(block_chunk_size)
 
     blocks = packed_weights.contiguous().reshape(-1, IQ2_XXS_BLOCK_BYTES)
+    if blocks.is_cuda:
+        extension = get_cuda_ext_ggml()
+        if extension is not None:
+            grid = iq2_xxs_grid(blocks.device)
+            return extension.iq2_xxs_unpack(blocks, grid, dtype).reshape(shape)
     bit_positions = torch.arange(8, dtype=torch.int64, device=blocks.device)
     sign_shifts = 7 * torch.arange(
         _IQ2_XXS_GROUPS_PER_SUBBLOCK, dtype=torch.int64, device=blocks.device
@@ -265,7 +270,7 @@ def dequantize_iq2_xxs(
     return decoded.reshape(shape)
 
 
-IQ2_XXS_FORMAT = IQFormat(
+IQ2_XXS_FORMAT = GGMLFormat(
     name="iq2_xxs",
     block_size=IQ2_XXS_BLOCK_SIZE,
     block_bytes=IQ2_XXS_BLOCK_BYTES,
@@ -277,5 +282,5 @@ IQ2_XXS_FORMAT = IQFormat(
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq2_xxs and
 # dequantize_iq2_xxs when it was built, so patching those module functions changes neither backend
-# dispatch nor this alias; substitute a format's encoder or decoder in IQ_FORMAT_REGISTRY.
+# dispatch nor this alias; substitute a format's encoder or decoder in GGML_FORMAT_REGISTRY.
 iq2_xxs_fake_quant = IQ2_XXS_FORMAT.fake_quant

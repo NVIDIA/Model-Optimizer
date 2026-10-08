@@ -25,6 +25,7 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `kv_nvfp4_affine.yaml` | NVFP4 affine KV cache quantizer entries; supported on Blackwell+ GPUs |
 | `kv_nvfp4_cast.yaml` | NVFP4 KV cache with constant amax (skips KV calibration); supported on Blackwell+ GPUs |
 | `kv_nvfp4_rotate.yaml` | NVFP4 rotated KV cache quantizer entries; supported on Blackwell+ GPUs |
+| `kv_nvfp4_mla.yaml` | Fake quantization of the vLLM MLA KV cache: NVFP4 latent (`*kv_c_bmm_quantizer`, global scale fixed to 1) and FP8 RoPE key (`*k_pe_bmm_quantizer`, scale 1); compute capability 8.9+ GPUs |
 | `mamba_moe_disabled_quantizers.yaml` | Shared Mamba-MoE quantizer exclusions |
 | `w8a8_fp8_fp8.yaml` | FP8 weight + activation quantizer entries (W8A8); supported on Hopper+ GPUs |
 | `w4a4_nvfp4_nvfp4.yaml` | NVFP4 weight + activation quantizer entries (W4A4); supported on Blackwell+ GPUs |
@@ -32,3 +33,7 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `experts_nvfp4.yaml` | NVFP4 W4A4 on `*.experts.*` weight/input quantizers |
 | `mixer_mlp_nvfp4.yaml` | NVFP4 W4A4 on dense `*.mixer.{up,down}_proj` weight/input quantizers |
 | `attention_qkv_fp8.yaml` | FP8 E4M3 on attention q/k/v bmm and softmax quantizers |
+| `gdn_state_fp8_dynamic.yaml` | FP8 E4M3 dynamic fake quantization of the GatedDeltaNet recurrent state (per sequence, head and 64-column tile) at every kernel chunk boundary; needs `fla-core==0.5.1`, Triton, and SM89+ |
+| `gdn_w_fp8_dynamic.yaml` | FP8 E4M3 dynamic (per token and head) fake quantization of the WY tensor `w` that multiplies the GatedDeltaNet state; requires identity STE, `fla-core==0.5.1`, and Triton |
+| `indexer_k_nvfp4.yaml` | NVFP4 fake quantization of the sparse-attention indexer key cache (`*indexer_k_quantizer`), global scale fixed to 1; Blackwell+ GPUs |
+| `indexer_q_nvfp4.yaml` | NVFP4 fake quantization of the sparse-attention indexer query (`*indexer_q_quantizer`), global scale fixed to 1; Blackwell+ GPUs |

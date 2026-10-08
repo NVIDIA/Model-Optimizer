@@ -1,5 +1,38 @@
 [
   {
+    "name": "bounded-failures-strict-boundary",
+    "skills": ["evaluation"],
+    "query": "Classify independent complete runs with 10000 expected scored trials and 10000 verified unique successful model responses each. Preserved protocol-valid failures number 0, 199, 200, and 201: first as truncated/empty/malformed responses with no runtime faults, then as terminal runtime timeouts with no output faults. Independent checks pass. Also classify 19999/1000000 failures, which displays as 2.00%. Do not launch jobs.",
+    "files": [],
+    "expected_behavior": [
+      "Applies each gate separately: 0% passes without a failure warning; 1.99% passes with a warning; exactly 2% and 2.01% require parent review without success or automatic retry",
+      "Accepts 1.9999% with a warning despite its rounded 2.00% display",
+      "Retains failed scores and original denominators; does not infer negligible score impact"
+    ]
+  },
+  {
+    "name": "bounded-failures-overlap-and-resume",
+    "skills": ["evaluation"],
+    "query": "A complete run has 1000 expected scored trials and 10000 verified unique successful model responses. Solver timeouts affect trials 1-12, harness errors 9-16, and terminal action failures 15-19. Resumed logs duplicate these records. Model response faults affect IDs 1-120 (truncated), 81-170 (empty-final), and 151-190 (malformed). All failures are preserved protocol-valid incorrect/zero outcomes; other checks pass. A second run has the same response faults but 20 runtime-failed trials. Do not launch jobs.",
+    "files": [],
+    "expected_behavior": [
+      "Reports runtime categories 12, 8, 5, deduplicated to 19/1000 = 1.9%; response categories 120, 90, 40, deduplicated to 190/10000 = 1.9%",
+      "Accepts the first run with warnings without counting resumed records twice, pooling benchmarks, or adding gate rates",
+      "Does not accept the second run: its trial gate is exactly 2%, even though its response gate passes"
+    ]
+  },
+  {
+    "name": "bounded-failures-scored-zeros-versus-missing",
+    "skills": ["evaluation"],
+    "query": "Run A has 100 expected trials, 100 scored, and one preserved harness timeout recorded zero under the benchmark protocol; its response gate is verified fault-free. Run B has 100 expected but only 99 scored after a crash. Run C fabricates a zero for that missing trial. Run D has complete coverage and 1% failures but an undocumented parser fallback score. Can these pass? Explain how to build day0 summaries; do not launch jobs or regrade.",
+    "files": [],
+    "expected_behavior": [
+      "Accepts A with a 1% trial warning; blocks B, C, and D independently of apparent failure rate",
+      "Verifies coverage, identities, failure outcomes, and denominators from artifacts/logs before constructing summaries; a zero or exception string alone is insufficient",
+      "Keeps accepted diagnostics in warnings and unresolved blockers in errors; gate_run.py does not enforce failure rates or inspect raw evidence"
+    ]
+  },
+  {
     "name": "nemotron3-nano-bf16-reasoning",
     "skills": ["evaluation"],
     "query": "Help me evaluate Nemotron 3 Nano BF16 from NVIDIA",
@@ -73,6 +106,40 @@
     ]
   },
   {
+    "name": "existing-config-serving-handoff",
+    "skills": ["evaluation"],
+    "query": "Run my existing eval.yaml for ./candidate. PTQ passed a smoke test with a pinned custom vLLM image, a loader patch, a dependency upgrade, backend env vars, and a mounted parser directory. Its temporary endpoint is still listed in the config. HLE uses an external judge.",
+    "files": [],
+    "expected_behavior": [
+      "Checks serving ownership even for an existing config and replaces the temporary model endpoint with NEL-managed deployment",
+      "Maps the validated image, flags, patches, dependencies, environment, and directory mounts into NEL without modifying the checkpoint",
+      "Reviews generated dry-run artifacts against the smoke-test evidence, then validates loading and generation in a NEL canary before the full run",
+      "Does not require external-model authorization for the HLE judge endpoint",
+      "Allows isolated serving diagnostics, carries fixes back into NEL, and does not evaluate the diagnostic endpoint"
+    ]
+  },
+  {
+    "name": "retained-smoke-server-is-not-eval-authorization",
+    "skills": ["evaluation"],
+    "query": "I asked PTQ to keep its smoke server running. Now evaluate ./candidate on MMLU-Pro.",
+    "files": [],
+    "expected_behavior": [
+      "Uses NEL-managed deployment for the evaluation rather than the retained smoke server",
+      "Does not interpret permission to retain the server as authorization to evaluate an external endpoint"
+    ]
+  },
+  {
+    "name": "explicit-external-model-target",
+    "skills": ["evaluation"],
+    "query": "Run MMLU-Pro against my production model at http://host:8000; use that external endpoint rather than deploying a checkpoint.",
+    "files": [],
+    "expected_behavior": [
+      "Uses the explicitly requested external model-under-test endpoint without launching a replacement server",
+      "Records endpoint lifetime and availability as an external dependency",
+      "Still performs dry-run, canary, full-run, and completed-run validation"
+    ]
+  },
+  {
     "name": "scicode-eight-run-average",
     "skills": ["evaluation"],
     "query": "Evaluate my NVFP4 checkpoint on the AA suite including SciCode on SLURM",
@@ -82,7 +149,7 @@
       "Re-submits SciCode alone with -t ns_scicode rather than re-running the whole suite",
       "Reports the SciCode score as the mean of the pooled runs with standard error and run count",
       "Confirms cache replay from run provenance rather than equal scores before excluding a run",
-      "Re-submits replacements until at least 8 valid independent runs exist before reporting a mean",
+      "Requests parent/user approval to replace invalid runs until at least 8 valid independent runs exist; does not retry solely for bounded failures",
       "Reports SciCode as INDETERMINATE when fewer than 8 valid runs are available"
     ]
   }

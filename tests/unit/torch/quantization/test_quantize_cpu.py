@@ -21,6 +21,7 @@ from unittest import mock
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from _test_utils.torch.quantization.quantize_common import (
     INT4_AWQ_CLIP_CFG,
@@ -40,6 +41,7 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     SequentialQuantizer,
     TensorQuantizer,
 )
+from modelopt.torch.utils.distributed import ParallelState
 
 # A test config with double-quant (using `SequentialQuantizers`)
 WINT4INT8_CFG = {
@@ -623,6 +625,134 @@ def test_skip_weight_quant_check_env_var_bypasses_the_guard():
     }
     with mock.patch.dict(os.environ, {"MODELOPT_SKIP_WEIGHT_QUANT_CHECK": "1"}):
         mtq.quantize(model, config, lambda m: m(m.get_input()))
+
+
+class _ToyIndexer(torch.nn.Module):
+    """Stands in for a framework's sparse-attention indexer (vLLM ``Indexer``, MCore ``CSAIndexer``)."""
+
+    def __init__(self):
+        super().__init__()
+        self.wk = torch.nn.Linear(16, 8)
+
+    def forward(self, x):
+        return self.wk(x)
+
+
+class _QuantToyIndexer(_ToyIndexer):
+    def _setup(self):
+        self.indexer_k_quantizer = TensorQuantizer()
+        # Like a pipeline stage's own layer: no amax sync with the other ranks.
+        self.parallel_state = ParallelState(data_parallel_group=-1)
+
+    def forward(self, x):
+        return self.indexer_k_quantizer(super().forward(x))
+
+
+class _ToyIndexerModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(16, 16)
+        self.indexer = _ToyIndexer()
+
+    def forward(self, x):
+        return self.indexer(self.linear(x))
+
+
+INDEXER_K_ONLY_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*indexer_k_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+    ],
+    "algorithm": "max",
+}
+
+
+def test_indexer_k_patterns_on_unconverted_indexer_raise():
+    """An indexer the plugins do not recognize must fail instead of leaving its K cache unquantized."""
+    with pytest.raises(RuntimeError, match=r"indexer_k_quantizer.*\(_ToyIndexer\)"):
+        mtq.quantize(_ToyIndexerModel(), INDEXER_K_ONLY_CFG, lambda m: m(torch.randn(2, 16)))
+
+
+def test_indexer_k_patterns_on_model_without_indexer_are_allowed():
+    """Other architectures and pipeline stages without an indexer layer have nothing to quantize."""
+    model = SimpleLinear()
+    mtq.quantize(model, INDEXER_K_ONLY_CFG, lambda m: m(m.get_input()))
+
+
+def test_indexer_k_patterns_on_converted_indexer_pass():
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
+    try:
+        model = mtq.quantize(
+            _ToyIndexerModel(), INDEXER_K_ONLY_CFG, lambda m: m(torch.randn(2, 16))
+        )
+    finally:
+        mtq.unregister(_ToyIndexer)
+    assert model.indexer.indexer_k_quantizer.is_enabled
+    assert model.indexer.indexer_k_quantizer.amax is not None
+
+
+class _ToyStage(torch.nn.Module):
+    """A pipeline stage holding the indexer layers ``layer_ids``."""
+
+    def __init__(self, layer_ids):
+        super().__init__()
+        self.layers = torch.nn.ModuleDict({str(i): _ToyIndexerModel() for i in layer_ids})
+
+    def forward(self, x):
+        return [layer(x) for layer in self.layers.values()]
+
+
+def _test_indexer_check_covers_all_ranks(rank, size):
+    # Rank 0 holds no indexer and rank 1 one that no plugin converted: every rank raises.
+    model = SimpleLinear() if rank == 0 else _ToyIndexerModel()
+    with pytest.raises(RuntimeError, match=r"indexer_k_quantizer.*\(_ToyIndexer\)"):
+        mtq.quantize(model, INDEXER_K_ONLY_CFG, lambda m: None)
+
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
+    try:
+        # A layer-selective recipe: the stage holding layer 0 has no selected indexer, which is fine.
+        config = copy.deepcopy(INDEXER_K_ONLY_CFG)
+        config["quant_cfg"][1]["quantizer_name"] = "*layers.1.indexer.indexer_k_quantizer"
+        model = mtq.quantize(_ToyStage([rank]), config, lambda m: m(torch.randn(2, 16)))
+        assert model.layers[str(rank)].indexer.indexer_k_quantizer.is_enabled == (rank == 1)
+
+        # A pattern that matches no stage: every rank raises.
+        config["quant_cfg"][1]["quantizer_name"] = "*layers.9.indexer.indexer_k_quantizer"
+        with pytest.raises(RuntimeError, match="no sparse-attention indexer has an enabled one"):
+            mtq.quantize(_ToyStage([rank]), config, lambda m: None)
+    finally:
+        mtq.unregister(_ToyIndexer)
+    torch.distributed.destroy_process_group()
+
+
+def test_indexer_k_check_covers_all_ranks(skip_on_windows):
+    spawn_multiprocess_job(2, _test_indexer_check_covers_all_ranks, backend="gloo")
+
+
+def test_indexer_q_patterns_need_the_query_quantizer():
+    """Each indexer quantizer is checked on its own: a converted key quantizer does not count."""
+    config = copy.deepcopy(INDEXER_K_ONLY_CFG)
+    config["quant_cfg"].append(
+        {"quantizer_name": "*indexer_q_quantizer", "cfg": {"num_bits": 8, "axis": None}}
+    )
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
+    try:
+        with pytest.raises(RuntimeError, match=r"enables indexer_q_quantizer, but no"):
+            mtq.quantize(_ToyIndexerModel(), config, lambda m: m(torch.randn(2, 16)))
+    finally:
+        mtq.unregister(_ToyIndexer)
+
+
+def test_indexer_k_sequential_cfg_on_converted_indexer_pass():
+    """A list-valued cfg makes the quantizer a SequentialQuantizer, which still counts as attached."""
+    config = copy.deepcopy(INDEXER_K_ONLY_CFG)
+    config["quant_cfg"][1]["cfg"] = [{"num_bits": 8, "axis": None}, {"num_bits": 8, "axis": None}]
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
+    try:
+        model = mtq.quantize(_ToyIndexerModel(), config, lambda m: m(torch.randn(2, 16)))
+    finally:
+        mtq.unregister(_ToyIndexer)
+    assert isinstance(model.indexer.indexer_k_quantizer, SequentialQuantizer)
 
 
 def test_atomicity_later_cfg_entry_does_not_inherit_earlier():
