@@ -111,6 +111,13 @@ task count, sharding, or concurrency change. A flag calls for artifact/log
 investigation and an explanation before a reliable-score verdict. It does not
 replace `run-validation.md`'s full coverage and bounded-failure gates.
 
+**Required score handoff:** Before quoting or comparing `pass@1`, report each
+signal's measured value, denominator/window, threshold, and artifact path, then
+state `TB2.1 health` as `flagged` for any breached threshold, `unknown` for
+missing evidence, or `healthy` otherwise. A flagged or unknown run needs
+investigation before a reliable-score verdict. Full coverage alone does not
+satisfy this screen.
+
 ## Score Extraction
 
 Before reporting `pass@1`, complete the evaluation skill's
