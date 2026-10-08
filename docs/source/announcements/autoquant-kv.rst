@@ -210,9 +210,5 @@ runtime overhead and weights; they are not total GPU-memory or throughput measur
    settings per benchmark. Dashes withhold unmatched AIME2025 controls.
    SciCode counts missing/unsuccessful generations as failures in 2,704 trials
    per run; Native 6.25 averages three runs. Differences are point estimates,
-   not significance claims. Download the
-   :download:`results CSV <assets/autoquant-kv-qwen3-8b-results.csv>` for scores,
-   standard errors, and response counts, and the
-   :download:`evaluation setup <assets/autoquant-kv-qwen3-8b-methods.json>` for
-   search data and benchmark settings. Study checkpoints and runtime are not
-   distributed with this post.
+   not significance claims. Study checkpoints and runtime are not distributed
+   with this post.
