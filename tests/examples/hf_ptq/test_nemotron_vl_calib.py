@@ -166,3 +166,181 @@ def test_calibration_loop_keeps_the_plain_forward_for_encoder_decoder_vlms():
     assert "input_ids" not in passed
     # the helper's fallback was not applied
     assert passed["pixel_values"].dtype is torch.float32
+
+
+# --- sharded InternVL path -----------------------------------------------------------------
+#
+# The omni tests above exit through the fallback and never reach the InternVL branch, where two
+# bool masks index tensors that a sharded ``device_map`` can place on other GPUs. This group
+# runs CPU-only, so the topology is simulated rather than allocated -- the convention
+# ``test_example_utils.py`` already uses for ``torch.cuda.device_count``.
+
+
+def _device_of(tensor):
+    return getattr(tensor, "_fake_device", torch.device("cpu"))
+
+
+def _shard(tensor, device):
+    """Tag a CPU tensor as living on ``device``."""
+    out = tensor.as_subclass(_ShardedTensor)
+    out._fake_device = torch.device(device)
+    return out
+
+
+class _ShardedTensor(torch.Tensor):
+    """CPU-backed tensor that reports a fake device and enforces CUDA's indexing rule.
+
+    Storage stays on CPU; only the reported device, ``.to(device)`` and the cross-device
+    indexing error are faked. CUDA raises when a bool mask lives on another device, and that
+    is the failure this reproduces without needing two GPUs.
+    """
+
+    _fake_device = torch.device("cpu")
+
+    @property
+    def device(self):
+        return self._fake_device
+
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func in (torch.Tensor.__getitem__, torch.Tensor.__setitem__):
+            target, index = args[0], args[1]
+            if isinstance(index, torch.Tensor) and _device_of(index) != _device_of(target):
+                raise RuntimeError(
+                    "indices should be either on cpu or on the same device as the indexed "
+                    f"tensor (got {_device_of(index)} vs {_device_of(target)})"
+                )
+        if func is torch.Tensor.to:
+            target = kwargs.get("device", args[1] if len(args) > 1 else None)
+            if isinstance(target, (str, torch.device)):
+                return _shard(args[0].clone(), target)
+        out = super().__torch_function__(func, types, args, kwargs)
+        device = next((a._fake_device for a in args if isinstance(a, _ShardedTensor)), None)
+        if device is not None:
+            for tensor in out if isinstance(out, (list, tuple)) else [out]:
+                if isinstance(tensor, _ShardedTensor):
+                    tensor._fake_device = device
+        return out
+
+
+class _Embedding:
+    """Callable embedding table that answers on ``device``, as ``.weight.device`` does."""
+
+    def __init__(self, device, hidden):
+        self.weight = _shard(torch.zeros(16, hidden), device)
+        self._device = device
+        self._hidden = hidden
+
+    def __call__(self, input_ids):
+        b, n = input_ids.shape
+        return _shard(torch.zeros(b, n, self._hidden), self._device)
+
+
+class _LanguageModel(torch.nn.Module):
+    def __init__(self, device, hidden):
+        super().__init__()
+        self.config = SimpleNamespace(torch_dtype=torch.float32)
+        self.calls: list[dict] = []
+        self._embedding = _Embedding(device, hidden)
+
+    def get_input_embeddings(self):
+        return self._embedding
+
+    def forward(self, **kwargs):
+        self.calls.append(kwargs)
+        return (torch.zeros(1),)
+
+
+class _ShardedInternVL(torch.nn.Module):
+    """InternVL-style wrapper with vision tower, embedding table and batch on three devices."""
+
+    def __init__(self, vision_device, embed_device, tokens_per_image=1, hidden=4):
+        super().__init__()
+        self.config = SimpleNamespace(
+            architectures=["NemotronVLForConditionalGeneration"], is_encoder_decoder=False
+        )
+        self.vision_model = SimpleNamespace(config=SimpleNamespace(torch_dtype=torch.float32))
+        self.language_model = _LanguageModel(embed_device, hidden)
+        self.img_context_token_id = 7
+        self._vision_device = vision_device
+        self._tokens_per_image = tokens_per_image
+        self._hidden = hidden
+
+    def extract_feature(self, pixel_values):
+        return _shard(
+            torch.ones(pixel_values.shape[0], self._tokens_per_image, self._hidden),
+            self._vision_device,
+        )
+
+
+def _sharded_batch(device):
+    """Two images and four tokens, of which two are image-context tokens.
+
+    ``image_flags`` is supplied rather than left to the helper's synthesis step: that step
+    allocates on ``pixel_values.device``, which under this harness is a *fake* device name, so
+    it would escape the bookkeeping. A processor that emits ``image_flags`` puts it on the
+    batch device anyway, which is exactly the placement the synthesis step reproduces.
+    """
+    return {
+        "input_ids": _shard(torch.tensor([[7, 7, 1, 1]], dtype=torch.long), device),
+        "pixel_values": _shard(torch.zeros(2, 3, 8, 8), device),
+        "attention_mask": _shard(torch.ones(1, 4, dtype=torch.long), device),
+        "image_flags": _shard(torch.ones(2, 1, dtype=torch.long), device),
+        "position_ids": None,
+    }
+
+
+def test_sharded_internvl_aligns_both_index_masks():
+    """``image_flags_s`` must follow the vision output and ``selected`` the embedding table.
+
+    Pre-fix this raised on ``vit_embeds[image_flags_s == 1]``, before any alignment ran.
+    """
+    model = _ShardedInternVL(vision_device="cuda:1", embed_device="cuda:2")
+
+    nemotron_vl_calib.safe_nemotron_vl_forward(model, _sharded_batch("cuda:0"))
+
+    assert len(model.language_model.calls) == 1, "the LLM forward drives the activation stats"
+    passed = model.language_model.calls[0]
+    assert passed["inputs_embeds"].device == torch.device("cuda:2")
+    assert passed["attention_mask"].device == torch.device("cuda:2")
+    assert passed["use_cache"] is False
+
+
+def test_sharded_internvl_retry_path_also_uses_aligned_masks():
+    """The ``except`` branch re-indexes with ``selected``, so it needs the aligned mask too.
+
+    Two images of two tokens each give four vision rows for two selected positions, so the
+    first assignment raises on shape and the retry runs -- under the same sharding.
+    """
+    model = _ShardedInternVL(vision_device="cuda:1", embed_device="cuda:2", tokens_per_image=2)
+
+    nemotron_vl_calib.safe_nemotron_vl_forward(model, _sharded_batch("cuda:0"))
+
+    assert len(model.language_model.calls) == 1, "the retry still reaches the LLM forward"
+
+
+def test_unsharded_internvl_is_unaffected():
+    """Everything on one device: no mask is moved and the merge still happens."""
+    model = _ShardedInternVL(vision_device="cuda:0", embed_device="cuda:0")
+
+    nemotron_vl_calib.safe_nemotron_vl_forward(model, _sharded_batch("cuda:0"))
+
+    assert len(model.language_model.calls) == 1
+    assert model.language_model.calls[0]["inputs_embeds"].device == torch.device("cuda:0")
+
+
+def test_sharded_internvl_aligns_the_token_mask_when_only_the_embedding_moves():
+    """Isolates the second mask, which the first test cannot reach.
+
+    When the vision tower shares the batch device, ``vit_embeds[image_flags_s == 1]`` succeeds
+    and execution gets as far as ``flat_embeds[selected]``, where ``selected`` -- built from
+    ``input_ids`` -- meets ``flat_embeds`` on the embedding device. Pre-fix that raises, and the
+    ``except`` branch retries with the same mask and raises again.
+    """
+    model = _ShardedInternVL(vision_device="cuda:0", embed_device="cuda:2")
+
+    nemotron_vl_calib.safe_nemotron_vl_forward(model, _sharded_batch("cuda:0"))
+
+    assert len(model.language_model.calls) == 1
+    assert model.language_model.calls[0]["inputs_embeds"].device == torch.device("cuda:2")

@@ -106,11 +106,20 @@ def safe_nemotron_vl_forward(full_model: torch.nn.Module, batch: dict[str, Any])
     flat_embeds = inputs_embeds.reshape(b * n, c)
     flat_ids = input_ids.reshape(b * n)
     selected = flat_ids == full_model.img_context_token_id
+    # A bool mask must sit on the device of the tensor it indexes, not the one it was derived
+    # from. Under a sharded device_map the embedding table can run on a different GPU than the
+    # batch, so `selected` -- built from `input_ids` -- follows `flat_embeds`. Both the fast
+    # path and the except-branch retry below index with it.
+    if selected.device != flat_embeds.device:
+        selected = selected.to(flat_embeds.device)
 
     vit_embeds = full_model.extract_feature(pixel_values)
+    # Same rule for the image filter: the vision tower returns on its own device, while
+    # `image_flags` arrived with the batch (or was synthesized on `pixel_values.device`).
+    if image_flags_s.device != vit_embeds.device:
+        image_flags_s = image_flags_s.to(vit_embeds.device)
     vit_embeds = vit_embeds[image_flags_s == 1]
-    # Under a multi-GPU device_map the vision tower and the LLM embedding table can live on
-    # different devices, so the merge below would raise a cross-device error. Align explicitly.
+    # The merge target lives on the embedding device; bring the filtered vision embeddings over.
     if vit_embeds.device != flat_embeds.device:
         vit_embeds = vit_embeds.to(flat_embeds.device)
     try:
