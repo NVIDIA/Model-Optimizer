@@ -241,6 +241,19 @@ def _merge_values_require_identical(merged_key: str, key_value_pairs: list[tuple
     return first_value
 
 
+def _map_linear_attention_names(values, map_fun):
+    """Map module paths using weight-path probes without dropping numerical policies."""
+    if map_fun is None:
+        return values
+    probes = {(name + ".weight" if name else "weight"): value for name, value in values.items()}
+    mapped = map_fun(probes)
+    if len(mapped) != len(values) or any(
+        name != "weight" and not name.endswith(".weight") for name in mapped
+    ):
+        raise ValueError("HF-to-vLLM mapping must preserve every linear-attention module")
+    return {name.removesuffix("weight").removesuffix("."): value for name, value in mapped.items()}
+
+
 def convert_dict_to_vllm(
     state_dict: dict[str, Any],
     max_or_concat: bool = True,
@@ -254,6 +267,15 @@ def convert_dict_to_vllm(
         max_or_concat: Whether to merge grouped values by taking max/concatenate or require identical
         map_fun: Function to map the state dict to vLLM format
     """
+    state_dict = dict(state_dict)
+    linear_quantizers = {}
+    for key in list(state_dict):
+        match = re.match(r"^(.*)\.((?:gdn|kda)_(?:state|w)_quantizer(?:\..*)?)$", key)
+        if match:
+            module, suffix = match.groups()
+            mapped = _map_linear_attention_names({module: state_dict.pop(key)}, map_fun)
+            name, value = next(iter(mapped.items()))
+            linear_quantizers[f"{name}.{suffix}"] = value
     # If map_fun is provided, pre-transform quantizer key module-path prefixes so that
     # HF→vLLM model renames (e.g. backbone.layers → model.layers) are applied before
     # key grouping (q/k/v → qkv, experts.N.up_proj → experts.w13, etc.).
@@ -287,7 +309,7 @@ def convert_dict_to_vllm(
             _, value = key_value_pairs[0]
             vllm_state_dict[merged_key] = value
     if map_fun is None:
-        return vllm_state_dict
+        return {**vllm_state_dict, **linear_quantizers}
     # Quantizer module-path keys (e.g. "layers.0.mlp.gate_proj.input_quantizer") must NOT
     # go through map_fun (hf_to_vllm_mapper.apply_dict), which maps weight tensor paths and
     # drops any key it doesn't recognise — including all quantizer keys. Split them out,
@@ -295,7 +317,7 @@ def convert_dict_to_vllm(
     quantizer_keys = {k: v for k, v in vllm_state_dict.items() if "_quantizer" in k}
     non_quantizer_keys = {k: v for k, v in vllm_state_dict.items() if "_quantizer" not in k}
     mapped = map_fun(non_quantizer_keys) if non_quantizer_keys else {}
-    return {**mapped, **quantizer_keys}
+    return {**mapped, **quantizer_keys, **linear_quantizers}
 
 
 def convert_modelopt_state_to_vllm(
@@ -320,6 +342,16 @@ def convert_modelopt_state_to_vllm(
     modelopt_state_dict = modelopt_state.pop("modelopt_state_dict", [])
     for idx, current_mode in enumerate(modelopt_state_dict):
         current_mode_metadata = current_mode[1].pop("metadata", {})
+        if "linear_attention" in current_mode_metadata:
+            current_mode_metadata["linear_attention"] = _map_linear_attention_names(
+                current_mode_metadata["linear_attention"], map_fun
+            )
+            # Use exact saved module names instead of training-framework selector patterns.
+            if "quant_cfg" in current_mode[1]["config"]:
+                current_mode[1]["config"]["linear_attention"] = [
+                    {"module_name": name, "cfg": policy}
+                    for name, policy in current_mode_metadata["linear_attention"].items()
+                ]
         current_mode_quant_state = current_mode_metadata.pop("quantizer_state", {})
         if current_mode_quant_state:
             current_mode_metadata["quantizer_state"] = convert_dict_to_vllm(
@@ -367,6 +399,15 @@ def filter_modelopt_state_quantizer_state_for_model(
         metadata = mode_entry[1].get("metadata", {})
         if "quantizer_state" in metadata:
             saved = metadata["quantizer_state"]
+            missing_linear = [
+                name
+                for name, state in saved.items()
+                if re.search(r"(?:gdn|kda)_(?:state|w)_quantizer$", name)
+                and not state.get("_disabled", False)
+                and name not in model_keys
+            ]
+            if missing_linear:
+                raise ValueError(f"Saved linear-attention quantizers are missing: {missing_linear}")
 
             # Keep keys that exist in the model. Remove disabled quantizers UNLESS they
             # have registered buffers (e.g. _pre_quant_scale from AWQ/smoothquant on a

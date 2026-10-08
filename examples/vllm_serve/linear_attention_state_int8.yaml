@@ -1,0 +1,15 @@
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  state_int8: configs/ptq/units/linear_attention_state_int8_dynamic
+
+metadata:
+  recipe_type: ptq
+  description: GDN/KDA INT8 state-tile QDQ before native vLLM prefill and decode.
+quantize:
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: state_int8
+  linear_attention:
+    - module_name: '*'
+      cfg: {backend: serving, precision: vllm}
+  algorithm:
