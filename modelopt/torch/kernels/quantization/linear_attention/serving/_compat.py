@@ -15,6 +15,7 @@
 
 """Keep native vLLM imports and state layout changes at the kernel boundary."""
 
+from functools import cache
 from importlib import import_module
 from importlib.util import find_spec
 
@@ -22,13 +23,18 @@ import vllm
 
 __all__ = []
 
-# vLLM 0.16 transposed the recurrent cache; ModelOpt keeps [H,K,V] for QDQ/autograd.
-STATE_V_FIRST = vllm.__version_tuple__[:2] >= (0, 16)
 _FLA_OPS = (
     "vllm.third_party.flash_linear_attention.ops"
     if find_spec("vllm.third_party.flash_linear_attention") is not None
     else "vllm.model_executor.layers.fla.ops"
 )
+
+
+@cache
+def state_v_first():
+    """Inspect the native layout at first use, after optional-dependency docs imports."""
+    # vLLM 0.16 transposed the recurrent cache; ModelOpt keeps [H,K,V] for QDQ/autograd.
+    return vllm.__version_tuple__[:2] >= (0, 16)
 
 
 def fla_module(name):
@@ -37,4 +43,4 @@ def fla_module(name):
 
 def state_layout(state):
     """Convert between ModelOpt and native layout; transposing is its own inverse."""
-    return state.transpose(-1, -2).contiguous() if STATE_V_FIRST else state.contiguous()
+    return state.transpose(-1, -2).contiguous() if state_v_first() else state.contiguous()
