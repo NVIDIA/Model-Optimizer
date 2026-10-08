@@ -158,6 +158,35 @@ def _fp8_llama(*quantizer_names):
     )
 
 
+def test_reverse_rename_is_idempotent_when_repl_contains_pattern():
+    """A rule whose replacement keeps the pattern must not re-apply to its own output."""
+    rules = [RenameRule("input_conditioner", "radio_model.input_conditioner", ("vision_model.",))]
+    key = "vision_model.input_conditioner.norm_mean"
+    expected = "vision_model.radio_model.input_conditioner.norm_mean"
+
+    once = apply_reverse_rules({key: torch.zeros(3)}, [], rules)
+    assert list(once) == [expected]
+
+    twice = apply_reverse_rules(once, [], rules)
+    assert list(twice) == [expected], "reverse rename must be idempotent"
+
+
+def test_reverse_rename_idempotent_for_already_hub_named_key():
+    """An input already carrying the reverted prefix is left untouched."""
+    rules = [RenameRule("summary_idxs", "radio_model.summary_idxs", ("vision_model.",))]
+    already = "vision_model.radio_model.summary_idxs"
+    out = apply_reverse_rules({already: torch.zeros(1)}, [], rules)
+    assert list(out) == [already]
+
+
+def test_idempotency_guard_leaves_disjoint_rules_alone():
+    """A replacement that cannot re-match keeps its original behaviour."""
+    rules = [RenameRule("encoder.layer", "radio_model.model.blocks", ("vision_model.",))]
+    key = "vision_model.encoder.layer.0.attn.weight"
+    out = apply_reverse_rules({key: torch.zeros(2)}, [], rules)
+    assert list(out) == ["vision_model.radio_model.model.blocks.0.attn.weight"]
+
+
 def test_rename_carries_scale_siblings():
     """A module rename rewrites weight + all scale siblings with identical values."""
     sd = _nvfp4_linear("model.language_model.layers.10.mlp.experts.40.gate_proj", 8, 16)
