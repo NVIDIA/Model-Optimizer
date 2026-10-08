@@ -28,9 +28,23 @@ Instead, we run a "safe multimodal forward" that exercises:
 from __future__ import annotations
 
 import contextlib
+import inspect
 from typing import Any
 
 import torch
+
+
+def _accepted_kwargs(fn, kwargs: dict) -> dict:
+    """Drop keys ``fn`` cannot accept, so a wrapper with a narrow forward signature does not
+    trade one ``AttributeError`` for a ``TypeError``. Callables taking ``**kwargs`` are left alone.
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return kwargs
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return kwargs
+    return {k: v for k, v in kwargs.items() if k in params}
 
 
 def safe_nemotron_vl_forward(full_model: torch.nn.Module, batch: dict[str, Any]) -> None:
@@ -67,6 +81,23 @@ def safe_nemotron_vl_forward(full_model: torch.nn.Module, batch: dict[str, Any])
     ):
         pixel_values = pixel_values.to(dtype=vision_dtype)
 
+    # InternVL-style Nemotron VL exposes `extract_feature(pixel_values)`; the newer omni wrappers
+    # (e.g. NemotronH_Omni_Reasoning_V3 / nemotron_h_omni) do not -- they merge the vision
+    # embeddings via masked_scatter inside their own forward, and do not necessarily define
+    # `img_context_token_id` either. Hand the batch to the model's own forward before touching
+    # anything InternVL-specific, carrying the dtype-cast pixel_values.
+    if not hasattr(full_model, "extract_feature"):
+        # Only the batch's own entries, plus the dtype-cast pixel_values. The synthesized
+        # `image_flags` above is deliberately NOT injected: it is built on pixel_values.device,
+        # while a sharded wrapper runs its vision tower elsewhere and indexes image_embeds with
+        # it, so a synthesized tensor raises "indices should be ... on the same device".
+        # Wrappers that need image_flags either receive the batch's own or build their own.
+        fallback = {k: v for k, v in batch.items() if v is not None}
+        fallback["pixel_values"] = pixel_values
+        fallback["use_cache"] = False
+        full_model(**_accepted_kwargs(full_model.forward, fallback))
+        return
+
     # Token embeddings
     inputs_embeds = full_model.language_model.get_input_embeddings()(input_ids)
     image_flags_s = image_flags.squeeze(-1)
@@ -76,14 +107,6 @@ def safe_nemotron_vl_forward(full_model: torch.nn.Module, batch: dict[str, Any])
     flat_ids = input_ids.reshape(b * n)
     selected = flat_ids == full_model.img_context_token_id
 
-    # Vision embeddings. InternVL-style Nemotron VL exposes `extract_feature(pixel_values)`, but
-    # newer omni wrappers (e.g. NemotronH_Omni_Reasoning_V3 / nemotron_h_omni) do not: they merge the
-    # vision embeddings via masked_scatter inside their own forward. Calling the helper
-    # unconditionally raises AttributeError on those, aborting calibration. Fall back to the model's
-    # own forward when the helper is absent.
-    if not hasattr(full_model, "extract_feature"):
-        full_model(**{k: v for k, v in batch.items() if v is not None})
-        return
     vit_embeds = full_model.extract_feature(pixel_values)
     vit_embeds = vit_embeds[image_flags_s == 1]
     # Under a multi-GPU device_map the vision tower and the LLM embedding table can live on
@@ -99,7 +122,9 @@ def safe_nemotron_vl_forward(full_model: torch.nn.Module, batch: dict[str, Any])
 
     inputs_embeds = flat_embeds.reshape(b, n, c)
 
-    # Under a sharded device_map the LLM's first block may not sit on the embedding device.
+    # `inputs_embeds` comes off the embedding table, so under a sharded device_map it can sit on a
+    # different device than the mask/ids that came in with the batch. Align them to the embedding
+    # device so the LLM call starts consistent; accelerate's hooks handle later blocks.
     _lm_dev = getattr(full_model.language_model.get_input_embeddings().weight, "device", None)
     if _lm_dev is not None:
         if attention_mask is not None and attention_mask.device != _lm_dev:
