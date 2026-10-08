@@ -350,17 +350,55 @@ def test_composed_kv_autoquant_rejects_enabled_actual_kv_quantizers(monkeypatch)
         hf_ptq.auto_quantize(args, model, [], aq, full_model=model)
 
 
-def test_fsdp2_kv_autoquant_rejected_before_model_load(monkeypatch):
-    hf_ptq = _import_hf_ptq(monkeypatch)
-    monkeypatch.setattr(hf_ptq, "_recipe_is_kv_auto_quantize", lambda _: True)
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        "general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+        "general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+    ],
+    ids=["kv", "weight_then_kv"],
+)
+def test_fsdp2_kv_autoquant_uses_parallel_model_loader(monkeypatch, tmp_path, recipe):
+    model = get_tiny_qwen3(num_hidden_layers=1)
+    model.save_pretrained(tmp_path)
+    monkeypatch.setenv("RANK", "1")
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        str(tmp_path),
+        "--recipe",
+        recipe,
+        "--use_fsdp2",
+        "--attn_implementation",
+        "eager",
+    )
+    args.dist_state = SimpleNamespace(device=torch.device("cpu"), rank=1, world_size=2)
+    calls = []
+
+    def parallel_loader(checkpoint, device, rank, world_size, **kwargs):
+        calls.append((checkpoint, device, rank, world_size, kwargs))
+        return model
+
+    monkeypatch.setattr(hf_ptq, "parallel_load_and_prepare_fsdp2", parallel_loader)
     monkeypatch.setattr(
-        hf_ptq.AutoConfig,
-        "from_pretrained",
-        lambda *_args, **_kwargs: pytest.fail("The model config must not be loaded."),
+        hf_ptq,
+        "get_tokenizer",
+        lambda *_args, **_kwargs: SimpleNamespace(padding_side="right", pad_token=None),
     )
 
-    with pytest.raises(NotImplementedError, match="KV-cache AutoQuantize does not support"):
-        hf_ptq.load_model(SimpleNamespace(use_fsdp2=True, recipe="autoquant"))
+    loaded = hf_ptq.load_model(args)
+
+    assert len(calls) == 1
+    assert calls[0][:4] == (str(tmp_path), args.dist_state.device, 1, 2)
+    loader_kwargs = calls[0][4]
+    assert loader_kwargs["trust_remote_code"] is False
+    assert loader_kwargs["cpu_offload"] is False
+    assert loader_kwargs["attn_implementation"] == "eager"
+    assert loader_kwargs["hf_config"].model_type == model.config.model_type
+    assert loaded[0] is model
+    assert loaded[1] is model
+    assert loaded[3] is False
+    assert loaded[8] == args.dist_state.device
 
 
 def test_mlflow_flag_defaults_the_experiment_name(monkeypatch):
