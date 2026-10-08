@@ -28,6 +28,7 @@ import pytest
 import torch
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.vllm import VllmMLAAttention
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples/vllm_serve"
@@ -109,6 +110,45 @@ def test_fakequant_launcher_rejects_unusable_quant_file(
     )
     with pytest.raises(SystemExit, match=error):
         launcher.main()
+
+
+@pytest.mark.parametrize("with_weight_state", [False, True])
+def test_quantizer_state_disables_only_missing_weight_quantizers(
+    monkeypatch, tmp_path, with_weight_state
+):
+    reload_utils = _load_example_module("vllm_reload_utils")
+    monkeypatch.setattr(reload_utils, "process_state_dict_for_tp", lambda saved, _: saved)
+
+    model = torch.nn.Module()
+    model.weight_quantizer = SequentialQuantizer(
+        TensorQuantizer(amax=1.0), TensorQuantizer(amax=2.0)
+    )
+    model.experts = torch.nn.Module()
+    model.experts.w13_weight_quantizer = TensorQuantizer()
+    model.experts.w2_weight_quantizer = TensorQuantizer(amax=4.0)
+    model.input_quantizer = TensorQuantizer(amax=5.0)
+    model.missing_input_quantizer = TensorQuantizer(amax=6.0)
+    checkpoint = {"input_quantizer._amax": torch.tensor(13.0)}
+    if with_weight_state:
+        checkpoint.update(
+            {
+                "weight_quantizer.0._amax": torch.tensor(11.0),
+                "experts.w2_weight_quantizer._amax": torch.tensor(12.0),
+            }
+        )
+    path = tmp_path / "quantizer_state.pth"
+    torch.save(checkpoint, path)
+
+    with pytest.warns(UserWarning, match="missing from every rank's checkpoint"):
+        restored = reload_utils.load_state_dict_from_path(str(path), model)
+
+    assert model.weight_quantizer[0].is_enabled == with_weight_state
+    assert not model.weight_quantizer[1].is_enabled
+    assert not model.experts.w13_weight_quantizer.is_enabled
+    assert model.experts.w2_weight_quantizer.is_enabled == with_weight_state
+    assert model.input_quantizer.is_enabled
+    assert model.missing_input_quantizer.is_enabled
+    assert torch.equal(restored["input_quantizer._amax"], torch.tensor(13.0))
 
 
 def _calibration_worker(

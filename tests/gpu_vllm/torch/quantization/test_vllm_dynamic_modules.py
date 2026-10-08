@@ -1088,8 +1088,8 @@ def test_tiny_moe_quantize(tiny_moe_llm, tmp_path):
             for projection in ("q", "k", "v"):
                 recipe[f"model.layers.{layer}.self_attn.{projection}_proj.input_quantizer"] = custom
         projections = (
-            ("gate_up_proj", "down_proj")
-            if layer == 0
+            ("gate_up_proj" if layer == 0 else "up_proj", "down_proj")
+            if layer == 0 or is_gpt_oss
             else tuple(
                 f"{expert}.{projection}_proj"
                 for expert in range(4)
@@ -1098,8 +1098,9 @@ def test_tiny_moe_quantize(tiny_moe_llm, tmp_path):
         )
         for projection in projections:
             prefix = f"model.layers.{layer}.mlp.experts.{projection}"
-            recipe[f"{prefix}.input_quantizer"] = active
-            recipe[f"{prefix}.weight_quantizer"] = {"_disabled": True}
+            separator = "_" if is_gpt_oss and layer == 1 else "."
+            recipe[f"{prefix}{separator}input_quantizer"] = active
+            recipe[f"{prefix}{separator}weight_quantizer"] = {"_disabled": True}
     path = tmp_path / "quant_recipe.yaml"
     path.write_text(yaml.safe_dump(recipe))
     state_path = tmp_path / "quantizer_state.pth"
@@ -1145,6 +1146,9 @@ def test_tiny_moe_quantize(tiny_moe_llm, tmp_path):
         ("model.layers.0.mlp.experts.gate_up_proj.input_quantizer._amax", "w13_input_quantizer"),
         ("model.layers.0.mlp.experts.down_proj.weight_quantizer._amax", "w2_weight_quantizer"),
         ("model.layers.1.mlp.experts.0.gate_proj.input_quantizer._amax", "w13_input_quantizer"),
+        ("model.layers.1.mlp.experts.gate_up_proj_input_quantizer._amax", "w13_input_quantizer"),
+        ("model.layers.1.mlp.experts.up_proj_input_quantizer._amax", "w13_input_quantizer"),
+        ("model.layers.1.mlp.experts.down_proj_weight_quantizer._amax", "w2_weight_quantizer"),
     ):
         action, vllm_key, _ = reload_utils._convert_key_for_vllm(hf_key, 1.0)
         assert action == "group", (hf_key, action)
