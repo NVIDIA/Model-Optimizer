@@ -129,6 +129,7 @@ from .quant_utils import (
     maybe_transpose_expert_weight_dimensions,
     postprocess_state_dict,
     preprocess_linear_fusion,
+    seed_carried_over_exclusions,
     sync_tied_input_amax,
     to_quantized_weight,
 )
@@ -1009,7 +1010,9 @@ def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
     except ImportError:
         pass  # no accelerate installed → no offload hooks exist to remove
 
-    quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
+    quant_config = get_quant_config(
+        model, is_modelopt_qlora=is_modelopt_qlora, include_carried_over=False
+    )
 
     _warn_on_unsynced_moe_gate_up(model)
 
@@ -1582,6 +1585,8 @@ def _write_hf_export_config(
     export_dir: Path,
 ) -> None:
     """Write hf_quant_config.json (if quantized) and embed quantization_config into config.json."""
+    if hf_quant_config is not None:
+        seed_carried_over_exclusions(model, hf_quant_config)
     quantization_details = (hf_quant_config or {}).get("quantization", {})
     is_quantized_export = (
         quantization_details.get("quant_algo") is not None
@@ -1907,11 +1912,8 @@ def export_hf_checkpoint(
     _carried = read_unplaced_weights(model, keys_only=not _writes_extra)
     if _writes_extra and _carried:
         extra_state_dict = {**_carried, **(extra_state_dict or {})}
-    # Everything the export writes in original precision straight from the source, by either
-    # mechanism: tensors carried above, and the off-index weight files copied verbatim alongside.
-    # get_quant_config reads this to seed exclude_modules; recorded here because it runs before
-    # that, and because only this point knows what was actually written rather than what was
-    # merely unplaced.
+    # Record source-named tensors for name preservation and final exclusion seeding,
+    # including off-index weight files that are copied verbatim alongside the shards.
     model._modelopt_carried_over_names = sorted({*_carried, *off_index_tensor_names(model)})
 
     from .layerwise_export import LAYERWISE_EXPORTER_ATTR
@@ -2032,7 +2034,7 @@ def export_hf_checkpoint(
                         name_mapper,
                         module_names=(
                             key.removesuffix(".weight")
-                            for key in export_state_dict
+                            for key in post_state_dict
                             if key.endswith(".weight")
                         ),
                     )

@@ -388,9 +388,7 @@ def build_reverse_name_mapper(model, *, tensor_keys: bool = False):
     if not merge_rules and not rename_rules:
         return None
     compiled = _compile_rename_rules(rename_rules)
-    source_names = _carried_source_keys(model)
-    if not tensor_keys:
-        source_names = {key.rsplit(".", 1)[0] for key in source_names if "." in key}
+    source_names = _carried_source_keys(model) if tensor_keys else set()
 
     def _apply(text: str) -> str:
         for rule in merge_rules:

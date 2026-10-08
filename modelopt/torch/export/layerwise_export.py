@@ -44,7 +44,6 @@ from .quant_utils import (
     _postprocess_single_tensor,
     get_quant_config,
     get_quantization_format,
-    seed_carried_over_exclusions,
 )
 from .registry import ExportContext, PrepareMoEInputsRegistry
 from .unified_export_hf import (
@@ -257,7 +256,9 @@ class LayerwiseExporter:
         )
         # get_quant_config reports on the quantizer modules, which export_layer replaces as
         # it goes, so by finalize() the model would look unquantized.
-        self._quant_config = get_quant_config(model, is_modelopt_qlora=self._ctx.is_modelopt_qlora)
+        self._quant_config = get_quant_config(
+            model, is_modelopt_qlora=self._ctx.is_modelopt_qlora, include_carried_over=False
+        )
         # Not get_kv_cache_dtype: it does not recurse, so on the root it answers None.
         self._kv_cache_format = _get_kv_cache_postprocess_config(self._quant_config["quantization"])
 
@@ -386,17 +387,6 @@ class LayerwiseExporter:
                     quant_config.get("quantization", {}),
                     self._name_mapper,
                     module_names=(name for name, _ in model.named_modules()),
-                )
-        # After the reversal, not before: carried names are source-checkpoint names already, so
-        # passing them through the mapper would rewrite names that are correct as they stand.
-        # bind() snapshotted this config during calibration, so the carried set -- which
-        # export_hf_checkpoint records immediately before calling us -- is only visible now.
-        if quant_config:
-            seeded = seed_carried_over_exclusions(model, quant_config)
-            if seeded:
-                print(
-                    f"Excluding {len(seeded)} carried-over module(s) from the layerwise "
-                    f"quantization config (e.g. {seeded[0]})"
                 )
 
         names = module_name_maps(model)

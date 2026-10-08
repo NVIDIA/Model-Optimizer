@@ -1646,13 +1646,8 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
 def seed_carried_over_exclusions(model: nn.Module, quant_config: dict) -> list[str]:
     """Add carried-weight module names to an already-built ``quant_config``'s exclusions.
 
-    The single place carried weights reach ``exclude_modules``, for both exporters.
-    :func:`get_quant_config` calls it once the per-layer pass is done, and the layerwise exporter
-    calls it again from ``finalize()`` -- it snapshots its config during ``bind()``, while
-    calibration is still running and long before ``export_hf_checkpoint`` records what it carried,
-    so it has no chance to see them any earlier. Without it a layerwise export copies GLM-4.7's
-    ``mtp.safetensors`` into the checkpoint with nothing in ``exclude_modules``: the same
-    NVBug 5718750 failure this pass exists to prevent, reached through the other exporter.
+    Exporters defer this until model-backed names have been reversed, since carried
+    tensors already use source names and can share a parent name with a live module.
 
     Exclusions are exact module names rather than prefix wildcards. That keeps both exporters
     emitting the same thing, and a literal can never over-match a module the export did in fact
@@ -1749,6 +1744,8 @@ def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
 def get_quant_config(
     model: nn.Module,
     is_modelopt_qlora: bool = False,
+    *,
+    include_carried_over: bool = True,
 ) -> dict[str, Any]:
     """Generate quantization config for a model.
 
@@ -1758,6 +1755,8 @@ def get_quant_config(
     Args:
         model: The PyTorch model to make config for.
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
+        include_carried_over: Include source-named exclusions. Exporters defer these until
+            model-backed module names have been reversed to the source namespace.
 
     Returns:
         Dictionary containing the quantization configuration
@@ -1885,14 +1884,9 @@ def get_quant_config(
     # Process per layer quantization config dict
     quant_config["quantization"].update(process_layer_quant_config(layer_config_dict))
 
-    # Carried weights are seeded AFTER the per-layer pass, through the same helper the layerwise
-    # exporter calls. Seeding them into layer_config_dict instead would route them through
-    # _prefix_wildcard_summarize_exclude_modules and emit wildcards here, while the layerwise path
-    # -- which can only act once its config is already built -- emits literals: one model, two
-    # exporters, two different-looking quantization_config.ignore. The summarizer cannot serve both,
-    # because it needs `quantized_layers` to avoid a wildcard swallowing a quantized module and
-    # process_layer_quant_config pops that key before returning.
-    seed_carried_over_exclusions(model, quant_config)
+    # Keep carried exclusions exact instead of folding them into model-backed wildcards.
+    if include_carried_over:
+        seed_carried_over_exclusions(model, quant_config)
 
     weight_quant_algo = quant_config["quantization"].get("quant_algo")
     needs_layerwise_kv_metadata = bool(kv_cache_quantized_layers) and (

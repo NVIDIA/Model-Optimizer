@@ -45,9 +45,9 @@ from modelopt.torch.export.quant_aware_conversion import (
 )
 from modelopt.torch.export.quant_utils import _prefix_wildcard_summarize_exclude_modules
 from modelopt.torch.export.unified_export_hf import (
-    _export_transformers_checkpoint,
     _revert_hf_quant_config_names,
     _revert_quant_config_names_best_effort,
+    _write_hf_export_config,
     export_hf_checkpoint,
     read_unplaced_weights,
 )
@@ -746,8 +746,11 @@ def test_quantized_weight_specific_rename_keeps_scales_aligned(tmp_path, export_
     for rule in (weight_rename, container_rename):
         if scope:
             _set_scope_attr(rule, "scope_prefix", scope)
-    model = types.SimpleNamespace(_weight_conversions=[container_rename, weight_rename])
     prefix = f"{scope}." if scope else ""
+    model = types.SimpleNamespace(
+        _weight_conversions=[container_rename, weight_rename],
+        _modelopt_carried_over_names=[prefix + "lm_head.norm_mean"],
+    )
     state = _nvfp4_linear(prefix + "lm_head", 8, 16)
     state[prefix + "lm_head.weight_scale_inv"] = torch.ones(8, 1)
     state["unrelated.weight"] = torch.ones(8, 16)
@@ -770,7 +773,10 @@ def test_quantized_weight_specific_rename_keeps_scales_aligned(tmp_path, export_
 
 @pytest.mark.parametrize("export_mode", ["resident", "streaming", "layerwise"])
 @pytest.mark.parametrize("quantized_head", [False, True])
-def test_export_weight_specific_rename_keeps_config_aligned(tmp_path, quantized_head, export_mode):
+@pytest.mark.parametrize("carried_buffer", [False, True])
+def test_export_weight_specific_rename_keeps_config_aligned(
+    tmp_path, quantized_head, export_mode, carried_buffer
+):
     """Every export path keeps renamed BF16/FP8 weights, scales, and config aligned."""
     names = ["model.layers.0.self_attn.q_proj.weight_quantizer"]
     model = _fp8_llama(*names, *(["lm_head.*quantizer"] if quantized_head else []))
@@ -779,23 +785,33 @@ def test_export_weight_specific_rename_keeps_config_aligned(tmp_path, quantized_
 
     model._weight_conversions = [WeightRenaming(r"^head\.weight$", "lm_head.weight")]
     original_head = model.lm_head.weight.detach().clone()
+    carried = {"lm_head.norm_mean": torch.arange(3, dtype=torch.float32)} if carried_buffer else {}
+    source = tmp_path / "source"
+    source.mkdir()
+    model._modelopt_source_checkpoint = str(source)
+    model._modelopt_unplaced_source_keys = list(carried)
+    if carried:
+        save_file(carried, str(source / "model.safetensors"))
     if export_mode == "layerwise":
         exporter = LayerwiseExporter(model, tmp_path)
         exporter.bind(list(model.model.layers))
         exporter.export_layer(0, model.model.layers[0])
-        config = exporter.finalize()
+        config = exporter.finalize(extra_state_dict=carried)
     elif export_mode == "streaming":
-        state, config = _export_transformers_checkpoint(model)
-        _stream_tensors(model, state, tmp_path)
-        config = _revert_quant_config_names_best_effort(model, config)
+        accelerate = pytest.importorskip("accelerate")
+        accelerate.cpu_offload(model.lm_head, execution_device=torch.device("cpu"))
+        export_hf_checkpoint(model, export_dir=tmp_path, save_modelopt_state=False)
+        config = json.loads((tmp_path / "hf_quant_config.json").read_text())
     else:
         export_hf_checkpoint(model, export_dir=tmp_path, save_modelopt_state=False)
         config = json.loads((tmp_path / "hf_quant_config.json").read_text())
     written = _load_shards(tmp_path)
 
     assert ("head" in config["quantization"]["exclude_modules"]) is not quantized_head
-    assert "lm_head" not in config["quantization"]["exclude_modules"]
-    assert not any(key.startswith("lm_head.") for key in written)
+    assert ("lm_head" in config["quantization"]["exclude_modules"]) is carried_buffer
+    assert {key for key in written if key.startswith("lm_head.")} == set(carried)
+    for key, value in carried.items():
+        torch.testing.assert_close(written[key], value, rtol=0, atol=0)
     assert "model.layers.0.self_attn.q_proj.weight" in written
     if quantized_head:
         assert written["head.weight"].dtype == torch.float8_e4m3fn
@@ -838,6 +854,7 @@ def test_export_preserves_carried_source_names(tmp_path, export_mode, recorded):
             model, export_dir=export, extra_state_dict=carried
         )
         config = _revert_quant_config_names_best_effort(model, config)
+        _write_hf_export_config(model, config, export)
     else:
         export_hf_checkpoint(model, export_dir=export)
         config = json.loads((export / "hf_quant_config.json").read_text())

@@ -361,7 +361,9 @@ def _export_transformers_checkpoint_streaming(
 
     requantize_resmooth_fused_llm_layers(model)
 
-    quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
+    quant_config = get_quant_config(
+        model, is_modelopt_qlora=is_modelopt_qlora, include_carried_over=False
+    )
 
     _warn_on_unsynced_moe_gate_up(model)
 
