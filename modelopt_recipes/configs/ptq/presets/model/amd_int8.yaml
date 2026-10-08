@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 AMD, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# QuantizeConfig preset for W8A8 INT8 for AMD MI300X/MI325X.
+# Per-channel weight quantization + per-tensor input quantization.
+# Maps directly to hipBLASLt INT8 GEMM (1,205 TOPS peak on MI300X).
+#
+# Usage:
+#   import modelopt.torch.quantization as mtq
+#   mtq.quantize(model, mtq.AMD_INT8_DEFAULT_CFG, forward_loop=lambda m: m(x_cal))
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
+algorithm: max
+quant_cfg:
+  - quantizer_name: '*'
+    enable: false
+  - quantizer_name: '*weight_quantizer'
+    cfg:
+      num_bits: 8
+      axis: 0
+  - quantizer_name: '*input_quantizer'
+    cfg:
+      num_bits: 8
+      axis: null
