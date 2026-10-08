@@ -280,12 +280,11 @@ class _Partition:
             yield from encoded_batch
 
     def _encode_docs(self, encoder: "_Encoder", lines, may_stop_early: bool = False):
-        """Tokenize ``lines``, forking worker processes only when ``workers > 1``.
+        """Tokenize ``lines``, using worker processes only when ``workers > 1``.
 
-        ``multiprocessing.Pool`` always ``fork()``s, even for a single worker. Forking a
-        process that has already initialized a CUDA context / many native threads (e.g. when
-        this is called in-process after GPU work) is unsafe and can segfault the children.
-        The single-worker path avoids the fork entirely by tokenizing inline in this process.
+        The single-worker path tokenizes inline. Multiworker processing starts from a
+        clean process context so prior CUDA work or native threads in the caller are not
+        inherited by tokenizer workers.
 
         When ``may_stop_early`` is true, wait for finite batches so no worker results are pending
         if the caller stops consuming documents after reaching its token limit.
@@ -295,7 +294,12 @@ class _Partition:
         if self.workers == 1:
             encoder.initializer()
             return None, map(encoder.encode, lines)
-        pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
+        start_method = (
+            "forkserver" if "forkserver" in multiprocessing.get_all_start_methods() else "spawn"
+        )
+        pool = multiprocessing.get_context(start_method).Pool(
+            self.workers, initializer=encoder.initializer
+        )
         if may_stop_early:
             batch_size = self.workers * 4  # Balance throughput against unused final-batch work.
             encoded_docs = self._encode_in_batches(pool, encoder, lines, batch_size)
