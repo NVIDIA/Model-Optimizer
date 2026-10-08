@@ -236,16 +236,21 @@ def _check_indexer_quantization_took_effect(model: nn.Module, config: QuantizeCo
     """Raise when a config enables an indexer quantizer that quantizes no indexer.
 
     ``indexer_q_quantizer`` and ``indexer_k_quantizer`` only exist on indexers that a framework
-    plugin (vLLM, Megatron-Core) converted. When a plugin does not recognize the installed
-    framework's indexer class, or the patterns match none of the indexers, the indexer silently
-    stays unquantized. Intent is read like in :func:`_check_weight_quantization_took_effect`, but
-    only from patterns naming the quantizer, so catch-all patterns do not count. A model without an
-    ``*Indexer`` module (another architecture) is skipped. Under ``torch.distributed`` the check
-    covers the whole model: a pipeline stage may hold none of the indexers a layer-selective recipe
-    selects. All ranks then raise together instead of some waiting in calibration for the others.
+    plugin (vLLM, Megatron-Core) converted, and the scorer quantizers only on the vLLM ones. When a
+    plugin does not recognize the installed framework's indexer class, or the patterns match none
+    of the indexers, the indexer silently stays unquantized. Intent is read like in
+    :func:`_check_weight_quantization_took_effect`, but only from patterns naming the quantizer, so
+    catch-all patterns do not count. A model without an ``*Indexer`` module (another architecture)
+    is skipped. Under ``torch.distributed`` the check covers the whole model: a pipeline stage may
+    hold none of the indexers a layer-selective recipe selects. All ranks then raise together
+    instead of some waiting in calibration for the others.
     """
     last_entry_per_pattern = {entry.quantizer_name: entry for entry in config.quant_cfg}
-    for quantizer_name in ("indexer_q_quantizer", "indexer_k_quantizer"):
+    for quantizer_name in (
+        "indexer_q_quantizer",
+        "indexer_k_quantizer",
+        "indexer_scorer_kwargs_quantizer",
+    ):
         if not any(
             entry.enable and quantizer_name in pattern
             for pattern, entry in last_entry_per_pattern.items()

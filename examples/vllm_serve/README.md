@@ -315,6 +315,51 @@ Notes:
 - vLLM quantizes the DeepSeek-V4 indexer key and query without a Hadamard rotation and the
   GLM-5.3-Flash ones after one, so the fake quantization applies in that basis.
 
+### Indexer scorer kernel arguments
+
+GLM-5.3-Flash's indexer scores each key as `k_scale * sum_h W[h] * ReLU(q_h . k)` in DeepGEMM, from
+the FP8 query and key and the effective head weights `W` (with the query scale folded in).
+`indexer_scorer_kwargs_quantizer` passes keyword arguments to that scorer kernel, per layer, e.g. the
+numerics options of a DeepGEMM build. It stays disabled unless a recipe enables it with
+`backend: scorer_kwargs`; its `backend_extra_args` are the arguments. For example, this recipe sums
+the heads in BF16:
+
+```yaml
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+
+metadata:
+  description: BF16 head sum in the indexer scorer.
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*indexer_scorer_kwargs_quantizer'
+      cfg:
+        backend: scorer_kwargs
+        backend_extra_args: {logits_dtype: bfloat16}
+```
+
+Plugins can add quantizers that turn their own configs into such arguments with
+`register_indexer_scorer_kwargs_quantizer` of `modelopt.torch.quantization.plugins.vllm_indexer`.
+Stock DeepGEMM takes `logits_dtype` (on SM100 GPUs); other arguments need a DeepGEMM build that takes
+them and declares them, with their values, in `deep_gemm.MQA_LOGITS_NUMERICS`, such as a DeepGEMM
+fork. ModelOpt ships none. vLLM imports an installed `deep_gemm` before its own copy, so install
+such a build into the serving environment and serve:
+
+```bash
+pip install --no-deps --no-build-isolation <DeepGEMM source directory or git URL>
+RECIPE_PATH=<recipe>.yaml \
+  python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
+```
+
+Notes:
+
+- Scores that come out NaN, e.g. from overflowing reduced-precision arithmetic in the scorer, are set
+  to `-inf` before top-k, as vLLM's prefill top-k mishandles NaN.
+- DeepSeek-V4 rejects the scorer quantizers.
+
 ## Serve a model with sparse attention in vLLM
 
 Apply ModelOpt sparse attention at serve time. Right after model load, the launcher replaces each native attention implementation with its matching ModelOpt adapter: `ModelOptSparseAttentionImpl` for FlashAttention or `ModelOptSparseFlashInferImpl` for FlashInfer. Both adapters use the same Triton kernel with paged KV cache support.
