@@ -115,8 +115,8 @@ inline void check_importance(const char *format, const at::Tensor &input,
                   importance.size(0) > 0 && importance.size(1) == kBlockSize &&
                   (input.numel() / kBlockSize) % importance.size(0) == 0,
               format, " importance must be float32 [blocks per row, 256]");
-  TORCH_CHECK((importance.isfinite() & (importance >= 0)).all().item<bool>(), format,
-              " importance must be finite and non-negative");
+  // The Python encoders check the values are finite and non-negative; repeating it here would
+  // add a host sync to every encode.
 }
 
 #ifdef __CUDACC__
