@@ -17,7 +17,8 @@
 
 The encoder performs a single-pass squared-error grid search at a fixed,
 empirically anchored super-block scale. It does not iteratively refine the
-scale or apply importance weights. Every 256 logical values become one 50-byte
+scale. An optional per-input-column importance weights each value's squared
+error in the search. Every 256 logical values become one 50-byte
 ``block_iq1_s`` payload:
 
 * bytes 0..1: little-endian FP16 super-block scale ``d``
@@ -39,6 +40,8 @@ from .codebooks import iq1_s_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
     GGMLFormat,
+    chunk_importance,
+    importance_blocks,
     narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
@@ -100,17 +103,27 @@ def _predict_iq1_s_scales(blocks: torch.Tensor) -> torch.Tensor:
 
 
 def _search_shifted_grid(
-    vectors: torch.Tensor, d: torch.Tensor, grid: torch.Tensor
+    vectors: torch.Tensor,
+    d: torch.Tensor,
+    grid: torch.Tensor,
+    weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Score every grid entry against each 8-value vector at every shift and local scale.
 
     Returns the lowest error and the entry reaching it, both ``[blocks, 32, 16]`` and indexed
     by choice ``shift * 8 + local``. IQ1_M runs the same search over the same grid and delta;
-    the two formats differ only in how they select among the choices afterwards.
+    the two formats differ only in how they select among the choices afterwards. ``weights``,
+    ``[blocks, 32, 8]``, scales each value's squared error.
     """
     block_count = vectors.shape[0]
-    xnorm = vectors.square().sum(dim=-1)
-    xsum = vectors.sum(dim=-1)
+    if weights is None:
+        xnorm = vectors.square().sum(dim=-1)
+        xsum = vectors.sum(dim=-1)
+        weight_sum = 8
+    else:
+        xnorm = (weights * vectors.square()).sum(dim=-1)
+        xsum = (weights * vectors).sum(dim=-1)
+        weight_sum = weights.sum(dim=-1, keepdim=True)
     best_error = torch.full(
         (block_count, 32, 16), torch.inf, dtype=torch.float32, device=vectors.device
     )
@@ -122,14 +135,19 @@ def _search_shifted_grid(
     # retains the lowest codebook index when two candidates have equal error.
     for entry_start in range(0, 2048, 128):
         grid_tile = grid[entry_start : entry_start + 128]
-        dot = torch.matmul(vectors, grid_tile.T)
-        tile_norm = grid_norm[entry_start : entry_start + 128].reshape(1, 1, -1)
-        tile_sum = grid_sum[entry_start : entry_start + 128].reshape(1, 1, -1)
+        if weights is None:
+            dot = torch.matmul(vectors, grid_tile.T)
+            tile_norm = grid_norm[entry_start : entry_start + 128].reshape(1, 1, -1)
+            tile_sum = grid_sum[entry_start : entry_start + 128].reshape(1, 1, -1)
+        else:
+            dot = torch.matmul(weights * vectors, grid_tile.T)
+            tile_norm = torch.matmul(weights, grid_tile.square().T)
+            tile_sum = torch.matmul(weights, grid_tile.T)
 
         for shift in range(2):
             delta = -_IQ1_S_DELTA if shift else _IQ1_S_DELTA
             shifted_dot = dot + delta * xsum.unsqueeze(-1)
-            shifted_norm = tile_norm + 2 * delta * tile_sum + 8 * delta * delta
+            shifted_norm = tile_norm + 2 * delta * tile_sum + weight_sum * delta * delta
             for local in range(8):
                 choice = shift * 8 + local
                 scale = d.reshape(-1, 1, 1) * (2 * local + 1)
@@ -147,13 +165,17 @@ def _search_shifted_grid(
     return best_error, best_entry
 
 
-def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
+def _encode_blocks(
+    blocks: torch.Tensor, grid: torch.Tensor, weights: torch.Tensor | None = None
+) -> torch.Tensor:
     """Encode a moderate-size batch of flattened 256-value blocks."""
     x = narrow_to_float32(blocks)
     block_count = x.shape[0]
     d = _predict_iq1_s_scales(x)
     d_float = d.float()
-    best_error, best_entry = _search_shifted_grid(x.reshape(block_count, 32, 8), d_float, grid)
+    best_error, best_entry = _search_shifted_grid(
+        x.reshape(block_count, 32, 8), d_float, grid, weights
+    )
 
     group_error = best_error.reshape(block_count, 8, 4, 16).sum(dim=2)
     selected_choice = group_error.argmin(dim=-1)
@@ -182,17 +204,22 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def quantize_iq1_s(
-    weight: torch.Tensor, *, block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE
+    weight: torch.Tensor,
+    *,
+    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
+    importance: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ1_S blocks.
 
     Returned shapes are ``[*weight.shape[:-1], weight.shape[-1] // 256, 50]``
     and ``[weight.ndim]``. The packed payload remains on the weight's device;
     the logical-shape metadata is kept on CPU. Non-finite input elements are
-    treated as zero during packing.
+    treated as zero during packing. ``importance``, a non-negative per-input-column vector,
+    weights each value's squared error in the search, as llama.cpp's imatrix does.
     """
     validate_weight(weight, "IQ1_S")
     validate_block_chunk_size(block_chunk_size)
+    block_importance = importance_blocks(importance, weight, "IQ1_S")
 
     logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
     blocks = weight.contiguous().reshape(-1, IQ1_S_BLOCK_SIZE)
@@ -200,7 +227,7 @@ def quantize_iq1_s(
     if weight.is_cuda:
         extension = get_cuda_ext_ggml()
         if extension is not None:
-            packed = extension.iq1_s_pack(blocks, grid)
+            packed = extension.iq1_s_pack(blocks, grid, block_importance)
             packed_shape = (
                 *weight.shape[:-1],
                 weight.shape[-1] // IQ1_S_BLOCK_SIZE,
@@ -209,7 +236,13 @@ def quantize_iq1_s(
             return packed.reshape(packed_shape), logical_shape
 
     chunks = [
-        _encode_blocks(blocks[start : start + block_chunk_size], grid)
+        _encode_blocks(
+            blocks[start : start + block_chunk_size],
+            grid,
+            chunk_importance(
+                block_importance, start, min(start + block_chunk_size, blocks.shape[0])
+            ),
+        )
         for start in range(0, blocks.shape[0], block_chunk_size)
     ]
     packed_shape = (
@@ -270,6 +303,7 @@ IQ1_S_FORMAT = GGMLFormat(
     dequantize=dequantize_iq1_s,
     block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
     decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+    weighted=True,
 )
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq1_s and

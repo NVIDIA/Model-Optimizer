@@ -1247,8 +1247,8 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         default=False,
         title="Weight the codebook search by the Hessian diagonal.",
         description="""When True, formats whose codebook search takes a per-input-column importance
-        (the GGML ``iq2_xxs``, ``iq2_xs`` and ``iq2_s`` formats) weight it by the square root of
-        the Hessian diagonal, llama.cpp's imatrix statistic. Other formats ignore it.""",
+        (the GGML IQ1 and IQ2 formats) weight it by the square root of the Hessian diagonal,
+        llama.cpp's imatrix statistic. Other formats ignore it.""",
     )
 
 

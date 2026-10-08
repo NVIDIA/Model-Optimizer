@@ -261,11 +261,12 @@ def test_cuda_weighted_pack_matches_pytorch_encoder(monkeypatch, name):
 
 @pytest.mark.parametrize("name", WEIGHTED)
 def test_cuda_packer_rejects_importance_that_does_not_tile_the_blocks(name):
-    module, packer, _, _ = FORMATS[name]
+    module, packer, _, takes_scales = FORMATS[name]
     weight = torch.randn((4, 512), device="cuda")
     blocks = weight.reshape(-1, 256)
-    scales = getattr(module, f"_predict_{name}_scales")(blocks)
     grid = getattr(module, f"{name}_grid")("cuda")
+    # IQ1_S predicts its block scales inside the packer.
+    scales = (getattr(module, f"_predict_{name}_scales")(blocks),) if takes_scales else ()
 
     with pytest.raises(RuntimeError, match="importance must be float32"):
-        getattr(_extension(), packer)(blocks, grid, scales, torch.ones(3, 256, device="cuda"))
+        getattr(_extension(), packer)(blocks, grid, *scales, torch.ones(3, 256, device="cuda"))

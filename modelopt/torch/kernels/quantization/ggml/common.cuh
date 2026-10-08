@@ -176,11 +176,13 @@ __device__ __forceinline__ void grid_terms(const float *x, const float *q, float
 }
 
 // Squared error of approximating x by scale * (q + delta): the offset shifts the dot and norm
-// that grid_terms computed for q alone.
+// that grid_terms computed for q alone. weight_sum is the sum of the vector's importance, which
+// is the vector size when the error is unweighted.
 __device__ __forceinline__ float shifted_error(float xnorm, float xsum, float dot, float qnorm,
-                                               float qsum, float scale, float delta) {
+                                               float qsum, float scale, float delta,
+                                               float weight_sum = 8.0f) {
   const float shifted_dot = dot + delta * xsum;
-  const float shifted_norm = qnorm + 2.0f * delta * qsum + 8.0f * delta * delta;
+  const float shifted_norm = qnorm + 2.0f * delta * qsum + weight_sum * delta * delta;
   return clamped_quant_error(xnorm, shifted_dot, shifted_norm, scale);
 }
 

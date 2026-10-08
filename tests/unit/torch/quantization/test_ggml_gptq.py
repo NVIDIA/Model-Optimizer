@@ -97,7 +97,11 @@ def _iq_config(algorithm, num_bits="iq1_s"):
             {"quantizer_name": "*", "enable": False},
             {
                 "quantizer_name": "*weight_quantizer",
-                "cfg": {"num_bits": num_bits, "block_sizes": {-1: 256}, "backend": "ggml"},
+                "cfg": {
+                    "num_bits": num_bits,
+                    "block_sizes": {-1: GGML_FORMAT_REGISTRY[num_bits].block_size},
+                    "backend": "ggml",
+                },
                 "enable": True,
             },
         ],
@@ -148,7 +152,12 @@ def test_gptq_on_a_ggml_format_pins_the_payload_it_chose():
 
 @pytest.mark.parametrize(
     ("num_bits", "importance_weighted", "weighted"),
-    [("iq2_xxs", True, True), ("iq2_xxs", False, False), ("iq1_s", True, False)],
+    [
+        ("iq2_xxs", True, True),
+        ("iq1_s", True, True),
+        ("iq2_xxs", False, False),
+        ("q8_0", True, False),
+    ],
 )
 def test_gptq_weights_the_search_by_the_root_of_the_hessian_diagonal(
     monkeypatch, num_bits, importance_weighted, weighted
@@ -170,9 +179,9 @@ def test_gptq_weights_the_search_by_the_root_of_the_hessian_diagonal(
     algorithm = {**GPTQ, "importance_weighted": importance_weighted}
     mtq.quantize(model, _iq_config(algorithm, num_bits), forward_loop=lambda m: m(inputs))
 
-    gptq_calls = calls[-2:]  # one call per 256-column group
+    gptq_calls = calls[-(512 // ggml_format.block_size) :]  # one call per GGML column group
     if not weighted:
-        assert gptq_calls == [None, None]
+        assert gptq_calls == [None] * len(gptq_calls)
         return
     root = inputs.square().sum(dim=0).sqrt()
     importance = torch.cat(gptq_calls)
