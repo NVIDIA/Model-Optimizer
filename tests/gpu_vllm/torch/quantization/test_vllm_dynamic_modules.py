@@ -56,7 +56,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
-from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer, register_quant_backend
 from modelopt.torch.quantization.plugins import vllm as vllm_plugin
 from modelopt.torch.quantization.plugins.vllm import (
     _ATTENTION_TYPES,
@@ -720,6 +720,10 @@ def _quantize_and_summarize(self, recipe_path=None, quantizer_path=None):
 
     quant_cfg = mtq.NVFP4_DEFAULT_CFG
     if recipe_path is not None:
+        register_quant_backend(
+            "test_vllm_recipe",
+            lambda inputs, quantizer: inputs + quantizer.backend_extra_args["offset"],
+        )
         quant_cfg = _load_example_module("vllm_ptq_utils").get_quant_config(
             {"recipe_path": recipe_path, "quant_cfg": None, "kv_quant_cfg": None}, model
         )
@@ -789,6 +793,12 @@ def _quantize_and_summarize(self, recipe_path=None, quantizer_path=None):
                 "axis": module.axis,
                 "block_sizes": module.block_sizes,
             }
+            if module.backend is not None:
+                enabled_quantizers[name].update(
+                    {"backend": module.backend, "backend_extra_args": module.backend_extra_args}
+                )
+                probe = torch.tensor([-0.5, 0.25, 1.0], device=module.amax.device)
+                torch.testing.assert_close(module(probe), probe + 0.25, rtol=0, atol=0)
             if quantizer_path is not None:
                 restored_amaxes[name] = module.amax.detach().cpu()
             if not hasattr(module, "_amax") and "kv_b_proj" not in name:
@@ -1057,10 +1067,16 @@ def test_tiny_llama_quantize(tiny_llama_llm):
 def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm, tmp_path):
     """Restore exported recipes and ranges on real Qwen3-MoE linears and fused experts."""
     active = {"_disabled": False, "_num_bits": [4, 3], "_axis": None, "_block_sizes": None}
+    custom = {
+        **active,
+        "_num_bits": "test_format",
+        "_backend": "test_vllm_recipe",
+        "_backend_extra_args": {"offset": 0.25},
+    }
     recipe = {}
     for layer in range(2):
         for projection in ("q", "k", "v"):
-            recipe[f"model.layers.{layer}.self_attn.{projection}_proj.input_quantizer"] = active
+            recipe[f"model.layers.{layer}.self_attn.{projection}_proj.input_quantizer"] = custom
         for expert in range(4):
             for projection in ("gate", "up", "down"):
                 prefix = f"model.layers.{layer}.mlp.experts.{expert}.{projection}_proj"
@@ -1095,7 +1111,13 @@ def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm, tmp_path):
     assert all(torch.equal(value, amax) for value in summary["restored_amaxes"].values())
     assert all("weight_quantizer" not in name for name in enabled)
     assert all(
-        cfg == {"num_bits": (4, 3), "axis": None, "block_sizes": None} for cfg in enabled.values()
+        cfg
+        == (
+            {key[1:]: value for key, value in custom.items() if key != "_disabled"}
+            if name.endswith("qkv_proj.input_quantizer")
+            else {"num_bits": (4, 3), "axis": None, "block_sizes": None}
+        )
+        for name, cfg in enabled.items()
     )
 
     # The vllm_serve reload helper must map HF expert keys onto module paths that exist here:

@@ -256,7 +256,7 @@ python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
   --host 0.0.0.0 --port 8000
 ```
 
-- **MCore export**: Megatron-LM export/reload is currently supported for Nemotron-H models. Pass the exported recipe and quantizer tensors directly. The loader maps HF quantizer names to vLLM and keeps folded weight quantizers disabled.
+- **MCore export**: pass the exported recipe and quantizer tensors directly. The loader maps HF quantizer names to vLLM and keeps folded weight quantizers disabled. Custom quantization backends must be registered in the serving environment; the recipe preserves their names and arguments.
 
 ```bash
 # MCore
