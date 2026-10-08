@@ -300,7 +300,7 @@ def quantize(
         onnx_model = onnx.load(tmp_onnx_path)
         graph = gs.import_onnx(onnx_model)
         remove_partial_input_qdq(graph, no_quantize_inputs)
-        if kwargs.get("target_dla") == "eq":
+        if kwargs.get("target_dla", False):
             remove_dla_scalar_input_qdq(graph)
         onnx_model = gs.export_onnx(graph)
 

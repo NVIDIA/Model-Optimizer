@@ -176,13 +176,21 @@ The [PETR example](./petr/) exports and quantizes the PETRv1 and PETRv2 ONNX bac
 
 ### INT8 quantization for DLA
 
-Choose the deployment workflow with `--target_dla iq` or `--target_dla eq` (Python: `target_dla="iq"` or `target_dla="eq"`). Both modes export explicit Q/DQ models.
+Use the boolean flag `--target_dla` (Python: `target_dla=True`) to export an INT8 Q/DQ model for DLA. It expands Q/DQ coverage while preserving scalar multiplication/division operands and padding fill values as constants.
 
-- `iq` retains legacy DLA Q/DQ placement, including quantized scalar operands. Use `--high_precision_dtype=fp32` and the default `dq_only=False`, then run the separate Q/DQ Translator for a supported legacy TensorRT/DLA release.
-- `eq` preserves scalar multiplication/division operands and padding fill values as constants for direct deployment. It requires **TensorRT 11.4 or later with strongly typed DLA support enabled**. Validation used a pre-release 11.4.1.22 build; confirm support for your platform and package.
+Choose the deployment route for your TensorRT version and platform package:
 
-Bare `--target_dla` and Python `target_dla=True` remain aliases for `iq`. Omitting the option, or passing `None` or `False` in Python, disables DLA targeting.
-See the [DLA deployment guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html#deploy-on-dla) for both export commands and deployment steps.
+| TensorRT deployment version | DLA workflow |
+| --- | --- |
+| 10.7 and earlier | On a supported DLA platform/build, use the separate Q/DQ Translator and a calibration cache matching the target TensorRT version. |
+| After 10.7 through 11.3 | Not supported for this DLA workflow. |
+| 11.4 and later | Deploy Q/DQ directly with a compatible build that enables strongly typed DLA. |
+
+The legacy route was validated with TensorRT 10.7; direct deployment used a pre-release 11.4.1.22 build. Earlier releases and other platform packages are not covered by those checks. These are deployment requirements, not a TensorRT version requirement for ModelOpt export.
+
+**Migration:** replace `--target_dla iq` or `--target_dla eq` with bare `--target_dla`, and Python string selectors with `target_dla=True`. The flag now uses the constant-preserving DLA placement rules for both deployment routes. Omitting the flag or using `target_dla=False` keeps the default GPU-oriented quantization; Python `None` and string selectors are not accepted.
+
+See the [DLA deployment guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html#deploy-on-dla) for export commands and deployment steps.
 
 ### Per node calibration of ONNX models
 

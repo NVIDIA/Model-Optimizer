@@ -403,25 +403,24 @@ def test_quantize_opset_handling(
 @pytest.mark.parametrize(
     ("args", "expected"),
     [
-        ([], None),
-        (["--target_dla"], "iq"),
-        (["--target_dla", "iq"], "iq"),
-        (["--target_dla", "eq"], "eq"),
+        ([], False),
+        (["--target_dla"], True),
     ],
 )
 def test_target_dla_cli(args, expected):
-    """Select explicit DLA workflows while preserving the legacy bare flag."""
+    """Enable DLA targeting with a boolean flag."""
     assert get_parser().parse_args(["--onnx_path", "model.onnx", *args]).target_dla == expected
 
 
-def test_target_dla_cli_rejects_invalid_mode():
+@pytest.mark.parametrize("value", ["iq", "eq"])
+def test_target_dla_cli_rejects_values(value):
     with pytest.raises(SystemExit) as exc:
-        get_parser().parse_args(["--onnx_path", "model.onnx", "--target_dla", "invalid"])
+        get_parser().parse_args(["--onnx_path", "model.onnx", "--target_dla", value])
     assert exc.value.code == 2
 
 
-@pytest.mark.parametrize("target_dla", ["invalid", "EQ", "", 1])
-def test_target_dla_api_rejects_invalid_mode(target_dla):
-    """Reject invalid deployment modes before loading the input model."""
+@pytest.mark.parametrize("target_dla", ["iq", "eq", None, 1])
+def test_target_dla_api_rejects_non_boolean(target_dla):
+    """Reject obsolete modes and non-boolean values before loading the input model."""
     with pytest.raises(ValueError, match="target_dla"):
         moq.quantize("missing.onnx", target_dla=target_dla)

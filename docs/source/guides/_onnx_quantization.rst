@@ -110,70 +110,101 @@ Deploy Quantized ONNX Model
 Deploy on DLA
 -------------
 
-Choose ``--target_dla iq`` or ``--target_dla eq`` to expand INT8 Q/DQ coverage
-when quantizing a floating-point ONNX model for DLA. In Python, use
-``target_dla="iq"`` or ``target_dla="eq"``. Both modes export an explicit Q/DQ
-model; the choice controls quantization placement for the intended deployment workflow.
+Use the boolean flag ``--target_dla`` (Python: ``target_dla=True``) when
+quantizing a floating-point ONNX model for DLA. It exports an explicit INT8 Q/DQ
+model with expanded activation coverage, preserving scalar multiplication/division
+operands and padding fill values as constants. Choose the deployment route below;
+the flag does not convert TensorRT implicit quantization or weak typing.
 
-Legacy implicit quantization (IQ)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.. list-table:: DLA deployment compatibility
+    :header-rows: 1
+    :widths: 25 75
 
-Use ``iq`` to retain the existing DLA Q/DQ placement, including Q/DQ on scalar
-operands. Export with FP32 high-precision tensors and leave ``dq_only=False``
-(the default) for the legacy translator workflow:
-
-.. code-block:: bash
-
-    python -m modelopt.onnx.quantization \
-        --onnx_path=model.onnx \
-        --output_path=model.int8.dla-iq.onnx \
-        --quantize_mode=int8 \
-        --high_precision_dtype=fp32 \
-        --calibration_data_path=calib.npy \
-        --target_dla iq
-
-Pass the exported model through
-`NVIDIA's Q/DQ Translator <https://github.com/NVIDIA/Deep-Learning-Accelerator-SW/tree/main/tools/qdq-translator>`_.
-It produces an ONNX model without Q/DQ nodes, a calibration cache, and layer
-precision settings for a TensorRT release that supports legacy implicit-quantization
-DLA deployment. The translator remains a separate step; ``iq`` does not emit an
-implicit-quantization model itself.
-Set the translator's ``--trt_calib_version`` to the deployment TensorRT version
-(for example, ``--trt_calib_version 100700`` for TensorRT 10.7) so the generated
-cache header matches the target runtime.
-
-Direct explicit quantization (EQ)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Use ``eq`` to retain scalar multiplication coefficients, division denominators,
-and padding fill values as constants while preserving activation and weight
-quantization for direct strongly typed DLA deployment.
+    * - TensorRT version
+      - Deployment route
+    * - 10.7 and earlier
+      - On a supported DLA platform/build, use the separate Q/DQ Translator and
+        a calibration cache matching the target TensorRT version.
+    * - After 10.7 through 11.3
+      - Not supported for this DLA workflow.
+    * - 11.4 and later
+      - Deploy Q/DQ directly with a compatible platform package that enables
+        strongly typed DLA.
 
 .. important::
 
-    The direct EQ workflow requires **TensorRT 11.4 or later** with strongly typed
-    DLA support enabled. Validation used a pre-release TensorRT 11.4.1.22 build.
-    Confirm DLA availability for your TensorRT platform and package; the version
-    number alone does not establish support. This requirement does not apply to
-    the legacy IQ workflow above.
+    The legacy route was validated with TensorRT 10.7, and the direct route with
+    a pre-release TensorRT 11.4.1.22 build. These checks do not establish support
+    for every earlier release or platform package. Confirm DLA availability and
+    the translator's platform requirements; version alone is insufficient. These
+    deployment requirements do not impose a TensorRT version requirement on
+    ModelOpt export.
+
+The TensorRT `11.1 release notes
+<https://docs.nvidia.com/deeplearning/tensorrt/latest/getting-started/release-notes-11/11.1.0.html#limitations>`_
+identify 10.7 as the last supported DLA release before the gap, and the
+`11.3 release notes
+<https://docs.nvidia.com/deeplearning/tensorrt/latest/getting-started/release-notes-11/11.3.0.html#limitations>`_
+document the continued DLA limitation.
+
+Legacy deployment through Q/DQ Translator
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For the TensorRT 10.7-and-earlier route, export FP32 high-precision tensors and
+leave ``dq_only=False`` (the default):
 
 .. code-block:: bash
 
     python -m modelopt.onnx.quantization \
         --onnx_path=model.onnx \
-        --output_path=model.int8.dla-eq.onnx \
+        --output_path=model.int8.dla.onnx \
+        --quantize_mode=int8 \
+        --high_precision_dtype=fp32 \
+        --calibration_data_path=calib.npy \
+        --target_dla
+
+Pass the exported model through
+`NVIDIA's Q/DQ Translator <https://github.com/NVIDIA/Deep-Learning-Accelerator-SW/blob/main/tools/qdq-translator/README.md>`_.
+It produces an ONNX model without Q/DQ nodes, a calibration cache, and layer
+precision settings for the legacy implicit-quantization DLA build. Translation
+remains a separate step; ``--target_dla`` itself always exports Q/DQ.
+Set the translator's ``--trt_calib_version`` to the deployment TensorRT version
+(for example, ``--trt_calib_version 100700`` for TensorRT 10.7), then use the
+generated model, cache, and precision settings to build the engine.
+
+Direct explicit-quantization deployment
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For TensorRT 11.4 or later with strongly typed DLA enabled, export FP16
+high-precision tensors:
+
+.. code-block:: bash
+
+    python -m modelopt.onnx.quantization \
+        --onnx_path=model.onnx \
+        --output_path=model.int8.dla.onnx \
         --quantize_mode=int8 \
         --high_precision_dtype=fp16 \
         --calibration_data_path=calib.npy \
-        --target_dla eq
+        --target_dla
 
-Deploy this explicit Q/DQ model directly with the DLA-enabled TensorRT build;
-no Q/DQ Translator is needed.
+Deploy the explicit Q/DQ model directly with the compatible DLA-enabled build;
+no Q/DQ Translator is needed:
 
-For compatibility, bare ``--target_dla`` and Python ``target_dla=True`` select
-``iq``. Omitting the option, or passing ``None`` or ``False`` in Python, disables
-DLA targeting. Neither mode performs TensorRT implicit-to-explicit quantization
-or weak-to-strong typing conversion. Check accuracy after changing Q/DQ placement.
+.. code-block:: bash
+
+    trtexec --onnx=model.int8.dla.onnx --stronglyTyped \
+        --useDLACore=0 --allowGPUFallback --saveEngine=model.int8.dla.engine
+
+Migration from the mode selector
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Replace ``--target_dla iq`` or ``--target_dla eq`` with bare ``--target_dla``,
+and Python ``target_dla="iq"`` or ``target_dla="eq"`` with ``target_dla=True``.
+The boolean flag uses the constant-preserving DLA placement rules for both
+deployment routes. Omitting it, or using ``target_dla=False`` in Python, keeps
+the default GPU-oriented quantization. Python ``None`` and string selectors
+are not accepted. Check accuracy after changing Q/DQ placement.
 
 Compare the performance
 =======================

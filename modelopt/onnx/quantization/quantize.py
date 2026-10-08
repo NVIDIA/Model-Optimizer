@@ -40,7 +40,7 @@ import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import onnx
 import onnx.onnx_cpp2py_export.checker as C
@@ -499,7 +499,7 @@ def quantize(
     trust_remote_code: bool = False,
     direct_io_types: bool = False,
     opset: int | None = None,
-    target_dla: Literal["iq", "eq"] | bool | None = None,
+    target_dla: bool = False,
     autotune: bool = False,
     autotune_output_dir: str | None = None,
     autotune_num_schemes_per_region: int = 50,
@@ -651,11 +651,12 @@ def quantize(
             (19 for int8/fp8, 21 for int4, 23 for nvfp4). If the specified opset is lower than the required minimum,
             a warning will be issued and the opset will be upgraded to the required minimum.
         target_dla:
-            INT8 DLA deployment mode. Both modes export explicit Q/DQ ONNX models.
-            'iq' preserves legacy placement for the separate Q/DQ Translator workflow.
-            'eq' also preserves scalar operator constants for direct strongly typed DLA deployment,
-            requiring TensorRT 11.4 or later with strongly typed DLA support enabled.
-            True aliases 'iq'; None (default) and False disable DLA targeting. May reduce accuracy.
+            Expand INT8 Q/DQ coverage for DLA and preserve scalar operator constants.
+            TensorRT 10.7 and earlier require the separate Q/DQ Translator workflow.
+            DLA deployment is unsupported after 10.7 through 11.3. TensorRT 11.4+ supports
+            direct Q/DQ deployment with strongly typed DLA support enabled.
+            Requires a compatible DLA platform and package. False disables DLA targeting.
+            This option only affects INT8 quantization and may reduce accuracy.
         autotune:
             If True, detect optimal Q/DQ node placements according to the TensorRT version and platform available.
             If False, use the default pattern-based quantization approach.
@@ -696,10 +697,8 @@ def quantize(
         None, writes the quantized onnx model in the supplied output_path
         or writes to the same directory with filename like "<model_name>.quant.onnx".
     """
-    if isinstance(target_dla, bool):
-        target_dla = "iq" if target_dla else None
-    if target_dla not in (None, "iq", "eq"):
-        raise ValueError("target_dla must be 'iq', 'eq', None, or a legacy boolean")
+    if not isinstance(target_dla, bool):
+        raise ValueError("target_dla must be a boolean; use True to enable DLA targeting")
 
     if trt_rtx_backend not in ("legacy", "abi"):
         raise ValueError(f"trt_rtx_backend must be 'legacy' or 'abi', got {trt_rtx_backend!r}")

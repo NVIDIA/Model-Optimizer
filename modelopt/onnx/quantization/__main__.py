@@ -368,16 +368,13 @@ def get_parser() -> argparse.ArgumentParser:
     )
     argparser.add_argument(
         "--target_dla",
-        choices=["iq", "eq"],
-        nargs="?",
-        const="iq",
-        default=None,
+        action="store_true",
         help=(
-            "INT8 DLA deployment mode; both modes export explicit Q/DQ ONNX. "
-            "'iq' preserves legacy placement for the separate Q/DQ Translator workflow. "
-            "'eq' preserves scalar constants for direct strongly typed DLA deployment with "
-            "TensorRT 11.4 or later and strongly typed DLA support enabled. "
-            "A bare --target_dla selects 'iq' for backward compatibility. May reduce accuracy."
+            "Expand INT8 Q/DQ coverage for DLA and preserve scalar operator constants. "
+            "TensorRT 10.7 and earlier require the separate Q/DQ Translator workflow. "
+            "DLA deployment is unsupported after 10.7 through 11.3. TensorRT 11.4+ supports "
+            "direct Q/DQ deployment with strongly typed DLA support enabled. "
+            "Requires a compatible DLA platform and package. Only affects INT8; may reduce accuracy."
         ),
     )
     argparser.add_argument(
