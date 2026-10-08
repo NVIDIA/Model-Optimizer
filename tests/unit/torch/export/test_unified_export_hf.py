@@ -28,6 +28,7 @@ from _test_utils.torch.quantization.tied_modules import (
 from safetensors.torch import save_file
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.layerwise_export import LAYERWISE_EXPORTER_ATTR
 from modelopt.torch.export.model_utils import (
     TiedWeightMap,
     get_language_model_from_vl,
@@ -38,7 +39,12 @@ from modelopt.torch.export.quant_utils import (
     postprocess_state_dict,
     sync_tied_input_amax,
 )
-from modelopt.torch.export.unified_export_hf import _resolve_export_dtype, read_unplaced_weights
+from modelopt.torch.export.unified_export_hf import (
+    _resolve_export_dtype,
+    export_hf_checkpoint,
+    read_unplaced_weights,
+)
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
@@ -1077,6 +1083,8 @@ def test_union_degrades_to_the_recorded_set_without_the_loader(tmp_path, monkeyp
     assert key in carried, "recorded keys must still carry when the structural pass is unavailable"
 
 
+# TODO: cover the FSDP2 export path too, with a multi-rank upcast test in
+# tests/gpu/torch/export/test_fsdp2_export.py.
 @pytest.mark.parametrize("moe", [False, True])
 def test_upcast_ggml_export_loads_as_a_plain_checkpoint(tmp_path, moe):
     """With upcast_ggml="bf16" the checkpoint carries no quantization config, so a runtime without
@@ -1088,9 +1096,6 @@ def test_upcast_ggml_export_loads_as_a_plain_checkpoint(tmp_path, moe):
     # Local import: transformers and its test fixtures are optional dependencies.
     from _test_utils.torch.transformers_models import get_tiny_qwen3, get_tiny_qwen3_moe
     from transformers import AutoModelForCausalLM
-
-    from modelopt.torch.export import export_hf_checkpoint
-    from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 
     model = (get_tiny_qwen3_moe if moe else get_tiny_qwen3)()
     original = {name: param.detach().clone() for name, param in model.named_parameters()}
@@ -1124,7 +1129,15 @@ def test_upcast_ggml_export_loads_as_a_plain_checkpoint(tmp_path, moe):
 
 
 def test_upcast_ggml_rejects_an_unsupported_dtype(tmp_path):
-    from modelopt.torch.export import export_hf_checkpoint
-
+    """Only the dtypes the upcast knows are accepted."""
     with pytest.raises(ValueError, match="upcast_ggml must be one of"):
         export_hf_checkpoint(torch.nn.Linear(2, 2), export_dir=tmp_path, upcast_ggml="fp8")
+
+
+def test_upcast_ggml_rejects_a_layerwise_export(tmp_path):
+    """A layerwise export wrote its layer shards packed during calibration, too early to upcast."""
+    model = torch.nn.Linear(2, 2)
+    setattr(model, LAYERWISE_EXPORTER_ATTR, object())
+
+    with pytest.raises(NotImplementedError, match=r"layerwise\.export_dir"):
+        export_hf_checkpoint(model, export_dir=tmp_path, upcast_ggml="bf16")

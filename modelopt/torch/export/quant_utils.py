@@ -443,6 +443,25 @@ def get_weight_block_size(module: nn.Module, weight_name: str = "weight") -> int
     return 0
 
 
+def validate_ggml_layer(weight_quantizer, input_quantizer) -> None:
+    """Reject a GGML-quantized weight whose layer export cannot represent.
+
+    Both exporters return before collecting input_scale and before the pre_quant_scale handling,
+    so an enabled activation quantizer would be dropped without a trace and the checkpoint would
+    load as weight-only. Refuse instead.
+    """
+    if weight_quantizer.backend != "ggml":
+        raise ValueError("GGML formats require the built-in 'ggml' quantization backend")
+    if input_quantizer is not None and input_quantizer.is_enabled:
+        raise NotImplementedError(
+            "GGML export is weight-only, but this layer has an enabled input "
+            "quantizer. The GGML block payload carries no activation scale, so the "
+            "activation quantization would be silently lost."
+        )
+    if input_quantizer is not None and hasattr(input_quantizer, "_pre_quant_scale"):
+        raise NotImplementedError("GGML export does not support an AWQ-style pre_quant_scale.")
+
+
 def uses_iq_quantization(module) -> bool:
     """Whether any weight quantizer in ``module`` or its children targets a GGML format.
 
@@ -501,21 +520,7 @@ def get_quantization_format(module) -> str | None:
 
         # Handle individual num_bits cases
         if weight_quantizer.num_bits in GGML_FORMATS:
-            if weight_quantizer.backend != "ggml":
-                raise ValueError("GGML formats require the built-in 'ggml' quantization backend")
-            # Both exporters return before collecting input_scale and before the pre_quant_scale
-            # handling below, so an enabled activation quantizer would be dropped without a trace
-            # and the checkpoint would load as weight-only. Refuse instead.
-            if input_quantizer is not None and input_quantizer.is_enabled:
-                raise NotImplementedError(
-                    "GGML export is weight-only, but this layer has an enabled input "
-                    "quantizer. The GGML block payload carries no activation scale, so the "
-                    "activation quantization would be silently lost."
-                )
-            if input_quantizer is not None and hasattr(input_quantizer, "_pre_quant_scale"):
-                raise NotImplementedError(
-                    "GGML export does not support an AWQ-style pre_quant_scale."
-                )
+            validate_ggml_layer(weight_quantizer, input_quantizer)
             return weight_quantizer.num_bits
 
         if weight_quantizer.num_bits == 4:

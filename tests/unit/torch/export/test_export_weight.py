@@ -203,23 +203,26 @@ def test_export_drops_the_payload_gptq_pinned():
     assert list(state_dict) == ["weight"]
 
 
+def _ggml_model(num_bits, dtype=torch.bfloat16, input_cfg=None):
+    """A one-linear model whose weight quantizer is ``num_bits``; ``input_cfg`` enables its input."""
+    model = nn.Sequential(nn.Linear(512, 4, bias=False, dtype=dtype))
+    quant_cfg = [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {"num_bits": num_bits, "backend": "ggml"},
+            "enable": True,
+        },
+    ]
+    if input_cfg is not None:
+        quant_cfg.append({"quantizer_name": "*input_quantizer", "cfg": input_cfg, "enable": True})
+    return mtq.quantize(model, {"quant_cfg": quant_cfg, "algorithm": None})
+
+
 @pytest.mark.parametrize("num_bits", sorted(GGML_FORMAT_REGISTRY))
 def test_upcast_ggml_writes_what_the_packed_export_decodes_to(num_bits):
-    model = nn.Sequential(nn.Linear(512, 4, bias=False, dtype=torch.bfloat16))
-    mtq.quantize(
-        model,
-        {
-            "quant_cfg": [
-                {"quantizer_name": "*", "enable": False},
-                {
-                    "quantizer_name": "*weight_quantizer",
-                    "cfg": {"num_bits": num_bits, "backend": "ggml"},
-                    "enable": True,
-                },
-            ],
-            "algorithm": None,
-        },
-    )
+    """The upcast weight is exactly the decoding of the payload the packed export writes."""
+    model = _ggml_model(num_bits)
     packed = copy.deepcopy(model[0])
     _export_quantized_weight(packed, torch.bfloat16)
 
@@ -231,6 +234,71 @@ def test_upcast_ggml_writes_what_the_packed_export_decodes_to(num_bits):
     assert torch.equal(model[0].weight, expected)
     # The layer now exports as an unquantized one, so it stays out of the quantization config.
     assert get_quantization_format(model) == QUANTIZATION_NONE
+
+
+@pytest.mark.parametrize(
+    ("dtype", "input_cfg", "error"),
+    [
+        (torch.bfloat16, {"num_bits": (4, 3)}, "enabled input quantizer"),
+        (torch.bfloat16, "pre_quant_scale", "pre_quant_scale"),
+        (torch.float16, None, "stored as torch.float16"),
+        (torch.float32, None, "stored as torch.float32"),
+    ],
+    ids=["input_quantizer", "pre_quant_scale", "fp16_weight", "fp32_weight"],
+)
+def test_upcast_ggml_refuses_a_layer_before_changing_any(dtype, input_cfg, error):
+    """Activation quantization the upcast would drop, or a weight not stored in BF16, is refused.
+
+    The packed export refuses the first two too; disabling the quantizer must not skip that. The
+    model is left as it was, so a refusal never leaves it half upcast.
+    """
+    model = _ggml_model("q8_0", dtype, None if input_cfg == "pre_quant_scale" else input_cfg)
+    if input_cfg == "pre_quant_scale":
+        model[0].input_quantizer.pre_quant_scale = torch.ones(512)
+    weight = model[0].weight.detach().clone()
+
+    with pytest.raises((NotImplementedError, ValueError), match=error):
+        _upcast_ggml_weights(model, torch.bfloat16)
+
+    assert torch.equal(model[0].weight, weight)
+    assert model[0].weight_quantizer.is_enabled
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_upcast_ggml_writes_back_an_offloaded_weight(monkeypatch, pinned):
+    """The decoded values reach the offloaded copy; a payload GPTQ pinned is decoded, not redone."""
+    pytest.importorskip("accelerate")
+    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
+    from accelerate.utils import set_module_tensor_to_device
+
+    model = _ggml_model("q8_0")
+    linear = model[0]
+    q8_0 = GGML_FORMAT_REGISTRY["q8_0"]
+    payload, shape = q8_0.quantize(linear.weight.detach())
+    expected = q8_0.dequantize(payload, shape, dtype=torch.bfloat16)
+    assert not torch.equal(linear.weight, expected)
+    if pinned:
+        # How GPTQ leaves a layer: its payload pinned, and the weight equal to the decoding.
+        with torch.no_grad():
+            linear.weight.copy_(expected)
+        pin_packed_weight(linear.weight_quantizer, "q8_0", payload)
+        _without_search(monkeypatch, "q8_0")
+    weights_map = {"weight": linear.weight.detach().clone()}
+    add_hook_to_module(
+        linear, AlignDevicesHook(execution_device="cpu", offload=True, weights_map=weights_map)
+    )
+    set_module_tensor_to_device(linear, "weight", "meta")
+
+    _upcast_ggml_weights(model, torch.bfloat16)
+
+    assert linear.weight.is_meta
+    assert torch.equal(weights_map["weight"], expected)
+
+
+def test_upcast_ggml_warns_when_there_is_nothing_to_upcast():
+    """Asking for an upcast of a model with no GGML weights is most likely a mistake."""
+    with pytest.warns(UserWarning, match="no GGML-quantized weights"):
+        _upcast_ggml_weights(nn.Sequential(nn.Linear(4, 4)), torch.bfloat16)
 
 
 class QuantMoELinear(nn.Module):
