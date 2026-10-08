@@ -52,6 +52,42 @@ class SDPAAttention(nn.Module):
         return F.scaled_dot_product_attention(q, k, v), None
 
 
+class FlatMatmulAttention(nn.Module):
+    def forward(self, q, k, v):
+        scores = torch.matmul(q, k.transpose(-2, -1))
+        probs = torch.softmax(scores, dim=-1)
+        return torch.matmul(probs, v)
+
+
+class FlatBMMAttention(nn.Module):
+    def forward(self, q, k, v):
+        scores = torch.bmm(q, k.transpose(-2, -1))
+        probs = torch.softmax(scores, dim=-1)
+        return torch.bmm(probs, v)
+
+
+class FlatBinMatmulAttention(nn.Module):
+    def forward(self, q, k, v):
+        scores = q @ k.transpose(-2, -1)
+        probs = torch.softmax(scores, dim=-1)
+        return probs @ v
+
+
+class NestedMatmulAttention(nn.Module):
+    def forward(self, q, k, v):
+        return torch.matmul(torch.softmax(torch.matmul(q, k.transpose(-2, -1)), dim=-1), v)
+
+
+class NestedBMMAttention(nn.Module):
+    def forward(self, q, k, v):
+        return torch.bmm(torch.softmax(torch.bmm(q, k.transpose(-2, -1)), dim=-1), v)
+
+
+class NestedBinMatmulAttention(nn.Module):
+    def forward(self, q, k, v):
+        return torch.softmax(q @ k.transpose(-2, -1), dim=-1) @ v
+
+
 kv_cache_config = {
     "quant_cfg": [
         {"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": 4}, "enable": True},
@@ -112,6 +148,31 @@ def test_kv_quant_hf(model_getter, attn_cls):
 
     if attn_cls is not None:
         _QuantAttention.is_compatible_attention = original_is_compatible_attention
+        mtq.unregister(attn_cls)
+
+
+@pytest.mark.parametrize(
+    "attn_cls",
+    [
+        FlatMatmulAttention,
+        FlatBMMAttention,
+        FlatBinMatmulAttention,
+        NestedMatmulAttention,
+        NestedBMMAttention,
+        NestedBinMatmulAttention,
+    ],
+)
+def test_kv_quant_operand_wiring(attn_cls):
+    """Each q/k/v_bmm_quantizer must calibrate on its own operand, whatever the layout."""
+    q, k, v = torch.randn(1, 4, 8), 10 * torch.randn(1, 4, 8), 100 * torch.randn(1, 4, 8)
+    assert mtq.plugins.register_attention_for_kv_quant(attn_cls)
+    try:
+        model = attn_cls()
+        mtq.quantize(model, kv_cache_config, lambda model: model(q, k, v))
+        for name, operand in zip("qkv", (q, k, v)):
+            quantizer = getattr(model, f"{name}_bmm_quantizer")
+            assert quantizer.amax == operand.abs().max(), f"{name}_bmm_quantizer saw another tensor"
+    finally:
         mtq.unregister(attn_cls)
 
 
