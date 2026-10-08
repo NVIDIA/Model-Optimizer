@@ -100,7 +100,11 @@ class GGMLGPTQHelper(GPTQHelper):
         importance = None
         if self.importance_weighted and ggml_format.weighted:
             diagonal = self.hessian.diagonal().to(self.weight.device, torch.float32)
-            importance = diagonal.clamp_min(_IMPORTANCE_FLOOR * diagonal.mean()).sqrt()
+            mean = diagonal.mean()
+            # A module no calibration token reached (an idle MoE expert) has a zero Hessian, and
+            # weighting by it would make every code score zero error: keep the plain search.
+            if mean > 0:
+                importance = diagonal.clamp_min(_IMPORTANCE_FLOOR * mean).sqrt()
 
         def quantize_group(group, columns):
             kwargs = {} if importance is None else {"importance": importance[columns]}

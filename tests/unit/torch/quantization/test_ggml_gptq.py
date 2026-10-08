@@ -179,6 +179,23 @@ def test_gptq_weights_the_search_by_the_root_of_the_hessian_diagonal(
     torch.testing.assert_close(importance / importance.mean(), root / root.mean())
 
 
+def test_a_module_calibration_never_reached_gets_the_plain_search():
+    # An MoE expert that no calibration token reaches keeps a zero Hessian. Weighting by its
+    # diagonal would make every code score zero error, so GPTQ must fall back to the plain search.
+    torch.manual_seed(0)
+    model = torch.nn.ModuleDict(
+        {"used": torch.nn.Linear(512, 8, bias=False), "unused": torch.nn.Linear(512, 8, bias=False)}
+    )
+    original = model["unused"].weight.detach().clone()
+    inputs = _inputs()
+    algorithm = {**GPTQ, "importance_weighted": True}
+    mtq.quantize(model, _iq_config(algorithm, "iq2_xxs"), forward_loop=lambda m: m["used"](inputs))
+
+    packed, shape = IQ2_XXS.quantize(original)
+    plain = IQ2_XXS.dequantize(packed, shape, dtype=original.dtype)
+    torch.testing.assert_close(model["unused"].weight.detach(), plain, rtol=0, atol=0)
+
+
 def test_pin_outlives_the_weight_tensor():
     model, _ = _gptq_model()
     # Same values in a new tensor, as an offload round trip or a layerwise resume leaves them.
