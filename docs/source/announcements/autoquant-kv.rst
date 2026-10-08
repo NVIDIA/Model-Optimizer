@@ -163,7 +163,7 @@ RULER-128K**, compared with −6.54 for uniform NVFP4. These results isolate KV
 quantization: all model weights remain BF16. They do not measure the composed
 GEMM+KV recipe above.
 
-.. image:: assets/autoquant-kv-qwen3-8b-accuracy-memory.png
+.. image:: assets/autoquant-kv-qwen3-8b-accuracy-memory.svg
    :alt: AutoQuant 5.76 uses 1.62 GiB of modeled KV payload versus 4.50 GiB for BF16 at 32768 tokens; RULER accuracy changes by minus 1.04 points versus minus 6.54 for NVFP4.
    :width: 100%
 
@@ -194,7 +194,7 @@ The study searched FP8 K/V, FP8 K with NVFP4 V, and NVFP4 K/V. Both AQ maps keep
 all values in NVFP4; 17 of 36 layers use FP8 keys at 5.33 bits, and 26 at 5.76
 bits. Their requested budgets were 5.375 and 5.8125 bits.
 
-.. image:: assets/autoquant-kv-qwen3-8b-layer-allocation.png
+.. image:: assets/autoquant-kv-qwen3-8b-layer-allocation.svg
    :alt: AutoQuant selects FP8 keys in 17 of 36 layers at 5.33 bits and 26 layers at 5.76 bits; all value caches use NVFP4.
    :width: 100%
 
