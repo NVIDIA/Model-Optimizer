@@ -106,6 +106,21 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
         group_key = qkv_match.group(1) + "qkv_proj." + qkv_match.group(3) + suffix
         return ("group", group_key, value)
 
+    # Packed GPT-OSS/Llama4 experts use the same fused quantizers as per-expert weights.
+    packed_expert_match = re.search(
+        r"(.*\.experts)\.(gate_up|down)_proj\.([^.]+_quantizer)(\..+)?$", key
+    )
+    if packed_expert_match:
+        projection = "w13" if packed_expert_match.group(2) == "gate_up" else "w2"
+        new_key = (
+            packed_expert_match.group(1)
+            + _EXPERTS_INFIX
+            + f".{projection}_"
+            + packed_expert_match.group(3)
+            + (packed_expert_match.group(4) or "")
+        )
+        return ("group", new_key, value)
+
     # Expert gate/up (per-expert) → w13 merge
     expert_gate_up_match = re.search(
         r"(.*\.experts)\.\d+\.(gate|up)_proj\.([^.]+_quantizer)(\..+)?$", key
@@ -670,5 +685,9 @@ def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str,
     saved_quant_dict = process_state_dict_for_tp(saved_quant_dict, current_state_dict)
     for key, value in saved_quant_dict.items():
         if key in current_state_dict:
-            current_state_dict[key] = value.to(current_state_dict[key].device)
+            value = value.to(current_state_dict[key].device)
+            if key.endswith("._amax"):
+                # Calibration buffers may be BF16; keep the saved range's precision on reload.
+                model.get_submodule(key.removesuffix("._amax")).register_buffer("_amax", value)
+            current_state_dict[key] = value
     return current_state_dict

@@ -17,6 +17,7 @@
 import os
 import tempfile
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -197,8 +198,9 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         """Initialize recipe capture before lazy export shards are built."""
         super().__init__(*args, **kwargs)
         self._quantizer_state_for_recipe: dict[str, dict] = {}
-        self._quantizer_recipe_markers: list[tuple[str, dict]] = []
+        self._quantizer_recipe_markers: list[dict] = []
         self._quantizer_validation_failure = ""
+        self._packing_experts = False
 
     def _store_quantizer_recipe(self, name: str, recipe: dict) -> None:
         """Store one resolved recipe, requiring repeated routes to agree."""
@@ -223,7 +225,6 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         self, layer_state_dicts: Mapping[Any, dict[str, torch.Tensor]]
     ) -> None:
         """Resolve temporary recipe markers after the normal export mapping has routed them."""
-        routed_marker_ids: set[int] = set()
         for state_dict in layer_state_dicts.values():
             for key in list(state_dict):
                 if not key.endswith(self._QUANT_RECIPE_MARKER_SUFFIX):
@@ -231,20 +232,12 @@ class VllmFqGPTModelExporter(GPTModelExporter):
 
                 marker = state_dict.pop(key)
                 marker_ids = [int(i) for i in marker.detach().cpu().reshape(-1).tolist()]
-                recipes = [self._quantizer_recipe_markers[i][1] for i in marker_ids]
+                recipes = [self._quantizer_recipe_markers[i] for i in marker_ids]
                 if any(recipe != recipes[0] for recipe in recipes[1:]):
                     raise ValueError(f"Conflicting packed quantizer recipes routed to {key}")
 
                 recipe_name = key[: -len(self._QUANT_RECIPE_MARKER_SUFFIX)]
                 self._store_quantizer_recipe(recipe_name, recipes[0])
-                routed_marker_ids.update(marker_ids)
-
-        # Packed expert mappings currently consume only selected tensor fields instead of
-        # forwarding arbitrary name_to_value entries. Their supplied prefix is already final,
-        # so use the normalized source name for markers that were not emitted into a shard.
-        for marker_id, (source_name, recipe) in enumerate(self._quantizer_recipe_markers):
-            if marker_id not in routed_marker_ids:
-                self._store_quantizer_recipe(source_name, recipe)
 
     def _get_quantizer_state(self, state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Move routed quantizer tensors and recipe markers out of a weight shard."""
@@ -294,6 +287,24 @@ class VllmFqGPTModelExporter(GPTModelExporter):
 
     def _get_quantization_format(self, module: torch.nn.Module):
         return QUANTIZATION_NONE
+
+    @contextmanager
+    def _collect_packed_quantizers(self):
+        """Capture quantizer entries that packed weight mappings do not forward."""
+        previous = self._packing_experts
+        self._packing_experts = True
+        try:
+            yield
+        finally:
+            self._packing_experts = previous
+
+    def _pack_name_remapping(self, *args, **kwargs):
+        with self._collect_packed_quantizers():
+            return super()._pack_name_remapping(*args, **kwargs)
+
+    def _pack_name_remapping_gpt_oss(self, *args, **kwargs):
+        with self._collect_packed_quantizers():
+            return super()._pack_name_remapping_gpt_oss(*args, **kwargs)
 
     def _self_attention_scaling(
         self, module, prefix, k_scale_name="k_scale", v_scale_name="v_scale", is_mtp=False
@@ -345,7 +356,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         source_prefix = prefix if not prefix or prefix.endswith(".") else prefix + "."
         for qname, qstate in quantizer_configs.items():
             marker_id = len(self._quantizer_recipe_markers)
-            self._quantizer_recipe_markers.append((source_prefix + qname, qstate))
+            self._quantizer_recipe_markers.append(qstate)
             name_to_value[qname + self._QUANT_RECIPE_MARKER_SUFFIX] = torch.tensor(
                 marker_id, dtype=torch.int64
             )
@@ -403,6 +414,24 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             if amax is not None:
                 name = get_unwrapped_name(name, module)
                 name_to_value[name + "._amax"] = amax.detach().cpu().clone()
+        if self._packing_experts:
+            for name, value in self._get_quantizer_state(name_to_value).items():
+                key = source_prefix + name
+                previous = self._state_dict.get(key)
+                if previous is not None:
+                    if name.endswith(self._QUANT_RECIPE_MARKER_SUFFIX):
+                        previous_recipe = self._quantizer_recipe_markers[int(previous.flatten()[0])]
+                        recipe = self._quantizer_recipe_markers[int(value)]
+                        if previous_recipe != recipe:
+                            self._quantizer_validation_failure = (
+                                self._quantizer_validation_failure
+                                or f"Conflicting packed quantizer recipes routed to {key}"
+                            )
+                        value = torch.cat((previous.reshape(-1), value.reshape(-1)))
+                    else:
+                        # vLLM shares one activation range across fused experts.
+                        value = torch.maximum(previous, value)
+                self._state_dict[key] = value
         return name_to_value, qformat, block_size
 
 

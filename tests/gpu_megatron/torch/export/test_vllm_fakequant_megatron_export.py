@@ -24,7 +24,11 @@ import torch
 import yaml
 from _test_utils.torch.megatron.models import get_mcore_gpt_model, get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import run_mcore_inference
-from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_nemotron_h_dir
+from _test_utils.torch.transformers_models import (
+    create_tiny_gpt_oss_dir,
+    create_tiny_llama_dir,
+    create_tiny_nemotron_h_dir,
+)
 from megatron.core.parallel_state import is_pipeline_last_stage
 from safetensors import safe_open
 
@@ -226,6 +230,74 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
 def test_mcore_vllm_export(dist_workers_size_1, tmp_path):
     """Cached export preserves default and supported quantizers from separate layers."""
     dist_workers_size_1.run(partial(_test_mcore_vllm_export, tmp_path))
+
+
+def _test_mcore_vllm_export_packed(tmp_path, rank, size):
+    model = get_mcore_gpt_model(
+        initialize_megatron=True,
+        hidden_size=128,
+        num_attention_heads=2,
+        num_query_groups=1,
+        num_moe_experts=4,
+        ffn_hidden_size=64,
+        moe_ffn_hidden_size=64,
+        max_sequence_length=64,
+        vocab_size=128,
+        normalization="RMSNorm",
+        softmax_type="learnable",
+    ).cuda()
+    # GPT-OSS has biased projections; the MCore helper defaults to bias-free linears.
+    for layer in model.decoder.layers:
+        for module in layer.modules():
+            weight = getattr(module, "weight", None)
+            if weight is not None and weight.ndim == 2:
+                module.bias = torch.nn.Parameter(weight.new_zeros(weight.shape[0]))
+    model = mtq.quantize(model, {**mtq.FP8_DEFAULT_CFG, "algorithm": None})
+    for layer in model.decoder.layers:
+        for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
+            for linear in (expert.linear_fc1, expert.linear_fc2):
+                linear.input_quantizer.amax = torch.tensor(1.001 + expert_id, device="cuda")
+                linear.weight_quantizer.disable()
+    # Only expert activations are active; folded weights need no calibration.
+    for name, quantizer in model.named_modules():
+        if isinstance(quantizer, TensorQuantizer) and ".local_experts." not in name:
+            quantizer.disable()
+    source = create_tiny_gpt_oss_dir(
+        tmp_path,
+        hidden_size=128,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=64,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        vocab_size=128,
+    )
+    export_dir = tmp_path / "packed_export"
+    exporter = VllmFqGPTModelExporter(model, source, dtype=torch.bfloat16)
+    _ = exporter.state_dict
+    exporter.save_pretrained(str(export_dir), source)
+    names = {
+        f"model.layers.{layer}.mlp.experts.{projection}.input_quantizer"
+        for layer in range(2)
+        for projection in ("gate_up_proj", "down_proj")
+    }
+    _, recipe, _ = _assert_exported_quantizers(export_dir, names, amax=4.001)
+    assert all(
+        recipe[name.replace("input_quantizer", "weight_quantizer")]["_disabled"] for name in names
+    )
+
+    model.decoder.layers[0].mlp.experts.local_experts[0].linear_fc1.input_quantizer.num_bits = 8
+    unsupported_dir = tmp_path / "conflicting_packed_export"
+    with pytest.raises(ValueError, match="Conflicting packed quantizer recipes"):
+        export_mcore_gpt_to_hf_vllm_fq(model, str(source), export_dir=str(unsupported_dir))
+    assert not list(unsupported_dir.glob("*.safetensors"))
+
+
+def test_mcore_vllm_export_packed(dist_workers_size_1, tmp_path):
+    """Packed GPT-OSS export preserves recipes and the maximum expert activation ranges."""
+    dist_workers_size_1.run(partial(_test_mcore_vllm_export_packed, tmp_path))
 
 
 def _test_mcore_vllm_export_mtp(tmp_path, rank, size):

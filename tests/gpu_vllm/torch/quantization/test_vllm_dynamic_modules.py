@@ -44,6 +44,7 @@ from _test_utils.torch.transformers_models import (
     create_tiny_deepseek_v3_dir,
     create_tiny_deepseek_v4_config_dir,
     create_tiny_glm5_next_config_dir,
+    create_tiny_gpt_oss_dir,
     create_tiny_llama_dir,
     create_tiny_qwen3_moe_dir,
 )
@@ -733,6 +734,8 @@ def _quantize_and_summarize(self, recipe_path=None, quantizer_path=None):
     if quantizer_path is not None:
         reload_utils = _load_example_module("vllm_reload_utils")
         model.load_state_dict(reload_utils.load_state_dict_from_path(quantizer_path, model))
+        with disable_compilation(model):
+            _forward_loop(model)
 
     parallel_linear_counts: dict[str, int] = {}
     moe_count = 0
@@ -867,24 +870,29 @@ def tiny_llama_llm(tmp_path_factory):
         _shutdown_llm(llm)
 
 
-@pytest.fixture(scope="module")
-def tiny_qwen3_moe_llm(tmp_path_factory):
-    tmp = tmp_path_factory.mktemp("tiny_qwen3_moe")
-    # head_dim=64 with num_attention_heads=2 is broadly supported by vLLM's attention backends.
-    model_dir = create_tiny_qwen3_moe_dir(
+@pytest.fixture(scope="module", params=["qwen3_moe", "gpt_oss"])
+def tiny_moe_llm(request, tmp_path_factory):
+    tmp = tmp_path_factory.mktemp(request.param)
+    create_model = (
+        create_tiny_qwen3_moe_dir if request.param == "qwen3_moe" else create_tiny_gpt_oss_dir
+    )
+    expert_config = (
+        {"moe_intermediate_size": 64, "num_experts": 4, "decoder_sparse_step": 1}
+        if request.param == "qwen3_moe"
+        else {"num_local_experts": 4}
+    )
+    model_dir = create_model(
         tmp,
         hidden_size=128,
-        intermediate_size=256,
-        moe_intermediate_size=64,
+        intermediate_size=64,
         num_hidden_layers=2,
         num_attention_heads=2,
         num_key_value_heads=1,
         max_position_embeddings=128,
         vocab_size=128,
         head_dim=64,
-        num_experts=4,
         num_experts_per_tok=2,
-        decoder_sparse_step=1,
+        **expert_config,
     )
     llm = _boot_llm(model_dir, moe_backend="triton", enable_expert_parallel=True)
     try:
@@ -1064,8 +1072,8 @@ def test_tiny_llama_quantize(tiny_llama_llm):
     _assert_quantizer_amax_is_static(summary)
 
 
-def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm, tmp_path):
-    """Restore exported recipes and ranges on real Qwen3-MoE linears and fused experts."""
+def test_tiny_moe_quantize(tiny_moe_llm, tmp_path):
+    """Restore packed and per-expert recipes and ranges on real MoE models."""
     active = {"_disabled": False, "_num_bits": [4, 3], "_axis": None, "_block_sizes": None}
     custom = {
         **active,
@@ -1073,23 +1081,33 @@ def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm, tmp_path):
         "_backend": "test_vllm_recipe",
         "_backend_extra_args": {"offset": 0.25},
     }
+    is_gpt_oss = tiny_moe_llm.llm_engine.model_config.hf_config.model_type == "gpt_oss"
     recipe = {}
     for layer in range(2):
-        for projection in ("q", "k", "v"):
-            recipe[f"model.layers.{layer}.self_attn.{projection}_proj.input_quantizer"] = custom
-        for expert in range(4):
-            for projection in ("gate", "up", "down"):
-                prefix = f"model.layers.{layer}.mlp.experts.{expert}.{projection}_proj"
-                recipe[f"{prefix}.input_quantizer"] = active
-                recipe[f"{prefix}.weight_quantizer"] = {"_disabled": True}
+        if not is_gpt_oss:
+            for projection in ("q", "k", "v"):
+                recipe[f"model.layers.{layer}.self_attn.{projection}_proj.input_quantizer"] = custom
+        projections = (
+            ("gate_up_proj", "down_proj")
+            if layer == 0
+            else tuple(
+                f"{expert}.{projection}_proj"
+                for expert in range(4)
+                for projection in ("gate", "up", "down")
+            )
+        )
+        for projection in projections:
+            prefix = f"model.layers.{layer}.mlp.experts.{projection}"
+            recipe[f"{prefix}.input_quantizer"] = active
+            recipe[f"{prefix}.weight_quantizer"] = {"_disabled": True}
     path = tmp_path / "quant_recipe.yaml"
     path.write_text(yaml.safe_dump(recipe))
     state_path = tmp_path / "quantizer_state.pth"
-    amax = torch.tensor(4.5, dtype=torch.bfloat16)
+    amax = torch.tensor(4.001, dtype=torch.float32)
     torch.save(
         {name + "._amax": amax for name, cfg in recipe.items() if not cfg["_disabled"]}, state_path
     )
-    summaries = tiny_qwen3_moe_llm.collective_rpc(
+    summaries = tiny_moe_llm.collective_rpc(
         _quantize_and_summarize, args=(str(path), str(state_path))
     )
     summary = summaries[0]
@@ -1106,7 +1124,7 @@ def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm, tmp_path):
 
     _assert_quantizer_amax_is_static(summary)
     enabled = summary["enabled_quantizers"]
-    assert len(enabled) == 6  # One fused QKV and two expert projections per layer.
+    assert len(enabled) == (4 if is_gpt_oss else 6)  # Two experts and optional QKV per layer.
     assert summary["restored_amaxes"].keys() == enabled.keys()
     assert all(torch.equal(value, amax) for value in summary["restored_amaxes"].values())
     assert all("weight_quantizer" not in name for name in enabled)
@@ -1124,8 +1142,9 @@ def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm, tmp_path):
     # a stale mapping is dropped silently at load and serves uncalibrated experts.
     reload_utils = _load_example_module("vllm_reload_utils")
     for hf_key, expected_quantizer in (
-        ("model.layers.0.mlp.experts.0.gate_proj.input_quantizer._amax", "w13_input_quantizer"),
-        ("model.layers.0.mlp.experts.0.down_proj.weight_quantizer._amax", "w2_weight_quantizer"),
+        ("model.layers.0.mlp.experts.gate_up_proj.input_quantizer._amax", "w13_input_quantizer"),
+        ("model.layers.0.mlp.experts.down_proj.weight_quantizer._amax", "w2_weight_quantizer"),
+        ("model.layers.1.mlp.experts.0.gate_proj.input_quantizer._amax", "w13_input_quantizer"),
     ):
         action, vllm_key, _ = reload_utils._convert_key_for_vllm(hf_key, 1.0)
         assert action == "group", (hf_key, action)
