@@ -75,7 +75,7 @@ class LinearAttentionState:
     started: bool  # Initial-state encoding has run; resuming must not repeat it.
     signature: str  # Execution/quantizer settings used to check compatible reuse.
     value_basis: str = "identity"  # Anchor and updates may use the Hadamard value basis.
-    precision: str = "vllm_0_15"  # Selects the native profile's reconstruction arithmetic.
+    precision: str = "vllm"  # Selects the native profile's reconstruction arithmetic.
 
     @property
     def cursor(self):
@@ -315,7 +315,7 @@ def recurrent_decode(
     if config.backend != "serving":
         raise ValueError("State QAT requires backend='serving'")
     block_v = config.state_block_v
-    serving = config.precision == "vllm_0_15"
+    serving = config.precision in ("vllm", "vllm_0_15")
     native_replay = config.precision == "replayssm"
     if q.device.type != "cuda":
         raise ValueError("Serving arithmetic requires CUDA")

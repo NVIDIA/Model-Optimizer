@@ -18,6 +18,7 @@ from copy import deepcopy
 import pytest
 import torch
 import torch.nn as nn
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -223,7 +224,10 @@ def test_quantizer_roundtrip_and_hybrid_selection(tmp_path):
 @pytest.mark.parametrize("reverse", [False, True], ids=["fp8-to-replay", "replay-to-fp8"])
 def test_restore_changed_policy_and_quantizer_together(tmp_path, reverse):
     states = [
-        (GDN_STATE_FP8_DYNAMIC, LinearAttentionConfig(backend="serving")),
+        (
+            GDN_STATE_FP8_DYNAMIC,
+            LinearAttentionConfig(backend="serving", precision="vllm_0_15"),
+        ),
         (
             {"num_bits": 8, "axis": (0, 1), "type": "dynamic", "narrow_range": True},
             LinearAttentionConfig(backend="serving", precision="replayssm"),
@@ -315,3 +319,30 @@ def test_policy_rejects_unmatched_and_unimplemented_modes():
     ):
         with pytest.raises(ValueError):
             QuantizeConfig(linear_attention=[{"module_name": "*", "cfg": policy}])
+
+
+def _test_policy_matches_across_stages(rank, size):
+    config = {
+        "quant_cfg": [{"quantizer_name": "*", "enable": False}],
+        "linear_attention": [{"module_name": "layer", "cfg": {"backend": "serving"}}],
+        "algorithm": None,
+    }
+    try:
+        # Only rank 1 owns a selected layer; both stages use the same recipe and phase.
+        layer = TinyGatedDeltaNet() if rank else nn.Linear(4, 4)
+        model = mtq.quantize(nn.ModuleDict({"layer": layer}), config)
+        with linear_attention_training_phase(model, [3]):
+            if rank:
+                assert model["layer"]._linear_attention_prefill_lengths == (3,)
+        if rank:
+            assert model["layer"]._linear_attention_prefill_lengths is None
+
+        config["linear_attention"][0]["module_name"] = "missing"
+        with pytest.raises(ValueError, match="matches no supported"):
+            mtq.quantize(model, config)
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+def test_policy_matches_across_stages(skip_on_windows):
+    spawn_multiprocess_job(2, _test_policy_matches_across_stages, backend="gloo")

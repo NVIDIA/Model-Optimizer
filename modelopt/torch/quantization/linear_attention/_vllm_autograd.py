@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Differentiable adapter for pinned serving arithmetic.
+"""Differentiable adapter for the installed serving runtime's arithmetic.
 
 The kernels supply forward values. Autograd differentiates the corresponding
 operations evaluated at those values; operand casts and QDQ use identity STE.

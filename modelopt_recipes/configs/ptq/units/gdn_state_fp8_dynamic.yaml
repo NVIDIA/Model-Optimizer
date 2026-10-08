@@ -19,7 +19,7 @@
 # Set BV through linear_attention[].cfg.state_block_v (default: 64).
 # This unit enables only the quantizer. Select backend='serving' in the execution
 # policy and provide prefill lengths through linear_attention_training_phase.
-# With precision='vllm_0_15', state QDQ applies at the handoff to a nonempty decode
+# With precision='vllm', state QDQ applies at the handoff to a nonempty decode
 # suffix and at each suffix token's cache write; fresh prefill has no internal QDQ.
 # The serving profile requires public vLLM's GDN kernels.
 # See modelopt.torch.quantization.plugins.gdn.

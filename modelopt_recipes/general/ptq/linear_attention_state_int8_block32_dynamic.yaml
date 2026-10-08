@@ -33,4 +33,4 @@ quantize:
     - module_name: '*'
       cfg:
         backend: serving
-        precision: vllm_0_15
+        precision: vllm

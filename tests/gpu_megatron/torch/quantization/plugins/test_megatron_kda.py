@@ -39,7 +39,7 @@ from modelopt.torch.quantization.linear_attention import (
 )
 
 KimiDeltaAttention = pytest.importorskip("megatron.core.ssm.gated_delta_net.kda").KimiDeltaAttention
-pytest.importorskip("vllm.model_executor.layers.fla.ops.kda", exc_type=ModuleNotFoundError)
+pytest.importorskip("vllm")
 
 
 def _layer():
@@ -113,7 +113,7 @@ def _test_kda(rank, size, cfg, checkpoint_path):
     model, hidden, forward, baseline = _case(cfg)
     assert model.kda_state_quantizer.is_enabled
     assert model.kda_state_quantizer.num_bits == 8
-    assert model.linear_attention_config.precision == "vllm_0_15"
+    assert model.linear_attention_config.precision == "vllm"
     assert model.kda_state_quantizer.block_sizes == {-1: 32}
     kernel = model.gated_delta_rule
     with torch.no_grad():

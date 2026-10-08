@@ -22,20 +22,28 @@
 
 """Save FP32 training intermediates using vLLM's unchanged chunk-state kernel."""
 
+from inspect import signature
+
 import torch
 import triton
-from vllm.model_executor.layers.fla.ops.chunk_delta_h import (
-    chunk_gated_delta_rule_fwd_kernel_h_blockdim64,
+
+from ._compat import STATE_V_FIRST, fla_module
+
+_chunk = fla_module("chunk_delta_h")
+chunk_gated_delta_rule_fwd_kernel_h_blockdim64 = (
+    _chunk.chunk_gated_delta_rule_fwd_kernel_h_blockdim64
 )
-from vllm.model_executor.layers.fla.ops.index import prepare_chunk_offsets
+prepare_chunk_offsets = fla_module("index").prepare_chunk_offsets
+_HAS_EXP2 = "use_exp2" in signature(_chunk.chunk_gated_delta_rule_fwd_h).parameters
 
 
-def chunk_state(k, w, u, g, gk, initial_state, cu_seqlens):
+def chunk_state(k, w, u, g, gk, initial_state, cu_seqlens, use_exp2=False):
     """Return chunk-start states, residual values, and final state for one sequence."""
     _, length, heads, key_dim = k.shape
     value_dim = u.shape[-1]
     # The Torch adjoint needs unrounded values. Output kernels receive BF16 casts.
-    h = k.new_empty(1, triton.cdiv(length, 64), heads, key_dim, value_dim, dtype=torch.float32)
+    state_shape = (value_dim, key_dim) if STATE_V_FIRST else (key_dim, value_dim)
+    h = k.new_empty(1, triton.cdiv(length, 64), heads, *state_shape, dtype=torch.float32)
     updated = torch.empty_like(u, dtype=torch.float32)
     final = torch.empty_like(initial_state, dtype=torch.float32)
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[
@@ -58,5 +66,6 @@ def chunk_state(k, w, u, g, gk, initial_state, cu_seqlens):
         K=key_dim,
         V=value_dim,
         BT=64,
+        **({"USE_EXP2": use_exp2} if _HAS_EXP2 else {}),
     )
     return h, updated, final

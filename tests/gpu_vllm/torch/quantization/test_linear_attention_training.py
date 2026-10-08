@@ -26,20 +26,64 @@ from modelopt.torch.quantization.linear_attention import (
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
 
+vllm = pytest.importorskip("vllm")
+
+from modelopt.torch.kernels.quantization.linear_attention.serving._compat import fla_module
+
+
+@torch.no_grad()
+def _native_forward(args, quantizer, kda):
+    """Execute native prefill/decode directly, with QDQ in ModelOpt's [K,V] basis."""
+    prefill = fla_module("kda").chunk_kda if kda else fla_module("chunk").chunk_gated_delta_rule
+    step = (
+        fla_module("kda").fused_recurrent_kda
+        if kda
+        else fla_module("fused_recurrent").fused_recurrent_gated_delta_rule
+    )
+    value_first = vllm.__version_tuple__[:2] >= (0, 16)
+
+    def layout(state):
+        return state.transpose(-1, -2).contiguous() if value_first else state
+
+    state = layout(args[0].new_zeros(1, 1, args[0].shape[-1], args[2].shape[-1]).float())
+    prefix, state = prefill(
+        *[x[:, :65].detach().clone() for x in args],
+        initial_state=state,
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        cu_seqlens=torch.tensor([0, 65], device="cuda", dtype=torch.int32),
+    )
+    outputs = [prefix]
+    state = layout(quantizer(layout(state)[0])[None])
+    for token in range(65, 73):
+        output, state = step(
+            *[x[:, token : token + 1].detach().clone() for x in args],
+            initial_state=state,
+            inplace_final_state=False,
+            use_qk_l2norm_in_kernel=True,
+            cu_seqlens=torch.tensor([0, 1], device="cuda", dtype=torch.int32),
+        )
+        outputs.append(output)
+        state = layout(quantizer(layout(state)[0])[None])
+    return torch.cat(outputs, dim=1), layout(state)
+
 
 @pytest.fixture(scope="module", params=[False, True])
 def compiled_serving_case(request):
     """Compile one shared BF16 shape per model, outside the test-call timer."""
-    pytest.importorskip("vllm.model_executor.layers.fla.ops.kda", exc_type=ModuleNotFoundError)
     kda = request.param
     torch.manual_seed(73)
-    args = [torch.randn(1, 73, 1, 32, device="cuda", dtype=torch.bfloat16) for _ in range(3)]
+    # A rectangular GDN state detects accidental key/value-axis swaps.
+    args = [
+        torch.randn(1, 73, 1, dim, device="cuda", dtype=torch.bfloat16)
+        for dim in (32, 32, 32 if kda else 64)
+    ]
     args += [
         -torch.rand((1, 73, 1, 32) if kda else (1, 73, 1), device="cuda") * 0.03,
         torch.rand(1, 73, 1, device="cuda") * 0.4,
     ]
     args = [x.requires_grad_() for x in args]
-    policy = LinearAttentionConfig(backend="serving", precision="vllm_0_15")
+    policy = LinearAttentionConfig(backend="serving", precision="vllm")
     quantizer = TensorQuantizer(
         QuantizerAttributeConfig(
             num_bits=8,
@@ -60,12 +104,13 @@ def compiled_serving_case(request):
     )
     output, state = forward()
     torch.autograd.grad(output.float().sum() + state.sum(), args)
+    expected = _native_forward(args, quantizer, kda)
     torch.cuda.synchronize()
-    return args, quantizer, forward
+    return args, quantizer, forward, expected
 
 
 def test_serving_state_qdq_and_handoff_gradient(compiled_serving_case):
-    args, quantizer, forward = compiled_serving_case
+    args, quantizer, forward, (expected, expected_state) = compiled_serving_case
     calls = []
     handle = quantizer.register_forward_hook(lambda *_: calls.append(True))
     output, state = forward()
@@ -73,7 +118,6 @@ def test_serving_state_qdq_and_handoff_gradient(compiled_serving_case):
     # One handoff QDQ, then one QDQ per suffix update; none inside the fresh prefill.
     assert len(calls) == 9
     with torch.no_grad():
-        expected, expected_state = forward()
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
         torch.testing.assert_close(state, expected_state, rtol=0, atol=0)
         quantizer.disable()

@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Optional vLLM forward kernels for the ``vllm_0_15`` precision profile."""
+"""Optional vLLM forward kernels for linear-attention serving precision profiles."""
 
 try:
     import vllm
 except ImportError as error:
     raise ImportError(
-        "precision='vllm_0_15' requires the optional vLLM dependency; "
-        "install the dependencies in the linear-attention QAT example's requirements-vllm.txt."
+        "Linear-attention serving profiles require the optional vLLM dependency: "
+        "public vLLM for 'vllm' (legacy spelling 'vllm_0_15'), or the compatible quantized-ReplaySSM "
+        "vLLM fork for 'replayssm'."
     ) from error
