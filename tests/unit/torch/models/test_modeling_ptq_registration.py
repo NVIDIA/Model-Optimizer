@@ -17,8 +17,8 @@
 
 The HF quantization plugin imports every ``<model_type>/modeling_ptq.py`` from an explicit
 list, and those modules import back from the plugin, so registration depends on import
-order. Each case runs in a fresh interpreter: registration happens once per process, so an
-in-process test would only ever see the import order of whichever test ran first.
+order. Each first import runs in a fresh interpreter: registration happens once per process,
+so an in-process test would only ever see the import order of whichever test ran first.
 """
 
 import subprocess
@@ -73,9 +73,23 @@ assert predicates.index(is_nemotron_h_model) < predicates.index(is_homogeneous_h
 """
 
 
-@pytest.mark.parametrize("first_import", FIRST_IMPORTS)
-def test_registration_is_independent_of_import_order(first_import):
-    result = subprocess.run(
-        [sys.executable, "-c", CHECK, first_import], capture_output=True, text=True, check=False
+def test_registration_is_independent_of_import_order():
+    # Each first import needs its own interpreter, but starting them one after another would
+    # add over a minute to the unit-test job, so launch them all and then collect the results.
+    procs = {
+        first_import: subprocess.Popen(
+            [sys.executable, "-c", CHECK, first_import],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for first_import in FIRST_IMPORTS
+    }
+    failures = {}
+    for first_import, proc in procs.items():
+        _, stderr = proc.communicate(timeout=600)
+        if proc.returncode != 0:
+            failures[first_import] = stderr
+    assert not failures, "\n\n".join(
+        f"importing {name} first:\n{err}" for name, err in failures.items()
     )
-    assert result.returncode == 0, result.stderr
