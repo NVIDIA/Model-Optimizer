@@ -124,6 +124,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix ``examples/hf_ptq`` forcing Nemotron VL models onto a single GPU. The default now preserves automatic device mapping; ``--use_seq_device_map`` still selects sequential placement.
 - Fix calibration silently dropping samples when an out-of-memory error forces the batch to be
   split and a smaller working batch size is already known: the slices stopped tiling the batch,
   so the rows between the old and the new width never reached the model and the collected
