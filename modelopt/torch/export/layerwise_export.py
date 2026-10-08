@@ -444,8 +444,12 @@ class LayerwiseExporter:
                 continue
             self._collect(tail, name, tensor)
 
+        # Carry-over is recorded after bind(), when the tensor name mapper was built.
+        carried_names = set(getattr(model, "_modelopt_carried_over_names", ()))
         for name, tensor in (extra_state_dict or {}).items():
-            key = self._tensor_name_mapper(name) if self._tensor_name_mapper is not None else name
+            key = name
+            if name not in carried_names and self._tensor_name_mapper is not None:
+                key = self._tensor_name_mapper(name)
             tail[key] = tensor.detach().contiguous().cpu()
 
         save_file(tail, str(self._export_dir / _TAIL_SHARD))

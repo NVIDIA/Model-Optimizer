@@ -330,6 +330,14 @@ def apply_reverse_rules(
     return renamed
 
 
+def _carried_source_keys(model) -> set[str]:
+    """Return original checkpoint names, including the pre-export loader record."""
+    keys = getattr(model, "_modelopt_carried_over_names", None)
+    if keys is None:
+        keys = getattr(model, "_modelopt_unplaced_source_keys", None)
+    return set(keys or ())
+
+
 def revert_weight_conversion_quant_aware(model, state_dict: dict[str, torch.Tensor]):
     """Reverse a transformers conversion_mapping on a quantized state dict.
 
@@ -341,8 +349,18 @@ def revert_weight_conversion_quant_aware(model, state_dict: dict[str, torch.Tens
     split_rules, merge_rules, rename_rules, expert_fused_leaves = _build_reverse_rules(model)
     if not split_rules and not merge_rules and not rename_rules:
         return state_dict
-    _assert_experts_pre_expanded(state_dict, expert_fused_leaves)
-    return apply_reverse_rules(state_dict, split_rules, rename_rules, merge_rules)
+    # Carried tensors already use source names; only model-backed state needs conversion.
+    carried_keys = _carried_source_keys(model)
+    model_state = dict(state_dict)
+    carried = {key: model_state.pop(key) for key in carried_keys if key in model_state}
+    _assert_experts_pre_expanded(model_state, expert_fused_leaves)
+    reverted = apply_reverse_rules(model_state, split_rules, rename_rules, merge_rules)
+    if collisions := carried.keys() & reverted.keys():
+        raise QuantConversionUnsupportedError(
+            f"reverse conversion collision with carried source tensors: {sorted(collisions)}"
+        )
+    reverted.update(carried)
+    return reverted
 
 
 def build_reverse_name_mapper(model, *, tensor_keys: bool = False):
@@ -370,6 +388,9 @@ def build_reverse_name_mapper(model, *, tensor_keys: bool = False):
     if not merge_rules and not rename_rules:
         return None
     compiled = _compile_rename_rules(rename_rules)
+    source_names = _carried_source_keys(model)
+    if not tensor_keys:
+        source_names = {key.rsplit(".", 1)[0] for key in source_names if "." in key}
 
     def _apply(text: str) -> str:
         for rule in merge_rules:
@@ -377,6 +398,8 @@ def build_reverse_name_mapper(model, *, tensor_keys: bool = False):
         return _apply_rename_rules(text, compiled)
 
     def _map(name: str) -> str:
+        if name in source_names:
+            return name
         if tensor_keys:
             return _apply(name)
         base, suffix = name, ""

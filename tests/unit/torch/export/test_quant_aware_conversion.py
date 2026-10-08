@@ -29,10 +29,10 @@ from fnmatch import fnmatchcase
 
 import pytest
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.layerwise_export import LayerwiseExporter
+from modelopt.torch.export.layerwise_export import LAYERWISE_EXPORTER_ATTR, LayerwiseExporter
 from modelopt.torch.export.quant_aware_conversion import (
     QuantConversionUnsupportedError,
     RenameRule,
@@ -49,10 +49,12 @@ from modelopt.torch.export.unified_export_hf import (
     _revert_hf_quant_config_names,
     _revert_quant_config_names_best_effort,
     export_hf_checkpoint,
+    read_unplaced_weights,
 )
 from modelopt.torch.export.unified_export_hf_streaming import (
     _assert_no_split_rules,
     _build_reverse_name_mapper_or_none,
+    _export_transformers_checkpoint_streaming,
     _make_tensor_sink,
     _StreamingShardWriter,
 )
@@ -801,6 +803,69 @@ def test_export_weight_specific_rename_keeps_config_aligned(tmp_path, quantized_
         assert "head.input_scale" in written
     else:
         torch.testing.assert_close(written["head.weight"], original_head)
+
+
+@pytest.mark.parametrize(
+    ("export_mode", "recorded"),
+    [("resident", True), ("streaming", True), ("layerwise", True), ("layerwise", False)],
+)
+def test_export_preserves_carried_source_names(tmp_path, export_mode, recorded):
+    """Carried tensors and exclusions stay source-named while model tensors are reversed."""
+    model = _fp8_llama("model.layers.0.self_attn.q_proj.*quantizer")
+    # Local import: _fp8_llama guards the optional Transformers dependency.
+    from transformers.core_model_loading import WeightRenaming
+
+    model._weight_conversions = [WeightRenaming("original.lm_head", "lm_head")]
+    source_name = "original.lm_head.norm_mean"
+    source = tmp_path / "source"
+    source.mkdir()
+    expected = torch.arange(3, dtype=torch.float32)
+    save_file({source_name: expected}, str(source / "model.safetensors"))
+    model._modelopt_source_checkpoint = str(source)
+    model._modelopt_unplaced_source_keys = [source_name] if recorded else []
+    export = tmp_path / "export"
+    export.mkdir()
+
+    if export_mode == "layerwise":
+        exporter = LayerwiseExporter(model, export)
+        exporter.bind(list(model.model.layers))
+        exporter.export_layer(0, model.model.layers[0])
+        setattr(model, LAYERWISE_EXPORTER_ATTR, exporter)
+    if export_mode == "streaming":
+        carried = read_unplaced_weights(model)
+        model._modelopt_carried_over_names = sorted(carried)
+        _, config = _export_transformers_checkpoint_streaming(
+            model, export_dir=export, extra_state_dict=carried
+        )
+        config = _revert_quant_config_names_best_effort(model, config)
+    else:
+        export_hf_checkpoint(model, export_dir=export)
+        config = json.loads((export / "hf_quant_config.json").read_text())
+
+    written = _load_shards(export)
+    torch.testing.assert_close(written[source_name], expected, rtol=0, atol=0)
+    assert "original.lm_head.weight" in written
+    assert not any("original.original" in key or key.startswith("lm_head.") for key in written)
+    exclusions = config["quantization"]["exclude_modules"]
+    assert "original.lm_head" in exclusions
+    assert not any("original.original" in name or name == "lm_head" for name in exclusions)
+
+
+def test_reverse_conversion_rejects_collision_with_carried_tensor():
+    """A converted model tensor must not silently replace a carried source tensor."""
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: Transformers is optional for ModelOpt.
+    from transformers.core_model_loading import WeightRenaming
+
+    model = types.SimpleNamespace(
+        _weight_conversions=[WeightRenaming("original.head", "head")],
+        _modelopt_carried_over_names=["original.head.weight"],
+    )
+    state = {"head.weight": torch.ones(2, 2), "original.head.weight": torch.zeros(2, 2)}
+    with pytest.raises(QuantConversionUnsupportedError, match="collision"):
+        revert_weight_conversion_quant_aware(model, state)
+    assert list(state) == ["head.weight", "original.head.weight"]
+    assert torch.equal(state["original.head.weight"], torch.zeros(2, 2))
 
 
 @pytest.mark.parametrize("quantized_merge", [False, True])
