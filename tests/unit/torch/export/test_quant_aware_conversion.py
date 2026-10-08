@@ -48,16 +48,12 @@ from modelopt.torch.export.quant_aware_conversion import (
 from modelopt.torch.export.quant_utils import _prefix_wildcard_summarize_exclude_modules
 from modelopt.torch.export.unified_export_hf import (
     _revert_hf_quant_config_names,
-    _revert_quant_config_names_best_effort,
-    _write_hf_export_config,
     export_hf_checkpoint,
-    read_unplaced_weights,
 )
 from modelopt.torch.export.unified_export_hf_streaming import (
     _assert_no_split_rules,
     _build_reverse_name_mapper_or_none,
     _export_fsdp2_checkpoint_streaming,
-    _export_transformers_checkpoint_streaming,
     _make_tensor_sink,
     _StreamingShardWriter,
 )
@@ -828,20 +824,30 @@ def test_export_weight_specific_rename_keeps_config_aligned(
     ("export_mode", "recorded"),
     [("resident", True), ("streaming", True), ("layerwise", True), ("layerwise", False)],
 )
-def test_export_preserves_carried_source_names(tmp_path, export_mode, recorded):
-    """Carried tensors and exclusions stay source-named while model tensors are reversed."""
-    model = _fp8_llama("model.layers.0.self_attn.q_proj.*quantizer")
+@pytest.mark.parametrize("quantized", [False, True])
+@pytest.mark.parametrize("module_name", ["lm_head", "model.layers.0.self_attn.q_proj"])
+def test_export_preserves_carried_source_names(
+    tmp_path, export_mode, recorded, quantized, module_name
+):
+    """Carried buffers retain source names without excluding a live quantized sibling weight."""
+    model = _fp8_llama(
+        "model.layers.0.mlp.gate_proj.*quantizer",
+        *([f"{module_name}.*quantizer"] if quantized else []),
+    )
     # Local import: _fp8_llama guards the optional Transformers dependency.
     from transformers.core_model_loading import WeightRenaming
 
-    model._weight_conversions = [WeightRenaming("original.lm_head", "lm_head")]
-    source_name = "original.lm_head.norm_mean"
+    model._weight_conversions = [WeightRenaming(f"original.{module_name}", module_name)]
+    source_module = f"original.{module_name}"
     source = tmp_path / "source"
     source.mkdir()
-    expected = torch.arange(3, dtype=torch.float32)
-    save_file({source_name: expected}, str(source / "model.safetensors"))
+    carried = {
+        f"{source_module}.norm_mean": torch.arange(3, dtype=torch.float32),
+        "original.aux_proj.weight": torch.ones(2, 2, dtype=torch.bfloat16),
+    }
+    save_file(carried, str(source / "model.safetensors"))
     model._modelopt_source_checkpoint = str(source)
-    model._modelopt_unplaced_source_keys = [source_name] if recorded else []
+    model._modelopt_unplaced_source_keys = list(carried) if recorded else []
     export = tmp_path / "export"
     export.mkdir()
 
@@ -851,24 +857,28 @@ def test_export_preserves_carried_source_names(tmp_path, export_mode, recorded):
         exporter.export_layer(0, model.model.layers[0])
         setattr(model, LAYERWISE_EXPORTER_ATTR, exporter)
     if export_mode == "streaming":
-        carried = read_unplaced_weights(model)
-        model._modelopt_carried_over_names = sorted(carried)
-        _, config = _export_transformers_checkpoint_streaming(
-            model, export_dir=export, extra_state_dict=carried
-        )
-        config = _revert_quant_config_names_best_effort(model, config)
-        _write_hf_export_config(model, config, export)
-    else:
-        export_hf_checkpoint(model, export_dir=export)
-        config = json.loads((export / "hf_quant_config.json").read_text())
+        accelerate = pytest.importorskip("accelerate")
+        accelerate.cpu_offload(model.lm_head, execution_device=torch.device("cpu"))
+    export_hf_checkpoint(model, export_dir=export, save_modelopt_state=False)
+    config = json.loads((export / "hf_quant_config.json").read_text())
 
     written = _load_shards(export)
-    torch.testing.assert_close(written[source_name], expected, rtol=0, atol=0)
-    assert "original.lm_head.weight" in written
-    assert not any("original.original" in key or key.startswith("lm_head.") for key in written)
+    for key, expected in carried.items():
+        torch.testing.assert_close(written[key], expected, rtol=0, atol=0)
+    assert f"{source_module}.weight" in written
+    assert not any(
+        "original.original" in key or key.startswith(f"{module_name}.") for key in written
+    )
     exclusions = config["quantization"]["exclude_modules"]
-    assert "original.lm_head" in exclusions
-    assert not any("original.original" in name or name == "lm_head" for name in exclusions)
+    assert any(fnmatchcase(source_module, pattern) for pattern in exclusions) is not quantized
+    assert "original.aux_proj" in exclusions
+    assert not any("original.original" in name or name == module_name for name in exclusions)
+    embedded = json.loads((export / "config.json").read_text())["quantization_config"]
+    assert embedded["ignore"] == exclusions
+    if quantized:
+        assert written[f"{source_module}.weight"].dtype == torch.float8_e4m3fn
+        assert f"{source_module}.weight_scale" in written
+        assert f"{source_module}.input_scale" in written
 
 
 def test_reverse_conversion_rejects_collision_with_carried_tensor():

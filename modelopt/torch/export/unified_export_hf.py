@@ -38,6 +38,7 @@ from modelopt.torch.models import hf_model_type, is_moe
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     copy_off_index_safetensors,
+    indexed_weight_map,
     locate_source_keys,
     off_index_safetensors_files,
     sanitize_hf_config_for_deployment,
@@ -1586,7 +1587,9 @@ def _write_hf_export_config(
 ) -> None:
     """Write hf_quant_config.json (if quantized) and embed quantization_config into config.json."""
     if hf_quant_config is not None:
-        seed_carried_over_exclusions(model, hf_quant_config)
+        seed_carried_over_exclusions(
+            model, hf_quant_config, tensor_names=indexed_weight_map(export_dir)
+        )
     quantization_details = (hf_quant_config or {}).get("quantization", {})
     is_quantized_export = (
         quantization_details.get("quant_algo") is not None

@@ -18,7 +18,7 @@
 import fnmatch
 import logging
 from collections import defaultdict
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 from typing import Any
 from warnings import warn
 
@@ -1643,22 +1643,25 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
                 module.weight_quantizer.amax = weight_amax
 
 
-def seed_carried_over_exclusions(model: nn.Module, quant_config: dict) -> list[str]:
+def seed_carried_over_exclusions(
+    model: nn.Module, quant_config: dict, *, tensor_names: Iterable[str] | None = None
+) -> list[str]:
     """Add carried-weight module names to an already-built ``quant_config``'s exclusions.
 
     Exporters defer this until model-backed names have been reversed, since carried
     tensors already use source names and can share a parent name with a live module.
 
-    Exclusions are exact module names rather than prefix wildcards. That keeps both exporters
-    emitting the same thing, and a literal can never over-match a module the export did in fact
-    quantize -- the risk :func:`_prefix_wildcard_summarize_exclude_modules` has to guard against by
-    consulting ``quantized_layers``, which is unavailable by the time the layerwise path runs.
+    ``tensor_names`` supplies checkpoint keys in the config's namespace; exporters pass the
+    final index after name conversion. A carried buffer must not override the existing
+    quantization metadata for a model-backed weight with the same parent.
 
     Returns the names it added. No-op when the export is not uniformly quantized -- there is no
     single ``quant_algo`` for a deployment framework to misapply, so there is nothing to exclude
     a weight from.
     """
-    names = _get_carried_over_module_names(model)
+    if tensor_names is None:
+        tensor_names = (name for name, _ in model.named_parameters(remove_duplicate=False))
+    names = _get_carried_over_module_names(model, tensor_names=tensor_names)
     if not names:
         return []
     quantization = quant_config.get("quantization")
@@ -1674,7 +1677,9 @@ def seed_carried_over_exclusions(model: nn.Module, quant_config: dict) -> list[s
     return added
 
 
-def _get_carried_over_module_names(model: nn.Module) -> list[str]:
+def _get_carried_over_module_names(
+    model: nn.Module, *, tensor_names: Iterable[str] = ()
+) -> list[str]:
     """Return module names for checkpoint weights carried over without a module.
 
     Weights the loader could not place -- an MTP head, an auxiliary tower -- are copied into
@@ -1695,7 +1700,8 @@ def _get_carried_over_module_names(model: nn.Module) -> list[str]:
 
     A state-dict key is ``<module path>.<parameter name>``, so the owning module is the key with
     its last component removed. Keys without a dot are top-level tensors with no module and are
-    skipped.
+    skipped. Parents with a model-backed ``weight`` in ``tensor_names`` keep their existing
+    quantization metadata rather than gaining an exclusion solely for a carried buffer.
     """
     keys = getattr(model, "_modelopt_carried_over_names", None)
     if keys is None:
@@ -1705,7 +1711,14 @@ def _get_carried_over_module_names(model: nn.Module) -> list[str]:
         # ignores an exclusion it finds no weight for, but fails loading one it was never told
         # about.
         keys = getattr(model, "_modelopt_unplaced_source_keys", None) or []
-    return sorted({key.rsplit(".", 1)[0] for key in keys if "." in key})
+    if not keys:
+        return []
+    model_backed_weights = {
+        key.removesuffix(".weight")
+        for key in set(tensor_names) - set(keys)
+        if key.endswith(".weight")
+    }
+    return sorted({key.rsplit(".", 1)[0] for key in keys if "." in key} - model_backed_weights)
 
 
 def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:

@@ -880,6 +880,7 @@ def test_carried_over_weights_are_excluded_from_quantization():
         "model.mtp.eh_proj.weight",
         "model.mtp.eh_proj.bias",
         "model.mtp.embed_tokens.weight",
+        "block.experts.0.norm_mean",  # a buffer must not exclude its quantized sibling weight
     ]
 
     quant_config = get_quant_config(model)
@@ -1015,7 +1016,7 @@ def test_both_export_paths_exclude_carried_weights_identically():
 
 
 def test_seeded_exclusions_are_literal_module_names():
-    """Exact names, not prefix wildcards: a literal cannot over-match a quantized module."""
+    """Carried exclusions use exact module names, not prefix wildcards."""
     model = torch.nn.Module()
     model._modelopt_carried_over_names = ["model.mtp.eh_proj.weight"]
     cfg = {"quantization": {"quant_algo": "NVFP4", "exclude_modules": []}}
