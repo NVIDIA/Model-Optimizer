@@ -14,6 +14,7 @@ Changelog
 *Quantization*
 
 - Add Q8_0 weight-only quantization with 32-value GGML blocks, packed unified HF and Megatron export, and a built-in ``q8_0`` PTQ recipe.
+- Add ``upcast_ggml="bf16"`` to ``export_hf_checkpoint`` (``--upcast_ggml bf16`` in ``examples/hf_ptq/hf_ptq.py``): GGML-quantized weights are exported as the BF16 values their packed blocks decode to, with no quantization config, so runtimes without GGML kernels such as vLLM can evaluate the quantized model.
 - Add Hugging Face PTQ calibration and export support for Nemotron-H MTP modules, preserving calibrated expert input scales.
 - Backfill checkpoint aliases for nine more published NVFP4 releases, so each is reachable from its source model's hub path: ``zai-org/GLM-5.1`` and ``GLM-5.2``, ``MiniMaxAI/MiniMax-M2.5`` and ``MiniMax-M3``, ``deepseek-ai/DeepSeek-V3.1`` and ``DeepSeek-V3.2``, ``Qwen/Qwen3-235B-A22B-Instruct-2507`` and ``-Thinking-2507``, and ``Qwen/Qwen3.6-27B``. Each imports an existing general or architecture recipe wholesale rather than copying its body.
 - Add composed Hugging Face AutoQuantize recipes that run fixed PTQ or weight AutoQuantize before

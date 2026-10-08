@@ -646,6 +646,8 @@ python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --qformat fp8 --export
 ```
 
 > *For exporting fake-quantized models for vLLM serving (e.g., for research or kernels not yet supported in real-quant), use the `--vllm_fakequant_export` flag. See [vllm_serve/README.md](../vllm_serve/README.md) for details.*
+>
+> *To evaluate a GGML-quantized model (IQ formats, Q8_0) in stock vLLM, add `--upcast_ggml bf16`: the GGML weights are exported as the BF16 values their packed blocks decode to, with no quantization config.*
 
 ### Hugging Face framework [Script](./scripts/huggingface_example.sh)
 

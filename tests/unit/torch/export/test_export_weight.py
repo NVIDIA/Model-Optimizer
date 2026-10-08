@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import copy
 import dataclasses
 
 import pytest
@@ -22,13 +23,16 @@ import torch.nn as nn
 from _test_utils.torch.export.utils import ToyModel, partial_fp8_config, partial_w4a8_config
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.quant_utils import postprocess_state_dict
+from modelopt.torch.export.quant_format import QUANTIZATION_NONE
+from modelopt.torch.export.quant_utils import get_quantization_format, postprocess_state_dict
 from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     _process_quantized_modules,
+    _upcast_ggml_weights,
 )
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml.common import pin_packed_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils import quantizer_attr_names
 
@@ -185,6 +189,48 @@ def test_export_repacks_a_weight_changed_since_fake_quant(num_bits):
     _export_quantized_weight(linear, torch.bfloat16)
 
     assert torch.equal(linear.weight, expected)
+
+
+def test_export_drops_the_payload_gptq_pinned():
+    """GPTQ pins its payload to the quantizer as a buffer; only the packed weight is exported."""
+    linear = _iq_linear("q8_0")
+    packed, _ = GGML_FORMAT_REGISTRY["q8_0"].quantize(linear.weight.detach())
+    pin_packed_weight(linear.weight_quantizer, "q8_0", packed)
+
+    _export_quantized_weight(linear, torch.bfloat16)
+    state_dict = postprocess_state_dict(linear.state_dict(), maxbound=448, quantization=None)
+
+    assert list(state_dict) == ["weight"]
+
+
+@pytest.mark.parametrize("num_bits", sorted(GGML_FORMAT_REGISTRY))
+def test_upcast_ggml_writes_what_the_packed_export_decodes_to(num_bits):
+    model = nn.Sequential(nn.Linear(512, 4, bias=False, dtype=torch.bfloat16))
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": num_bits, "backend": "ggml"},
+                    "enable": True,
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+    packed = copy.deepcopy(model[0])
+    _export_quantized_weight(packed, torch.bfloat16)
+
+    _upcast_ggml_weights(model, torch.bfloat16)
+
+    expected = GGML_FORMAT_REGISTRY[num_bits].dequantize(
+        packed.weight, torch.tensor((4, 512)), dtype=torch.bfloat16
+    )
+    assert torch.equal(model[0].weight, expected)
+    # The layer now exports as an unquantized one, so it stays out of the quantization config.
+    assert get_quantization_format(model) == QUANTIZATION_NONE
 
 
 class QuantMoELinear(nn.Module):

@@ -1075,3 +1075,56 @@ def test_union_degrades_to_the_recorded_set_without_the_loader(tmp_path, monkeyp
 
     carried = read_unplaced_weights(model)
     assert key in carried, "recorded keys must still carry when the structural pass is unavailable"
+
+
+@pytest.mark.parametrize("moe", [False, True])
+def test_upcast_ggml_export_loads_as_a_plain_checkpoint(tmp_path, moe):
+    """With upcast_ggml="bf16" the checkpoint carries no quantization config, so a runtime without
+    GGML kernels loads it as an ordinary BF16 model, and every GGML weight holds its decoded payload.
+
+    The MoE model exercises the fused experts, which export splits into per-expert projections.
+    """
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: transformers and its test fixtures are optional dependencies.
+    from _test_utils.torch.transformers_models import get_tiny_qwen3, get_tiny_qwen3_moe
+    from transformers import AutoModelForCausalLM
+
+    from modelopt.torch.export import export_hf_checkpoint
+    from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
+
+    model = (get_tiny_qwen3_moe if moe else get_tiny_qwen3)()
+    original = {name: param.detach().clone() for name, param in model.named_parameters()}
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*mlp*weight_quantizer",
+                    "cfg": {"num_bits": "q8_0", "backend": "ggml"},
+                    "enable": True,
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+
+    export_hf_checkpoint(model, export_dir=tmp_path, upcast_ggml="bf16")
+
+    assert "quantization_config" not in json.loads((tmp_path / "config.json").read_text())
+    assert not (tmp_path / "hf_quant_config.json").exists()
+    reloaded = AutoModelForCausalLM.from_pretrained(tmp_path, dtype=torch.bfloat16)
+    q8_0 = GGML_FORMAT_REGISTRY["q8_0"]
+    for name, param in reloaded.named_parameters():
+        expected = original[name]
+        # The MoE router (mlp.gate) is not a linear, so it is never quantized.
+        if ".mlp." in name and not name.endswith(".mlp.gate.weight"):
+            expected = q8_0.dequantize(*q8_0.quantize(expected), dtype=expected.dtype)
+        assert torch.equal(param, expected), name
+
+
+def test_upcast_ggml_rejects_an_unsupported_dtype(tmp_path):
+    from modelopt.torch.export import export_hf_checkpoint
+
+    with pytest.raises(ValueError, match="upcast_ggml must be one of"):
+        export_hf_checkpoint(torch.nn.Linear(2, 2), export_dir=tmp_path, upcast_ggml="fp8")
