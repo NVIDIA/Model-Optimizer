@@ -39,7 +39,7 @@ from modelopt.torch.export.plugins.vllm_fakequant_megatron import (
     gather_mcore_vllm_fq_quantized_state_dict,
     gather_mcore_vllm_fq_quantizer_recipe,
 )
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 
 
 def _assert_exported_quantizers(export_dir, expected_names, amax=1.001, disabled_names=()):
@@ -390,6 +390,7 @@ def _assert_unsupported_settings(model, source, export_dir, rank, size):
         ),
         ("input_quantizer", {"enable": False, "rotate": True, "pre_quant_scale": True}),
         ("weight_quantizer", {"fake_quant": False}),
+        ("input_quantizer", {"sequential": True}),
     ]
     if rank == size - 1:
         linear = next(
@@ -403,10 +404,14 @@ def _assert_unsupported_settings(model, source, export_dir, rank, size):
         if rank == size - 1:
             original_quantizer = getattr(linear, quantizer_name)
             quantizer = deepcopy(original_quantizer)
+            if attribute_cfg.get("sequential"):
+                quantizer.disable()
+                quantizer = SequentialQuantizer(quantizer, deepcopy(original_quantizer))
+            else:
+                quantizer.set_from_attribute_config(
+                    {key: value for key, value in attribute_cfg.items() if key != "pre_quant_scale"}
+                )
             setattr(linear, quantizer_name, quantizer)
-            quantizer.set_from_attribute_config(
-                {key: value for key, value in attribute_cfg.items() if key != "pre_quant_scale"}
-            )
             if "pre_quant_scale" in attribute_cfg:
                 quantizer.pre_quant_scale = torch.full(
                     (linear.weight.shape[1],), 2.0, device="cuda"

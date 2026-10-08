@@ -26,7 +26,7 @@ import yaml
 
 from modelopt.torch.export.quant_format import QUANTIZATION_NONE
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.utils import get_unwrapped_name
 from modelopt.torch.utils.distributed import DistributedProcessGroup, is_master
 
@@ -37,6 +37,15 @@ def _quantizer_configs(module: torch.nn.Module) -> tuple[dict[str, dict], str]:
     """Return quantizer recipes and an unsupported-settings error, if any."""
     configs = {}
     for name, quantizer in module.named_modules():
+        if (
+            isinstance(quantizer, SequentialQuantizer)
+            and "weight_quantizer" not in name
+            and any(q.is_enabled and q._if_quant for q in quantizer)
+        ):
+            return {}, (
+                f"Unsupported vLLM fakequant quantizer settings for {name or '<root>'}: "
+                "sequential activation quantization"
+            )
         if not isinstance(quantizer, TensorQuantizer):
             continue
         is_weight_quantizer = "weight_quantizer" in name
