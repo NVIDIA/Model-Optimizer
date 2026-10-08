@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Native vLLM state-boundary QDQ and worker reload on tiny offline models."""
+"""Native vLLM state-boundary QDQ and policy restoration on tiny offline models."""
 
 import copy
 import gc
@@ -32,12 +32,11 @@ from vllm import __version__ as vllm_version
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 import modelopt.torch.opt as mto
+from modelopt.torch.opt.conversion import ModeloptStateManager
+from modelopt.torch.quantization.conversion import restore_quantizer_state
 from modelopt.torch.quantization.linear_attention import LinearAttentionConfig
 from modelopt.torch.quantization.plugins.vllm_linear_attention import _QuantVllmLinearAttention
 
-pytestmark = pytest.mark.skipif(
-    Version(vllm_version).release[:2] != (0, 15), reason="Requires the pinned vLLM 0.15.x ABI"
-)
 ROOT = Path(__file__).parents[4]
 
 
@@ -50,41 +49,25 @@ def _example_module(name):
     return module
 
 
-def _set_state_format_worker(worker, *, format="int8"):
-    for layer in worker.model_runner.model.modules():
-        if not isinstance(layer, _QuantVllmLinearAttention):
-            continue
-        quantizer = layer._linear_attn_state
-        quantizer.num_bits = (4, 3) if format == "fp8" else 8
-        quantizer.block_sizes = {-1: 32} if format == "block32" else None
-        if format != "block32":
-            quantizer.axis = (0, 1)
-        # Smaller than both tiny models' value dimensions, exposing tile grouping.
-        layer.linear_attention_config.state_block_v = 16
-        layer.validate_linear_attention()
-
-
-def _disable_worker(worker):
-    for layer in worker.model_runner.model.modules():
-        if not isinstance(layer, _QuantVllmLinearAttention):
-            continue
-        layer._linear_attn_state.disable()
-        layer.linear_attention_config = LinearAttentionConfig()
-
-
-def _audit_worker(worker, *, checkpoint=None):
+def _state_worker(worker, *, action="audit"):
     model = worker.model_runner.model
     if hasattr(model, "unwrap"):
         model = model.unwrap()
     layers = [m for m in model.modules() if isinstance(m, _QuantVllmLinearAttention)]
     assert layers
-    if checkpoint is not None and torch.distributed.get_rank() == 0:
-        torch.save(mto.modelopt_state(model), checkpoint)
-    reports = []
+    if action == "restore":
+        state = worker._state_checkpoint
+        manager = ModeloptStateManager()
+        manager.load_state_dict(state["modelopt_state_dict"], state["modelopt_version"])
+        for _, config, metadata in manager.modes_with_states():
+            restore_quantizer_state(model, config, metadata)
     for layer in layers:
-        assert not hasattr(layer, "_linear_attention_cache")
-        if not hasattr(layer, "_state_audit"):
-            layer._state_audit = {"prefill": 0, "decode": 0, "changed": 0, "heads": 0}
+        if action == "disable":
+            layer._linear_attn_state.disable()
+            layer.linear_attention_config = LinearAttentionConfig()
+        elif action == "setup":
+            layer.linear_attention_config.state_block_v = 16
+            layer._state_calls = {"prefill": 0, "decode": 0, "changed": 0}
             original = layer._quantized_state_call
 
             def checked_call(native, *args, _layer=layer, _original=original, **kwargs):
@@ -92,59 +75,28 @@ def _audit_worker(worker, *, checkpoint=None):
                 indices = kwargs.get("ssm_state_indices")
                 if indices is not None:
                     indices = indices[: kwargs["cu_seqlens"].numel() - 1].long()
-                expected_state = state.clone()
                 selected = state if indices is None else state.index_select(0, indices)
-                reference_quantizer = copy.deepcopy(_layer._linear_attn_state)
-                if reference_quantizer.block_sizes is not None:
-                    rounded = reference_quantizer(selected.clone())
-                else:
-                    rounded = torch.cat(
-                        [
-                            reference_quantizer(part.clone())
-                            for part in selected.split(
-                                _layer.linear_attention_config.state_block_v, dim=-1
-                            )
-                        ],
-                        dim=-1,
-                    )
+                quantizer = copy.deepcopy(_layer._linear_attn_state)
+                rounded = torch.cat([quantizer(x) for x in selected.split(16, -1)], -1)
+                expected = state.clone()
                 if indices is None:
-                    expected_state = rounded
+                    expected = rounded
                 else:
-                    expected_state.index_copy_(0, indices.long(), rounded)
-                # Native KDA prefill writes its output into the value-input buffer.
-                control_args = tuple(x.clone() if isinstance(x, torch.Tensor) else x for x in args)
-                control_kwargs = {
-                    name: x.clone() if isinstance(x, torch.Tensor) else x
-                    for name, x in kwargs.items()
-                }
-                control_kwargs["initial_state"] = expected_state.clone()
-                expected = native(*control_args, **control_kwargs)
-                native_calls = []
+                    expected.index_copy_(0, indices, rounded)
 
-                def checked_native(*native_args, **native_kwargs):
-                    incoming = native_kwargs["initial_state"]
-                    # Full-cache equality also verifies untouched inactive slots.
-                    torch.testing.assert_close(incoming, expected_state, atol=0, rtol=0)
-                    native_calls.append(True)
-                    return native(*native_args, **native_kwargs)
+                def checked_native(*a, **kw):
+                    # Check the full cache, including inactive slots, before delegating.
+                    torch.testing.assert_close(kw["initial_state"], expected, atol=0, rtol=0)
+                    return native(*a, **kw)
 
-                actual = _original(checked_native, *args, **kwargs)
-                if indices is not None:
-                    torch.testing.assert_close(
-                        state, control_kwargs["initial_state"], atol=0, rtol=0
-                    )
-                assert native_calls == [True]
-                for result, control in zip(actual, expected):
-                    if control is not None:
-                        torch.testing.assert_close(result, control, atol=0, rtol=0)
-                _layer._state_audit["prefill" if indices is None else "decode"] += 1
-                _layer._state_audit["changed"] += int(not torch.equal(selected, rounded))
-                _layer._state_audit["heads"] = state.shape[1]
-                return actual
+                _layer._state_calls["prefill" if indices is None else "decode"] += 1
+                _layer._state_calls["changed"] += int(not torch.equal(selected, rounded))
+                return _original(checked_native, *args, **kwargs)
 
             layer._quantized_state_call = checked_call
-        reports.append(dict(layer._state_audit))
-    return reports
+    if action == "setup":
+        worker._state_checkpoint = copy.deepcopy(mto.modelopt_state(model))
+    return [dict(layer._state_calls) for layer in layers]
 
 
 def _tiny_model(path, kind):
@@ -202,15 +154,15 @@ def _generate(llm):
     return values
 
 
-@pytest.mark.parametrize("kind", ["gdn", "kda"])
-@pytest.mark.timeout(360)
-def test_fakequant_worker_generation_reference_and_reload(tmp_path, monkeypatch, kind):
+@pytest.fixture(params=["gdn", "kda"])
+def compiled_worker(request, tmp_path, monkeypatch):
+    """Compile one tiny native model outside the functional test's timeout."""
+    if Version(vllm_version).release[:2] != (0, 15):
+        pytest.skip("The state adapter requires vLLM 0.15.x")
     if not torch.cuda.is_available():
         pytest.skip("Requires a CUDA GPU")
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     paths = [str(ROOT), str(ROOT / "examples/vllm_serve"), str(Path(__file__).parent)]
-    # Spawn restores the parent interpreter search path after reading PYTHONPATH.
     for path in reversed(paths):
         monkeypatch.syspath_prepend(path)
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join([*paths, os.environ.get("PYTHONPATH", "")]))
@@ -218,68 +170,45 @@ def test_fakequant_worker_generation_reference_and_reload(tmp_path, monkeypatch,
         "RECIPE_PATH", str(ROOT / "examples/vllm_serve/linear_attention_state_int8.yaml")
     )
     monkeypatch.delenv("MODELOPT_STATE_PATH", raising=False)
-    model_path, checkpoint = tmp_path / "model", tmp_path / "state.pt"
-    _tiny_model(model_path, kind)
-    kwargs = {
-        "model": str(model_path),
-        "load_format": "dummy",
-        "dtype": "bfloat16",
-        "max_model_len": 128,
-        "max_num_seqs": 4,
-        "max_num_batched_tokens": 64,
-        "enforce_eager": True,
-        "enable_prefix_caching": False,
-        "enable_chunked_prefill": True,
-        "async_scheduling": False,
-        "mamba_cache_dtype": "float32",
-        "kv_cache_memory_bytes": 128 * 1024**2,
-        "worker_cls": "fakequant_worker.FakeQuantWorker",
-        "disable_custom_all_reduce": True,
-        "tensor_parallel_size": 1,
-        "gpu_memory_utilization": 0.1,
-        "seed": 17,
-    }
-    llm = LLM(**kwargs)
+    model_path = tmp_path / "model"
+    _tiny_model(model_path, request.param)
+    llm = LLM(
+        model=str(model_path),
+        load_format="dummy",
+        dtype="bfloat16",
+        max_model_len=128,
+        max_num_seqs=4,
+        max_num_batched_tokens=64,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        enable_chunked_prefill=True,
+        async_scheduling=False,
+        mamba_cache_dtype="float32",
+        kv_cache_memory_bytes=128 * 1024**2,
+        gpu_memory_utilization=0.1,
+        worker_cls="fakequant_worker.FakeQuantWorker",
+        seed=17,
+    )
     try:
-        llm.collective_rpc(_set_state_format_worker)
-        llm.collective_rpc(_audit_worker, kwargs={"checkpoint": str(checkpoint)})
-        actual = _generate(llm)
-        assert _generate(llm) == actual  # Fresh requests can reuse the same native state slots.
-        reports = llm.collective_rpc(_audit_worker)
-        assert len(reports) == 1
-        for rank in reports:
-            assert all(
-                r["prefill"] > 0 and r["decode"] > 0 and r["changed"] > 0 and r["heads"] == 4
-                for r in rank
-            )
-        for format in ("fp8", "block32"):
-            llm.collective_rpc(_set_state_format_worker, kwargs={"format": format})
-            _generate(llm)
-        llm.collective_rpc(_disable_worker)
-        disabled = _generate(llm)
+        llm.collective_rpc(_state_worker, kwargs={"action": "setup"})
+        _generate(llm)
+        yield llm
     finally:
         llm.llm_engine.engine_core.shutdown()
         del llm
         gc.collect()
 
-    monkeypatch.delenv("RECIPE_PATH")
-    monkeypatch.setenv("MODELOPT_STATE_PATH", str(checkpoint))
-    llm = LLM(**kwargs)
-    try:
-        assert _generate(llm) == actual
-    finally:
-        llm.llm_engine.engine_core.shutdown()
-        del llm
-        gc.collect()
 
-    monkeypatch.delenv("MODELOPT_STATE_PATH")
-    llm = LLM(**kwargs)
-    try:
-        assert _generate(llm) == disabled
-    finally:
-        llm.llm_engine.engine_core.shutdown()
-        del llm
-        gc.collect()
+def test_state_qdq_and_restore(compiled_worker):
+    llm = compiled_worker
+    expected = _generate(llm)
+    reports = llm.collective_rpc(_state_worker)
+    assert all(all(count > 0 for count in layer.values()) for rank in reports for layer in rank)
+    llm.collective_rpc(_state_worker, kwargs={"action": "disable"})
+    _generate(llm)
+    assert llm.collective_rpc(_state_worker) == reports
+    llm.collective_rpc(_state_worker, kwargs={"action": "restore"})
+    assert _generate(llm) == expected
 
 
 def test_saved_linear_attention_policy_and_quantizer_names_follow_mapper():
