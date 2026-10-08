@@ -124,6 +124,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix ``MXFP4QTensor.quantize`` (used by MXFP4 export) rounding E2M1 halfway cases down instead of to even, so exported weights at 0.75, 1.75 and 3.5 times the block scale differed from MXFP4 fake quantization. Zeros are no longer encoded with the sign bit set.
 - Fix calibration silently dropping samples when an out-of-memory error forces the batch to be
   split and a smaller working batch size is already known: the slices stopped tiling the batch,
   so the rows between the old and the new width never reached the model and the collected

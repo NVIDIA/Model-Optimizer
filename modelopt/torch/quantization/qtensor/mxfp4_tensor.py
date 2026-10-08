@@ -44,11 +44,12 @@ class MXFP4QTensor(BaseQuantizedTensor):
         """
 
         def cast_fp4(x):
-            sign = torch.sign(x)
-            sign_bit = (2 - sign) // 2
-            ord_ = torch.sum(
-                (x.abs().unsqueeze(-1) - MXFP4QTensor.E2M1_bounds.to(x.device)) > 0, dim=-1
-            )
+            sign_bit = (x < 0).to(torch.uint8)
+            x_abs = x.abs().unsqueeze(-1)
+            e2m1_bounds = MXFP4QTensor.E2M1_bounds.to(x.device)
+            ord_ = torch.sum(x_abs > e2m1_bounds, dim=-1)
+            # Round half to even: ties at 0.75, 1.75 and 3.5 go up to the even code
+            ord_ = ord_ + torch.any(x_abs == e2m1_bounds[[1, 3, 5]], dim=-1)
             fp4_val = (sign_bit * 0b1000 + ord_).to(torch.uint8)
             return fp4_val
 
