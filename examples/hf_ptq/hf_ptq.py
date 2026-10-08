@@ -716,6 +716,7 @@ def export_quantized(
                 export_hf_checkpoint(
                     full_model,
                     export_dir=export_path,
+                    upcast_ggml=args.upcast_ggml,
                 )
 
                 if args.qformat == "w4a16_nvfp4":
@@ -960,6 +961,11 @@ def quantize_main(
             raise NotImplementedError(
                 "layerwise.export_dir is not supported with an AutoQuantize recipe; "
                 "use a PTQ recipe, or drop export_dir and export afterwards."
+            )
+        if args.upcast_ggml:
+            # Fail before calibration rather than after: the layer shards are written packed.
+            raise NotImplementedError(
+                "--upcast_ggml is not supported with layerwise.export_dir; drop export_dir."
             )
         if not args.skip_generate:
             print("Layerwise export: forcing --skip_generate, the model is left in export form.")
@@ -1351,6 +1357,16 @@ def parse_args() -> argparse.Namespace:
         "for use with vllm_serve_fakequant.py).",
     )
     parser.add_argument(
+        "--upcast_ggml",
+        default=None,
+        choices=["bf16"],
+        help=(
+            "Export GGML-quantized weights (IQ formats, Q8_0) as the values their packed blocks "
+            "decode to in this dtype, rather than as the blocks, so runtimes without GGML kernels "
+            "such as vLLM can evaluate the checkpoint."
+        ),
+    )
+    parser.add_argument(
         "--cast_mxfp4_to_nvfp4",
         action="store_true",
         default=False,
@@ -1432,6 +1448,11 @@ def parse_args() -> argparse.Namespace:
         parser.error(f"--use_fsdp2 does not support --sparsity_fmt {args.sparsity_fmt}.")
     if args.use_fsdp2 and args.vllm_fakequant_export:
         parser.error("--use_fsdp2 does not support --vllm_fakequant_export.")
+    if args.upcast_ggml and args.vllm_fakequant_export:
+        parser.error(
+            "--upcast_ggml applies to the unified HF export; --vllm_fakequant_export already "
+            "writes fake-quantized weights."
+        )
     if args.use_fsdp2 and args.cast_mxfp4_to_nvfp4:
         parser.error("--use_fsdp2 does not support --cast_mxfp4_to_nvfp4.")
 
