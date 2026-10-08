@@ -228,8 +228,8 @@ def _resolve(index: str, pin: Version | None) -> str:
         raise RuntimeError(
             f"pip finds no deep_gemm wheel for {_python_tag()} on {platform.machine()} on {index}, "
             f"see its output above. {DEEPGEMM_URL_ENV} takes a package index (https://.../simple) "
-            "or a wheel; to serve a DeepGEMM source tree, build its wheel with "
-            "`pip wheel --no-deps --no-build-isolation <source> -w <dir>` and pass that file."
+            "or a wheel; to serve a DeepGEMM source tree, install it into the environment with "
+            "`pip install --no-deps --no-build-isolation <source>` instead."
         )
     selected = json.loads(result.stdout)["install"]
     if len(selected) != 1:  # --no-deps and --ignore-installed: deep_gemm only

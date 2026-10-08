@@ -275,7 +275,7 @@ def test_inputs_are_checked_before_pip_runs(deepgemm, monkeypatch, url, version,
 
 
 def test_pip_failures_are_reported(deepgemm, monkeypatch):
-    """Nothing is built: a git URL or source tree finds no wheel, with a hint to build one."""
+    """Nothing is built: a git URL or source tree finds no wheel, with a hint to install it."""
     _Subprocesses(deepgemm, monkeypatch, returncode=1)
     git = "git+https://git.example.com/group/deepgemm.git@main"
     with pytest.raises(RuntimeError) as error:
@@ -284,7 +284,7 @@ def test_pip_failures_are_reported(deepgemm, monkeypatch):
         f"pip finds no deep_gemm wheel for {deepgemm._python_tag()} on {os.uname().machine} on "
         f"{git}, see its output above."
     )
-    assert "build its wheel with `pip wheel --no-deps" in str(error.value)
+    assert "install it into the environment with `pip install --no-deps" in str(error.value)
     with pytest.raises(RuntimeError, match=re.escape(f"from {INDEX} failed, see the pip output")):
         deepgemm.install_deepgemm(INDEX, NEWEST)
     assert [path.name for path in _wheels().iterdir()] == [".lock"]  # no folder, no staging

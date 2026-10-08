@@ -250,15 +250,16 @@ change. `<cache>` is `MODELOPT_DEEPGEMM_CACHE_DIR`, else `$VLLM_CACHE_ROOT/model
 
 `DEEPGEMM_URL` also takes a single wheel (a path, or an `https://` or `file://` URL), installed the
 same way; a local wheel once per content, so a rebuilt wheel of the same version is installed
-again. To serve a DeepGEMM that has no published wheel, such as a local branch, build its wheel
-where DeepGEMM can be built and pass the file:
+again.
+
+To serve a DeepGEMM source tree, such as a local branch, install it into the serving environment
+instead; vLLM then uses it, without `DEEPGEMM_URL`, for every serve from that environment until it
+is uninstalled:
 
 ```bash
-pip wheel --no-deps --no-build-isolation <DeepGEMM source directory or git URL> -w dist/
-DEEPGEMM_URL=dist/deep_gemm-<version>-<tags>.whl python vllm_serve_fakequant.py ...
+pip install --no-deps --no-build-isolation <DeepGEMM source directory or git URL>
+python vllm_serve_fakequant.py ...
 ```
-
-Give the exact file name: a `*` in `DEEPGEMM_URL=` is not expanded.
 
 Notes:
 
