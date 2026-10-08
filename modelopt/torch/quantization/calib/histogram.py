@@ -89,7 +89,11 @@ class HistogramCalibrator(_Calibrator):
 
             if self._calib_bin_edges is None and self._calib_hist is None:
                 # first time it uses num_bins to compute histogram.
-                self._calib_hist, self._calib_bin_edges = np.histogram(x_np, bins=self._num_bins)
+                # Start the bins at 0 like the torch path, so later batches with smaller
+                # values than the first batch's minimum are not dropped.
+                self._calib_hist, self._calib_bin_edges = np.histogram(
+                    x_np, bins=self._num_bins, range=(0, x_np.max()) if x_np.size else None
+                )
             else:
                 temp_amax = np.max(x_np)
                 if temp_amax > self._calib_bin_edges[-1]:  # type: ignore[index]
