@@ -146,9 +146,12 @@ def test_gptq_on_a_ggml_format_pins_the_payload_it_chose():
     assert weighted_error(model.weight) < weighted_error(plain.weight_quantizer(plain.weight))
 
 
-@pytest.mark.parametrize(("num_bits", "weighted"), [("iq2_xxs", True), ("iq1_s", False)])
+@pytest.mark.parametrize(
+    ("num_bits", "importance_weighted", "weighted"),
+    [("iq2_xxs", True, True), ("iq2_xxs", False, False), ("iq1_s", True, False)],
+)
 def test_gptq_weights_the_search_by_the_root_of_the_hessian_diagonal(
-    monkeypatch, num_bits, weighted
+    monkeypatch, num_bits, importance_weighted, weighted
 ):
     ggml_format = GGML_FORMAT_REGISTRY[num_bits]
     calls = []
@@ -164,7 +167,8 @@ def test_gptq_weights_the_search_by_the_root_of_the_hessian_diagonal(
     )
     model = torch.nn.Linear(512, 8, bias=False)
     inputs = _inputs()
-    mtq.quantize(model, _iq_config(GPTQ, num_bits), forward_loop=lambda m: m(inputs))
+    algorithm = {**GPTQ, "importance_weighted": importance_weighted}
+    mtq.quantize(model, _iq_config(algorithm, num_bits), forward_loop=lambda m: m(inputs))
 
     gptq_calls = calls[-2:]  # one call per 256-column group
     if not weighted:

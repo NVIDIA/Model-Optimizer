@@ -74,9 +74,9 @@ def gptq_group_update(
 class GGMLGPTQHelper(GPTQHelper):
     """GPTQ for ``ggml``-backend weight quantizers, one GGML block of columns at a time.
 
-    Formats whose search takes an importance get the square root of the Hessian diagonal
-    ``E[x_j^2]`` (llama.cpp's imatrix statistic), so each block's codes favour the columns its
-    outputs depend on most. The raw diagonal is heavy-tailed, so a few outlier columns would
+    With ``importance_weighted``, formats whose search takes an importance get the square root of
+    the Hessian diagonal ``E[x_j^2]`` (llama.cpp's imatrix statistic), so each block's codes favour
+    the columns its outputs depend on most. The raw diagonal is heavy-tailed, so a few outlier columns would
     dominate the search; its root keeps the column ranking at half the log-range.
     The payload GPTQ chose is pinned to the weight quantizer, so later forwards and export use
     those exact codes rather than encoding the GPTQ'd weight again, which would not return them.
@@ -98,7 +98,7 @@ class GGMLGPTQHelper(GPTQHelper):
         payloads = []
         assert self.weight is not None, "_blockwise_update called before update_weights()"
         importance = None
-        if ggml_format.weighted:
+        if self.importance_weighted and ggml_format.weighted:
             diagonal = self.hessian.diagonal().to(self.weight.device, torch.float32)
             importance = diagonal.clamp_min(_IMPORTANCE_FLOOR * diagonal.mean()).sqrt()
 
