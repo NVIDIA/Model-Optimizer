@@ -35,7 +35,7 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 @pytest.mark.parametrize("decoder_name", ["model", "backbone"])
 @pytest.mark.parametrize("with_mtp", [False, True], ids=["no-mtp", "mtp"])
 def test_4p9_mse_recipe_resolves_search_and_fixed_mtp(wrapped, decoder_name, with_mtp):
-    """Search decoder/head groups at 4.5/8/16 bits, fix MTP experts, and cast KV."""
+    """Search decoder/head groups, fix MTP routed experts, and cast only base-model KV."""
     config = native.NemotronHConfig(
         vocab_size=32,
         hidden_size=32,
@@ -98,7 +98,7 @@ def test_4p9_mse_recipe_resolves_search_and_fixed_mtp(wrapped, decoder_name, wit
     groups = [hparam for _, hparam in named_hparams(model, unique=True)]
     searcher._verify_resolved_constraint(groups)
 
-    searched_names, fixed_expert_names = set(), set()
+    searched_names, fixed_expert_names, bf16_mtp_names = set(), set(), set()
     for group in groups:
         names = group.quant_module_names
         bits = [choice.compression * 16 for choice in group.solver_choices]
@@ -112,7 +112,7 @@ def test_4p9_mse_recipe_resolves_search_and_fixed_mtp(wrapped, decoder_name, wit
             assert group.cost_weight == 1
             assert group.solver_choices[0].config.algorithm == fixed.config.algorithm
             searched_names.update(names)
-        elif all("mtp.layers.1.mixer." in name for name in names):
+        elif all("mtp.layers.1.mixer.experts" in name for name in names):
             assert bits == [4.5]
             assert group.is_fixed and not group.allow_no_quant
             assert group.cost_weight == 0
@@ -133,6 +133,7 @@ def test_4p9_mse_recipe_resolves_search_and_fixed_mtp(wrapped, decoder_name, wit
         else:
             assert all(name.startswith(prefix + "mtp.") for name in names)
             assert bits == [16] and group.is_fixed and group.cost_weight == 0
+            bf16_mtp_names.update(names)
 
     assert prefix + "lm_head" in searched_names
     assert any(".layers.0.mixer.q_proj" in name for name in searched_names)
@@ -140,12 +141,18 @@ def test_4p9_mse_recipe_resolves_search_and_fixed_mtp(wrapped, decoder_name, wit
     assert bool(fixed_expert_names) == with_mtp
     if with_mtp:
         assert any(".mixer.experts" in name for name in fixed_expert_names)
-        assert any(".mixer.shared_experts" in name for name in fixed_expert_names)
+        assert any(".mixer.shared_experts" in name for name in bf16_mtp_names)
 
-    # The baseline already casts MTP KV; the post-search preset also casts base-model KV.
+    # Post-search KV casting must preserve the routed-experts-only MTP policy.
     for stage in ("baseline", "post-search"):
         if stage == "post-search":
             mtq.set_quantizer_by_cfg(model, aq.kv_cache.quant_cfg)
+        for name, quantizer in model.named_modules():
+            if isinstance(quantizer, TensorQuantizer) and name.startswith(prefix + "mtp."):
+                routed_io = name.startswith(prefix + "mtp.layers.1.mixer.experts.") and (
+                    "weight_quantizer" in name or "input_quantizer" in name
+                )
+                assert quantizer.is_enabled == routed_io
         kv = {
             name: q
             for name, q in model.named_modules()
@@ -153,7 +160,7 @@ def test_4p9_mse_recipe_resolves_search_and_fixed_mtp(wrapped, decoder_name, wit
         }
         assert len(kv) == 2 + 2 * with_mtp
         for name, quantizer in kv.items():
-            enabled = stage == "post-search" or "mtp." in name
+            enabled = stage == "post-search" and "mtp." not in name
             assert quantizer.is_enabled == enabled
             if enabled:
                 assert quantizer.num_bits == (4, 3) and quantizer._use_constant_amax
