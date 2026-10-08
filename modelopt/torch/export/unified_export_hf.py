@@ -77,6 +77,8 @@ from modelopt.torch.quantization.utils import (
     fsdp2_aware_weight_update,
     module_name_maps,
     quantizer_attr_names,
+    representative_weight_quantizer,
+    weight_attr_names,
 )
 from modelopt.torch.quantization.utils.core_utils import (
     enable_weight_access_and_writeback,
@@ -134,6 +136,7 @@ from .quant_utils import (
     preprocess_linear_fusion,
     sync_tied_input_amax,
     to_quantized_weight,
+    validate_ggml_layer,
 )
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
 
@@ -1861,6 +1864,7 @@ _GGML_UPCAST_DTYPES: dict[str, torch.dtype] = {"bf16": torch.bfloat16}
 
 
 def _is_ggml_weight_quantizer(quantizer) -> bool:
+    """Whether ``quantizer`` is an enabled GGML weight quantizer."""
     # getattr: a SequentialQuantizer has no num_bits, and is never GGML.
     return getattr(quantizer, "num_bits", None) in GGML_FORMATS and quantizer.is_enabled
 
@@ -1875,13 +1879,39 @@ def _upcast_ggml_weights(model: nn.Module, dtype: torch.dtype) -> None:
     such as vLLM, loads the checkpoint as plain weights.
     """
     names = module_name_maps(model)
-    upcast_count = 0
-    for module in model.modules():
-        # Check the quantizers first, so an offloaded module is materialized only if it has work.
-        if not isinstance(module, QuantModule) or not any(
-            map(_is_ggml_weight_quantizer, module.iter_weight_quantizers_for_calibration())
-        ):
-            continue
+    # Read only the quantizers here, so an offloaded module is materialized only if it has work.
+    ggml_modules = [
+        module
+        for module in model.modules()
+        if isinstance(module, QuantModule)
+        and any(map(_is_ggml_weight_quantizer, module.iter_weight_quantizers_for_calibration()))
+    ]
+    if not ggml_modules:
+        warnings.warn("upcast_ggml is set, but the model has no GGML-quantized weights.")
+        return
+
+    # Check every layer before changing any, so a refusal leaves the model as it was.
+    for module in ggml_modules:
+        for weight_name in weight_attr_names(module):
+            weight_quantizer = representative_weight_quantizer(module, weight_name)
+            if not _is_ggml_weight_quantizer(weight_quantizer):
+                continue
+            # Disabling the quantizer would skip the checks the packed export runs on the layer.
+            input_quantizer = getattr(
+                module, quantizer_attr_names(weight_name).input_quantizer, None
+            )
+            validate_ggml_layer(weight_quantizer, input_quantizer)
+            # Fused-expert slices and the offload and FSDP2 writebacks keep the stored dtype, so
+            # the decoded values can only be written to a weight already stored in ``dtype``.
+            weight_dtype = getattr(module, weight_name).dtype
+            if weight_dtype != dtype:
+                raise ValueError(
+                    f"upcast_ggml decodes to {dtype}, but "
+                    f"{names.module_to_name.get(id(module), '')}.{weight_name} is stored as "
+                    f"{weight_dtype}. Load the model in {dtype} before quantizing it."
+                )
+
+    for module in ggml_modules:
         with enable_weight_access_and_writeback(module, model, names):
             for weight, quantizer in module.iter_weights_for_calibration():
                 if not _is_ggml_weight_quantizer(quantizer):
@@ -1892,9 +1922,6 @@ def _upcast_ggml_weights(model: nn.Module, dtype: torch.dtype) -> None:
                     ggml_format.dequantize(packed_weight, torch.tensor(weight.shape), dtype=dtype)
                 )
                 quantizer.disable()
-                upcast_count += 1
-    if upcast_count == 0:
-        warnings.warn("upcast_ggml is set, but the model has no GGML-quantized weights.")
 
 
 def export_hf_checkpoint(

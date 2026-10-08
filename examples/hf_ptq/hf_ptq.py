@@ -648,6 +648,11 @@ def export_quantized(
         # Early exit for speculative decoding checkpoints
         # No tokenizer saving needed for spec ckpts
         if has_spec_opt(full_model):
+            if args.upcast_ggml:
+                raise NotImplementedError(
+                    "--upcast_ggml applies to the unified HF export, not a speculative "
+                    "decoding checkpoint."
+                )
             export_speculative_decoding(full_model, export_dir=export_path)
             args.checkpoint_exported = True
             print(f"Quantized speculative decoding checkpoint exported to: {export_path}")
@@ -666,6 +671,11 @@ def export_quantized(
             or "int8_smoothquant" in args.qformat
         )
         if is_tensorrt_llm_export:
+            if args.upcast_ggml:
+                raise NotImplementedError(
+                    "--upcast_ggml applies to the unified HF export, but this model exports a "
+                    "TensorRT-LLM checkpoint."
+                )
             if (
                 args.inference_tensor_parallel != 1 or args.inference_pipeline_parallel != 1
             ) and args.qformat == "nvfp4_svdquant":
@@ -1448,6 +1458,9 @@ def parse_args() -> argparse.Namespace:
         parser.error(f"--use_fsdp2 does not support --sparsity_fmt {args.sparsity_fmt}.")
     if args.use_fsdp2 and args.vllm_fakequant_export:
         parser.error("--use_fsdp2 does not support --vllm_fakequant_export.")
+    if args.upcast_ggml and args.sparsity_fmt != "dense":
+        # Sparsity exports a TensorRT-LLM checkpoint, which the upcast does not apply to.
+        parser.error("--upcast_ggml does not support --sparsity_fmt.")
     if args.upcast_ggml and args.vllm_fakequant_export:
         parser.error(
             "--upcast_ggml applies to the unified HF export; --vllm_fakequant_export already "
