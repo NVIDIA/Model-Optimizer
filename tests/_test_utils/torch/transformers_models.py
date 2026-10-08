@@ -485,9 +485,20 @@ get_tiny_qwen3_5_moe_vl = partial(_get_tiny_qwen3_5_vl, moe=True)
 create_tiny_qwen3_5_moe_vl_dir = partial(_create_tiny_qwen3_5_vl_dir, moe=True)
 
 
-def get_tiny_qwen3_5_vl_offline(**config_kwargs) -> PreTrainedModel:
-    """Build a dense tiny Qwen3.5-VL without downloading its reference tokenizer."""
-    return _get_tiny_qwen3_5_vl(moe=False, tokenizer=_TinyQwen35Tokenizer(), **config_kwargs)
+def get_tiny_qwen3_5_vl_offline(moe: bool = False, **config_kwargs) -> PreTrainedModel:
+    """Build a tiny Qwen3.5-VL without downloading its reference tokenizer."""
+    return _get_tiny_qwen3_5_vl(moe=moe, tokenizer=_TinyQwen35Tokenizer(), **config_kwargs)
+
+
+def create_tiny_qwen3_5_vl_offline_dir(
+    tmp_path: Path | str, moe: bool = False, **config_kwargs
+) -> Path:
+    """Save an offline tiny Qwen3.5-VL with the released BF16 expert layout."""
+    checkpoint = Path(tmp_path) / ("tiny_qwen3_5_moe_vl" if moe else "tiny_qwen3_5_vl")
+    get_tiny_qwen3_5_vl_offline(moe=moe, **config_kwargs).save_pretrained(checkpoint)
+    if moe:
+        _pack_qwen3_5_moe_experts(checkpoint)
+    return checkpoint
 
 
 ##### NEMOTRON #####
