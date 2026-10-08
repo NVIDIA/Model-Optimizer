@@ -308,7 +308,7 @@ that baseline. The deviations come in four kinds:
 
 | Kind | What changes vs. the general recipe | Examples |
 |------|-------------------------------------|----------|
-| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama` |
+| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama`, `nemotron_h` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
 | **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma` |
 | **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/NVIDIA-Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
@@ -406,6 +406,22 @@ recipes, for Step-3.7 checkpoints; Step-3.5 has its own recipe above.
   vLLM on the Marlin dequant fallback, which measured *slower* than BF16. The `_mcore` suffix is
   load-bearing: selectors are Megatron-Core leaf names (`mlp.experts.linear_fc1`,
   `self_attention.linear_qkv`), so under `hf_ptq.py` nothing matches and `mtq.quantize` raises.
+
+- **`nemotron_h/ptq/nvfp4-aggressive-mse`** is the **aggressive** tier for hybrid Mamba-MoE
+  NemotronH checkpoints, including the omni VL wrappers:
+  - MoE routed + shared experts → NVFP4 W4A4, `group_size 16`, **static** weight scales
+    (`nvfp4_static`) with dynamic NVFP4 activations (`nvfp4`)
+  - attention q/k/v/out, Mamba `in/out_proj`, `lm_head` → FP8
+  - MTP block-1 routed + shared experts → identical treatment to the main experts; the MTP rules
+    are inert on checkpoints without an MTP tail
+  - latent MoE, embeddings, router and the vision tower → **BF16**
+  - KV cache → FP8, **asymmetric**: the language-model backbone casts at a fixed FP8 range
+    (`use_constant_amax`, as in `configs/ptq/units/kv_fp8_cast`, so no `k_scale`/`v_scale` is
+    exported) while MTP attention stays data-calibrated and keeps its pair
+
+  Calibration is weight-MSE with an FP8-scale sweep, which is why the weight quantizers are
+  `static`. Use `--calib_with_images` on VL checkpoints: the vision tower must see image batches
+  even though it stays BF16.
 
 ### Algorithm overrides — `gemma`, `gemma4`, `mpt`
 
