@@ -15,23 +15,28 @@
 
 """vLLM forward primitives with FP32 saved values; autograd lives in quantization."""
 
-import torch
-from vllm.model_executor.layers.fla.ops.chunk_o import chunk_fwd_o
-from vllm.model_executor.layers.fla.ops.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
-from vllm.model_executor.layers.fla.ops.cumsum import chunk_local_cumsum
-from vllm.model_executor.layers.fla.ops.fused_recurrent import fused_recurrent_gated_delta_rule
-from vllm.model_executor.layers.fla.ops.kda import (
-    chunk_gla_fwd_o_gk,
-    chunk_kda_scaled_dot_kkt_fwd,
-    fused_recurrent_kda,
-)
-from vllm.model_executor.layers.fla.ops.kda import fused_kda_gate as fused_kda_gate
-from vllm.model_executor.layers.fla.ops.kda import recompute_w_u_fwd as kda_wu
-from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
-from vllm.model_executor.layers.fla.ops.solve_tril import solve_tril
-from vllm.model_executor.layers.fla.ops.wy_fast import recompute_w_u_fwd as gdn_wu
+from functools import cache
+from importlib import import_module
 
+import torch
+
+from ._compat import fla_module, state_layout
 from .chunk_delta_h import chunk_state
+
+chunk_fwd_o = fla_module("chunk_o").chunk_fwd_o
+chunk_scaled_dot_kkt_fwd = fla_module("chunk_scaled_dot_kkt").chunk_scaled_dot_kkt_fwd
+chunk_local_cumsum = fla_module("cumsum").chunk_local_cumsum
+fused_recurrent_gated_delta_rule = fla_module("fused_recurrent").fused_recurrent_gated_delta_rule
+_kda = fla_module("kda")
+chunk_gla_fwd_o_gk = _kda.chunk_gla_fwd_o_gk
+chunk_kda_scaled_dot_kkt_fwd = _kda.chunk_kda_scaled_dot_kkt_fwd
+fused_recurrent_kda = _kda.fused_recurrent_kda
+fused_kda_gate = _kda.fused_kda_gate
+kda_wu = _kda.recompute_w_u_fwd
+l2norm_fwd = fla_module("l2norm").l2norm_fwd
+solve_tril = fla_module("solve_tril").solve_tril
+gdn_wu = fla_module("wy_fast").recompute_w_u_fwd
+_KDA_GATE_SCALE = getattr(_kda, "RCP_LN2", 1.0)
 
 
 def prefill(q, k, v, g, beta, state, scale, normalize=False):
@@ -42,6 +47,10 @@ def prefill(q, k, v, g, beta, state, scale, normalize=False):
         q, k = l2norm_fwd(q), l2norm_fwd(k)
     channel = g.ndim == 4
     gc = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu)
+    # Newer native KDA kernels evaluate exp2 of base-2 cumulative log gates.
+    natural_gc = gc
+    if channel:
+        gc = gc * _KDA_GATE_SCALE
     if channel:
         lower, scores = chunk_kda_scaled_dot_kkt_fwd(q, k, gc, beta, scale=scale, cu_seqlens=cu)
     else:
@@ -62,8 +71,9 @@ def prefill(q, k, v, g, beta, state, scale, normalize=False):
         u=u,
         g=None if channel else gc,
         gk=gc if channel else None,
-        initial_state=state.unsqueeze(0).contiguous(),
+        initial_state=state_layout(state.unsqueeze(0)),
         cu_seqlens=cu,
+        use_exp2=channel and _KDA_GATE_SCALE != 1.0,
     )
     assert updated is not None and final is not None
     if channel:
@@ -85,17 +95,17 @@ def prefill(q, k, v, g, beta, state, scale, normalize=False):
     intermediates = {
         "q": q[0],
         "k": k[0],
-        "g": gc[0],
+        "g": natural_gc[0],
         "lower": lower[0],
         "inverse": inverse[0],
         "w": w[0],
         "u": u[0],
-        "h": h[0],
+        "h": state_layout(h[0]),
         "updated": updated[0],
         "kg": kg[0],
         "scores": None if scores is None else scores[0],
     }
-    return out[0], final[0], intermediates
+    return out[0], state_layout(final[0]), intermediates
 
 
 def step(q, k, v, g, beta, state, scale, normalize=False):
@@ -103,18 +113,34 @@ def step(q, k, v, g, beta, state, scale, normalize=False):
     recurrent = fused_recurrent_kda if g.ndim == 2 else fused_recurrent_gated_delta_rule
     out, final = recurrent(
         *[x[None, None].contiguous() for x in (q, k, v, g, beta)],
-        initial_state=state.unsqueeze(0).contiguous(),
+        initial_state=state_layout(state.unsqueeze(0)),
         inplace_final_state=False,
         scale=scale,
         use_qk_l2norm_in_kernel=normalize,
         cu_seqlens=torch.tensor([0, 1], device=q.device, dtype=torch.int32),
-        ssm_state_indices=torch.tensor([0], device=q.device, dtype=torch.int32),
+        # Private dense training state needs no paged-cache index (0 is now reserved).
+        ssm_state_indices=None,
     )
-    return out[0, 0], final[0]
+    return out[0, 0], state_layout(final[0])
 
 
 def fused_gdn_gating(*args, **kwargs):
     """Load the optional vLLM model only when Megatron needs GDN gate preparation."""
-    from vllm.model_executor.models.qwen3_next import fused_gdn_gating as native_gate
+    return _gdn_gate()(*args, **kwargs)
 
-    return native_gate(*args, **kwargs)
+
+# Megatron compiles gate preparation; module discovery must execute outside that graph.
+@torch.compiler.disable
+@cache
+def _gdn_gate():
+    for path in (
+        "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn",
+        "vllm.model_executor.layers.mamba.gdn_linear_attn",
+        "vllm.model_executor.models.qwen3_next",
+    ):
+        try:
+            return import_module(path).fused_gdn_gating
+        except ModuleNotFoundError as error:  # noqa: PERF203 - cached, one-time import discovery
+            if error.name is None or not (path == error.name or path.startswith(error.name + ".")):
+                raise
+    raise ImportError("The installed vLLM does not provide fused_gdn_gating")

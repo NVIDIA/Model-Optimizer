@@ -28,7 +28,8 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     """One execution policy shared by the chunked prefix and recurrent suffix.
 
     ``serving`` uses native forward arithmetic with a differentiable adjoint;
-    ``fla`` is the disabled/default path. ``vllm_0_15`` uses public vLLM arithmetic;
+    ``fla`` is the disabled/default path. ``vllm`` uses the installed vLLM's arithmetic;
+    ``vllm_0_15`` remains an accepted legacy spelling for existing checkpoints.
     ``replayssm`` uses the serving fork's INT8/Hadamard checkpoint and ring kernels.
     ``replay_window=1`` refreshes the state every token; larger windows enable replay.
     Fresh prefill has no internal state QDQ; incoming continuation state and
@@ -39,7 +40,7 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     """
 
     backend: Literal["fla", "serving"] = ModeloptField(default="fla")
-    precision: Literal["vllm_0_15", "replayssm"] = ModeloptField(default="vllm_0_15")
+    precision: Literal["vllm", "vllm_0_15", "replayssm"] = ModeloptField(default="vllm")
     replay_window: int = Field(default=1, ge=1, le=64, strict=True)
     state_block_v: Literal[16, 32, 64, 128] = ModeloptField(default=64)
 
@@ -64,7 +65,7 @@ class LinearAttentionPolicyEntry(ModeloptBaseConfig):
     """Assign a complete policy to supported modules matching ``module_name``.
 
     Rules apply in order: the last match wins, without merging fields.
-    A rule must match at least one supported linear-attention module.
+    A rule must match at least one supported module across distributed stages.
     """
 
     module_name: str = Field(...)

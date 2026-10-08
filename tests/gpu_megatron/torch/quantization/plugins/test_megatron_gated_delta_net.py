@@ -33,7 +33,7 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 
 pytest.importorskip("fla")  # Megatron-Core GatedDeltaNet needs FLA for its baseline kernels.
 GatedDeltaNet = pytest.importorskip("megatron.core.ssm.gated_delta_net").GatedDeltaNet
-pytest.importorskip("vllm.model_executor.layers.fla.ops.kda", exc_type=ModuleNotFoundError)
+pytest.importorskip("vllm")
 
 from modelopt.torch.quantization.plugins.megatron import _QuantGatedDeltaNet
 

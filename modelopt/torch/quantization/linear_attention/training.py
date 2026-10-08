@@ -20,6 +20,8 @@ from itertools import pairwise
 
 import torch
 
+import modelopt.torch.utils.distributed as dist
+
 from .decode import recurrent_decode
 from .utils import _resolve_state_quantizer, _state_qdq, forward_value
 
@@ -52,7 +54,8 @@ def linear_attention_training_phase(model, prefill_lengths):
         if isinstance(m, _LinearAttentionQuantMixin)
         and m.linear_attention_config.backend == "serving"
     ]
-    if not layers:
+    # A pipeline stage may have no selected layers; conversion validates global matches.
+    if not layers and dist.size() == 1:
         raise ValueError("The model has no converted decode-aware linear-attention layers")
     previous = [getattr(m, "_linear_attention_prefill_lengths", None) for m in layers]
     try:

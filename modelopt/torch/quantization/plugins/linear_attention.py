@@ -17,6 +17,9 @@
 
 import fnmatch
 
+import torch
+
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch.opt.conversion import ApplyModeError
 from modelopt.torch.utils import get_unwrapped_name
 
@@ -42,7 +45,12 @@ def _apply_linear_attention_policy(model, config):
     # getattr also handles pickled configs that predate the policy field.
     for entry in getattr(config, "linear_attention", []):
         matches = [name for name in modules if fnmatch.fnmatch(name, entry.module_name)]
-        if not matches:
+        matched_on_rank = [bool(matches)]
+        if dist.size() > 1:
+            # Shared recipes can select layers owned by another pipeline stage.
+            matched_on_rank = [False] * dist.size()
+            torch.distributed.all_gather_object(matched_on_rank, bool(matches))
+        if not any(matched_on_rank):
             raise ValueError(
                 f"linear_attention rule {entry.module_name!r} matches no supported modules"
             )
