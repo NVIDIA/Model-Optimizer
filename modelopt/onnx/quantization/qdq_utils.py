@@ -577,6 +577,60 @@ def _get_scale_and_zp(
     return scale, zp
 
 
+def _get_quantization_axis(node: onnx.NodeProto) -> int:
+    """Extract quantization axis from consumer node.
+
+    Mirrors _convert_weight() logic exactly.
+    """
+    op_type = node.op_type
+    if op_type == "Gemm":
+        trans_b = 0
+        for attr in node.attribute:
+            if attr.name == "transB":
+                trans_b = attr.i
+                break
+        return 0 if trans_b else 1
+    axis_map = {"Conv": 0, "ConvTranspose": 1, "MatMul": 1}
+    if op_type not in axis_map:
+        raise ValueError(f"Unsupported op_type for weight quantization: {op_type}")
+    return axis_map[op_type]
+
+
+def _get_dq_consumers_ops(
+    dq_node: onnx.NodeProto,
+    tensor_consumers: dict[str, list[onnx.NodeProto]]
+) -> list[onnx.NodeProto]:
+    """Get all operations consuming DQ output. Handles Cast chains.
+
+    Returns a list of operation nodes that consume the DQ output, handling
+    Cast chains by recursively following them to their final non-Cast consumers.
+    """
+    def _follow_cast_chain(node: onnx.NodeProto) -> list[onnx.NodeProto]:
+        """Recursively follow Cast nodes to find non-Cast consumers."""
+        if node.op_type != "Cast":
+            return [node]
+        consumers = tensor_consumers.get(node.output[0], [])
+        if not consumers:
+            raise ValueError(f"No consumer found after Cast for {node.name}")
+        result = []
+        for consumer in consumers:
+            result.extend(_follow_cast_chain(consumer))
+        return result
+
+    consumers = tensor_consumers.get(dq_node.output[0], [])
+    if not consumers:
+        raise ValueError(f"No consumer found for {dq_node.name}")
+
+    quantized_nodes = []
+    for consumer in consumers:
+        quantized_nodes.extend(_follow_cast_chain(consumer))
+
+    if not quantized_nodes:
+        raise ValueError(f"No valid operation found for {dq_node.name}")
+
+    return quantized_nodes
+
+
 def _get_successive_consumers(
     node: onnx.NodeProto, tensor_consumers: dict[str, list[onnx.NodeProto]]
 ) -> tuple[onnx.NodeProto, onnx.NodeProto]:
@@ -598,16 +652,13 @@ def _get_successive_consumers(
     if not dq_node or dq_node.op_type != "DequantizeLinear":
         raise ValueError(f"Invalid consumer for {node.name}")
 
-    quantized_node = tensor_consumers.get(dq_node.output[0], [None])[0]
-    if not quantized_node:
-        raise ValueError(f"No consumer found for {dq_node.name}")
-    if quantized_node.op_type == "Cast":
-        next_node = tensor_consumers.get(quantized_node.output[0], [None])[0]
-        if not next_node:
-            raise ValueError(f"No consumer found after Cast for {quantized_node.name}")
-        quantized_node = next_node
-
-    return dq_node, quantized_node
+    quantized_nodes = _get_dq_consumers_ops(dq_node, tensor_consumers)
+    if len(quantized_nodes) > 1:
+        raise ValueError(
+            f"Expected single consumer for DQ {dq_node.name} in single-consumer path, "
+            f"got {len(quantized_nodes)}"
+        )
+    return dq_node, quantized_nodes[0]
 
 
 def _convert_weight(
@@ -636,31 +687,12 @@ def _convert_weight(
     """
     # Per-op quantization axis mapping (must match ORT config)
     weight_shape = weight_array.shape
-    op_type = quantized_node.op_type
 
     # Convert onnx tensors to numpy array
     scale_array = onnx.numpy_helper.to_array(scale)
     zp_array = onnx.numpy_helper.to_array(zp)
 
-    # Dynamically determine transB for Gemm
-    trans_b = 0
-    if op_type == "Gemm":
-        for attr in quantized_node.attribute:
-            if attr.name == "transB":
-                trans_b = attr.i
-                break
-
-    axis_map = {
-        "Conv": 0,
-        "ConvTranspose": 1,
-        "Gemm": 0 if trans_b else 1,
-        "MatMul": 1,
-    }
-
-    if op_type not in axis_map:
-        raise ValueError(f"Unsupported op_type for real weight quantization: {op_type}")
-
-    axis = axis_map[op_type]
+    axis = _get_quantization_axis(quantized_node)
 
     if scale_array.shape and scale_array.shape[0] != weight_shape[axis]:
         raise ValueError(
@@ -753,10 +785,58 @@ def qdq_to_dq(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
             # Get scale and zero point
             scale, zp = _get_scale_and_zp(node, initializers, tensor_producers)
 
-            # Validate Q->DQ->Op pattern and get consumers
-            dq_node, quantized_node = _get_successive_consumers(node, tensor_consumers)
+            # Get Q's scale and zero-point input names
+            q_scale_name = node.input[1]
+            q_zp_name = node.input[2] if len(node.input) >= 3 else None
 
-            # Convert weight
+            # Partition consumers of Q output
+            consumers = tensor_consumers[node.output[0]]
+            dq_consumers = [c for c in consumers if c.op_type == "DequantizeLinear"]
+            other_consumers = [c for c in consumers if c.op_type != "DequantizeLinear"]
+
+            # Reject mixed consumers
+            if other_consumers:
+                raise ValueError(
+                    f"QuantizeLinear {node.name} has non-DequantizeLinear consumers: "
+                    f"{[c.op_type for c in other_consumers]}. Shared QDQ requires all consumers to be DQ."
+                )
+            if not dq_consumers:
+                raise ValueError(f"QuantizeLinear {node.name} has no DequantizeLinear consumers")
+
+            # Verify ALL DQs use SAME scale/zp as Q
+            for dq in dq_consumers:
+                if dq.input[1] != q_scale_name:
+                    raise ValueError(
+                        f"DequantizeLinear {dq.name} scale input ({dq.input[1]}) differs from "
+                        f"QuantizeLinear {node.name} scale ({q_scale_name}). "
+                        f"Shared QDQ requires identical scale input references."
+                    )
+                if q_zp_name is not None:
+                    if len(dq.input) < 3 or dq.input[2] != q_zp_name:
+                        raise ValueError(
+                            f"DequantizeLinear {dq.name} zero-point input differs from "
+                            f"QuantizeLinear {node.name}. Shared QDQ requires identical zero-point references."
+                        )
+                elif len(dq.input) >= 3:
+                    raise ValueError(
+                        f"DequantizeLinear {dq.name} has zero-point but QuantizeLinear {node.name} does not."
+                    )
+
+            # Get quantized_nodes for each DQ (with Cast handling)
+            # Each DQ may have multiple consumers (fan-out), so we get all
+            all_quantized_nodes = []
+            for dq in dq_consumers:
+                dq_quantized_nodes = _get_dq_consumers_ops(dq, tensor_consumers)
+                all_quantized_nodes.extend(dq_quantized_nodes)
+
+            # Verify axis compatibility across ALL branches (all DQs and their consumers)
+            axes = {_get_quantization_axis(qn) for qn in all_quantized_nodes}
+            if len(axes) > 1:
+                raise ValueError(f"Shared QDQ {node.name} feeds incompatible axes: {axes}")
+
+            # Convert weight ONCE using first branch's quantized_node
+            scale, zp = _get_scale_and_zp(node, initializers, tensor_producers)
+            quantized_node = all_quantized_nodes[0]
             scaled = _convert_weight(weight_array, scale, zp, quantized_node)
 
             # Create and update new weight tensor
@@ -772,14 +852,9 @@ def qdq_to_dq(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
             # Note. Scale and zero point tensors are shared between Q and DQ nodes and should not be deleted
             q_indices.append(node_idx)
 
-            # Update following DQ nodes input name, each q should only have one dq consumer
-            consumers = tensor_consumers[node.output[0]]
-            assert len(consumers) == 1, f"Expected exactly one consumer for {node.name}"
-            dq_node = consumers[0]
-            assert dq_node.op_type == "DequantizeLinear", (
-                f"Expected DequantizeLinear consumer for {node.name}"
-            )
-            dq_node.input[0] = weight_name
+            # Rewire ALL DQ consumers to point to the converted weight
+            for dq in dq_consumers:
+                dq.input[0] = weight_name
 
         except Exception as e:
             raise RuntimeError(f"Failed to convert node {node.name}: {e!s}")
