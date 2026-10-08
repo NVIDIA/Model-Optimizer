@@ -1,5 +1,7 @@
 kernels>=0.9.0,<0.13
-trackio
+# older trackio (e.g. 0.20) imports `CommitOperationAdd`, which newer huggingface_hub releases removed
+trackio>=0.41
 # transformers>=5.3 avoids CVE-2026-4372 (RCE via the `kernels` Hub download path, which this example installs)
 transformers>=5.3
-trl>=1.0
+# trl 1.15 always runs SFT loss through a Triton kernel, which fails for CPU training
+trl>=1.0,<1.15
