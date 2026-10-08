@@ -321,3 +321,9 @@ GEMM quantization and approximate inverse are outside this example.
 
 See [ReplaySSM state QAT](REPLAYSSM.md) for the optional INT8/Hadamard fork,
 its checkpoint window, and the proposed two-precision extension.
+
+## State-only serving with vLLM
+
+The [vLLM example](../../vllm_serve/README.md#linear-attention-state-quantization)
+uses the same state QDQ helper for plain FP8/INT8 policies. Match the runtime,
+quantizer grouping, and scheduler prefill boundaries to the training setup.
