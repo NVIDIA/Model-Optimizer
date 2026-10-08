@@ -157,6 +157,9 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
         log_interval=1,
         exit_interval=early_exit_iter,
         exit_duration_in_mins=10,
+        recompute_granularity="full" if lora_rank else None,
+        recompute_method="uniform" if lora_rank else None,
+        recompute_num_layers=1 if lora_rank else None,
     )
     run_example_command(distill_cmd, example_path="megatron_bridge", setup_free_port=True)
     distilled_megatron_path = distill_output_dir / "checkpoints"

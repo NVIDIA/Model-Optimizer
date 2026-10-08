@@ -1078,6 +1078,9 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
     Any weight-quantizer rotation is folded into the weights and disabled so subsequent
     forwards do not re-rotate the already-folded weights.
     """
+    for module in model.modules():
+        if isinstance(module, QuantModule):
+            module._validate_fold_weight()
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             module.fold_weight(keep_attrs)

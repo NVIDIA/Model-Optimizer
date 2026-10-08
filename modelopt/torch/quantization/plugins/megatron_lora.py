@@ -24,13 +24,28 @@ from megatron.core.extensions.transformer_engine import (
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.tensor_parallel.mappings import copy_to_tensor_model_parallel_region
 from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
+from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
+from megatron.core.utils import WrappedTensor
 
-from ..lora import QuantLoRARegistry, _QuantLoRALinear
+from ..lora import QuantLoRAInputRegistry, QuantLoRARegistry, _QuantLoRAInput, _QuantLoRALinear
 from ..nn import QuantModuleRegistry
 from .megatron import _QuantMegatronMLP
 
 __all__ = []
+
+
+@QuantLoRAInputRegistry.register({TransformerBlock: "TransformerBlock"})
+class _MegatronQuantLoRATransformerBlock(_QuantLoRAInput):
+    def forward(self, hidden_states, *args, **kwargs):
+        # Reentrant checkpoints need a differentiable input even with frozen embeddings.
+        if self.training and torch.is_grad_enabled():
+            activation = hidden_states if self.pre_process else self.input_tensor
+            if isinstance(activation, WrappedTensor):
+                activation = activation.unwrap()
+            if isinstance(activation, torch.Tensor):
+                activation.requires_grad_(True)
+        return super().forward(hidden_states, *args, **kwargs)
 
 
 @QuantLoRARegistry.register(

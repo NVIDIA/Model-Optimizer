@@ -354,7 +354,9 @@ are `modelopt.torch.quantization.enable_quant_lora` and `merge_quant_lora`.
 
 Supported targets are fake-quantized dense PyTorch and Megatron/Transformer Engine linear
 layers, including tensor-parallel row/column and fused layer-normalization linear layers.
-Grouped MoE experts and compressed quantized weights are unsupported. The backbone remains
+Grouped MoE experts, shared target weights, and compressed quantized weights are unsupported.
+Merge adapters with `merge_quant_lora` before using weight-folding APIs. Full activation
+recomputation is supported without unfreezing the backbone. The backbone remains
 in floating point and the implementation forms dense weight updates, so memory savings come
 primarily from the smaller optimizer state rather than compressed backbone storage.
 

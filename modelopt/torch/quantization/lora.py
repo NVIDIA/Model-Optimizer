@@ -17,6 +17,7 @@
 
 import fnmatch
 import math
+from collections import Counter
 
 import torch
 from torch import nn
@@ -44,6 +45,23 @@ class QuantLoRAConfig(ModeloptBaseConfig):
 
 
 QuantLoRARegistry = _DMRegistryCls("quant_lora")
+QuantLoRAInputRegistry = _DMRegistryCls("quant_lora_input")
+
+
+class _QuantLoRAInput(DynamicModule):
+    def _setup(self):
+        """Preserve activation gradients without adding trainable backbone parameters."""
+
+
+@QuantLoRAInputRegistry.register(
+    {nn.Embedding: "nn.Embedding", QuantModuleRegistry[nn.Embedding]: "QuantEmbedding"}
+)
+class _QuantLoRAEmbedding(_QuantLoRAInput):
+    def forward(self, *args, **kwargs):
+        output = super().forward(*args, **kwargs)
+        if self.training and torch.is_grad_enabled():
+            output.requires_grad_(True)
+        return output
 
 
 @QuantLoRARegistry.register({QuantModuleRegistry[nn.Linear]: "nn.Linear"})
@@ -70,6 +88,12 @@ class _QuantLoRALinear(DynamicModule):
             return super().forward(*args, **kwargs)
         finally:
             self._parameters["weight"] = weight
+
+    def _validate_fold_weight(self):
+        raise ValueError("Merge quantization-aware LoRA adapters before folding weights.")
+
+    def fold_weight(self, keep_attrs=False):
+        self._validate_fold_weight()
 
     @torch.no_grad()
     def merge_lora(self):
@@ -101,6 +125,12 @@ def merge_quant_lora(model: nn.Module) -> nn.Module:
 def _convert_quant_lora(model, config):
     """Validate all targets before freezing the backbone and adding factors."""
     targets = []
+    parameter_uses = Counter(
+        id(parameter)
+        for module in model.modules()
+        for parameter in module._parameters.values()
+        if parameter is not None
+    )
     for name, module in model.named_modules():
         if not isinstance(module, QuantModule) or not hasattr(module, "weight_quantizer"):
             continue
@@ -115,12 +145,17 @@ def _convert_quant_lora(model, config):
             raise ValueError(
                 f"Quantization-aware LoRA does not support layer {name}: {type(module)}"
             )
+        if parameter_uses[id(weight)] > 1:
+            raise ValueError(f"Quantization-aware LoRA does not support shared weight at {name}.")
         targets.append(module)
     if not targets:
         raise ValueError("No supported fake-quantized linear layers match target_modules.")
     model.requires_grad_(False)
     for module in targets:
         QuantLoRARegistry[type(module)].convert(module, config=config)
+    for module in list(model.modules()):
+        if type(module) in QuantLoRAInputRegistry:
+            QuantLoRAInputRegistry[type(module)].convert(module)
     metadata = {}
     _update_quant_lora(model, config, metadata)
     return model, metadata
@@ -142,6 +177,8 @@ def _merge_quant_lora(model, config):
     for module in list(model.modules()):
         if isinstance(module, _QuantLoRALinear):
             module.merge_lora()
+        elif isinstance(module, _QuantLoRAInput):
+            module.export()
     metadata = {}
     _update_quant_lora(model, config, metadata)
     return model, metadata
