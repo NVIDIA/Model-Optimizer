@@ -884,7 +884,7 @@ def tiny_moe_llm(request, tmp_path_factory):
     model_dir = create_model(
         tmp,
         hidden_size=128,
-        intermediate_size=64,
+        intermediate_size=256,
         num_hidden_layers=2,
         num_attention_heads=2,
         num_key_value_heads=1,
