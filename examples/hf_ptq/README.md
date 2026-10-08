@@ -728,7 +728,7 @@ with torch.inference_mode():
 
 ### Build the TensorRT-LLM engines
 
-After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build command to build the engines from the exported checkpoints. Please check the [TensorRT-LLM Build API](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/architecture/workflow.md#build-apis) documentation for reference.
+After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build command to build the engines from the exported checkpoints. Please check the [TensorRT-LLM Build API](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/legacy/architecture/workflow.md#build-apis) documentation for reference.
 
 ## Pre-Quantized Checkpoints
 
