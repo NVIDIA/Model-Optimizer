@@ -27,7 +27,11 @@ from modelopt.torch.quantization.algo_cfg import (
     AlgoCapabilities,
     capabilities_for,
 )
-from modelopt.torch.quantization.config import LocalHessianCalibConfig, QuantizeAlgorithmConfig
+from modelopt.torch.quantization.config import (
+    LocalHessianCalibConfig,
+    MseCalibConfig,
+    QuantizeAlgorithmConfig,
+)
 from modelopt.torch.quantization.mode import (
     BaseCalibrateModeDescriptor,
     CalibrateModeRegistry,
@@ -179,6 +183,34 @@ def test_a_delegating_algorithm_refines_both_roles_when_its_sub_algorithm_differ
     assert folded.refines == "both"
     # Matching roles stay put rather than widening to "both".
     assert capabilities_for("lsq", {"scale_algorithm": {"method": "mse"}}).refines == "weight"
+
+
+def test_capabilities_see_defaults_the_algorithm_will_receive():
+    # A plan entry carries only what the user wrote, but the algorithm is handed a fully
+    # defaulted config. `local_hessian` defaults `fp8_scale_sweep=True`, so it searches stored
+    # per-block scales -- if capabilities were read off the sparse dict the compiler would see
+    # no grid requirement, never promote, and the search would run against a dynamic grid that
+    # stores none. The two defaults differ on purpose, so `mse` must stay unaffected.
+    assert LocalHessianCalibConfig().fp8_scale_sweep is True
+    assert MseCalibConfig().fp8_scale_sweep is False
+
+    assert (
+        capabilities_for("local_hessian", {"method": "local_hessian"}).requires_weight_scales
+        == "static"
+    )
+    assert capabilities_for("mse", {"method": "mse"}).requires_weight_scales is None
+
+    # An explicit value still wins over the default, in both directions.
+    assert (
+        capabilities_for(
+            "local_hessian", {"method": "local_hessian", "fp8_scale_sweep": False}
+        ).requires_weight_scales
+        is None
+    )
+    assert (
+        capabilities_for("mse", {"method": "mse", "fp8_scale_sweep": True}).requires_weight_scales
+        == "static"
+    )
 
 
 def test_a_delegating_algorithm_falls_back_to_the_conservative_upper_bound():

@@ -104,7 +104,43 @@ def capabilities_for(algo: str | None, cfg: dict | None = None) -> AlgoCapabilit
     descriptor = CalibrateModeRegistry.get(BaseCalibrateModeDescriptor._get_mode_name(algo))
     if descriptor is None:
         return None
-    return type(descriptor).capabilities_for_cfg(cfg or {})
+    # Resolve through the algorithm's config class first. A plan entry carries only what the
+    # user wrote -- `['local_hessian']` lowers to `{"method": "local_hessian"}` -- while the
+    # algorithm is handed a fully defaulted config at convert time. Reading capabilities off
+    # the sparse dict therefore misses defaulted fields, and the two disagree in the unsafe
+    # direction: `local_hessian` defaults `fp8_scale_sweep=True`, so it searches stored
+    # per-block scales, but the compiler saw no `requires_weight_scales` and never promoted
+    # the grid that holds them.
+    return type(descriptor).capabilities_for_cfg(_with_config_defaults(descriptor, cfg or {}))
+
+
+def _with_config_defaults(descriptor, cfg: dict) -> dict:
+    """``cfg`` plus the defaults its algorithm's config class would apply.
+
+    A plan entry carries only what the user wrote -- ``['local_hessian']`` lowers to
+    ``{"method": "local_hessian"}`` -- while the algorithm is handed a fully defaulted config
+    at convert time. Reading capabilities off the sparse dict misses defaulted fields, and the
+    two then disagree in the unsafe direction: ``local_hessian`` defaults ``fp8_scale_sweep``
+    to True, so it searches stored per-block scales, while the compiler saw no
+    ``requires_weight_scales`` and never promoted the grid that holds them.
+
+    Defaults are read off the field descriptors rather than by building the config: one of
+    those validators asks for capabilities itself, so constructing here would recurse, and
+    ``model_dump`` would additionally run field serializers over values nothing has coerced.
+    """
+    from pydantic_core import PydanticUndefined
+
+    fields = getattr(descriptor.config_class, "model_fields", None)
+    if not fields:
+        return cfg
+    defaults = {}
+    for name, field in fields.items():
+        if name in cfg:
+            continue
+        value = field.get_default(call_default_factory=True)
+        if value is not PydanticUndefined:
+            defaults[name] = value
+    return {**defaults, **cfg}
 
 
 # --- Stages ---
