@@ -180,7 +180,7 @@ student).
 | `model` | `pretrained_model_name_or_path` | Qwen-Image HF id or local snapshot. |
 | `model` | `mode` | `finetune` — loads the pretrained weights. |
 | `step_scheduler` | `global_batch_size`, `local_batch_size`, `max_steps`, `ckpt_every_steps`, `log_every` | Standard AutoModel scheduling knobs. |
-| `dmd2` | `recipe_path` | Built-in fastgen recipe to hydrate `DMDConfig` from (`general/distillation/dmd2_qwen_image`). |
+| `dmd2` | `recipe_path` | [Built-in recipe](../../../../modelopt_recipes/general/distillation/dmd2_qwen_image.yaml) to hydrate `DMDConfig` from (`general/distillation/dmd2_qwen_image`). |
 | `dmd2` | `pipeline_plugin` | `qwen_image` — selects `QwenImageDMDPipeline` (2×2 patch packing / img_shapes). |
 | `dmd2` | `student_sample_steps` | Number of student sampling steps (e.g. 4). |
 | `dmd2` | `guidance_scale` | CFG strength on the teacher (`null` disables CFG; requires a negative-prompt embedding when set). |
@@ -208,10 +208,3 @@ or set `dmd2.guidance_scale: null` to disable CFG.
 
 **Dataloader yields empty batches.** Ensure your cache has at least
 `local_batch_size * fsdp.dp_size` items; the distributed sampler drops incomplete batches.
-
-## Reference
-
-- Fastgen library: [`modelopt/torch/fastgen/`](../../../../modelopt/torch/fastgen/)
-- Built-in recipe: [`modelopt_recipes/general/distillation/dmd2_qwen_image.yaml`](../../../../modelopt_recipes/general/distillation/dmd2_qwen_image.yaml)
-- AutoModel recipe this example subclasses:
-  [`nemo_automodel/recipes/diffusion/train.py`](https://github.com/NVIDIA-NeMo/Automodel/blob/main/nemo_automodel/recipes/diffusion/train.py)

@@ -90,6 +90,7 @@ jobs:
           find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do python3 -m pip install -r "$req_file" || exit 1; done
       - name: Run tests
         id: run_tests
+        shell: bash
         continue-on-error: ${{ inputs.allow_failure }}
         env:
           # Absolute paths so subprocesses running from different working directories
@@ -98,7 +99,12 @@ jobs:
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: |
           echo "Running tests for: ${{ inputs.example }}"
-          python3 -m pytest tests/examples/${{ inputs.example }} --cov
+          pytest_args=()
+          if [[ "${{ inputs.example }}" == "diffusers" ]]; then
+            # Keep legacy ONNX/TRT tests available manually during deprecation.
+            pytest_args+=(--ignore=tests/examples/diffusers/test_diffusers_onnx_trt.py)
+          fi
+          python3 -m pytest tests/examples/${{ inputs.example }} --cov "${pytest_args[@]}"
       - name: Flag allowed failure
         if: ${{ inputs.allow_failure && steps.run_tests.outcome == 'failure' }}
         run: |

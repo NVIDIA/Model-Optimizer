@@ -1,4 +1,4 @@
-# PDD for Qwen-Image
+# PDD distillation for Qwen-Image
 
 [Parallel Decoding Distillation (PDD)](https://arxiv.org/abs/2607.26004) trains one
 diffusion-transformer call to predict several consecutive rectified-flow intervals. This example
@@ -21,6 +21,25 @@ prompt embeddings and masks plus a static negative-prompt embedding for teacher 
 tensors through a user-prepared FastGen cache. With `prompt_only: true`, cached image latents are
 omitted from the training batch and never enter the PDD objective.
 
+> [!NOTE]
+> Qwen-Image is a third-party model with its own license terms. Review the
+> [Qwen-Image model card](https://huggingface.co/Qwen/Qwen-Image) before downloading or
+> redistributing weights or derivatives.
+
+## Install
+
+Run the commands below from the root of a Model-Optimizer source checkout; the `examples/` tree
+is not included in the `nvidia-modelopt` pip package.
+
+```bash
+pip install -e ".[all]"
+pip install -r examples/diffusers/requirements.txt
+pip install -r examples/diffusers/fastgen/pdd/requirements.txt
+```
+
+The PDD requirements pin NeMo AutoModel to `0.5.0` and Diffusers to `0.39.0`, a narrower range
+than the shared DMD2 requirements.
+
 ## Prepare the student
 
 Widen the Qwen output projection before AutoModel constructs FSDP and the optimizer:
@@ -42,11 +61,9 @@ following the [DMD2 data preparation guide](../dmd2/README.md#requirements--self
 The shared cache format contains image latents for use by other FastGen methods, but PDD's
 prompt-only dataloader excludes them from training.
 
-## Train and resume
+## Training
 
 ```bash
-pip install -r examples/diffusers/fastgen/pdd/requirements.txt
-
 torchrun --standalone --nproc-per-node=8 \
   examples/diffusers/fastgen/pdd/finetune.py \
   --config examples/diffusers/fastgen/pdd/configs/qwen_image.yaml \
@@ -60,7 +77,11 @@ runtime cache location differs from the YAML. Sample payloads and the negative e
 from that root, and paths declared by the dataset remain confined to it.
 
 The checked-in recipe targets 3,000 optimizer steps with global batch size 2,048, local batch size
-4, and constant learning rate `1e-5`. Use a new, empty checkpoint directory for the first job.
+4, and constant learning rate `1e-5`.
+
+### Checkpoints & resuming
+
+Use a new, empty checkpoint directory for the first job.
 AutoModel auto-detects the latest checkpoint in that directory on later jobs. In-flight data-free
 trajectories are transient, as in FastGen's carry callback, and restart from fresh noise after a
 resume; AutoModel restores the model, optimizer, scheduler, RNG, and dataloader. For
@@ -69,7 +90,7 @@ wall-time-limited Slurm jobs, request an early signal such as
 `step_scheduler.max_steps` at the overall training target rather than imposing a per-job step
 limit.
 
-## Generate an image
+## Inference
 
 At the final step, `checkpoint.save_consolidated: final` writes a Diffusers-compatible transformer
 under the native checkpoint's `model/consolidated` directory. A periodic or SIGTERM checkpoint

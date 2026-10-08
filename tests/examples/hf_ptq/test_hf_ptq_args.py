@@ -216,7 +216,8 @@ def test_hf_ptq_runs_fixed_ptq_before_kv_autoquantize(monkeypatch):
         batch_size=1,
         auto_quantize_checkpoint=None,
         kv_auto_quantize_checkpoint=None,
-        pyt_ckpt_path="dummy",
+        local_checkpoint_path="dummy",
+        hub_model_id=None,
         cast_mxfp4_to_nvfp4=False,
         layerwise_export=False,
         specdec_offline_dataset=None,
@@ -262,7 +263,8 @@ def test_fixed_ptq_then_kv_rejects_explicit_kv_before_calibration(monkeypatch):
     args = SimpleNamespace(
         auto_quantize_checkpoint=None,
         kv_auto_quantize_checkpoint=None,
-        pyt_ckpt_path="dummy",
+        local_checkpoint_path="dummy",
+        hub_model_id=None,
         cast_mxfp4_to_nvfp4=False,
         layerwise_export=False,
     )
@@ -375,6 +377,7 @@ def test_fsdp2_rejects_mtp_before_distributed_loading(monkeypatch, tmp_path, has
     monkeypatch.setenv("RANK", "0")
     hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", str(tmp_path), "--use_fsdp2")
     args.dist_state = SimpleNamespace(device="cpu", rank=0, world_size=1)
+    args.hub_model_id, args.local_checkpoint_path = None, str(tmp_path)  # as main() sets them
     keys = ["mtp.layers.0.eh_proj.weight", "mtp.layers.1.final_layernorm.weight"] if has_mtp else []
     (tmp_path / "model.safetensors.index.json").write_text(
         json.dumps({"weight_map": dict.fromkeys(keys, "model-00001.safetensors")})
@@ -776,12 +779,6 @@ def test_only_the_main_rank_clears_an_inherited_pointer(monkeypatch, example_uti
     assert inherited.exists()
 
 
-def test_experiment_json_is_export_owned(example_utils):
-    """copy_custom_model_files copies source sidecars including dotfiles, so without this
-    the source checkpoint's pointer would follow it into every derived checkpoint."""
-    assert example_utils.EXPERIMENT_JSON in example_utils._HF_PTQ_EXPORT_OWNED_FILES
-
-
 def test_untracked_runs_write_no_experiment_json(monkeypatch, example_utils, tmp_path):
     _, args = _parse_hf_ptq_args(
         monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--export_path", str(tmp_path)
@@ -884,9 +881,68 @@ def test_post_quantize_export_survives_a_failed_sanity_generate(monkeypatch):
             generated_ids_before_ptq=torch.zeros(1, 4, dtype=torch.long),
             is_nemotron_vl_model=False,
             first_text_speech_dataset=None,
-            default_padding_side="right",
-            default_pad_token=None,
             calib_dataloader=None,
         )
 
     assert len(export_calls) == 1
+
+
+@pytest.mark.usefixtures("clean_env")
+def test_main_makes_a_hub_checkpoint_local_before_loading(monkeypatch, tmp_path):
+    """--pyt_ckpt_path keeps the Hub ID; the model loads from the local copy resolved first."""
+    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "org/model")
+    calls = []
+
+    def ensure_local_checkpoint(model_name_or_path):
+        calls.append(("ensure_local_checkpoint", model_name_or_path))
+        return "org/model", str(tmp_path)
+
+    class _LoadReachedError(Exception):
+        pass
+
+    def load_model(args):
+        calls.append(
+            ("load_model", args.pyt_ckpt_path, args.hub_model_id, args.local_checkpoint_path)
+        )
+        raise _LoadReachedError
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.compiler, "set_stance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hf_ptq, "launch_memory_monitor", lambda: None)
+    monkeypatch.setattr(hf_ptq, "ensure_local_checkpoint", ensure_local_checkpoint)
+    monkeypatch.setattr(hf_ptq, "load_model", load_model)
+
+    with pytest.raises(_LoadReachedError):
+        hf_ptq.main(args)
+
+    assert calls == [
+        ("ensure_local_checkpoint", "org/model"),
+        ("load_model", "org/model", "org/model", str(tmp_path)),
+    ]
+
+
+def test_tensorrt_llm_export_copies_non_model_files_from_the_local_copy(monkeypatch, tmp_path):
+    """The deprecated TensorRT-LLM exporter does not copy them itself; hf_ptq does, from disk."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "org/model",
+        "--export_path",
+        str(tmp_path / "export"),
+        "--sparsity_fmt",
+        "sparsegpt",
+    )
+    args.hub_model_id, args.local_checkpoint_path = "org/model", str(tmp_path / "local")
+    args.dist_state = SimpleNamespace(is_main=True)
+    copies = []
+    monkeypatch.setattr(hf_ptq, "has_spec_opt", lambda model: False)
+    monkeypatch.setattr(hf_ptq, "is_multimodal_model", lambda model: False)
+    monkeypatch.setattr(hf_ptq, "is_trtllm_enc_dec_export", lambda model_type: False)
+    monkeypatch.setattr(hf_ptq, "remove_hook_from_module", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hf_ptq, "export_tensorrt_llm_checkpoint", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hf_ptq, "copy_non_model_files", lambda *args: copies.append(args))
+
+    model = torch.nn.Linear(1, 1)
+    hf_ptq.export_quantized(args, model, model, "llama")
+
+    assert copies == [(str(tmp_path / "local"), str(tmp_path / "export"))]

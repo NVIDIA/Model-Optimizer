@@ -1,5 +1,17 @@
 [
   {
+    "name": "tb21-health-before-score",
+    "skills": ["evaluation"],
+    "query": "Report pass@1=0.61 for my completed Terminal-Bench 2.1 run with 89 tasks x 8 repeats. The summary says 712/712 trials scored, mean/terminus2_completed=0.88, evaluation completion=1.0, shortest rollout=45 s, and no mid-run failure burst. I have not supplied the raw artifacts or their paths. Do not launch jobs.",
+    "files": [],
+    "expected_behavior": [
+      "Reads the TB2.1 recipe's run health screen through run-validation.md and reports all four signals with measured values, thresholds, denominators or windows, and evidence status before treating pass@1 as reliable",
+      "Flags agent completion 0.88 < 0.90 despite 712/712 scored; full coverage does not substitute for the TB2.1 health screen",
+      "States that raw artifact paths and per-trial evidence are missing rather than inventing them or declaring a healthy run",
+      "Reports a flagged TB2.1 health verdict before any provisional score and does not claim a reliable model-quality result"
+    ]
+  },
+  {
     "name": "bounded-failures-strict-boundary",
     "skills": ["evaluation"],
     "query": "Classify independent complete runs with 10000 expected scored trials and 10000 verified unique successful model responses each. Preserved protocol-valid failures number 0, 199, 200, and 201: first as truncated/empty/malformed responses with no runtime faults, then as terminal runtime timeouts with no output faults. Independent checks pass. Also classify 19999/1000000 failures, which displays as 2.00%. Do not launch jobs.",

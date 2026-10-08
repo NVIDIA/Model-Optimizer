@@ -13,16 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import pytest
-import transformers
 from _test_utils.examples.hf_ptq_utils import PTQCommand
-from _test_utils.examples.models import (
-    BART_PATH,
-    MIXTRAL_PATH,
-    T5_PATH,
-    TINY_LLAMA_PATH,
-    WHISPER_PATH,
-)
-from packaging.version import Version
+from _test_utils.examples.models import BART_PATH, MIXTRAL_PATH, T5_PATH, TINY_LLAMA_PATH
 
 
 @pytest.mark.parametrize(
@@ -52,22 +44,6 @@ def test_ptq_mixtral(command):
     command.run(MIXTRAL_PATH)
 
 
-@pytest.mark.skipif(
-    Version(transformers.__version__) >= Version("5.0"),
-    reason="Whisper requires torchcodec and other system packages for transformers>=5.0",
-)
-@pytest.mark.parametrize(
-    "command",
-    [
-        # Auto-batch-size computation seems to take >10mins for Whisper hence using a fixed batch size
-        PTQCommand(quant="fp8", calib_batch_size=16, calib_dataset="peoples_speech", min_sm=89),
-    ],
-    ids=PTQCommand.param_str,
-)
-def test_ptq_whisper(command):
-    command.run(WHISPER_PATH)
-
-
 @pytest.mark.parametrize(
     "command",
     [
@@ -84,6 +60,8 @@ def test_ptq_whisper(command):
         PTQCommand(recipe="general/ptq/iq2_xxs", kv_cache_quant="none"),
         PTQCommand(recipe="general/ptq/iq2_xs", kv_cache_quant="none"),
         PTQCommand(recipe="general/ptq/iq2_s", kv_cache_quant="none"),
+        # Q8_0 has 32-value blocks and needs no calibration forward pass.
+        PTQCommand(recipe="general/ptq/q8_0", kv_cache_quant="none"),
         PTQCommand(quant="nvfp4"),
         PTQCommand(quant="nvfp4_awq_lite"),
         # autoquant (recipe-driven)

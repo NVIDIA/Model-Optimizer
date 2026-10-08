@@ -44,6 +44,8 @@ from modelopt.torch.quantization.ggml import (
     IQ2_XS_EFFECTIVE_BITS,
     IQ2_XXS_BLOCK_SIZE,
     IQ2_XXS_EFFECTIVE_BITS,
+    Q8_0_BLOCK_SIZE,
+    Q8_0_EFFECTIVE_BITS,
 )
 
 
@@ -145,6 +147,7 @@ def test_mlp_weight_only_recipe_matches_its_mtq_cfg(recipe_name, cfg_name):
         ("iq2_xxs", IQ2_XXS_BLOCK_SIZE, IQ2_XXS_EFFECTIVE_BITS),
         ("iq2_xs", IQ2_XS_BLOCK_SIZE, IQ2_XS_EFFECTIVE_BITS),
         ("iq2_s", IQ2_S_BLOCK_SIZE, IQ2_S_EFFECTIVE_BITS),
+        ("q8_0", Q8_0_BLOCK_SIZE, Q8_0_EFFECTIVE_BITS),
     ],
 )
 def test_iq_recipe_matches_packing_contract(qformat, block_size, effective_bits):
@@ -157,13 +160,21 @@ def test_iq_recipe_matches_packing_contract(qformat, block_size, effective_bits)
     }
 
     assert qformat in presets.QUANT_CFG_CHOICES
-    assert set(weight_cfgs) == {"*mlp*weight_quantizer", "*block_sparse_moe*weight_quantizer"}
+    expected_weight_quantizers = (
+        {"*weight_quantizer"}
+        if qformat == "q8_0"
+        else {"*mlp*weight_quantizer", "*block_sparse_moe*weight_quantizer"}
+    )
+    assert set(weight_cfgs) == expected_weight_quantizers
     for weight_cfg in weight_cfgs.values():
         assert weight_cfg["backend"] == "ggml"
         assert weight_cfg["block_sizes"][-1] == block_size
         assert weight_cfg["effective_bits"] == effective_bits
-    assert quantize["algorithm"]["method"] == "gptq"
-    assert quantize["algorithm"]["block_size"] % block_size == 0
+    if qformat == "q8_0":
+        assert quantize["algorithm"] is None
+    else:
+        assert quantize["algorithm"]["method"] == "gptq"
+        assert quantize["algorithm"]["block_size"] % block_size == 0
 
 
 # --- RecipeSupersededAction: the flags --recipe replaces ----------------------------------------
