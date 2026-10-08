@@ -103,9 +103,22 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
         {"use_constant_amax": True, "unsigned": True, "narrow_range": True, "type": "dynamic"}
     )
     qkv.reset_amax()
+    backend_cfg = {
+        "num_bits": "test_format",
+        "backend": "test_vllm_recipe",
+        "backend_extra_args": {"offset": 0.25},
+    }
     layer.self_attention.linear_proj.input_quantizer.set_from_attribute_config(
+        {**backend_cfg, "use_constant_amax": True}
+    )
+    for name in ("k_bmm_quantizer", "v_bmm_quantizer"):
+        quantizer = getattr(layer.self_attention.core_attention, name)
+        quantizer.set_from_attribute_config({**backend_cfg, "enable": True})
+        quantizer.amax = torch.tensor(1.001, device="cuda")
+    layer.self_attention.core_attention.k_bmm_quantizer.set_from_attribute_config(
         {"use_constant_amax": True}
     )
+    layer.self_attention.core_attention.k_bmm_quantizer.reset_amax()
     inactive_cfg = {
         "num_bits": 8,
         "unsigned": True,
@@ -174,6 +187,10 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
         for projections, _ in linears[:2]
         for projection in projections
     }
+    expected_names.update(
+        f"model.layers.0.self_attn.{name}" for name in ("k_bmm_quantizer", "v_bmm_quantizer")
+    )
+    constant_names.add("model.layers.0.self_attn.k_bmm_quantizer")
     state, recipe, weight_map = _assert_exported_quantizers(
         export_dir,
         expected_names,
@@ -196,6 +213,11 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
         rtol=0,
         atol=0,
     )
+    for name in ("o_proj.input_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
+        custom_recipe = recipe[f"model.layers.0.self_attn.{name}"]
+        assert custom_recipe["_num_bits"] == "test_format"
+        assert custom_recipe["_backend"] == "test_vllm_recipe"
+        assert custom_recipe["_backend_extra_args"] == {"offset": 0.25}
     assert stale_quantizer + "._amax" not in state
     assert stale_quantizer not in recipe
     assert {"model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"} <= weight_map.keys()
@@ -292,7 +314,6 @@ def _assert_unsupported_settings(model, source, export_dir, rank, size):
                 "fake_quant": False,
                 "type": "dynamic",
                 "bias": {-1: None},
-                "backend": "custom",
             },
         ),
         ("input_quantizer", {"enable": False, "rotate": True, "pre_quant_scale": True}),

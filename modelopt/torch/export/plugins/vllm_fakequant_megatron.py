@@ -59,7 +59,6 @@ def _quantizer_configs(module: torch.nn.Module) -> tuple[dict[str, dict], str]:
                     or getattr(quantizer, "_amax", None) is not None
                 ),
                 "bias": is_activation_quantizing and quantizer.bias is not None,
-                "backend": is_activation_quantizing and quantizer.backend is not None,
             }.items()
             if invalid
         ]
@@ -77,6 +76,13 @@ def _quantizer_configs(module: torch.nn.Module) -> tuple[dict[str, dict], str]:
                     "_block_sizes": quantizer.block_sizes,
                 }
             )
+            if quantizer.backend is not None:
+                recipe.update(
+                    {
+                        "_backend": quantizer.backend,
+                        "_backend_extra_args": quantizer.backend_extra_args,
+                    }
+                )
         configs[get_unwrapped_name(name, module)] = recipe
     return configs, ""
 
@@ -289,6 +295,15 @@ class VllmFqGPTModelExporter(GPTModelExporter):
     def _get_quantization_format(self, module: torch.nn.Module):
         return QUANTIZATION_NONE
 
+    def _self_attention_scaling(
+        self, module, prefix, k_scale_name="k_scale", v_scale_name="v_scale", is_mtp=False
+    ):
+        # Fakequant stores K/V ranges and recipes instead of real KV-cache scaling factors.
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
+        state, _, _ = self._get_quantized_state(module, prefix=prefix)
+        self._state_dict.update({prefix + name: value for name, value in state.items()})
+
     def _get_quantized_state(
         self,
         module: torch.nn.Module,
@@ -376,8 +391,6 @@ class VllmFqGPTModelExporter(GPTModelExporter):
                         if need_move:
                             weight_quantizer.to(wq_dev)
             name_to_value["weight"] = weight.cpu()
-        else:
-            return name_to_value, qformat, block_size
 
         # Save activation ranges; weight quantizers are folded into the weights above.
         for name, quantizer in module.named_modules():
@@ -386,7 +399,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             amax = getattr(quantizer, "_amax", None)
             # The constant amax takes precedence over any stored calibration buffer.
             if quantizer._use_constant_amax and not quantizer.is_mx_format:
-                amax = quantizer._get_amax(module.weight)
+                amax = quantizer._get_amax(amax if amax is not None else torch.empty(0))
             if amax is not None:
                 name = get_unwrapped_name(name, module)
                 name_to_value[name + "._amax"] = amax.detach().cpu().clone()

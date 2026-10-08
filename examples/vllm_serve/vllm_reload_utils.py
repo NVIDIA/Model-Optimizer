@@ -350,7 +350,7 @@ def quantizer_recipe_to_quant_cfg(recipe: dict[str, Any], model: Any) -> dict[st
         cfg = {
             key[1:]: value
             for key, value in state.items()
-            if key in ("_num_bits", "_axis", "_block_sizes")
+            if key in ("_num_bits", "_axis", "_block_sizes", "_backend", "_backend_extra_args")
         }
         if cfg:
             entry["cfg"] = cfg
