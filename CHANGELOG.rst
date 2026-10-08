@@ -106,6 +106,7 @@ Changelog
 
 **Deprecations**
 
+- The Diffusers ONNX export and TensorRT engine deployment workflow is deprecated and will be removed no earlier than 0.49.0, after the one-release migration period. Export unified Hugging Face checkpoints with ``--hf-ckpt-dir`` and follow the `diffusion deployment guide <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/diffusers#hf-checkpoint-deployment>`_ to select a compatible backend.
 - The ``examples/vllm_serve`` ``QUANT_CFG`` / ``KV_QUANT_CFG`` environment variables and their
   ``--modelopt-quant-cfg`` / ``--modelopt-kv-quant-cfg`` flags will be deprecated in a future release.
   For new runs, use a PTQ recipe via ``RECIPE_PATH`` or ``--modelopt-recipe-path``; unset the old

@@ -30,7 +30,7 @@ class DiffuserModel(NamedTuple):
     quant_algo: str
     collect_method: str
 
-    def _run_cmd(self, script: str, *args: str) -> None:
+    def _run_cmd(self, script: str, *args: str) -> str:
         cmd_args = [
             "python",
             script,
@@ -40,7 +40,7 @@ class DiffuserModel(NamedTuple):
             self.path,
         ]
         cmd_args.extend(args)
-        run_example_command(cmd_args, "diffusers/quantization")
+        return run_example_command(cmd_args, "diffusers/quantization")
 
     def _format_args(self) -> list[str]:
         return [
@@ -62,7 +62,7 @@ class DiffuserModel(NamedTuple):
             self.quant_algo,
         ]
 
-    def quantize(self, tmp_path: Path) -> None:
+    def quantize(self, tmp_path: Path, *export_args: str) -> None:
         self._run_cmd(
             "quantize.py",
             *self._format_args(),
@@ -70,111 +70,22 @@ class DiffuserModel(NamedTuple):
             self.dtype,
             "--quantized-torch-ckpt-save-path",
             str(tmp_path / f"{self.name}_{self.format_type}.pt"),
-            "--onnx-dir",
-            str(tmp_path / f"{self.name}_{self.format_type}_onnx"),
+            *export_args,
         )
 
-    def restore(self, tmp_path: Path) -> None:
-        self._run_cmd(
+        assert any((tmp_path / f"{self.name}_{self.format_type}.pt").glob("*.pt"))
+
+    def restore(self, tmp_path: Path, *export_args: str) -> None:
+        output = self._run_cmd(
             "quantize.py",
             *self._format_args(),
             "--trt-high-precision-dtype",
             self.dtype,
             "--restore-from",
             str(tmp_path / f"{self.name}_{self.format_type}.pt"),
-            "--onnx-dir",
-            str(tmp_path / f"{self.name}_{self.format_type}_onnx"),
+            *export_args,
         )
-
-    def inference(self, tmp_path: Path) -> None:
-        self._run_cmd(
-            "diffusion_trt.py",
-            "--onnx-load-path",
-            str(tmp_path / f"{self.name}_{self.format_type}_onnx/model.onnx"),
-            "--dq-only",
-            "--torch-autocast",
-            "--num-inference-steps",
-            "2",
-        )
-
-
-@pytest.mark.parametrize(
-    "model",
-    [
-        DiffuserModel(
-            name="flux-schnell",
-            path=FLUX_SCHNELL_PATH,
-            dtype="BFloat16",
-            format_type="int8",
-            quant_algo="smoothquant",
-            collect_method="min-mean",
-        ),
-        DiffuserModel(
-            name="sd3-medium",
-            path=SD3_PATH,
-            dtype="Half",
-            format_type="int8",
-            quant_algo="smoothquant",
-            collect_method="min-mean",
-        ),
-        pytest.param(
-            DiffuserModel(
-                name="sd3-medium",
-                path=SD3_PATH,
-                dtype="Half",
-                format_type="fp8",
-                quant_algo="max",
-                collect_method="default",
-            ),
-            marks=minimum_sm(89),
-        ),
-        pytest.param(
-            DiffuserModel(
-                name="sdxl-1.0",
-                path=SDXL_PATH,
-                dtype="Half",
-                format_type="fp8",
-                quant_algo="max",
-                collect_method="default",
-            ),
-            marks=minimum_sm(89),
-        ),
-        pytest.param(
-            DiffuserModel(
-                name="sdxl-1.0",
-                path=SDXL_PATH,
-                dtype="Half",
-                format_type="fp4",
-                quant_algo="max",
-                collect_method="default",
-            ),
-            marks=minimum_sm(100),
-        ),
-        DiffuserModel(
-            name="sdxl-1.0",
-            path=SDXL_PATH,
-            dtype="Half",
-            format_type="int8",
-            quant_algo="smoothquant",
-            collect_method="min-mean",
-        ),
-    ],
-    ids=[
-        "flux_schnell_bf16_int8_smoothquant_3.0_min_mean",
-        "sd3_medium_fp16_int8_smoothquant_3.0_min_mean",
-        "sd3_medium_fp16_fp8_max_3.0_default",
-        "sdxl_1.0_fp16_fp8_max_3.0_default",
-        "sdxl_1.0_fp16_fp4_max_3.0_default",
-        "sdxl_1.0_fp16_int8_smoothquant_3.0_min_mean",
-    ],
-)
-def test_diffusers_quantization(
-    model: DiffuserModel,
-    tmp_path: Path,
-) -> None:
-    model.quantize(tmp_path)
-    model.restore(tmp_path)
-    model.inference(tmp_path)
+        assert f"Detected restored quantization format: {self.format_type}" in output
 
 
 class Wan22Model(NamedTuple):
@@ -242,49 +153,128 @@ class Wan22Model(NamedTuple):
         )
 
 
+DIFFUSER_MODELS = [
+    pytest.param(
+        DiffuserModel(
+            name="flux-schnell",
+            path=FLUX_SCHNELL_PATH,
+            dtype="BFloat16",
+            format_type="int8",
+            quant_algo="smoothquant",
+            collect_method="min-mean",
+        ),
+        id="flux_schnell_bf16_int8_smoothquant_3.0_min_mean",
+    ),
+    pytest.param(
+        DiffuserModel(
+            name="sd3-medium",
+            path=SD3_PATH,
+            dtype="Half",
+            format_type="int8",
+            quant_algo="smoothquant",
+            collect_method="min-mean",
+        ),
+        id="sd3_medium_fp16_int8_smoothquant_3.0_min_mean",
+    ),
+    pytest.param(
+        DiffuserModel(
+            name="sd3-medium",
+            path=SD3_PATH,
+            dtype="Half",
+            format_type="fp8",
+            quant_algo="max",
+            collect_method="default",
+        ),
+        marks=minimum_sm(89),
+        id="sd3_medium_fp16_fp8_max_3.0_default",
+    ),
+    pytest.param(
+        DiffuserModel(
+            name="sdxl-1.0",
+            path=SDXL_PATH,
+            dtype="Half",
+            format_type="fp8",
+            quant_algo="max",
+            collect_method="default",
+        ),
+        marks=minimum_sm(89),
+        id="sdxl_1.0_fp16_fp8_max_3.0_default",
+    ),
+    pytest.param(
+        DiffuserModel(
+            name="sdxl-1.0",
+            path=SDXL_PATH,
+            dtype="Half",
+            format_type="fp4",
+            quant_algo="max",
+            collect_method="default",
+        ),
+        marks=minimum_sm(100),
+        id="sdxl_1.0_fp16_fp4_max_3.0_default",
+    ),
+    pytest.param(
+        DiffuserModel(
+            name="sdxl-1.0",
+            path=SDXL_PATH,
+            dtype="Half",
+            format_type="int8",
+            quant_algo="smoothquant",
+            collect_method="min-mean",
+        ),
+        id="sdxl_1.0_fp16_int8_smoothquant_3.0_min_mean",
+    ),
+]
+
+
 # The VAE (``AutoencoderKLWan``) is shared between Wan 2.2 14B and 5B, so the
 # Conv3D NVFP4 implicit-GEMM dispatch exercises the same kernel either way; we
 # parametrize both ``--model`` values to also cover the ``quantize.py`` dispatch
 # for each.
-@pytest.mark.parametrize(
-    "wan_model",
-    [
+WAN22_MODELS = [
+    pytest.param(
         Wan22Model("wan2.2-t2v-14b", None, "int8", "smoothquant", "min-mean"),
-        pytest.param(
-            Wan22Model("wan2.2-t2v-14b", None, "fp8", "max", "default"),
-            marks=minimum_sm(89),
-        ),
-        pytest.param(
-            Wan22Model("wan2.2-t2v-14b", None, "fp4", "max", "default"),
-            marks=minimum_sm(89),
-        ),
-        pytest.param(
-            Wan22Model("wan2.2-t2v-14b", "vae", "fp8", "max", "default"),
-            marks=minimum_sm(89),
-        ),
-        pytest.param(
-            Wan22Model("wan2.2-t2v-14b", "vae", "fp4", "max", "default"),
-            marks=minimum_sm(89),
-        ),
-        pytest.param(
-            Wan22Model("wan2.2-t2v-5b", "vae", "fp8", "max", "default"),
-            marks=minimum_sm(89),
-        ),
-        pytest.param(
-            Wan22Model("wan2.2-t2v-5b", "vae", "fp4", "max", "default"),
-            marks=minimum_sm(89),
-        ),
-    ],
-    ids=[
-        "wan22_14b_transformer_int8_smoothquant",
-        "wan22_14b_transformer_fp8_max",
-        "wan22_14b_transformer_fp4_max",
-        "wan22_14b_vae_fp8_max",
-        "wan22_14b_vae_fp4_max",
-        "wan22_5b_vae_fp8_max",
-        "wan22_5b_vae_fp4_max",
-    ],
-)
+        id="wan22_14b_transformer_int8_smoothquant",
+    ),
+    pytest.param(
+        Wan22Model("wan2.2-t2v-14b", None, "fp8", "max", "default"),
+        marks=minimum_sm(89),
+        id="wan22_14b_transformer_fp8_max",
+    ),
+    pytest.param(
+        Wan22Model("wan2.2-t2v-14b", None, "fp4", "max", "default"),
+        marks=minimum_sm(89),
+        id="wan22_14b_transformer_fp4_max",
+    ),
+    pytest.param(
+        Wan22Model("wan2.2-t2v-14b", "vae", "fp8", "max", "default"),
+        marks=minimum_sm(89),
+        id="wan22_14b_vae_fp8_max",
+    ),
+    pytest.param(
+        Wan22Model("wan2.2-t2v-14b", "vae", "fp4", "max", "default"),
+        marks=minimum_sm(89),
+        id="wan22_14b_vae_fp4_max",
+    ),
+    pytest.param(
+        Wan22Model("wan2.2-t2v-5b", "vae", "fp8", "max", "default"),
+        marks=minimum_sm(89),
+        id="wan22_5b_vae_fp8_max",
+    ),
+    pytest.param(
+        Wan22Model("wan2.2-t2v-5b", "vae", "fp4", "max", "default"),
+        marks=minimum_sm(89),
+        id="wan22_5b_vae_fp4_max",
+    ),
+]
+
+
+@pytest.mark.parametrize("model", DIFFUSER_MODELS)
+def test_diffusers_quantization(model: DiffuserModel, tmp_path: Path) -> None:
+    model.quantize(tmp_path)
+    model.restore(tmp_path)
+
+
+@pytest.mark.parametrize("wan_model", WAN22_MODELS)
 def test_wan22_quantization(wan_model: Wan22Model, tiny_wan22_path: str, tmp_path: Path) -> None:
     wan_model.quantize(tiny_wan22_path, tmp_path)
     wan_model.restore(tiny_wan22_path, tmp_path)
