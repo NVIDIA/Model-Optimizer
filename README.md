@@ -27,6 +27,7 @@ Model Optimizer is also integrated with [NVIDIA Megatron-Bridge](https://github.
 
 ## Latest News
 
+- [2026/09/16] [BLOG: Scale Learning: Training NVFP4 Block Scales to Recover Accuracy](https://nvidia.github.io/Model-Optimizer/announcements/scale-learning.html)
 - [2026/09/16] [**End-to-end W4A4 NVFP4 + QAD tutorial for Qwen3.6-35B-A3B**](./examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B): NVFP4 W4A4 PTQ plus quantization-aware distillation, reaching up to 1.30x vLLM throughput over BF16 and 3.1x smaller checkpoints while recovering the accuracy W4A4 costs.
 - [2026/09/09] [BLOG: Improving NVFP4 Accuracy with Local-Hessian Weight Scales](https://nvidia.github.io/Model-Optimizer/announcements/local-hessian.html)
 - [2026/08/24] [BLOG: AutoQuantize: A Fast Automatic Mixed-Precision Assignment](https://nvidia.github.io/Model-Optimizer/announcements/autoquantize.html)
@@ -109,7 +110,7 @@ more fine-grained control on installed dependencies or for alternative docker im
 | **Technique** | **Description** | **Getting started** | **Examples** |
 | :------------: | :------------: | :------------: | :------------: |
 | Post Training Quantization | Compress model size by 2x-4x, speeding up inference while preserving model quality! | \[[Start&nbsp;here](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] | \[[HF LLMs / VLMs](./examples/hf_ptq/)\] \[[Megatron-Bridge LLMs / VLMs](./examples/megatron_bridge/README.md#post-training-quantization)\] \[[Diffusers](./examples/diffusers/)\] \[[ONNX](./examples/onnx_ptq/)\] \[[Windows](./examples/windows/)\] |
-| Quantization Aware Training / Distillation | Refine accuracy of quantized models even further with a few training steps! | \[[Start&nbsp;here](https://nvidia.github.io/Model-Optimizer/guides/quantization_aware_training.html)\] | \[[Hugging Face](./examples/llm_qat/)\] \[[Megatron-Bridge](./examples/megatron_bridge/README.md#quantization-aware-distillation-qad)\] |
+| Quantization Aware Training / Distillation | Refine accuracy of quantized models even further with a few training steps! | \[[Start&nbsp;here](https://nvidia.github.io/Model-Optimizer/guides/quantization_aware_training_and_distillation.html)\] | \[[Hugging Face](./examples/llm_qat/)\] \[[Megatron-Bridge](./examples/megatron_bridge/README.md#quantization-aware-distillation-qad)\] |
 | Pruning | Reduce your model parameters or memory footprint and accelerate inference by removing unnecessary weights! | \[[Start&nbsp;here](./examples/pruning/README.md)\] | \[[General](./examples/pruning/)\] \[[Megatron-Bridge](./examples/megatron_bridge/README.md#pruning)\] |
 | Distillation | Reduce deployment model size by teaching small models to behave like larger models! | \[[Start&nbsp;here](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html)\] | \[[Hugging Face](./examples/llm_distill/)\] \[[Megatron-Bridge](./examples/megatron_bridge/README.md#distillation)\] \[[Megatron-LM](./examples/llm_distill/README.md#knowledge-distillation-kd-in-nvidia-megatron-lm-framework)\] |
 | Speculative Decoding | Train draft modules to predict extra tokens during inference! | \[[Start&nbsp;here](https://nvidia.github.io/Model-Optimizer/guides/5_speculative_decoding.html)\] | \[[Hugging Face](./examples/speculative_decoding/)\] \[[Megatron-LM](./examples/speculative_decoding#mlm-example)\] |

@@ -35,20 +35,18 @@ from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
 from example_utils import (
     HF_PTQ,
     _prepare_quant_cfg,
-    _resolve_model_path,
     build_quant_cfg,
     cleanup_distributed,
-    copy_custom_model_files,
     create_vlm_calibration_loop,
+    generate_excludes_prompt,
     get_model,
     get_processor,
     get_tokenizer,
-    is_enc_dec,
     is_nemotron_vl,
+    is_trtllm_enc_dec_export,
     mlflow_run,
     recipe_layerwise_blocks,
     run_nemotron_vl_preview,
-    save_processor_config,
     save_source_config,
     setup_distributed_args,
     validate_fsdp2_supported,
@@ -79,13 +77,14 @@ from modelopt.torch.export import (
     export_hf_checkpoint,
     export_hf_vllm_fq_checkpoint,
     export_speculative_decoding,
-    get_model_type,
     has_spec_opt,
     save_expert_token_count_table,
 )
 from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
+from modelopt.torch.models import hf_model_type
+from modelopt.torch.models.hf import prepare_model_for_calibration, prepare_model_for_loading
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
@@ -102,6 +101,10 @@ from modelopt.torch.utils.dataset_utils import (
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.mlflow import add_mlflow_args, resolve_mlflow_args
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    copy_non_model_files,
+    ensure_local_checkpoint,
+)
 from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
@@ -111,14 +114,16 @@ RAND_SEED = 1234
 mto.enable_huggingface_checkpointing()
 
 
-def extract_and_prepare_language_model_from_vl(full_model):
+def extract_and_prepare_language_model_from_vl(
+    full_model: torch.nn.Module,
+) -> torch.nn.Module | None:
     """Extract language model from VL model and disable quantization for non-language components.
 
     Args:
         full_model: The full VLM model
 
     Returns:
-        tuple: (language_model, model_type) or (None, None) if not a VLM
+        The language model, or None if not a VLM
     """
     language_model_lineage = get_language_model_from_vl(full_model, strict=True)
     if language_model_lineage is not None:
@@ -138,10 +143,9 @@ def extract_and_prepare_language_model_from_vl(full_model):
                     mtq.quantize(module, disabled_quant_cfg, forward_loop=None)
                     memo.add(module)
 
-        model_type = get_model_type(language_model)
-        return language_model, model_type
+        return language_model
 
-    return None, None
+    return None
 
 
 class _DeviceDataLoader:
@@ -304,11 +308,11 @@ def load_model(args: argparse.Namespace):
         raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
     if args.use_fsdp2:
         hf_config = AutoConfig.from_pretrained(
-            args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code
+            args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
         )
         validate_fsdp2_supported(args, hf_config)
         full_model = parallel_load_and_prepare_fsdp2(
-            args.pyt_ckpt_path,
+            args.local_checkpoint_path,
             args.dist_state.device,
             args.dist_state.rank,
             args.dist_state.world_size,
@@ -319,7 +323,7 @@ def load_model(args: argparse.Namespace):
         )
     elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
-            args.pyt_ckpt_path,
+            args.local_checkpoint_path,
             args.dist_state.device,
             gpu_mem_percentage=args.gpu_max_mem_percentage,
             trust_remote_code=args.trust_remote_code,
@@ -344,16 +348,27 @@ def load_model(args: argparse.Namespace):
         with init_quantized_weights(
             quant_cfg, gpu_mem_percentage=args.gpu_max_mem_percentage, quant_gemm=False
         ):
+            hf_config = AutoConfig.from_pretrained(
+                args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
+            )
             model_kwargs = {"trust_remote_code": args.trust_remote_code}
             if args.attn_implementation is not None:
                 model_kwargs["attn_implementation"] = args.attn_implementation
-            full_model = AutoModelForCausalLM.from_pretrained(
-                args.pyt_ckpt_path,
-                **model_kwargs,
-            )
+            with prepare_model_for_loading(
+                hf_config.model_type, args.local_checkpoint_path, args.trust_remote_code
+            ):
+                full_model = AutoModelForCausalLM.from_pretrained(
+                    args.local_checkpoint_path,
+                    **model_kwargs,
+                )
         calibration_only = True
 
-    model_type = get_model_type(full_model)
+    # Include auxiliary modules whose activation quantizers require calibration data.
+    prepare_model_for_calibration(full_model)
+
+    # The checkpoint's Hugging Face model_type. Always taken from the root model: a VLM's language
+    # model reports its own sub-config's type, which varies across transformers versions.
+    model_type = hf_model_type(full_model)
 
     if args.use_fsdp2:
         device = args.dist_state.device
@@ -364,8 +379,6 @@ def load_model(args: argparse.Namespace):
     processor = None
     tokenizer = None
     language_model = full_model
-    default_padding_side = None
-    default_pad_token = None
 
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
@@ -382,14 +395,14 @@ def load_model(args: argparse.Namespace):
 
     if model_type == "whisper":
         processor = get_processor(
-            args.pyt_ckpt_path,
+            args.local_checkpoint_path,
             model_type,
             trust_remote_code=args.trust_remote_code,
         )
     elif args.calib_with_images:
         # For VLM image calibration, we need an AutoProcessor to build multimodal inputs.
         processor = AutoProcessor.from_pretrained(
-            args.pyt_ckpt_path,
+            args.local_checkpoint_path,
             trust_remote_code=args.trust_remote_code,
             padding_side="left",
         )
@@ -397,26 +410,25 @@ def load_model(args: argparse.Namespace):
         if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
             tokenizer = processor.tokenizer
         else:
-            tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
+            tokenizer = get_tokenizer(
+                args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
+            )
 
-        default_pad_token = tokenizer.pad_token
         # Some Nemotron tokenizers may not define pad_token by default; but we use padding=True during calibration.
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
-        assert tokenizer.pad_token is not None, f"Pad token for {args.pyt_ckpt_path} cannot be set!"
+        assert tokenizer.pad_token is not None, (
+            f"Pad token for {args.local_checkpoint_path} cannot be set!"
+        )
 
-        default_padding_side = tokenizer.padding_side
         tokenizer.padding_side = "left"
 
         # Plain PTQ quantizes only the language model. Recipes keep the complete VLM so their
         # quantizer rules can target vision and language components in one state.
         if args.recipe is None:
-            extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
-                full_model
-            )
+            extracted_lm = extract_and_prepare_language_model_from_vl(full_model)
             if extracted_lm is not None:
                 language_model = extracted_lm
-                model_type = extracted_model_type
     else:
         if args.specdec_offline_dataset is not None:
             language_model = full_model
@@ -437,17 +449,14 @@ def load_model(args: argparse.Namespace):
             # would leave modelopt state on the ancestors and make auto_quantize() fail with
             # "multiple modelopt states".
             if args.recipe is None:
-                extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
-                    full_model
-                )
+                extracted_lm = extract_and_prepare_language_model_from_vl(full_model)
                 if extracted_lm is not None:
                     language_model = extracted_lm
-                    model_type = extracted_model_type
 
-        tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
+        tokenizer = get_tokenizer(
+            args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
+        )
 
-        default_padding_side = tokenizer.padding_side
-        default_pad_token = tokenizer.pad_token
         # Left padding usually provides better calibration result.
         tokenizer.padding_side = "left"
 
@@ -458,8 +467,6 @@ def load_model(args: argparse.Namespace):
         calibration_only,
         processor,
         tokenizer,
-        default_padding_side,
-        default_pad_token,
         device,
     )
 
@@ -632,17 +639,10 @@ def export_quantized(
     full_model: torch.nn.Module,
     language_model: torch.nn.Module,
     model_type: str | None,
-    tokenizer: PreTrainedTokenizerBase | None,
-    default_padding_side,
-    default_pad_token,
 ):
     # Not inference_mode: the FSDP2 path gathers full params in this context and
     # inference tensors break the subsequent state_dict() -> param.detach().
     with torch.no_grad():
-        if model_type is None:
-            print(f"Unknown model type {type(language_model).__name__}. Continue exporting...")
-            model_type = f"unknown:{type(language_model).__name__}"
-
         export_path = args.export_path
 
         # Early exit for speculative decoding checkpoints
@@ -658,11 +658,10 @@ def export_quantized(
             # the source config would replace; it never writes a processor config.
             if not args.layerwise_export:
                 save_source_config(args, export_path)
-            save_processor_config(args, export_path)
 
         start_time = time.time()
         is_tensorrt_llm_export = (
-            model_type in ["t5", "bart", "whisper"]
+            is_trtllm_enc_dec_export(model_type)
             or args.sparsity_fmt != "dense"
             or "int8_smoothquant" in args.qformat
         )
@@ -678,24 +677,17 @@ def export_quantized(
             # Move meta tensor back to device before exporting.
             remove_hook_from_module(language_model, recurse=True)
 
+            # The deprecated exporter detects its TensorRT-LLM decoder_type from the model class.
             export_tensorrt_llm_checkpoint(
                 language_model,
-                model_type,
                 export_dir=export_path,
                 inference_tensor_parallel=args.inference_tensor_parallel,
                 inference_pipeline_parallel=args.inference_pipeline_parallel,
             )
-
-            # Copy custom model files (Python files and JSON configs) for TensorRT-LLM export
-            # TRT-LLM checkpoints are rank<N>.safetensors plus their own config; nothing
-            # there reads an off-index sidecar, and the exclude_modules seeding that gives
-            # one meaning happens only inside export_hf_checkpoint.
-            copy_custom_model_files(
-                args.pyt_ckpt_path,
-                export_path,
-                args.trust_remote_code,
-                copy_off_index_weights=False,
-            )
+            # The unified exporters copy the source's non-model files themselves; this deprecated
+            # one does not.
+            if args.dist_state.is_main:
+                copy_non_model_files(args.local_checkpoint_path, export_path)
         else:
             # Check arguments for unified_hf export format and set to default if unsupported arguments are provided
             assert args.sparsity_fmt == "dense", (
@@ -731,28 +723,6 @@ def export_quantized(
                         "TensorRT-LLM and SGLang do not support this format. "
                         "vLLM deployment support is in progress."
                     )
-
-        # Restore default padding and export the tokenizer as well.
-        if tokenizer is not None:
-            tokenizer.padding_side = default_padding_side
-            if default_pad_token is not None:
-                tokenizer.pad_token = default_pad_token
-            if args.dist_state.is_main:
-                tokenizer.save_pretrained(export_path)
-
-        # Copy custom model files (Python files and JSON configs) if trust_remote_code is used.
-        # This must run AFTER tokenizer.save_pretrained() so original tokenizer files
-        # from the source checkpoint take precedence over regenerated ones (which may
-        # differ in format due to newer transformers versions).
-        if args.dist_state.is_main:
-            exclude_files = None if is_tensorrt_llm_export else {"generation_config.json"}
-            copy_custom_model_files(
-                args.pyt_ckpt_path,
-                export_path,
-                args.trust_remote_code,
-                exclude_files=exclude_files,
-                copy_off_index_weights=not is_tensorrt_llm_export,
-            )
 
         args.checkpoint_exported = True
         end_time = time.time()
@@ -791,8 +761,9 @@ def pre_quantize(
     # Generate preview before quantization
     if args.skip_generate:
         generated_ids_before_ptq = None
-    elif model_type == "deepseek":
-        # DeepSeek generation may go OOM, so we skip it
+    elif model_type is not None and model_type.startswith(("deepseek", "kimi_k2")):
+        # DeepSeek generation may go OOM, so we skip it. Kimi-K2 (kimi_k2) and Kimi-K2.5
+        # (kimi_k25) are DeepSeek-V3 architectures under their own model_type.
         generated_ids_before_ptq = None
     elif model_type == "nemotron_h":
         # NemotronH (SSM/Mamba hybrid) modeling code does not work with accelerate's big model inference
@@ -804,7 +775,7 @@ def pre_quantize(
             full_model,
             tokenizer,
             preview_input_ids,
-            args.pyt_ckpt_path,
+            args.local_checkpoint_path,
             "before quantization",
             allow_fallback=False,
             trust_remote_code=args.trust_remote_code,
@@ -826,13 +797,11 @@ def post_quantize(
     model_type: str | None,
     tokenizer: PreTrainedTokenizerBase | None,
     processor: ProcessorMixin | None,
-    preview_input_ids,
-    preview_attention_mask,
-    generated_ids_before_ptq,
-    is_nemotron_vl_model,
-    first_text_speech_dataset,
-    default_padding_side,
-    default_pad_token,
+    preview_input_ids: torch.Tensor | None,
+    preview_attention_mask: torch.Tensor | None,
+    generated_ids_before_ptq: Any,
+    is_nemotron_vl_model: bool,
+    first_text_speech_dataset: str | None,
     calib_dataloader: DataLoader,
 ):
     """
@@ -846,16 +815,9 @@ def post_quantize(
     # Early exit for offline speculative decoding: skip generation comparison and export directly.
     # The model's get_dummy_inputs() provides the right input format for the export forward pass.
     if args.specdec_offline_dataset is not None:
-        export_quantized(
-            args,
-            full_model,
-            language_model,
-            model_type,
-            tokenizer,
-            default_padding_side,
-            default_pad_token,
-        )
+        export_quantized(args, full_model, language_model, model_type)
         return
+    assert preview_input_ids is not None, "pre_quantize returns preview inputs for this path"
 
     if args.verbose and args.dist_state.is_main:
         try:
@@ -870,7 +832,7 @@ def post_quantize(
     generated_ids_after_ptq = None
     if generated_ids_before_ptq is None:
         pass
-    elif model_type != "llama4" and not is_nemotron_vl_model:
+    elif model_type not in ("llama4", "llama4_text") and not is_nemotron_vl_model:
         # Our fake quantizer may not be fully compatible with torch.compile.
         # This is a best-effort sanity check: e.g. a `device_map="auto"` load that offloads
         # part of the model to CPU (seen on unified-memory single-GPU hosts) can make a
@@ -889,7 +851,7 @@ def post_quantize(
             full_model,
             tokenizer,
             preview_input_ids,
-            args.pyt_ckpt_path,
+            args.local_checkpoint_path,
             "after quantization",
             allow_fallback=False,
             trust_remote_code=args.trust_remote_code,
@@ -913,7 +875,7 @@ def post_quantize(
         if hasattr(generated_ids, "sequences"):
             generated_ids = generated_ids.sequences
 
-        if is_enc_dec(model_type):
+        if generate_excludes_prompt(full_model):
             if processor is not None and isinstance(processor, WhisperProcessor):
                 return processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
             elif tokenizer is not None:
@@ -945,15 +907,7 @@ def post_quantize(
                 f"example outputs after ptq: {output_decode(generated_ids_after_ptq, preview_input_ids.shape[1])}"
             )
 
-    export_quantized(
-        args,
-        full_model,
-        language_model,
-        model_type,
-        tokenizer,
-        default_padding_side,
-        default_pad_token,
-    )
+    export_quantized(args, full_model, language_model, model_type)
 
 
 def quantize_main(
@@ -964,8 +918,6 @@ def quantize_main(
     calibration_only: bool,
     processor: ProcessorMixin | None,
     tokenizer: PreTrainedTokenizerBase | None,
-    default_padding_side,
-    default_pad_token,
     device: torch.device,
 ):
     # Load the recipe up front so we can detect layerwise calibration before batch-size probing.
@@ -1145,7 +1097,6 @@ def quantize_main(
                 is_nemotron_vl_model,
             )
         else:
-            assert model_type != "dbrx", f"Does not support export {model_type} without quantizaton"
             print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
 
     # If asked, run the closed-form MXFP4 -> NVFP4 cast: read the source MXFP4
@@ -1154,12 +1105,9 @@ def quantize_main(
     # to NVFP4StaticQuantizer with a data-derived ``_global_amax``); we just
     # override that scalar with the closed-form value before export.
     if args.cast_mxfp4_to_nvfp4:
-        # The cast reads the source MXFP4 ``*_scales``/``*_blocks`` tensors from a local
-        # checkpoint directory. ``--pyt_ckpt_path`` may be a HF Hub ID (e.g.
-        # ``openai/gpt-oss-20b``); resolve it to the local snapshot dir that load_model's
-        # ``from_pretrained`` already populated so the cast works with the documented command.
-        source_ckpt_dir = _resolve_model_path(args.pyt_ckpt_path, args.trust_remote_code)
-        apply_cast_mxfp4_to_nvfp4(language_model, source_ckpt_dir)
+        # The cast reads the source MXFP4 ``*_scales``/``*_blocks`` tensors from the local
+        # checkpoint directory main() downloaded.
+        apply_cast_mxfp4_to_nvfp4(language_model, args.local_checkpoint_path)
 
     post_quantize(
         args,
@@ -1173,8 +1121,6 @@ def quantize_main(
         generated_ids_before_ptq,
         is_nemotron_vl_model,
         first_text_speech_dataset,
-        default_padding_side,
-        default_pad_token,
         calib_dataloader,
     )
 
@@ -1186,7 +1132,9 @@ def parse_args() -> argparse.Namespace:
         "--model",
         help=(
             "Model name or path to the PyTorch checkpoint to be quantized. "
-            "Can be a local path or a Huggingface model name."
+            "Can be a local path or a Huggingface model name; a model name is downloaded in "
+            "full. To skip files, download it yourself (e.g. `hf download <name> --exclude "
+            "'original/*'`) and pass the local path."
         ),
         required=True,
     )
@@ -1531,6 +1479,13 @@ def main(args: argparse.Namespace):
         # cleanup_distributed would leave the other ranks blocked on the first collective
         # until the NCCL timeout.
         with mlflow_run(args):
+            # --pyt_ckpt_path stays as given. Every later step reads the local copy of the whole
+            # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local
+            # path.
+            args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
+                args.pyt_ckpt_path
+            )
+
             # launch a memory monitor to read the currently used GPU memory.
             launch_memory_monitor()
 
@@ -1544,8 +1499,6 @@ def main(args: argparse.Namespace):
                 calibration_only,
                 processor,
                 tokenizer,
-                default_padding_side,
-                default_pad_token,
                 device,
             ) = load_model(args)
 
@@ -1562,8 +1515,6 @@ def main(args: argparse.Namespace):
                     calibration_only,
                     processor,
                     tokenizer,
-                    default_padding_side,
-                    default_pad_token,
                     device,
                 )
     finally:

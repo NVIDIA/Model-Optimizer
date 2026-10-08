@@ -65,7 +65,11 @@ __all__ = [
 @functools.cache
 def _flash_attention_kv_cache_layout() -> str:
     """Return the installed vLLM backend's K/V packing contract."""
-    cache_shape = FlashAttentionBackend.get_kv_cache_shape(3, 16, 1, 16)
+    get_cache_shape = getattr(FlashAttentionBackend, "get_kv_cache_shape", None)
+    if get_cache_shape is None:
+        # vLLM >= 0.29 no longer exposes this helper; validate the live cache below.
+        return "packed"
+    cache_shape = get_cache_shape(3, 16, 1, 16)
     if cache_shape == (2, 3, 16, 1, 16):
         return "kv-first"
     if cache_shape == (3, 2, 16, 1, 16):
@@ -82,6 +86,10 @@ def _flash_attention_kv_cache_views(kv_cache: torch.Tensor, head_size: int):
         return kv_cache.unbind(0)
     if cache_layout == "blocks-first":
         return kv_cache.unbind(1)
+    if kv_cache.ndim != 4 or kv_cache.shape[-1] != 2 * head_size:
+        raise RuntimeError(
+            f"Unsupported packed vLLM FlashAttention KV cache shape {tuple(kv_cache.shape)}"
+        )
     return kv_cache.transpose(1, 2).split(head_size, dim=-1)
 
 

@@ -9,34 +9,26 @@ those whose cards disclose nothing usable, and **speculative-decoding variants
 not change its output distribution, so those checkpoints share their base
 checkpoint's row. A miss here means "read the card", not "not yet checked".
 
-Use it to reproduce a published NVFP4 number, and as the cross-check when a card
-is silent or ambiguous. It does not replace reading the card — see
-`model-card-research.md`.
+Use it to cross-check published settings. It does not replace reading the card.
 
 ## Lookup
 
 **The card is the source of truth; this table is a reference, not a constraint.**
-Use it to confirm what you read, to fill a gap when the card is silent, and as a
-sanity check when you are unsure — never to override a value the card states.
+For `max_new_tokens`, follow [Model Card Research's token-budget rule](model-card-research.md#max_new_tokens--mandatory-model-card-lookup), including for caps in the notes.
+The lookup steps below apply only to `temperature` / `top_p`:
 
 1. **Exact row, resolved per field.** `eval` → use it, cite the row. `rec` → use
    it, but note in the config comment that it is recommended sampling, not a
    stated eval setting; if a same-family `eval` row disagrees, surface both.
    `—` → that field is unpublished; resolve **it alone** via step 2.
-   `max_num_tokens` is the card's *headline* cap — where a note names a higher
-   per-task cap (GLM-5.2 GPQA `100000`, Qwen3.5-397B-V2 τ²-Telecom `128000`,
-   Kimi-K3 uncapped for Terminal-Bench) and that task is in your suite, SKILL.md
-   Step 3's take-the-highest rule governs the single top-level value, not the
-   column.
 2. **No row** (new or unreleased variant, non-NVIDIA baseline, pre-2026) → take
    the nearest same-family rows as the expected value.
 3. **Card vs. table.** Agree → proceed. Card silent + family consistent → adopt
-   the family value and cite this file in a line comment; that beats SKILL.md
-   Step 3's generic 65536 / 16384. **Card disagrees → the card wins**, but
-   surface it — defaults shift between generations, so a mismatch means re-read,
-   not auto-correct.
+   the family sampling value and cite this file in a line comment.
+   **Card disagrees → the card wins**, but surface it — defaults shift between
+   generations, so a mismatch means re-read, not auto-correct.
 4. **Baseline and candidate share one setting.** Cards report both precisions
-   measured under the single setting listed; use the NVFP4 row for both.
+   measured under the single setting listed; use the NVFP4 sampling row for both.
 
 **Per-task sampling is precedent, not mandate.** Some notes record a
 benchmark-specific `temperature` / `top_p` (Qwen3.6 SciCode `0.6`; Qwen3.6-27B
@@ -47,7 +39,7 @@ regime change, not a nudge** — greedy (`temperature ≤ 0.1` or `top_p ≤ 1e-
 versus sampled flips the regime and materially moves both score and variance;
 `0.95` vs `1.0` does not. NEL accepts per-task `temperature` / `top_p` under
 `evaluation.tasks.*.nemo_evaluator_config`; only `max_new_tokens` is barred
-(SKILL.md Step 3).
+(see [launcher workflow](launcher-workflow.md#evaluation-params-template-top-level-params)).
 
 > **Never take sampling from a card's quickstart snippet.**
 > `SamplingParams(temperature=0.8, top_p=0.95)` and `max_tokens=32` are
@@ -104,9 +96,8 @@ that tie. `max_num_tokens` is the max generation length, i.e.
   `384000` is a long-context outlier.
 - **Per-task overrides are narrow** — SciCode (lower temperature), τ²-Bench
   Telecom (greedy or larger cap), GPQA Diamond (larger cap), Terminal-Bench
-  (uncapped). SKILL.md Step 3 forbids per-task `max_new_tokens`, so when a card
-  lists two caps **take the maximum** as the single top-level value and note the
-  split in a comment.
+  (uncapped). Caps are observations, not selection rules; follow the
+  [token-budget rule](model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
 
 ## Refreshing
 

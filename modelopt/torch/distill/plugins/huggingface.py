@@ -190,7 +190,9 @@ class KDTrainer(ModelOptHFTrainer):
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """Train and evaluate on KD loss, with eval CE tracked as a metric."""
         self._ensure_teacher_prepared()
-        kd_inputs = {k: v for k, v in inputs.items() if k != "labels"}
+        # ``skip_logits`` (added for Liger eval by transformers>=5.15) would make the teacher's
+        # Liger forward demand labels; the fused KD loss needs its hidden states instead.
+        kd_inputs = {k: v for k, v in inputs.items() if k not in ("labels", "skip_logits")}
         labels = inputs.get("labels")
         is_training = model.training
 

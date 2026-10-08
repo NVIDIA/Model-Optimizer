@@ -45,6 +45,7 @@ def _get_offload_hook(hook):
 
 def _writeback_params_to_weights_map(module, align_hook):
     """Write all non-meta parameters and buffers back to the hook's CPU weights_map."""
+    buffer_names = {name for name, _ in module.named_buffers()}
     for name, tensor in module.state_dict(keep_vars=True).items():
         if tensor.device.type == "meta":
             continue
@@ -72,6 +73,10 @@ def _writeback_params_to_weights_map(module, align_hook):
                 RuntimeWarning,
                 stacklevel=2,
             )
+        elif align_hook.offload_buffers and name in buffer_names:
+            # A buffer first registered inside the context, such as a GPTQ payload pin: without a
+            # backing value the hook cannot reload it after offloading the module again.
+            w_map[key] = tensor.detach().cpu()
 
 
 @contextmanager

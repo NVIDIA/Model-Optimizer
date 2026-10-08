@@ -53,7 +53,8 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, uint8_t *outpu
     payload[1] = static_cast<uint8_t>(d_bits >> 8);
   }
   d = __shfl_sync(0xffffffff, d, 0);
-  const float rounded = d > 0.0f ? roundf(value / d) : 0.0f;
+  const float inverse = d > 0.0f ? 1.0f / d : 0.0f;
+  const float rounded = roundf(value * inverse);
   const int quant = static_cast<int>(fminf(fmaxf(rounded, -kMaxQuant), kMaxQuant));
   payload[kScaleBytes + lane] = static_cast<uint8_t>(static_cast<int8_t>(quant));
 }

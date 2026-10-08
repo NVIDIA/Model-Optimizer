@@ -26,6 +26,7 @@ from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, Schedul
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+from modelopt.torch.quantization.plugins.vllm import VllmMLAAttention
 
 
 def _create_new_data_cls(data_cls, **kwargs):
@@ -277,35 +278,40 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
 def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: list) -> list:
     """Update KV cache quantization config for MLA models.
 
-    MLA uses `kv_c_bmm_quantizer` (compressed KV) instead of separate
-    `k_bmm_quantizer` and `v_bmm_quantizer`. This function copies the
-    config from `*[kv]_bmm_quantizer` to also cover `*kv_c_bmm_quantizer`.
+    MLA uses `kv_c_bmm_quantizer` (compressed KV) and `k_pe_bmm_quantizer` (RoPE key) instead of
+    separate `k_bmm_quantizer` and `v_bmm_quantizer`. This function copies the format of the first
+    `*[kv]_bmm_quantizer` entry to them; `k_pe` is skipped for NoPE models (no RoPE key).
     """
-    try:
-        from vllm.attention.layer import MLAAttention
-    except ImportError:
+    mla_layers = [
+        m
+        for m in model.modules()
+        if VllmMLAAttention is not None and isinstance(m, VllmMLAAttention)
+    ]
+    if not mla_layers:
         return kv_quant_cfg
 
-    if not any(isinstance(m, MLAAttention) for m in model.modules()):
+    kv_entries = [
+        e
+        for e in kv_quant_cfg
+        if isinstance(e, dict) and e.get("quantizer_name") == "*[kv]_bmm_quantizer"
+    ]
+    if not kv_entries:
+        warnings.warn(
+            "MLA detected, but the KV-cache config has no '*[kv]_bmm_quantizer' entry, so the MLA "
+            "KV cache stays unquantized."
+        )
         return kv_quant_cfg
+    if any(isinstance(e.get("cfg"), dict) and e["cfg"].get("bias") for e in kv_entries):
+        warnings.warn("The affine KV-cache bias is not applied to the MLA KV cache.")
 
-    kv_entry = next(
-        (
-            e
-            for e in kv_quant_cfg
-            if isinstance(e, dict) and e.get("quantizer_name") == "*[kv]_bmm_quantizer"
-        ),
-        None,
+    kv_config = kv_entries[0].get("cfg", {})
+    names = ["*kv_c_bmm_quantizer"]
+    if any(getattr(m, "qk_rope_head_dim", 1) for m in mla_layers):
+        names.append("*k_pe_bmm_quantizer")
+    kv_quant_cfg.extend(
+        {"quantizer_name": name, "cfg": kv_config, "enable": True} for name in names
     )
-    if kv_entry is not None:
-        kv_config = kv_entry.get("cfg", {})
-        kv_quant_cfg.append(
-            {"quantizer_name": "*kv_c_bmm_quantizer", "cfg": kv_config, "enable": True}
-        )
-        kv_quant_cfg.append(
-            {"quantizer_name": "*k_pe_bmm_quantizer", "cfg": kv_config, "enable": True}
-        )
-        print("MLA detected: added *kv_c_bmm_quantizer and k_pe_bmm_quantizer config")
+    print(f"MLA detected: added {' and '.join(names)} config")
 
     return kv_quant_cfg
 

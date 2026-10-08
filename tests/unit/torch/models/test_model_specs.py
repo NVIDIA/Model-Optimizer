@@ -89,13 +89,6 @@ def test_get_expert_linear_names_raises_when_unmatched():
 def test_get_expert_linear_names_from_specs():
     # Arctic keeps the w1/w2/w3 naming it previously got from the engine default.
     assert get_expert_linear_names(_UnknownMoeBlock(), "arctic") == ["w1", "w2", "w3"]
-    # DBRX resolves the quantized per-expert ModuleList names (previously it fell
-    # through to the w1/w2/w3 default, which never existed on the quantized module).
-    assert get_expert_linear_names(_UnknownMoeBlock(), "dbrx") == [
-        "w1_linear",
-        "w2_linear",
-        "v1_linear",
-    ]
 
 
 class NemotronHMOE(nn.Module):
@@ -198,41 +191,21 @@ def test_get_experts_list_skips_fused_expert_containers():
     assert get_experts_list(MixtralSparseMoeBlockFused(), "mixtral") == []
 
 
-def test_get_experts_list_still_rejects_unsupported_non_iterable_layouts():
-    """Non-iterable is not by itself a reason to skip grouping.
+def test_get_experts_list_rejects_specs_without_grouped_export():
+    """A matching spec must still allow grouped export, whatever the experts' layout.
 
-    DBRX's experts container is not iterable either, but its per-expert linears exist
-    under ``experts.mlp`` -- grouping is possible, just not by this function, and its
-    spec says so. Skipping it would silently drop AWQ/SVDQuant resmoothing instead of
-    reporting an unsupported layout, so the fused shortcut is scoped to specs that
-    claim iterable experts.
+    Non-iterable experts are not by themselves a reason to skip grouping: that would
+    silently drop AWQ/SVDQuant resmoothing instead of reporting an unsupported layout.
     """
 
-    class DbrxExperts(nn.Module):
-        def __init__(self):
+    class Qwen3_5MoeSparseMoeBlock(nn.Module):  # noqa: N801
+        def __init__(self, experts):
             super().__init__()
-            self.mlp = nn.Module()  # per-expert linears hang off here, not off self
+            self.experts = experts
 
-    class DbrxFFN(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.experts = DbrxExperts()
-
-    assert not hasattr(DbrxFFN().experts, "__iter__")
-    with pytest.raises(NotImplementedError):
-        get_experts_list(DbrxFFN(), "dbrx")
-
-
-def test_get_experts_list_rejects_non_iterable_layouts():
-    # DBRX matches a spec but is not an iterable-experts layout; grouped export
-    # must keep rejecting it (legacy behavior).
-    class DbrxFFN(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.experts = nn.ModuleList()
-
-    with pytest.raises(NotImplementedError):
-        get_experts_list(DbrxFFN(), "dbrx")
+    for experts in (nn.Module(), nn.ModuleList()):
+        with pytest.raises(NotImplementedError):
+            get_experts_list(Qwen3_5MoeSparseMoeBlock(experts), "qwen3_5_moe")
 
     with pytest.raises(NotImplementedError):
         get_experts_list(_UnknownMoeBlock(), "some_unknown_model")
@@ -242,15 +215,10 @@ class ArcticMoE(nn.Module):
     pass
 
 
-class DbrxFFN(nn.Module):
-    pass
-
-
 def test_is_moe_matches_registered_non_standard_names():
     # Non-standard MoE block names (no *SparseMoeBlock suffix, no router/experts
     # attributes) resolve through the model spec registry.
     assert is_moe(ArcticMoE())
-    assert is_moe(DbrxFFN())
     assert not is_moe(_UnknownMoeBlock())
 
 
@@ -554,7 +522,6 @@ def test_fused_experts_shortcut_ignores_unrelated_attributes():
 # (model_type, block_names, expert_linear_names, fused_expert_names, gate_up_pair)
 EXPECTED_MOE_LAYOUTS = [
     ("arctic", ("ArcticMoE",), ("w1", "w2", "w3"), False, ("w1", "w3")),
-    ("dbrx", ("DbrxFFN",), ("w1_linear", "w2_linear", "v1_linear"), False, None),
     (
         "deepseek",
         ("DeepseekMoE",),
@@ -585,6 +552,7 @@ EXPECTED_MOE_LAYOUTS = [
         ("gate_proj", "up_proj"),
     ),
     ("gpt_oss", ("GptOssMLP", "GptOssMoE"), ("gate_up_proj", "down_proj"), True, None),
+    ("llama4", ("Llama4TextMoe",), ("gate_up_proj", "down_proj"), True, None),
     ("minimax", ("MiniMaxSparseMoeBlock",), ("w1", "w2", "w3"), False, ("w1", "w3")),
     ("mixtral", ("MixtralSparseMoeBlock",), ("w1", "w2", "w3"), False, ("w1", "w3")),
     ("phimoe", ("PhimoeSparseMoeBlock",), ("w1", "w2", "w3"), False, ("w1", "w3")),
@@ -616,6 +584,13 @@ EXPECTED_MOE_LAYOUTS = [
         ("gate_proj", "down_proj", "up_proj"),
         False,
         ("gate_proj", "up_proj"),
+    ),
+    (
+        "qwen3_vl_moe",
+        ("Qwen3VLMoeTextSparseMoeBlock",),
+        ("gate_up_proj", "down_proj"),
+        True,
+        None,
     ),
 ]
 
@@ -744,13 +719,13 @@ def test_iterable_experts_matches_pre_refactor_support():
     # The real HF root class name for each registered MoE model type.
     root_class_names = {
         "arctic": "ArcticForCausalLM",
-        "dbrx": "DbrxForCausalLM",
         "deepseek": "DeepseekForCausalLM",
         "deepseek_v3": "DeepseekV3ForCausalLM",
         "deepseek_v4": "DeepseekV4ForCausalLM",
         "gemma4": "Gemma4ForConditionalGeneration",
         "gemma4_text": "Gemma4TextForCausalLM",
         "gpt_oss": "GptOssForCausalLM",
+        "llama4": "Llama4ForConditionalGeneration",
         "minimax": "MiniMaxForCausalLM",
         "mixtral": "MixtralForCausalLM",
         "phimoe": "PhimoeForCausalLM",
@@ -759,6 +734,7 @@ def test_iterable_experts_matches_pre_refactor_support():
         "qwen3_5_moe": "Qwen3_5MoeForCausalLM",
         "qwen3_moe": "Qwen3MoeForCausalLM",
         "qwen3_next": "Qwen3NextForCausalLM",
+        "qwen3_vl_moe": "Qwen3VLMoeForConditionalGeneration",
     }
     moe_specs = [s for s in get_specs() if _layouts(s)]
     assert {s.model_type for s in moe_specs} == set(root_class_names), (
