@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 32 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 34 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -64,8 +64,13 @@ supported combinations.
 | `iq2_xs` | IQ2_XS W2A16 (2.31 bpw), MLP + MoE weights only | none | GPTQ (layerwise) |
 | `iq2_s` | IQ2_S W2A16 (2.56 bpw), MLP + MoE weights only | none | GPTQ (layerwise) |
 | `q8_0` | Q8_0 W8A16 (8.5 bpw), eligible linears | none | none (no calibration) |
+| `linear_attention_state_int8_dynamic` | GDN/KDA decode state INT8 + Hadamard; weights unchanged | none | none (dynamic scales; requires a prefix/decode phase context) |
+| `linear_attention_state_int8_block32_dynamic` | GDN/KDA state INT8, 32 value channels per key row; weights unchanged | none | none (dynamic scales; requires vLLM and a prefix/decode phase context) |
 
 </details>
+
+The block32 linear-attention recipe selects `precision="vllm"`
+and working-state readout. It applies fake QDQ with floating-point state storage.
 
 ---
 

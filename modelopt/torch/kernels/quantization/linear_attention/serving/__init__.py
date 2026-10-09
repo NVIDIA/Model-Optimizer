@@ -13,10 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Numerical policies and differentiable kernels for linear attention."""
+"""Optional vLLM forward kernels for linear-attention serving precision profiles."""
 
-from .config import *
-from .decode import *
-from .gdn import *
-from .kda import *
-from .training import *
+try:
+    import vllm
+except ImportError as error:
+    raise ImportError(
+        "Linear-attention serving profiles require the optional vLLM dependency: "
+        "public vLLM for 'vllm' (legacy spelling 'vllm_0_15'), or the compatible quantized-ReplaySSM "
+        "vLLM fork for 'replayssm'."
+    ) from error

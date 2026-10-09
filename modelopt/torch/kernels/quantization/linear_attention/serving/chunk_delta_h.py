@@ -1,0 +1,77 @@
+# Adapted from: https://github.com/vllm-project/vllm/blob/1892993bc18e243e2c05841314c5e9c06a80c70d/vllm/model_executor/layers/fla/ops/chunk_delta_h.py
+# Modifications: import the kernel; retain FP32 intermediates for the training adjoint.
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-License-Identifier: Apache-2.0
+# Original FLA code: Copyright (c) 2023-2025, Songlin Yang, Yu Zhang.
+# FLA is licensed under the MIT license reproduced in the root LICENSE.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Save FP32 training intermediates using vLLM's unchanged chunk-state kernel."""
+
+from functools import cache
+from inspect import signature
+
+import torch
+import triton
+
+from ._compat import fla_module, state_v_first
+
+_chunk = fla_module("chunk_delta_h")
+chunk_gated_delta_rule_fwd_kernel_h_blockdim64 = (
+    _chunk.chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+)
+prepare_chunk_offsets = fla_module("index").prepare_chunk_offsets
+
+
+@cache
+def _has_exp2():
+    """Inspect the native signature only when a kernel runs, not during docs imports."""
+    return "use_exp2" in signature(_chunk.chunk_gated_delta_rule_fwd_h).parameters
+
+
+def chunk_state(k, w, u, g, gk, initial_state, cu_seqlens, use_exp2=False):
+    """Return chunk-start states, residual values, and final state for one sequence."""
+    _, length, heads, key_dim = k.shape
+    value_dim = u.shape[-1]
+    # The Torch adjoint needs unrounded values. Output kernels receive BF16 casts.
+    state_shape = (value_dim, key_dim) if state_v_first() else (key_dim, value_dim)
+    h = k.new_empty(1, triton.cdiv(length, 64), heads, *state_shape, dtype=torch.float32)
+    updated = torch.empty_like(u, dtype=torch.float32)
+    final = torch.empty_like(initial_state, dtype=torch.float32)
+    chunk_gated_delta_rule_fwd_kernel_h_blockdim64[
+        lambda meta: (triton.cdiv(value_dim, meta["BV"]), heads)
+    ](
+        k=k,
+        v=u,
+        w=w,
+        v_new=updated,
+        g=g,
+        gk=gk,
+        h=h,
+        h0=initial_state,
+        ht=final,
+        cu_seqlens=cu_seqlens,
+        chunk_offsets=prepare_chunk_offsets(cu_seqlens, 64),
+        T=length,
+        H=heads,
+        Hg=heads,
+        K=key_dim,
+        V=value_dim,
+        BT=64,
+        **({"USE_EXP2": use_exp2} if _has_exp2() else {}),
+    )
+    return h, updated, final
