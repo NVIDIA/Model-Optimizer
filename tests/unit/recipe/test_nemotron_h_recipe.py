@@ -37,14 +37,20 @@ _WIDTH = 32
 
 
 class _Attention(nn.Module):
-    """A NemotronH attention mixer."""
+    """A NemotronH attention mixer.
 
-    def __init__(self):
+    ``relative`` adds the Parakeet audio encoder's extra projection: ``*[qkvo]_proj`` matches
+    ``relative_k_proj`` too, on the ``k``, so narrowing the attention globs is not a way out.
+    """
+
+    def __init__(self, relative: bool = False):
         super().__init__()
         self.q_proj = nn.Linear(_WIDTH, _WIDTH, bias=False)
         self.k_proj = nn.Linear(_WIDTH, _WIDTH, bias=False)
         self.v_proj = nn.Linear(_WIDTH, _WIDTH, bias=False)
         self.o_proj = nn.Linear(_WIDTH, _WIDTH, bias=False)
+        if relative:
+            self.relative_k_proj = nn.Linear(_WIDTH, _WIDTH, bias=False)
 
 
 class _QuantAttention(QuantModule):
@@ -97,17 +103,26 @@ class _Block(nn.Module):
 
 
 def _nemotron_h(with_mtp: bool) -> nn.Module:
-    """Hub-named NemotronH skeleton: attention, Mamba and MoE blocks, vision tower, MTP tail."""
+    """Hub-named NemotronH skeleton: attention, Mamba and MoE blocks, vision and audio
+    encoders, MTP tail.
+    """
     model = nn.Module()
     model.backbone = nn.Module()
     model.backbone.embeddings = nn.Linear(_WIDTH, _WIDTH, bias=False)
     model.backbone.layers = nn.ModuleList([_Block(_Attention()), _Block(_Mamba()), _Block(_MoE())])
     model.lm_head = nn.Linear(_WIDTH, _WIDTH, bias=False)
-    # VL wrapper pieces that must stay in BF16
+    # VL wrapper pieces that must stay in BF16. Both encoders carry an attention block, not
+    # just projections: their attention classes end in `Attention`, so a real run registers
+    # them for KV-cache quantization and `*[kv]_bmm_quantizer` reaches them. The audio branch
+    # exists whenever the omni config carries a `sound_config`, and image calibration never
+    # exercises it, so anything enabled there exports without an activation scale.
     model.embed_vision = nn.Linear(_WIDTH, _WIDTH, bias=False)
     model.vision_model = nn.Module()
     model.vision_model.radio_model = nn.Module()
-    model.vision_model.radio_model.blocks = nn.ModuleList([_Expert()])
+    model.vision_model.radio_model.blocks = nn.ModuleList([_Expert(), _Block(_Attention())])
+    model.sound_projector = nn.Module()
+    model.sound_projector.sound_encoder = nn.Module()
+    model.sound_projector.sound_encoder.layers = nn.ModuleList([_Block(_Attention(relative=True))])
     if with_mtp:
         # block 0 carries the attention (hence the KV pair), block 1 the MoE
         model.mtp = nn.Module()
@@ -223,8 +238,14 @@ def test_mtp_block_one_experts_match_the_backbone_formats():
 
 
 @pytest.mark.parametrize("with_mtp", [True, False])
-def test_vision_router_and_embeddings_stay_bf16(with_mtp):
-    """Everything the blanket `*` disable is meant to leave alone stays unquantized."""
+def test_vision_audio_router_and_embeddings_stay_bf16(with_mtp):
+    """Everything the blanket `*` disable is meant to leave alone stays unquantized.
+
+    The encoder attention entries are the load-bearing ones: they are named by the FP8
+    attention and KV rules earlier in the file and only the trailing disables turn them back
+    off. A constant-amax KV cast exports no scale either way, so no artefact check would
+    catch it being left on.
+    """
     _, modules = _quantize(with_mtp)
 
     disabled = [
@@ -235,6 +256,12 @@ def test_vision_router_and_embeddings_stay_bf16(with_mtp):
         "vision_model.radio_model.blocks.0.up_proj.weight_quantizer",
         "vision_model.radio_model.blocks.0.up_proj.input_quantizer",
         "vision_model.radio_model.blocks.0.down_proj.weight_quantizer",
+        "vision_model.radio_model.blocks.1.mixer.q_proj.weight_quantizer",
+        "vision_model.radio_model.blocks.1.mixer.k_bmm_quantizer",
+        "sound_projector.sound_encoder.layers.0.mixer.q_proj.weight_quantizer",
+        "sound_projector.sound_encoder.layers.0.mixer.o_proj.input_quantizer",
+        "sound_projector.sound_encoder.layers.0.mixer.relative_k_proj.weight_quantizer",
+        "sound_projector.sound_encoder.layers.0.mixer.v_bmm_quantizer",
     ]
     for name in disabled:
         assert not modules[name].is_enabled, f"{name} should stay BF16"

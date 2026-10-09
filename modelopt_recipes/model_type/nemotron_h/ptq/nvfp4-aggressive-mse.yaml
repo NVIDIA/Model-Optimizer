@@ -23,7 +23,7 @@
 #   MoE routed + shared experts   NVFP4 W4A4, static weight scales
 #   attention q/k/v/o, Mamba in/out_proj, lm_head   FP8
 #   MTP block-1 routed + shared experts   NVFP4 W4A4, static weight scales
-#   latent MoE, embeddings, router, C-RADIO vision   BF16
+#   latent MoE, embeddings, router, C-RADIO vision, Parakeet audio   BF16
 #   KV cache                      FP8 (see the kv rules below)
 #
 # quant_cfg is ordered and the LAST match wins, so the blanket disable comes first and the
@@ -135,4 +135,16 @@ quantize:
     - quantizer_name: 'mlp1.*'
       enable: false
     - quantizer_name: '*.mlp1.*'
+      enable: false
+    # Audio branch of the omni wrapper, present when the config carries a `sound_config`.
+    # The Parakeet encoder names its projections `self_attn.{q,k,v,o,relative_k}_proj`, so the
+    # FP8 attention rules above match it, and its attention class is registered for KV-cache
+    # quantization like any other. Image calibration supplies no audio, so those input
+    # quantizers collect no amax and the export drops the input scale while still writing an
+    # FP8 weight scale -- a layer that claims W8A8 with no activation scale. Keep it BF16.
+    - quantizer_name: '*audio_tower*'
+      enable: false
+    - quantizer_name: '*sound_encoder*'
+      enable: false
+    - quantizer_name: '*sound_projector*'
       enable: false
