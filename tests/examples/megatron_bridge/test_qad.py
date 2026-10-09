@@ -19,6 +19,8 @@ import warnings
 from pathlib import Path
 
 import pytest
+import torch
+import torch.distributed.checkpoint as dcp
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.export.unified_checkpoint import (
     assert_exported_checkpoint_matches,
@@ -32,6 +34,7 @@ from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_5_moe_vl_dir,
     create_tiny_qwen3_dir,
 )
+from torch.distributed.checkpoint import FileSystemReader
 
 # The fix ships in the nemo:26.10 container.
 # TODO(Megatron-Bridge#6243): drop this probe once the minimum Megatron-Bridge carries it.
@@ -45,9 +48,18 @@ except ImportError:  # Megatron-Bridge that still CP-shards mrope position ids
 
 @pytest.mark.timeout(720)  # Multiple steps in one test hence takes longer than the default timeout
 @pytest.mark.parametrize(
-    "create_student",
+    ("create_student", "lora_rank"),
     [
-        lambda tmp_path: create_tiny_qwen3_dir(tmp_path, with_tokenizer=True),
+        (lambda tmp_path: create_tiny_qwen3_dir(tmp_path, with_tokenizer=True), 0),
+        (
+            lambda tmp_path: create_tiny_qwen3_dir(
+                tmp_path,
+                with_tokenizer=True,
+                hidden_size=128,
+                intermediate_size=256,
+            ),
+            4,
+        ),
         pytest.param(
             lambda tmp_path: create_tiny_qwen3_5_moe_vl_dir(
                 tmp_path,
@@ -56,11 +68,12 @@ except ImportError:  # Megatron-Bridge that still CP-shards mrope position ids
                 num_hidden_layers=2,
                 layer_types=["linear_attention", "full_attention"],
             ),
+            0,
         ),
     ],
-    ids=["qwen3", "qwen3_5_moe_vl"],
+    ids=["qwen3", "qwen3_lora_nvfp4", "qwen3_5_moe_vl"],
 )
-def test_qad(tmp_path: Path, num_gpus, create_student):
+def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
     """Quantize a tiny model, run QAD from the quantized student, and export the result.
 
     Covers what only QAD exercises: that the ModelOpt state survives distillation. Per-architecture
@@ -83,16 +96,33 @@ def test_qad(tmp_path: Path, num_gpus, create_student):
     distill_output_dir = tmp_path / "qad_output"
     train_iters = 3
     early_exit_iter = 2
+    calib_dataset = "cnn_dailymail"
+    if lora_rank:
+        # Keep the LoRA smoke test independent of dataset downloads on the GPU node.
+        calib_path = tmp_path / "calibration.jsonl"
+        calib_path.write_text(
+            "\n".join(
+                json.dumps(
+                    {"text": f"Sample {i}: " + "The quick brown fox jumps over the lazy dog. " * 4}
+                )
+                for i in range(8)
+            ),
+            encoding="utf-8",
+        )
+        calib_dataset = str(calib_path)
 
-    # Step 1: PTQ the (language) model to FP8 and save a Megatron checkpoint carrying the ModelOpt state.
+    # Step 1: PTQ the model and save its quantizers and optional adapters.
     quantize_cmd = extend_cmd_parts(
         # QAD below must load this checkpoint at the same TP, so size the PTQ run to tp_size.
         ["torchrun", f"--nproc_per_node={tp_size}", "quantize.py", "--skip_generate"],
         hf_model_name_or_path=hf_model_path,
-        recipe="general/ptq/fp8_default-kv_fp8",
+        recipe="general/ptq/nvfp4_default-kv_fp8"
+        if lora_rank
+        else "general/ptq/fp8_default-kv_fp8",
+        lora_rank=lora_rank,
         tp_size=tp_size,
         pp_size=1,
-        calib_dataset_name="cnn_dailymail",  # text dataset -> (for VLMs) text-only LM calibration
+        calib_dataset_name=calib_dataset,  # text dataset -> (for VLMs) text-only LM calibration
         calib_num_samples=8,
         calib_batch_size=2,
         seq_length=16,
@@ -127,6 +157,9 @@ def test_qad(tmp_path: Path, num_gpus, create_student):
         log_interval=1,
         exit_interval=early_exit_iter,
         exit_duration_in_mins=10,
+        recompute_granularity="full" if lora_rank else None,
+        recompute_method="uniform" if lora_rank else None,
+        recompute_num_layers=1 if lora_rank else None,
     )
     run_example_command(distill_cmd, example_path="megatron_bridge", setup_free_port=True)
     distilled_megatron_path = distill_output_dir / "checkpoints"
@@ -135,9 +168,45 @@ def test_qad(tmp_path: Path, num_gpus, create_student):
     assert (distilled_megatron_path / "iter_0000001").is_dir()
     assert_has_modelopt_state(distilled_megatron_path)
 
+    if lora_rank:
+        # Reuse the output directory to exercise optimizer and trained-adapter restoration.
+        run_example_command(distill_cmd, example_path="megatron_bridge", setup_free_port=True)
+        assert tracker.read_text(encoding="utf-8").strip() == str(train_iters)
+        # Compare against the same seed, data, schedule, and PTQ checkpoint without a restart.
+        reference_dir = tmp_path / "qad_uninterrupted"
+        reference_cmd = distill_cmd.copy()
+        reference_cmd[reference_cmd.index("--output_dir") + 1] = str(reference_dir)
+        reference_cmd[reference_cmd.index("--exit_interval") + 1] = str(train_iters)
+        run_example_command(reference_cmd, example_path="megatron_bridge", setup_free_port=True)
+        reference_checkpoint = reference_dir / "checkpoints"
+        assert (
+            reference_checkpoint / "latest_checkpointed_iteration.txt"
+        ).read_text().strip() == str(train_iters)
+        adapter_states = []
+        for checkpoint_path in (distilled_megatron_path, reference_checkpoint):
+            reader = FileSystemReader(str(checkpoint_path / f"iter_{train_iters:07d}"))
+            metadata = reader.read_metadata().state_dict_metadata
+            adapters = {
+                name: torch.empty(meta.size, dtype=meta.properties.dtype)
+                for name, meta in metadata.items()
+                if name.endswith(("lora_A", "lora_B"))
+            }
+            assert adapters, "Trained checkpoint lost the LoRA factors"
+            dcp.load(adapters, storage_reader=reader)
+            assert any(
+                value.count_nonzero() > 0
+                for name, value in adapters.items()
+                if name.endswith("lora_B")
+            )
+            adapter_states.append(adapters)
+        resumed, uninterrupted = adapter_states
+        assert resumed.keys() == uninterrupted.keys()
+        for name, value in resumed.items():
+            torch.testing.assert_close(value, uninterrupted[name], rtol=0, atol=0)
+
     # Step 3: export the distilled quantized checkpoint to a unified HF checkpoint. hf_quant_config.json
     # is only written for a quantized model, so its presence confirms the quantizers survived QAD.
-    hf_export_path = tmp_path / "qad_fp8_hf"
+    hf_export_path = tmp_path / "qad_hf"
     export_cmd = extend_cmd_parts(
         [
             "torchrun",
@@ -152,6 +221,12 @@ def test_qad(tmp_path: Path, num_gpus, create_student):
     run_example_command(export_cmd, example_path="megatron_bridge", setup_free_port=True)
     assert (hf_export_path / "config.json").exists()
     assert (hf_export_path / "hf_quant_config.json").exists()
+    if lora_rank:
+        assert not (hf_export_path / "adapter_config.json").exists()
+        index = json.loads((hf_export_path / "model.safetensors.index.json").read_text())
+        assert not any("lora_" in key for key in index["weight_map"])
+        quant_config = json.loads((hf_export_path / "hf_quant_config.json").read_text())
+        assert quant_config["quantization"]["quant_algo"] == "NVFP4"
     # A quantized export writes routed experts one per expert while the BF16 reference packs
     # them, so both sides of that expansion differ from the reference.
     text_config = json.loads((hf_model_path / "config.json").read_text())

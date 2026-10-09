@@ -327,6 +327,39 @@ torchrun --nproc_per_node 8 distill.py \
 
 The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) (point `--megatron_path` at `/output/qwen3_8b_nvfp4_qad/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
 
+### LoRA QAD
+
+Add `--lora_rank` to PTQ to train low-rank weight updates with the usual QAD flow:
+
+```bash
+torchrun --nproc_per_node 2 quantize.py \
+    --hf_model_name_or_path Qwen/Qwen3-0.6B \
+    --recipe general/ptq/nvfp4_default-kv_fp8 \
+    --tp_size 2 --lora_rank 8 --lora_alpha 16 \
+    --export_megatron_path /output/qwen3_06b_nvfp4_lora
+```
+
+PTQ calibrates the quantizers before adding the adapters. The backbone is frozen; `A` starts
+random and `B` starts at zero. Each linear layer quantizes `W + (alpha / rank) B @ A` before
+its matrix multiplication. The default targets are `linear_qkv`, `linear_proj`, `linear_fc1`,
+and `linear_fc2`; select other module-name globs with `--lora_target_modules`.
+
+Run `distill.py` with this checkpoint as `--student_megatron_path`, just as for regular QAD.
+ModelOpt reconstructs the quantizers and factors before DDP and optimizer setup, then loads
+the distributed checkpoint tensors. Resuming the output directory also restores the optimizer.
+
+`export_quantized_megatron_to_hf.py` merges the factors into the backbone before exporting a
+standalone quantized checkpoint. Deployment does not require a LoRA adapter. The Python APIs
+are `modelopt.torch.quantization.enable_quant_lora` and `merge_quant_lora`.
+
+Supported targets are fake-quantized dense PyTorch and Megatron/Transformer Engine linear
+layers, including tensor-parallel row/column and fused layer-normalization linear layers.
+Grouped MoE experts, shared target weights, and compressed quantized weights are unsupported.
+Merge adapters with `merge_quant_lora` before using weight-folding APIs. Full activation
+recomputation is supported without unfreezing the backbone. The backbone remains
+in floating point and the implementation forms dense weight updates, so memory savings come
+primarily from the smaller optimizer state rather than compressed backbone storage.
+
 ### Slurm Usage
 
 To run the distillation script on a Slurm cluster for multi-node training, you just need use `python` instead of `torchrun` and set the number of nodes using `#SBATCH --nodes=<num_nodes>` clause in your Slurm script.

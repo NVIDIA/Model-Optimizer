@@ -50,6 +50,7 @@ from mlflow_utils import (
     resolve_mlflow_args,
 )
 
+import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import export_mcore_gpt_to_hf
 from modelopt.torch.utils import print_args, print_rank_0
@@ -178,6 +179,7 @@ def main(args: argparse.Namespace):
     print_rank_0(f"Loading quantized Megatron checkpoint from {args.megatron_path}...")
     load_modelopt_megatron_checkpoint(model, args.megatron_path)
     unwrapped_model = unwrap_model(model[0])
+    mtq.merge_quant_lora(unwrapped_model)
 
     # Extra modules (Medusa / EAGLE / MTP) only exist on the last pipeline stage. Use an all-reduce
     # MAX over all ranks (rather than a broadcast from a hard-coded source rank) so the decision is
