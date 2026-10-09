@@ -15,7 +15,6 @@
 
 """Offline correctness cases for the KL example; no checkpoints or datasets are downloaded."""
 
-import copy
 import importlib
 import math
 import sys
@@ -24,7 +23,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import GPT2Config, GPT2LMHeadModel
+from datasets import Dataset
+from transformers import GPT2Config
 
 
 @pytest.fixture
@@ -48,92 +48,142 @@ def test_kl_direction_shared_support_and_chunk_reduction(kl_eval, chunk_size):
     assert entire_vocab["conditional_topk_kl"] == pytest.approx(expected_full, abs=1e-6)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_identical_logits_have_zero_kl(kl_eval, dtype):
-    logits = torch.tensor([[1, 2, -3], [8, 4, 1]], dtype=dtype)
-    metrics = kl_eval.mean_kl(logits, logits.clone(), top_k=2)
+def test_identical_distributions_have_zero_kl(kl_eval):
+    logprobs = torch.tensor([[1, 2, -3], [8, 4, 1]], dtype=torch.float32).log_softmax(-1)
+    metrics = kl_eval.mean_kl(logprobs, logprobs.clone(), top_k=2)
     assert metrics == pytest.approx({"full_vocab_kl": 0, "conditional_topk_kl": 0}, abs=1e-7)
 
 
-def _tiny_model():
-    return GPT2LMHeadModel(
-        GPT2Config(
-            vocab_size=16,
-            n_positions=16,
-            n_embd=8,
-            n_layer=1,
-            n_head=1,
-            resid_pdrop=0,
-            embd_pdrop=0,
-            attn_pdrop=0,
-            bos_token_id=1,
-            eos_token_id=0,
-            pad_token_id=0,
-        )
-    ).eval()
+def _logprob_row(probabilities):
+    # vLLM maps token IDs to Logprob records; dictionary order is not vocabulary order.
+    return {
+        token_id: SimpleNamespace(logprob=math.log(probabilities[token_id]))
+        for token_id in reversed(range(len(probabilities)))
+    }
 
 
 def test_scores_all_and_only_continuation_predictions(kl_eval):
-    reference = _tiny_model()
-    quantized = copy.deepcopy(reference)
-    with torch.no_grad():
-        quantized.lm_head.weight[3, 0].add_(3)
-    sequence = torch.tensor([[4, 5, 6, 7, 8]])
-    with torch.inference_mode():
-        p = reference(sequence[:, :-1], use_cache=False).logits[0].float().softmax(-1)
-        q = quantized(sequence[:, :-1], use_cache=False).logits[0].float().softmax(-1)
-        expected = (p[2:] * (p[2:].log() - q[2:].log())).sum(-1).mean().item()
-    assert expected > 1e-6
-    actual = kl_eval.score_continuation(reference, quantized, sequence, prompt_tokens=3, top_k=4)
-    assert actual["full_vocab_kl"] == pytest.approx(expected, abs=1e-6)
+    probabilities = [[0.1, 0.2, 0.3, 0.4], [0.4, 0.3, 0.2, 0.1], [0.2, 0.4, 0.1, 0.3]]
+    output = SimpleNamespace(
+        prompt_token_ids=[2, 1, 3, 1, 2, 0],  # Three-token continuation ending in EOS=0.
+        prompt_logprobs=[
+            None,
+            _logprob_row([0.25] * 4),
+            _logprob_row([0.25] * 4),
+            *[_logprob_row(row) for row in probabilities],
+        ],
+    )
+    actual = kl_eval._continuation_logprobs(output, prompt_tokens=3, vocab_size=4)
+    assert actual.dtype == torch.float32
+    torch.testing.assert_close(actual, torch.tensor(probabilities).log())
+
+
+@pytest.mark.parametrize("duplicate_actual_token", [False, True])
+def test_flat_logprobs_preserve_token_ids(kl_eval, duplicate_actual_token):
+    probabilities = [0.1, 0.2, 0.3, 0.4]
+    token_ids = [3, 2, 1, 0]
+    if duplicate_actual_token:
+        token_ids.insert(0, 0)
+    flat = SimpleNamespace(
+        start_indices=[0, 0],
+        end_indices=[0, len(token_ids)],
+        token_ids=token_ids,
+        logprobs=[math.log(probabilities[token_id]) for token_id in token_ids],
+    )
+    output = SimpleNamespace(prompt_token_ids=[1, 0], prompt_logprobs=flat)
+    actual = kl_eval._continuation_logprobs(output, prompt_tokens=1, vocab_size=4)
+    torch.testing.assert_close(actual, torch.tensor([probabilities]).log())
+
+
+@pytest.mark.parametrize("bad_ids", [(0, 1, 2), (0, 1, 2, 4), (0, 1, 2, "0")])
+def test_incomplete_or_mismatched_vocabulary_is_rejected(kl_eval, bad_ids):
+    output = SimpleNamespace(
+        prompt_token_ids=[1, 0],
+        prompt_logprobs=[
+            None,
+            dict.fromkeys(bad_ids, SimpleNamespace(logprob=math.log(0.25))),
+        ],
+    )
+    with pytest.raises(ValueError):
+        kl_eval._continuation_logprobs(output, prompt_tokens=1, vocab_size=4)
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
+def test_invalid_scores_fail_instead_of_dropping_positions(kl_eval, invalid):
+    reference = torch.full((2, 4), math.log(0.25))
+    quantized = reference.clone()
+    quantized[1, 2] = invalid
+    with pytest.raises(ValueError):
+        kl_eval.mean_kl(reference, quantized, top_k=2)
+    row = _logprob_row([0.25] * 4)
+    row[2].logprob = invalid
+    output = SimpleNamespace(prompt_token_ids=[1, 0], prompt_logprobs=[None, row])
+    with pytest.raises(ValueError):
+        kl_eval._continuation_logprobs(output, prompt_tokens=1, vocab_size=4)
+
+
+@pytest.mark.parametrize("missing", [None, [None], [None, None]])
+def test_missing_continuation_scores_are_rejected(kl_eval, missing):
+    output = SimpleNamespace(prompt_token_ids=[1, 0], prompt_logprobs=missing)
+    with pytest.raises(ValueError):
+        kl_eval._continuation_logprobs(output, prompt_tokens=1, vocab_size=4)
 
 
 @pytest.mark.parametrize("detailed_results", [False, True])
-def test_real_generation_stops_at_eos_and_scores_it(kl_eval, monkeypatch, detailed_results):
-    argv = ["kl_eval.py", "--model", "local-test-model", "--recipe", "local-test-recipe"]
+def test_cli_checkpoint_inputs_and_defaults(kl_eval, monkeypatch, detailed_results):
+    argv = ["kl_eval.py", "--model", "local-bf16", "--quantized_model", "local-nvfp4"]
     if detailed_results:
         argv.append("--detailed_results")
     monkeypatch.setattr(sys, "argv", argv)
     args = kl_eval._parse_args()
-    reference = _tiny_model()
-    with torch.no_grad():
-        for parameter in reference.parameters():
-            parameter.zero_()
-    # Equal logits greedily choose token 0, which is this model's EOS.
-    # Checkpoint decoding settings must not override the evaluation's plain greedy policy.
-    reference.generation_config.suppress_tokens = [0]
-    reference.generation_config.return_dict_in_generate = True
-    original_generation = copy.deepcopy(reference.generation_config)
-    quantized = copy.deepcopy(reference)
-    tokenizer = SimpleNamespace(eos_token_id=0, pad_token_id=0)
-    prompts = [{"block_index": 3, "input_ids": [4, 5, 6]}]
-    result = kl_eval.evaluate(
-        reference,
-        quantized,
-        tokenizer,
-        prompts,
-        max_new_tokens=4,
-        top_k=4,
-        detailed_results=args.detailed_results,
+    assert args.model == "local-bf16"
+    assert args.quantized_model == "local-nvfp4"
+    assert (args.num_examples, args.prompt_tokens, args.max_new_tokens, args.top_k, args.seed) == (
+        100,
+        128,
+        512,
+        128,
+        0,
     )
-    assert reference.generation_config == original_generation
-    expected = {"full_vocab_kl": 0, "conditional_topk_kl": 0}
+    assert args.detailed_results is detailed_results
+    assert not hasattr(args, "recipe")
+    assert not hasattr(args, "calib_size")
+
+
+@pytest.mark.parametrize("detailed_results", [False, True])
+def test_report_weights_examples_equally_and_preserves_output_shape(kl_eval, detailed_results):
+    examples = [
+        {"generated_tokens": 1, "full_vocab_kl": 2.0, "conditional_topk_kl": 1.0},
+        {"generated_tokens": 3, "full_vocab_kl": 0.0, "conditional_topk_kl": 0.0},
+    ]
+    expected = {"full_vocab_kl": 1.0, "conditional_topk_kl": 0.5}
+    actual = kl_eval._build_report(examples, detailed_results=detailed_results)
     if detailed_results:
-        assert result["examples"] == [
-            {
-                "example": 0,
-                "block_index": 3,
-                "prompt_ids": [4, 5, 6],
-                "generated_ids": [0],
-                "generated_tokens": 1,
-                **expected,
-            }
-        ]
-        assert result["summary"] == pytest.approx(expected, abs=1e-7)
+        assert actual == {"summary": expected, "examples": examples}
     else:
-        assert result == pytest.approx(expected, abs=1e-7)
+        assert actual == expected
 
 
-def test_invalid_logits_fail_instead_of_dropping_positions(kl_eval):
-    with pytest.raises(ValueError, match="Non-finite KL"):
-        kl_eval.mean_kl(torch.zeros(2, 4), torch.full((2, 4), float("nan")), top_k=2)
+def test_missing_generation_config_preserves_model_eos_ids(kl_eval, monkeypatch, tmp_path):
+    GPT2Config(vocab_size=4, eos_token_id=[0, 2]).save_pretrained(tmp_path)
+    tokenizer = SimpleNamespace(
+        eos_token_id=0,
+        get_vocab=lambda: {"a": 0, "b": 1, "c": 2, "d": 3},
+        encode=lambda text, add_special_tokens: [1, 3, 1],
+    )
+    dataset = Dataset.from_dict({"text": ["Local evaluation text."]})
+    monkeypatch.setattr(kl_eval.AutoTokenizer, "from_pretrained", lambda *a, **kw: tokenizer)
+    monkeypatch.setattr(kl_eval, "load_dataset", lambda *a, **kw: dataset)
+    args = SimpleNamespace(
+        model=str(tmp_path),
+        quantized_model=str(tmp_path),
+        revision=None,
+        quantized_revision=None,
+        trust_remote_code=False,
+        num_examples=1,
+        prompt_tokens=3,
+        seed=0,
+    )
+    manifest = kl_eval._prepare(args)
+    assert manifest["eos_token_ids"] == [0, 2]
+    assert manifest["prompts"] == [{"block_index": 0, "input_ids": [1, 3, 1]}]
