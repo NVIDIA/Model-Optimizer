@@ -255,16 +255,22 @@ LLAVA_VISION_PREFIXES = ("multi_modal_projector", "vision_model")
 
 def with_language_model_prefix(
     mapping: dict[str, CustomModuleMapping],
+    old_prefix: str = "model.",
+    new_prefix: str = "model.language_model.",
 ) -> dict[str, CustomModuleMapping]:
-    """Nest a text-model mapping under ``model.language_model.``; other prefixes are unchanged."""
+    """Nest a text-model mapping under the VLM's language-model prefix.
+
+    Targets starting with ``old_prefix`` have it replaced by ``new_prefix``; other targets are
+    unchanged.
+    """
     result = {}
     for key, m in mapping.items():
         if not isinstance(m, CustomModuleMapping):
             result[key] = m  # plain flags such as ``use_packed_local_experts``
             continue
         prefix = m.target_name_or_prefix
-        if prefix.startswith("model."):
-            prefix = "model.language_model." + prefix[len("model.") :]
+        if prefix.startswith(old_prefix):
+            prefix = new_prefix + prefix[len(old_prefix) :]
         result[key] = type(m)(
             target_name_or_prefix=prefix, func_kwargs=copy.deepcopy(m.func_kwargs)
         )
