@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 import transformer_engine as te
 from _test_utils.torch.misc import set_seed
+from _test_utils.torch.quantization.quant_utils import NVFP4_LSQ_TIED_CFG
 from _test_utils.torch.quantization.quantize_common import quantize_model_and_forward
 
 import modelopt.torch.opt as mto
@@ -199,6 +200,22 @@ def test_quantize_forward_backward():
 
         # In-directly tests that gradients were computed correctly
         assert linear.weight.grad is not None and linear.weight.grad.abs().sum() > 0.0
+
+
+@pytest.mark.parametrize("freeze_weight", [False, True])
+def test_layernorm_linear_lsq_scale_grad(freeze_weight):
+    """The learnable weight scale of a quantized TE LayerNormLinear receives a gradient."""
+    set_seed()
+    model = te.pytorch.LayerNormLinear(32, 16, normalization="RMSNorm").cuda()
+    x = torch.randn(4, 32, device="cuda")
+    mtq.quantize(model, NVFP4_LSQ_TIED_CFG, lambda m: m(x))
+    model.weight.requires_grad_(not freeze_weight)
+
+    model(x).sum().backward()
+
+    scale = model.weight_quantizer._amax_post
+    assert scale.grad is not None and scale.grad.abs().sum() > 0.0
+    assert (model.weight.grad is None) == freeze_weight
 
 
 @pytest.mark.parametrize(

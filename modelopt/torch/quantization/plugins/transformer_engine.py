@@ -315,24 +315,9 @@ class _QuantLayerNormLinearFunc(torch.autograd.Function):
     """Patched version of _LayerNormLinear to quantize the input to the GEMM operation."""
 
     @staticmethod
-    def forward(ctx, inp, ln_weight, ln_bias, weight, *args, **kwargs):
-        input_quantizer, weight_quantizer, unquantized_rows = (
-            _QuantLayerNormLinearFunc.modelopt_quantizers
-        )
-
-        qweight = weight_quantizer(weight)
-        if unquantized_rows is not None:
-            # Deployment keeps these rows in BF16: they skip QDQ but keep the quantizers' scaling
-            # and rotation. Not in place: the fake-quant weight cache may hold qweight.
-            row_weight = apply_without_qdq(weight_quantizer, weight[unquantized_rows])
-            qweight = torch.cat(
-                (
-                    qweight[: unquantized_rows.start],
-                    row_weight.to(qweight.dtype),
-                    qweight[unquantized_rows.stop :],
-                )
-            )
-        qweight.requires_grad = weight.requires_grad
+    def forward(ctx, inp, ln_weight, ln_bias, qweight, *args, **kwargs):
+        # The weight arrives already fake-quantized (see _QuantLayerNormLinearEntry).
+        input_quantizer, _, unquantized_rows = _QuantLayerNormLinearFunc.modelopt_quantizers
         if ctx is not None:
             # We need to recompute the quantized input for the backward pass, so we save the input_quantizer
             ctx.modelopt_input_quantizer = input_quantizer
@@ -345,6 +330,7 @@ class _QuantLayerNormLinearFunc(torch.autograd.Function):
             outputs = original_gemm(gemm_weight, qinput, *gemm_args, **gemm_kwargs)
             if unquantized_rows is not None:
                 bias = gemm_kwargs.get("bias")
+                row_weight = qweight[unquantized_rows]
                 outputs[0][..., unquantized_rows] = torch.nn.functional.linear(
                     apply_without_qdq(input_quantizer, input).to(row_weight.dtype),
                     row_weight,
@@ -414,6 +400,44 @@ class _QuantLayerNormLinearFunc(torch.autograd.Function):
         return outputs
 
 
+class _QuantLayerNormLinearEntry:
+    """Stands in for TE's ``_LayerNormLinear`` while a quantized ``LayerNormLinear`` runs.
+
+    Fake-quantizes the weight before entering ``_QuantLayerNormLinearFunc``, where autograd still
+    records it, so learnable quantizer parameters (e.g. LSQ scales) receive gradients. TE calls
+    ``apply`` when grad is enabled and ``forward`` (with ``ctx=None``) otherwise.
+    """
+
+    @staticmethod
+    def _quantize_weight(weight):
+        _, weight_quantizer, unquantized_rows = _QuantLayerNormLinearFunc.modelopt_quantizers
+        qweight = weight_quantizer(weight)
+        if unquantized_rows is None:
+            return qweight
+        # Deployment keeps these rows in BF16: they skip QDQ but keep the quantizers' scaling
+        # and rotation. Not in place: the fake-quant weight cache may hold qweight.
+        row_weight = apply_without_qdq(weight_quantizer, weight[unquantized_rows])
+        return torch.cat(
+            (
+                qweight[: unquantized_rows.start],
+                row_weight.to(qweight.dtype),
+                qweight[unquantized_rows.stop :],
+            )
+        )
+
+    @staticmethod
+    def apply(inp, ln_weight, ln_bias, weight, *args, **kwargs):
+        qweight = _QuantLayerNormLinearEntry._quantize_weight(weight)
+        return _QuantLayerNormLinearFunc.apply(inp, ln_weight, ln_bias, qweight, *args, **kwargs)
+
+    @staticmethod
+    def forward(ctx, inp, ln_weight, ln_bias, weight, *args, **kwargs):
+        qweight = _QuantLayerNormLinearEntry._quantize_weight(weight)
+        return _QuantLayerNormLinearFunc.forward(
+            ctx, inp, ln_weight, ln_bias, qweight, *args, **kwargs
+        )
+
+
 @QuantModuleRegistry.register({te.pytorch.LayerNormLinear: "te_LayerNormLinear"})
 class _QuantTELayerNormLinear(_ParallelLinear):
     _functionals_to_replace = []
@@ -451,7 +475,7 @@ class _QuantTELayerNormLinear(_ParallelLinear):
         with replace_function(
             te_layernorm_linear,
             "_LayerNormLinear",
-            _QuantLayerNormLinearFunc,
+            _QuantLayerNormLinearEntry,
             "_og_LayerNormLinear",
         ):
             outputs = super().forward(*args, **kwargs)
