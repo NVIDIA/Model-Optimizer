@@ -140,7 +140,8 @@ class DistributedWorkerPool:
             self._processes.append(p)
 
         for _ in range(world_size):
-            msg = self._result_queue.get(timeout=120)
+            # Cold imports of the Megatron/TE/modelopt stack take 75-100 s under coverage in CI
+            msg = self._result_queue.get(timeout=300)
             assert msg == "ready", f"Worker failed to initialize: {msg}"
 
     @staticmethod
