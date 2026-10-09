@@ -1,0 +1,43 @@
+# Megatron-Bridge HF export for nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (NVFP4).
+#
+# Converts the quantized MCore ckpt (from megatron_bridge_ptq.yaml) to a deployable
+# HuggingFace checkpoint. The HF exporter does not gather TP-sharded weights — TP=1
+# is required, PP is used to shard the model across GPUs.
+#
+# Cluster shape: 2 nodes x 4 GPUs = 8 ranks (PP=8, EP=1, TP=1).
+#
+# Usage:
+#   source .env-slurm
+#   cd tools/launcher
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/megatron_bridge_export.yaml --yes
+
+job_name: Nemotron-3-Nano_megatron_bridge_export
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note: "Megatron-Bridge HF export for Nano-30B-A3B NVFP4: 2 nodes x 4 GPUs, TP=1 PP=8"
+
+  global_vars:
+    output_dir: /cicd/megatron-bridge
+
+  task_0:
+    script: common/megatron_bridge/export/export.sh
+    environment:
+      - HF_MODEL_ID: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - MEGATRON_LOAD_PATH: <<global_vars.output_dir>>/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4-MLM
+      - EXPORT_DIR: /cicd/export/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4-HF
+      - TP: "1"
+      - PP: "8"
+      - EP: "1"
+      - ETP: "1"
+      - DTYPE: bfloat16
+      - TRUST_REMOTE_CODE: "true"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.04
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      partition: batch
+      nodes: 2
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      time: "02:00:00"
