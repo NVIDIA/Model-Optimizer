@@ -2929,7 +2929,7 @@ requires-dist = [
     { name = "onnxruntime-gpu", marker = "python_full_version < '3.11' and platform_machine != 'aarch64' and sys_platform != 'darwin' and sys_platform != 'win32' and extra == 'onnx'", specifier = "~=1.22.0" },
     { name = "onnxruntime-gpu", marker = "platform_machine == 'AMD64' and sys_platform == 'win32' and extra == 'onnx'", specifier = "==1.22.0" },
     { name = "onnxscript", marker = "extra == 'onnx'" },
-    { name = "onnxslim", marker = "extra == 'onnx'", specifier = ">=0.1.76" },
+    { name = "onnxslim", marker = "extra == 'onnx'", specifier = ">=0.1.78" },
     { name = "packaging" },
     { name = "pandas", marker = "extra == 'puzzletron'" },
     { name = "peft", marker = "extra == 'hf'", specifier = ">=0.17.0" },
