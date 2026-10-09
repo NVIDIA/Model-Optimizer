@@ -322,12 +322,15 @@ def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]
     """Resolve and merge model and KV-cache quantization configuration."""
     import copy
 
+    if quant_config["recipe_path"] and (quant_config["quant_cfg"] or quant_config["kv_quant_cfg"]):
+        raise ValueError(
+            "recipe_path and quant_cfg/kv_quant_cfg are mutually exclusive -- the recipe file "
+            "already carries the quant_cfg. Set only one."
+        )
+
     if quant_config["recipe_path"]:
         recipe_path = Path(quant_config["recipe_path"])
-        raw_recipe = None
-        if recipe_path.is_file():
-            with recipe_path.open() as file:
-                raw_recipe = yaml.safe_load(file)
+        raw_recipe = yaml.safe_load(recipe_path.read_text()) if recipe_path.is_file() else None
         if (
             isinstance(raw_recipe, dict)
             and raw_recipe
@@ -338,7 +341,7 @@ def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]
 
             quant_cfg = quantizer_recipe_to_quant_cfg(raw_recipe, model)
         else:
-            recipe = load_recipe(quant_config["recipe_path"])
+            recipe = load_recipe(recipe_path)
             assert isinstance(recipe, ModelOptPTQRecipe), (
                 f"Expected PTQ recipe, but got {type(recipe).__name__} from {quant_config['recipe_path']}"
             )

@@ -26,6 +26,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+import yaml
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 
 import modelopt.torch.quantization as mtq
@@ -153,6 +154,107 @@ def test_quantizer_state_disables_only_missing_weight_quantizers(
     assert model.input_quantizer.is_enabled
     assert not model.missing_input_quantizer.is_enabled
     assert torch.equal(restored["input_quantizer._amax"], torch.tensor(13.0))
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "modelopt_quant_cfg",
+        "modelopt_kv_quant_cfg",
+        "modelopt_quant_file_path",
+        "modelopt_recipe_path",
+        "modelopt_state_path",
+    ],
+)
+def test_manual_quantization_setting_prevents_sidecar_autodetection(
+    monkeypatch, clean_launcher_env, tmp_path, setting
+):
+    launcher = _load_fakequant_launcher(monkeypatch)
+    (tmp_path / "vllm_fq_modelopt_state.pth").touch()
+    args = SimpleNamespace(
+        model=str(tmp_path),
+        modelopt_quant_cfg=None,
+        modelopt_kv_quant_cfg=None,
+        modelopt_quant_file_path=None,
+        modelopt_recipe_path=None,
+        modelopt_state_path=None,
+    )
+    setattr(args, setting, "explicit-value")
+    original_args = vars(args).copy()
+
+    launcher._autodetect_fakequant_paths(args)
+
+    assert vars(args) == original_args
+
+
+def test_full_state_sidecar_takes_priority(monkeypatch, clean_launcher_env, tmp_path):
+    launcher = _load_fakequant_launcher(monkeypatch)
+    (tmp_path / "vllm_fq_modelopt_state.pth").touch()
+    (tmp_path / "quantizer_state.pth").touch()
+    (tmp_path / "quant_recipe.yaml").touch()
+    args = SimpleNamespace(
+        model=str(tmp_path),
+        modelopt_quant_cfg=None,
+        modelopt_kv_quant_cfg=None,
+        modelopt_quant_file_path=None,
+        modelopt_recipe_path=None,
+        modelopt_state_path=None,
+    )
+
+    launcher._autodetect_fakequant_paths(args)
+
+    assert args.modelopt_state_path == str(tmp_path / "vllm_fq_modelopt_state.pth")
+    assert args.modelopt_quant_file_path is None
+    assert args.modelopt_recipe_path is None
+
+
+def test_fakequant_launcher_autodetects_megatron_sidecars(
+    monkeypatch, clean_launcher_env, tmp_path
+):
+    (tmp_path / "quantizer_state.pth").touch()
+    (tmp_path / "quant_recipe.yaml").write_text("quantizer: {}")
+    launcher = _load_fakequant_launcher(monkeypatch)
+    monkeypatch.setattr(launcher, "resolve_mlflow_args", Mock())
+    vllm_main, ray_registration, _ = _stub_launcher_runtime(monkeypatch, launcher)
+    monkeypatch.setattr(sys, "argv", ["vllm_serve_fakequant.py", str(tmp_path)])
+
+    launcher.main()
+
+    assert os.environ["QUANT_FILE_PATH"] == str(tmp_path / "quantizer_state.pth")
+    assert os.environ["RECIPE_PATH"] == str(tmp_path / "quant_recipe.yaml")
+    assert os.environ["VLLM_DISABLE_COMPILE_CACHE"] == "1"
+    assert "--worker-cls" in sys.argv
+    assert "fakequant_worker.FakeQuantWorker" in sys.argv
+    vllm_main.assert_called_once_with()
+    ray_registration.assert_called_once_with()
+
+
+@pytest.mark.parametrize("conflicting_field", ["quant_cfg", "kv_quant_cfg"])
+def test_recipe_path_rejects_manual_quant_config(conflicting_field):
+    ptq_utils = _load_example_module("vllm_ptq_utils")
+    config = {"recipe_path": "/missing/recipe.yaml", "quant_cfg": None, "kv_quant_cfg": None}
+    config[conflicting_field] = "FP8_DEFAULT_CFG"
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ptq_utils.get_quant_config(config, model=None)
+
+
+@pytest.mark.parametrize(
+    ("contents", "error"),
+    [
+        ("", ValueError),
+        ("quantize: [", yaml.YAMLError),
+        ("- not\n- a mapping\n", ValueError),
+    ],
+)
+def test_invalid_recipe_yaml_is_rejected(tmp_path, contents, error):
+    ptq_utils = _load_example_module("vllm_ptq_utils")
+    recipe_path = tmp_path / "recipe.yaml"
+    recipe_path.write_text(contents)
+    config = {"recipe_path": str(recipe_path), "quant_cfg": None, "kv_quant_cfg": None}
+
+    with pytest.raises(error):
+        ptq_utils.get_quant_config(config, model=None)
 
 
 def _calibration_worker(
