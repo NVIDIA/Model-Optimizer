@@ -65,6 +65,7 @@ from transformers import AutoTokenizer
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.export import ensure_local_checkpoint
 from modelopt.torch.opt.conversion import ModeloptStateManager
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.mlflow import Tool, masked_args
@@ -408,6 +409,12 @@ def _tokenizer_prepends_bos(args) -> bool:
 
 
 def main(args: argparse.Namespace, owns_the_run: bool = True):
+    # --student_hf_path stays as given. The student is built and exported from the local copy of
+    # the whole checkpoint in student_local_checkpoint_path, since the HF export reads the source's
+    # files from local disk only; student_hub_model_id is the Hub ID, or None for a local path.
+    args.student_hub_model_id, args.student_local_checkpoint_path = ensure_local_checkpoint(
+        args.student_hf_path
+    )
     student_has_modelopt_state = args.student_megatron_path is not None and has_modelopt_state(
         args.student_megatron_path
     )
@@ -416,7 +423,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     # reads either layout, so it keeps the faster grouped GEMM.
     moe_grouped_gemm = (
         use_moe_grouped_gemm(
-            args.student_hf_path,
+            args.student_local_checkpoint_path,
             trust_remote_code=args.trust_remote_code,
             force_sequential=args.no_moe_grouped_gemm,
         )
@@ -460,7 +467,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     # the built student inside the patched provide() below).
     # Only the student's layout is pinned -- it must match --student_megatron_path (see quantize.py).
     student_provider = _build_model_provider(
-        args.student_hf_path,
+        args.student_local_checkpoint_path,
         load_weights=args.student_megatron_path is None,
         moe_grouped_gemm=moe_grouped_gemm,
     )
@@ -497,7 +504,9 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
 
     # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under
     # ``language_model`` (used as ``distill_submodule`` below).
-    is_vlm = is_vlm_config(args.student_hf_path, trust_remote_code=args.trust_remote_code)
+    is_vlm = is_vlm_config(
+        args.student_local_checkpoint_path, trust_remote_code=args.trust_remote_code
+    )
 
     if is_vlm:
         warn_rank_0(
@@ -695,7 +704,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         save_vlm_to_hf(
             full_student,
             args.hf_export_path,
-            args.student_hf_path,
+            args.student_local_checkpoint_path,
             trust_remote_code=args.trust_remote_code,
         )
         print_rank_0(f"Saved distilled VLM to {args.hf_export_path} in HF format")
@@ -712,7 +721,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             export_llm_to_hf(
                 megatron_path=f"{checkpoint_dir}/iter_{args.train_iters:07d}",
                 hf_export_path=args.hf_export_path,
-                student_hf_path=args.student_hf_path,
+                student_hf_path=args.student_local_checkpoint_path,
                 template_hf=args.student_hf_model,
                 trust_remote_code=args.trust_remote_code,
             )
