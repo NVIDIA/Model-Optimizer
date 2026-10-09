@@ -572,11 +572,15 @@ entry is a thin **alias** that imports that recipe wholesale and overrides only
   `general/ptq/nvfp4_experts_only-kv_fp8_cast` — expert-only NVFP4 with max calibration and an
   FP8 KV cache in cast mode — as published in `nvidia/Gemma-4-26B-A4B-NVFP4` and
   `nvidia/diffusiongemma-26B-A4B-it-NVFP4`.
-- **`models/zai-org/GLM-5.1/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast`** and
-  **`models/zai-org/GLM-5.2/ptq/...`** alias
+- **`models/zai-org/GLM-5.2/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast`** aliases
   `general/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast` — expert-only NVFP4 with the
   expert `input_scale` pinned to 1.0 and an FP8 KV cache in cast mode — as published in
-  `nvidia/GLM-5.1-NVFP4` and `nvidia/GLM-5.2-NVFP4`.
+  `nvidia/GLM-5.2-NVFP4`.
+- **`models/zai-org/GLM-5.1/ptq/nvfp4_experts_only-kv_fp8_cast`** aliases
+  `general/ptq/nvfp4_experts_only-kv_fp8_cast` — expert-only NVFP4 with calibrated
+  activation scales and an FP8 KV cache in cast mode — as published in
+  `nvidia/GLM-5.1-NVFP4`. Unlike GLM-5.2, this release's exported expert `input_scale`
+  tensors are calibrated rather than pinned to 1.0.
 - **`models/MiniMaxAI/MiniMax-M2.5/ptq/nvfp4_experts_only-kv_fp8_cast`** aliases
   `general/ptq/nvfp4_experts_only-kv_fp8_cast` — expert-only NVFP4 with an FP8 KV cache in
   cast mode — as published in `nvidia/MiniMax-M2.5-NVFP4`.
