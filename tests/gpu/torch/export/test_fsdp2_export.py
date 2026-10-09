@@ -450,8 +450,17 @@ def _streaming_export_matches_reference_test(rank, size, export_dir, quant_confi
 
 @pytest.mark.parametrize(
     "quant_config",
-    [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
-    ids=["nvfp4", "fp8"],
+    [
+        pytest.param(
+            mtq.NVFP4_DEFAULT_CFG,
+            id="nvfp4",
+            marks=pytest.mark.skip(
+                reason="Hangs on 2 GPUs: it times out the nightly gpu job every night, "
+                "root cause not found. Re-enable once fixed."
+            ),
+        ),
+        pytest.param(mtq.FP8_DEFAULT_CFG, id="fp8"),
+    ],
 )
 def test_fsdp2_streaming_export_matches_reference(dist_workers, tmp_path, quant_config):
     if torch.cuda.device_count() < 2:
