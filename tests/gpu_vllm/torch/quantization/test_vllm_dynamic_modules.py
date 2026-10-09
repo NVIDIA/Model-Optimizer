@@ -22,8 +22,8 @@ installed and every enabled quantizer ends up with a registered tensor-level
 ``_amax`` after calibration. Mirrors the
 ``examples/vllm_serve/fakequant_worker.py`` production path.
 
-Architectures: TinyLlama (Linear + Attention), TinyQwen3MoE (+ FusedMoE),
-TinyDeepseekV3 (+ MLAAttention).
+Architectures: TinyQwen3MoE (Linear + Attention + FusedMoE), TinyDeepseekV3 (+ MLAAttention
+and the shared expert's merged and row-parallel linears).
 """
 
 from __future__ import annotations
@@ -42,7 +42,6 @@ from _test_utils.torch.transformers_models import (
     create_tiny_deepseek_v3_dir,
     create_tiny_deepseek_v4_config_dir,
     create_tiny_glm5_next_config_dir,
-    create_tiny_llama_dir,
     create_tiny_qwen3_moe_dir,
 )
 from vllm import LLM, ModelRegistry, SamplingParams
@@ -788,7 +787,13 @@ def _quantize_and_summarize(self):
     }
 
 
-def _boot_llm(model_dir, max_model_len=64, **extra):
+_MAX_MODEL_LEN = 64
+# One 64-token request needs a handful of KV blocks. The defaults size the KV pool from the memory
+# fraction (about 17 GB, millions of Python block objects) and the token budget to thousands.
+_SMALL_ENGINE = {"num_gpu_blocks_override": 32, "max_num_batched_tokens": _MAX_MODEL_LEN}
+
+
+def _boot_llm(model_dir, max_model_len=_MAX_MODEL_LEN, **extra):
     """Construct a vLLM engine on a tiny model.
 
     MoE fixtures override with ``moe_backend="triton"`` (pins the Triton
@@ -815,27 +820,6 @@ def _shutdown_llm(llm):
 
 
 @pytest.fixture(scope="module")
-def tiny_llama_llm(tmp_path_factory):
-    tmp = tmp_path_factory.mktemp("tiny_llama")
-    # Helper default ``max_position_embeddings=32`` would clash with vLLM's ``max_model_len=64`` set in ``_boot_llm``.
-    # head_dim=64 with num_attention_heads=2 is broadly supported by vLLM's attention backends.
-    model_dir = create_tiny_llama_dir(
-        tmp,
-        hidden_size=128,
-        intermediate_size=256,
-        num_attention_heads=2,
-        num_key_value_heads=1,
-        max_position_embeddings=64,
-        head_dim=64,
-    )
-    llm = _boot_llm(model_dir)
-    try:
-        yield llm
-    finally:
-        _shutdown_llm(llm)
-
-
-@pytest.fixture(scope="module")
 def tiny_qwen3_moe_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_qwen3_moe")
     # head_dim=64 with num_attention_heads=2 is broadly supported by vLLM's attention backends.
@@ -854,7 +838,7 @@ def tiny_qwen3_moe_llm(tmp_path_factory):
         num_experts_per_tok=2,
         decoder_sparse_step=1,
     )
-    llm = _boot_llm(model_dir, moe_backend="triton", enable_expert_parallel=True)
+    llm = _boot_llm(model_dir, moe_backend="triton", enable_expert_parallel=True, **_SMALL_ENGINE)
     try:
         yield llm
     finally:
@@ -871,7 +855,7 @@ def tiny_deepseek_llm(tmp_path_factory):
     model_dir = create_tiny_deepseek_v3_dir(
         tmp, kv_lora_rank=512, qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128
     )
-    llm = _boot_llm(model_dir, moe_backend="triton", enable_expert_parallel=True)
+    llm = _boot_llm(model_dir, moe_backend="triton", enable_expert_parallel=True, **_SMALL_ENGINE)
     try:
         yield llm
     finally:
@@ -1007,33 +991,8 @@ def _assert_quantizer_amax_is_static(summary):
     assert summary["quantizers_without_amax"] == [], summary["quantizers_without_amax"]
 
 
-def test_tiny_llama_quantize(tiny_llama_llm):
-    """Covers QKV/Row/MergedColumn ParallelLinear + Attention on a dense Llama."""
-    summaries = tiny_llama_llm.collective_rpc(_quantize_and_summarize)
-    summary = summaries[0]
-
-    assert summary["missing_quantizers"] == [], summary["missing_quantizers"]
-
-    parallel_linear_counts = summary["parallel_linear_counts"]
-    # Each decoder layer contributes one of each. With num_hidden_layers=2:
-    assert parallel_linear_counts.get("QuantQKVParallelLinear", 0) >= 2, parallel_linear_counts
-    # o_proj + down_proj per layer
-    assert parallel_linear_counts.get("QuantRowParallelLinear", 0) >= 4, parallel_linear_counts
-    assert parallel_linear_counts.get("QuantMergedColumnParallelLinear", 0) >= 2, (
-        parallel_linear_counts
-    )
-
-    # Llama uses the base Attention type — one per decoder layer.
-    assert summary["attention_count"] >= 2, summary
-
-    # No MoE in a dense Llama.
-    assert summary["moe_count"] == 0
-
-    _assert_quantizer_amax_is_static(summary)
-
-
 def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm):
-    """Tiny Qwen3-MoE adds FusedMoE coverage on top of the dense linears."""
+    """Tiny Qwen3-MoE covers QKV/Row ParallelLinear, base Attention and FusedMoE."""
     summaries = tiny_qwen3_moe_llm.collective_rpc(_quantize_and_summarize)
     summary = summaries[0]
 
@@ -1159,6 +1118,14 @@ def test_tiny_deepseek_mla_quantize(tiny_deepseek_llm):
     # ``first_k_dense_replace=0`` → every layer is MoE.
     assert summary["moe_count"] >= 2, summary
 
+    # The shared expert's gate_up_proj is a MergedColumnParallelLinear; o_proj and the shared
+    # expert's down_proj are RowParallelLinear. Two layers contribute 2 Merged and 4 Row.
+    parallel_linear_counts = summary["parallel_linear_counts"]
+    assert parallel_linear_counts.get("QuantMergedColumnParallelLinear", 0) >= 2, (
+        parallel_linear_counts
+    )
+    assert parallel_linear_counts.get("QuantRowParallelLinear", 0) >= 4, parallel_linear_counts
+
     _assert_quantizer_amax_is_static(summary)
 
     # ``n_shared_experts=1``: vLLM merges the shared expert's gate/up into ``gate_up_proj``, so
@@ -1223,7 +1190,11 @@ def tiny_deepseek_fp8_llm(tmp_path):
         tmp_path, kv_lora_rank=512, qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128
     )
     llm = _boot_llm(
-        model_dir, quantization="fp8", moe_backend="triton", enable_expert_parallel=True
+        model_dir,
+        quantization="fp8",
+        moe_backend="triton",
+        enable_expert_parallel=True,
+        **_SMALL_ENGINE,
     )
     try:
         yield llm
