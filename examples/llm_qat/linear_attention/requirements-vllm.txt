@@ -1,0 +1,3 @@
+# Optional native arithmetic profile; kernels are imported without starting a server.
+# Apache-2.0: https://github.com/vllm-project/vllm/blob/v0.15.1/LICENSE
+vllm==0.15.1
