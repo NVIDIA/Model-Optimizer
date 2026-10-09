@@ -1,0 +1,67 @@
+# External (standalone) draft speculative-decoding training recipe.
+# Unlike the head-based recipes, model.model_name_or_path is the *base* model --
+# used only for its lm_head and vocabulary -- and draft_model_name_or_path names
+# the pretrained draft that is actually trained.
+# Override fields via OmegaConf dotlist on the CLI.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptExternalDraftRecipe
+metadata:
+  description: External standalone draft training recipe (model/data/training/external bundled).
+
+# maps to ModelArguments (main.py); this is the BASE model
+model:
+  model_name_or_path:
+  # Matches every other recipe and the ModelArguments default. Pass
+  # model.trust_remote_code=true on the CLI for a base that genuinely needs it.
+  trust_remote_code: false
+  use_fake_base_for_offline: true
+
+# the pretrained draft to train
+draft_model_name_or_path:
+
+# maps to DataArguments (main.py)
+data:
+  # Auto-derived from the data-source fields below; leave unset.
+  mode:
+  data_path:
+  offline_data_path:
+  # Dumped top-k teacher deployment policy. Selects data.mode=sparse, which needs no
+  # base lm_head at train time and requires a TVD objective (tvd or tvd_deploy).
+  sparse_data_path:
+  draft_vocab_cache:
+  vlm_img_dir:
+  vlm_processor:
+
+# maps to TrainingArguments (main.py)
+training:
+  output_dir:
+  num_train_epochs: 1
+  per_device_train_batch_size: 1
+  learning_rate: 1.0e-4
+  warmup_steps: 20
+  training_seq_len: 2048
+  logging_steps: 1
+  save_steps: 8192
+  cp_size: 1
+  disable_tqdm: false
+  estimate_ar: false
+  ar_validate_steps: -1
+  answer_only_loss: true
+  bf16: true
+  # The offline collator needs base_model_hidden_states/aux_hidden_states, which HF
+  # Trainer's RemoveColumnsCollator would strip: they are not named in the model's
+  # forward signature. Every speculative recipe sets this.
+  remove_unused_columns: false
+
+external:
+  # soft_ce matches the EAGLE offline objective. tvd is plain total-variation
+  # distance; tvd_deploy filters both sides to the serving policy first and is the
+  # acceptance the deployed pair sees.
+  #
+  # How much of the base's distribution the loss can see depends on the data:
+  #   offline_data_path  hidden states -> base lm_head -> the FULL distribution,
+  #                      so tvd is untruncated total-variation distance
+  #   sparse_data_path   only the dumped top-k policy, so the base side is
+  #                      truncated by the dump no matter which objective is used
+  external_loss: tvd
+  external_report_acc: true
