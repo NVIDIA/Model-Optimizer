@@ -46,6 +46,7 @@ Changelog
 - Add the DFlash2 draft variant, selected with ``dflash_architecture_config.projector_type="dflash2"``: DFlash's one-pass parallel backbone plus a grouped dynamic convolution around every attention/MLP sublayer (``conv_kernel_size`` / ``conv_group_size``) and a low-rank candidate selector (``selector_rank`` / ``selector_top_k``, weighted by ``dflash_selector_loss_alpha``). Exported checkpoints declare ``DFlash2DraftModel`` and load in the SGLang/vLLM DFlash2 serving path.
 - LiLiCorr now trains offline and in streaming mode, not only online: the target logits its distractor penalty reads are reconstructed from the captured final hidden state, the same path self-logit distillation uses.
 - Add ``dflash_lilicorr_w_cal`` (default ``0.0``, off): an optional LiLiCorr proposal-calibration term, a KL divergence from the target's distribution over each slot's candidates to the reranker's candidate distribution, usable in place of the distractor penalty.
+- ``dflash_freeze_base_model=False`` now actually trains the base model. The base forward ran under an unconditional ``torch.no_grad()``, so the flag was honoured on the parameters while no autograd graph was built and no gradient ever reached them; the base stayed at its initial weights for the whole run. Training with the base unfrozen now also costs the activation memory that implies.
 
 *Megatron Framework (M-LM / M-Bridge)*
 

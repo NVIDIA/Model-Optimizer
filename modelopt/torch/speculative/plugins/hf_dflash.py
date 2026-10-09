@@ -71,6 +71,7 @@ Draft model components:
            off meta; ``_maybe_init_rotary_emb`` stays idempotent for the lazy pattern.
 """
 
+import contextlib
 import logging
 from pathlib import Path
 from typing import NamedTuple
@@ -898,7 +899,15 @@ class HFDFlashModel(DFlashModel):
             # long-standing narrow call for text-only models.
             base_forward_kwargs = _multimodal_forward_kwargs(kwargs)
             use_top_level_forward = bool(base_forward_kwargs)
-            with torch.no_grad():
+            # Only skip the graph when the base is actually frozen. Running this under
+            # no_grad unconditionally made dflash_freeze_base_model=False silently inert:
+            # convert() honors it on the parameters (requires_grad stays True), but with no
+            # graph built nothing ever reaches them, so the base is pinned at its initial
+            # weights while appearing trainable.
+            base_grad_ctx = (
+                torch.no_grad() if self.dflash_freeze_base_model else contextlib.nullcontext()
+            )
+            with base_grad_ctx:
                 if use_top_level_forward:
                     raw_outputs = super().forward(
                         input_ids=input_ids,
