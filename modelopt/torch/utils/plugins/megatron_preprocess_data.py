@@ -280,12 +280,15 @@ class _Partition:
             yield from encoded_batch
 
     def _encode_docs(self, encoder: "_Encoder", lines, may_stop_early: bool = False):
-        """Tokenize ``lines``, forking worker processes only when ``workers > 1``.
+        """Tokenize ``lines``, using worker processes only when ``workers > 1``.
 
-        ``multiprocessing.Pool`` always ``fork()``s, even for a single worker. Forking a
+        The worker pool uses the ``spawn`` start method, not the default ``fork``: forking a
         process that has already initialized a CUDA context / many native threads (e.g. when
-        this is called in-process after GPU work) is unsafe and can segfault the children.
-        The single-worker path avoids the fork entirely by tokenizing inline in this process.
+        this runs in-process after GPU work) is unsafe and can segfault the children -- the
+        forked child inherits the parent's locks and half-initialized native state. ``spawn``
+        starts clean workers that inherit none of it. ``_Encoder`` holds only picklable fields
+        (the tokenizer is loaded per-worker in ``initializer``) so it crosses the spawn boundary.
+        The single-worker path tokenizes inline to skip the process overhead entirely.
 
         When ``may_stop_early`` is true, wait for finite batches so no worker results are pending
         if the caller stops consuming documents after reaching its token limit.
@@ -295,7 +298,11 @@ class _Partition:
         if self.workers == 1:
             encoder.initializer()
             return None, map(encoder.encode, lines)
-        pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
+        # spawn, not the default fork: forking after CUDA/native-thread init segfaults the
+        # children (see this method's docstring). spawn starts clean, isolated workers.
+        pool = multiprocessing.get_context("spawn").Pool(
+            self.workers, initializer=encoder.initializer
+        )
         if may_stop_early:
             batch_size = self.workers * 4  # Balance throughput against unused final-batch work.
             encoded_docs = self._encode_in_batches(pool, encoder, lines, batch_size)

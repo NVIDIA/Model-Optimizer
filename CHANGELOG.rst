@@ -137,6 +137,7 @@ Changelog
 - Fix ``hf_ptq`` overwriting a model's existing ``pad_token`` with ``eos_token`` when the model already has a valid padding token. The exported tokenizer now preserves the source model's padding configuration.
 - Fix Hugging Face exports dropping off-index safetensors such as GLM-4.7's ``mtp.safetensors``.
 - Fix Megatron-Core checkpoint saving for quantized grouped MoE experts when tensor and expert parallelism are both enabled.
+- Fix ``megatron_preprocess_data`` with ``workers > 1`` segfaulting when run in a process that has already initialized CUDA or other native threads (for example in-process after GPU work): the tokenization worker pool now uses the ``spawn`` start method instead of ``fork``.
 - Fix unified HuggingFace export of RADIO-based VLMs retaining post-conversion vision and
   projector names instead of restoring the hub layout; deployment loaders could skip those weights.
   Streaming, offload, FSDP2, and layerwise export now reject reverse conversions that regroup
