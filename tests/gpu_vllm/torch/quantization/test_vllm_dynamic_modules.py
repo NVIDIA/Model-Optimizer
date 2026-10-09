@@ -858,12 +858,13 @@ def _boot_llm(model_dir, max_model_len=64, **extra):
 
 
 def _shutdown_llm(llm):
-    del llm
+    # Stop the worker even while pytest still holds fixture references.
+    llm.llm_engine.engine_core.shutdown()
     gc.collect()
     cleanup_dist_env_and_memory(shutdown_ray=False)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def tiny_llama_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_llama")
     # Helper default ``max_position_embeddings=32`` would clash with vLLM's ``max_model_len=64`` set in ``_boot_llm``.
@@ -914,12 +915,12 @@ def _tiny_moe_llm(tmp_path_factory, model_type):
         _shutdown_llm(llm)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def tiny_qwen3_moe_llm(tmp_path_factory):
     yield from _tiny_moe_llm(tmp_path_factory, "qwen3_moe")
 
 
-@pytest.fixture(scope="module", params=["qwen3_moe", "gpt_oss"])
+@pytest.fixture(params=["qwen3_moe", "gpt_oss"])
 def tiny_moe_llm(request, tmp_path_factory):
     if request.param == "qwen3_moe":
         yield request.getfixturevalue("tiny_qwen3_moe_llm")
@@ -927,7 +928,7 @@ def tiny_moe_llm(request, tmp_path_factory):
         yield from _tiny_moe_llm(tmp_path_factory, "gpt_oss")
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def tiny_deepseek_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_deepseek")
     # vLLM 0.26's MLA prefill selector rejects the helper's 16/16/16 dimensions,
@@ -970,7 +971,7 @@ _SPARSE_ATTN_MODELS = {
 }
 
 
-@pytest.fixture(scope="module", params=list(_SPARSE_ATTN_MODELS))
+@pytest.fixture(params=list(_SPARSE_ATTN_MODELS))
 def tiny_sparse_attn_llm(request, tmp_path_factory):
     """Tiny sparse-attention models with an indexer K cache: GLM-5.3-Flash and DeepSeek-V4-Pro."""
     arch, build, extra = _SPARSE_ATTN_MODELS[request.param]
