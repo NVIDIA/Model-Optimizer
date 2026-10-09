@@ -261,7 +261,7 @@ def with_language_model_prefix(
     """Nest a text-model mapping under the VLM's language-model prefix.
 
     Targets starting with ``old_prefix`` have it replaced by ``new_prefix``; other targets are
-    unchanged.
+    unchanged. ``old_prefix=""`` matches every target, prefixing the whole mapping.
     """
     result = {}
     for key, m in mapping.items():
