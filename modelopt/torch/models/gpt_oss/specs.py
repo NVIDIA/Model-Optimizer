@@ -22,7 +22,7 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="gpt_oss",
-        min_transformers_version="4.57",
+        min_transformers_version="5.5",
         moe_spec=MoESpec(
             # GPT-OSS fuses gate and up into a single gate_up_proj.
             # transformers names the block GptOssMLP; GptOssMoE is kept for the

@@ -20,8 +20,9 @@ handful of primitives that DMD2 actually needs as plain functions, so callers ca
 fastgen into any training stack without adopting a new scheduler object.
 
 RF convention used throughout: ``alpha_t = 1 - t`` and ``sigma_t = t``, so
-``x_t = (1 - t) * x_0 + t * eps`` with ``t in [0, 1]``. Internally all arithmetic is in
-``float64`` for numerical stability, and the result is cast back to the input dtype.
+``x_t = (1 - t) * x_0 + t * eps`` with ``t in [0, 1]``. Existing RF conversions use
+``float64`` intermediates and cast back to the input dtype. PDD grid and interval helpers
+instead preserve float32-or-higher outputs because their result remains in the decoding path.
 """
 
 from __future__ import annotations
@@ -39,6 +40,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "add_noise",
+    "fusion_coefficients",
+    "integrate_interval_velocities",
+    "make_shifted_flow_grid",
     "pred_noise_to_pred_x0",
     "pred_x0_from_flow",
     "rf_alpha",
@@ -48,6 +52,178 @@ __all__ = [
     "x0_to_eps",
     "x0_to_flow",
 ]
+
+
+def _pdd_math_dtype(dtype: torch.dtype) -> torch.dtype:
+    """Promote low-precision floating-point dtypes for PDD interval math."""
+    if dtype == torch.float64:
+        return dtype
+    if dtype in (torch.float16, torch.bfloat16, torch.float32):
+        return torch.float32
+    raise TypeError(f"PDD interval math requires a real floating-point dtype, got {dtype}.")
+
+
+def make_shifted_flow_grid(
+    grid_size: int,
+    shift: float,
+    *,
+    max_t: float,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Construct the fixed decreasing shifted rectified-flow grid.
+
+    Schedule construction and upper clamps use float64, matching FastGen's RF
+    scheduler. The completed grid is cast to the requested PDD math dtype. Low
+    precision requests are promoted to float32 so distinct early intervals do not
+    collapse for the canonical 128-node, shift-5 schedule.
+    """
+    if isinstance(grid_size, bool) or not isinstance(grid_size, int) or grid_size <= 0:
+        raise ValueError(f"grid_size must be a positive integer, got {grid_size!r}.")
+    if type(max_t) is not float:
+        raise TypeError(f"max_t must be a float, got {max_t!r}.")
+    if not math.isfinite(max_t) or not 0.0 < max_t <= 1.0:
+        raise ValueError(f"max_t must be finite and satisfy 0 < max_t <= 1, got {max_t!r}.")
+    if not math.isfinite(shift) or shift < 1.0:
+        raise ValueError(f"shift must be finite and >= 1, got {shift!r}.")
+
+    math_dtype = _pdd_math_dtype(dtype)
+    schedule_dtype = torch.float64
+    upper = torch.as_tensor(max_t, device=device, dtype=schedule_dtype)
+    unshifted = torch.linspace(
+        max_t,
+        0.0,
+        grid_size + 1,
+        device=device,
+        dtype=schedule_dtype,
+    )
+    unshifted = torch.minimum(unshifted, upper)
+    grid = shift * unshifted / (1.0 + (shift - 1.0) * unshifted)
+    grid = torch.minimum(grid, upper).to(math_dtype)
+    torch._assert_async(
+        torch.all(torch.diff(grid) < 0),
+        "shifted grid is not strictly decreasing for "
+        f"grid_size={grid_size}, max_t={max_t}, shift={shift}.",
+    )
+    return grid
+
+
+def _batch_indices(
+    value: int | torch.Tensor,
+    *,
+    name: str,
+    batch_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Normalize a scalar or per-sample interval index to a batch tensor."""
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an integer or integer tensor, got bool.")
+    if isinstance(value, int):
+        return torch.full((batch_size,), value, device=device, dtype=torch.long)
+    if not isinstance(value, torch.Tensor):
+        raise TypeError(f"{name} must be an integer or tensor, got {type(value).__name__}.")
+    if value.dtype == torch.bool or value.dtype.is_floating_point or value.dtype.is_complex:
+        raise TypeError(f"{name} must use an integer dtype, got {value.dtype}.")
+    if value.ndim == 0:
+        return value.to(device=device, dtype=torch.long).expand(batch_size)
+    if value.shape != (batch_size,):
+        raise ValueError(
+            f"{name} must be scalar or shape ({batch_size},), got {tuple(value.shape)}."
+        )
+    return value.to(device=device, dtype=torch.long)
+
+
+def integrate_interval_velocities(
+    state: torch.Tensor,
+    velocities: torch.Tensor,
+    grid: torch.Tensor,
+    start: int | torch.Tensor,
+    end: int | torch.Tensor,
+) -> torch.Tensor:
+    """Integrate per-sample velocity heads over half-open blocks ``[start, end)``.
+
+    ``state`` is batch-first with shape ``[B, ...]`` and ``velocities`` has shape
+    ``[B, N, ...]``. ``start`` and ``end`` may be scalar integers or integer
+    tensors of shape ``[B]``. The empty block ``start == end`` returns ``state``
+    promoted to the PDD math dtype.
+    """
+    if state.ndim < 1:
+        raise ValueError(f"state must be batch-first, got shape {tuple(state.shape)}.")
+    if velocities.ndim != state.ndim + 1:
+        raise ValueError(
+            f"velocities must have one interval axis after batch; got state {tuple(state.shape)} "
+            f"and velocities {tuple(velocities.shape)}."
+        )
+    if velocities.shape[0] != state.shape[0] or velocities.shape[2:] != state.shape[1:]:
+        raise ValueError(
+            f"velocities must have shape [B, N, *state.shape[1:]], got "
+            f"state {tuple(state.shape)} and velocities {tuple(velocities.shape)}."
+        )
+    if grid.ndim != 1 or grid.shape[0] != velocities.shape[1] + 1:
+        raise ValueError(
+            f"grid must be one-dimensional with N + 1={velocities.shape[1] + 1} nodes, "
+            f"got shape {tuple(grid.shape)}."
+        )
+    if not grid.dtype.is_floating_point:
+        raise ValueError("grid must be a strictly decreasing real floating-point tensor.")
+    torch._assert_async(
+        torch.all(torch.diff(grid) < 0),
+        "grid must be a strictly decreasing real floating-point tensor.",
+    )
+
+    batch_size, grid_size = state.shape[0], velocities.shape[1]
+    if isinstance(start, int) and isinstance(end, int) and not 0 <= start <= end <= grid_size:
+        raise ValueError(f"require 0 <= start <= end <= {grid_size}, got {start}, {end}.")
+    start_tensor = _batch_indices(start, name="start", batch_size=batch_size, device=state.device)
+    end_tensor = _batch_indices(end, name="end", batch_size=batch_size, device=state.device)
+    torch._assert_async(
+        torch.all((start_tensor >= 0) & (start_tensor <= end_tensor) & (end_tensor <= grid_size)),
+        f"require 0 <= start <= end <= {grid_size} for every batch element.",
+    )
+
+    result_dtype = _pdd_math_dtype(torch.promote_types(state.dtype, velocities.dtype))
+    result_dtype = torch.promote_types(result_dtype, _pdd_math_dtype(grid.dtype))
+    interval_ids = torch.arange(grid_size, device=state.device)
+    mask = (interval_ids[None] >= start_tensor[:, None]) & (
+        interval_ids[None] < end_tensor[:, None]
+    )
+    widths = torch.diff(grid.to(device=state.device, dtype=result_dtype))
+    weights = mask.to(result_dtype) * widths[None]
+    update = torch.einsum(
+        "bn,bn...->b...",
+        weights,
+        velocities.to(device=state.device, dtype=result_dtype),
+    )
+    return state.to(dtype=result_dtype) + update
+
+
+def fusion_coefficients(grid: torch.Tensor, start: int, end: int) -> torch.Tensor:
+    """Return step-width-normalized coefficients for a contiguous block ``[start, end)``."""
+    if grid.ndim != 1 or grid.shape[0] < 2:
+        raise ValueError(f"grid must be one-dimensional with at least two nodes, got {grid.shape}.")
+    if not grid.dtype.is_floating_point:
+        raise ValueError("grid must be a strictly decreasing real floating-point tensor.")
+    torch._assert_async(
+        torch.all(torch.diff(grid) < 0),
+        "grid must be a strictly decreasing real floating-point tensor.",
+    )
+    if isinstance(start, bool) or isinstance(end, bool):
+        raise TypeError("start and end must be integers, not bool.")
+    if not isinstance(start, int) or not isinstance(end, int):
+        raise TypeError("start and end must be Python integers.")
+    grid_size = grid.shape[0] - 1
+    if not 0 <= start < end <= grid_size:
+        raise ValueError(f"require 0 <= start < end <= {grid_size}, got {start}, {end}.")
+
+    result_dtype = _pdd_math_dtype(grid.dtype)
+    math_grid = grid.to(dtype=result_dtype)
+    widths = torch.diff(math_grid)[start:end]
+    coefficients = widths / (math_grid[end] - math_grid[start])
+    valid_coefficients = torch.all(coefficients > 0) & torch.isclose(
+        coefficients.sum(), torch.ones((), device=grid.device, dtype=result_dtype)
+    )
+    torch._assert_async(valid_coefficients, "fusion coefficients must be positive and sum to one.")
+    return coefficients
 
 
 def rf_alpha(t: torch.Tensor) -> torch.Tensor:

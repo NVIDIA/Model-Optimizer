@@ -17,7 +17,6 @@
 
 import pytest
 import torch
-from packaging.version import Version
 
 pytest.importorskip("accelerate")
 
@@ -31,9 +30,7 @@ from modelopt.torch.utils.plugins.model_load_utils import (
 
 def _build_tiny_qwen3_moe():
     """A tiny meta-init Qwen3-MoE (fused ``gate_up_proj`` + ``down_proj`` experts) for converter tests."""
-    transformers = pytest.importorskip("transformers")
-    if Version(transformers.__version__) < Version("5.0"):
-        pytest.skip("multi-source fused-MoE conversion needs transformers>=5")
+    pytest.importorskip("transformers")
     from accelerate import init_empty_weights
     from transformers import AutoConfig, AutoModelForCausalLM
 
