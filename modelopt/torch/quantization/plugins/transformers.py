@@ -15,6 +15,8 @@
 
 """Support quantization for Transformers."""
 
+import sys
+
 import torch.nn as nn
 
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import TensorQuantizer
@@ -24,12 +26,14 @@ from .custom import CUSTOM_POST_CONVERSION_PLUGINS
 
 def make_deepspeed_compatible(model: nn.Module):
     """Make the model compatible with DeepSpeed."""
-    try:
-        from deepspeed.runtime.zero.parameter_offload import ZeROOrderedDict
-    except ImportError:
+    # A ZeRO-3 model's ZeROOrderedDicts mean their module is already imported. Look it up rather
+    # than import deepspeed, which takes several seconds, on every quantize call.
+    parameter_offload = sys.modules.get("deepspeed.runtime.zero.parameter_offload")
+    zero_ordered_dict = getattr(parameter_offload, "ZeROOrderedDict", None)
+    if zero_ordered_dict is None:
         return
     is_deepspeed_zero3_enabled = any(
-        hasattr(module, "_parameters") and isinstance(module._parameters, ZeROOrderedDict)
+        hasattr(module, "_parameters") and isinstance(module._parameters, zero_ordered_dict)
         for module in model.modules()
     )
 
@@ -40,9 +44,9 @@ def make_deepspeed_compatible(model: nn.Module):
         def _make_deepspeed_compatible(module):
             """Make a module's _parameters DeepSpeed compatible."""
             if isinstance(module, TensorQuantizer) and not isinstance(
-                module._parameters, ZeROOrderedDict
+                module._parameters, zero_ordered_dict
             ):
-                module._parameters = ZeROOrderedDict(module._parameters)
+                module._parameters = zero_ordered_dict(module._parameters)
 
         # Make all modules DeepSpeed compatible
         for module in model.modules():

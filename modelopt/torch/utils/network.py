@@ -16,6 +16,7 @@
 """Utility functions for PyTorch models."""
 
 import inspect
+import sys
 import types
 import warnings
 from collections import abc, deque
@@ -74,13 +75,24 @@ SUPPORTED_WRAPPERS: dict[type[nn.Module], str] = {
     torch.distributed.fsdp.FullyShardedDataParallel: "module",
 }
 
-try:
-    from deepspeed.runtime.engine import DeepSpeedEngine
-except:  # noqa: E722
-    DeepSpeedEngine = None
 
-if DeepSpeedEngine is not None:
-    SUPPORTED_WRAPPERS[DeepSpeedEngine] = "module"
+def _deepspeed_engine_type() -> type[nn.Module] | None:
+    """Return ``DeepSpeedEngine`` if deepspeed is in use, else ``None``.
+
+    An engine can only exist once its module is imported, so look it up there rather than import
+    deepspeed, which takes several seconds, with modelopt.
+    """
+    return getattr(sys.modules.get("deepspeed.runtime.engine"), "DeepSpeedEngine", None)
+
+
+def _supported_wrappers() -> dict[type[nn.Module], str]:
+    """Return ``SUPPORTED_WRAPPERS``, with ``DeepSpeedEngine`` added once deepspeed is in use."""
+    deepspeed_engine = _deepspeed_engine_type()
+    if deepspeed_engine is not None:
+        SUPPORTED_WRAPPERS.setdefault(deepspeed_engine, "module")
+    return SUPPORTED_WRAPPERS
+
+
 ModelLike: TypeAlias = nn.Module | type[nn.Module] | tuple | Callable
 ConstructorLike: TypeAlias = Callable | tuple
 
@@ -442,22 +454,23 @@ def unwrap_model(
     force_unwrap: bool = False,
 ) -> nn.Module:
     """Unwrap a model that is wrapped by supported wrapper module or return original model."""
+    wrappers = _supported_wrappers()
     if force_unwrap:
         try:
-            if type(model) in SUPPORTED_WRAPPERS:
-                return getattr(model, SUPPORTED_WRAPPERS[type(model)])
+            if type(model) in wrappers:
+                return getattr(model, wrappers[type(model)])
         except AttributeError:
             raise ValueError(
                 f"Model of type {type(model)} could not be forcefully unwrapped! Please manually"
                 " unwrap the model before passing it in."
             )
 
-    if type(model) in SUPPORTED_WRAPPERS:
+    if type(model) in wrappers:
         if raise_error:
             raise ValueError(msg or f"Model {model} is wrapped by {type(model)}!")
         elif warn:
             warnings.warn(msg or f"Model {model} is wrapped by {type(model)}; unwrapping...")
-        return getattr(model, SUPPORTED_WRAPPERS[type(model)])
+        return getattr(model, wrappers[type(model)])
     return model
 
 
@@ -609,8 +622,9 @@ def get_unwrapped_name(name: str, model: nn.Module | None = None) -> str:
     # So unwrapping just the parent module is not enough
     # Instead of unwrapping the child modules and changing the model, we can just clean the name
     # _convert_to_wrapped_module_name is a Pytorch utility function to do this
+    deepspeed_engine = _deepspeed_engine_type()
     if isinstance(model, (nn.parallel.DistributedDataParallel, nn.parallel.DataParallel)) or (
-        DeepSpeedEngine is not None and isinstance(model, DeepSpeedEngine)
+        deepspeed_engine is not None and isinstance(model, deepspeed_engine)
     ):
         name = name.removeprefix("module.")
 
