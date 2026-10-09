@@ -519,9 +519,9 @@ checkpoint's** quant config verbatim:
   wildcards reach `linear_attn.conv1d` too — matching the published checkpoint,
   whose `hf_quant_config.json` lists `linear_attn.conv1d` as FP8 on every gated-delta
   layer (the full-attention layers have no `conv1d`). The
-  source ships as native block-FP8 (`weight_block_size [128, 128]`); the loader
-  dequantizes it to BF16 before quantizers are inserted, so the scales are
-  calibrated against BF16 weights, not the shipped FP8.
+  source is the plain-BF16 `Qwen/Qwen3.8-2.4T-A95B` (no `quantization_config`), so
+  the scales are calibrated directly against BF16 weights. The block-FP8
+  `Qwen/Qwen3.8-2.4T-A95B-FP8` is a separate release, not the validated source.
 - **`models/zai-org/GLM-5.3-Flash-BF16/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`** is
   the NVFP4 config for `zai-org/GLM-5.3-Flash-BF16`, a `glm5_next` VLM MoE with
   **hybrid attention** — KDA (linear-attention) layers interleaved with NoPE

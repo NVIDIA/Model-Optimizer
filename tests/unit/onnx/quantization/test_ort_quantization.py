@@ -57,7 +57,7 @@ def test_patch_composition_uses_capability_owners(monkeypatch):
             ort_patches.CalibraterBase,
             ("__init__", "create_inference_session", "select_tensors_to_calibrate"),
         ),
-        (ort_patches.QDQQuantizer, ("check_opset_version",)),
+        (ort_patches.QDQQuantizer, ("check_opset_version", "_make_scale_zp_initializers")),
         (ort_patches.BaseQuantizer, ("adjust_tensor_ranges",)),
         (ort_patches.qdq_quantizer, ("compute_scale_zp",)),
     )
