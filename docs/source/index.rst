@@ -13,6 +13,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
          <button class="announcement-tag is-active" type="button" data-tag="all" aria-pressed="true">All</button>
          <button class="announcement-tag" type="button" data-tag="release" aria-pressed="false">Release</button>
          <button class="announcement-tag" type="button" data-tag="autoquantize" aria-pressed="false">AutoQuantize</button>
+         <button class="announcement-tag" type="button" data-tag="kv-cache" aria-pressed="false">KV cache</button>
          <button class="announcement-tag" type="button" data-tag="quantization" aria-pressed="false">Quantization</button>
          <button class="announcement-tag" type="button" data-tag="nvfp4" aria-pressed="false">NVFP4</button>
          <button class="announcement-tag" type="button" data-tag="qad" aria-pressed="false">QAD</button>
@@ -29,6 +30,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
+     <article class="announcement-card" data-date="2026-10-08" data-title="AutoQuant KV: Automatic Mixed-Precision KV Cache Quantization" data-summary="Learn how AutoQuant selects per-layer KV formats under a storage budget and combines with GEMM quantization, with Qwen3-8B as a case study." data-tags="autoquantize kv-cache quantization mixed-precision modelopt">
+       <div class="announcement-card-meta">October 8, 2026 &middot; Model Optimizer Team</div>
+       <h2><a href="announcements/autoquant-kv.html">AutoQuant KV: Automatic Mixed-Precision KV Cache Quantization</a></h2>
+       <p>Learn how AutoQuant selects per-layer KV formats under a storage budget and combines with GEMM quantization, with Qwen3-8B as a case study.</p>
+       <div class="announcement-card-tags"><span>autoquantize</span><span>kv-cache</span><span>quantization</span><span>mixed-precision</span><span>modelopt</span></div>
+     </article>
      <article class="announcement-card" data-date="2026-09-16" data-title="Scale Learning: Training NVFP4 Block Scales to Recover Accuracy" data-summary="How ModelOpt learns NVFP4 per-block weight scales with gradients instead of setting them with a calibration rule, and what that recovers." data-tags="scale-learning quantization nvfp4 qad modelopt">
        <div class="announcement-card-meta">September 16, 2026 &middot; Model Optimizer Team</div>
        <h2><a href="announcements/scale-learning.html">Scale Learning: Training NVFP4 Block Scales to Recover Accuracy</a></h2>
