@@ -20,8 +20,6 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 import torch
-import transformers
-from packaging.version import Version
 from torch import nn
 
 from .base_hooks import ForwardHook
@@ -363,10 +361,7 @@ class Qwen3VLRemoveExpertsIndependentHook(RemoveExpertsIndependentHook):
         Based on Qwen3VLMoeSparseMoe forward pass.
         """
         orig_shape = hidden_states.shape
-        # Use hidden_states.shape[-1] instead of self.moe.hidden_size for transformers v5 compatibility
-        hidden_size = (
-            self.moe.hidden_size if hasattr(self.moe, "hidden_size") else hidden_states.shape[-1]
-        )
+        hidden_size = hidden_states.shape[-1]
 
         # Flatten to (num_tokens, hidden_size) for processing
         hidden_states_flat = hidden_states.reshape(-1, hidden_size)
@@ -384,19 +379,8 @@ class Qwen3VLRemoveExpertsIndependentHook(RemoveExpertsIndependentHook):
         routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
         routing_weights = routing_weights.to(hidden_states_flat.dtype)
 
-        if Version(transformers.__version__) >= Version("5.0"):
-            # transformers 5.x: grouped_mm_experts_forward expects
-            # (hidden_states_flat 2D, top_k_index, top_k_weights)
-            routed_out = self.moe.experts(hidden_states_flat, router_indices, routing_weights)
-        else:
-            # transformers 4.x: loop-based experts expects
-            # (hidden_states_3d 3D, routing_weights_full, router_indices)
-            batch_size = orig_shape[0] if hidden_states.ndim == 3 else 1
-            hidden_states_3d = hidden_states_flat.reshape(batch_size, -1, hidden_size)
-            router_weights = torch.zeros(
-                router_logits.shape, dtype=routing_weights.dtype, device=router_logits.device
-            ).scatter_(1, router_indices, routing_weights)
-            routed_out = self.moe.experts(hidden_states_3d, router_weights, router_indices)
+        # Fused experts take (hidden_states_flat 2D, top_k_index, top_k_weights)
+        routed_out = self.moe.experts(hidden_states_flat, router_indices, routing_weights)
 
         # Return in same shape as input
         routed_out = routed_out.reshape(*orig_shape)

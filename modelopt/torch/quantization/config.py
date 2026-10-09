@@ -1232,15 +1232,23 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
     )
     block_size: int | None = ModeloptField(
         default=128,
+        gt=0,
         title="Block size for GPTQ weight update.",
-        description="""The block size for GPTQ weight update, which must be a multiple of the
-        group_size used in the quantization.""",
+        description="""The block size for GPTQ weight update, which must be positive and a multiple
+        of the group_size used in the quantization.""",
     )
     fused: bool = ModeloptField(
         default=False,
         title="Use fused Triton kernel for GPTQ.",
         description="""When True, use a fused Triton kernel that combines quantization and
         per-column error propagation into one launch per GPTQ block.""",
+    )
+    importance_weighted: bool = ModeloptField(
+        default=False,
+        title="Weight the codebook search by the Hessian diagonal.",
+        description="""When True, formats whose codebook search takes a per-input-column importance
+        (the GGML ``iq2_xxs``, ``iq2_xs`` and ``iq2_s`` formats) weight it by the square root of
+        the Hessian diagonal, llama.cpp's imatrix statistic. Other formats ignore it.""",
     )
 
 

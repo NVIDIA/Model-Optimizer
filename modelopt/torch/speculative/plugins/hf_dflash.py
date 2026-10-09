@@ -73,11 +73,10 @@ Draft model components:
 
 import logging
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
-import transformers
 from transformers import PreTrainedModel
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config as _Qwen3Config
 from transformers.trainer_pt_utils import LabelSmoother
@@ -103,7 +102,6 @@ logger = logging.getLogger(__name__)
 __all__ = ["HFDFlashModel"]
 
 
-_QWEN3_VL_MROPE_WORKAROUND_VERSION = "5.3.0"
 _MULTIMODAL_FORWARD_KWARGS = frozenset(
     {
         "pixel_values",
@@ -125,30 +123,6 @@ def _multimodal_forward_kwargs(model_kwargs: dict) -> dict:
         for name, value in model_kwargs.items()
         if name in _MULTIMODAL_FORWARD_KWARGS and value is not None
     }
-
-
-def _expand_qwen3_video_grid_thw(video_grid_thw: torch.Tensor) -> torch.Tensor:
-    """Return the per-frame video grid representation used by Qwen3-VL RoPE.
-
-    Qwen3-VL's video processor emits one ``[T, H, W]`` row per source video, but
-    its rendered prompt contains a separate visual-token group for every temporal
-    frame.  Transformers 5.3's ``get_rope_index`` consumes one grid row per
-    rendered group, while the vision encoder still requires the original one-row-
-    per-video representation.  This helper is therefore used *only* for mRoPE
-    position construction; callers must keep the original tensor for the model
-    forward.
-    """
-    if video_grid_thw.ndim != 2 or video_grid_thw.shape[-1] != 3:
-        raise ValueError(
-            "Qwen3-VL video_grid_thw must have shape [num_videos, 3], got "
-            f"{tuple(video_grid_thw.shape)}."
-        )
-    if torch.any(video_grid_thw[:, 0] <= 0):
-        raise ValueError("Qwen3-VL video_grid_thw temporal lengths must be positive.")
-
-    expanded_grid_thw = torch.repeat_interleave(video_grid_thw, video_grid_thw[:, 0], dim=0)
-    expanded_grid_thw[:, 0] = 1
-    return expanded_grid_thw
 
 
 def _dpace_position_weights(
@@ -253,125 +227,6 @@ class HFDFlashModel(DFlashModel):
             or getattr(self.config, "llm_config", None)
             or self.config
         )
-
-    def _qwen3_vl_position_ids(
-        self,
-        input_ids,
-        attention_mask,
-        position_ids,
-        past_key_values,
-        inputs_embeds,
-        model_kwargs,
-    ):
-        """Precompute Qwen3-VL mRoPE positions for Transformers 5.3.0 batches.
-
-        The video encoder consumes one grid row per source video, whereas mRoPE
-        consumes one row per rendered temporal-frame group.  Calling the
-        top-level model with the original video grid makes the two contracts
-        conflict.  Construct the mRoPE positions with a frame-expanded copy,
-        then pass the original grid to the vision encoder in ``forward``.
-
-        Transformers 5.4.0 performs this frame expansion in ``get_rope_index``
-        itself; only 5.3.0 needs the external workaround. See
-        https://github.com/huggingface/transformers/blob/v5.4.0/src/transformers/models/qwen3_vl/modeling_qwen3_vl.py
-
-        Prefer ``get_rope_index`` over ``compute_3d_position_ids``. The latter
-        writes ``rope_deltas`` into the base model even though DFlash training
-        never supplies a cache.  Keeping this calculation side-effect free is
-        important when the frozen target is reused for consecutive training
-        batches or validation.
-        """
-        model_type = str(getattr(self.config, "model_type", ""))
-        if (
-            position_ids is not None
-            or not model_type.startswith("qwen3_vl")
-            # Cached decoding uses the base model's rope_deltas path.  DFlash
-            # training has no cache and is the only path that needs the
-            # frame-expanded construction below.
-            or past_key_values is not None
-        ):
-            return position_ids
-
-        image_grid_thw = model_kwargs.get("image_grid_thw")
-        video_grid_thw = model_kwargs.get("video_grid_thw")
-        if not isinstance(image_grid_thw, torch.Tensor) and not isinstance(
-            video_grid_thw, torch.Tensor
-        ):
-            return position_ids
-
-        if transformers.__version__ != _QWEN3_VL_MROPE_WORKAROUND_VERSION:
-            if transformers.__version__.startswith("5.3."):
-                raise RuntimeError(
-                    "Qwen3-VL DFlash mRoPE supports Transformers 5.3.0 or >=5.4.0; "
-                    f"got {transformers.__version__}. A 5.3.x patch release may already "
-                    "expand video_grid_thw internally."
-                )
-            return position_ids
-
-        mm_token_type_ids = model_kwargs.get("mm_token_type_ids")
-        backbone = getattr(self, "model", None)
-        # Probed dynamically: which one exists depends on the Transformers version.
-        get_rope_index: Any = getattr(backbone, "get_rope_index", None)
-        compute_position_ids: Any = getattr(backbone, "compute_3d_position_ids", None)
-        if (
-            not isinstance(mm_token_type_ids, torch.Tensor)
-            or input_ids is None
-            or (not callable(get_rope_index) and not callable(compute_position_ids))
-        ):
-            raise ValueError(
-                "Qwen3-VL DFlash training requires input_ids, mm_token_type_ids, and "
-                "a Qwen3-VL model with get_rope_index or compute_3d_position_ids. "
-                "Use the Qwen3-VL AutoProcessor without dropping mm_token_type_ids."
-            )
-
-        if mm_token_type_ids.shape != input_ids.shape:
-            raise ValueError(
-                "Qwen3-VL mm_token_type_ids must have the same shape as input_ids, got "
-                f"{tuple(mm_token_type_ids.shape)} and {tuple(input_ids.shape)}."
-            )
-
-        rope_video_grid_thw = video_grid_thw
-        if isinstance(video_grid_thw, torch.Tensor) and video_grid_thw.numel() > 0:
-            video_token_mask = mm_token_type_ids == 2
-            if isinstance(attention_mask, torch.Tensor):
-                video_token_mask = video_token_mask & attention_mask.bool()
-            video_group_starts = video_token_mask.clone()
-            video_group_starts[:, 1:] &= ~video_token_mask[:, :-1]
-            expected_video_groups = int(video_grid_thw[:, 0].sum())
-            actual_video_groups = int(video_group_starts.sum())
-            if actual_video_groups != expected_video_groups:
-                raise ValueError(
-                    "Qwen3-VL video frame groups do not match video_grid_thw: "
-                    f"expected {expected_video_groups}, found {actual_video_groups}."
-                )
-            rope_video_grid_thw = _expand_qwen3_video_grid_thw(video_grid_thw)
-
-        rope_kwargs = {
-            "input_ids": input_ids,
-            "image_grid_thw": image_grid_thw,
-            "video_grid_thw": rope_video_grid_thw,
-            "attention_mask": attention_mask,
-            "mm_token_type_ids": mm_token_type_ids,
-        }
-        if callable(get_rope_index):
-            position_ids, _ = get_rope_index(**rope_kwargs)
-        else:
-            position_ids = compute_position_ids(
-                **rope_kwargs,
-                inputs_embeds=inputs_embeds,
-                past_key_values=past_key_values,
-            )
-
-        expected_shape = (3, *input_ids.shape)
-        valid_position_ids = isinstance(position_ids, torch.Tensor) and (
-            tuple(position_ids.shape) == expected_shape
-        )
-        if not valid_position_ids:
-            raise RuntimeError(
-                "Qwen3-VL produced invalid mRoPE position ids: expected shape "
-                f"{expected_shape}, got {getattr(position_ids, 'shape', None)}."
-            )
-        return position_ids
 
     def _find_base_model_parts(self):
         """Locate base model submodules (backbone, embeddings, lm_head) by probing known paths.
@@ -992,16 +847,6 @@ class HFDFlashModel(DFlashModel):
         - Label alignment: position k predicts token at anchor+k
         - Optional loss decay weighting
         """
-        if self.training:
-            position_ids = self._qwen3_vl_position_ids(
-                input_ids,
-                attention_mask,
-                position_ids,
-                past_key_values,
-                inputs_embeds,
-                kwargs,
-            )
-
         if not self.training:
             if self.dflash_offline:
                 raise RuntimeError(

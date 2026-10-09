@@ -226,3 +226,46 @@ def test_cuda_decoder_matches_llama_cpp_on_captured_blocks(name):
 def test_every_registered_format_is_covered():
     """A format registered for dispatch must also be listed here, or it escapes this contract."""
     assert sorted(IQ_FORMAT_REGISTRY) == sorted(FORMATS)
+
+
+# The formats whose packer takes a per-input-column importance.
+WEIGHTED = sorted(name for name, fmt in IQ_FORMAT_REGISTRY.items() if fmt.weighted)
+
+
+@pytest.mark.parametrize("name", WEIGHTED)
+def test_cuda_weighted_pack_matches_pytorch_encoder(monkeypatch, name):
+    """The weighted search agrees with the reference as closely as the unweighted one does."""
+    module, _, _, _ = FORMATS[name]
+    quantize = getattr(module, f"quantize_{name}")
+    dequantize = getattr(module, f"dequantize_{name}")
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    weight = torch.randn((128, 2048), generator=generator, device="cuda", dtype=torch.bfloat16)
+    importance = torch.randn(2048, generator=generator, device="cuda").mul(1.5).exp()
+    blocks = weight.numel() // 256
+
+    packed, shape = quantize(weight, importance=importance)
+    assert torch.equal(
+        quantize(weight, importance=torch.ones_like(importance))[0], quantize(weight)[0]
+    )
+    monkeypatch.setattr(module, "get_cuda_ext_ggml", lambda: None)
+    reference, _ = quantize(weight, importance=importance)
+
+    def weighted_error(payload):
+        decoded = dequantize(payload, shape, dtype=torch.float32)
+        return ((decoded - weight.float()) ** 2 * importance).sum()
+
+    differing = int((packed != reference).any(dim=-1).sum())
+    assert differing <= blocks // 1000, f"{differing} of {blocks} blocks differ"
+    assert torch.isclose(weighted_error(packed), weighted_error(reference), rtol=1e-5)
+
+
+@pytest.mark.parametrize("name", WEIGHTED)
+def test_cuda_packer_rejects_importance_that_does_not_tile_the_blocks(name):
+    module, packer, _, _ = FORMATS[name]
+    weight = torch.randn((4, 512), device="cuda")
+    blocks = weight.reshape(-1, 256)
+    scales = getattr(module, f"_predict_{name}_scales")(blocks)
+    grid = getattr(module, f"{name}_grid")("cuda")
+
+    with pytest.raises(RuntimeError, match="importance must be float32"):
+        getattr(_extension(), packer)(blocks, grid, scales, torch.ones(3, 256, device="cuda"))

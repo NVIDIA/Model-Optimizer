@@ -129,8 +129,6 @@ def test_post_quantize_preview_keeps_whole_answer(
         False,
         None,
         None,
-        None,
-        None,
     )
 
     assert "example outputs after ptq: ['7 8']" in capsys.readouterr().out

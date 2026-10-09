@@ -36,7 +36,8 @@ from packaging.version import InvalidVersion, Version
 
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.operators import QDQConvTranspose, QDQCustomOp, QDQNormalization
-from modelopt.onnx.quantization.ort_patching import _configure_session_providers, patch_ort_modules
+from modelopt.onnx.quantization.ort_patches import patch_ort_modules
+from modelopt.onnx.quantization.ort_session import _configure_session_providers
 
 
 def _check_lib_in_ld_library_path(ld_library_path, lib_pattern):

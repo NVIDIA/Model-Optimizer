@@ -42,7 +42,7 @@ import torch
 from ..extensions import get_cuda_ext_ggml
 from .common import (
     GGML_BLOCK_SIZE,
-    IQFormat,
+    GGMLFormat,
     narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
@@ -238,7 +238,7 @@ def dequantize_iq1_m(
     return decoded.reshape(shape)
 
 
-IQ1_M_FORMAT = IQFormat(
+IQ1_M_FORMAT = GGMLFormat(
     name="iq1_m",
     block_size=IQ1_M_BLOCK_SIZE,
     block_bytes=IQ1_M_BLOCK_BYTES,

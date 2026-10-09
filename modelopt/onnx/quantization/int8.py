@@ -35,7 +35,7 @@ from modelopt.onnx.quantization.graph_selection import (
     find_nodes_from_matmul_to_exclude,
     find_nodes_to_exclude,
 )
-from modelopt.onnx.quantization.ort_patching import _quantize_static as quantize_static
+from modelopt.onnx.quantization.ort_quantization import _quantize_static as quantize_static
 from modelopt.onnx.quantization.ort_utils import configure_ort
 from modelopt.onnx.quantization.partitioning import (
     find_fusible_partitions,

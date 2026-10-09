@@ -37,9 +37,8 @@ import sys
 import pytest
 
 # Resolve the example dir (examples/diffusers/fastgen) from this test's location
-# (tests/examples/diffusers/fastgen/) and put it on sys.path so ``fastgen_data`` /
-# ``fastgen_checkpoint`` / ``preprocess`` import as top-level modules, exactly as
-# dmd2_finetune.py / preprocess_qwen_image.py do.
+# (tests/examples/diffusers/fastgen/) and put it on sys.path so ``fastgen_data`` / ``dmd2`` /
+# ``preprocess`` imports resolve exactly as ``dmd2/finetune.py`` / ``preprocess_qwen_image.py`` do.
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
 _FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
 if str(_FASTGEN_DIR) not in sys.path:
@@ -51,7 +50,7 @@ if str(_FASTGEN_DIR) not in sys.path:
 # relative to this example dir) or ``None`` when the patch is intentionally excluded (unused on
 # the DMD2 path, or not needed for real training).
 STAGED_AUTOMODEL_DISPOSITION = {
-    "components/checkpoint/checkpointing.py": "fastgen_checkpoint.py",  # subclass override
+    "components/checkpoint/checkpointing.py": "dmd2/checkpoint.py",  # subclass override
     "components/datasets/diffusion/__init__.py": "fastgen_data/__init__.py",
     "components/datasets/diffusion/collate_fns.py": "fastgen_data/collate_fns.py",  # thin wrapper
     "components/datasets/diffusion/mock_dataloader.py": None,  # excluded: mock smoke (not real training)
@@ -74,8 +73,8 @@ def test_all_configs_target_vendored_builders():
     Enumerates all YAMLs so a newly added config cannot silently reintroduce the upstream
     dependence (which would break on stock nemo_automodel).
     """
-    configs = sorted((_FASTGEN_DIR / "configs").glob("*.yaml"))
-    assert configs, "no configs found under configs/"
+    configs = sorted(_FASTGEN_DIR.glob("*/configs/*.yaml"))
+    assert configs, "no algorithm configs found"
     for cfg in configs:
         text = cfg.read_text()
         assert "nemo_automodel.components.datasets.diffusion.build_" not in text, (
@@ -149,8 +148,8 @@ def test_formerly_vendored_files_use_standard_nvidia_header():
 # --------------------------------------------------------------------------------------------- #
 
 
-def test_data_builders_importable_and_accept_negative_prompt_path():
-    """The real-data builder exists and accepts ``negative_prompt_embedding_path``."""
+def test_data_builders_importable_and_accept_shared_cache_options():
+    """The real-data builder exposes the shared negative-embedding seam."""
     pytest.importorskip("nemo_automodel")
     pytest.importorskip("torch")
 
@@ -172,7 +171,7 @@ def test_collate_emits_contract_keys_and_broadcasts_negative_prompt():
 
     seq, dim, c, h, w = 5, 16, 4, 8, 8
     # A per-item sample matching what TextToImageDataset emits — collate_fn_production requires
-    # crop_resolution / original_resolution / crop_offset / prompt / image_path / bucket_id /
+    # crop_resolution / original_resolution / crop_offset / prompt / sample_id / bucket_id /
     # aspect_ratio in addition to the latent + text embeds.
     sample = {
         "latent": torch.randn(c, h, w),
@@ -180,7 +179,7 @@ def test_collate_emits_contract_keys_and_broadcasts_negative_prompt():
         "original_resolution": torch.tensor([h, w]),
         "crop_offset": torch.tensor([0, 0]),
         "prompt": "a test prompt",
-        "image_path": "img.png",
+        "image_path": "/source/image.png",
         "bucket_id": 0,
         "aspect_ratio": 1.0,
         "prompt_embeds": torch.randn(seq, dim),
@@ -199,10 +198,40 @@ def test_collate_emits_contract_keys_and_broadcasts_negative_prompt():
     )  # broadcast [seq,dim]->[B,seq,dim]
 
 
+def test_collate_zero_pads_variable_length_qwen_embeddings_and_masks():
+    pytest.importorskip("nemo_automodel")
+    torch = pytest.importorskip("torch")
+
+    from fastgen_data import collate_fn_text_to_image
+
+    def sample(sample_id, sequence_length):
+        return {
+            "latent": torch.full((4, 8, 8), float(sample_id)),
+            "crop_resolution": torch.tensor([8, 8]),
+            "original_resolution": torch.tensor([8, 8]),
+            "crop_offset": torch.tensor([0, 0]),
+            "prompt": f"prompt-{sample_id}",
+            "image_path": f"/source/{sample_id}.png",
+            "bucket_id": 0,
+            "aspect_ratio": 1.0,
+            "prompt_embeds": torch.full((sequence_length, 3), float(sample_id)),
+            "prompt_embeds_mask": torch.ones(sequence_length, dtype=torch.long),
+        }
+
+    result = collate_fn_text_to_image([sample(1, 5), sample(2, 3)])
+
+    assert result["text_embeddings"].shape == (2, 5, 3)
+    assert result["text_embeddings_mask"].tolist() == [
+        [1, 1, 1, 1, 1],
+        [1, 1, 1, 0, 0],
+    ]
+    torch.testing.assert_close(result["text_embeddings"][1, 3:], torch.zeros(2, 3))
+
+
 def test_partial_load_checkpointer_overrides_only_load_optimizer():
     """The subclass relaxes only optimizer load; model-state load stays strict (inherited)."""
     pytest.importorskip("nemo_automodel")
-    from fastgen_checkpoint import PartialLoadCheckpointer, make_optimizer_partial_load_tolerant
+    from dmd2.checkpoint import PartialLoadCheckpointer, make_optimizer_partial_load_tolerant
     from nemo_automodel.components.checkpoint.checkpointing import Checkpointer
 
     assert issubclass(PartialLoadCheckpointer, Checkpointer)
@@ -220,8 +249,8 @@ def test_partial_load_checkpointer_overrides_only_load_optimizer():
 
 def test_recipe_injects_partial_load_checkpointer_in_load_checkpoint():
     """The recipe upgrades self.checkpointer in load_checkpoint (before the parent restore)."""
-    src = (_FASTGEN_DIR / "dmd2_recipe.py").read_text()
-    assert "from fastgen_checkpoint import make_optimizer_partial_load_tolerant" in src
+    src = (_FASTGEN_DIR / "dmd2" / "recipe.py").read_text()
+    assert "from .checkpoint import make_optimizer_partial_load_tolerant" in src
     assert "make_optimizer_partial_load_tolerant(self.checkpointer)" in src
 
 

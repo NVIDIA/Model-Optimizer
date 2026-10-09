@@ -105,6 +105,20 @@ inline void check_scaled_pack_inputs(const char *format, const at::Tensor &input
   TORCH_CHECK(input.get_device() == scales.get_device(), "input and scales must share a device");
 }
 
+// Validates the optional per-column importance of a weighted encode: float32 [blocks per row, 256],
+// on the input's device, finite and non-negative. Flattened block i is weighted by row i % rows.
+inline void check_importance(const char *format, const at::Tensor &input,
+                             const at::Tensor &importance) {
+  TORCH_CHECK(importance.is_cuda() && importance.get_device() == input.get_device(), format,
+              " importance must be on the input's CUDA device");
+  TORCH_CHECK(importance.scalar_type() == at::kFloat && importance.dim() == 2 &&
+                  importance.size(0) > 0 && importance.size(1) == kBlockSize &&
+                  (input.numel() / kBlockSize) % importance.size(0) == 0,
+              format, " importance must be float32 [blocks per row, 256]");
+  // The Python encoders check the values are finite and non-negative; repeating it here would
+  // add a host sync to every encode.
+}
+
 #ifdef __CUDACC__
 
 // Reads one input element as float32. Non-finite elements are treated as zero, and finiteness is
