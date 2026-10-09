@@ -38,11 +38,6 @@ MIXTRAL_PATH = _select_path(
     local_id="TinyLlama-1.1B-Chat-v1.0-x2-MoE",
 )
 
-WHISPER_PATH = _select_path(
-    remote_id="openai/whisper-tiny",
-    local_id="whisper-tiny",
-)
-
 TINY_LLAMA_PATH = _select_path(
     remote_id="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     local_id="TinyLlama-1.1B-Chat-v1.0",

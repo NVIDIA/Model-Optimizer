@@ -46,12 +46,8 @@ TORCH_VERSIONS = {
 # Extra install pins applied per transformers matrix entry (installed after the base
 # ``.[all,dev-test]`` install to constrain that env).
 TRANSFORMERS_VERSIONS = {
-    "tf_latest": ("transformers~=5.14.0",),
-    # transformers 4.57 caps ``huggingface_hub<1.0``, but ``diffusers>=0.40`` requires
-    # ``huggingface_hub>=1.23``. Bound diffusers to a hub<1.0-compatible release so this env
-    # stays internally consistent; otherwise diffusers' pipeline import fails and diffusers
-    # models silently misroute to the LLM path on export.
-    "tf_min": ("transformers~=4.57.0", "diffusers<0.40"),
+    "tf_latest": ("transformers~=5.18.0",),
+    "tf_min": ("transformers~=5.5.0",),
 }
 
 
@@ -117,7 +113,7 @@ def gpu(session):
         "--no-build-isolation",
         "git+https://github.com/Dao-AILab/fast-hadamard-transform.git",
     )
-    session.run("python", "-m", "pip", "install", "-e", ".[all,dev-test]")
+    session.run("python", "-m", "pip", "install", "-e", ".[all,dev-test,dev-fla]")
     session.run("python", "-m", "pip", "uninstall", "-y", "cupy-cuda12x")
     session.run("python", "-m", "pip", "install", "cupy-cuda13x")
     session.run(
@@ -140,7 +136,7 @@ def gpu_megatron(session):
     session.run("pip", "uninstall", "-y", "tensorrt_llm")
     # Pre-installed nvidia-modelopt shadows the editable install
     session.run("pip", "uninstall", "-y", "nvidia-modelopt")
-    session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test]")
+    session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test,dev-fla]")
     session.run("python", "-m", "pytest", "tests/gpu_megatron", *_cov_args())
 
 

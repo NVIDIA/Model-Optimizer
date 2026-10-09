@@ -21,7 +21,7 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="qwen3_moe",
-        min_transformers_version="4.57",
+        min_transformers_version="5.5",
         # modelopt policy, not a model fact: this model is validated for grouped export.
         export_spec=ExportSpec(grouped_expert_export=True),
         moe_spec=MoESpec(
@@ -50,6 +50,22 @@ star-import. A value shared between two model types is private and imported expl
 (`gemma4_text` reuses `gemma4`'s `_GEMMA4_MOE_SPEC`); sub-model types of one family are
 an intra-family detail, not a package API.
 
+## PTQ modeling
+
+Quantized-module wrappers and registrations that only one model needs (e.g. Llama4's fused
+BMM experts) live in `<model_type>/modeling_ptq.py`; generic
+ones (fused/sequential MoE auto-detection, attention, `FP8Linear`) stay in
+`modelopt/torch/quantization/plugins/huggingface.py`. The HF plugin imports every
+`modeling_ptq` from an explicit list at its end, so add the new model type there. Leave the
+model's `__init__.py` importing only `specs`: `modeling_ptq` pulls in quantization and
+transformers, which `import modelopt.torch.models` must not.
+
+A `modeling_ptq.py` registers on import — static classes via `QuantModuleRegistry.register`
+behind a `try`/`except ImportError`, remote-code classes via a callback added to
+`CUSTOM_MODEL_PLUGINS` — and exports nothing (`__all__ = []`). Every package still has
+a `specs.py`, even when its spec only records `model_type` and where the modeling code comes
+from.
+
 ## Sections
 
 A `ModelSpec` holds one attribute per section, each `None` unless the model fills it:
@@ -71,7 +87,7 @@ come from, and they must agree:
 | `min_transformers_version` | Earliest `transformers` release whose definitions match this spec; `None` for a `remote_code` model |
 
 Clamp `min_transformers_version` at the repo's minimum supported transformers (`tf_min`
-in `noxfile.py`, currently `4.57`) — a model older than the floor records the floor,
+in `noxfile.py`, currently `5.5`) — a model older than the floor records the floor,
 since nothing older is installed or tested. A model added later records its own release.
 The pair is what lets `test_specs_vs_transformers.py` assert rather than skip: it can
 tell a model that is legitimately absent on an older transformers from a spec that no
@@ -82,3 +98,11 @@ longer matches reality.
 See [`specs.py`](specs.py) — each field is documented on its declaration, and those
 docstrings are what the API reference renders. Specs hold data and trivial accessors
 only; subsystem logic stays in the subsystem.
+
+## Model-specific behavior
+
+Keep architecture-specific loading and calibration helpers alongside the model's
+`specs.py` (for example, `nemotron_h/mtp.py`). The `hf.py` dispatcher loads these
+helpers on demand; examples call its loading context and calibration hook.
+Do not import runtime helpers from a model package's `__init__.py`: registering
+specs must remain independent of optional Transformers and calibration imports.

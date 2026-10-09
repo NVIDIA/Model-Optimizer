@@ -337,7 +337,7 @@ def main():
         "per_device_eval_batch_size": 1,
         "gradient_accumulation_steps": args.grad_accum,
         "learning_rate": args.lr,
-        "warmup_ratio": args.warmup_ratio,
+        "warmup_steps": args.warmup_ratio,  # a warmup_steps below 1 is a ratio
         "max_steps": args.max_steps,
         "logging_steps": args.logging_steps,
         "save_steps": args.save_steps,
