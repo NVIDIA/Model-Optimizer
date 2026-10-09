@@ -50,6 +50,8 @@ class _QuantMoELinear(QuantModule):
     """
 
     def _setup(self):
+        # Deferred: accelerate is a separate optional dependency, and the HF plugin (which
+        # imports this module) must stay importable without it.
         from accelerate import init_empty_weights
 
         # Accelerate's CPU/disk offload (`device_map="auto"`, `--offload_folder`) leaves
