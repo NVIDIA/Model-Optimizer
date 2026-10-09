@@ -45,7 +45,7 @@ corresponding environment variable when omitted:
 | `--modelopt-kv-quant-cfg` | `KV_QUANT_CFG` | KV-cache quantization config (planned deprecation) |
 | `--modelopt-quant-file-path` | `QUANT_FILE_PATH` | Path to `quantizer_state.pth` in a Megatron (MCore) vLLM fakequant export; requires a quantization config or recipe |
 | `--modelopt-state-path` | `MODELOPT_STATE_PATH` | Path to `vllm_fq_modelopt_state.pth` in an HF vLLM fakequant export (full ModelOpt state) |
-| `--modelopt-recipe-path` | `RECIPE_PATH` | ModelOpt PTQ recipe YAML |
+| `--modelopt-recipe-path` | `RECIPE_PATH` | ModelOpt PTQ recipe YAML or exported `quant_recipe.yaml` |
 | `--modelopt-quant-dataset` | `QUANT_DATASET` | Calibration dataset |
 | `--modelopt-quant-calib-size` | `QUANT_CALIB_SIZE` | Calibration sample count |
 | `--modelopt-calib-batch-size` | `CALIB_BATCH_SIZE` | Calibration batch size |
@@ -243,7 +243,7 @@ python3 examples/hf_ptq/hf_ptq.py \
 
   Note: `--pyt_ckpt_path` can point to either an HF checkpoint or a ModelOpt-saved checkpoint (e.g., a QAT/QAD checkpoint produced by `examples/llm_qat/train.py`). If the input checkpoint is already quantized, the script will **skip re-quantization** and only export artifacts for vLLM fakequant reload.
 
-- For **MCore** models, export the model with flag `--export-vllm-fq` as described in [Megatron-LM README](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-nvfp4-quantization-qauntization-aware-training-and-model-export). This generates `quantizer_state.pth`, which contains quantizer tensors for vLLM reload via `QUANT_FILE_PATH`.
+- For **MCore** models, export the model with flag `--export-vllm-fq` as described in [Megatron-LM README](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-nvfp4-quantization-qauntization-aware-training-and-model-export). This generates `quant_recipe.yaml` and `quantizer_state.pth` for vLLM fakequant reload.
 
 Step 2: use the exported artifacts when serving:
 
@@ -256,14 +256,22 @@ python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
   --host 0.0.0.0 --port 8000
 ```
 
-- **MCore export**: pass the exported `quantizer_state.pth` via `--modelopt-quant-file-path` and set `--modelopt-quant-cfg` to match the MCore quantization recipe
+- **MCore export**: pass the exported recipe and quantizer tensors directly. The loader maps HF quantizer names to vLLM and keeps folded weight quantizers disabled. Custom quantization backends must be registered in the serving environment; the recipe preserves their names and arguments.
 
 ```bash
 # MCore
 python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
-  -tp 8 --modelopt-quant-cfg <quant_cfg> \
-  --modelopt-quant-file-path <quantizer_state.pth> --host 0.0.0.0 --port 8000
+  -tp 8 --modelopt-recipe-path <model_path>/quant_recipe.yaml \
+  --modelopt-quant-file-path <model_path>/quantizer_state.pth \
+  --host 0.0.0.0 --port 8000
 ```
+
+Megatron-LM fakequant export rejects MTP quantization and effective activation pre-quantization
+scales, including SmoothQuant/AWQ smoothing scales. Weight-quantizer transforms are folded into
+backbone weights; MTP weights remain unquantized.
+
+For Nemotron-H with BF16 MTP, add
+`--speculative-config '{"method":"mtp","num_speculative_tokens":1}'` and keep MTP quantizers disabled.
 
 ## Fake-quantize the sparse-attention indexer query and K cache
 
@@ -465,6 +473,6 @@ Unsupported features are sliding window, ALiBi, softcap, sinks, FP8 KV cache, cr
 
 ## Known Problems
 
-1. **MCore reload does not use `MODELOPT_STATE_PATH`**; use `QUANT_FILE_PATH` and make sure `QUANT_CFG` matches the quantization recipe used for the original MCore model (otherwise quantizer keys/config won’t align).
+1. **MCore reload does not use `MODELOPT_STATE_PATH`**; pass `quant_recipe.yaml` via `RECIPE_PATH` and `quantizer_state.pth` via `QUANT_FILE_PATH`.
 2. KV cache quantization export and reload is not supported in MCore yet.
 3. **Keep vLLM's torch.compile cache off** (`VLLM_DISABLE_COMPILE_CACHE=1`, which the shim sets when fakequant is requested). The cache is not keyed on the fake quant, so a graph compiled earlier for the same model without it is reused and the fake quant is silently skipped. If you run `FakeQuantWorker` without this launcher, set it yourself or pass `--enforce-eager`.

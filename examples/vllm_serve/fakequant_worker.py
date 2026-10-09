@@ -29,6 +29,7 @@ from vllm_reload_utils import (
     load_state_dict_from_path,
     restore_from_modelopt_state_vllm,
     shard_pre_quant_scale_for_tp,
+    validate_quantizer_recipe_for_model,
 )
 
 import modelopt.torch.quantization as mtq
@@ -110,7 +111,8 @@ def _fakequant_run_prolog_worker(self, mlflow_tracker: FakeQuantMlflowTracker) -
             shard_pre_quant_scale_for_tp(model)
 
     else:
-        if quant_config["quant_file_path"]:
+        quantizer_file_path = quant_config["quant_file_path"]
+        if quantizer_file_path:
             print("Will load quant, so only do a single sample calibration")
             quant_config["calib_size"] = 1
 
@@ -132,11 +134,12 @@ def _fakequant_run_prolog_worker(self, mlflow_tracker: FakeQuantMlflowTracker) -
             print("Quantizing model...")
             mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
 
-        quantizer_file_path = quant_config["quant_file_path"]
+        if quant_config["recipe_path"]:
+            validate_quantizer_recipe_for_model(model, quant_cfg)
+
         if quantizer_file_path:
             self.model_runner._dummy_run(1)
-            current_state_dict = load_state_dict_from_path(self, quantizer_file_path, model)
-            model.load_state_dict(current_state_dict)
+            model.load_state_dict(load_state_dict_from_path(quantizer_file_path, model))
 
             # Only barrier if distributed is actually initialized (avoids deadlocks).
             if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:

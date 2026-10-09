@@ -32,6 +32,7 @@ from modelopt.torch.opt.conversion import (
     ModeloptStateManager,
     _check_init_modellike,
 )
+from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import (
     convert_to_quantized_model,
     restore_quantizer_state,
@@ -39,6 +40,7 @@ from modelopt.torch.quantization.conversion import (
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.vllm import _has_routed_experts_cls
 from modelopt.torch.quantization.utils import is_quantized
+from modelopt.torch.utils import get_unwrapped_name
 
 # vLLM >= 0.24 moved the fused expert weights (and their quantizers) onto a ``routed_experts``
 # submodule of the MoE layer, so merged expert keys need that extra hop. Follow the plugin's
@@ -105,6 +107,21 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
         suffix = qkv_match.group(4) or ""
         group_key = qkv_match.group(1) + "qkv_proj." + qkv_match.group(3) + suffix
         return ("group", group_key, value)
+
+    # Packed modules use dots; HF fused quantizer attributes use underscores.
+    fused_expert_match = re.search(
+        r"(.*\.experts)\.(gate_up|up|down)_proj[._]([^.]+_quantizer)(\..+)?$", key
+    )
+    if fused_expert_match:
+        projection = "w2" if fused_expert_match.group(2) == "down" else "w13"
+        new_key = (
+            fused_expert_match.group(1)
+            + _EXPERTS_INFIX
+            + f".{projection}_"
+            + fused_expert_match.group(3)
+            + (fused_expert_match.group(4) or "")
+        )
+        return ("group", new_key, value)
 
     # Expert gate/up (per-expert) → w13 merge
     expert_gate_up_match = re.search(
@@ -331,6 +348,62 @@ def convert_modelopt_state_to_vllm(
         modelopt_state_dict[idx] = (current_mode[0], current_mode[1])
     modelopt_state["modelopt_state_dict"] = modelopt_state_dict
     return modelopt_state
+
+
+def quantizer_recipe_to_quant_cfg(recipe: dict[str, Any], model: Any) -> dict[str, Any]:
+    """Map an exported quantizer recipe to vLLM quantization configuration."""
+    if any(
+        not isinstance(state, dict) or not isinstance(state.get("_disabled"), bool)
+        for state in recipe.values()
+    ):
+        raise ValueError("Exported quantizer recipe entries must include a boolean _disabled")
+    skipped = [
+        name
+        for name, state in recipe.items()
+        if not state["_disabled"] and _convert_key_for_vllm(name, state)[0] == "skip"
+    ]
+    if skipped:
+        raise ValueError(f"Active exported quantizers are unsupported by vLLM reload: {skipped}")
+    map_fun = model.hf_to_vllm_mapper.apply_dict if hasattr(model, "hf_to_vllm_mapper") else None
+    mapped_recipe = convert_dict_to_vllm(recipe, max_or_concat=False, map_fun=map_fun)
+
+    # Uncaptured quantizers stay disabled; exported weights are already folded.
+    entries = [{"quantizer_name": "*", "enable": False}]
+    for name, state in mapped_recipe.items():
+        entry = {"quantizer_name": name, "enable": not state["_disabled"]}
+        cfg = {
+            key[1:]: value
+            for key, value in state.items()
+            if key in ("_num_bits", "_axis", "_block_sizes", "_backend", "_backend_extra_args")
+        }
+        if cfg:
+            entry["cfg"] = cfg
+        entries.append(entry)
+    return {"quant_cfg": entries, "algorithm": "max"}
+
+
+def validate_quantizer_recipe_for_model(
+    model: torch.nn.Module, quant_cfg: dict[str, Any] | QuantizeConfig
+) -> None:
+    """Require active, explicit recipe names to identify enabled quantizers on some rank."""
+    # Standard PTQ recipes retain ModelOpt's ordered wildcard rules; exported recipes are flat.
+    if isinstance(quant_cfg, QuantizeConfig):
+        return
+    expected = {entry["quantizer_name"] for entry in quant_cfg["quant_cfg"] if entry["enable"]}
+    local_names = {
+        get_unwrapped_name(name, model)
+        for name, module in model.named_modules()
+        if isinstance(module, (TensorQuantizer, SequentialQuantizer)) and module.is_enabled
+    }
+    per_rank_names = [local_names]
+    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+        per_rank_names = [set() for _ in range(torch.distributed.get_world_size())]
+        torch.distributed.all_gather_object(per_rank_names, local_names)
+    missing = expected - set().union(*per_rank_names)
+    if missing:
+        raise ValueError(
+            f"Active recipe quantizers have no enabled match on any serving rank: {sorted(missing)}"
+        )
 
 
 def filter_modelopt_state_quantizer_state_for_model(
@@ -568,6 +641,9 @@ def process_state_dict_for_tp(saved_qstate_dict, current_state_dict):
         if key in current_state_dict:
             expected = current_state_dict[key]
             if hasattr(value, "shape") and hasattr(expected, "shape"):
+                # Broadcast scalar ranges may be saved with singleton dimensions.
+                if key.endswith("._amax") and value.numel() == expected.numel() == 1:
+                    value = value.reshape(expected.shape)
                 value = _narrow_tensor_to_tp_local_shard(
                     value,
                     expected.shape,
@@ -580,15 +656,30 @@ def process_state_dict_for_tp(saved_qstate_dict, current_state_dict):
     return result
 
 
-def load_state_dict_from_path(
-    fakequant_runner: Any, quantizer_file_path: str, model: Any
-) -> dict[str, Any]:
+def _validate_quantizer_ranges(model, saved_quant_dict, current_state_dict) -> None:
+    missing = {
+        get_unwrapped_name(name, model) + "._amax"
+        for name, module in model.named_modules()
+        if isinstance(module, TensorQuantizer)
+        and module.is_enabled
+        and module._if_quant
+        and not module.is_mx_format
+        and not module._dynamic
+        and not is_weight_quantizer_state_key(name)
+    } - (saved_quant_dict.keys() & current_state_dict.keys())
+    missing = _union_quantizer_keys_across_ranks(sorted(missing))
+    if missing:
+        raise ValueError(
+            f"Active quantizer ranges are missing or cannot be loaded: {sorted(missing)}"
+        )
+
+
+def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str, Any]:
+    """Overlay mapped, TP-sharded quantizer tensors on the model's state dict."""
     # Load on CPU to avoid failures when the checkpoint was saved from a different GPU mapping.
     saved_quant_dict = torch.load(quantizer_file_path, weights_only=True, map_location="cpu")
-    if hasattr(fakequant_runner.model_runner.model, "hf_to_vllm_mapper"):
-        saved_quant_dict = fakequant_runner.model_runner.model.hf_to_vllm_mapper.apply_dict(
-            saved_quant_dict
-        )
+    if hasattr(model, "hf_to_vllm_mapper"):
+        saved_quant_dict = model.hf_to_vllm_mapper.apply_dict(saved_quant_dict)
         saved_quant_dict = {
             key.replace("quantizer_", "quantizer._"): value
             for key, value in saved_quant_dict.items()
@@ -597,35 +688,19 @@ def load_state_dict_from_path(
     saved_quant_dict = convert_dict_to_vllm(saved_quant_dict)
 
     current_state_dict = model.state_dict()
+    _validate_quantizer_ranges(model, saved_quant_dict, current_state_dict)
     checkpoint_quant_keys = [key for key in saved_quant_dict if "quantizer" in key]
-    model_quant_keys = [key for key in current_state_dict if "quantizer" in key]
-    ckpt_key_set = set(checkpoint_quant_keys)
+    local_checkpoint_quantizers = {
+        key.rsplit(".", 1)[0] for key in checkpoint_quant_keys if key in current_state_dict
+    }
     global_ckpt_key_set = _union_quantizer_keys_across_ranks(checkpoint_quant_keys)
-    # For weight quantizers absent from the checkpoint the weights were already fake-quantized
-    # at export time (amax folded into weights). Disable those quantizers so that fold_weight
-    # is a no-op for them. Non-weight keys missing on this rank but present on another rank's
-    # shard are omitted from global_missing (all_gather union of key strings).
-    missing_wq_module_paths: set[str] = set()
-    global_missing_non_wq: list[str] = []
-    for key in model_quant_keys:
-        if key in ckpt_key_set:
-            continue
-        if "weight_quantizer" in key:
-            # Per-rank shard: only disable using this rank's checkpoint contents.
-            parts = key.split(".")
-            weight_quantizer_index = next(
-                (i for i, p in enumerate(parts) if p.endswith("weight_quantizer")),
-                None,
-            )
-            if weight_quantizer_index is not None:
-                missing_wq_module_paths.add(".".join(parts[: weight_quantizer_index + 1]))
-            else:
-                raise ValueError(
-                    f"Missing checkpoint key {key!r} looks like a weight quantizer, but no path "
-                    "component ends with 'weight_quantizer'; cannot map to a module to disable."
-                )
-        elif key not in global_ckpt_key_set:
-            global_missing_non_wq.append(key)
+    # Warn for activation state absent on every rank. Weight quantizer state is
+    # local to each shard: its absence means the exported weight is already folded.
+    global_missing_non_wq = [
+        key
+        for key in current_state_dict
+        if "quantizer" in key and "weight_quantizer" not in key and key not in global_ckpt_key_set
+    ]
 
     if global_missing_non_wq:
         keys = sorted(global_missing_non_wq)
@@ -637,16 +712,21 @@ def load_state_dict_from_path(
         )
 
     for name, module in model.named_modules():
-        if (
-            name in missing_wq_module_paths
-            and isinstance(module, TensorQuantizer)
-            and hasattr(module, "disable")
+        quantizer_name = get_unwrapped_name(name, model)
+        if not isinstance(module, TensorQuantizer) or not is_weight_quantizer_state_key(
+            quantizer_name
         ):
+            continue
+        if quantizer_name not in local_checkpoint_quantizers:
             module.disable()
 
     # Update quant values
     saved_quant_dict = process_state_dict_for_tp(saved_quant_dict, current_state_dict)
     for key, value in saved_quant_dict.items():
         if key in current_state_dict:
-            current_state_dict[key] = value.to(current_state_dict[key].device)
+            value = value.to(current_state_dict[key].device)
+            if key.endswith("._amax"):
+                # Calibration buffers may be BF16; keep the saved range's precision on reload.
+                model.get_submodule(key.removesuffix("._amax")).register_buffer("_amax", value)
+            current_state_dict[key] = value
     return current_state_dict

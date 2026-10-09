@@ -31,6 +31,7 @@ from __future__ import annotations
 import gc
 import importlib.util
 import inspect
+import sys
 from functools import partial, wraps
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,10 +39,12 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+import yaml
 from _test_utils.torch.transformers_models import (
     create_tiny_deepseek_v3_dir,
     create_tiny_deepseek_v4_config_dir,
     create_tiny_glm5_next_config_dir,
+    create_tiny_gpt_oss_dir,
     create_tiny_llama_dir,
     create_tiny_qwen3_moe_dir,
 )
@@ -51,10 +54,15 @@ from vllm.inputs import TokensPrompt
 from vllm.utils.import_utils import has_deep_gemm
 
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import ModelOptPTQRecipe
 from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
-from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    SequentialQuantizer,
+    TensorQuantizer,
+    register_quant_backend,
+)
 from modelopt.torch.quantization.plugins import vllm as vllm_plugin
 from modelopt.torch.quantization.plugins.vllm import (
     _ATTENTION_TYPES,
@@ -72,6 +80,8 @@ from modelopt.torch.quantization.plugins.vllm_indexer import _QuantVLLMIndexerBa
 def _load_example_module(name: str):
     """Import a module from ``examples/vllm_serve/`` by path (not an installed package)."""
     path = Path(__file__).parents[4] / "examples/vllm_serve" / f"{name}.py"
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
     spec = importlib.util.spec_from_file_location(f"{name}_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -701,7 +711,7 @@ def test_kv_nvfp4_mla_quantizer_replays_in_cuda_graph(name, shape):
     assert torch.equal(static_out, quantizer(new_in))
 
 
-def _quantize_and_summarize(self):
+def _quantize_and_summarize(self, recipe_path=None, quantizer_path=None):
     """Run on the worker via ``LLM.collective_rpc``.
 
     Module-level so it survives pickle over engine-core IPC. ``self`` is the
@@ -714,8 +724,32 @@ def _quantize_and_summarize(self):
         # ``num_tokens=1`` is enough for the ``"max"`` calibrator.
         self.model_runner._dummy_run(1)
 
+    quant_cfg = mtq.NVFP4_DEFAULT_CFG
+    if recipe_path is not None:
+        register_quant_backend(
+            "test_vllm_recipe",
+            lambda inputs, quantizer: inputs + quantizer.backend_extra_args["offset"],
+        )
+        quant_cfg = _load_example_module("vllm_ptq_utils").get_quant_config(
+            {"recipe_path": recipe_path, "quant_cfg": None, "kv_quant_cfg": None}, model
+        )
+    # Reused workers may already have ranges calibrated with a different axis.
+    for module in model.modules():
+        if isinstance(module, TensorQuantizer):
+            module.reset_amax()
     with disable_compilation(model):
-        mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, forward_loop=_forward_loop)
+        mtq.quantize(model, quant_cfg, forward_loop=_forward_loop)
+
+    if recipe_path is not None:
+        _load_example_module("vllm_reload_utils").validate_quantizer_recipe_for_model(
+            model, quant_cfg
+        )
+
+    if quantizer_path is not None:
+        reload_utils = _load_example_module("vllm_reload_utils")
+        model.load_state_dict(reload_utils.load_state_dict_from_path(quantizer_path, model))
+        with disable_compilation(model):
+            _forward_loop(model)
 
     parallel_linear_counts: dict[str, int] = {}
     moe_count = 0
@@ -723,7 +757,8 @@ def _quantize_and_summarize(self):
     mla_count = 0
     missing_quantizers: list[str] = []
     quantizers_without_amax: list[str] = []
-    enabled_quantizer_count = 0
+    enabled_quantizers = {}
+    restored_amaxes = {}
 
     def _missing(module, name, slots):
         return (
@@ -770,18 +805,32 @@ def _quantize_and_summarize(self):
         # after calibration. ``kv_b_proj`` is exempt — vLLM's MLA decode path
         # reads its weight directly and never calls its forward.
         if isinstance(module, TensorQuantizer) and module.is_enabled:
-            enabled_quantizer_count += 1
+            enabled_quantizers[name] = {
+                "num_bits": module.num_bits,
+                "axis": module.axis,
+                "block_sizes": module.block_sizes,
+            }
+            if module.backend is not None:
+                enabled_quantizers[name].update(
+                    {"backend": module.backend, "backend_extra_args": module.backend_extra_args}
+                )
+                probe = torch.tensor([-0.5, 0.25, 1.0], device=module.amax.device)
+                torch.testing.assert_close(module(probe), probe + 0.25, rtol=0, atol=0)
+            if quantizer_path is not None:
+                restored_amaxes[name] = module.amax.detach().cpu()
             if not hasattr(module, "_amax") and "kv_b_proj" not in name:
                 quantizers_without_amax.append(name)
 
     return {
+        "restored_amaxes": restored_amaxes,
         "parallel_linear_counts": parallel_linear_counts,
         "moe_count": moe_count,
         "attention_count": attention_count,
         "mla_count": mla_count,
         "missing_quantizers": missing_quantizers,
         "quantizers_without_amax": quantizers_without_amax,
-        "enabled_quantizer_count": enabled_quantizer_count,
+        "enabled_quantizer_count": len(enabled_quantizers),
+        "enabled_quantizers": enabled_quantizers,
         "quantizer_names": sorted(
             name for name, m in model.named_modules() if isinstance(m, TensorQuantizer)
         ),
@@ -809,12 +858,13 @@ def _boot_llm(model_dir, max_model_len=64, **extra):
 
 
 def _shutdown_llm(llm):
-    del llm
+    # Stop the worker even while pytest still holds fixture references.
+    llm.llm_engine.engine_core.shutdown()
     gc.collect()
     cleanup_dist_env_and_memory(shutdown_ray=False)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def tiny_llama_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_llama")
     # Helper default ``max_position_embeddings=32`` would clash with vLLM's ``max_model_len=64`` set in ``_boot_llm``.
@@ -835,24 +885,28 @@ def tiny_llama_llm(tmp_path_factory):
         _shutdown_llm(llm)
 
 
-@pytest.fixture(scope="module")
-def tiny_qwen3_moe_llm(tmp_path_factory):
-    tmp = tmp_path_factory.mktemp("tiny_qwen3_moe")
-    # head_dim=64 with num_attention_heads=2 is broadly supported by vLLM's attention backends.
-    model_dir = create_tiny_qwen3_moe_dir(
+def _tiny_moe_llm(tmp_path_factory, model_type):
+    tmp = tmp_path_factory.mktemp(model_type)
+    create_model = (
+        create_tiny_qwen3_moe_dir if model_type == "qwen3_moe" else create_tiny_gpt_oss_dir
+    )
+    expert_config = (
+        {"moe_intermediate_size": 64, "num_experts": 4, "decoder_sparse_step": 1}
+        if model_type == "qwen3_moe"
+        else {"num_local_experts": 4}
+    )
+    model_dir = create_model(
         tmp,
         hidden_size=128,
         intermediate_size=256,
-        moe_intermediate_size=64,
         num_hidden_layers=2,
         num_attention_heads=2,
         num_key_value_heads=1,
         max_position_embeddings=128,
         vocab_size=128,
         head_dim=64,
-        num_experts=4,
         num_experts_per_tok=2,
-        decoder_sparse_step=1,
+        **expert_config,
     )
     llm = _boot_llm(model_dir, moe_backend="triton", enable_expert_parallel=True)
     try:
@@ -861,7 +915,20 @@ def tiny_qwen3_moe_llm(tmp_path_factory):
         _shutdown_llm(llm)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
+def tiny_qwen3_moe_llm(tmp_path_factory):
+    yield from _tiny_moe_llm(tmp_path_factory, "qwen3_moe")
+
+
+@pytest.fixture(params=["qwen3_moe", "gpt_oss"])
+def tiny_moe_llm(request, tmp_path_factory):
+    if request.param == "qwen3_moe":
+        yield request.getfixturevalue("tiny_qwen3_moe_llm")
+    else:
+        yield from _tiny_moe_llm(tmp_path_factory, "gpt_oss")
+
+
+@pytest.fixture
 def tiny_deepseek_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_deepseek")
     # vLLM 0.26's MLA prefill selector rejects the helper's 16/16/16 dimensions,
@@ -904,7 +971,7 @@ _SPARSE_ATTN_MODELS = {
 }
 
 
-@pytest.fixture(scope="module", params=list(_SPARSE_ATTN_MODELS))
+@pytest.fixture(params=list(_SPARSE_ATTN_MODELS))
 def tiny_sparse_attn_llm(request, tmp_path_factory):
     """Tiny sparse-attention models with an indexer K cache: GLM-5.3-Flash and DeepSeek-V4-Pro."""
     arch, build, extra = _SPARSE_ATTN_MODELS[request.param]
@@ -1007,7 +1074,7 @@ def _assert_quantizer_amax_is_static(summary):
     assert summary["quantizers_without_amax"] == [], summary["quantizers_without_amax"]
 
 
-def test_tiny_llama_quantize(tiny_llama_llm):
+def test_tiny_llama_quantize(tiny_llama_llm, tmp_path):
     """Covers QKV/Row/MergedColumn ParallelLinear + Attention on a dense Llama."""
     summaries = tiny_llama_llm.collective_rpc(_quantize_and_summarize)
     summary = summaries[0]
@@ -1031,10 +1098,114 @@ def test_tiny_llama_quantize(tiny_llama_llm):
 
     _assert_quantizer_amax_is_static(summary)
 
+    # Broadcast scalar ranges exported by MCore must reload without losing FP32 precision.
+    name = "model.layers.0.self_attn.o_proj.input_quantizer"
+    scalar_recipe = tmp_path / "scalar_recipe.yaml"
+    scalar_recipe.write_text(
+        yaml.safe_dump({name: {"_disabled": False, "_num_bits": 8, "_axis": None}})
+    )
+    scalar_state = tmp_path / "scalar_state.pth"
+    scalar_amax = torch.tensor(1.001, dtype=torch.float32)
+    for shape in ((1,), (1, 1, 1)):
+        torch.save({name + "._amax": scalar_amax.reshape(shape)}, scalar_state)
+        summaries = tiny_llama_llm.collective_rpc(
+            _quantize_and_summarize, args=(str(scalar_recipe), str(scalar_state))
+        )
+        for item in summaries:
+            restored = item["restored_amaxes"][name]
+            assert restored.dtype == torch.float32
+            assert torch.equal(restored, scalar_amax)
 
-def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm):
-    """Tiny Qwen3-MoE adds FusedMoE coverage on top of the dense linears."""
-    summaries = tiny_qwen3_moe_llm.collective_rpc(_quantize_and_summarize)
+    # A range in vLLM's own layout must remain loadable through the shared HF/MCore loader.
+    recipe_path = tmp_path / "channel_recipe.yaml"
+    recipe_path.write_text(
+        yaml.safe_dump({name: {"_disabled": False, "_num_bits": 8, "_axis": -1}})
+    )
+    amax = torch.full((1, tiny_llama_llm.llm_engine.model_config.hf_config.hidden_size), 4.001)
+    state_path = tmp_path / "channel_state.pth"
+    torch.save({name + "._amax": amax}, state_path)
+    summaries = tiny_llama_llm.collective_rpc(
+        _quantize_and_summarize, args=(str(recipe_path), str(state_path))
+    )
+    assert all(torch.equal(item["restored_amaxes"][name], amax) for item in summaries)
+
+    recipe = ModelOptPTQRecipe(
+        metadata={},
+        quantize={
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "model.layers.0.self_attn.qkv_proj.input_quantizer",
+                    "cfg": {"num_bits": 8},
+                },
+                {"quantizer_name": "*", "enable": False},
+            ],
+            "algorithm": None,
+        },
+    )
+    path = tmp_path / "ptq_recipe.yaml"
+    path.write_text(yaml.safe_dump(recipe.model_dump(mode="json")))
+    summaries = tiny_llama_llm.collective_rpc(_quantize_and_summarize, args=(str(path),))
+    assert all(not item["enabled_quantizers"] for item in summaries)
+
+
+def test_tiny_moe_quantize(tiny_moe_llm, tmp_path):
+    """Calibrate default NVFP4 on Qwen3, then restore MoE recipes and ranges."""
+    active = {"_disabled": False, "_num_bits": [4, 3], "_axis": None, "_block_sizes": None}
+    custom = {
+        **active,
+        "_num_bits": "test_format",
+        "_backend": "test_vllm_recipe",
+        "_backend_extra_args": {"offset": 0.25},
+    }
+    is_gpt_oss = tiny_moe_llm.llm_engine.model_config.hf_config.model_type == "gpt_oss"
+    if not is_gpt_oss:
+        # Preserve default NVFP4 expert weight/input calibration coverage before reload.
+        summary = tiny_moe_llm.collective_rpc(_quantize_and_summarize)[0]
+        assert summary["missing_quantizers"] == [], summary["missing_quantizers"]
+        assert summary["parallel_linear_counts"].get("QuantQKVParallelLinear", 0) >= 2
+        assert summary["parallel_linear_counts"].get("QuantRowParallelLinear", 0) >= 2
+        assert summary["moe_count"] >= 2
+        assert summary["attention_count"] >= 2
+        _assert_quantizer_amax_is_static(summary)
+        for layer in range(2):
+            for projection in ("w13", "w2"):
+                for kind in ("input", "weight"):
+                    assert any(
+                        name.startswith(f"model.layers.{layer}.mlp.experts.")
+                        and name.endswith(f"{projection}_{kind}_quantizer")
+                        for name in summary["enabled_quantizers"]
+                    ), summary["enabled_quantizers"]
+
+    recipe = {}
+    for layer in range(2):
+        if not is_gpt_oss:
+            for projection in ("q", "k", "v"):
+                recipe[f"model.layers.{layer}.self_attn.{projection}_proj.input_quantizer"] = custom
+        projections = (
+            ("gate_up_proj" if layer == 0 else "up_proj", "down_proj")
+            if layer == 0 or is_gpt_oss
+            else tuple(
+                f"{expert}.{projection}_proj"
+                for expert in range(4)
+                for projection in ("gate", "up", "down")
+            )
+        )
+        for projection in projections:
+            prefix = f"model.layers.{layer}.mlp.experts.{projection}"
+            separator = "_" if is_gpt_oss and layer == 1 else "."
+            recipe[f"{prefix}{separator}input_quantizer"] = active
+            recipe[f"{prefix}{separator}weight_quantizer"] = {"_disabled": True}
+    path = tmp_path / "quant_recipe.yaml"
+    path.write_text(yaml.safe_dump(recipe))
+    state_path = tmp_path / "quantizer_state.pth"
+    amax = torch.tensor(4.001, dtype=torch.float32)
+    torch.save(
+        {name + "._amax": amax for name, cfg in recipe.items() if not cfg["_disabled"]}, state_path
+    )
+    summaries = tiny_moe_llm.collective_rpc(
+        _quantize_and_summarize, args=(str(path), str(state_path))
+    )
     summary = summaries[0]
 
     assert summary["missing_quantizers"] == [], summary["missing_quantizers"]
@@ -1048,19 +1219,69 @@ def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm):
     assert summary["attention_count"] >= 2, summary
 
     _assert_quantizer_amax_is_static(summary)
+    enabled = summary["enabled_quantizers"]
+    assert len(enabled) == (4 if is_gpt_oss else 6)  # Two experts and optional QKV per layer.
+    assert summary["restored_amaxes"].keys() == enabled.keys()
+    assert all(torch.equal(value, amax) for value in summary["restored_amaxes"].values())
+    assert all("weight_quantizer" not in name for name in enabled)
+    assert all(
+        cfg
+        == (
+            {key[1:]: value for key, value in custom.items() if key != "_disabled"}
+            if name.endswith("qkv_proj.input_quantizer")
+            else {"num_bits": (4, 3), "axis": None, "block_sizes": None}
+        )
+        for name, cfg in enabled.items()
+    )
 
     # The vllm_serve reload helper must map HF expert keys onto module paths that exist here:
     # a stale mapping is dropped silently at load and serves uncalibrated experts.
     reload_utils = _load_example_module("vllm_reload_utils")
     for hf_key, expected_quantizer in (
-        ("model.layers.0.mlp.experts.0.gate_proj.input_quantizer._amax", "w13_input_quantizer"),
-        ("model.layers.0.mlp.experts.0.down_proj.weight_quantizer._amax", "w2_weight_quantizer"),
+        ("model.layers.0.mlp.experts.gate_up_proj.input_quantizer._amax", "w13_input_quantizer"),
+        ("model.layers.0.mlp.experts.down_proj.weight_quantizer._amax", "w2_weight_quantizer"),
+        ("model.layers.1.mlp.experts.0.gate_proj.input_quantizer._amax", "w13_input_quantizer"),
+        ("model.layers.1.mlp.experts.gate_up_proj_input_quantizer._amax", "w13_input_quantizer"),
+        ("model.layers.1.mlp.experts.up_proj_input_quantizer._amax", "w13_input_quantizer"),
+        ("model.layers.1.mlp.experts.down_proj_weight_quantizer._amax", "w2_weight_quantizer"),
     ):
         action, vllm_key, _ = reload_utils._convert_key_for_vllm(hf_key, 1.0)
         assert action == "group", (hf_key, action)
         module_path = vllm_key.rsplit("._amax", 1)[0]
         assert module_path.endswith(expected_quantizer), vllm_key
         assert module_path in summary["quantizer_names"], (vllm_key, summary["quantizer_names"])
+
+    # A partial tensor file must fail instead of retaining the worker's calibration range.
+    saved = torch.load(state_path, weights_only=True)
+    missing = next(name for name in saved if "layers.0.mlp.experts" in name)
+    saved.pop(missing)
+    torch.save(saved, state_path)
+    errors = tiny_moe_llm.collective_rpc(_check_missing_range, args=(str(state_path),))
+    assert all("missing" in error and "w13_input_quantizer" in error for error in errors)
+
+    recipe["model.layers.0.mlp.missing.input_quantizer"] = active
+    path.write_text(yaml.safe_dump(recipe))
+    errors = tiny_moe_llm.collective_rpc(_check_unmatched_recipe, args=(str(path),))
+    assert all("model.layers.0.mlp.missing.input_quantizer" in error for error in errors)
+
+
+def _check_missing_range(self, quantizer_path):
+    with pytest.raises(ValueError, match="Active quantizer ranges") as error:
+        _load_example_module("vllm_reload_utils").load_state_dict_from_path(
+            quantizer_path, self.get_model()
+        )
+    return str(error.value)
+
+
+def _check_unmatched_recipe(self, recipe_path):
+    model = self.get_model()
+    cfg = _load_example_module("vllm_ptq_utils").get_quant_config(
+        {"recipe_path": recipe_path, "quant_cfg": None, "kv_quant_cfg": None}, model
+    )
+    mtq.quantize(model, {**cfg, "algorithm": None})
+    with pytest.raises(ValueError, match="no enabled match on any serving rank") as error:
+        _load_example_module("vllm_reload_utils").validate_quantizer_recipe_for_model(model, cfg)
+    return str(error.value)
 
 
 _MOE_COMMUNICATION_FP8_CFG = {

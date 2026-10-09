@@ -26,8 +26,10 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.vllm import VllmMLAAttention
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples/vllm_serve"
@@ -109,6 +111,48 @@ def test_fakequant_launcher_rejects_unusable_quant_file(
     )
     with pytest.raises(SystemExit, match=error):
         launcher.main()
+
+
+@pytest.mark.parametrize("with_weight_state", [False, True])
+def test_quantizer_state_disables_only_missing_weight_quantizers(
+    monkeypatch, tmp_path, with_weight_state
+):
+    reload_utils = _load_example_module("vllm_reload_utils")
+    monkeypatch.setattr(reload_utils, "process_state_dict_for_tp", lambda saved, _: saved)
+
+    model = torch.nn.Module()
+    model.weight_quantizer = SequentialQuantizer(
+        TensorQuantizer(amax=1.0), TensorQuantizer(amax=2.0)
+    )
+    model.experts = torch.nn.Module()
+    model.experts.w13_weight_quantizer = TensorQuantizer()
+    model.experts.w2_weight_quantizer = TensorQuantizer(amax=4.0)
+    model.input_quantizer = TensorQuantizer(amax=5.0)
+    model.missing_input_quantizer = TensorQuantizer(amax=6.0)
+    checkpoint = {"input_quantizer._amax": torch.tensor(13.0)}
+    if with_weight_state:
+        checkpoint.update(
+            {
+                "weight_quantizer.0._amax": torch.tensor(11.0),
+                "experts.w2_weight_quantizer._amax": torch.tensor(12.0),
+            }
+        )
+    path = tmp_path / "quantizer_state.pth"
+    torch.save(checkpoint, path)
+
+    with pytest.raises(ValueError, match="missing_input_quantizer"):
+        reload_utils.load_state_dict_from_path(str(path), model)
+    model.missing_input_quantizer.disable()
+    with pytest.warns(UserWarning, match="missing from every rank's checkpoint"):
+        restored = reload_utils.load_state_dict_from_path(str(path), model)
+
+    assert model.weight_quantizer[0].is_enabled == with_weight_state
+    assert not model.weight_quantizer[1].is_enabled
+    assert not model.experts.w13_weight_quantizer.is_enabled
+    assert model.experts.w2_weight_quantizer.is_enabled == with_weight_state
+    assert model.input_quantizer.is_enabled
+    assert not model.missing_input_quantizer.is_enabled
+    assert torch.equal(restored["input_quantizer._amax"], torch.tensor(13.0))
 
 
 def _calibration_worker(
@@ -665,3 +709,69 @@ def test_update_kv_cfg_for_mla_skips_non_mla_and_warns_on_affine():
         "cfg": kv_cfg[0]["cfg"],
         "enable": True,
     }
+
+
+@pytest.mark.parametrize(
+    "name", ["lm_head.input_quantizer", "model.layers.0.self_attn.p_bmm_quantizer"]
+)
+def test_exported_recipe_rejects_active_skipped_quantizers(name):
+    reload_utils = _load_example_module("vllm_reload_utils")
+    with pytest.raises(ValueError, match="unsupported by vLLM reload"):
+        reload_utils.quantizer_recipe_to_quant_cfg({name: {"_disabled": False}}, torch.nn.Module())
+    cfg = reload_utils.quantizer_recipe_to_quant_cfg({name: {"_disabled": True}}, torch.nn.Module())
+    assert cfg["quant_cfg"] == [{"quantizer_name": "*", "enable": False}]
+
+
+def _check_distributed_recipe_names(rank, size):
+    reload_utils = _load_example_module("vllm_reload_utils")
+    model = torch.nn.Module()
+    model.add_module(f"stage{rank}", torch.nn.Linear(4, 4))
+    recipe = {
+        f"stage{i}.input_quantizer": {"_disabled": False, "_num_bits": 8} for i in range(size)
+    }
+    recipe["absent.weight_quantizer"] = {"_disabled": True}
+    cfg = reload_utils.quantizer_recipe_to_quant_cfg(recipe, model)
+    mtq.quantize(model, {**cfg, "algorithm": None})
+    reload_utils.validate_quantizer_recipe_for_model(model, cfg)
+    recipe["missing.input_quantizer"] = {"_disabled": False, "_num_bits": 8}
+    missing_cfg = reload_utils.quantizer_recipe_to_quant_cfg(recipe, model)
+    with pytest.raises(ValueError, match=r"missing\.input_quantizer"):
+        reload_utils.validate_quantizer_recipe_for_model(model, missing_cfg)
+    if rank == 0:
+        model.stage0.input_quantizer.disable()
+    with pytest.raises(ValueError, match=r"stage0\.input_quantizer"):
+        reload_utils.validate_quantizer_recipe_for_model(model, cfg)
+
+    quantizer = model.get_submodule(f"stage{rank}.input_quantizer")
+    quantizer.enable()
+    quantizer.amax = torch.tensor(1.0)
+    key = f"stage{rank}.input_quantizer._amax"
+    state = {key: quantizer.amax}
+    current = model.state_dict()
+    reload_utils._validate_quantizer_ranges(model, state, current)
+    if rank == 0:
+        state.pop(key)
+    with pytest.raises(ValueError, match=r"missing.*stage0\.input_quantizer"):
+        reload_utils._validate_quantizer_ranges(model, state, current)
+    state[key] = quantizer.amax
+    if rank == 0:
+        current.pop(key)
+    with pytest.raises(ValueError, match=r"missing.*stage0\.input_quantizer"):
+        reload_utils._validate_quantizer_ranges(model, state, current)
+
+    quantizer.reset_amax()
+    quantizer.set_from_attribute_config(
+        {
+            "num_bits": (4, 3),
+            "axis": None,
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+        }
+    )
+    assert quantizer.is_mx_format
+    reload_utils._validate_quantizer_ranges(model, {}, model.state_dict())
+    quantizer.set_from_attribute_config({"num_bits": 8, "block_sizes": None, "type": "dynamic"})
+    reload_utils._validate_quantizer_ranges(model, {}, model.state_dict())
+
+
+def test_exported_recipe_matches_enabled_quantizers_across_ranks():
+    spawn_multiprocess_job(2, _check_distributed_recipe_names)
