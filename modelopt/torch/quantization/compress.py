@@ -27,6 +27,7 @@ from modelopt.torch.opt import apply_mode
 from modelopt.torch.opt.conversion import ModelLikeModule, ModeloptStateManager
 from modelopt.torch.opt.dynamic import _DMRegistryCls
 from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
+from modelopt.torch.utils.import_utils import import_plugin
 
 from .backends.gemm_registry import disable_real_quant_gemm, enable_real_quant_gemm
 from .config import CompressCfgType, CompressConfig
@@ -35,7 +36,8 @@ from .nn.modules.quant_linear import RealQuantLinear
 from .qtensor import QTensorWrapper, pack_real_quantize_weight
 from .utils import is_quantized_linear
 
-try:
+mcore_available = False
+with import_plugin("megatron"):
     from .plugins.megatron import (
         _MegatronColumnParallelLinear,
         _MegatronRowParallelLinear,
@@ -44,8 +46,6 @@ try:
     )
 
     mcore_available = True
-except ImportError:
-    mcore_available = False
 
 RealQuantModuleRegistry = _DMRegistryCls("RealQuant")
 
