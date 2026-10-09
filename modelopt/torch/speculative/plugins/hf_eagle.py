@@ -357,7 +357,7 @@ class HFEagleModel(EagleModel):
         arch_config = config.eagle_architecture_config
 
         # Populate base-model-dependent fields before constructing PretrainedConfig,
-        # since transformers >=5.4 validates rope_scaling during __init__.
+        # since transformers validates rope_scaling during __init__.
         arch_config["hidden_size"] = self._base_llm_config.hidden_size
         arch_config["vocab_size"] = self._base_llm_config.vocab_size
         arch_config["max_position_embeddings"] = self._base_llm_config.max_position_embeddings
@@ -366,7 +366,7 @@ class HFEagleModel(EagleModel):
             rope_scaling["rope_theta"] = arch_config["rope_theta"]
 
         # Use the base model's config class so fields like max_position_embeddings are declared
-        # before transformers>=5.5 rope standardization runs in __post_init__.
+        # before transformers' rope standardization runs in __post_init__.
         base_config_cls = type(self._base_llm_config)
         self.eagle_config = base_config_cls.from_dict(arch_config)
         self.eagle_config.eagle_decoder_type = self.eagle_decoder_type

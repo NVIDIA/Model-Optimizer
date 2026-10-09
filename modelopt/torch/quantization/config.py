@@ -1232,9 +1232,10 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
     )
     block_size: int | None = ModeloptField(
         default=128,
+        gt=0,
         title="Block size for GPTQ weight update.",
-        description="""The block size for GPTQ weight update, which must be a multiple of the
-        group_size used in the quantization.""",
+        description="""The block size for GPTQ weight update, which must be positive and a multiple
+        of the group_size used in the quantization.""",
     )
     fused: bool = ModeloptField(
         default=False,

@@ -14,7 +14,6 @@
 # limitations under the License.
 
 from packaging.version import Version as _Version
-from transformers import __version__ as _transformers_version
 
 # Import models to trigger factory registration
 from .gpt_oss import *

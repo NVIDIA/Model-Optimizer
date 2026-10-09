@@ -1,6 +1,6 @@
 ---
 name: evaluation
-description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Not for quantizing models (use ptq), deploying/serving models (use deployment), or comparing completed baseline-vs-quantized results (use compare-results).
+description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Always load when validating completed runs or reporting evaluation scores, including standalone launching-evals analysis. Not for quantizing models (use ptq), standalone serving (use deployment), or comparing completed baseline-vs-quantized results (use compare-results).
 license: Apache-2.0
 # Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073).
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant
@@ -8,11 +8,17 @@ license: Apache-2.0
 
 ## NeMo Evaluator Launcher Assistant
 
-Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress.
+Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for canaries and full runs; see [Step 3's serving-handoff check](references/launcher-workflow.md#step-3--configure-deployment) for external endpoints.
+
+### Completed-run analysis
+
+For completed runs, skip launch/config; use launching-evals for artifacts/analysis
+and apply [run-validation.md](references/run-validation.md) before scores. Its policy
+overrides blanket uncapping and fixed token/context limits.
 
 ### Workspace integration
 
-If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-management.md` and reuse existing workspaces (this skill is usually the final stage of PTQ → Deploy → Eval; carry any deployment-time patches into `deployment.command`).
+If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-management.md` and reuse existing workspaces (PTQ → checkpoint smoke test → NEL evaluation; carry compatibility requirements into NEL's deployment config).
 
 ### Workflow
 
@@ -42,8 +48,9 @@ for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
 
 1. Read **`references/nel-next.md`** (shared: venv, schema, AWS creds, architecture, timeout strategy, MLflow, run flow) + the per-benchmark recipe `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md`; start from `recipes/examples/example_eval_next.yaml`.
 2. Isolated nel-next venv: `"$SKILL_DIR/scripts/nel-next.sh" --setup-only` (keeps 0.2.6 `nel` untouched).
-3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`) into `.env`; always include the `output.export_config.mlflow` block.
+3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`, `${HARBOR_ECS_REGION}`) into `.env`; always include the `output.export_config.mlflow` block.
 4. Dry-run → canary → full (`nel-next.sh eval run`), then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
+5. Before reporting a full-run score, apply `references/run-validation.md`, including its benchmark-specific checks.
 
 Steps 1–9 below are currently validated with 0.2.6 — use them for everything else.
 
@@ -64,6 +71,7 @@ for an "AA" request. If the user asks for MRCR:
 2. **Pick the variant first** (`config_n3_1m` / `config_n3_128k` / `config`) — it
    sets the context cap, dataset *and* metric prefix; the three are not
    comparable; set it in **both** `data_prep_params` and `collect_rollout_params`.
+   Take the largest variant within the checkpoint's trained context — see the recipe.
 3. `.env`: `HF_TOKEN` (dataset + n3 tokenizer are gated) plus
    `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the `pre_cmd` installs `tiktoken` +
    `transformers`; prepare fails without it) and
@@ -72,22 +80,23 @@ for an "AA" request. If the user asks for MRCR:
    Gym and must apply, so the template's `container:` is `???` and the bootstrap
    exits 1 on a non-git `/opt/Gym` (the public `eval-factory/nemo-gym:*` images).
    NVIDIA-internal: `modelopttools:eval-config` Step 3d names a working image.
-5. Long-context deploy (`--max-model-len 1100000` +
-   `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`, `gpu_memory_utilization: 0.95`,
-   multi-instance fan-out); **never cap output tokens**; report the needle-count
-   strata alongside `pass@1/accuracy`.
+5. Long-context deploy: for **1M**, `--max-model-len 1100000` +
+   `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`; for **128K**, `--max-model-len` at the
+   checkpoint's trained context (room for the answer above 131,072) and no
+   override. 1M also needs `gpu_memory_utilization: 0.95`. Both: multi-instance fan-out;
+   **never cap output tokens**; report the needle-count strata alongside
+   `pass@1/accuracy`.
 6. Run both dry-run and launch through `"$SKILL_DIR/scripts/nel-gym.sh"`; it
    enforces the currently validated 0.2.6 launcher even if `nel` on PATH is stale
    and avoids an unset `NEL_INVOCATION_ID` failure before client startup.
-   **`limit_samples` is inert on the gym path** — canary with the gym's own
-   `++limit=N` (see the recipe's Canary section), remembering the prepare pass
-   still runs in full.
+   Canary with `limit_samples` — the MRCR template forwards it as `++limit`
+   (see the recipe's Canary section); the prepare pass still runs in full.
 
 ---
 
 Detailed launcher instructions live in [launcher-workflow.md](references/launcher-workflow.md).
 Read only the sections needed for the current stage; retain the dry-run → canary →
-full-run gates. Existing configs can start at Step 8. Paths in that reference are
+full-run gates. Existing configs must pass Step 3's serving-handoff check before Step 8. Paths in that reference are
 relative to this skill directory.
 
 ### Step 1 — Prerequisites
@@ -128,10 +137,10 @@ Read [Step 8](references/launcher-workflow.md#step-8--run-evaluation-gated-dry-r
 
 ### Step 9 — Verify completed run
 
-Read [run-validation.md](references/run-validation.md) before reporting scores:
-validate logs and sample coverage, complete **Timeout and Output-Limit Accounting**
-for every task, and report missing telemetry as unknown. For comparisons, also
-apply its **External Baseline Sanity Check**, then use `compare-results`.
+Apply [run-validation.md](references/run-validation.md)'s **Bounded Evaluation-Failure
+Policy** and **Timeout and Output-Limit Accounting** before reporting scores. For
+comparisons, also apply its **External Baseline Sanity Check**, then use
+`compare-results`.
 
 ---
 
