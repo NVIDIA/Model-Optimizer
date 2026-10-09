@@ -32,14 +32,18 @@ an average-bit budget.
 **Prepare candidates.** The starter recipe uses constant scales and offers FP8
 K/V (8 bits) and NVFP4 K/V (4.5 bits including block scales). The case study
 also includes FP8 K with NVFP4 V (6.25 bits for equal K/V widths).
+NVFP4 K with FP8 V is excluded because the current export path does not
+support that pair; this study did not evaluate its accuracy.
 
-**Score each choice.** Compare each isolated layer/candidate trial against a
-reference with K/V quantization disabled in all eligible layers. KL divergence
-measures the change in output predictions; existing GEMM quantizers stay fixed.
-BF16 K/V is the reference, not an implicit solver choice.
+**Score each choice.** GEMM settings stay fixed in the reference and every
+trial: BF16 when starting from a BF16 model, or the existing quantized formats
+and scales. The reference disables K/V quantization in all eligible layers.
+Each trial changes only one layer's K/V pair; KL divergence measures the
+change in output predictions. BF16 K/V is the reference, not an implicit
+solver choice.
 
 .. figure:: assets/autoquant-kv-search.svg
-   :alt: Three-stage illustrative search: score isolated layer/candidate trials against BF16 KV, build a sensitivity map, and optimize under a 5.375-bit budget. NVFP4 scores are 0.03, 0.32, 0.09, and 0.02; FP8 scores are 0.01, 0.02, 0.01, and 0.01. Select FP8 for layer 2 and NVFP4 for the other three layers.
+   :alt: Three-stage illustrative search with GEMM settings fixed in the reference and every trial: score isolated layer/candidate trials against BF16 KV, build a sensitivity map, and optimize under a 5.375-bit budget. NVFP4 scores are 0.03, 0.32, 0.09, and 0.02; FP8 scores are 0.01, 0.02, 0.01, and 0.01. Select FP8 for layer 2 and NVFP4 for the other three layers.
    :width: 640px
    :align: center
 
@@ -132,6 +136,11 @@ scales when serving with a compatible runtime.
 Combining KV and GEMM AutoQuant
 *******************************
 
+**Score KV candidates on the GEMM configuration you will serve.** If GEMMs
+will be quantized, apply GEMM AutoQuant or fixed PTQ first. KV-only search is
+useful for BF16 deployments, controlled KV studies, or models whose GEMMs are
+already quantized.
+
 A composed recipe runs **GEMM AutoQuant first, then KV AutoQuant**. The shipped
 example uses gradient-based NVFP4/FP8 GEMM search, freezes its selected
 weight/activation quantizers and calibrated tensors, then runs forward-KL KV
@@ -148,7 +157,7 @@ files, plus a fresh export directory:
    --kv_auto_quantize_checkpoint kv_after_gemm_search.pth
 
 Changing the GEMM configuration requires recomputing KV sensitivity with a new
-checkpoint. Fixed GEMM PTQ can also precede KV search; the
+checkpoint. The
 `HF PTQ guide <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq#autoquantize>`_
 describes both compositions. Serving support must cover the combined weight
 and KV formats; an export marked ``kv_cache_deployment_supported: false``
