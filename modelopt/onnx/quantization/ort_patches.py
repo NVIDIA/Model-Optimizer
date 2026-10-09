@@ -53,6 +53,7 @@ from modelopt.onnx.quantization.ort_quantization import (
     _check_opset_version,
     _compute_scale_zp,
     _create_calibrator_with_extra_options,
+    _make_scale_zp_initializers,
 )
 from modelopt.onnx.quantization.ort_session import _create_inference_session_with_ep_config
 
@@ -87,6 +88,7 @@ def patch_ort_modules(calibrate_per_node: bool = False):
     CalibraterBase.create_inference_session = _create_inference_session_with_ep_config
     CalibraterBase.select_tensors_to_calibrate = _select_tensors_to_calibrate
     QDQQuantizer.check_opset_version = _check_opset_version
+    QDQQuantizer._make_scale_zp_initializers = _make_scale_zp_initializers
     BaseQuantizer.adjust_tensor_ranges = _adjust_tensor_ranges
     qdq_quantizer.compute_scale_zp = _compute_scale_zp
     CalibraterBase.__init__ = _init_calibrater_base

@@ -19,10 +19,11 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
-from _test_utils.examples.models import FLUX_SCHNELL_PATH, SDXL_PATH
+from _test_utils.examples.models import FLUX_SCHNELL_PATH
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.misc import minimum_sm
 from safetensors import safe_open
+from test_diffusers import CALIB_PROMPTS_FILE, assert_hf_ckpt_exported
 
 
 class DiffuserHfExportModel(NamedTuple):
@@ -63,6 +64,8 @@ class DiffuserHfExportModel(NamedTuple):
             self.model_dtype,
             "--trt-high-precision-dtype",
             self.dtype,
+            "--prompts-file",
+            str(CALIB_PROMPTS_FILE),
             "--hf-ckpt-dir",
             str(hf_ckpt_dir),
         ]
@@ -70,17 +73,11 @@ class DiffuserHfExportModel(NamedTuple):
         return hf_ckpt_dir
 
 
+# The SDXL int8/fp8 and Wan 2.2 transformer int8/fp8 exports run in test_diffusers.py, from the
+# quantize run those tests already do (``hf_export=True``).
 @pytest.mark.parametrize(
     "model",
     [
-        DiffuserHfExportModel(
-            name="sdxl-1.0",
-            path=SDXL_PATH,
-            dtype="Half",
-            format_type="int8",
-            quant_algo="smoothquant",
-            collect_method="min-mean",
-        ),
         DiffuserHfExportModel(
             name="flux-schnell",
             path=FLUX_SCHNELL_PATH,
@@ -89,17 +86,6 @@ class DiffuserHfExportModel(NamedTuple):
             quant_algo="smoothquant",
             collect_method="min-mean",
             model_dtype="BFloat16",
-        ),
-        pytest.param(
-            DiffuserHfExportModel(
-                name="sdxl-1.0",
-                path=SDXL_PATH,
-                dtype="Half",
-                format_type="fp8",
-                quant_algo="max",
-                collect_method="default",
-            ),
-            marks=minimum_sm(89),
         ),
         pytest.param(
             DiffuserHfExportModel(
@@ -115,22 +101,12 @@ class DiffuserHfExportModel(NamedTuple):
         ),
     ],
     ids=[
-        "sdxl_1.0_int8_smoothquant_min_mean",
         "flux_schnell_int8_smoothquant_min_mean",
-        "sdxl_1.0_fp8_max_default",
         "flux_schnell_fp4_max_default",
     ],
 )
 def test_diffusers_hf_ckpt_export(model: DiffuserHfExportModel, tmp_path: Path) -> None:
-    hf_ckpt_dir = model.quantize_and_export_hf(tmp_path)
-
-    assert hf_ckpt_dir.exists(), f"HF checkpoint directory was not created: {hf_ckpt_dir}"
-
-    config_files = list(hf_ckpt_dir.rglob("config.json"))
-    assert len(config_files) > 0, f"No config.json found in {hf_ckpt_dir}"
-
-    weight_files = list(hf_ckpt_dir.rglob("*.safetensors")) + list(hf_ckpt_dir.rglob("*.bin"))
-    assert len(weight_files) > 0, f"No weight files (.safetensors or .bin) found in {hf_ckpt_dir}"
+    assert_hf_ckpt_exported(model.quantize_and_export_hf(tmp_path))
 
 
 class QwenHfExportModel(NamedTuple):
@@ -163,6 +139,8 @@ class QwenHfExportModel(NamedTuple):
             "1",
             "--n-steps",
             "2",
+            "--prompts-file",
+            str(CALIB_PROMPTS_FILE),
             "--hf-ckpt-dir",
             str(hf_ckpt_dir),
         ]
@@ -306,84 +284,3 @@ def test_qwen_image_hf_ckpt_export(
         assert not any(k.endswith(".svdquant_lora_a") for k in keys)
         if qwen_model.format_type == "fp4":
             assert any(k.endswith(".weight_scale_2") for k in keys)
-
-
-class Wan22HfExportModel(NamedTuple):
-    model: str
-    backbone: str | None
-    format_type: str
-    quant_algo: str
-    collect_method: str
-
-    def _suffix(self) -> str:
-        stem = self.model.replace("wan2.2-t2v-", "")
-        parts = [stem, *([self.backbone] if self.backbone else []), self.format_type]
-        return "_".join(parts)
-
-    def quantize_and_export_hf(self, tiny_wan22_path: str, tmp_path: Path) -> Path:
-        hf_ckpt_dir = tmp_path / f"wan22_{self._suffix()}_hf_ckpt"
-        cmd_args = [
-            "python",
-            "quantize.py",
-            "--model",
-            self.model,
-            "--override-model-path",
-            tiny_wan22_path,
-            "--format",
-            self.format_type,
-            "--quant-algo",
-            self.quant_algo,
-            "--collect-method",
-            self.collect_method,
-            "--model-dtype",
-            "BFloat16",
-            "--trt-high-precision-dtype",
-            "BFloat16",
-            "--calib-size",
-            "2",
-            "--batch-size",
-            "1",
-            "--n-steps",
-            "2",
-            # Tiny video dims — override MODEL_DEFAULTS for fast CI.
-            "--extra-param",
-            "height=16",
-            "--extra-param",
-            "width=16",
-            "--extra-param",
-            "num_frames=5",
-            "--hf-ckpt-dir",
-            str(hf_ckpt_dir),
-        ]
-        if self.backbone is not None:
-            cmd_args.extend(["--backbone", self.backbone])
-        run_example_command(cmd_args, "diffusers/quantization")
-        return hf_ckpt_dir
-
-
-@pytest.mark.parametrize(
-    "wan_model",
-    [
-        Wan22HfExportModel("wan2.2-t2v-14b", None, "int8", "smoothquant", "min-mean"),
-        pytest.param(
-            Wan22HfExportModel("wan2.2-t2v-14b", None, "fp8", "max", "default"),
-            marks=minimum_sm(89),
-        ),
-    ],
-    ids=[
-        "wan22_14b_transformer_int8_smoothquant",
-        "wan22_14b_transformer_fp8_max",
-    ],
-)
-def test_wan22_hf_ckpt_export(
-    wan_model: Wan22HfExportModel, tiny_wan22_path: str, tmp_path: Path
-) -> None:
-    hf_ckpt_dir = wan_model.quantize_and_export_hf(tiny_wan22_path, tmp_path)
-
-    assert hf_ckpt_dir.exists(), f"HF checkpoint directory was not created: {hf_ckpt_dir}"
-
-    config_files = list(hf_ckpt_dir.rglob("config.json"))
-    assert len(config_files) > 0, f"No config.json found in {hf_ckpt_dir}"
-
-    weight_files = list(hf_ckpt_dir.rglob("*.safetensors")) + list(hf_ckpt_dir.rglob("*.bin"))
-    assert len(weight_files) > 0, f"No weight files (.safetensors or .bin) found in {hf_ckpt_dir}"
