@@ -22,12 +22,14 @@ native = pytest.importorskip("transformers.models.nemotron_h.modeling_nemotron_h
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
-from modelopt.torch.models.nemotron_h.mtp import _NemotronHMTP
+from modelopt.torch.export.quant_utils import postprocess_state_dict
+from modelopt.torch.models.nemotron_h.mtp import _NemotronHMTP, prepare_for_calibration
 from modelopt.torch.opt.conversion import apply_mode
 from modelopt.torch.opt.utils import named_hparams
 from modelopt.torch.quantization._auto_quantize_cost import get_auto_quantize_cost_model
 from modelopt.torch.quantization.algorithms import AutoQuantizeGradientSearcher, QuantRecipe
 from modelopt.torch.quantization.mode import QuantizeModeRegistry
+from modelopt.torch.quantization.model_calib import max_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
@@ -35,7 +37,7 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 @pytest.mark.parametrize("decoder_name", ["model", "backbone"])
 @pytest.mark.parametrize("with_mtp", [False, True], ids=["no-mtp", "mtp"])
 def test_4p9_mse_recipe_resolves_search_and_fixed_mtp(wrapped, decoder_name, with_mtp):
-    """Search decoder/head groups, fix MTP routed experts, and cast only base-model KV."""
+    """Search decoder/head groups, fix MTP experts, and preserve calibrated MTP KV scales."""
     config = native.NemotronHConfig(
         vocab_size=32,
         hidden_size=32,
@@ -112,7 +114,10 @@ def test_4p9_mse_recipe_resolves_search_and_fixed_mtp(wrapped, decoder_name, wit
             assert group.cost_weight == 1
             assert group.solver_choices[0].config.algorithm == fixed.config.algorithm
             searched_names.update(names)
-        elif all("mtp.layers.1.mixer.experts" in name for name in names):
+        elif all(
+            "mtp.layers.1.mixer.experts" in name or "mtp.layers.1.mixer.shared_experts." in name
+            for name in names
+        ):
             assert bits == [4.5]
             assert group.is_fixed and not group.allow_no_quant
             assert group.cost_weight == 0
@@ -141,18 +146,49 @@ def test_4p9_mse_recipe_resolves_search_and_fixed_mtp(wrapped, decoder_name, wit
     assert bool(fixed_expert_names) == with_mtp
     if with_mtp:
         assert any(".mixer.experts" in name for name in fixed_expert_names)
-        assert any(".mixer.shared_experts" in name for name in bf16_mtp_names)
+        for projection in ("up_proj", "down_proj"):
+            assert prefix + f"mtp.layers.1.mixer.shared_experts.{projection}" in fixed_expert_names
+        assert bf16_mtp_names
 
-    # Post-search KV casting must preserve the routed-experts-only MTP policy.
+    calibrated_amax = {}
+    # Exercise actual KV activation collection without CPU NVFP4 weight calibration.
+    if with_mtp and decoder_name == "model":
+        prepare_for_calibration(model)
+        with mtq.set_quantizer_by_cfg_context(
+            model,
+            [
+                {"quantizer_name": "*weight_quantizer*", "enable": False},
+                {"quantizer_name": "*input_quantizer", "enable": False},
+            ],
+        ):
+            max_calibrate(
+                model,
+                lambda _: language_model(torch.tensor([[1, 2, 3, 4]]), use_cache=False),
+                distributed_sync=False,
+            )
+        calibrated_amax = {
+            name: quantizer.amax.clone()
+            for name, quantizer in model.named_modules()
+            if "mtp." in name and name.endswith(("k_bmm_quantizer", "v_bmm_quantizer"))
+        }
+        assert len(calibrated_amax) == 2
+        for amax in calibrated_amax.values():
+            assert torch.isfinite(amax).all() and amax.max() > 0
+
+    # Post-search casting must retain the fixed MTP quantizers and their collected scales.
     for stage in ("baseline", "post-search"):
         if stage == "post-search":
             mtq.set_quantizer_by_cfg(model, aq.kv_cache.quant_cfg)
         for name, quantizer in model.named_modules():
             if isinstance(quantizer, TensorQuantizer) and name.startswith(prefix + "mtp."):
-                routed_io = name.startswith(prefix + "mtp.layers.1.mixer.experts.") and (
-                    "weight_quantizer" in name or "input_quantizer" in name
-                )
-                assert quantizer.is_enabled == routed_io
+                expert_io = name.startswith(
+                    (
+                        prefix + "mtp.layers.1.mixer.experts.",
+                        prefix + "mtp.layers.1.mixer.shared_experts.",
+                    )
+                ) and ("weight_quantizer" in name or "input_quantizer" in name)
+                mtp_kv = name.endswith(("k_bmm_quantizer", "v_bmm_quantizer"))
+                assert quantizer.is_enabled == (expert_io or mtp_kv)
         kv = {
             name: q
             for name, q in model.named_modules()
@@ -160,9 +196,26 @@ def test_4p9_mse_recipe_resolves_search_and_fixed_mtp(wrapped, decoder_name, wit
         }
         assert len(kv) == 2 + 2 * with_mtp
         for name, quantizer in kv.items():
-            enabled = stage == "post-search" and "mtp." not in name
+            is_mtp = "mtp." in name
+            enabled = stage == "post-search" or is_mtp
             assert quantizer.is_enabled == enabled
             if enabled:
-                assert quantizer.num_bits == (4, 3) and quantizer._use_constant_amax
-                assert quantizer._get_amax(torch.tensor([0.01, 1000.0])).item() == 448
-                assert not hasattr(quantizer, "_amax")
+                assert quantizer.num_bits == (4, 3)
+                assert quantizer._use_constant_amax == (not is_mtp)
+                if not is_mtp:
+                    assert quantizer._get_amax(torch.tensor([0.01, 1000.0])).item() == 448
+                    assert not hasattr(quantizer, "_amax")
+                elif name in calibrated_amax:
+                    torch.testing.assert_close(quantizer.amax, calibrated_amax[name])
+
+    if calibrated_amax:
+        exported = postprocess_state_dict(model.state_dict(), maxbound=448, quantization="FP8")
+        for name, amax in calibrated_amax.items():
+            projection = "k_proj.k_scale" if name.endswith("k_bmm_quantizer") else "v_proj.v_scale"
+            torch.testing.assert_close(
+                exported[name.rsplit(".", 1)[0] + "." + projection], amax / 448
+            )
+        assert not any(
+            name.startswith(prefix + decoder_name + ".") and name.endswith(("k_scale", "v_scale"))
+            for name in exported
+        )

@@ -25,8 +25,8 @@ metadata:
   recipe_type: auto_quantize
   description: >-
     Nemotron-H AutoQuantize at 4.9 effective bits over weight-MSE NVFP4, FP8, and BF16,
-    with MSE-calibrated MTP routed experts fixed at NVFP4 W4A4 and base-model FP8 KV casting.
-    Other MTP modules and vision/audio remain in BF16; MTP KV quantization is disabled.
+    with MSE-calibrated MTP routed/shared experts fixed at NVFP4 W4A4, calibrated MTP FP8 KV,
+    and base-model FP8 KV casting. Other MTP modules and vision/audio remain in BF16.
 
 quantize:
   algorithm: &mse
@@ -44,6 +44,18 @@ quantize:
     - quantizer_name: "*mtp.layers.1.mixer.experts.*input_quantizer"
       enable: true
       cfg: {$import: nvfp4}
+    - quantizer_name: "*mtp.layers.1.mixer.shared_experts.*weight_quantizer"
+      enable: true
+      cfg: *nvfp4_weight
+    - quantizer_name: "*mtp.layers.1.mixer.shared_experts.*input_quantizer"
+      enable: true
+      cfg: {$import: nvfp4}
+    # Collect MTP KV scales in the fixed calibration pass, before base-model KV casting.
+    - quantizer_name: "*mtp.*[kv]_bmm_quantizer"
+      enable: true
+      cfg: &mtp_kv_fp8
+        $import: fp8
+        use_constant_amax: false
 
 auto_quantize:
   constraints:
@@ -88,7 +100,8 @@ auto_quantize:
     quant_cfg:
       - $import: kv_fp8_cast
       - quantizer_name: "*mtp.*[kv]_bmm_quantizer"
-        enable: false
+        enable: true
+        cfg: *mtp_kv_fp8
   disabled_layers:
     - "*block_sparse_moe.gate*"
     - "*linear_attn.conv1d*"
