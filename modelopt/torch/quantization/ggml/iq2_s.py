@@ -42,6 +42,9 @@ from .codebooks import iq2_s_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
     GGMLFormat,
+    chunk_importance,
+    importance_blocks,
+    iq2_tile_terms,
     narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
@@ -102,8 +105,10 @@ def _predict_iq2_s_scales(blocks: torch.Tensor) -> torch.Tensor:
     return ((amax / _IQ2_S_NATIVE_MAX) * anchor_ratio).clamp(max=65504.0).to(torch.float16)
 
 
-def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
-    """Encode a moderate-size batch of flattened 256-value blocks."""
+def _encode_blocks(
+    blocks: torch.Tensor, grid: torch.Tensor, weights: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Encode a moderate-size batch of flattened 256-value blocks, optionally error-weighted."""
     x = narrow_to_float32(blocks)
     block_count = x.shape[0]
     vectors = x.reshape(block_count, _IQ2_S_GROUPS, 8)
@@ -113,7 +118,7 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
     d = _predict_iq2_s_scales(x)
     d_float = d.float()
 
-    xnorm = vectors.square().sum(dim=-1)
+    xnorm = (vectors.square() if weights is None else weights * vectors.square()).sum(dim=-1)
     qnorm = grid.square().sum(dim=-1)
     shape = (block_count, _IQ2_S_GROUPS, _IQ2_S_LOCAL_SCALES)
     best_error = torch.full(shape, torch.inf, dtype=torch.float32, device=x.device)
@@ -121,8 +126,9 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
     # All eight signs are storable, so the search compares magnitudes directly.
     for entry_start in range(0, _IQ2_S_GRID_ENTRIES, 64):
         grid_tile = grid[entry_start : entry_start + 64]
-        dot = (magnitudes.unsqueeze(2) * grid_tile.reshape(1, 1, -1, 8)).sum(dim=-1)
-        tile_qnorm = qnorm[entry_start : entry_start + 64].reshape(1, 1, -1)
+        dot, tile_qnorm = iq2_tile_terms(
+            magnitudes, grid_tile, qnorm[entry_start : entry_start + 64], weights
+        )
 
         for local in range(_IQ2_S_LOCAL_SCALES):
             scale = d_float.reshape(-1, 1, 1) * ((2 * local + 1) / 8.0)
@@ -159,15 +165,20 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def quantize_iq2_s(
-    weight: torch.Tensor, *, block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE
+    weight: torch.Tensor,
+    *,
+    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
+    importance: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ2_S blocks.
 
     Returned shapes are ``[*weight.shape[:-1], weight.shape[-1] // 256, 82]``
-    and ``[weight.ndim]``.
+    and ``[weight.ndim]``. ``importance``, a non-negative per-input-column vector, weights each
+    value's squared error in the search, as llama.cpp's imatrix does.
     """
     validate_weight(weight, "IQ2_S")
     validate_block_chunk_size(block_chunk_size)
+    block_importance = importance_blocks(importance, weight, "IQ2_S")
 
     logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
     blocks = weight.contiguous().reshape(-1, IQ2_S_BLOCK_SIZE)
@@ -180,11 +191,17 @@ def quantize_iq2_s(
                 _predict_iq2_s_scales(blocks[start : start + _SCALE_BLOCK_CHUNK_SIZE])
                 for start in range(0, blocks.shape[0], _SCALE_BLOCK_CHUNK_SIZE)
             ]
-            packed = extension.iq2_s_pack(blocks, grid, torch.cat(scale_chunks))
+            packed = extension.iq2_s_pack(blocks, grid, torch.cat(scale_chunks), block_importance)
             return packed.reshape(packed_shape), logical_shape
 
     chunks = [
-        _encode_blocks(blocks[start : start + block_chunk_size], grid)
+        _encode_blocks(
+            blocks[start : start + block_chunk_size],
+            grid,
+            chunk_importance(
+                block_importance, start, min(start + block_chunk_size, blocks.shape[0])
+            ),
+        )
         for start in range(0, blocks.shape[0], block_chunk_size)
     ]
     return torch.cat(chunks).reshape(packed_shape), logical_shape
@@ -244,6 +261,7 @@ IQ2_S_FORMAT = GGMLFormat(
     dequantize=dequantize_iq2_s,
     block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
     decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+    weighted=True,
 )
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq2_s and

@@ -129,11 +129,12 @@ class GPTQHelper:
 
     CACHE_NAME = "_forward_no_gptq_hessian"
 
-    def __init__(self, module, name, offload_to_cpu=False, fused=False):
+    def __init__(self, module, name, offload_to_cpu=False, fused=False, importance_weighted=False):
         """Initialize GPTQHelper with module state and Hessian storage."""
         self.module = module
         self.name = name
         self.fused = fused
+        self.importance_weighted = importance_weighted
         in_features = module.weight.shape[-1]
         device = module.weight.device
         if device.type == "meta" or (

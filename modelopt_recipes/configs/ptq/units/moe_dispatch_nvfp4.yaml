@@ -13,16 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Step-3.7 specs (HF model type ``step3p7``).
+# QuantizerCfgList snippet that enables NVFP4 (E2M1, block 16, E4M3 scales) fake quantization of the
+# MoE expert-parallel dispatch: the routed tokens entering the MoE kernel's prepare step, before vLLM
+# sends them to the expert ranks. The quantizer lives on vLLM's RoutedExperts module (vLLM >= 0.24);
+# see examples/vllm_serve/README.md for the supported paths. Pairs with the moe_combine_nvfp4 unit.
+# Requires Blackwell+ GPUs for the NVFP4 fake-quant kernels.
 
-Shares Step-3.5's architecture; its PTQ modeling lives in ``step3p5/modeling_ptq.py``,
-which matches every Step revision.
-"""
-
-from ..specs import ModelSpec, register
-
-__all__: list[str] = []
-
-# Native in transformers since 5.16. No MoESpec, for the same reasons as step3p5 (see
-# step3p5/specs.py).
-register(ModelSpec(model_type="step3p7", min_transformers_version="5.16"))
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+imports:
+  nvfp4: configs/numerics/nvfp4
+---
+  - quantizer_name: '*dispatch_quantizer'
+    cfg:
+      $import: nvfp4

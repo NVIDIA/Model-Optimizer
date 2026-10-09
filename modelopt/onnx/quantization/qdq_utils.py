@@ -484,22 +484,33 @@ def replace_scale_values(graph: onnx.GraphProto, act_scales_dict: dict[str, floa
 
     Args:
         graph: ONNX graph to modify
-        act_scales_dict: Dictionary mapping scale tensor names to their new values
+        act_scales_dict: Dictionary mapping original tensor names plus '_scale' to new values
     """
     logger.debug(f"Replacing scale values for {len(act_scales_dict)} tensors")
     initializer_indices = {init.name: idx for idx, init in enumerate(graph.initializer)}
+    graph_outputs = {output.name for output in graph.output}
+    output_scale_names = {
+        node.input[0]: node.output[0] + "_scale"
+        for node in graph.node
+        if node.op_type == "DequantizeLinear" and node.output[0] in graph_outputs
+    }
 
     for node in graph.node:
         if node.op_type != "QuantizeLinear":
             continue
 
         scale_name = node.input[1]
-        if scale_name in act_scales_dict:
+        # Recover the cached tensor identity when generated parameter names collide.
+        # ORT also renames the Q input when DQ restores an original graph output.
+        cache_scale_name = scale_name
+        if cache_scale_name not in act_scales_dict and node.input[0] not in initializer_indices:
+            cache_scale_name = output_scale_names.get(node.output[0], node.input[0] + "_scale")
+        if cache_scale_name in act_scales_dict:
             if scale_name not in initializer_indices:
                 raise ValueError(f"Scale tensor '{scale_name}' not found in graph initializers")
 
             scale = onnx.numpy_helper.from_array(
-                np.float32(act_scales_dict[scale_name]), scale_name
+                np.float32(act_scales_dict[cache_scale_name]), scale_name
             )
             graph.initializer[initializer_indices[scale_name]].CopyFrom(scale)
             logger.debug(f"Updated scale value for {scale_name}")
@@ -735,6 +746,7 @@ def qdq_to_dq(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         raise ValueError("Model graph is empty")
 
     initializers, tensor_producers, tensor_consumers = _get_graph_metadata(graph)
+    graph_outputs = {output.name for output in graph.output}
     q_nodes = [
         (idx, node) for idx, node in enumerate(graph.node) if node.op_type == "QuantizeLinear"
     ]
@@ -781,7 +793,12 @@ def qdq_to_dq(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
             else:
                 new_weight = onnx.numpy_helper.from_array(scaled.astype("int8"), weight_name)
                 logger.debug(f"Converted {weight_name} to INT8")
-            weight.CopyFrom(new_weight)
+            if len(tensor_consumers[weight_name]) > 1 or weight_name in graph_outputs:
+                # Keep the float value for other consumers and reuse the removed Q output name.
+                new_weight.name = node.output[0]
+                graph.initializer.append(new_weight)
+            else:
+                weight.CopyFrom(new_weight)
 
             # Track QuantizeLinear node indices for cleanup
             # Note. Scale and zero point tensors are shared between Q and DQ nodes and should not be deleted
@@ -794,7 +811,7 @@ def qdq_to_dq(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
             assert dq_node.op_type == "DequantizeLinear", (
                 f"Expected DequantizeLinear consumer for {node.name}"
             )
-            dq_node.input[0] = weight_name
+            dq_node.input[0] = new_weight.name
 
         except Exception as e:
             raise RuntimeError(f"Failed to convert node {node.name}: {e!s}")

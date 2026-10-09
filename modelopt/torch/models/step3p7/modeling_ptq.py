@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,12 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
-from _test_utils.examples.models import QWEN_VL_PATH
-from _test_utils.examples.run_command import run_hf_ptq_command
+"""Step-3.7 PTQ modeling (HF model type ``step3p7``).
 
+Step-3.7 shares Step-3.5's expert-indexed ``MoELinear`` layout, so its PTQ support is the
+Step-family code in ``step3p5/modeling_ptq.py``, which matches every Step revision. This
+module imports it, so that loading the PTQ modeling for model type ``step3p7`` by name
+registers that support too.
+"""
 
-@pytest.mark.timeout(420)  # PTQ + TRT-LLM multimodal deploy in one test; fp8 takes 190-270s in CI
-@pytest.mark.parametrize("quant", ["fp8", "nvfp4"])
-def test_qwen_vl(quant):
-    run_hf_ptq_command(model=QWEN_VL_PATH, quant=quant, vlm=True)
+from ..step3p5 import modeling_ptq as _step3p5_modeling_ptq  # noqa: F401
+
+__all__: list[str] = []

@@ -18,6 +18,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
          <button class="announcement-tag" type="button" data-tag="qad" aria-pressed="false">QAD</button>
          <button class="announcement-tag" type="button" data-tag="scale-learning" aria-pressed="false">Scale learning</button>
          <button class="announcement-tag" type="button" data-tag="local-hessian" aria-pressed="false">Local-Hessian</button>
+         <button class="announcement-tag" type="button" data-tag="single-gpu" aria-pressed="false">Single GPU</button>
          <button class="announcement-tag" type="button" data-tag="speculative-decoding" aria-pressed="false">Speculative decoding</button>
          <button class="announcement-tag" type="button" data-tag="dflash" aria-pressed="false">DFlash</button>
          <button class="announcement-tag" type="button" data-tag="dspark" aria-pressed="false">DSpark</button>
@@ -29,6 +30,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
+     <article class="announcement-card" data-date="2026-09-28" data-title="Quantizing a 4.9 TB Qwen3.8 Model on a Single GPU" data-summary="Layerwise calibration and per-layer shard export drop the memory floor for PTQ from one model to one layer: a 4.9 TB Qwen3.8 checkpoint quantized on a single GB300." data-tags="quantization nvfp4 layerwise moe single-gpu modelopt">
+       <div class="announcement-card-meta">September 28, 2026 &middot; Model Optimizer Team</div>
+       <h2><a href="announcements/single-gpu-ptq.html">Quantizing a 4.9 TB Qwen3.8 Model on a Single GPU</a></h2>
+       <p>Layerwise calibration and per-layer shard export drop the memory floor for PTQ from one model to one layer: a 4.9 TB Qwen3.8 checkpoint quantized on a single GB300.</p>
+       <div class="announcement-card-tags"><span>quantization</span><span>nvfp4</span><span>layerwise</span><span>moe</span><span>single-gpu</span><span>modelopt</span></div>
+     </article>
      <article class="announcement-card" data-date="2026-09-16" data-title="Scale Learning: Training NVFP4 Block Scales to Recover Accuracy" data-summary="How ModelOpt learns NVFP4 per-block weight scales with gradients instead of setting them with a calibration rule, and what that recovers." data-tags="scale-learning quantization nvfp4 qad modelopt">
        <div class="announcement-card-meta">September 16, 2026 &middot; Model Optimizer Team</div>
        <h2><a href="announcements/scale-learning.html">Scale Learning: Training NVFP4 Block Scales to Recover Accuracy</a></h2>
