@@ -38,6 +38,7 @@ from .model_utils import *
 from .moe_utils import *
 from .plugins import *
 from .quant_format import *
+from .quantized_weight_export import *
 from .registry import *
 from .shard_cast_utils import *
 from .transformer_engine import *
