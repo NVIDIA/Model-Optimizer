@@ -1081,8 +1081,25 @@ def test_tiny_llama_quantize(tiny_llama_llm, tmp_path):
 
     _assert_quantizer_amax_is_static(summary)
 
-    # A range in vLLM's own layout must remain loadable through the shared HF/MCore loader.
+    # Broadcast scalar ranges exported by MCore must reload without losing FP32 precision.
     name = "model.layers.0.self_attn.o_proj.input_quantizer"
+    scalar_recipe = tmp_path / "scalar_recipe.yaml"
+    scalar_recipe.write_text(
+        yaml.safe_dump({name: {"_disabled": False, "_num_bits": 8, "_axis": None}})
+    )
+    scalar_state = tmp_path / "scalar_state.pth"
+    scalar_amax = torch.tensor(1.001, dtype=torch.float32)
+    for shape in ((1,), (1, 1, 1)):
+        torch.save({name + "._amax": scalar_amax.reshape(shape)}, scalar_state)
+        summaries = tiny_llama_llm.collective_rpc(
+            _quantize_and_summarize, args=(str(scalar_recipe), str(scalar_state))
+        )
+        for item in summaries:
+            restored = item["restored_amaxes"][name]
+            assert restored.dtype == torch.float32
+            assert torch.equal(restored, scalar_amax)
+
+    # A range in vLLM's own layout must remain loadable through the shared HF/MCore loader.
     recipe_path = tmp_path / "channel_recipe.yaml"
     recipe_path.write_text(
         yaml.safe_dump({name: {"_disabled": False, "_num_bits": 8, "_axis": -1}})
@@ -1116,7 +1133,7 @@ def test_tiny_llama_quantize(tiny_llama_llm, tmp_path):
 
 
 def test_tiny_moe_quantize(tiny_moe_llm, tmp_path):
-    """Restore packed and per-expert recipes and ranges on real MoE models."""
+    """Calibrate default NVFP4 on Qwen3, then restore MoE recipes and ranges."""
     active = {"_disabled": False, "_num_bits": [4, 3], "_axis": None, "_block_sizes": None}
     custom = {
         **active,
@@ -1125,6 +1142,24 @@ def test_tiny_moe_quantize(tiny_moe_llm, tmp_path):
         "_backend_extra_args": {"offset": 0.25},
     }
     is_gpt_oss = tiny_moe_llm.llm_engine.model_config.hf_config.model_type == "gpt_oss"
+    if not is_gpt_oss:
+        # Preserve default NVFP4 expert weight/input calibration coverage before reload.
+        summary = tiny_moe_llm.collective_rpc(_quantize_and_summarize)[0]
+        assert summary["missing_quantizers"] == [], summary["missing_quantizers"]
+        assert summary["parallel_linear_counts"].get("QuantQKVParallelLinear", 0) >= 2
+        assert summary["parallel_linear_counts"].get("QuantRowParallelLinear", 0) >= 2
+        assert summary["moe_count"] >= 2
+        assert summary["attention_count"] >= 2
+        _assert_quantizer_amax_is_static(summary)
+        for layer in range(2):
+            for projection in ("w13", "w2"):
+                for kind in ("input", "weight"):
+                    assert any(
+                        name.startswith(f"model.layers.{layer}.mlp.experts.")
+                        and name.endswith(f"{projection}_{kind}_quantizer")
+                        for name in summary["enabled_quantizers"]
+                    ), summary["enabled_quantizers"]
+
     recipe = {}
     for layer in range(2):
         if not is_gpt_oss:

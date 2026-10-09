@@ -92,6 +92,10 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
             quantizer.float()
             quantizer.amax = torch.full_like(quantizer.amax, 1.001)
 
+    # Valid per-tensor broadcast ranges retain their FP32 values in the sidecar.
+    singleton = model.decoder.layers[1].self_attention.linear_qkv.input_quantizer
+    singleton.reset_amax()
+    singleton.amax = torch.tensor([1.001], dtype=torch.float32, device="cuda")
     layer = model.decoder.layers[0]
     output = layer.self_attention.linear_qkv.output_quantizer
     output.set_from_attribute_config({"num_bits": 8, "axis": None, "enable": True})
@@ -208,6 +212,10 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
         amax={name: 448.0 if name in constant_names else 1.001 for name in expected_names},
         disabled_names={name for name in expected_names if name.startswith("model.layers.0.mlp.")},
     )
+    for projection in ("q", "k", "v"):
+        assert state[f"model.layers.1.self_attn.{projection}_proj.input_quantizer._amax"].shape == (
+            1,
+        )
     for (projections, _), expected_weight in zip(linears, expected_weights):
         folded_weights = []
         for projection in projections:

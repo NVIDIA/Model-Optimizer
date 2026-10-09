@@ -641,6 +641,9 @@ def process_state_dict_for_tp(saved_qstate_dict, current_state_dict):
         if key in current_state_dict:
             expected = current_state_dict[key]
             if hasattr(value, "shape") and hasattr(expected, "shape"):
+                # Broadcast scalar ranges may be saved with singleton dimensions.
+                if key.endswith("._amax") and value.numel() == expected.numel() == 1:
+                    value = value.reshape(expected.shape)
                 value = _narrow_tensor_to_tp_local_shard(
                     value,
                     expected.shape,
