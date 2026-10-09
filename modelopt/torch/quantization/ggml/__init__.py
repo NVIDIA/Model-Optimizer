@@ -30,7 +30,7 @@ from .iq2_xxs import *
 from .iq2_xxs import __all__ as _iq2_xxs_all
 from .q8_0 import *
 from .q8_0 import __all__ as _q8_0_all
-from .registry import GGML_FORMAT_REGISTRY, IQ_FORMAT_REGISTRY, GGMLFormat, IQFormat
+from .registry import GGML_FORMAT_REGISTRY, IQ_FORMAT_REGISTRY, GGMLFormat
 
 __all__ = [  # noqa: PLE0604
     *_iq1_m_all,
@@ -42,5 +42,4 @@ __all__ = [  # noqa: PLE0604
     "GGML_FORMAT_REGISTRY",
     "GGMLFormat",
     "IQ_FORMAT_REGISTRY",
-    "IQFormat",
 ]

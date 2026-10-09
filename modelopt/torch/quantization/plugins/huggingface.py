@@ -15,6 +15,7 @@
 
 """Support quantization for huggingface layers."""
 
+import importlib
 import inspect
 import logging
 import re
@@ -29,9 +30,6 @@ import transformers
 from torch import Tensor
 from torch.nn.functional import linear
 from transformers.integrations.finegrained_fp8 import FP8Linear
-from transformers.models.falcon.modeling_falcon import FalconLinear
-from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts
-from transformers.models.llama4.modeling_llama4 import Llama4TextExperts
 from transformers.models.t5.modeling_t5 import T5Attention
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_FA_AVAILABLE
@@ -769,28 +767,6 @@ class _QuantSparseSequentialMoe(QuantModule):
         sync_moe_expert_amax(self.experts, sync_weight_amax=sync_weight_amax)
 
 
-class _QuantLlama4TextExperts(_TransposedExpertsCalibMixin, QuantModule):
-    def _setup(self):
-        self.gate_up_proj_input_quantizer = TensorQuantizer()
-        self.gate_up_proj_weight_quantizer = TensorQuantizer()
-        self.down_proj_input_quantizer = TensorQuantizer()
-        self.down_proj_weight_quantizer = TensorQuantizer()
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = hidden_states.view(self.num_experts, -1, self.hidden_size)
-        gate_up = torch.bmm(
-            self.gate_up_proj_input_quantizer(hidden_states),
-            _transposed_quantize(self.gate_up_proj, self.gate_up_proj_weight_quantizer),
-        )
-        gate, up = gate_up.chunk(2, dim=-1)  # not supported for DTensors
-        next_states = torch.bmm(
-            self.down_proj_input_quantizer(up * self.act_fn(gate)),
-            _transposed_quantize(self.down_proj, self.down_proj_weight_quantizer),
-        )
-        next_states = next_states.view(-1, self.hidden_size)
-        return next_states
-
-
 def _get_fused_expert_intermediate_dim(module):
     """Resolve the intermediate (expert) dimension from a fused expert module.
 
@@ -1215,14 +1191,6 @@ class _QuantFP8Linear(QuantModule):
             del self.weight_scale_inv
 
 
-if Llama4TextExperts not in QuantModuleRegistry:
-    QuantModuleRegistry.register({Llama4TextExperts: "hf.Llama4TextExperts"})(
-        _QuantLlama4TextExperts
-    )
-
-if FalconLinear not in QuantModuleRegistry:
-    QuantModuleRegistry.register({FalconLinear: "hf.FalconLinear"})(_QuantLinear)
-
 try:
     from compressed_tensors.linear.compressed_linear import CompressedLinear
 
@@ -1235,109 +1203,6 @@ except ImportError:
 
 if FP8Linear not in QuantModuleRegistry:
     QuantModuleRegistry.register({FP8Linear: "hf.FP8Linear"})(_QuantFP8Linear)
-
-
-class _QuantGptOssExperts(_TransposedExpertsCalibMixin, _QuantFunctionalMixin):
-    """Quantized wrapper for `transformers.GptOssExperts`.
-
-    Quantizes `gate_up_proj` and `down_proj` weights via dynamic attributes inside `quantize_weight()`.
-    Activations into `gate_up_proj` are quantized by `gate_up_proj_input_quantizer`. For `down_proj`
-    activation quantization, we intercept `torch.Tensor.__matmul__`/`torch.bmm` and quantize inputs
-    on every second call (since the first call computes `gate_up_proj` outputs and second call
-    computes `down_proj` outputs).
-    """
-
-    @staticmethod
-    def _get_quantized_weight(quantizer, module, weight):
-        # MoE weight is accessed for each expert in one forward pass. so lets cache it
-        if module._enable_weight_quantization:
-            if hasattr(quantizer, "_cached_quant_val"):
-                return getattr(quantizer, "_cached_quant_val")
-            quantizer._cached_quant_val = _transposed_quantize(weight, quantizer)
-            return quantizer._cached_quant_val
-        return weight
-
-    def _setup_for_weight_quantization(self):
-        self._register_dynamic_attribute(
-            "gate_up_proj", partial(self._get_quantized_weight, self.gate_up_proj_weight_quantizer)
-        )
-        self._register_dynamic_attribute(
-            "down_proj", partial(self._get_quantized_weight, self.down_proj_weight_quantizer)
-        )
-
-    def _setup(self):
-        assert not hasattr(self, "kernel_layer_name"), (
-            "ModelOpt quantization does not support patched forward for kernel_hub"
-        )
-        self.gate_up_proj_input_quantizer = TensorQuantizer()
-        self.gate_up_proj_weight_quantizer = TensorQuantizer()
-        self.down_proj_input_quantizer = TensorQuantizer()
-        self.down_proj_weight_quantizer = TensorQuantizer()
-
-        self._register_temp_attribute("_enable_weight_quantization", False)
-        self._register_temp_attribute("_down_proj_mul", False)
-        self._setup_for_weight_quantization()
-
-    @property
-    def functionals_to_replace(self):
-        # Use torch.ops.aten to bypass Python dispatch and avoid RecursionError
-        # (torch.matmul / __matmul__ can dispatch to each other)
-        _aten_bmm = torch.ops.aten.bmm
-        _aten_matmul = torch.ops.aten.matmul
-
-        def _quantized_bmm(batch1, batch2, *, out=None):
-            batch1 = self.down_proj_input_quantizer(batch1) if self._down_proj_mul else batch1
-            self._down_proj_mul = not self._down_proj_mul  # toggle the flag
-            if out is not None:
-                return torch.ops.aten.bmm.out(batch1, batch2, out=out)
-            return _aten_bmm(batch1, batch2)
-
-        def _tensor_matmul(self_t, other):
-            self_t = self.down_proj_input_quantizer(self_t) if self._down_proj_mul else self_t
-            self._down_proj_mul = not self._down_proj_mul
-            return _aten_matmul(self_t, other)
-
-        return [
-            (torch, "bmm", _quantized_bmm),
-            (torch.Tensor, "__matmul__", _tensor_matmul),
-        ]
-
-    @contextmanager
-    def quantize_weight(self):
-        """Context in which MoE weight is quantized."""
-        self._enable_weight_quantization = True
-        try:
-            yield
-        finally:
-            for module in self.modules():
-                if isinstance(module, TensorQuantizer) and hasattr(module, "_cached_quant_val"):
-                    delattr(module, "_cached_quant_val")
-        self._enable_weight_quantization = False
-
-    def forward(
-        self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None
-    ) -> torch.Tensor:
-        """Forward method to add quantization."""
-        hidden_states = self.gate_up_proj_input_quantizer(hidden_states)
-        with self.quantize_weight():
-            return super().forward(hidden_states, router_indices, routing_weights)
-
-
-if GptOssExperts not in QuantModuleRegistry:
-    QuantModuleRegistry.register({GptOssExperts: "hf.GptOssExperts"})(_QuantGptOssExperts)
-
-
-def register_falcon_linears_on_the_fly(model):
-    """Register Falcon linear modules as a QUANT_MODULE.
-
-    Certain falcon models (for example, falcon 40b) use remote code, which are loaded dynamically, to build their model.
-    Therefore, we need to register the linear on the fly before quantization.
-    """
-    if type(model).__name__ in ["RWForCausalLM", "FalconForCausalLM"]:
-        linear_type = type(model.transformer.h[0].self_attention.dense)
-        # Create a QuantFalconLinear class on the fly
-        if QuantModuleRegistry.get(linear_type) is None:
-            QuantModuleRegistry.register({linear_type: linear_type.__name__})(_QuantLinear)
 
 
 def _has_num_experts(obj):
@@ -1529,27 +1394,9 @@ def _is_supported_hf_model(model):
     return isinstance(model, tuple(supported_models))
 
 
-def is_nemotron_h_model(model: nn.Module) -> bool:
-    return get_nemotron_h_decoder_layers(model) is not None
-
-
-def get_nemotron_h_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
-    if not _is_supported_hf_model(model):
-        return None
-
-    # Custom remote-code checkpoint uses model.backbone.layers;
-    # native transformers NemotronHModel uses model.model.layers.
-    for container_attr in ("backbone", "model"):
-        container = getattr(model, container_attr, None)
-        if container is not None and hasattr(container, "layers"):
-            layers = container.layers
-            if layers and hasattr(layers[0], "block_type"):
-                return layers
-
-    return None
-
-
 def is_homogeneous_hf_model(model: nn.Module) -> bool:
+    from modelopt.torch.models.nemotron_h.modeling_ptq import is_nemotron_h_model
+
     if is_nemotron_h_model(model):
         return False
     decoder_layers = get_homogeneous_hf_decoder_layers(model)
@@ -1627,12 +1474,18 @@ AutoQuantizeGradientSearcher.register_custom_support(
     _is_param_grad_enabled_for_auto_quantize,
 )
 
-# Order matters: more specific predicates must be registered first because
-# the first matching entry wins.  Nemotron-H must precede the generic
-# homogeneous HF discoverer (which explicitly rejects Nemotron-H).
-LayerActivationCollector.register_decoder_layer_support(
-    is_nemotron_h_model, get_nemotron_h_decoder_layers
-)
+# Model-specific PTQ support lives with its model in
+# ``modelopt/torch/models/<model_type>/modeling_ptq.py`` and registers itself on import. It is
+# imported here: after the generic wrappers it builds on are defined, and before the
+# homogeneous decoder discoverer below, since the first matching discoverer wins and
+# Nemotron-H's is the more specific one.
+for _model_type in (
+    "falcon",
+    "gpt_oss",
+    "llama4",
+    "nemotron_h",
+):
+    importlib.import_module(f"modelopt.torch.models.{_model_type}.modeling_ptq")
 
 LayerActivationCollector.register_decoder_layer_support(
     is_homogeneous_hf_model, get_homogeneous_hf_decoder_layers
@@ -1867,7 +1720,6 @@ def _reconstruct_fused_moe_linear(model: nn.Module) -> None:
 
 CUSTOM_MODEL_PLUGINS.update(
     [
-        register_falcon_linears_on_the_fly,
         register_moe_linear_on_the_fly,
         register_fused_experts_on_the_fly,
         force_eager_experts_impl_on_the_fly,

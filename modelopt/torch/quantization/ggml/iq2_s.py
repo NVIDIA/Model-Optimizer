@@ -41,7 +41,7 @@ from ..extensions import get_cuda_ext_ggml
 from .codebooks import iq2_s_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
-    IQFormat,
+    GGMLFormat,
     narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
@@ -236,7 +236,7 @@ def dequantize_iq2_s(
     return decoded.reshape(shape)
 
 
-IQ2_S_FORMAT = IQFormat(
+IQ2_S_FORMAT = GGMLFormat(
     name="iq2_s",
     block_size=IQ2_S_BLOCK_SIZE,
     block_bytes=IQ2_S_BLOCK_BYTES,

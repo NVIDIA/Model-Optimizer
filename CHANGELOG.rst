@@ -13,7 +13,9 @@ Changelog
 
 *Quantization*
 
+- Add Q8_0 weight-only quantization with 32-value GGML blocks, packed unified HF and Megatron export, and a built-in ``q8_0`` PTQ recipe.
 - Add Hugging Face PTQ calibration and export support for Nemotron-H MTP modules, preserving calibrated expert input scales.
+- Backfill checkpoint aliases for three more published NVFP4 releases: ``moonshotai/Kimi-K2.7-Code``, ``google/gemma-4-26B-A4B-it`` and ``google/diffusiongemma-26B-A4B-it``. Each imports an existing general recipe wholesale rather than copying its body.
 - Backfill checkpoint aliases for nine more published NVFP4 releases, so each is reachable from its source model's hub path: ``zai-org/GLM-5.1`` and ``GLM-5.2``, ``MiniMaxAI/MiniMax-M2.5`` and ``MiniMax-M3``, ``deepseek-ai/DeepSeek-V3.1`` and ``DeepSeek-V3.2``, ``Qwen/Qwen3-235B-A22B-Instruct-2507`` and ``-Thinking-2507``, and ``Qwen/Qwen3.6-27B``. Each imports an existing general or architecture recipe wholesale rather than copying its body.
 - Add composed Hugging Face AutoQuantize recipes that run fixed PTQ or weight AutoQuantize before
   a separate KV-cache AutoQuantize stage, with independent resumable checkpoints for the weight and
@@ -36,6 +38,7 @@ Changelog
 - vLLM fake-quant serving now runs on pre-quantized checkpoints such as FP8 when the recipe leaves those layers unquantized (for example a KV-cache-only recipe), and on MLA models with an FP8 KV cache; both previously failed during quantization.
 - ``KV_QUANT_CFG`` presets in vLLM fake-quant serving now quantize the MLA KV cache; on vLLM 0.16 and later they silently quantized nothing for MLA models.
 - vLLM fake-quant serving of NVFP4 and cast-mode KV-cache configs no longer needs ``--enforce-eager``. ``examples/vllm_serve/vllm_serve_fakequant.py`` now sets ``VLLM_DISABLE_COMPILE_CACHE=1`` for fake-quant serves by default, because a cached torch.compile graph of the same model without the fake quant would otherwise be reused.
+- ``examples/deepseek/deepseek_v4/ptq.py`` now supports DeepSeek-V4.1-Flash, whose reference implementation uses 32x32 FP8 blocks and a tokenizer-aware ``Transformer``; this is the setup used to produce ``nvidia/DeepSeek-V4.1-Flash-NVFP4``. DeepSeek-V4-Pro checkpoints work as before.
 
 *Speculative Decoding*
 
@@ -105,6 +108,7 @@ Changelog
 
 **Deprecations**
 
+- The Diffusers ONNX export and TensorRT engine deployment workflow is deprecated and will be removed no earlier than 0.49.0, after the one-release migration period. Export unified Hugging Face checkpoints with ``--hf-ckpt-dir`` and follow the `diffusion deployment guide <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/diffusers#hf-checkpoint-deployment>`_ to select a compatible backend.
 - The ``examples/vllm_serve`` ``QUANT_CFG`` / ``KV_QUANT_CFG`` environment variables and their
   ``--modelopt-quant-cfg`` / ``--modelopt-kv-quant-cfg`` flags will be deprecated in a future release.
   For new runs, use a PTQ recipe via ``RECIPE_PATH`` or ``--modelopt-recipe-path``; unset the old
@@ -138,6 +142,11 @@ Changelog
   projector names instead of restoring the hub layout; deployment loaders could skip those weights.
   Streaming, offload, FSDP2, and layerwise export now reject reverse conversions that regroup
   tensors; use resident export for those models.
+- Fix that same reverse rename double-prefixing tensors copied from the source checkpoint rather
+  than loaded by the model, when a conversion mapping renames a module to a suffix of its original
+  name. Those tensors already carry the hub name, so C-RADIO towers exported
+  ``vision_model.radio_model.radio_model.input_conditioner.norm_mean``. Re-export affected
+  checkpoints.
 - Fix shared ONNX export metadata and Diffusers attention policy: every ``NVFP4QuantExporter`` post-process now upgrades the default-domain opset to at least 23, all FP8 custom-op exports re-run ONNX shape/type inference after setting output metadata, and quantized SDPA derives FP8 MHA enablement from the live Q/K/V quantizers instead of honoring a caller-set ``_disable_fp8_mha`` attribute.
 - Fix ONNX FP16 conversion failing to preserve public output types when type inference changes a graph output declaration before output casts are inserted.
 - Fix ``examples/hf_ptq/hf_ptq.py`` discarding a completed PTQ run (no checkpoint exported) when the optional post-quantization sanity-check ``generate()`` call raised, for example because ``device_map="auto"`` placed part of the model on CPU. That failure is now caught and only skips the sanity check; export proceeds regardless.
@@ -155,6 +164,7 @@ Changelog
 - Fix two issues in the vLLM offline hidden-state dump (``examples/speculative_decoding/collect_hidden_states/compute_hidden_states_vllm.py``) that only surface on large runs. **Resume:** the filter that skips conversations whose ``.pt`` already exists now runs with ``load_from_cache_file=False``. It depends on on-disk state, which is not part of the fingerprint ``datasets`` computes from the function and the dataset, so with a persistent HF cache reused across a resumed or requeued run the cached "keep everything" result from an earlier run was replayed and the dump re-generated and overwrote conversations it had already finished (observed: tens of thousands of ``.pt`` rewritten while the output count stayed flat). **Staging:** generation is now chunked (``--save-chunk-size``, default 256), so each chunk is saved and its staged hidden states freed before the next chunk is generated. Previously the whole dataset was generated before anything was saved, which kept every conversation staged in the connector's ``shared_storage_path`` (``/dev/shm``, i.e. RAM, by default) at once and exhausted it partway through large dumps. Chunking also makes the dump incrementally durable, so an interrupted run keeps its finished conversations and resumes from them. The save path now also frees each conversation's staged hidden states in a ``finally``, so a conversation skipped mid-loop (e.g. a short ``loss_mask``) can no longer leak its staging file, and conversation ids are validated as plain filenames before being used to build output paths.
 - Fix YAML config I/O decoding with the locale codepage instead of UTF-8, which made a config containing any non-ASCII byte fail to load on a machine whose locale is not UTF-8 (notably Windows, where the default is cp1252). ``modelopt/recipe/loader.py``, the two ONNX autotune state files, the two transformers config readers, the distill config and the puzzletron profile now pass ``encoding="utf-8"`` explicitly. Only the YAML config paths are covered: these are the files most likely to carry non-ASCII text in comments, model names or paths, and the only ones read inside a user's process.
 - Hybrid (e.g. Nemotron-H) checkpoints saved by the ``examples/megatron_bridge`` scripts now record their layer spec in ``run_config.yaml`` in a form that reloads, so they can be converted to HuggingFace; a checkpoint saved by an earlier release still needs its ``model.hybrid_stack_spec`` block replaced by hand.
+- Fix ONNX export of quantized models failing with ``Unsupported op_type for real weight quantization: Transpose`` when a weight reaches its consumer transposed, as in MaxViT's attention blocks. The same export now also quantizes each weight along the axis its Q/DQ pair declares, correcting silently wrong ``dq_only`` output when that axis differed from the consumer's default.
 
 0.47.0 (2026-09-23)
 ^^^^^^^^^^^^^^^^^^^

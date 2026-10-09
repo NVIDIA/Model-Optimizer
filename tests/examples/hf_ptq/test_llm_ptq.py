@@ -60,6 +60,8 @@ def test_ptq_mixtral(command):
         PTQCommand(recipe="general/ptq/iq2_xxs", kv_cache_quant="none"),
         PTQCommand(recipe="general/ptq/iq2_xs", kv_cache_quant="none"),
         PTQCommand(recipe="general/ptq/iq2_s", kv_cache_quant="none"),
+        # Q8_0 has 32-value blocks and needs no calibration forward pass.
+        PTQCommand(recipe="general/ptq/q8_0", kv_cache_quant="none"),
         PTQCommand(quant="nvfp4"),
         PTQCommand(quant="nvfp4_awq_lite"),
         # autoquant (recipe-driven)

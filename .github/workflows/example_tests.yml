@@ -31,6 +31,7 @@ jobs:
       vllm: ${{ steps.lanes.outputs.vllm }}
       trtllm: ${{ steps.lanes.outputs.trtllm }}
       megatron: ${{ steps.lanes.outputs.megatron }}
+      diffusers: ${{ steps.lanes.outputs.diffusers }}
       onnx: ${{ steps.lanes.outputs.onnx }}
     steps:
       - uses: actions/checkout@v6
@@ -76,8 +77,11 @@ jobs:
             megatron:
               - "{examples,tests/examples}/megatron_bridge/**"
               - "!**/*.{md,rst,png,ipynb}"
+            diffusers:
+              - "{examples,tests/examples}/diffusers/**"
+              - "!**/*.{md,rst,png,ipynb}"
             onnx:
-              - "{examples,tests/examples}/{diffusers,torch_onnx,torch_trt}/**"
+              - "{examples,tests/examples}/{torch_onnx,torch_trt}/**"
               - examples/onnx_ptq/** # torch_trt reuses onnx_ptq
               - "!**/*.{md,rst,png,ipynb}"
       - id: lanes
@@ -89,10 +93,11 @@ jobs:
           VLLM: ${{ steps.changed.outputs.vllm_any_modified }}
           TRTLLM: ${{ steps.changed.outputs.trtllm_any_modified }}
           MEGATRON: ${{ steps.changed.outputs.megatron_any_modified }}
+          DIFFUSERS: ${{ steps.changed.outputs.diffusers_any_modified }}
           ONNX: ${{ steps.changed.outputs.onnx_any_modified }}
         run: |
           any=false
-          for lane in TORCH VLLM TRTLLM MEGATRON ONNX; do
+          for lane in TORCH VLLM TRTLLM MEGATRON DIFFUSERS ONNX; do
             if [[ "$NON_PR" == "true" || "$COMMON" == "true" || "${!lane}" == "true" ]]; then
               run=true
               any=true
@@ -187,6 +192,23 @@ jobs:
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
       allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), ',megatron_bridge,') }}
 
+  ##### Diffusers Example Tests #####
+  diffusers:
+    needs: [pr-gate]
+    if: needs.pr-gate.outputs.diffusers == 'true'
+    uses: ./.github/workflows/_example_tests_runner.yml
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      # Retain the existing environment while retiring the ONNX/TensorRT workflow.
+      docker_image: "nvcr.io/nvidia/tensorrt:26.05-py3"
+      example: diffusers
+      timeout_minutes: 60
+      pip_install_extras: "[onnx,hf,dev-test]"
+      runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
+      allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), ',diffusers,') }}
+
   ##### ONNX/TensorRT Example Tests #####
   onnx:
     needs: [pr-gate]
@@ -194,7 +216,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [diffusers, torch_onnx, torch_trt]
+        example: [torch_onnx, torch_trt]
     uses: ./.github/workflows/_example_tests_runner.yml
     permissions:
       contents: read
@@ -205,7 +227,7 @@ jobs:
       # a torch-tensorrt build for the newer TensorRT is available.
       docker_image: "nvcr.io/nvidia/tensorrt:26.05-py3"
       example: ${{ matrix.example }}
-      timeout_minutes: ${{ matrix.example == 'diffusers' && 60 || 45 }}
+      timeout_minutes: 45
       pip_install_extras: "[onnx,hf,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
       allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), format(',{0},', matrix.example)) }}
@@ -214,7 +236,7 @@ jobs:
   example-pr-required-check:
     # Run even if example tests are skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [pr-gate, torch, vllm, trtllm, megatron, onnx]
+    needs: [pr-gate, torch, vllm, trtllm, megatron, diffusers, onnx]
     runs-on: ubuntu-latest
     steps:
       - name: Required example tests did not succeed
@@ -225,6 +247,7 @@ jobs:
             !contains(fromJSON('["success", "skipped"]'), needs.vllm.result) ||
             !contains(fromJSON('["success", "skipped"]'), needs.trtllm.result) ||
             !contains(fromJSON('["success", "skipped"]'), needs.megatron.result) ||
+            !contains(fromJSON('["success", "skipped"]'), needs.diffusers.result) ||
             !contains(fromJSON('["success", "skipped"]'), needs.onnx.result)
           ))
         run: exit 1
