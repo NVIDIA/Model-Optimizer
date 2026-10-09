@@ -83,12 +83,12 @@ class DistillArguments(ModelOptHFArguments):
             )
         },
     )
-    kd_loss_weight: float = field(
+    kd_loss_alpha: float = field(
         default=1.0,
         metadata={
             "help": (
                 "Weight for KD loss in the combined training loss. "
-                "The CE (cross-entropy) loss weight is (1 - kd_loss_weight). "
+                "The CE (cross-entropy) loss weight is (1 - kd_loss_alpha). "
                 "Set to 1.0 (default) for pure KD loss. "
                 "Set to a value in (0, 1) to blend KD and CE losses, "
                 "e.g. 0.7 for 70% KD loss + 30% CE loss."
@@ -157,13 +157,13 @@ class KDTrainer(ModelOptHFTrainer):
         self._teacher_prepared = False
         self._eval_ce_loss_totals = None
 
-        kd_loss_weight = distill_args.kd_loss_weight
-        if not 0.0 < kd_loss_weight <= 1.0:
+        kd_loss_alpha = distill_args.kd_loss_alpha
+        if not 0.0 < kd_loss_alpha <= 1.0:
             raise ValueError(
-                f"`kd_loss_weight` must be in (0, 1]. Got {kd_loss_weight}. "
+                f"`kd_loss_alpha` must be in (0, 1]. Got {kd_loss_alpha}. "
                 "Set to 1.0 for pure KD loss or a value in (0, 1) to blend KD and CE losses."
             )
-        self._kd_loss_weight = kd_loss_weight
+        self._kd_loss_alpha = kd_loss_alpha
 
         if self.use_liger_kernel:
             self._liger_temperature = distill_args.temperature
@@ -212,12 +212,12 @@ class KDTrainer(ModelOptHFTrainer):
 
         During training and evaluation, the total loss is::
 
-            loss = kd_loss_weight * kd_loss + (1 - kd_loss_weight) * ce_loss
+            loss = kd_loss_alpha * kd_loss + (1 - kd_loss_alpha) * ce_loss
 
-        When ``kd_loss_weight=1.0`` (the default), this reduces to pure KD loss and the
+        When ``kd_loss_alpha=1.0`` (the default), this reduces to pure KD loss and the
         student is forwarded without labels to skip CE computation.
 
-        When ``kd_loss_weight < 1.0``, the blended loss is used consistently during both
+        When ``kd_loss_alpha < 1.0``, the blended loss is used consistently during both
         training and evaluation; the pure CE component is additionally recorded separately
         as ``eval_ce_loss``.
         """
@@ -231,13 +231,13 @@ class KDTrainer(ModelOptHFTrainer):
         if is_training:
             student_context = self._liger_identity_lm_head if self.use_liger_kernel else nullcontext
             with student_context():
-                if self._kd_loss_weight < 1.0 and not self.use_liger_kernel:
+                if self._kd_loss_alpha < 1.0 and not self.use_liger_kernel:
                     ce_loss, outputs = super().compute_loss(
                         model, inputs, return_outputs=True, **kwargs
                     )
                 else:
                     outputs = model(**kd_inputs)
-                    if self._kd_loss_weight < 1.0:
+                    if self._kd_loss_alpha < 1.0:
                         ce_loss = self._liger_loss_func(outputs, labels, **kwargs)
         else:
             ce_loss, outputs = super().compute_loss(model, inputs, return_outputs=True, **kwargs)
@@ -246,8 +246,8 @@ class KDTrainer(ModelOptHFTrainer):
 
         kd_loss = self._compute_kd_loss(outputs, labels, kd_inputs, **kwargs)
 
-        if self._kd_loss_weight < 1.0:
-            loss = self._kd_loss_weight * kd_loss + (1.0 - self._kd_loss_weight) * ce_loss
+        if self._kd_loss_alpha < 1.0:
+            loss = self._kd_loss_alpha * kd_loss + (1.0 - self._kd_loss_alpha) * ce_loss
         else:
             loss = kd_loss
 
@@ -299,7 +299,7 @@ class KDTrainer(ModelOptHFTrainer):
                 # average_tokens_across_devices is active, num_items_in_batch is
                 # the global count and DDP will average gradients across ranks.
                 # HF's parent compute_loss already multiplies CE by world_size;
-                # we must do the same for KD so the configured kd_loss_weight
+                # we must do the same for KD so the configured kd_loss_alpha
                 # ratio is preserved.
                 if getattr(self.args, "average_tokens_across_devices", False):
                     loss = loss * self.args.world_size

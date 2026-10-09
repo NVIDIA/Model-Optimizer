@@ -102,7 +102,7 @@ def _make_batch():
     return default_data_collator([_ToyDataset()[0], _ToyDataset()[1]])
 
 
-def _make_trainer(tmp_path, student, teacher, use_liger_kernel=False, kd_loss_weight=1.0, **kwargs):
+def _make_trainer(tmp_path, student, teacher, use_liger_kernel=False, kd_loss_alpha=1.0, **kwargs):
     use_cpu = kwargs.pop("use_cpu", True)
     training_args = TrainingArguments(
         output_dir=str(tmp_path),
@@ -117,7 +117,7 @@ def _make_trainer(tmp_path, student, teacher, use_liger_kernel=False, kd_loss_we
         args=training_args,
         eval_dataset=_ToyDataset(),
         data_collator=default_data_collator,
-        distill_args={"teacher_model": teacher, "kd_loss_weight": kd_loss_weight},
+        distill_args={"teacher_model": teacher, "kd_loss_alpha": kd_loss_alpha},
     )
 
 
@@ -149,7 +149,7 @@ def test_liger_kd_gradient_accumulation_scaling(tmp_path):
     full_batch = {k: v.cuda() for k, v in full_batch.items()}
 
     trainer = _make_trainer(
-        tmp_path, student, teacher, use_liger_kernel=True, kd_loss_weight=0.5, use_cpu=False
+        tmp_path, student, teacher, use_liger_kernel=True, kd_loss_alpha=0.5, use_cpu=False
     )
 
     trainer.model.train()
@@ -190,7 +190,7 @@ def test_training_loss_preserves_liger_label_smoothing(tmp_path):
     batch = {k: v.cuda() for k, v in batch.items()}
 
     trainer = _make_trainer(
-        tmp_path, student, teacher, use_liger_kernel=True, kd_loss_weight=0.5, use_cpu=False
+        tmp_path, student, teacher, use_liger_kernel=True, kd_loss_alpha=0.5, use_cpu=False
     )
 
     if not hasattr(trainer, "trainer_args"):
