@@ -68,7 +68,7 @@ except ImportError:
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
-from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
@@ -102,7 +102,7 @@ from .quant_aware_conversion import (
 )
 from .quant_format import (
     FUSION_FREE_FORMATS,
-    IQ_FORMATS,
+    GGML_FORMATS,
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
     QUANTIZATION_FP8_PC_PT,
@@ -634,13 +634,13 @@ def _export_quantized_weight(
             "which dispatches to the streaming writer that materialises weights layer-by-layer."
         )
 
-    if quantization_format in IQ_FORMATS:
+    if quantization_format in GGML_FORMATS:
         if weight_name != "weight":
             raise NotImplementedError(
-                "IQ unified export currently supports modules with a standard 'weight' "
+                "GGML unified export currently supports modules with a standard 'weight' "
                 f"attribute, got {weight_name!r} on {type(sub_module).__name__}"
             )
-        packed_weight = IQ_FORMAT_REGISTRY[quantization_format].pack(
+        packed_weight = GGML_FORMAT_REGISTRY[quantization_format].pack(
             weight.to(dtype), getattr(sub_module, quantizer_attrs.weight_quantizer, None)
         )
         setattr(sub_module, weight_name, nn.Parameter(packed_weight, requires_grad=False))
@@ -1027,10 +1027,9 @@ def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
 
 def pack_quantized_weights(model, dtype, is_modelopt_qlora: bool = False) -> None:
     """Quantize every module's weight in place, then rebuild the fused MoE linears."""
-    # Deferred: modelopt.torch.quantization.plugins.huggingface imports transformers at module
-    # scope, and transformers is an optional extra -- importing it here keeps
-    # ``import modelopt.torch.export`` working without it.
-    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+    # Deferred: modelopt.torch.quantization imports modelopt.torch.export, so importing the
+    # per-model PTQ module at module scope here would risk an import cycle.
+    from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
 
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
     _reconstruct_fused_moe_linear(model)

@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 31 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 32 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -63,6 +63,7 @@ supported combinations.
 | `iq2_xxs` | IQ2_XXS W2A16 (2.06 bpw), MLP + MoE weights only | none | GPTQ (layerwise) |
 | `iq2_xs` | IQ2_XS W2A16 (2.31 bpw), MLP + MoE weights only | none | GPTQ (layerwise) |
 | `iq2_s` | IQ2_S W2A16 (2.56 bpw), MLP + MoE weights only | none | GPTQ (layerwise) |
+| `q8_0` | Q8_0 W8A16 (8.5 bpw), eligible linears | none | none (no calibration) |
 
 </details>
 
@@ -152,6 +153,12 @@ activations and tensor-core math are what deliver the throughput.
   Unified HF export writes the packed GGML blocks; Megatron export additionally
   requires tensor and pipeline parallel sizes of 1, and does not support
   fused-MoE experts.
+- **`q8_0`** — GGML-compatible weight-only quantization on eligible linear layers,
+  with BF16 activations; `lm_head`, MoE routers, `conv1d` and the vision branch stay
+  in BF16. Q8_0 uses 8.5 bits per weight and requires no calibration data. Quantized
+  weights must have a final dimension divisible by 32. Unified HF and Megatron
+  export write packed GGML blocks; Megatron requires tensor and pipeline parallel
+  sizes of 1 and does not support fused-MoE experts.
 
 ---
 
@@ -512,9 +519,9 @@ checkpoint's** quant config verbatim:
   wildcards reach `linear_attn.conv1d` too — matching the published checkpoint,
   whose `hf_quant_config.json` lists `linear_attn.conv1d` as FP8 on every gated-delta
   layer (the full-attention layers have no `conv1d`). The
-  source ships as native block-FP8 (`weight_block_size [128, 128]`); the loader
-  dequantizes it to BF16 before quantizers are inserted, so the scales are
-  calibrated against BF16 weights, not the shipped FP8.
+  source is the plain-BF16 `Qwen/Qwen3.8-2.4T-A95B` (no `quantization_config`), so
+  the scales are calibrated directly against BF16 weights. The block-FP8
+  `Qwen/Qwen3.8-2.4T-A95B-FP8` is a separate release, not the validated source.
 - **`models/zai-org/GLM-5.3-Flash-BF16/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`** is
   the NVFP4 config for `zai-org/GLM-5.3-Flash-BF16`, a `glm5_next` VLM MoE with
   **hybrid attention** — KDA (linear-attention) layers interleaved with NoPE
@@ -556,6 +563,15 @@ entry is a thin **alias** that imports that recipe wholesale and overrides only
   `model_type/qwen3_5_moe/ptq/nvfp4_experts_mse-fp8_rest-kv_fp8` — NVFP4 (MSE static weights)
   on the routed experts, ModelOpt-default FP8 elsewhere, and an FP8 KV cache — as published in
   `nvidia/Qwen3.5-397B-A17B-NVFP4-V2`.
+- **`models/moonshotai/Kimi-K2.7-Code/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast`**
+  aliases `general/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast` — expert-only NVFP4 with
+  the expert `input_scale` pinned to 1.0 (no activation calibration) and an FP8 KV cache in
+  cast mode — as published in `nvidia/Kimi-K2.7-Code-NVFP4`.
+- **`models/google/gemma-4-26B-A4B-it/ptq/nvfp4_experts_only-kv_fp8_cast`** and
+  **`models/google/diffusiongemma-26B-A4B-it/ptq/...`** alias
+  `general/ptq/nvfp4_experts_only-kv_fp8_cast` — expert-only NVFP4 with max calibration and an
+  FP8 KV cache in cast mode — as published in `nvidia/Gemma-4-26B-A4B-NVFP4` and
+  `nvidia/diffusiongemma-26B-A4B-it-NVFP4`.
 - **`models/zai-org/GLM-5.1/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast`** and
   **`models/zai-org/GLM-5.2/ptq/...`** alias
   `general/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast` — expert-only NVFP4 with the

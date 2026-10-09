@@ -20,13 +20,12 @@ from ..specs import ModelSpec, MoESpec, register
 __all__: list[str] = []
 
 # Qwen3VLMoeTextExperts is fused on every supported transformers: 3-D gate_up_proj and
-# down_proj parameters (transposed before 5.12, standard layout from 5.12 on). Before 5.12
-# the PTQ wrapper unrolls them into gate_proj/up_proj/down_proj ModuleLists (see
-# quantization/plugins/huggingface.py); that rewrite is not iterable per expert, so no export path groups it.
+# down_proj parameters (transposed before 5.12, standard layout from 5.12 on), so there is no
+# (gate, up) pair left to fuse and no per-expert grouping for export.
 register(
     ModelSpec(
         model_type="qwen3_vl_moe",
-        min_transformers_version="4.57",
+        min_transformers_version="5.5",
         moe_spec=MoESpec(
             block_names=("Qwen3VLMoeTextSparseMoeBlock",),
             expert_linear_names=("gate_up_proj", "down_proj"),

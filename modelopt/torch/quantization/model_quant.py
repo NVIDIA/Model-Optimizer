@@ -232,20 +232,31 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
     )
 
 
-def _check_indexer_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
-    """Raise when a config enables an indexer quantizer that quantizes no indexer.
+# Quantizers that only framework plugins add: (class-name patterns of the modules they belong on,
+# what those modules are, recipe units listing the supported models).
+_PLUGIN_QUANTIZERS = {
+    "indexer_q_quantizer": (("*Indexer",), "sparse-attention indexer", "indexer_*_nvfp4"),
+    "indexer_k_quantizer": (("*Indexer",), "sparse-attention indexer", "indexer_*_nvfp4"),
+    "dispatch_quantizer": (("*Experts*", "*FusedMoE"), "MoE experts module", "moe_*_nvfp4"),
+    "combine_quantizer": (("*Experts*", "*FusedMoE"), "MoE experts module", "moe_*_nvfp4"),
+}
 
-    ``indexer_q_quantizer`` and ``indexer_k_quantizer`` only exist on indexers that a framework
-    plugin (vLLM, Megatron-Core) converted. When a plugin does not recognize the installed
-    framework's indexer class, or the patterns match none of the indexers, the indexer silently
-    stays unquantized. Intent is read like in :func:`_check_weight_quantization_took_effect`, but
-    only from patterns naming the quantizer, so catch-all patterns do not count. A model without an
-    ``*Indexer`` module (another architecture) is skipped. Under ``torch.distributed`` the check
-    covers the whole model: a pipeline stage may hold none of the indexers a layer-selective recipe
-    selects. All ranks then raise together instead of some waiting in calibration for the others.
+
+def _check_plugin_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
+    """Raise when a config enables a plugin-only quantizer that quantizes nothing.
+
+    The quantizers in ``_PLUGIN_QUANTIZERS`` only exist on modules (sparse-attention indexers, MoE
+    experts) that a framework plugin (vLLM, Megatron-Core) converted. When a plugin does not
+    recognize the installed framework's module class, or the patterns match none of the modules,
+    the tensors silently stay unquantized. Intent is read like in
+    :func:`_check_weight_quantization_took_effect`, but only from patterns naming the quantizer, so
+    catch-all patterns do not count. A model without such a module (another architecture) is
+    skipped. Under ``torch.distributed`` the check covers the whole model: a pipeline stage may hold
+    none of the modules a layer-selective recipe selects. All ranks then raise together instead of
+    some waiting in calibration for the others.
     """
     last_entry_per_pattern = {entry.quantizer_name: entry for entry in config.quant_cfg}
-    for quantizer_name in ("indexer_q_quantizer", "indexer_k_quantizer"):
+    for quantizer_name, (owner_patterns, owner_kind, units) in _PLUGIN_QUANTIZERS.items():
         if not any(
             entry.enable and quantizer_name in pattern
             for pattern, entry in last_entry_per_pattern.items()
@@ -258,34 +269,34 @@ def _check_indexer_quantization_took_effect(model: nn.Module, config: QuantizeCo
             if isinstance(module, (TensorQuantizer, SequentialQuantizer))
             and name.endswith(quantizer_name)
         ]
-        indexers = {
+        owners = {
             type(module).__name__
             for module in model.modules()
-            if type(module).__name__.endswith("Indexer")
+            if any(fnmatch.fnmatchcase(type(module).__name__, p) for p in owner_patterns)
         }
-        # (unconverted indexer classes, has the quantizer, has an enabled one)
+        # (unconverted owner classes, has the quantizer, has an enabled one)
         local = (
-            [] if quantizers else sorted(indexers),
+            [] if quantizers else sorted(owners),
             bool(quantizers),
             any(quantizer.is_enabled for quantizer in quantizers),
         )
         per_rank: list[Any] = [local]
-        if dist.size() > 1:  # every rank calls quantize() with the same indexer patterns
+        if dist.size() > 1:  # every rank calls quantize() with the same patterns
             per_rank = [None] * dist.size()
             torch.distributed.all_gather_object(per_rank, local)
         unsupported = sorted({name for names, _, _ in per_rank for name in names})
         if unsupported:
             raise RuntimeError(
-                f"The quantization config enables {quantizer_name}, but no sparse-attention "
-                f"indexer of this model ({', '.join(unsupported)}) has one: the ModelOpt indexer "
-                "plugins do not support this model or the installed vLLM / Megatron-Core version "
-                "(supported models: see the configs/ptq/units/indexer_*_nvfp4 recipe units)."
+                f"The quantization config enables {quantizer_name}, but no {owner_kind} of this "
+                f"model ({', '.join(unsupported)}) has one: the ModelOpt plugins do not support "
+                "this model, its runtime backend or the installed vLLM / Megatron-Core version "
+                f"(supported models: see the configs/ptq/units/{units} recipe units)."
             )
         if any(has for _, has, _ in per_rank) and not any(on for _, _, on in per_rank):
             raise RuntimeError(
-                f"The quantization config enables {quantizer_name}, but no sparse-attention "
-                "indexer has an enabled one: the patterns naming it match none of them, or a "
-                "later config entry disabled it."
+                f"The quantization config enables {quantizer_name}, but no {owner_kind} has an "
+                "enabled one: the patterns naming it match none of them, or a later config entry "
+                "disabled it."
             )
 
 
@@ -395,7 +406,7 @@ def quantize(
         _validate_linear_attention_quantizers(model)
     # Fail before calibration rather than after exporting an unquantized checkpoint.
     _check_weight_quantization_took_effect(model, quantize_config)
-    _check_indexer_quantization_took_effect(model, quantize_config)
+    _check_plugin_quantization_took_effect(model, quantize_config)
     return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
 
 

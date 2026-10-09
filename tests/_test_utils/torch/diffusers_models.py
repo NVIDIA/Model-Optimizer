@@ -263,6 +263,56 @@ def create_tiny_wan22_pipeline_dir(tmp_path: Path) -> Path:
     return save_dir
 
 
+def create_tiny_pixart_pipeline_dir(tmp_path: Path) -> Path:
+    """Create and save a tiny PixArt-Alpha pipeline to a directory.
+
+    Uses the same tiny config as diffusers' own PixArt-Alpha tests (2 transformer blocks,
+    hf-internal-testing/tiny-random-t5 text encoder). Its ``sample_size`` has no resolution
+    bin, so call the pipeline with ``use_resolution_binning=False``.
+
+    The saved directory can be loaded with ``PixArtAlphaPipeline.from_pretrained(path)``.
+    """
+    from diffusers import (
+        AutoencoderKL,
+        DDIMScheduler,
+        PixArtAlphaPipeline,
+        PixArtTransformer2DModel,
+    )
+    from transformers import AutoTokenizer, T5EncoderModel
+
+    torch.manual_seed(0)
+    transformer = PixArtTransformer2DModel(
+        sample_size=8,
+        num_layers=2,
+        patch_size=2,
+        attention_head_dim=8,
+        num_attention_heads=3,
+        caption_channels=32,
+        in_channels=4,
+        cross_attention_dim=24,
+        out_channels=8,
+        attention_bias=True,
+        activation_fn="gelu-approximate",
+        num_embeds_ada_norm=1000,
+        norm_type="ada_norm_single",
+        norm_elementwise_affine=False,
+        norm_eps=1e-6,
+    )
+
+    torch.manual_seed(0)
+    pipe = PixArtAlphaPipeline(
+        transformer=transformer,
+        vae=AutoencoderKL(),
+        scheduler=DDIMScheduler(),
+        text_encoder=T5EncoderModel.from_pretrained("hf-internal-testing/tiny-random-t5"),
+        tokenizer=AutoTokenizer.from_pretrained("hf-internal-testing/tiny-random-t5"),
+    )
+
+    save_dir = tmp_path / "tiny_pixart"
+    pipe.save_pretrained(save_dir)
+    return save_dir
+
+
 def get_tiny_qwen_image_transformer(**config_kwargs):
     """Create a tiny QwenImageTransformer2DModel for testing.
 

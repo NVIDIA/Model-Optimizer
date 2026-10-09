@@ -15,11 +15,21 @@
 
 import pytest
 from _test_utils.fs_utils import assert_unmodified_tree
-from _test_utils.torch.diffusers_models import create_tiny_qwen_image_pipeline_dir
+from _test_utils.torch.diffusers_models import (
+    create_tiny_pixart_pipeline_dir,
+    create_tiny_qwen_image_pipeline_dir,
+)
 
 
 @pytest.fixture(scope="session")
 def tiny_qwen_image_path(tmp_path_factory):
     tmp_path = tmp_path_factory.mktemp("qwen_image")
     with assert_unmodified_tree(create_tiny_qwen_image_pipeline_dir(tmp_path)) as path:
+        yield str(path)
+
+
+@pytest.fixture(scope="session")
+def tiny_pixart_path(tmp_path_factory):
+    tmp_path = tmp_path_factory.mktemp("pixart")
+    with assert_unmodified_tree(create_tiny_pixart_pipeline_dir(tmp_path)) as path:
         yield str(path)

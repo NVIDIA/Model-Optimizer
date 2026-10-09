@@ -286,8 +286,8 @@ class LayerwiseExporter:
         a fusing format can rediscover which modules share an input; omit them only when
         nothing fuses.
         """
-        # Local, as in every other export module: the plugin imports transformers.
-        from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+        # Local, as in every other export module: see pack_quantized_weights.
+        from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
 
         assert self._bound, "export_layer() before bind()"
         assert not self._finalized, "export_layer() called after finalize()"
