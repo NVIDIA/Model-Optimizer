@@ -282,13 +282,15 @@ class _Partition:
     def _encode_docs(self, encoder: "_Encoder", lines, may_stop_early: bool = False):
         """Tokenize ``lines``, using worker processes only when ``workers > 1``.
 
-        The worker pool uses the ``spawn`` start method, not the default ``fork``: forking a
-        process that has already initialized a CUDA context / many native threads (e.g. when
-        this runs in-process after GPU work) is unsafe and can segfault the children -- the
-        forked child inherits the parent's locks and half-initialized native state. ``spawn``
-        starts clean workers that inherit none of it. ``_Encoder`` holds only picklable fields
-        (the tokenizer is loaded per-worker in ``initializer``) so it crosses the spawn boundary.
-        The single-worker path tokenizes inline to skip the process overhead entirely.
+        The worker pool uses the ``forkserver`` start method, not the default ``fork``: forking a
+        process that has already initialized a CUDA context / many native threads (e.g. when this
+        runs in-process after GPU work) is unsafe and can segfault the children, because the forked
+        child inherits the parent's locks and half-initialized native state. ``forkserver`` forks
+        each worker from a separate, clean server process instead. That server is told to preload
+        this module, so its heavy ``torch`` / ``megatron`` import is paid once in the server and
+        inherited by every worker; plain ``spawn`` would re-import it per worker and blow the
+        tokenization timeout. ``_Encoder`` holds only picklable fields (the tokenizer is loaded
+        per-worker in ``initializer``). The single-worker path tokenizes inline, skipping all this.
 
         When ``may_stop_early`` is true, wait for finite batches so no worker results are pending
         if the caller stops consuming documents after reaching its token limit.
@@ -298,11 +300,13 @@ class _Partition:
         if self.workers == 1:
             encoder.initializer()
             return None, map(encoder.encode, lines)
-        # spawn, not the default fork: forking after CUDA/native-thread init segfaults the
-        # children (see this method's docstring). spawn starts clean, isolated workers.
-        pool = multiprocessing.get_context("spawn").Pool(
-            self.workers, initializer=encoder.initializer
-        )
+        # forkserver, not the default fork: forking after CUDA/native-thread init segfaults the
+        # children (see this method's docstring). Preload this module so the server pays the heavy
+        # torch/megatron import once and every worker inherits it (spawn would re-import per worker
+        # and blow the timeout).
+        ctx = multiprocessing.get_context("forkserver")
+        ctx.set_forkserver_preload(["modelopt.torch.utils.plugins.megatron_preprocess_data"])
+        pool = ctx.Pool(self.workers, initializer=encoder.initializer)
         if may_stop_early:
             batch_size = self.workers * 4  # Balance throughput against unused final-batch work.
             encoded_docs = self._encode_in_batches(pool, encoder, lines, batch_size)
