@@ -80,9 +80,12 @@ jobs:
         run: apt-get update && apt-get install -y git
       - uses: actions/checkout@v6
       - uses: nv-gha-runners/setup-proxy-cache@main
-      - uses: ./.github/actions/cache-extensions
+      - id: jit-cache
+        uses: ./.github/actions/cache-extensions
         with:
-          cache-key: rtxpro6000-${{ matrix.container_image }}
+          # One entry per lane: lanes sharing an image (gpu_megatron and the megatron_bridge
+          # example) would otherwise share one immutable, partially filled entry.
+          cache-key: rtxpro6000-${{ matrix.example }}-${{ matrix.container_image }}
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
@@ -96,6 +99,15 @@ jobs:
         run: |
           # Use `python3` (the vllm image has no `python` on PATH)
           python3 -m pip install nox && nox -s ${{ matrix.example }}
+      - name: Save JIT caches
+        # Also after a failed or cancelled run, so the next run starts warm
+        if: always()
+        uses: ./.github/actions/cache-extensions/save
+        with:
+          ext-key: ${{ steps.jit-cache.outputs.ext-key }}
+          ext-hit: ${{ steps.jit-cache.outputs.ext-hit }}
+          triton-key: ${{ steps.jit-cache.outputs.triton-key }}
+          triton-hit: ${{ steps.jit-cache.outputs.triton-hit }}
       - name: Upload GPU coverage to Codecov
         uses: codecov/codecov-action@v7
         with:

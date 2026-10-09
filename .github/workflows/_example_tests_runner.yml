@@ -58,9 +58,12 @@ jobs:
         run: apt-get update && apt-get install -y git
       - uses: actions/checkout@v6
       - uses: nv-gha-runners/setup-proxy-cache@main
-      - uses: ./.github/actions/cache-extensions
+      - id: jit-cache
+        uses: ./.github/actions/cache-extensions
         with:
-          cache-key: rtxpro6000-${{ inputs.docker_image }}
+          # One entry per example: the GPU-tests lanes and the examples that share an image would
+          # otherwise share one immutable, partially filled entry.
+          cache-key: rtxpro6000-example-${{ inputs.example }}-${{ inputs.docker_image }}
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu:/usr/local/tensorrt/targets/x86_64-linux-gnu/lib" >> $GITHUB_ENV
@@ -105,6 +108,15 @@ jobs:
             pytest_args+=(--ignore=tests/examples/diffusers/test_diffusers_onnx_trt.py)
           fi
           python3 -m pytest tests/examples/${{ inputs.example }} --cov "${pytest_args[@]}"
+      - name: Save JIT caches
+        # Also after a failed or cancelled run, so the next run starts warm
+        if: always()
+        uses: ./.github/actions/cache-extensions/save
+        with:
+          ext-key: ${{ steps.jit-cache.outputs.ext-key }}
+          ext-hit: ${{ steps.jit-cache.outputs.ext-hit }}
+          triton-key: ${{ steps.jit-cache.outputs.triton-key }}
+          triton-hit: ${{ steps.jit-cache.outputs.triton-hit }}
       - name: Flag allowed failure
         if: ${{ inputs.allow_failure && steps.run_tests.outcome == 'failure' }}
         run: |
