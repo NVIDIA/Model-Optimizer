@@ -591,16 +591,9 @@ def get_model(
     # Prepare config kwargs for loading
     config_kwargs = {"trust_remote_code": trust_remote_code} if trust_remote_code else {}
 
-    # Load config once and handle VL model detection
+    # Load config once.
     try:
         hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
-
-        if is_nemotron_vl(hf_config):
-            print(
-                "Detected Nemotron VL model from config. "
-                "Disabling automatic device mapping for compatibility."
-            )
-            device_map = None
     except Exception as e:
         print(f"Error: Could not load config from {ckpt_path}: {e}")
         raise RuntimeError(f"Failed to load model configuration from {ckpt_path}") from e

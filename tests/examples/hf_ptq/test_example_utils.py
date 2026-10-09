@@ -110,6 +110,55 @@ def test_get_model_preserves_preparation_error(monkeypatch, tmp_path, failure_at
     assert calls == failure_at
 
 
+@pytest.mark.parametrize(
+    ("device", "use_seq_device_map", "expected_map"),
+    [("cuda", False, "auto"), ("cuda", True, "sequential"), ("cpu", False, "cpu")],
+)
+def test_get_model_nemotron_vl_device_map(monkeypatch, device, use_seq_device_map, expected_map):
+    config = SimpleNamespace(
+        model_type="nemotron_vl",
+        architectures=["NemotronForConditionalGeneration"],
+        vision_config=SimpleNamespace(),
+        dtype=torch.bfloat16,
+    )
+    calls = {}
+
+    class FakeModel:
+        def eval(self):
+            return self
+
+        def parameters(self):
+            return iter(())
+
+        def to(self, device):
+            pytest.fail("A dispatched model must not be moved to a single device")
+
+    class FakeArchitecture:
+        @staticmethod
+        def _from_config(config, **kwargs):
+            return FakeModel()
+
+        @staticmethod
+        def from_pretrained(*args, output_loading_info=False, **kwargs):
+            calls.update(kwargs)
+            model = FakeModel()
+            return (model, {"unexpected_keys": []}) if output_loading_info else model
+
+    assert example_utils.is_nemotron_vl(config)
+    monkeypatch.setattr(example_utils.AutoConfig, "from_pretrained", lambda *a, **k: config)
+    monkeypatch.setattr(
+        example_utils.transformers, config.architectures[0], FakeArchitecture, raising=False
+    )
+    monkeypatch.setattr(example_utils, "prepare_model_for_loading", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(example_utils, "init_empty_weights", lambda **k: nullcontext())
+    monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024, 1: 1024})
+    monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda *a, **k: {"": 0})
+    example_utils.get_model("checkpoint", device=device, use_seq_device_map=use_seq_device_map)
+    assert calls["device_map"] == expected_map
+    if use_seq_device_map:
+        assert calls["max_memory"] == {0: 819.2, 1: 819.2}
+
+
 # ---------- get_original_hf_quant_method -------------------------------------
 # get_model uses this to detect native MXFP4 checkpoints (e.g. openai/gpt-oss-*) and load
 # them dequantized to BF16 GptOssExperts (so ModelOpt can quantize/export the experts).

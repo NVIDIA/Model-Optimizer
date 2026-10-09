@@ -69,16 +69,18 @@ def safe_nemotron_vl_forward(full_model: torch.nn.Module, batch: dict[str, Any])
 
     # Token embeddings
     inputs_embeds = full_model.language_model.get_input_embeddings()(input_ids)
-    image_flags_s = image_flags.squeeze(-1)
 
     b, n, c = inputs_embeds.shape
     flat_embeds = inputs_embeds.reshape(b * n, c)
-    flat_ids = input_ids.reshape(b * n)
+    flat_ids = input_ids.reshape(b * n).to(inputs_embeds.device)
     selected = flat_ids == full_model.img_context_token_id
 
     # Vision embeddings
     vit_embeds = full_model.extract_feature(pixel_values)
+    image_flags_s = image_flags.squeeze(-1).to(vit_embeds.device)
     vit_embeds = vit_embeds[image_flags_s == 1]
+    # Accelerate can place the projector and token embeddings on different devices.
+    vit_embeds = vit_embeds.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype)
     try:
         flat_embeds[selected] = flat_embeds[selected] * 0.0 + vit_embeds.reshape(-1, c)
     except Exception:
