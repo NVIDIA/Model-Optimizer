@@ -25,6 +25,9 @@ from _test_utils.torch.misc import minimum_sm
 from safetensors import safe_open
 from test_diffusers import CALIB_PROMPTS_FILE, assert_hf_ckpt_exported
 
+# Run the example scripts in this process: ~20s of startup saved per step (see conftest).
+pytestmark = pytest.mark.usefixtures("in_process_examples")
+
 
 class DiffuserHfExportModel(NamedTuple):
     name: str
