@@ -69,6 +69,8 @@ jobs:
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
           # Everything but PRs also runs the slow tests marked ``manual`` (e.g. AutoNAS).
           PYTEST_EXTRA: ${{ github.event_name != 'pull_request' && '--run-manual' || '' }}
+          # sys.monitoring records the same lines as the default C tracer at a fraction of the overhead
+          COVERAGE_CORE: sysmon
           # One single-threaded xdist worker per vCPU (`-n auto` counts physical cores); torch's
           # default threads per worker oversubscribe the runner and run slower than serial.
           PYTEST_ADDOPTS: -n 4 --dist loadfile
