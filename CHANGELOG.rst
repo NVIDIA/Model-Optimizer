@@ -278,6 +278,7 @@ Changelog
 - Require Pydantic 2.5.0 or newer to prevent configuration-schema errors when importing ``modelopt.torch`` with older releases.
 - Require Wonderwords 2.2.0 or newer in the ``hf`` extra to prevent RULER calibration failures during random-word generation with older releases.
 - A legacy dict-format ``quant_cfg`` now applies its ``"default"`` key before the other keys wherever it appears, as before 0.44.
+- Fix learnable LSQ weight scales getting no gradient on Transformer Engine ``LayerNormLinear`` layers (Megatron ``TELayerNormColumnParallelLinear``), so scale learning left them at their PTQ values.
 
 0.48.0 (2026-11-02)
 ^^^^^^^^^^^^^^^^^^^
