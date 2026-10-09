@@ -67,6 +67,10 @@ jobs:
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
+          # One single-threaded xdist worker per vCPU (`-n auto` counts physical cores); torch's
+          # default threads per worker oversubscribe the runner and run slower than serial.
+          PYTEST_ADDOPTS: -n 4 --dist loadfile
+          OMP_NUM_THREADS: "1"
         run: pip install nox uv && nox -s "unit-3.12(torch_214, tf_latest)"
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v7
@@ -144,6 +148,9 @@ jobs:
         with:
           python-version: ${{ matrix.python_version }}
       - name: Run unit tests
+        env:
+          PYTEST_ADDOPTS: -n 4 --dist loadfile
+          OMP_NUM_THREADS: "1"
         run: pip install nox uv && nox -s "${{ matrix.nox_session }}"
   partial-install:
     if: needs.check-file-changes.outputs.any_changed == 'true'
