@@ -67,6 +67,8 @@ jobs:
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
+          # sys.monitoring records the same lines as the default C tracer at a fraction of the overhead
+          COVERAGE_CORE: sysmon
           # One single-threaded xdist worker per vCPU (`-n auto` counts physical cores); torch's
           # default threads per worker oversubscribe the runner and run slower than serial.
           PYTEST_ADDOPTS: -n 4 --dist loadfile

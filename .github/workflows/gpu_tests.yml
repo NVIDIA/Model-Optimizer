@@ -90,6 +90,9 @@ jobs:
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
+          # sys.monitoring records the same lines as the default C tracer at a fraction of the
+          # overhead on import-heavy worker processes. Needs Python 3.12+.
+          COVERAGE_CORE: sysmon
         run: |
           # Use `python3` (the vllm image has no `python` on PATH)
           python3 -m pip install nox && nox -s ${{ matrix.example }}
