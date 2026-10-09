@@ -49,6 +49,8 @@ corresponding environment variable when omitted:
 | `--modelopt-quant-dataset` | `QUANT_DATASET` | Calibration dataset |
 | `--modelopt-quant-calib-size` | `QUANT_CALIB_SIZE` | Calibration sample count |
 | `--modelopt-calib-batch-size` | `CALIB_BATCH_SIZE` | Calibration batch size |
+| `--deepgemm-url` | `DEEPGEMM_URL` | Prebuilt DeepGEMM to serve with: a package index with its wheels, or a wheel (see [Serve with a prebuilt DeepGEMM](#serve-with-a-prebuilt-deepgemm)) |
+| `--deepgemm-version` | `DEEPGEMM_VERSION` | Version to install from the `DEEPGEMM_URL` package index instead of the newest one for the installed torch and CUDA |
 
 `QUANT_CFG` and `KV_QUANT_CFG` (and their CLI flags) will be deprecated in a future
 release. They still work today. For new runs, use a PTQ recipe through `RECIPE_PATH` or
@@ -222,6 +224,51 @@ Tracking needs the client: `pip install nvidia-modelopt[mlflow]` (already in thi
 (`MLFLOW_TRACKING_TOKEN`, or `MLFLOW_TRACKING_USERNAME` / `MLFLOW_TRACKING_PASSWORD`); with
 `--distributed-executor-backend ray` those are forwarded to the workers along with the
 tracking settings, since a Ray worker starts with a clean environment.
+
+## Serve with a prebuilt DeepGEMM
+
+vLLM serves with its own copy of DeepGEMM unless another `deep_gemm` comes first on the Python
+path. To serve with a DeepGEMM build instead, such as a DeepGEMM fork that publishes prebuilt wheels
+to a package index, pass the index as `--deepgemm-url` or `DEEPGEMM_URL`:
+
+```bash
+DEEPGEMM_URL="https://<package index>/simple" \
+  python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
+```
+
+Before vLLM starts, pip selects the newest `deep_gemm` version on the index that has a wheel for
+this Python, CPU architecture and glibc (its tag, such as `manylinux_2_38_x86_64`, names the oldest
+glibc it runs on), or the version that `--deepgemm-version` or `DEEPGEMM_VERSION` pins, e.g.
+`2.8.0.post12` or exactly `2.8.0.post12+g1a2b3c4.torch2.13.cu130`. The wheel must be built for the
+installed torch and CUDA: if the index has builds for others, pin one. The launcher installs the
+wheel with `pip install --no-deps --target` into `<cache>/wheels/<version>-<python>-<arch>-<source>`,
+once per version and source and one launch at a time, checks in a subprocess that `import deep_gemm`
+loads it with the installed torch, and puts that folder first on `PYTHONPATH`, so that vLLM's
+workers import it instead of vLLM's own copy. Nothing is built, and the Python environment does not
+change. `<cache>` is `MODELOPT_DEEPGEMM_CACHE_DIR`, else `$VLLM_CACHE_ROOT/modelopt/deepgemm`, else
+`~/.cache/modelopt/deepgemm`.
+
+`DEEPGEMM_URL` also takes a single wheel (a path, or an `https://` or `file://` URL), installed the
+same way; a local wheel once per content, so a rebuilt wheel of the same version is installed
+again.
+
+To serve a DeepGEMM source tree, such as a local branch, install it into the serving environment
+instead; vLLM then uses it, without `DEEPGEMM_URL`, for every serve from that environment until it
+is uninstalled:
+
+```bash
+pip install --no-deps --no-build-isolation <DeepGEMM source directory or git URL>
+python vllm_serve_fakequant.py ...
+```
+
+Notes:
+
+- Every installed version adds a folder of tens of MB to `<cache>/wheels`, which can be deleted
+  when no server uses it.
+- pip runs with your pip settings, e.g. `PIP_TRUSTED_HOST` for an `http://` index on another host.
+- Ray workers that vLLM does not start from the launcher's environment, such as those of a running
+  Ray cluster, need the installed folder (printed at launch) on their `PYTHONPATH`, on a filesystem
+  that all nodes share.
 
 ## Load QAT/PTQ model and serve in vLLM (WIP)
 

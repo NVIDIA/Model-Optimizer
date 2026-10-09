@@ -67,6 +67,8 @@ def clean_launcher_env():
             "MODELOPT_MLFLOW_REQUIRED",
             "MODELOPT_MLFLOW_COMMAND",
             "MODELOPT_MLFLOW_RUN_NAME",
+            "DEEPGEMM_URL",
+            "DEEPGEMM_VERSION",
         ):
             os.environ.pop(key, None)
         yield
@@ -156,6 +158,9 @@ def _launcher_import_modules():
             add_mlflow_args=Mock(),
             resolve_mlflow_args=Mock(),
         ),
+        "vllm_deepgemm_utils": SimpleNamespace(
+            add_deepgemm_args=Mock(), resolve_deepgemm_args=Mock()
+        ),
         "vllm.entrypoints.openai.cli_args": SimpleNamespace(
             make_arg_parser=entrypoints.legacy_arg_parser
         ),
@@ -202,6 +207,27 @@ def test_vllm_serve_main_disables_compile_cache(monkeypatch, clean_launcher_env)
     assert os.environ["VLLM_DISABLE_COMPILE_CACHE"] == "1"
     assert os.environ["MODELOPT_STATE_PATH"] == "/tmp/modelopt_state.pth"
     vllm_main.assert_called_once_with()
+
+
+def test_vllm_serve_main_installs_deepgemm_before_vllm_starts(monkeypatch, clean_launcher_env):
+    """vLLM's workers import deep_gemm from the Python path that the install sets."""
+    launcher = _load_fakequant_launcher(monkeypatch)
+    monkeypatch.setattr(launcher, "resolve_mlflow_args", Mock())
+    vllm_main, _, _ = _stub_launcher_runtime(monkeypatch, launcher)
+    calls = []
+    vllm_main.side_effect = lambda: calls.append("vllm")
+    monkeypatch.setattr(
+        launcher, "resolve_deepgemm_args", lambda args: calls.append(args.deepgemm_url)
+    )
+    url = "https://example.com/simple"
+    monkeypatch.setattr(
+        sys, "argv", ["vllm_serve_fakequant.py", "/models/qwen", "--deepgemm-url", url]
+    )
+
+    launcher.main()
+
+    assert calls == [url, "vllm"]
+    assert sys.argv == ["vllm", "serve", "/models/qwen"]
 
 
 def test_vllm_serve_entrypoint_dependency_error_propagates(monkeypatch):
