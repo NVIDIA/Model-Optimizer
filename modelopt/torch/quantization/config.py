@@ -1252,6 +1252,20 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
     )
 
 
+class ImatrixCalibConfig(QuantizeAlgorithmConfig):
+    """The config for imatrix calibration.
+
+    Encodes each weight once, its codebook search weighted by the square root of its inputs'
+    per-column second moment ``E[x_j^2]`` -- llama.cpp's importance matrix. Covers the GGML formats
+    with a weighted search,
+    on dense linears and on each expert of HF fused-MoE experts, which GPTQ does not reach. A
+    weight that already holds final codes, such as GPTQ's, is left alone, so
+    ``[{method: gptq}, {method: imatrix}]`` runs GPTQ where it applies and imatrix on the rest.
+    """
+
+    method: Literal["imatrix"] = ModeloptField("imatrix")
+
+
 _ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig
 
 

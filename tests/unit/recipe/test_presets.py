@@ -34,6 +34,7 @@ from modelopt.recipe.presets import RecipeSupersededAction
 from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT
 from modelopt.torch.quantization.config import LocalHessianCalibConfig, QuantizeConfig
 from modelopt.torch.quantization.ggml import (
+    GGML_FORMAT_REGISTRY,
     IQ1_M_BLOCK_SIZE,
     IQ1_M_EFFECTIVE_BITS,
     IQ1_S_BLOCK_SIZE,
@@ -173,8 +174,13 @@ def test_iq_recipe_matches_packing_contract(qformat, block_size, effective_bits)
     if qformat == "q8_0":
         assert quantize["algorithm"] is None
     else:
-        assert quantize["algorithm"]["method"] == "gptq"
-        assert quantize["algorithm"]["block_size"] % block_size == 0
+        algorithms = quantize["algorithm"]
+        algorithms = algorithms if isinstance(algorithms, list) else [algorithms]
+        assert algorithms[0]["method"] == "gptq"
+        assert algorithms[0]["block_size"] % block_size == 0
+        # Formats with a weighted search add imatrix for the fused MoE experts GPTQ does not reach.
+        expected = ["gptq", "imatrix"] if GGML_FORMAT_REGISTRY[qformat].weighted else ["gptq"]
+        assert [algorithm["method"] for algorithm in algorithms] == expected
 
 
 # --- RecipeSupersededAction: the flags --recipe replaces ----------------------------------------

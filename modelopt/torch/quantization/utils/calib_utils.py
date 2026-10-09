@@ -327,3 +327,36 @@ def register_gptq_helper(backend: str, factory: type[GPTQHelper]) -> None:
     construct ``factory`` instead of the default ``GPTQHelper``.
     """
     _GPTQ_HELPER_REGISTRY[backend] = factory
+
+
+class ImatrixEncoder:
+    """Encodes a weight once, its search weighted by its inputs' per-column second moments.
+
+    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` collects ``E[x_j^2]`` for
+    every weight whose quantizer an encoder accepts, then calls :meth:`encode` with it.
+    """
+
+    def accepts(self, quantizer) -> bool:
+        """Whether this encoder handles ``quantizer``; decided before calibration runs."""
+        raise NotImplementedError
+
+    def encode(
+        self, weight: torch.Tensor, quantizer, second_moments: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Return ``weight`` fake-quantized by ``quantizer``, weighted by ``second_moments``.
+
+        ``second_moments`` is ``None`` when no calibration input reached the weight.
+        """
+        raise NotImplementedError
+
+
+_IMATRIX_ENCODER_REGISTRY: dict[str, ImatrixEncoder] = {}
+
+
+def register_imatrix_encoder(backend: str, encoder: ImatrixEncoder) -> None:
+    """Register the :class:`ImatrixEncoder` for a quantizer backend.
+
+    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` only encodes weights whose
+    ``weight_quantizer.backend`` has a registered encoder.
+    """
+    _IMATRIX_ENCODER_REGISTRY[backend] = encoder

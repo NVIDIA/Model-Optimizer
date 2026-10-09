@@ -383,6 +383,27 @@ def validate_weight(
         raise TypeError(f"{format_name} requires a floating-point weight, got {weight.dtype}")
 
 
+# Floor on the per-column second moments, relative to their mean, so a column calibration never
+# activated still has some weight in the search.
+_IMPORTANCE_FLOOR = 1e-4
+
+
+def floored_second_moments(second_moments: torch.Tensor | None) -> torch.Tensor | None:
+    """The per-input-column ``E[x_j^2]``, floored at 1e-4 of its mean.
+
+    ``None`` when there is no statistic or it has no positive mean: a module no calibration token
+    reached (an idle MoE expert) would make every code score zero error, so it keeps the plain
+    search.
+    """
+    if second_moments is None:
+        return None
+    second_moments = second_moments.float()
+    mean = second_moments.mean()
+    if not mean > 0:
+        return None
+    return second_moments.clamp_min(_IMPORTANCE_FLOOR * mean)
+
+
 def importance_blocks(
     importance: torch.Tensor | None, weight: torch.Tensor, format_name: str
 ) -> torch.Tensor | None:
