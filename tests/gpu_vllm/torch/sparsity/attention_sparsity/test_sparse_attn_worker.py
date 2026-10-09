@@ -395,12 +395,32 @@ def test_flashinfer_quantized_decode_preserves_cache_layout(monkeypatch, layout)
     assert finalize_kw["page_size"] == page_size
 
 
-def test_flashinfer_sparse_prefill_uses_shared_triton_kernel(monkeypatch):
+@pytest.mark.parametrize("layout", ["HND", "packed"])
+def test_flashinfer_sparse_prefill_uses_shared_triton_kernel(monkeypatch, layout):
     """FlashInfer must route 2:4 prefill through the current ModelOpt kernel."""
     impl = _make_flashinfer_impl(sparse=True)
     page_size, num_heads, head_dim = 16, 2, 64
-    physical = torch.zeros(4, 2, num_heads, page_size, head_dim, dtype=torch.float16)
-    kv_cache = physical.permute(0, 1, 3, 2, 4)
+    expected_key = (
+        torch.arange(4 * page_size * num_heads * head_dim)
+        .remainder(127)
+        .reshape(4, page_size, num_heads, head_dim)
+        .to(torch.float16)
+    )
+    expected_value = -expected_key - 1
+    if layout == "packed":
+        kv_cache = torch.cat((expected_key, expected_value), dim=-1).transpose(1, 2).contiguous()
+        expected_stride = (
+            2 * num_heads * page_size * head_dim,
+            2 * head_dim,
+            2 * page_size * head_dim,
+            1,
+        )
+    else:
+        physical = (
+            torch.stack((expected_key, expected_value), dim=1).permute(0, 1, 3, 2, 4).contiguous()
+        )
+        kv_cache = physical.permute(0, 1, 3, 2, 4)
+        expected_stride = kv_cache[:, 0].stride()
     metadata = _flashinfer_metadata(query_lens=(2, 2), max_query_len=4)
     query = torch.zeros(4, num_heads, head_dim, dtype=torch.float16)
     captured = {}
@@ -419,8 +439,11 @@ def test_flashinfer_sparse_prefill_uses_shared_triton_kernel(monkeypatch):
     assert captured["sparsity_n"] == 2
     assert captured["sparsity_m"] == 4
     assert captured["page_size"] == page_size
-    assert captured["k_cache"].stride() == kv_cache[:, 0].stride()
-    assert captured["v_cache"].stride() == kv_cache[:, 1].stride()
+    for name, expected in (("k_cache", expected_key), ("v_cache", expected_value)):
+        cache = captured[name]
+        torch.testing.assert_close(cache, expected)
+        assert cache.stride() == expected_stride
+        assert cache.untyped_storage().data_ptr() == kv_cache.untyped_storage().data_ptr()
     assert captured["block_table"] is metadata._modelopt_block_table
     assert captured["b_seq_len_k"] is metadata._modelopt_seq_lens
 
