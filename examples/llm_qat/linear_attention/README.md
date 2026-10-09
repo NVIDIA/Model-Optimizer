@@ -208,3 +208,9 @@ The recurrent suffix uses Python orchestration and a Torch adjoint, so long
 suffixes can be slow. Kernel/cache agreement does not establish pretrained-model
 quality recovery, full serving-engine equivalence, or training speed. Prefill
 GEMM quantization and approximate inverse are outside this example.
+
+## State-only serving with vLLM
+
+The [vLLM example](../../vllm_serve/README.md#linear-attention-state-quantization)
+uses the same state QDQ helper for plain FP8/INT8 policies. Match the runtime,
+quantizer grouping, and scheduler prefill boundaries to the training setup.

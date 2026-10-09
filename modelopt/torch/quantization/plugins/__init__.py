@@ -72,6 +72,7 @@ with import_plugin("transformers"):
 with import_plugin("vllm"):
     from .vllm import *
     from .vllm_indexer import *
+    from .vllm_linear_attention import *
 
 with import_plugin("trl"):
     from .trl import *

@@ -9,6 +9,10 @@ compact NVFP4 attention worker documented below requires vLLM 0.15.0 or newer.
 
 The fakequant launcher does not support vLLM 0.9.0. Use one of the tested releases above.
 
+For GDN/KDA recurrent-state QDQ before native prefill and decode, see the
+[linear-attention example](#linear-attention-state-quantization), which
+documents the initial vLLM 0.15.x runtime requirements and state-only INT8 recipe.
+
 ## Prepare environment
 
 Run the commands below from the ModelOpt repository root (`/workspace/Model-Optimizer`
@@ -404,6 +408,95 @@ K is QDQ before its cache write, while V is written pristine. Complete 16-token 
 Supported configurations are regular decoder self-attention with FlashInfer or FlashAttention, fp16/bf16 model and KV cache, equal Q/K/V head dimensions that are multiples of 16, and DCP 1. The FlashInfer adapter preserves both NHD and HND cache strides and separates mixed decode/prefill launches so each phase keeps its own kernel contract. The default `FULL_AND_PIECEWISE` mode remains enabled for fixed N:M and attention-only NVFP4; checkpoints with calibrated decode `threshold_scale_factor` must use a non-`FULL` decode graph mode such as `--enforce-eager` because the live sequence length is not replayed as a Python scalar.
 
 Unsupported features are sliding window, ALiBi, softcap, sinks, FP8 KV cache, cross/encoder/MLA attention, KV sharing or transfer, prefix caching, speculative decoding, DBO/ubatching, and `FULL` mixed/prefill CUDA graphs.
+
+## Linear-attention state quantization
+
+The existing `FakeQuantWorker` adds a ModelOpt `TensorQuantizer` immediately before
+native vLLM prefill and decode for `Qwen3NextGatedDeltaNet` and
+`KimiDeltaAttention`. Native attention kernels, projections, convolution, gates,
+outputs, and cache management remain in use.
+
+### Runtime and launch
+
+The initial adapter targets vLLM 0.15.x V1 with key-first
+`[slot, head, Dk, Dv]` FP32 recurrent state. Runtime checks reject other layouts
+and versions. Use a vLLM 0.15.x environment for this adapter; the newer
+versions supported by the general fakequant example use different model wrappers.
+
+```bash
+PYTHONPATH=.:examples/vllm_serve \
+RECIPE_PATH=examples/vllm_serve/linear_attention_state_int8.yaml \
+bash examples/llm_qat/linear_attention/with_vllm_defaults.sh \
+python examples/vllm_serve/vllm_serve_fakequant.py /path/to/model \
+  --tensor-parallel-size 2 --enforce-eager --no-async-scheduling \
+  --no-enable-prefix-caching --mamba-cache-dtype float32
+```
+
+The example enables signed symmetric dynamic INT8 state QDQ. Import the `configs/ptq/units/gdn_state_fp8_dynamic` quantizer unit for GDN FP8
+E4M3, or set `num_bits: [4, 3]` on the corresponding state quantizers. Each invocation
+receives `[active_sequence, local_head, Dk, Dv]`; `axis: [0, 1]` retains one
+scale per sequence and local head **within each value-column tile**. The shared
+training/serving QDQ helper splits the last axis using `state_block_v` (default
+64), then reduces over `[Dk, tile_width]`. State tensors remain FP32.
+
+For per-key 32-value INT8 blocks, use the existing recipe
+`modelopt_recipes/general/ptq/linear_attention_state_int8_block32_dynamic.yaml`.
+Its `block_sizes: {-1: 32}` is handled directly by TensorQuantizer and overrides
+legacy tile grouping. The same recipe can be used for state QAT.
+
+Dynamic scales need no calibration dataset; `algorithm: null` skips dataset
+loading. Weight/activation calibration can use the worker's existing recipe
+and calibration loop. Static state calibration is unsupported in this adapter.
+
+Use `MODELOPT_STATE_PATH=/path/to/modelopt_state.pt` instead of a recipe to
+restore quantizer configuration. Reload maps recurrent-state quantizer names
+through the model's HF-to-vLLM mapper. Checkpoint weights must already match
+the vLLM model architecture.
+
+### Quantization boundaries
+
+- Prefill: vLLM gathers initial states and zeros fresh requests. The wrapper
+  applies `TensorQuantizer` to this tensor and calls the original prefill kernel.
+- Decode: the wrapper gathers active native cache slots, quantizes them, writes
+  them back, and calls the original decode kernel. Other slots are untouched.
+- Native kernels compute outputs and update recurrent state normally. No
+  additional rounding is applied to the kernel's final-state write.
+- The next call quantizes that state before reading it. A fresh zero state is
+  unchanged; prompt-to-decode rounding happens before the first decode call.
+- Scheduler-level chunked prefill creates one QDQ boundary per invocation.
+  Internal kernel chunks do not create extra state-quantization boundaries.
+  Results can therefore depend on scheduler prompt-chunk sizes.
+- Requests, cache-slot reuse, and preemption remain managed by vLLM. The plugin
+  allocates temporary gathered states, with no additional persistent state cache.
+- TP ranks quantize their local heads independently, without scale all-reduce.
+
+The adapter accepts plain `precision: vllm` policies, including the legacy
+`vllm_0_15` spelling. The serving engine supplies the phase boundaries, so no
+training phase context is required. W quantization and the native ReplaySSM/
+Hadamard profile require separate serving integration and are rejected.
+
+Training and serving share state-QDQ formats and grouping. Numerical alignment
+also requires the same vLLM runtime, arithmetic settings, and prefill scheduling:
+a training prefix must reproduce each serving prompt-continuation boundary.
+The QAT handoff rounds the prefix state before its first decode read; this
+adapter rounds that same state before the first native decode call. QAT stores the
+rounded next-state checkpoint after each update; serving stores the working
+state and rounds it at the next read. These feed the same rounded state to
+the next recurrence. Raw terminal cache buffers therefore need not match the
+QAT checkpoint until the same QDQ is applied.
+
+The supported scope is eager synchronous execution with TP and PP=DP=CP=1.
+Speculative decoding, prefix caching, state transfer, and CUDA graphs require
+separate integration. This is floating-point numerical emulation; model-quality,
+capacity, and performance claims require separate measurements.
+
+### Later prefill GEMM support
+
+Prefill operand QDQ will be a separate change after an optimized fused kernel
+is available. It will reuse the eight numerical sites from the training prefill
+implementation and preserve this native-cache wrapper. The PyTorch materialized
+backend is not exposed in vLLM by this state-only adapter. State QDQ cadence and
+prefill operand QDQ remain independent numerical policies.
 
 ## Known Problems
 
