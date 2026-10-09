@@ -18,6 +18,7 @@ import os
 import tempfile
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
+from itertools import chain
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,7 @@ def _quantizer_configs(module: torch.nn.Module) -> tuple[dict[str, dict], str]:
         is_quantizing = quantizer.is_enabled and quantizer._if_quant
         is_activation_quantizing = is_quantizing and not is_weight_quantizer
         is_integer_quantizing = is_activation_quantizing and isinstance(quantizer.num_bits, int)
+        amax = getattr(quantizer, "_amax", None)
         # Weight transforms are folded; activation transforms also run when quantization is off.
         unsupported = [
             setting
@@ -64,9 +66,13 @@ def _quantizer_configs(module: torch.nn.Module) -> tuple[dict[str, dict], str]:
                 "narrow_range": is_integer_quantizing and quantizer.narrow_range,
                 "dynamic_amax": is_activation_quantizing
                 and not (
-                    quantizer.is_mx_format
-                    or quantizer._use_constant_amax
-                    or getattr(quantizer, "_amax", None) is not None
+                    quantizer.is_mx_format or quantizer._use_constant_amax or amax is not None
+                ),
+                "channel-wise activation quantization": is_activation_quantizing
+                and (
+                    quantizer.axis is not None
+                    or quantizer.is_static_block_quant
+                    or (amax is not None and amax.numel() > 1)
                 ),
                 "bias": is_activation_quantizing and quantizer.bias is not None,
             }.items()
@@ -79,25 +85,15 @@ def _quantizer_configs(module: torch.nn.Module) -> tuple[dict[str, dict], str]:
             )
         recipe = {"_disabled": is_weight_quantizer or not is_quantizing}
         if not recipe["_disabled"]:
-            recipe.update(
-                {
-                    "_num_bits": quantizer.num_bits,
-                    "_axis": quantizer.axis,
-                    "_block_sizes": quantizer.block_sizes,
-                }
-            )
+            attributes = ("num_bits", "axis", "block_sizes")
             if quantizer.backend is not None:
-                recipe.update(
-                    {
-                        "_backend": quantizer.backend,
-                        "_backend_extra_args": quantizer.backend_extra_args,
-                    }
-                )
+                attributes += ("backend", "backend_extra_args")
+            recipe.update({"_" + name: getattr(quantizer, name) for name in attributes})
         configs[get_unwrapped_name(name, module)] = recipe
     return configs, ""
 
 
-def _save_quantizer_state(path: Path, save: Callable[[Path], None]) -> None:
+def _save_quantizer_state(path: Path, save: Callable[[Path], object]) -> None:
     """Save quantizer state or recipes and share write completion or failure across ranks."""
     failure = ""
     if is_master():
@@ -158,11 +154,10 @@ def gather_mcore_vllm_fq_quantizer_recipe(
         _merge_quantizer_states,
     )
 
-    def save_recipe(path: Path) -> None:
-        with open(path, "w") as f:
-            yaml.safe_dump(merged, f, sort_keys=False)
-
-    _save_quantizer_state(Path(save_directory) / "quant_recipe.yaml", save_recipe)
+    _save_quantizer_state(
+        Path(save_directory) / "quant_recipe.yaml",
+        lambda path: path.write_text(yaml.safe_dump(merged, sort_keys=False)),
+    )
 
 
 def gather_mcore_vllm_fq_quantized_state_dict(
@@ -206,20 +201,28 @@ class VllmFqGPTModelExporter(GPTModelExporter):
     def __init__(self, *args, **kwargs):
         """Initialize recipe capture before lazy export shards are built."""
         super().__init__(*args, **kwargs)
-        self._quantizer_state_for_recipe: dict[str, dict] = {}
         self._quantizer_recipe_markers: list[dict] = []
         self._quantizer_validation_failure = ""
         self._packing_experts = False
 
-    def _store_quantizer_recipe(self, name: str, recipe: dict) -> None:
-        """Store one resolved recipe, requiring repeated routes to agree."""
-        previous = self._quantizer_state_for_recipe.get(name)
-        if previous is not None and previous != recipe:
-            raise ValueError(f"Conflicting quantizer recipes routed to {name}")
-        self._quantizer_state_for_recipe[name] = recipe
-
     def _gather_exclude_modules(self) -> list[str]:
         """Validate settings before gathering excluded modules."""
+        # Tied embeddings bypass the output-layer route, so validate the live head here too.
+        head = getattr(self.model, "output_layer", None)
+        if head is not None:
+            for name, quantizer in head.named_modules():
+                if not isinstance(quantizer, TensorQuantizer):
+                    continue
+                tied = self.model.share_embeddings_and_output_weights
+                active = quantizer.is_enabled and quantizer._if_quant
+                if (active and (tied or "weight_quantizer" not in name)) or (
+                    tied and (quantizer.rotate_is_enabled or quantizer.pre_quant_scale is not None)
+                ):
+                    self._quantizer_validation_failure = (
+                        self._quantizer_validation_failure
+                        or f"Unsupported lm_head quantization for vLLM fakequant: {name}"
+                    )
+                    break
         # All ranks reach this after MTP collection and before writing weights.
         failure = DistributedProcessGroup.get_dist_syncd_obj(
             self._quantizer_validation_failure,
@@ -232,21 +235,22 @@ class VllmFqGPTModelExporter(GPTModelExporter):
 
     def _extract_quantizer_recipe_markers(
         self, layer_state_dicts: Mapping[Any, dict[str, torch.Tensor]]
-    ) -> None:
+    ) -> dict[str, dict]:
         """Resolve temporary recipe markers after the normal export mapping has routed them."""
+        recipe = {}
         for state_dict in layer_state_dicts.values():
             for key in list(state_dict):
                 if not key.endswith(self._QUANT_RECIPE_MARKER_SUFFIX):
                     continue
-
-                marker = state_dict.pop(key)
-                marker_ids = [int(i) for i in marker.detach().cpu().reshape(-1).tolist()]
-                recipes = [self._quantizer_recipe_markers[i] for i in marker_ids]
-                if any(recipe != recipes[0] for recipe in recipes[1:]):
+                name = key[: -len(self._QUANT_RECIPE_MARKER_SUFFIX)]
+                marker_ids = state_dict.pop(key).reshape(-1).tolist()
+                configs = [self._quantizer_recipe_markers[int(i)] for i in marker_ids]
+                if name in recipe:
+                    configs.append(recipe[name])
+                if any(config != configs[0] for config in configs[1:]):
                     raise ValueError(f"Conflicting packed quantizer recipes routed to {key}")
-
-                recipe_name = key[: -len(self._QUANT_RECIPE_MARKER_SUFFIX)]
-                self._store_quantizer_recipe(recipe_name, recipes[0])
+                recipe[name] = configs[0]
+        return recipe
 
     def _get_quantizer_state(self, state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Move routed quantizer tensors and recipe markers out of a weight shard."""
@@ -279,7 +283,6 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         )
 
         # Temporary scalar markers carry each recipe through the same export mapping as amax.
-        self._quantizer_state_for_recipe = {}
         # Cached shards still reference markers collected when they were built.
         if not self._layer_state_dicts:
             self._quantizer_recipe_markers = []
@@ -290,9 +293,9 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         super().save_pretrained(save_directory, pretrained_model_name_or_path)
 
         # Save fresh quantizer files after the base exporter copies source files.
-        self._extract_quantizer_recipe_markers(quantizer_state_dicts)
+        recipe = self._extract_quantizer_recipe_markers(quantizer_state_dicts)
         gather_mcore_vllm_fq_quantized_state_dict(self.model, quantizer_state_dicts, save_directory)
-        gather_mcore_vllm_fq_quantizer_recipe(self._quantizer_state_for_recipe, save_directory)
+        gather_mcore_vllm_fq_quantizer_recipe(recipe, save_directory)
 
     def _get_quantization_format(self, module: torch.nn.Module):
         return QUANTIZATION_NONE
@@ -375,11 +378,9 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             # string then it usually ends with "." which needs to be removed.
             self.exclude_modules.append(prefix.removesuffix("."))
         block_size = 0
-        name_to_value = self._get_weight_bias(module, dtype, name_to_value)
+        name_to_value = self._get_weight_bias(module, dtype, name_to_value, keep_weight_device=True)
         if "weight" in name_to_value:
-            # Use the original device (avoid the CPU round-trip introduced by _get_weight_bias;
-            # fake-quantization runs on CUDA and the result is moved to CPU below).
-            weight = module.weight.to(dtype)
+            weight = name_to_value["weight"]
             # Fold the weight_quantizer into the weight by applying fake-quantization
             # (quantize then dequantize). The weight_quantizer amax is not exported;
             # the vLLM fakequant reload path disables the weight quantizer when absent.
@@ -395,13 +396,10 @@ class VllmFqGPTModelExporter(GPTModelExporter):
                         else weight.device
                     )
                     # TensorQuantizer does not expose nn.Module.device (custom __getattr__).
-                    param_device = next(weight_quantizer.parameters(), None)
-                    buf_device = next(weight_quantizer.buffers(), None)
-                    wq_dev = (
-                        param_device.device
-                        if param_device is not None
-                        else (buf_device.device if buf_device is not None else torch.device("cpu"))
+                    tensor = next(
+                        chain(weight_quantizer.parameters(), weight_quantizer.buffers()), None
                     )
+                    wq_dev = tensor.device if tensor is not None else torch.device("cpu")
                     need_move = wq_dev != quant_device
                     if need_move:
                         weight_quantizer.to(quant_device)

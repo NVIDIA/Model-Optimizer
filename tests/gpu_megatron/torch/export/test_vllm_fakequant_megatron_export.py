@@ -93,6 +93,9 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
             quantizer.amax = torch.full_like(quantizer.amax, 1.001)
 
     layer = model.decoder.layers[0]
+    output = layer.self_attention.linear_qkv.output_quantizer
+    output.set_from_attribute_config({"num_bits": 8, "axis": None, "enable": True})
+    output.amax = torch.tensor(1.001, device="cuda")
     linears = (
         (
             ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),
@@ -186,6 +189,10 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
         for projections, _ in linears
         for projection in projections
     }
+    expected_names.update(
+        f"model.layers.0.self_attn.{projection}.output_quantizer"
+        for projection in ("q_proj", "k_proj", "v_proj")
+    )
     constant_names = {
         f"model.layers.0.{projection}.input_quantizer"
         for projections, _ in linears[:2]
@@ -225,6 +232,19 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
     assert stale_quantizer + "._amax" not in state
     assert stale_quantizer not in recipe
     assert {"model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"} <= weight_map.keys()
+
+    model.share_embeddings_and_output_weights = True
+    for quantizer in model.output_layer.modules():
+        if isinstance(quantizer, TensorQuantizer):
+            quantizer.disable()
+    config = json.loads((source / "config.json").read_text())
+    config["tie_word_embeddings"] = True
+    (source / "config.json").write_text(json.dumps(config))
+    tied_dir = tmp_path / "tied_export"
+    export_mcore_gpt_to_hf_vllm_fq(model, source, export_dir=str(tied_dir))
+    tied_recipe = yaml.safe_load((tied_dir / "quant_recipe.yaml").read_text())
+    assert not any(name.startswith("lm_head.") for name in tied_recipe)
+    assert json.loads((tied_dir / "config.json").read_text())["tie_word_embeddings"]
 
 
 def test_mcore_vllm_export(dist_workers_size_1, tmp_path):
@@ -391,6 +411,7 @@ def _assert_unsupported_settings(model, source, export_dir, rank, size):
         ("input_quantizer", {"enable": False, "rotate": True, "pre_quant_scale": True}),
         ("weight_quantizer", {"fake_quant": False}),
         ("input_quantizer", {"sequential": True}),
+        ("input_quantizer", {"num_bits": 8, "axis": -1}),
     ]
     if rank == size - 1:
         linear = next(
@@ -418,16 +439,66 @@ def _assert_unsupported_settings(model, source, export_dir, rank, size):
                 )
             if "type" in attribute_cfg:
                 quantizer.reset_amax()
+            if "axis" in attribute_cfg:
+                quantizer.reset_amax()
+                quantizer.amax = torch.ones(1, 1, linear.weight.shape[1], device="cuda")
         with pytest.raises(ValueError, match=f"Unsupported.*{quantizer_name}") as exc:
             export_mcore_gpt_to_hf_vllm_fq(model, source, export_dir=str(export_dir))
         for setting in attribute_cfg.keys() - {"enable", "num_bits"}:
-            assert ("dynamic_amax" if setting == "type" else setting) in str(exc.value)
+            expected = {
+                "type": "dynamic_amax",
+                "axis": "channel-wise activation quantization",
+            }.get(setting, setting)
+            assert expected in str(exc.value)
         assert not list(export_dir.glob("*.safetensors"))
         assert not (export_dir / "model.safetensors.index.json").exists()
         assert not (export_dir / "quantizer_state.pth").exists()
         assert not (export_dir / "quant_recipe.yaml").exists()
         if rank == size - 1:
             setattr(linear, quantizer_name, original_quantizer)
+
+    qkv = next(
+        (
+            layer.self_attention.linear_qkv
+            for layer in model.decoder.layers
+            if hasattr(getattr(layer, "self_attention", None), "linear_qkv")
+        ),
+        None,
+    )
+    if qkv is not None:
+        original_output = qkv.output_quantizer
+        qkv.output_quantizer = deepcopy(original_output)
+        qkv.output_quantizer.set_from_attribute_config({"num_bits": 8, "axis": -1, "enable": True})
+        qkv.output_quantizer.amax = torch.ones(1, 1, qkv.weight.shape[0], device="cuda")
+    with pytest.raises(ValueError, match="channel-wise activation quantization"):
+        export_mcore_gpt_to_hf_vllm_fq(model, source, export_dir=str(export_dir))
+    assert not list(export_dir.glob("*.safetensors"))
+    assert not (export_dir / "quantizer_state.pth").exists()
+    assert not (export_dir / "quant_recipe.yaml").exists()
+    if qkv is not None:
+        qkv.output_quantizer = original_output
+
+    original_tied = model.share_embeddings_and_output_weights
+    for tied in (False, True):
+        model.share_embeddings_and_output_weights = tied
+        quantizer_names = ["input_quantizer", "output_quantizer"]
+        if tied:
+            quantizer_names.append("weight_quantizer")
+        for quantizer_name in quantizer_names:
+            if is_pipeline_last_stage():
+                quantizer = getattr(model.output_layer, quantizer_name)
+                original_quantizer = deepcopy(quantizer)
+                quantizer.enable()
+                quantizer.amax = torch.tensor(1.001, device="cuda")
+            with pytest.raises(ValueError, match="Unsupported lm_head quantization"):
+                export_mcore_gpt_to_hf_vllm_fq(model, source, export_dir=str(export_dir))
+            assert not list(export_dir.glob("*.safetensors"))
+            assert not (export_dir / "model.safetensors.index.json").exists()
+            assert not (export_dir / "quantizer_state.pth").exists()
+            assert not (export_dir / "quant_recipe.yaml").exists()
+            if is_pipeline_last_stage():
+                setattr(model.output_layer, quantizer_name, original_quantizer)
+    model.share_embeddings_and_output_weights = original_tied
 
 
 def _test_cross_rank_quantizer_merge(tmp_path, rank, size):

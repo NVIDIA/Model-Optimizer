@@ -54,6 +54,7 @@ from vllm.inputs import TokensPrompt
 from vllm.utils.import_utils import has_deep_gemm
 
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import ModelOptPTQRecipe
 from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
@@ -728,8 +729,17 @@ def _quantize_and_summarize(self, recipe_path=None, quantizer_path=None):
         quant_cfg = _load_example_module("vllm_ptq_utils").get_quant_config(
             {"recipe_path": recipe_path, "quant_cfg": None, "kv_quant_cfg": None}, model
         )
+    # Reused workers may already have ranges calibrated with a different axis.
+    for module in model.modules():
+        if isinstance(module, TensorQuantizer):
+            module.reset_amax()
     with disable_compilation(model):
         mtq.quantize(model, quant_cfg, forward_loop=_forward_loop)
+
+    if recipe_path is not None:
+        _load_example_module("vllm_reload_utils").validate_quantizer_recipe_for_model(
+            model, quant_cfg
+        )
 
     if quantizer_path is not None:
         reload_utils = _load_example_module("vllm_reload_utils")
@@ -1047,7 +1057,7 @@ def _assert_quantizer_amax_is_static(summary):
     assert summary["quantizers_without_amax"] == [], summary["quantizers_without_amax"]
 
 
-def test_tiny_llama_quantize(tiny_llama_llm):
+def test_tiny_llama_quantize(tiny_llama_llm, tmp_path):
     """Covers QKV/Row/MergedColumn ParallelLinear + Attention on a dense Llama."""
     summaries = tiny_llama_llm.collective_rpc(_quantize_and_summarize)
     summary = summaries[0]
@@ -1070,6 +1080,39 @@ def test_tiny_llama_quantize(tiny_llama_llm):
     assert summary["moe_count"] == 0
 
     _assert_quantizer_amax_is_static(summary)
+
+    # A range in vLLM's own layout must remain loadable through the shared HF/MCore loader.
+    name = "model.layers.0.self_attn.o_proj.input_quantizer"
+    recipe_path = tmp_path / "channel_recipe.yaml"
+    recipe_path.write_text(
+        yaml.safe_dump({name: {"_disabled": False, "_num_bits": 8, "_axis": -1}})
+    )
+    amax = torch.full((1, tiny_llama_llm.llm_engine.model_config.hf_config.hidden_size), 4.001)
+    state_path = tmp_path / "channel_state.pth"
+    torch.save({name + "._amax": amax}, state_path)
+    summaries = tiny_llama_llm.collective_rpc(
+        _quantize_and_summarize, args=(str(recipe_path), str(state_path))
+    )
+    assert all(torch.equal(item["restored_amaxes"][name], amax) for item in summaries)
+
+    recipe = ModelOptPTQRecipe(
+        metadata={},
+        quantize={
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "model.layers.0.self_attn.qkv_proj.input_quantizer",
+                    "cfg": {"num_bits": 8},
+                },
+                {"quantizer_name": "*", "enable": False},
+            ],
+            "algorithm": None,
+        },
+    )
+    path = tmp_path / "ptq_recipe.yaml"
+    path.write_text(yaml.safe_dump(recipe.model_dump(mode="json")))
+    summaries = tiny_llama_llm.collective_rpc(_quantize_and_summarize, args=(str(path),))
+    assert all(not item["enabled_quantizers"] for item in summaries)
 
 
 def test_tiny_moe_quantize(tiny_moe_llm, tmp_path):
@@ -1155,6 +1198,38 @@ def test_tiny_moe_quantize(tiny_moe_llm, tmp_path):
         module_path = vllm_key.rsplit("._amax", 1)[0]
         assert module_path.endswith(expected_quantizer), vllm_key
         assert module_path in summary["quantizer_names"], (vllm_key, summary["quantizer_names"])
+
+    # A partial tensor file must fail instead of retaining the worker's calibration range.
+    saved = torch.load(state_path, weights_only=True)
+    missing = next(name for name in saved if "layers.0.mlp.experts" in name)
+    saved.pop(missing)
+    torch.save(saved, state_path)
+    errors = tiny_moe_llm.collective_rpc(_check_missing_range, args=(str(state_path),))
+    assert all("missing" in error and "w13_input_quantizer" in error for error in errors)
+
+    recipe["model.layers.0.mlp.missing.input_quantizer"] = active
+    path.write_text(yaml.safe_dump(recipe))
+    errors = tiny_moe_llm.collective_rpc(_check_unmatched_recipe, args=(str(path),))
+    assert all("model.layers.0.mlp.missing.input_quantizer" in error for error in errors)
+
+
+def _check_missing_range(self, quantizer_path):
+    with pytest.raises(ValueError, match="Active quantizer ranges") as error:
+        _load_example_module("vllm_reload_utils").load_state_dict_from_path(
+            quantizer_path, self.get_model()
+        )
+    return str(error.value)
+
+
+def _check_unmatched_recipe(self, recipe_path):
+    model = self.get_model()
+    cfg = _load_example_module("vllm_ptq_utils").get_quant_config(
+        {"recipe_path": recipe_path, "quant_cfg": None, "kv_quant_cfg": None}, model
+    )
+    mtq.quantize(model, {**cfg, "algorithm": None})
+    with pytest.raises(ValueError, match="no enabled match on any serving rank") as error:
+        _load_example_module("vllm_reload_utils").validate_quantizer_recipe_for_model(model, cfg)
+    return str(error.value)
 
 
 _MOE_COMMUNICATION_FP8_CFG = {

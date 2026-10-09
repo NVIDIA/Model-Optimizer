@@ -29,6 +29,7 @@ from vllm_reload_utils import (
     load_state_dict_from_path,
     restore_from_modelopt_state_vllm,
     shard_pre_quant_scale_for_tp,
+    validate_quantizer_recipe_for_model,
 )
 
 import modelopt.torch.quantization as mtq
@@ -132,6 +133,9 @@ def _fakequant_run_prolog_worker(self, mlflow_tracker: FakeQuantMlflowTracker) -
         with disable_compilation(model):
             print("Quantizing model...")
             mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
+
+        if quant_config["recipe_path"]:
+            validate_quantizer_recipe_for_model(model, quant_cfg)
 
         if quantizer_file_path:
             self.model_runner._dummy_run(1)

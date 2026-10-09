@@ -32,6 +32,7 @@ from modelopt.torch.opt.conversion import (
     ModeloptStateManager,
     _check_init_modellike,
 )
+from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import (
     convert_to_quantized_model,
     restore_quantizer_state,
@@ -356,6 +357,13 @@ def quantizer_recipe_to_quant_cfg(recipe: dict[str, Any], model: Any) -> dict[st
         for state in recipe.values()
     ):
         raise ValueError("Exported quantizer recipe entries must include a boolean _disabled")
+    skipped = [
+        name
+        for name, state in recipe.items()
+        if not state["_disabled"] and _convert_key_for_vllm(name, state)[0] == "skip"
+    ]
+    if skipped:
+        raise ValueError(f"Active exported quantizers are unsupported by vLLM reload: {skipped}")
     map_fun = model.hf_to_vllm_mapper.apply_dict if hasattr(model, "hf_to_vllm_mapper") else None
     mapped_recipe = convert_dict_to_vllm(recipe, max_or_concat=False, map_fun=map_fun)
 
@@ -372,6 +380,30 @@ def quantizer_recipe_to_quant_cfg(recipe: dict[str, Any], model: Any) -> dict[st
             entry["cfg"] = cfg
         entries.append(entry)
     return {"quant_cfg": entries, "algorithm": "max"}
+
+
+def validate_quantizer_recipe_for_model(
+    model: torch.nn.Module, quant_cfg: dict[str, Any] | QuantizeConfig
+) -> None:
+    """Require active, explicit recipe names to identify enabled quantizers on some rank."""
+    # Standard PTQ recipes retain ModelOpt's ordered wildcard rules; exported recipes are flat.
+    if isinstance(quant_cfg, QuantizeConfig):
+        return
+    expected = {entry["quantizer_name"] for entry in quant_cfg["quant_cfg"] if entry["enable"]}
+    local_names = {
+        get_unwrapped_name(name, model)
+        for name, module in model.named_modules()
+        if isinstance(module, (TensorQuantizer, SequentialQuantizer)) and module.is_enabled
+    }
+    per_rank_names = [local_names]
+    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+        per_rank_names = [set() for _ in range(torch.distributed.get_world_size())]
+        torch.distributed.all_gather_object(per_rank_names, local_names)
+    missing = expected - set().union(*per_rank_names)
+    if missing:
+        raise ValueError(
+            f"Active recipe quantizers have no enabled match on any serving rank: {sorted(missing)}"
+        )
 
 
 def filter_modelopt_state_quantizer_state_for_model(
@@ -621,6 +653,24 @@ def process_state_dict_for_tp(saved_qstate_dict, current_state_dict):
     return result
 
 
+def _validate_quantizer_ranges(model, saved_quant_dict, current_state_dict) -> None:
+    missing = {
+        get_unwrapped_name(name, model) + "._amax"
+        for name, module in model.named_modules()
+        if isinstance(module, TensorQuantizer)
+        and module.is_enabled
+        and module._if_quant
+        and not module.is_mx_format
+        and not module._dynamic
+        and not is_weight_quantizer_state_key(name)
+    } - (saved_quant_dict.keys() & current_state_dict.keys())
+    missing = _union_quantizer_keys_across_ranks(sorted(missing))
+    if missing:
+        raise ValueError(
+            f"Active quantizer ranges are missing or cannot be loaded: {sorted(missing)}"
+        )
+
+
 def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str, Any]:
     """Overlay mapped, TP-sharded quantizer tensors on the model's state dict."""
     # Load on CPU to avoid failures when the checkpoint was saved from a different GPU mapping.
@@ -635,6 +685,7 @@ def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str,
     saved_quant_dict = convert_dict_to_vllm(saved_quant_dict)
 
     current_state_dict = model.state_dict()
+    _validate_quantizer_ranges(model, saved_quant_dict, current_state_dict)
     checkpoint_quant_keys = [key for key in saved_quant_dict if "quantizer" in key]
     local_checkpoint_quantizers = {
         key.rsplit(".", 1)[0] for key in checkpoint_quant_keys if key in current_state_dict
