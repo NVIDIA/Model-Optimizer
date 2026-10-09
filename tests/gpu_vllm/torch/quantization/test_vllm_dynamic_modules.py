@@ -58,7 +58,11 @@ from modelopt.recipe import ModelOptPTQRecipe
 from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
-from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer, register_quant_backend
+from modelopt.torch.quantization.nn import (
+    SequentialQuantizer,
+    TensorQuantizer,
+    register_quant_backend,
+)
 from modelopt.torch.quantization.plugins import vllm as vllm_plugin
 from modelopt.torch.quantization.plugins.vllm import (
     _ATTENTION_TYPES,
@@ -880,15 +884,14 @@ def tiny_llama_llm(tmp_path_factory):
         _shutdown_llm(llm)
 
 
-@pytest.fixture(scope="module", params=["qwen3_moe", "gpt_oss"])
-def tiny_moe_llm(request, tmp_path_factory):
-    tmp = tmp_path_factory.mktemp(request.param)
+def _tiny_moe_llm(tmp_path_factory, model_type):
+    tmp = tmp_path_factory.mktemp(model_type)
     create_model = (
-        create_tiny_qwen3_moe_dir if request.param == "qwen3_moe" else create_tiny_gpt_oss_dir
+        create_tiny_qwen3_moe_dir if model_type == "qwen3_moe" else create_tiny_gpt_oss_dir
     )
     expert_config = (
         {"moe_intermediate_size": 64, "num_experts": 4, "decoder_sparse_step": 1}
-        if request.param == "qwen3_moe"
+        if model_type == "qwen3_moe"
         else {"num_local_experts": 4}
     )
     model_dir = create_model(
@@ -909,6 +912,19 @@ def tiny_moe_llm(request, tmp_path_factory):
         yield llm
     finally:
         _shutdown_llm(llm)
+
+
+@pytest.fixture(scope="module")
+def tiny_qwen3_moe_llm(tmp_path_factory):
+    yield from _tiny_moe_llm(tmp_path_factory, "qwen3_moe")
+
+
+@pytest.fixture(scope="module", params=["qwen3_moe", "gpt_oss"])
+def tiny_moe_llm(request, tmp_path_factory):
+    if request.param == "qwen3_moe":
+        yield request.getfixturevalue("tiny_qwen3_moe_llm")
+    else:
+        yield from _tiny_moe_llm(tmp_path_factory, "gpt_oss")
 
 
 @pytest.fixture(scope="module")
