@@ -122,6 +122,9 @@ jobs:
           # sys.monitoring records the same lines as the default C tracer at a fraction of the
           # overhead on import-heavy worker processes. Needs Python 3.12+.
           COVERAGE_CORE: sysmon
+          # Tests marked `release` (real-weight downloads and the like) run on nightly and
+          # on-demand runs, not on pull requests.
+          PYTEST_ADDOPTS: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') && '--run-release' || '' }}
         run: |
           # Use `python3` (the vllm image has no `python` on PATH)
           python3 -m pip install nox && nox -s ${{ matrix.example }}

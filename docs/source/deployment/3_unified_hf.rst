@@ -137,8 +137,8 @@ prompts, asserting that each returns non-empty output.
 Two limits are worth stating plainly, because they bound what any ✅ below can mean:
 
 * **These are declared cases, not PR-gated coverage.** The suite is marked ``release`` and collects
-  only when pytest is given ``--run-release``, which no workflow in ``.github/workflows/`` currently
-  passes. A green check on a pull request does not mean these cases ran.
+  only when pytest is given ``--run-release``, which no example workflow in ``.github/workflows/``
+  currently passes. A green check on a pull request does not mean these cases ran.
 * **Each case is a load-and-generate smoke check on the text path.** It does not verify accuracy,
   image or audio inputs, diffusion output, or that speculative decoding actually engages.
 
