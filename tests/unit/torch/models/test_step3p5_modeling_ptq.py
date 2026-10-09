@@ -27,13 +27,13 @@ pytest.importorskip("transformers")
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.hf_export_handlers import _export_moe_linear
 from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
-from modelopt.torch.quantization.nn import QuantModuleRegistry
-from modelopt.torch.quantization.plugins.huggingface import (
+from modelopt.torch.models.step3p5.modeling_ptq import (
     _is_expert_indexed_moe_linear,
     _QuantMoELinear,
     _reconstruct_fused_moe_linear,
     register_moe_linear_on_the_fly,
 )
+from modelopt.torch.quantization.nn import QuantModuleRegistry
 
 NUM_EXPERTS = 4
 HIDDEN_SIZE = 32
