@@ -1,5 +1,9 @@
 # Tau2 Bench Telecom
 
+> **Superseded in the AA suite by Tau3-Banking** (`recipes/tasks/gym/tau3_banking.md`,
+> a standalone gym config). Generate Tau2 only when the user asks for it by name or needs
+> continuity with earlier Tau2 results; the two scores are not comparable.
+
 ## Task Details
 
 - Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/index.html>
