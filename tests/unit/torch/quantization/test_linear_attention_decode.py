@@ -16,9 +16,9 @@
 import pytest
 import torch
 
-from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.linear_attention import LinearAttentionConfig
+from modelopt.torch.quantization.config import QuantizeConfig, QuantizerAttributeConfig
 from modelopt.torch.quantization.linear_attention.decode import _encode
+from modelopt.torch.quantization.linear_attention.utils import _state_qdq
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
@@ -36,6 +36,9 @@ def test_state_qdq_matches_tensor_quantizer(state_format):
     )
     encoded = _encode(value, True, 16, state_format=state_format, state_quantizer=quantizer)
     torch.testing.assert_close(encoded.values, expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        _state_qdq(value, 16, state_format, quantizer), expected, rtol=0, atol=0
+    )
     probe = torch.randn_like(value)
     (gradient,) = torch.autograd.grad((encoded.values * probe).sum(), value)
     torch.testing.assert_close(gradient, probe, rtol=0, atol=0)
@@ -46,12 +49,17 @@ def test_state_qdq_matches_tensor_quantizer(state_format):
 @pytest.mark.parametrize(
     "settings",
     [
+        {"chunk_size": 32},
+        {"solve": {"method": "neumann"}},
+        {"state": {"mode": "token"}},
         {"replay_window": 4},
         {"precision": "replayssm", "replay_window": 0},
         {"precision": "replayssm", "replay_window": 65},
         {"precision": "replayssm", "state_block_v": 16},
     ],
 )
-def test_unified_policy_rejects_incompatible_settings(settings):
+def test_linear_attention_policy_rejects_invalid_settings(settings):
     with pytest.raises(ValueError):
-        LinearAttentionConfig(backend="serving", **settings)
+        QuantizeConfig(
+            linear_attention=[{"module_name": "*", "cfg": {"backend": "serving", **settings}}]
+        )

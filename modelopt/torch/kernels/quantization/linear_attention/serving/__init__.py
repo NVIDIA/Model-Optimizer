@@ -20,6 +20,6 @@ try:
 except ImportError as error:
     raise ImportError(
         "Linear-attention serving profiles require the optional vLLM dependency: "
-        "public vLLM for 'vllm' (legacy spelling 'vllm_0_15'), or the compatible quantized-ReplaySSM "
+        "public vLLM for 'vllm', or the compatible quantized-ReplaySSM "
         "vLLM fork for 'replayssm'."
     ) from error

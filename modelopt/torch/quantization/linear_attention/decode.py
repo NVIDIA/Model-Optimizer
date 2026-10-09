@@ -20,11 +20,15 @@ from dataclasses import dataclass
 import torch
 
 from .config import LinearAttentionConfig
-from .utils import _resolve_state_quantizer, _tile_qdq, forward_value
+from .utils import (
+    _resolve_state_quantizer,
+    _state_qdq_with_scales,
+    _validate_gate_inputs,
+    forward_value,
+)
 
 __all__ = [
     "EncodedLinearAttentionTensor",
-    "LinearAttentionCarry",
     "LinearAttentionState",
     "ReplayEntry",
     "recurrent_decode",
@@ -101,10 +105,6 @@ class LinearAttentionState:
         return state
 
 
-# Compatibility name for existing imports and pickled runtime state objects.
-LinearAttentionCarry = LinearAttentionState
-
-
 def _hadamard32(value):
     """Apply the orthonormal Sylvester transform to contiguous 32-value groups."""
     shape = value.shape
@@ -153,12 +153,9 @@ def _encode(
     """Apply TensorQuantizer state QDQ with straight-through gradients."""
     if not enabled:
         return EncodedLinearAttentionTensor(value, None, "identity", None)
+    decoded, scales = _state_qdq_with_scales(value, block_v, state_format, state_quantizer)
     if state_quantizer is not None and state_quantizer.block_sizes is not None:
-        # TensorQuantizer owns dynamic scales; the floating carry needs only its QDQ output.
-        return EncodedLinearAttentionTensor(
-            state_quantizer(value), None, state_format, state_quantizer.block_sizes[-1]
-        )
-    decoded, scales = _tile_qdq(value, block_v, state_format, state_quantizer=state_quantizer)
+        block_v = state_quantizer.block_sizes[-1]
     return EncodedLinearAttentionTensor(decoded, scales, state_format, block_v)
 
 
@@ -285,7 +282,7 @@ def recurrent_decode(
     position=0,
     scale=None,
     use_qk_l2norm_in_kernel=False,
-    replay_gate_inputs=None,
+    gate_inputs=None,
 ) -> tuple[torch.Tensor, LinearAttentionState]:
     """Run a recurrent suffix and return its outputs and resumable runtime state.
 
@@ -312,10 +309,60 @@ def recurrent_decode(
     state_quantizer, state_qdq, state_format = _resolve_state_quantizer(
         state_quantizer, state_qdq, state_format
     )
+    _validate_gate_inputs(g, beta, gate_inputs)
+    if config.precision == "vllm_kimi_k3" and g.ndim != 3:
+        raise ValueError("vllm_kimi_k3 is a KDA-only precision profile")
+    if config.precision != "replayssm":
+        # Standalone decode validates before any cache writes.
+        from ...kernels.quantization.linear_attention.serving.forward import validate_profile
+
+        validate_profile(
+            gate_inputs,
+            use_qk_l2norm_in_kernel,
+            kimi_k3=config.precision == "vllm_kimi_k3",
+        )
+    return _recurrent_decode(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        config=config,
+        state_qdq=state_qdq,
+        state_format=state_format,
+        state_quantizer=state_quantizer,
+        initial_state=initial_state,
+        carry=carry,
+        position=position,
+        scale=scale,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        gate_inputs=gate_inputs,
+    )
+
+
+def _recurrent_decode(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    *,
+    config,
+    state_qdq,
+    state_format,
+    state_quantizer,
+    initial_state=None,
+    carry=None,
+    position=0,
+    scale=None,
+    use_qk_l2norm_in_kernel=False,
+    gate_inputs=None,
+):
+    """Execute a suffix after its caller validates the shared quantizer once."""
     if config.backend != "serving":
         raise ValueError("State QAT requires backend='serving'")
     block_v = config.state_block_v
-    serving = config.precision in ("vllm", "vllm_0_15")
+    serving = config.precision != "replayssm"
     native_replay = config.precision == "replayssm"
     if q.device.type != "cuda":
         raise ValueError("Serving arithmetic requires CUDA")
@@ -329,7 +376,7 @@ def recurrent_decode(
         and (
             q.shape[-1] < 32
             or q.shape[-1] & (q.shape[-1] - 1)
-            or (g.ndim == 2 and replay_gate_inputs is None)
+            or (g.ndim == 2 and gate_inputs is None)
         )
     ):
         raise ValueError("ReplaySSM requires power-of-two K >= 32 and raw GDN gate inputs")
@@ -362,7 +409,6 @@ def recurrent_decode(
     with torch.autocast(device_type=q.device.type, enabled=False):
         for t in range(len(q)):
             entries = carry.entries
-            state = carry.reconstruct(original_basis=False)
             gate = g[t]
             if native_replay:
                 from ...kernels.quantization.linear_attention.serving.replay import step
@@ -380,11 +426,11 @@ def recurrent_decode(
                         scale,
                         use_qk_l2norm_in_kernel,
                         (
-                            replay_gate_inputs[0][t],
-                            replay_gate_inputs[1][t],
-                            *replay_gate_inputs[2:],
+                            gate_inputs[0][t],
+                            gate_inputs[1][t],
+                            *gate_inputs[2:],
                         )
-                        if replay_gate_inputs is not None
+                        if gate_inputs is not None
                         else None,
                     )
                 native_outputs.append(native[0])
@@ -392,7 +438,20 @@ def recurrent_decode(
                 from ._vllm_autograd import step as serving_step
 
                 native_output, working = serving_step(
-                    q[t], k[t], v[t], gate, beta[t], state, scale, use_qk_l2norm_in_kernel
+                    q[t],
+                    k[t],
+                    v[t],
+                    gate,
+                    beta[t],
+                    carry.anchor.values,
+                    scale,
+                    use_qk_l2norm_in_kernel,
+                    precision=config.precision,
+                    gate_inputs=(
+                        (gate_inputs[0][t], gate_inputs[1][t], *gate_inputs[2:])
+                        if gate_inputs is not None
+                        else None
+                    ),
                 )
             else:
                 decay = gate.exp().unsqueeze(-1)
@@ -404,9 +463,11 @@ def recurrent_decode(
                         current_key / (current_key.square().sum(-1, keepdim=True) + 1e-6).sqrt()
                     )
                 key = EncodedLinearAttentionTensor(current_key, None, "identity", None)
-                decayed = state * decay
-                if native_replay and gate.ndim == 2:
-                    decayed = _replay_state(carry, gate)
+                decayed = (
+                    _replay_state(carry, gate)
+                    if gate.ndim == 2
+                    else carry.reconstruct(original_basis=False) * decay
+                )
                 residual = v[t] - _sum_keys(key.values.unsqueeze(-1) * decayed)
                 update = EncodedLinearAttentionTensor(
                     beta[t].unsqueeze(-1) * residual, None, "identity", None

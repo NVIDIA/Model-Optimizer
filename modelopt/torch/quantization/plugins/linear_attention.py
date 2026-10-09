@@ -16,10 +16,8 @@
 """Shared module policy and checkpoint support for linear-attention QAT."""
 
 import fnmatch
+import warnings
 
-import torch
-
-import modelopt.torch.utils.distributed as dist
 from modelopt.torch.opt.conversion import ApplyModeError
 from modelopt.torch.utils import get_unwrapped_name
 
@@ -40,28 +38,22 @@ def _linear_attention_modules(model):
 
 
 def _apply_linear_attention_policy(model, config):
-    """Assign complete policies in rule order, before compatibility validation."""
+    """Apply rules locally, like quant_cfg; a PP/VPP chunk may have no matches."""
     modules = _linear_attention_modules(model)
     # getattr also handles pickled configs that predate the policy field.
     for entry in getattr(config, "linear_attention", []):
         matches = [name for name in modules if fnmatch.fnmatch(name, entry.module_name)]
-        matched_on_rank = [bool(matches)]
-        if dist.size() > 1:
-            # Shared recipes can select layers owned by another pipeline stage.
-            matched_on_rank = [False] * dist.size()
-            torch.distributed.all_gather_object(matched_on_rank, bool(matches))
-        if not any(matched_on_rank):
-            raise ValueError(
-                f"linear_attention rule {entry.module_name!r} matches no supported modules"
-            )
         for name in matches:
             modules[name].linear_attention_config = entry.cfg.model_copy(deep=True)
 
 
 def _validate_linear_attention(model):
     """Validate configured modules after both policy and quantizers are assigned."""
-    for module in _linear_attention_modules(model).values():
+    modules = _linear_attention_modules(model).values()
+    for module in modules:
         module.validate_linear_attention()
+        module.warn_linear_attention_profile()
+        module._validate_linear_attention_config()
 
 
 def _linear_attention_state(model):
@@ -102,6 +94,8 @@ class _LinearAttentionQuantMixin(QuantModule):
             )
         self._register_temp_attribute("linear_attention_config", LinearAttentionConfig())
         self._register_temp_attribute("_linear_attention_prefill_lengths", None)
+        self._register_temp_attribute("_linear_attention_sequence_lengths", None)
+        self._register_temp_attribute("_linear_attention_cu_seqlens", None)
 
     @property
     def _linear_attn_state(self):
@@ -109,10 +103,12 @@ class _LinearAttentionQuantMixin(QuantModule):
 
     @property
     def linear_attention_is_enabled(self):
-        """Whether state quantization or the serving arithmetic policy is enabled."""
-        return (
-            any(getattr(self, name).is_enabled for name in self.linear_attention_quantizer_names)
-            or self.linear_attention_config.backend == "serving"
+        """Retain an unquantized serving baseline only inside an explicit phase."""
+        return any(
+            getattr(self, name).is_enabled for name in self.linear_attention_quantizer_names
+        ) or (
+            self.linear_attention_config.backend == "serving"
+            and self._linear_attention_prefill_lengths is not None
         )
 
     def validate_linear_attention(self):
@@ -124,8 +120,8 @@ class _LinearAttentionQuantMixin(QuantModule):
             )
             if self.linear_attention_config.backend != "serving":
                 raise ValueError(
-                    "GDN/KDA state QAT requires backend='serving' and prefill lengths "
-                    "through linear_attention_training_phase"
+                    "GDN/KDA state QAT requires backend='serving'; use "
+                    "linear_attention_training_phase to select a recurrent training suffix"
                 )
             if self.linear_attention_config.state_codec == "int8_hadamard32":
                 if state_format != "int8":
@@ -133,7 +129,35 @@ class _LinearAttentionQuantMixin(QuantModule):
                 if group_size:
                     raise ValueError("TensorQuantizer block_sizes requires state_codec='tile'")
 
+    def warn_linear_attention_profile(self):
+        """Warn at conversion/restore on one TP/DP representative of each owning stage."""
+        if (
+            not self._linear_attn_state.is_enabled
+            or "kda_state_quantizer" not in self.linear_attention_quantizer_names
+            or self.linear_attention_config.precision != "vllm"
+        ):
+            return
+        parallel = getattr(self, "parallel_state", None)
+        if parallel is not None and any(
+            group.rank() > 0
+            for group in (parallel.tensor_parallel_group, parallel.data_parallel_group)
+        ):
+            return
+        warnings.warn(
+            "KDA precision='vllm' selects standalone FLA/Triton kernels, not a model "
+            "serving profile. For Kimi-Linear/Kimi-K3 on vLLM 0.30, select "
+            "precision='vllm_kimi_k3' and configure the server's matching Triton "
+            "backends and unbounded gates."
+        )
+
+    def _validate_linear_attention_config(self):
+        """Check framework settings at conversion/forward, without restricting offline restore."""
+
+    def validate_linear_attention_execution(self):
+        """Check framework execution restrictions at forward, not conversion or restore."""
+
     def modelopt_post_restore(self, prefix=""):
         """Validate the restored numerical policy and quantizers."""
         super().modelopt_post_restore(prefix)
         self.validate_linear_attention()
+        self.warn_linear_attention_profile()

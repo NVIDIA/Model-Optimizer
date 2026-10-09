@@ -17,54 +17,125 @@
 
 from contextlib import contextmanager
 from itertools import pairwise
+from numbers import Integral
 
 import torch
 
-import modelopt.torch.utils.distributed as dist
-
-from .decode import recurrent_decode
+from .decode import _recurrent_decode
 from .utils import _resolve_state_quantizer, _state_qdq, forward_value
 
-__all__ = ["linear_attention_training_phase"]
+__all__ = ["get_linear_attention_layers", "linear_attention_training_phase"]
 
 
-def _lengths(values):
+def _lengths(values, name):
     if isinstance(values, torch.Tensor):
         values = values.tolist()
     values = tuple(values)
-    if any(type(value) is not int or value < 0 for value in values):
-        raise ValueError("Prefill lengths must be nonnegative integers")
-    return values
+    if any(
+        isinstance(value, bool) or not isinstance(value, Integral) or value < 0 for value in values
+    ):
+        raise ValueError(f"{name} must be nonnegative integers")
+    return tuple(int(value) for value in values)
 
 
-@contextmanager
-def linear_attention_training_phase(model, prefill_lengths):
-    """Supply explicit sequence phases through forward and checkpointed backward.
+class _PackedBoundaries:
+    """Own immutable host boundaries and verify each layer's current packed tensor."""
 
-    Runtime phase metadata is local to the converted layers and restored on exit.
-    Keep this context active through backward when activation checkpointing is used.
+    def __init__(self, values):
+        self.values = None if values is None else _lengths(values, "Packed boundaries")
+
+    def resolve(self, actual):
+        if actual is None:
+            if self.values is not None:
+                raise ValueError("Phase cu_seqlens requires packed boundaries from the layer")
+            return None
+        # Tensor versions do not track writes through .data, NumPy or DLPack aliases.
+        values = _lengths(actual, "Packed boundaries")
+        if self.values is not None and values != self.values:
+            raise ValueError("Phase cu_seqlens does not match the layer's packed boundaries")
+        self.values = values
+        return values
+
+
+def get_linear_attention_layers(model, *, enabled_only=False, unphased_only=False):
+    """Return serving-policy layers from a module or iterable of model chunks.
+
+    Disabled state quantizers are included by default so a baseline can use the
+    same serving arithmetic and phase as QAT. Use ``enabled_only`` for setup checks
+    and ``unphased_only`` to select layers needing adapter-provided defaults.
     """
     # The plugin imports this numerical package during quantization initialization.
     from ..plugins.linear_attention import _LinearAttentionQuantMixin
 
-    lengths = _lengths(prefill_lengths)
-    layers = [
-        m
-        for m in model.modules()
-        if isinstance(m, _LinearAttentionQuantMixin)
-        and m.linear_attention_config.backend == "serving"
+    roots = (model,) if isinstance(model, torch.nn.Module) else model
+    return tuple(
+        dict.fromkeys(
+            module
+            for root in roots
+            for module in root.modules()
+            if isinstance(module, _LinearAttentionQuantMixin)
+            and module.linear_attention_config.backend == "serving"
+            and (not enabled_only or module._linear_attn_state.is_enabled)
+            and (not unphased_only or module._linear_attention_prefill_lengths is None)
+        )
+    )
+
+
+def _prefix_lengths(values, valid_lengths):
+    prefixes = _lengths(values, "Prefill lengths")
+    if valid_lengths is not None and (
+        len(prefixes) != len(valid_lengths)
+        or any(prefix > end for prefix, end in zip(prefixes, valid_lengths))
+    ):
+        raise ValueError("Supply one prefill length <= sequence length per sequence")
+    return prefixes
+
+
+@contextmanager
+def linear_attention_training_phase(
+    model, prefill_lengths, *, sequence_lengths=None, cu_seqlens=None, preserve_existing=False
+):
+    """Supply per-sequence phases to a module or iterable of model chunks/layers.
+
+    Enabled state quantization requires a phase, including calibration/eval. Disabled
+    quantizers use the original module outside a phase and serving arithmetic inside.
+    Megatron selective recompute captures the phase for backward after context exit.
+
+    ``sequence_lengths`` excludes right padding in dense rows or padded THD segments.
+    ``cu_seqlens`` describes physical packed storage, including alignment padding.
+    Megatron derives omitted valid lengths from unpadded ``cu_seqlens_q`` metadata;
+    padded-only metadata requires explicit ``sequence_lengths``.
+    Padding produces zero attention outputs and never updates the recurrent state.
+    ``preserve_existing=True`` installs defaults only on layers without a phase.
+    Empty pipeline stages participate as no-ops.
+    """
+    layers = get_linear_attention_layers(model)
+    if preserve_existing:
+        layers = tuple(m for m in layers if m._linear_attention_prefill_lengths is None)
+    valid_lengths = (
+        None if sequence_lengths is None else _lengths(sequence_lengths, "Sequence lengths")
+    )
+    lengths = _prefix_lengths(prefill_lengths, valid_lengths)
+    boundaries = _PackedBoundaries(cu_seqlens)
+    previous = [
+        (
+            m._linear_attention_prefill_lengths,
+            m._linear_attention_sequence_lengths,
+            m._linear_attention_cu_seqlens,
+        )
+        for m in layers
     ]
-    # A pipeline stage may have no selected layers; conversion validates global matches.
-    if not layers and dist.size() == 1:
-        raise ValueError("The model has no converted decode-aware linear-attention layers")
-    previous = [getattr(m, "_linear_attention_prefill_lengths", None) for m in layers]
     try:
         for module in layers:
             module._linear_attention_prefill_lengths = lengths
+            module._linear_attention_sequence_lengths = valid_lengths
+            module._linear_attention_cu_seqlens = boundaries
         yield model
     finally:
-        for module, original in zip(layers, previous):
+        for module, (original, original_lengths, original_boundaries) in zip(layers, previous):
             module._linear_attention_prefill_lengths = original
+            module._linear_attention_sequence_lengths = original_lengths
+            module._linear_attention_cu_seqlens = original_boundaries
 
 
 def _prepare_prefill_inputs(q, k, v, g, beta, *, policy, chunk_size):
@@ -96,8 +167,9 @@ def _prefill_decode_forward(
     output_dtype,
     beta_dtype,
     prefill_lengths,
+    sequence_lengths=None,
     use_qk_l2norm_in_kernel=False,
-    replay_gate_inputs=None,
+    gate_inputs=None,
 ):
     """Run both prefill and decode phases in one differentiable training forward.
 
@@ -109,12 +181,17 @@ def _prefill_decode_forward(
     Args:
         prefill_lengths: Prefix token count per sequence. For 128 tokens, a value
             of 64 selects 64 chunked prefill tokens followed by 64 recurrent tokens.
+        sequence_lengths: Valid token count per sequence, excluding right padding.
+            Defaults to the dense row length or each packed storage segment length.
     """
     state_quantizer, state_qdq, state_format = _resolve_state_quantizer(
         state_quantizer, state_qdq, state_format
     )
-    if prefill_lengths is None:
-        raise ValueError("Decode-aware training requires explicit per-sequence prefill lengths")
+    if state_qdq and prefill_lengths is None:
+        raise ValueError(
+            "State quantization requires explicit prefill lengths through "
+            "linear_attention_training_phase"
+        )
     if q.ndim != 4 or k.shape != q.shape or v.ndim != 4 or v.shape[:2] != q.shape[:2]:
         raise ValueError("q/k and v must have compatible [B,T,H,D] shapes")
     batch, length, key_heads, keys = q.shape
@@ -124,11 +201,16 @@ def _prefill_decode_forward(
     if g.shape not in (beta.shape, (*beta.shape, keys)):
         raise ValueError("Invalid GDN/KDA log-retention shape")
     q, k = (x.repeat_interleave(heads // key_heads, dim=2) for x in (q, k))
-    boundaries = cu_seqlens_cpu if cu_seqlens_cpu is not None else cu_seqlens
+    if isinstance(cu_seqlens_cpu, _PackedBoundaries):
+        boundaries = cu_seqlens_cpu.resolve(cu_seqlens)
+    elif cu_seqlens_cpu is not None:
+        boundaries = _PackedBoundaries(cu_seqlens_cpu).resolve(cu_seqlens)
+    else:
+        boundaries = cu_seqlens
     if boundaries is None:
         sequences = [(b, 0, length) for b in range(batch)]
     else:
-        bounds = _lengths(boundaries)
+        bounds = _lengths(boundaries, "Packed boundaries")
         if (
             batch != 1
             or len(bounds) < 2
@@ -140,11 +222,18 @@ def _prefill_decode_forward(
                 "Packed boundaries must partition a batch of one, allowing empty entries"
             )
         sequences = [(0, a, b) for a, b in pairwise(bounds)]
-    prefixes = _lengths(prefill_lengths)
-    if len(prefixes) != len(sequences) or any(
-        p > end - start for p, (_, start, end) in zip(prefixes, sequences)
+    valid_lengths = (
+        tuple(end - start for _, start, end in sequences)
+        if sequence_lengths is None
+        else _lengths(sequence_lengths, "Sequence lengths")
+    )
+    if len(valid_lengths) != len(sequences) or any(
+        valid > end - start for valid, (_, start, end) in zip(valid_lengths, sequences)
     ):
-        raise ValueError("Supply one valid prefill length per sequence")
+        raise ValueError("Supply one sequence length within its storage segment per sequence")
+    prefixes = _prefix_lengths(
+        valid_lengths if prefill_lengths is None else prefill_lengths, valid_lengths
+    )
     if (
         keys > 256
         or (g.ndim == 4 and values != keys)
@@ -152,6 +241,15 @@ def _prefill_decode_forward(
     ):
         raise ValueError(
             "Serving arithmetic requires K <= 256, KDA V=K, and power-of-two K for normalization"
+        )
+    if policy.precision != "replayssm":
+        # Validate the optional native backend before launching any prefix kernels.
+        from ...kernels.quantization.linear_attention.serving.forward import validate_profile
+
+        validate_profile(
+            gate_inputs,
+            use_qk_l2norm_in_kernel,
+            kimi_k3=policy.precision == "vllm_kimi_k3",
         )
     if initial_state is None:
         states = q.new_zeros(len(sequences), heads, keys, values)
@@ -161,7 +259,8 @@ def _prefill_decode_forward(
         if states.shape != (len(sequences), heads, keys, values):
             raise ValueError("Initial state shape does not match sequence/head dimensions")
     outputs, finals = [], []
-    for n, (b, start, end) in enumerate(sequences):
+    for n, (b, start, storage_end) in enumerate(sequences):
+        end = start + valid_lengths[n]
         split = start + prefixes[n]
         prefix, state = q.new_empty(0, heads, values), states[n]
         if prefixes[n]:
@@ -194,11 +293,21 @@ def _prefill_decode_forward(
                     state=state,
                     scale=keys**-0.5 if scale is None else scale,
                     beta_dtype=beta_dtype,
+                    precision=policy.precision,
                     normalize=use_qk_l2norm_in_kernel,
+                    gate_inputs=(
+                        (
+                            gate_inputs[0][b, start:split],
+                            gate_inputs[1][b, start:split],
+                            *gate_inputs[2:],
+                        )
+                        if gate_inputs is not None
+                        else None
+                    ),
                 )
         # Keep the prefix state attached so suffix losses backpropagate through prefill.
         # recurrent_decode applies configured state QDQ at the handoff and suffix writes.
-        suffix, carry = recurrent_decode(
+        suffix, carry = _recurrent_decode(
             *(x[b, split:end] for x in (q, k, v, g, beta)),
             config=policy,
             state_qdq=state_qdq,
@@ -206,22 +315,27 @@ def _prefill_decode_forward(
             state_quantizer=state_quantizer,
             initial_state=state,
             position=prefixes[n],
-            replay_gate_inputs=(
+            gate_inputs=(
                 (
-                    replay_gate_inputs[0][b, split:end],
-                    replay_gate_inputs[1][b, split:end],
-                    *replay_gate_inputs[2:],
+                    gate_inputs[0][b, split:end],
+                    gate_inputs[1][b, split:end],
+                    *gate_inputs[2:],
                 )
-                if replay_gate_inputs is not None
+                if gate_inputs is not None
                 else None
             ),
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             scale=scale,
         )
-        outputs.append(torch.cat((prefix, suffix)))
-        finals.append(carry.reconstruct())
+        # Keep storage offsets for downstream layers while excluding padding from the graph.
+        pieces = (prefix, suffix)
+        if storage_end > end:
+            pieces += (v.new_zeros(storage_end - end, heads, values),)
+        outputs.append(torch.cat(pieces))
+        if output_final_state:
+            finals.append(carry.reconstruct())
     output = torch.stack(outputs) if boundaries is None else torch.cat(outputs).unsqueeze(0)
-    final = torch.stack(finals)
-    if state_v_first:
+    final = torch.stack(finals) if output_final_state else None
+    if final is not None and state_v_first:
         final = final.transpose(-1, -2)
-    return output.to(output_dtype), final if output_final_state else None
+    return output.to(output_dtype), final

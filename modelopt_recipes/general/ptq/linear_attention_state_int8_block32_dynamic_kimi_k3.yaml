@@ -20,10 +20,9 @@ imports:
 
 metadata:
   description: >-
-    Dynamic INT8 GDN/KDA state QDQ with per-key 32-value scales and working-state readout.
-    For Kimi-K3/Kimi-Linear, use the explicit kimi_k3 recipe instead.
-    Uses the installed vLLM GDN or standalone FLA/KDA Triton backend with BF16 operands
-    and FP32 state storage.
+    Dynamic INT8 Kimi-K3/Kimi-Linear KDA state QDQ with per-key 32-value scales and working-state readout.
+    Requires raw projections and unbounded softplus gates. In vLLM, set both
+    kda_prefill_backend and kda_decode_backend to triton; mixed batches are not covered.
     Fresh prefill has no internal state QDQ; handoff and recurrent writes use the configured QDQ.
     Supply per-sequence prefix lengths through
     linear_attention_training_phase. No calibration is required.
@@ -36,4 +35,4 @@ quantize:
     - module_name: '*'
       cfg:
         backend: serving
-        precision: vllm
+        precision: vllm_kimi_k3

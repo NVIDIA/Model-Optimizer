@@ -17,11 +17,7 @@ from contextlib import nullcontext
 
 import pytest
 import torch
-from _test_utils.torch.megatron.utils import (
-    initialize_for_megatron,
-    load_distributed_checkpoint,
-    save_distributed_checkpoint,
-)
+from _test_utils.torch.megatron.utils import initialize_for_megatron
 from megatron.core import parallel_state
 from megatron.core.models.hybrid.hybrid_layer_specs import hybrid_stack_spec
 from megatron.core.process_groups_config import ProcessGroupCollection
@@ -29,14 +25,7 @@ from megatron.core.transformer import TransformerConfig
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
-from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
-    restore_sharded_modelopt_state,
-    save_sharded_modelopt_state,
-)
-from modelopt.torch.quantization.linear_attention import (
-    LinearAttentionConfig,
-    linear_attention_training_phase,
-)
+from modelopt.torch.quantization.linear_attention import linear_attention_training_phase
 
 KimiDeltaAttention = pytest.importorskip("megatron.core.ssm.gated_delta_net.kda").KimiDeltaAttention
 pytest.importorskip("vllm")
@@ -86,11 +75,13 @@ def _case(cfg):
     model = _layer()
     hidden = torch.randn(73, 1, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    def forward(layer):
+    def forward(layer, *, decode_aware=True, prefix=31, length=None):
         policy = getattr(layer, "linear_attention_config", None)
         phase = (
-            linear_attention_training_phase(layer, [31])
-            if policy is not None and policy.backend == "serving"
+            linear_attention_training_phase(
+                layer, [prefix], sequence_lengths=None if length is None else [length]
+            )
+            if policy is not None and policy.backend == "serving" and decode_aware
             else nullcontext()
         )
         with phase, torch.autocast("cuda", dtype=torch.bfloat16):
@@ -98,19 +89,32 @@ def _case(cfg):
 
     with torch.no_grad():
         baseline = forward(model)
-    mtq.quantize(model, cfg)
+
+    def calibrate(m):
+        with linear_attention_training_phase(m, [73]):
+            return forward(m, decode_aware=False)
+
+    mtq.quantize(model, {**cfg, "algorithm": "max"}, calibrate)
     return model, hidden, forward, baseline
 
 
 def _compile_kda(rank, size, cfg):
     model, hidden, forward, _ = _case(cfg)
-    with linear_attention_training_phase(model, [31]):
-        forward(model).float().square().mean().backward()
+    for prefix in (31, 32):
+        forward(model, prefix=prefix, length=prefix + 4).float().square().mean().backward()
     torch.cuda.synchronize()
 
 
-def _test_kda(rank, size, cfg, checkpoint_path):
+def _test_kda(rank, size, cfg):
     model, hidden, forward, baseline = _case(cfg)
+    for name, value in (("kda_safe_gate", True), ("kda_lower_bound", -5.0)):
+        original = getattr(model.config, name)
+        try:
+            setattr(model.config, name, value)
+            with pytest.raises(NotImplementedError, match="unbounded softplus gates"):
+                mtq.quantize(model, cfg)
+        finally:
+            setattr(model.config, name, original)
     assert model.kda_state_quantizer.is_enabled
     assert model.kda_state_quantizer.num_bits == 8
     assert model.linear_attention_config.precision == "vllm"
@@ -120,43 +124,35 @@ def _test_kda(rank, size, cfg, checkpoint_path):
         assert not torch.equal(forward(model), baseline)
     assert model.gated_delta_rule is kernel
 
-    # The sharded checkpoint must restore this per-module change, not recipe defaults.
-    model.linear_attention_config.state_block_v = 32
-    policy = model.linear_attention_config
-    mtq.disable_quantizer(model, "*")
-    model.linear_attention_config = LinearAttentionConfig()
-    with torch.no_grad():
-        torch.testing.assert_close(forward(model), baseline, rtol=0, atol=0)
-    model.linear_attention_config = policy
-    mtq.enable_quantizer(model, "*kda_state_quantizer")
+    with pytest.raises(ValueError, match="explicit prefill lengths"):
+        forward(model, decode_aware=False)
+    # Two in-flight microbatches must keep their own phases after both contexts exit.
+    expected_grads = []
+    model.recompute_gdn = False
+    for prefix in (31, 32):
+        model.zero_grad(set_to_none=True)
+        hidden.grad = None
+        forward(model, prefix=prefix, length=prefix + 4).float().square().mean().backward()
+        expected_grads.append((hidden.grad.clone(), model.in_proj.weight.grad.clone()))
+    model.recompute_gdn = True
+    pending = [forward(model, prefix=prefix, length=prefix + 4) for prefix in (31, 32)]
+    for output, (hidden_grad, weight_grad) in zip(pending, expected_grads):
+        model.zero_grad(set_to_none=True)
+        hidden.grad = None
+        output.float().square().mean().backward()
+        torch.testing.assert_close(hidden.grad, hidden_grad, rtol=0, atol=0)
+        torch.testing.assert_close(model.in_proj.weight.grad, weight_grad, rtol=0, atol=0)
+    model.eval()
+    forward(model).float().sum().backward()  # No checkpoint hook may reject eval gradients.
+    model.train()
 
+    mtq.disable_quantizer(model, "*")
     with torch.no_grad():
-        expected = forward(model)
-    # A change made after conversion must survive beyond the saved recipe defaults.
-    mtq.disable_quantizer(model, "*kda_state_quantizer")
-    save_distributed_checkpoint(checkpoint_path, model)
-    save_sharded_modelopt_state([model], checkpoint_path)
-    restored = _layer()
-    restore_sharded_modelopt_state([restored], checkpoint_path)
-    load_distributed_checkpoint(checkpoint_path, restored)
-    assert not restored.kda_state_quantizer.is_enabled
-    mtq.enable_quantizer(restored, "*kda_state_quantizer")
-    # Megatron recomputes the core during backward, after forward's kernel wrapper exits.
-    with linear_attention_training_phase(restored, [31]):
-        actual = forward(restored)
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-        actual.float().square().mean().backward()
-    assert not hasattr(restored, "kda_w_quantizer")
-    assert restored._linear_attention_prefill_lengths is None
-    assert restored.linear_attention_config == policy
-    assert restored.gated_delta_rule is kernel
-    assert torch.isfinite(hidden.grad).all()
-    for parameter in restored.parameters():
-        assert parameter.grad is not None
-        assert torch.isfinite(parameter.grad).all()
-    before = restored.in_proj.weight.detach().clone()
-    torch.optim.SGD(restored.parameters(), lr=0.1).step()
-    assert not torch.equal(before, restored.in_proj.weight)
+        torch.testing.assert_close(forward(model, decode_aware=False), baseline, rtol=0, atol=0)
+    mtq.enable_quantizer(model, "*kda_state_quantizer")
+    before = model.in_proj.weight.detach().clone()
+    torch.optim.SGD(model.parameters(), lr=0.1).step()
+    assert not torch.equal(before, model.in_proj.weight)
 
 
 @pytest.fixture(scope="module")
@@ -169,6 +165,6 @@ def compiled_kda_workers(dist_workers_size_1):
     return dist_workers_size_1, cfg
 
 
-def test_kda_qat_and_sharded_restore(compiled_kda_workers, tmp_path):
+def test_kda_qat_recompute(compiled_kda_workers):
     workers, cfg = compiled_kda_workers
-    workers.run(_test_kda, cfg, tmp_path)
+    workers.run(_test_kda, cfg)

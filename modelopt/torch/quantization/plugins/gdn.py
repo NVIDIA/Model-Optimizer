@@ -59,6 +59,8 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
                 "GDN W quantization is no longer supported. Disable gdn_w_quantizer; "
                 "use gdn_state_quantizer with an explicit serving policy for state QAT."
             )
+        if self.linear_attention_config.precision == "vllm_kimi_k3":
+            raise ValueError("vllm_kimi_k3 is a KDA-only precision profile")
         super().validate_linear_attention()
 
     @property
@@ -70,7 +72,11 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
         self, gated_delta_rule: GatedDeltaRuleFn, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Route enabled state quantization to its training implementation."""
-        self.validate_linear_attention()
+        if (
+            self.gdn_w_quantizer.is_enabled
+            or self.linear_attention_config.precision == "vllm_kimi_k3"
+        ):
+            self.validate_linear_attention()
         if not self.linear_attention_is_enabled:
             return gated_delta_rule(*args, **kwargs)
         while isinstance(gated_delta_rule, partial):
@@ -85,11 +91,14 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
         chunk_size = kwargs.pop("chunk_size", 64)
         if chunk_size != 64:
             raise ValueError("GDN fake quantization supports only chunk_size=64")
+        if self._linear_attention_cu_seqlens is not None:
+            kwargs["cu_seqlens_cpu"] = self._linear_attention_cu_seqlens
         return gdn_state_qat(
             *args,
             policy=self.linear_attention_config,
             state_quantizer=self.gdn_state_quantizer,
             chunk_size=chunk_size,
             prefill_lengths=self._linear_attention_prefill_lengths,
+            sequence_lengths=self._linear_attention_sequence_lengths,
             **kwargs,
         )

@@ -16,5 +16,6 @@
 """Linear-attention quantization adapters for optional serving kernels.
 
 Serving adapters import forward kernels only when selected; this package
-initializer has no kernel dependencies.
+initializer has no kernel dependencies. The existing FLA chunk kernels remain
+available for direct calls with fla-core==0.5.1.
 """

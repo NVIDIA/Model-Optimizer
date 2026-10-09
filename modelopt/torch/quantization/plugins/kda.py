@@ -29,7 +29,6 @@ class KimiDeltaAttentionStateQuantMixin(_LinearAttentionQuantMixin):
     linear_attention_quantizer_names = ("kda_state_quantizer",)
 
     def _state_quantized_chunk_kda(self, kernel, *args, **kwargs):
-        self.validate_linear_attention()
         if not self.linear_attention_is_enabled:
             return kernel(*args, **kwargs)
         # FLA kernels are an optional dependency; the training layer belongs to Megatron.
@@ -41,10 +40,13 @@ class KimiDeltaAttentionStateQuantMixin(_LinearAttentionQuantMixin):
             kernel = kernel.func
         if kernel is not chunk_kda:
             raise NotImplementedError("KDA quantization requires FLA's chunk_kda callable")
+        if self._linear_attention_cu_seqlens is not None:
+            kwargs["cu_seqlens_cpu"] = self._linear_attention_cu_seqlens
         return kda_state_qat(
             *args,
             policy=self.linear_attention_config,
             state_quantizer=self.kda_state_quantizer,
             prefill_lengths=self._linear_attention_prefill_lengths,
+            sequence_lengths=self._linear_attention_sequence_lengths,
             **kwargs,
         )

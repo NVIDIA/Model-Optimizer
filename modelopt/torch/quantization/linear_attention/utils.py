@@ -44,6 +44,32 @@ def forward_value(value, rounded):
     return _ForwardValue.apply(value, rounded)
 
 
+def _validate_gate_inputs(g, beta, gate_inputs):
+    """Check raw projection shapes and types before dispatching native kernels."""
+    if gate_inputs is None:
+        return
+    if not isinstance(gate_inputs, (tuple, list)) or len(gate_inputs) != 4:
+        raise ValueError("gate_inputs must contain raw gate, raw beta, A_log, and bias")
+    raw_g, raw_beta, rate, bias = gate_inputs
+    for value in (raw_g, raw_beta, rate, bias):
+        if value is not None and (
+            not isinstance(value, torch.Tensor)
+            or value.device != g.device
+            or value.dtype not in (torch.bfloat16, torch.float32)
+        ):
+            raise ValueError("Raw gate inputs must be BF16/FP32 tensors on the gate device")
+    if raw_g is None or raw_beta is None or raw_g.shape != g.shape or raw_beta.shape != beta.shape:
+        raise ValueError("Raw gate and beta shapes must match their prepared operands")
+    heads = beta.shape[-1]
+    channels = g.shape[-1] if g.ndim == beta.ndim + 1 else 1
+    if rate is None or rate.numel() != heads or rate.ndim not in (1, 2):
+        raise ValueError("Raw gate A_log must contain one rate per value head")
+    if (bias is None and g.ndim == beta.ndim) or (
+        bias is not None and (bias.ndim != 1 or bias.numel() != heads * channels)
+    ):
+        raise ValueError("Raw gate bias must contain one value per gate channel")
+
+
 def validate_gdn_quantizer(
     quantizer: TensorQuantizer,
     *,
@@ -137,15 +163,19 @@ def _state_qdq(
     state_format: str = "fp8_e4m3",
     state_quantizer: TensorQuantizer | None = None,
 ):
-    """Dynamic state-tile QDQ with detached scales and identity STE."""
+    """Apply the same state encoding used by recurrent writes."""
+    return _state_qdq_with_scales(state, block_v, state_format, state_quantizer)[0]
+
+
+def _state_qdq_with_scales(state, block_v, state_format, state_quantizer=None):
+    """Shared continuation/decode QDQ; blockwise scales remain owned by TensorQuantizer."""
     if state_quantizer is not None and state_quantizer.block_sizes is not None:
-        return state_quantizer(state)
+        return state_quantizer(state), None
     if state_format not in ("fp8_e4m3", "int8"):
         raise ValueError("State format must be fp8_e4m3 or int8")
     if block_v not in (16, 32, 64, 128):
         raise ValueError("block_v must be 16, 32, 64, or 128")
-    quantized, _ = _tile_qdq(state, block_v, state_format, state_quantizer=state_quantizer)
-    return quantized
+    return _tile_qdq(state, block_v, state_format, state_quantizer=state_quantizer)
 
 
 def _tile_qdq(value, block_v, state_format, *, state_quantizer=None):

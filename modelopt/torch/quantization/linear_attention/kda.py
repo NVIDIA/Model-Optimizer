@@ -19,9 +19,9 @@ import torch
 import torch.nn.functional as F
 
 from .training import _prefill_decode_forward, _prepare_prefill_inputs
-from .utils import forward_value
+from .utils import _validate_gate_inputs, forward_value
 
-__all__ = ["kda_state_qat", "matmul_kda"]
+__all__ = ["kda_state_qat"]
 
 
 def kda_state_qat(
@@ -54,21 +54,25 @@ def kda_state_qat(
     disable_recompute=False,
     return_intermediate_states=False,
     prefill_lengths=None,
+    sequence_lengths=None,
+    gate_inputs=None,
 ):
     """Adapt Megatron's FLA-style KDA call to serving-aligned state QAT.
 
     Prepare per-key-channel gates and optional beta activation using FLA's formula.
     The shared training forward runs the chunked prefix and recurrent suffix with
-    native forward values, configured state QDQ, and a differentiable Torch adjoint.
+    native forward values and configured state QDQ. FLA supplies the prefix backward;
+    a Torch recurrence supplies the suffix adjoint.
     """
     if cp_context is not None or disable_recompute or return_intermediate_states:
         raise NotImplementedError(
             "KDA state QAT does not support CP or FLA recompute/intermediate flags"
         )
-    if allow_neg_eigval and not use_beta_sigmoid_in_kernel:
-        raise ValueError("allow_neg_eigval requires use_beta_sigmoid_in_kernel")
+    if allow_neg_eigval and (not use_beta_sigmoid_in_kernel or gate_inputs is not None):
+        raise ValueError("allow_neg_eigval requires sigmoid beta without raw gate_inputs")
     if lower_bound is not None or safe_gate:
         raise ValueError("Serving arithmetic uses the native softplus KDA gate")
+    _validate_gate_inputs(g, beta, gate_inputs)
     output_dtype = q.dtype
     beta_dtype = beta.dtype
     q, k, v, g, beta = _prepare_prefill_inputs(
@@ -86,15 +90,18 @@ def kda_state_qat(
         rate = A_log.to(dtype).exp().reshape(g.shape[-2], 1)
         g = -rate * F.softplus(g)
         # Import the optional vLLM backend only for the native precision profile.
-        from ...kernels.quantization.linear_attention.serving.forward import fused_kda_gate
+        from ...kernels.quantization.linear_attention.serving._compat import fla_module
 
         with torch.no_grad():
-            native_gate = fused_kda_gate(
+            native_gate = fla_module("kda").fused_kda_gate(
                 raw_gate.flatten(-2).contiguous(), A_log, raw_gate.shape[-1], g_bias=dt_bias
             )
         g = forward_value(g, native_gate)
     if use_beta_sigmoid_in_kernel:
+        if use_gate_in_kernel and gate_inputs is None and not allow_neg_eigval:
+            gate_inputs = (raw_gate, beta, A_log, dt_bias)
         beta = beta.sigmoid() * (2.0 if allow_neg_eigval else 1.0)
+        beta_dtype = torch.float32
     return _prefill_decode_forward(
         q,
         k,
@@ -114,9 +121,7 @@ def kda_state_qat(
         output_dtype=output_dtype,
         beta_dtype=beta_dtype,
         prefill_lengths=prefill_lengths,
+        sequence_lengths=sequence_lengths,
+        gate_inputs=gate_inputs,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
-
-
-# Compatibility name for callers using the original adapter API.
-matmul_kda = kda_state_qat

@@ -21,7 +21,9 @@ import re
 import textwrap
 import types
 from contextlib import contextmanager
+from copy import copy
 from functools import cache, partial
+from itertools import pairwise
 from typing import Any
 
 import megatron.core.parallel_state as mcore_parallel
@@ -29,6 +31,7 @@ import megatron.core.tensor_parallel.layers as megatron_parallel
 import megatron.core.transformer.mlp as megatron_mlp
 import megatron.core.transformer.moe.experts as megatron_moe
 import torch
+from megatron.core import tensor_parallel
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.extensions.transformer_engine import (
     TEColumnParallelGroupedLinear,
@@ -59,6 +62,7 @@ from modelopt.torch.utils.distributed import ParallelState
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import maybe_promote_nvfp4_static_quantizer
 from ..linear_attention.config import LinearAttentionConfig
+from ..linear_attention.training import _lengths, linear_attention_training_phase
 from ..nn import (
     GroupedQuantizer,
     QuantModule,
@@ -1137,7 +1141,8 @@ class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
 
     def _setup(self):
         super()._setup()
-        self._register_temp_attribute("_linear_attention_replay_gate_inputs", None)
+        self._register_temp_attribute("_linear_attention_gate_inputs", None)
+        self._register_temp_attribute("_linear_attention_recompute", False)
         try:
             data_parallel_group = get_data_parallel_group(with_context_parallel=True)
         except AssertionError:
@@ -1149,7 +1154,9 @@ class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
 
     @property
     def _serving_arithmetic(self):
-        return self.linear_attention_config.backend == "serving"
+        return (
+            self.linear_attention_config.backend == "serving" and self.linear_attention_is_enabled
+        )
 
     def _prepare_input_for_gated_delta_rule(self, *args, **kwargs):
         # Preserve raw BF16 Q/K: prefill stores normalized BF16 operands, whereas
@@ -1166,46 +1173,133 @@ class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
     @contextmanager
     def _quantized_linear_attention_kernel(self):
         kernel = self.gated_delta_rule
-        previous_gates = self._linear_attention_replay_gate_inputs
+        previous_gates = self._linear_attention_gate_inputs
         if self._serving_arithmetic:
 
             def run_kernel(*args, **kwargs):
                 kwargs["use_qk_l2norm_in_kernel"] = self.use_qk_l2norm
-                if self._linear_attention_replay_gate_inputs is not None:
-                    kwargs["replay_gate_inputs"] = self._linear_attention_replay_gate_inputs
+                if self._linear_attention_gate_inputs is not None:
+                    kwargs["gate_inputs"] = self._linear_attention_gate_inputs
                 return self._linear_attention_kernel(kernel, *args, **kwargs)
 
             self.gated_delta_rule = run_kernel
         else:
             self.gated_delta_rule = partial(self._linear_attention_kernel, kernel)
-        self._linear_attention_replay_gate_inputs = None
+        self._linear_attention_gate_inputs = None
         try:
             yield
         finally:
             self.gated_delta_rule = kernel
-            self._linear_attention_replay_gate_inputs = previous_gates
+            self._linear_attention_gate_inputs = previous_gates
 
     def forward(self, *args, **kwargs):
-        # Newer Megatron versions recompute the core independently during backward.
-        if hasattr(super(), "_forward_compute") or hasattr(
-            super(), "forward_pre_attn_and_core_attn"
-        ):
-            return super().forward(*args, **kwargs)
-        with self._quantized_linear_attention_kernel():
-            return super().forward(*args, **kwargs)
+        self.validate_linear_attention_execution()
+        recompute = getattr(self, "recompute_gdn", False)
+        capture = self._serving_arithmetic and self.training and recompute
+        if capture and not hasattr(super(), "_forward_compute"):
+            raise NotImplementedError("Selective state QAT recompute requires Megatron's core hook")
+        previous = self._linear_attention_recompute
+        self._linear_attention_recompute = capture
+        if capture:
+            # The adapter checkpoints the same core, with microbatch-local metadata.
+            self.recompute_gdn = False
+        try:
+            if hasattr(super(), "_forward_compute") or hasattr(
+                super(), "forward_pre_attn_and_core_attn"
+            ):
+                return super().forward(*args, **kwargs)
+            with self._quantized_linear_attention_kernel():
+                return super().forward(*args, **kwargs)
+        finally:
+            self._linear_attention_recompute = previous
+            if capture:
+                self.recompute_gdn = recompute
 
-    def _forward_compute(self, *args, **kwargs):
-        with self._quantized_linear_attention_kernel():
-            return super()._forward_compute(*args, **kwargs)
+    def _forward_compute(self, hidden_states, *args, **kwargs):
+        compute = super()._forward_compute
+        if not self._serving_arithmetic:
+            with self._quantized_linear_attention_kernel():
+                return compute(hidden_states, *args, **kwargs)
+        lengths = self._linear_attention_prefill_lengths
+        sequence_lengths = self._linear_attention_sequence_lengths
+        if lengths is None:
+            raise ValueError("State quantization requires explicit prefill lengths")
+        arguments = inspect.signature(compute).bind(hidden_states, *args, **kwargs)
+        boundaries = self._linear_attention_cu_seqlens.resolve(
+            arguments.arguments.get("cu_seqlens_q")
+        )
+        packed = arguments.arguments.get("packed_seq_params")
+        if packed is not None and packed.qkv_format == "thd":
+            actual = packed.cu_seqlens_q
+            if actual is None:
+                if sequence_lengths is None:
+                    raise ValueError(
+                        "Packed state QAT requires valid sequence_lengths or cu_seqlens_q"
+                    )
+            else:
+                real_bounds = _lengths(actual, "Packed boundaries")
+                valid = tuple(end - start for start, end in pairwise(real_bounds))
+                if sequence_lengths is None:
+                    sequence_lengths = valid
+                elif len(sequence_lengths) != len(valid) or any(
+                    length > end for length, end in zip(sequence_lengths, valid)
+                ):
+                    raise ValueError("Sequence lengths exceed the packed valid token counts")
+        if self._linear_attention_recompute:
+            # Packed metadata may refer to buffers reused by a later pipeline microbatch.
+            for name, value in list(arguments.arguments.items()):
+                if name == "cu_seqlens_q" and value is not None:
+                    arguments.arguments[name] = value.clone()
+                elif name == "packed_seq_params" and value is not None:
+                    snapshot = copy(value)
+                    for key, tensor in vars(value).items():
+                        if isinstance(tensor, torch.Tensor):
+                            setattr(snapshot, key, tensor.clone())
+                    arguments.arguments[name] = snapshot
+
+        # Megatron checkpoint preserves RNG, but does not capture PyTorch autocast.
+        autocast_enabled = torch.is_autocast_enabled("cuda")
+        autocast_dtype = torch.get_autocast_dtype("cuda")
+
+        def run(hidden):
+            with (
+                torch.autocast("cuda", enabled=autocast_enabled, dtype=autocast_dtype),
+                linear_attention_training_phase(
+                    self, lengths, sequence_lengths=sequence_lengths, cu_seqlens=boundaries
+                ),
+                self._quantized_linear_attention_kernel(),
+            ):
+                return compute(hidden, *arguments.args[1:], **arguments.kwargs)
+
+        if self._linear_attention_recompute:
+            return tensor_parallel.checkpoint(run, False, hidden_states)
+        return run(hidden_states)
 
     def forward_pre_attn_and_core_attn(self, *args, **kwargs):
         with self._quantized_linear_attention_kernel():
             return super().forward_pre_attn_and_core_attn(*args, **kwargs)
 
-    def validate_linear_attention(self):
-        super().validate_linear_attention()
-        if self.config.context_parallel_size > 1 and self.linear_attention_is_enabled:
+    def validate_linear_attention_execution(self):
+        super().validate_linear_attention_execution()
+        self._validate_linear_attention_config()
+        active = self.linear_attention_is_enabled
+        serving = self.linear_attention_config.backend == "serving" and active
+        if self.config.context_parallel_size > 1 and active:
             raise NotImplementedError("GDN/KDA QAT does not support Megatron context parallelism.")
+        if serving and self.training and self.config.recompute_granularity == "full":
+            raise NotImplementedError(
+                "State QAT supports selective GDN recompute, not full-layer recompute"
+            )
+        if (
+            serving
+            and getattr(self, "recompute_gdn", False)
+            and not hasattr(super(), "_forward_compute")
+        ):
+            raise NotImplementedError("Selective state QAT recompute requires Megatron's core hook")
+
+    def _validate_linear_attention_config(self):
+        if self._serving_arithmetic and self.config.deterministic_mode:
+            raise NotImplementedError("Serving state QAT requires non-deterministic kernels")
         if self._serving_arithmetic and (
             not hasattr(super(), "_prepare_input_for_gated_delta_rule")
             or getattr(self, "gdn_pre_gated_delta_rule_fusion", False)
@@ -1228,26 +1322,14 @@ if HAS_GDN:
         def _compute_gates(self, a_log, dt_bias, batch, seq_len, *gate_feats):
             gate, inputs = super()._compute_gates(a_log, dt_bias, batch, seq_len, *gate_feats)
             if self._serving_arithmetic:
-                # Import the optional vLLM backend only for the native precision profile.
-                from ...kernels.quantization.linear_attention.serving.forward import (
-                    fused_gdn_gating,
-                )
-                from ..linear_attention.utils import forward_value
-
                 raw_beta, raw_gate = gate_feats
-                if self.linear_attention_config.precision == "replayssm":
-                    self._linear_attention_replay_gate_inputs = (raw_gate, raw_beta, a_log, dt_bias)
-                with torch.no_grad():
-                    native_gate, native_beta = fused_gdn_gating(
-                        a_log,
-                        raw_gate.reshape(-1, raw_gate.shape[-1]).contiguous(),
-                        raw_beta.reshape(-1, raw_beta.shape[-1]).contiguous(),
-                        dt_bias,
-                    )
-                gate = forward_value(gate, native_gate.reshape_as(gate))
-                inputs["beta"] = forward_value(
-                    inputs["beta"], native_beta.reshape_as(inputs["beta"])
-                ).to(raw_beta.dtype)
+                # Native prefill/decode own gate activation and its phase-specific rounding.
+                self._linear_attention_gate_inputs = (
+                    raw_gate.reshape(batch, seq_len, -1),
+                    raw_beta.reshape(batch, seq_len, -1),
+                    a_log,
+                    dt_bias,
+                )
             return gate, inputs
 
 
@@ -1260,6 +1342,26 @@ if HAS_KDA:
         """Megatron KDA with decode-aware state fake quantization."""
 
         _linear_attention_kernel = KimiDeltaAttentionStateQuantMixin._state_quantized_chunk_kda
+
+        def _validate_linear_attention_config(self):
+            super()._validate_linear_attention_config()
+            if self._serving_arithmetic and (
+                getattr(self.config, "kda_safe_gate", False)
+                or getattr(self.config, "kda_lower_bound", None) is not None
+            ):
+                raise NotImplementedError("Serving KDA state QAT requires unbounded softplus gates")
+
+        def _compute_gates(self, a_log, dt_bias, batch, seq_len, *gate_feats):
+            gate, inputs = super()._compute_gates(a_log, dt_bias, batch, seq_len, *gate_feats)
+            if self._serving_arithmetic:
+                raw_gate, raw_beta = gate_feats
+                self._linear_attention_gate_inputs = (
+                    raw_gate.reshape_as(gate),
+                    raw_beta.reshape_as(inputs["beta"]),
+                    a_log,
+                    dt_bias,
+                )
+            return gate, inputs
 
 
 def _is_supported_megatron_model(model: torch.nn.Module) -> bool:

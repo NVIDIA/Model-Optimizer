@@ -15,8 +15,8 @@
 
 """Differentiable adapter for the installed serving runtime's arithmetic.
 
-The kernels supply forward values. Autograd differentiates the corresponding
-operations evaluated at those values; operand casts and QDQ use identity STE.
+Native kernels supply forward values. Prefill uses FLA's recurrence backward;
+decode uses a Torch adjoint. QDQ uses identity STE.
 The optional vLLM dependency supplies kernels; training owns its state and needs no server.
 """
 
@@ -25,20 +25,18 @@ import torch
 from .utils import forward_value
 
 
-def rounded(value):
-    return forward_value(value, value.to(torch.bfloat16))
-
-
 def normalized(value):
     return value / (value.square().sum(-1, keepdim=True) + 1e-6).sqrt()
 
 
-def prefix(q, k, v, g, beta, state, scale, beta_dtype, normalize=False):
-    # Keep the optional vLLM dependency isolated to the native precision profile.
+def prefix(
+    q, k, v, g, beta, state, scale, beta_dtype, normalize=False, gate_inputs=None, precision="vllm"
+):
+    # vLLM supplies the forward; the optional FLA dependency supplies the recurrence adjoint.
     from ...kernels.quantization.linear_attention.serving.forward import prefill
 
     with torch.no_grad():
-        out, final, saved = prefill(
+        out, final = prefill(
             q.to(torch.bfloat16),
             k.to(torch.bfloat16),
             v.to(torch.bfloat16),
@@ -47,73 +45,30 @@ def prefix(q, k, v, g, beta, state, scale, beta_dtype, normalize=False):
             state.float(),
             scale,
             normalize,
+            gate_inputs,
+            kimi_k3=precision == "vllm_kimi_k3",
         )
     if not torch.is_grad_enabled() or not any(x.requires_grad for x in (q, k, v, g, beta, state)):
         return out.float(), final
-    q, k = [
-        forward_value(normalized(x) if normalize else x, saved[n]) for n, x in (("q", q), ("k", k))
-    ]
-    outputs = []
-    channel = g.ndim == 3
-    for chunk, lo in enumerate(range(0, len(q), 64)):
-        hi = min(lo + 64, len(q))
-        qc, kc, vc = [x[lo:hi].transpose(0, 1) for x in (q, k, v)]
-        bc = beta[lo:hi].transpose(0, 1).unsqueeze(-1)
-        gc = forward_value(g[lo:hi].transpose(0, 1).cumsum(1), saved["g"][lo:hi].transpose(0, 1))
-        state = forward_value(state, saved["h"][chunk])
-        hs = rounded(state)
-        count = hi - lo
-
-        def matrix(name, value):
-            return forward_value(value, saved[name][lo:hi].transpose(0, 1)[..., :count])
-
-        if channel:
-            lower_rows, score_rows = [], []
-            for row in range(count):
-                right = (
-                    kc[:, : row + 1] * (gc[:, row : row + 1] - gc[:, : row + 1]).exp()
-                ).transpose(-1, -2)
-                lower_rows.append(
-                    torch.nn.functional.pad(
-                        (bc[:, row : row + 1] * kc[:, row : row + 1]) @ right, (0, count - row - 1)
-                    )
-                )
-                score_rows.append(
-                    torch.nn.functional.pad(
-                        (qc[:, row : row + 1] * scale) @ right, (0, count - row - 1)
-                    )
-                )
-            lower = matrix("lower", torch.cat(lower_rows, dim=1).tril(-1))
-            scores = matrix("scores", torch.cat(score_rows, dim=1))
-            gate = gc.exp()
-        else:
-            causal = torch.ones(count, count, device=q.device, dtype=torch.bool).tril()
-            decay = (gc.unsqueeze(-1) - gc.unsqueeze(-2)).masked_fill(~causal, 0).exp()
-            lower = matrix("lower", (bc * (kc @ kc.transpose(-1, -2)) * decay).tril(-1))
-            scores = ((qc @ kc.transpose(-1, -2)) * decay).tril()
-            gate = gc.exp().unsqueeze(-1)
-        eye = torch.eye(count, device=q.device, dtype=q.dtype).expand_as(lower)
-        inverse = matrix(
-            "inverse",
-            torch.linalg.solve_triangular(eye + lower, eye, upper=False, unitriangular=True),
-        )
-        u = forward_value(inverse @ rounded(bc * vc), saved["u"][lo:hi].transpose(0, 1))
-        kb = rounded(bc * kc) if beta_dtype == torch.bfloat16 else bc * kc
-        w = forward_value(inverse @ rounded(kb * gate), saved["w"][lo:hi].transpose(0, 1))
-        updated = forward_value(u - w @ hs, saved["updated"][lo:hi].transpose(0, 1))
-        if channel:
-            output = rounded(rounded(qc * scale) * gate) @ hs + rounded(scores) @ rounded(updated)
-            kg = forward_value(kc * (gc[:, -1:] - gc).exp(), saved["kg"][lo:hi].transpose(0, 1))
-            state = state * gate[:, -1, :, None] + kg.transpose(-1, -2) @ rounded(updated)
-        else:
-            output = ((qc @ hs) * gate + rounded(scores) @ rounded(updated)) * scale
-            weighted = rounded(updated * (gc[:, -1:] - gc).exp().unsqueeze(-1))
-            state = state * gate[:, -1, :, None] + kc.transpose(-1, -2) @ weighted
-        outputs.append(forward_value(output.transpose(0, 1), out[lo:hi]))
-    return torch.cat(outputs), forward_value(state, final)
+    # FLA differentiates the same recurrence. Its intermediate rounding is a backward
+    # surrogate, not a claim that vLLM inference kernels have an exact backward.
+    if g.ndim == 3:
+        from fla.ops.kda import chunk_kda as chunk
+    else:
+        from fla.ops.gated_delta_rule import chunk_gated_delta_rule as chunk
+    adjoint, adjoint_state = chunk(
+        *[x.to(torch.bfloat16)[None] for x in (q, k, v)],
+        g[None],
+        beta[None],
+        initial_state=state[None],
+        output_final_state=True,
+        scale=scale,
+        use_qk_l2norm_in_kernel=normalize,
+    )
+    return forward_value(adjoint[0].float(), out), forward_value(adjoint_state[0], final)
 
 
-def step(q, k, v, gate, beta, state, scale, normalize=False):
+def step(q, k, v, gate, beta, state, scale, normalize=False, gate_inputs=None, precision="vllm"):
     # Keep the optional vLLM dependency isolated to the native precision profile.
     from ...kernels.quantization.linear_attention.serving.forward import step as native_step
 
@@ -127,6 +82,8 @@ def step(q, k, v, gate, beta, state, scale, normalize=False):
             state.float(),
             scale,
             normalize,
+            gate_inputs,
+            kimi_k3=precision == "vllm_kimi_k3",
         )
     if not torch.is_grad_enabled() or not any(
         x.requires_grad for x in (q, k, v, gate, beta, state)

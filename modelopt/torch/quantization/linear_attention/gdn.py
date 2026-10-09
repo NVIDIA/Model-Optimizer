@@ -17,8 +17,9 @@
 
 from .config import LinearAttentionConfig
 from .training import _prefill_decode_forward, _prepare_prefill_inputs
+from .utils import _validate_gate_inputs
 
-__all__ = ["gdn_state_qat", "matmul_gdn"]
+__all__ = ["gdn_state_qat"]
 
 
 def gdn_state_qat(
@@ -47,21 +48,28 @@ def gdn_state_qat(
     chunk_size=64,
     cp_context=None,
     prefill_lengths=None,
-    replay_gate_inputs=None,
+    sequence_lengths=None,
+    gate_inputs=None,
 ):
     """Adapt Megatron's FLA-style GDN call to serving-aligned state QAT.
 
     Validate prepared scalar log gates and promote inputs to FP32 working values.
     The shared training forward runs the chunked prefix and recurrent suffix with
-    native forward values, configured state QDQ, and a differentiable Torch adjoint.
+    native forward values and configured state QDQ. FLA supplies the prefix backward;
+    a Torch recurrence supplies the suffix adjoint.
     """
+    if policy.precision == "vllm_kimi_k3":
+        raise ValueError("vllm_kimi_k3 is a KDA-only precision profile")
     if cp_context is not None:
         raise NotImplementedError("GDN state QAT does not support context parallelism")
+    _validate_gate_inputs(g, beta, gate_inputs)
     output_dtype = q.dtype
     beta_dtype = beta.dtype
     q, k, v, g, beta = _prepare_prefill_inputs(
         q, k, v, g, beta, policy=policy, chunk_size=chunk_size
     )
+    if allow_neg_eigval:
+        raise ValueError("Serving GDN does not support allow_neg_eigval")
     if use_gate_in_kernel or use_beta_sigmoid_in_kernel:
         raise ValueError(
             "Serving GDN expects prepared log gates and beta from the Megatron adapter"
@@ -87,10 +95,7 @@ def gdn_state_qat(
         output_dtype=output_dtype,
         beta_dtype=beta_dtype,
         prefill_lengths=prefill_lengths,
-        replay_gate_inputs=replay_gate_inputs,
+        sequence_lengths=sequence_lengths,
+        gate_inputs=gate_inputs,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
-
-
-# Compatibility name for callers using the original adapter API.
-matmul_gdn = gdn_state_qat

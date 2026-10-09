@@ -106,8 +106,9 @@ def restore_quantized_model(
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
     replace_quant_module(model, version=ModeloptStateManager(model).state_version)
     set_quantizer_by_cfg(model, config.get("quant_cfg", []))
-    # Rebuild from the recipe without validating against partially restored state.
-    _apply_linear_attention_policy(model, config)
+    # Current checkpoints save resolved local policies; only older ones need matching.
+    if "linear_attention" not in metadata:
+        _apply_linear_attention_policy(model, config)
 
     return restore_quantizer_state(model, config, metadata)
 
@@ -220,7 +221,7 @@ def update_quantize_metadata(
     from .plugins.linear_attention import _linear_attention_state
 
     policies = _linear_attention_state(model)
-    if policies:
+    if policies or getattr(config, "linear_attention", []):
         metadata["linear_attention"] = policies
     else:
         metadata.pop("linear_attention", None)

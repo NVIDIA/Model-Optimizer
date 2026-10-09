@@ -28,8 +28,20 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     """One execution policy shared by the chunked prefix and recurrent suffix.
 
     ``serving`` uses native forward arithmetic with a differentiable adjoint;
-    ``fla`` is the disabled/default path. ``vllm`` uses the installed vLLM's arithmetic;
-    ``vllm_0_15`` remains an accepted legacy spelling for existing checkpoints.
+    ``fla`` is the disabled/default path. ``vllm`` targets the installed vLLM's
+    Triton prefill and single-token, non-speculative decode with BF16 operands and
+    FP32 recurrent storage. Deployment must explicitly select Triton prefill
+    (``gdn_prefill_backend="triton"``) and enable packed recurrent decode where
+    available (``VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE=1``). Mixed prefill/decode
+    batches and automatic FlashInfer/CuTe dispatch are outside this profile.
+    KDA uses the standalone FLA/Triton API, with no model-level serving guarantee.
+    ``vllm_kimi_k3`` explicitly selects
+    vLLM's Kimi-K3 Triton kernels (also used by Kimi-Linear in vLLM 0.30),
+    raw projections and that model package's dependencies.
+    These targets are saved in ModelOpt/Megatron policy metadata, not HF export;
+    they do not configure or validate a remote server. Kimi serving must set both
+    ``kda_prefill_backend`` and ``kda_decode_backend`` to ``triton``;
+    the supported gate is unbounded softplus.
     ``replayssm`` uses the serving fork's INT8/Hadamard checkpoint and ring kernels.
     ``replay_window=1`` refreshes the state every token; larger windows enable replay.
     Fresh prefill has no internal state QDQ; incoming continuation state and
@@ -40,7 +52,7 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     """
 
     backend: Literal["fla", "serving"] = ModeloptField(default="fla")
-    precision: Literal["vllm", "vllm_0_15", "replayssm"] = ModeloptField(default="vllm")
+    precision: Literal["vllm", "vllm_kimi_k3", "replayssm"] = ModeloptField(default="vllm")
     replay_window: int = Field(default=1, ge=1, le=64, strict=True)
     state_block_v: Literal[16, 32, 64, 128] = ModeloptField(default=64)
 
@@ -65,7 +77,8 @@ class LinearAttentionPolicyEntry(ModeloptBaseConfig):
     """Assign a complete policy to supported modules matching ``module_name``.
 
     Rules apply in order: the last match wins, without merging fields.
-    A rule must match at least one supported module across distributed stages.
+    Unmatched rules are ignored locally, as with quant_cfg, so a shared recipe
+    can be applied independently to pipeline stages and virtual-pipeline chunks.
     """
 
     module_name: str = Field(...)

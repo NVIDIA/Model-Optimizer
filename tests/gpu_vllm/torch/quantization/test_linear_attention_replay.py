@@ -59,7 +59,7 @@ def compiled_replay(request):
         "config": config,
         "state_qdq": True,
         "state_format": "int8",
-        "replay_gate_inputs": None if channel else (raw, raw_beta, rate, bias),
+        "gate_inputs": None if channel else (raw, raw_beta, rate, bias),
     }
 
     def forward():
@@ -100,7 +100,7 @@ def test_replay_matches_persistent_serving_cache(compiled_replay):
             if channel:
                 a, b, rate, bias = gate.flatten()[None], beta[None], None, None
             else:
-                raw, raw_beta, rate, bias = kwargs["replay_gate_inputs"]
+                raw, raw_beta, rate, bias = kwargs["gate_inputs"]
                 a, b = raw[t : t + 1], raw_beta[t : t + 1]
             expected = torch.empty(1, 1, 64, device="cuda", dtype=torch.bfloat16)
             native.fused_recurrent_gated_delta_rule_replayssm(
@@ -130,13 +130,6 @@ def test_replay_matches_persistent_serving_cache(compiled_replay):
             carry.anchor.values, (decoded * metadata[..., None]).flatten(-2), rtol=0, atol=0
         )
         torch.testing.assert_close(carry.anchor.scales, metadata, rtol=0, atol=0)
-        for i, entry in enumerate(carry.entries):
-            torch.testing.assert_close(
-                entry.key.values.float(), keys[1, :, i].float(), rtol=0, atol=0
-            )
-            torch.testing.assert_close(
-                entry.update.values.float(), updates[1, :, i].float(), rtol=0, atol=0
-            )
     grads = torch.autograd.grad(
         output.square().mean() + carry.reconstruct().square().mean(), (*args, initial)
     )

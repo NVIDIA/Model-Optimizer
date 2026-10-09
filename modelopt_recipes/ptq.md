@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 34 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 35 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -66,11 +66,75 @@ supported combinations.
 | `q8_0` | Q8_0 W8A16 (8.5 bpw), eligible linears | none | none (no calibration) |
 | `linear_attention_state_int8_dynamic` | GDN/KDA decode state INT8 + Hadamard; weights unchanged | none | none (dynamic scales; requires a prefix/decode phase context) |
 | `linear_attention_state_int8_block32_dynamic` | GDN/KDA state INT8, 32 value channels per key row; weights unchanged | none | none (dynamic scales; requires vLLM and a prefix/decode phase context) |
+| `linear_attention_state_int8_block32_dynamic_kimi_k3` | Kimi-K3/Kimi-Linear KDA state INT8, 32 value channels per key row | none | none (dynamic scales; explicit Triton Kimi profile) |
 
 </details>
 
 The block32 linear-attention recipe selects `precision="vllm"`
 and working-state readout. It applies fake QDQ with floating-point state storage.
+For GDN, select `gdn_prefill_backend="triton"` and
+`VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE=1` where packed decode is available.
+This profile covers pure, single-token, non-speculative decode. Mixed prefill/decode
+batches can select different native kernels, so arbitrary continuous batching is
+not numerically qualified by these tests.
+
+For KDA, `precision="vllm"` selects the standalone FLA/Triton API, without a
+model-level serving parity claim; conversion emits a diagnostic for this choice. Use the
+`linear_attention_state_int8_block32_dynamic_kimi_k3` recipe for Kimi-K3 and
+Kimi-Linear on vLLM 0.30, which share model kernels (`precision="vllm_kimi_k3"`). Set vLLM's `additional_config` to
+`{"kda_prefill_backend": "triton", "kda_decode_backend": "triton"}`. The profile
+requires raw projections, Q/K normalization, unbounded softplus gates, and the
+Kimi-K3 package dependencies (`gate_lower_bound=None` in the serving HF config).
+It never falls back to prepared-only arithmetic.
+KDA validates the selected cache paths at the actual head size once per device;
+builds with inconsistent state readout are rejected before training.
+
+State QAT training requires explicit per-sequence prefix lengths. Megatron selective
+GDN recompute captures each microbatch's phase and packed metadata, allowing backward
+after its context exits. Full-layer recompute and CP remain unsupported while state
+QAT is active; disabled quantizers outside a phase retain the original module path.
+Framework training, evaluation and generation loops must establish this context;
+automatic Bridge and evaluation-helper integration is a separate change. Dynamic
+state quantizers need no calibration. `examples/megatron_bridge/quantize.py` rejects
+linear-attention recipes that require calibration before loading a model. To combine
+calibrated projection quantization with state QDQ, provide `mtq.quantize` with a
+calibration loop inside `linear_attention_training_phase`; a full-prefill phase
+calibrates projections but does not measure decode state-QDQ quality.
+To compare state QDQ, convert both models
+with the same serving policy, disable the baseline's state quantizers, and use
+identical prefix and valid-token lengths:
+
+```python
+for model in (baseline, candidate):
+    mtq.quantize(model, state_recipe)
+mtq.disable_quantizer(baseline, "*state_quantizer")
+for model in (baseline, candidate):
+    with linear_attention_training_phase(
+        model, prefill_lengths, sequence_lengths=valid_lengths
+    ):
+        logits = model(tokens, position_ids, attention_mask)
+    # Score only valid continuation tokens, identically for both models.
+```
+
+`sequence_lengths` excludes right padding in dense rows or padded THD segments.
+The recurrent suffix ends at that valid length; padding produces zero attention
+outputs and does not update the cache. Omit valid lengths only when all storage
+tokens are real. For Megatron THD input, omitted lengths are derived from the
+unpadded `packed_seq_params.cu_seqlens_q`. If only padded boundaries are available,
+pass `sequence_lengths` explicitly, even when every storage token is real.
+Full-prefill scoring alone does not exercise decode state QDQ.
+
+The selected precision profile is saved in ModelOpt/Megatron checkpoints.
+HF export currently does not carry this serving contract, and neither checkpoint
+format configures or validates a remote vLLM process. Apply the backend and gate
+settings above to the actual server; a matching trainer environment variable is no proof.
+Server configuration and mixed-batch dispatch enforcement belong to the vLLM plugin.
+The tests qualify the selected native kernels, not arbitrary server dispatch.
+
+Packed boundaries must match the layer's actual (including padding) boundaries.
+Validation reads their values rather than trusting tensor versions, so it can synchronize
+CUDA metadata. Prefix backward still runs a separate FLA recurrence as an adjoint;
+this implementation is not an optimized fused training kernel.
 
 ---
 
