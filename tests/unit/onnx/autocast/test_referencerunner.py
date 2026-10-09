@@ -477,10 +477,24 @@ def test_multi_batch_does_not_accumulate_batches(reference_runner, monkeypatch):
                 X1=np.full((1, 3), i, dtype=np.float32),
                 X2=np.full((1, 3), i + 1, dtype=np.float32),
             )
-        reference_runner.run(temp_dir)
+        results = reference_runner.run(temp_dir)
 
     assert len(concurrent) == 5, "every batch should reach the aggregator"
     assert max(concurrent) == 1, f"batches were retained instead of streamed: {concurrent}"
     assert max(array_concurrent) == 1, (
         f"batch activations were retained instead of streamed: {array_concurrent}"
     )
+    # The streaming machinery is only worth testing if it still produces the right
+    # numbers: X1=0..4, X2=1..5, Y1=X1+X2, Y2=X1*X2.
+    assert results["X1"].absmax == 4.0
+    assert results["X1"].min_val == 0.0
+    assert results["X1"].max_val == 4.0
+    assert results["X2"].absmax == 5.0
+    assert results["X2"].min_val == 1.0
+    assert results["X2"].max_val == 5.0
+    assert results["Y1"].absmax == 9.0
+    assert results["Y1"].min_val == 1.0
+    assert results["Y1"].max_val == 9.0
+    assert results["Y2"].absmax == 20.0
+    assert results["Y2"].min_val == 0.0
+    assert results["Y2"].max_val == 20.0
