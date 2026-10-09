@@ -30,7 +30,6 @@ import transformers
 from torch import Tensor
 from torch.nn.functional import linear
 from transformers.integrations.finegrained_fp8 import FP8Linear
-from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts
 from transformers.models.t5.modeling_t5 import T5Attention
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_FA_AVAILABLE
@@ -1206,96 +1205,6 @@ if FP8Linear not in QuantModuleRegistry:
     QuantModuleRegistry.register({FP8Linear: "hf.FP8Linear"})(_QuantFP8Linear)
 
 
-class _QuantGptOssExperts(_TransposedExpertsCalibMixin, _QuantFunctionalMixin):
-    """Quantized wrapper for `transformers.GptOssExperts`.
-
-    Quantizes `gate_up_proj` and `down_proj` weights via dynamic attributes inside `quantize_weight()`.
-    Activations into `gate_up_proj` are quantized by `gate_up_proj_input_quantizer`. For `down_proj`
-    activation quantization, we intercept `torch.Tensor.__matmul__`/`torch.bmm` and quantize inputs
-    on every second call (since the first call computes `gate_up_proj` outputs and second call
-    computes `down_proj` outputs).
-    """
-
-    @staticmethod
-    def _get_quantized_weight(quantizer, module, weight):
-        # MoE weight is accessed for each expert in one forward pass. so lets cache it
-        if module._enable_weight_quantization:
-            if hasattr(quantizer, "_cached_quant_val"):
-                return getattr(quantizer, "_cached_quant_val")
-            quantizer._cached_quant_val = _transposed_quantize(weight, quantizer)
-            return quantizer._cached_quant_val
-        return weight
-
-    def _setup_for_weight_quantization(self):
-        self._register_dynamic_attribute(
-            "gate_up_proj", partial(self._get_quantized_weight, self.gate_up_proj_weight_quantizer)
-        )
-        self._register_dynamic_attribute(
-            "down_proj", partial(self._get_quantized_weight, self.down_proj_weight_quantizer)
-        )
-
-    def _setup(self):
-        assert not hasattr(self, "kernel_layer_name"), (
-            "ModelOpt quantization does not support patched forward for kernel_hub"
-        )
-        self.gate_up_proj_input_quantizer = TensorQuantizer()
-        self.gate_up_proj_weight_quantizer = TensorQuantizer()
-        self.down_proj_input_quantizer = TensorQuantizer()
-        self.down_proj_weight_quantizer = TensorQuantizer()
-
-        self._register_temp_attribute("_enable_weight_quantization", False)
-        self._register_temp_attribute("_down_proj_mul", False)
-        self._setup_for_weight_quantization()
-
-    @property
-    def functionals_to_replace(self):
-        # Use torch.ops.aten to bypass Python dispatch and avoid RecursionError
-        # (torch.matmul / __matmul__ can dispatch to each other)
-        _aten_bmm = torch.ops.aten.bmm
-        _aten_matmul = torch.ops.aten.matmul
-
-        def _quantized_bmm(batch1, batch2, *, out=None):
-            batch1 = self.down_proj_input_quantizer(batch1) if self._down_proj_mul else batch1
-            self._down_proj_mul = not self._down_proj_mul  # toggle the flag
-            if out is not None:
-                return torch.ops.aten.bmm.out(batch1, batch2, out=out)
-            return _aten_bmm(batch1, batch2)
-
-        def _tensor_matmul(self_t, other):
-            self_t = self.down_proj_input_quantizer(self_t) if self._down_proj_mul else self_t
-            self._down_proj_mul = not self._down_proj_mul
-            return _aten_matmul(self_t, other)
-
-        return [
-            (torch, "bmm", _quantized_bmm),
-            (torch.Tensor, "__matmul__", _tensor_matmul),
-        ]
-
-    @contextmanager
-    def quantize_weight(self):
-        """Context in which MoE weight is quantized."""
-        self._enable_weight_quantization = True
-        try:
-            yield
-        finally:
-            for module in self.modules():
-                if isinstance(module, TensorQuantizer) and hasattr(module, "_cached_quant_val"):
-                    delattr(module, "_cached_quant_val")
-        self._enable_weight_quantization = False
-
-    def forward(
-        self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None
-    ) -> torch.Tensor:
-        """Forward method to add quantization."""
-        hidden_states = self.gate_up_proj_input_quantizer(hidden_states)
-        with self.quantize_weight():
-            return super().forward(hidden_states, router_indices, routing_weights)
-
-
-if GptOssExperts not in QuantModuleRegistry:
-    QuantModuleRegistry.register({GptOssExperts: "hf.GptOssExperts"})(_QuantGptOssExperts)
-
-
 def _has_num_experts(obj):
     # n_routed_experts: NemotronH-style MoE
     return hasattr(obj, "num_experts") or hasattr(obj, "n_routed_experts")
@@ -1572,6 +1481,7 @@ AutoQuantizeGradientSearcher.register_custom_support(
 # Nemotron-H's is the more specific one.
 for _model_type in (
     "falcon",
+    "gpt_oss",
     "llama4",
     "nemotron_h",
 ):
