@@ -36,6 +36,7 @@ FIRST_IMPORTS = [
     "modelopt.torch.models.llama4.modeling_ptq",
     "modelopt.torch.models.nemotron_h.modeling_ptq",
     "modelopt.torch.models.step3p5.modeling_ptq",
+    "modelopt.torch.models.step3p7.modeling_ptq",
     "modelopt.torch.quantization",
     "modelopt.torch.export",
 ]

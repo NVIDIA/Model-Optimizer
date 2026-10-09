@@ -60,12 +60,12 @@ ones (fused/sequential MoE auto-detection, attention, `FP8Linear`) stay in
 model's `__init__.py` importing only `specs`: `modeling_ptq` pulls in quantization and
 transformers, which `import modelopt.torch.models` must not.
 
-A `modeling_ptq.py` registers on import — static classes via `QuantModuleRegistry.register`
-behind a `try`/`except ImportError`, remote-code classes via a callback added to
+A `modeling_ptq.py` registers on import — static classes via `QuantModuleRegistry.register`,
+imported from transformers at module scope; remote-code classes via a callback added to
 `CUSTOM_MODEL_PLUGINS` — and exports nothing (`__all__ = []`). Every package still has
 a `specs.py`, even when its spec only records `model_type` and where the modeling code comes
-from; a family revision sharing another type's `modeling_ptq.py` (`step3p7` uses `step3p5`'s)
-holds only `specs.py`.
+from. A family revision that shares another type's PTQ code (`step3p7` uses `step3p5`'s) still
+gets a `modeling_ptq.py` that imports the shared one, so loading it by model type works.
 
 ## Sections
 

@@ -1483,6 +1483,7 @@ for _model_type in (
     "llama4",
     "nemotron_h",
     "step3p5",
+    "step3p7",
 ):
     importlib.import_module(f"modelopt.torch.models.{_model_type}.modeling_ptq")
 
