@@ -15,10 +15,10 @@
 
 """YAML-driven configuration loading for fastgen distillation pipelines.
 
-YAML is the first-class entry point for DMD configurations — the fastgen library
+YAML is the first-class entry point for fastgen configurations — the library
 does not expect callers to hand-build Python dicts. Typical usage::
 
-    from modelopt.torch.fastgen import DMDConfig, load_dmd_config
+    from modelopt.torch.fastgen import DMDConfig, PDDConfig, load_dmd_config, load_pdd_config
 
     # (a) Load a built-in recipe by relative path
     cfg = load_dmd_config("general/distillation/dmd2_qwen_image")
@@ -29,11 +29,14 @@ does not expect callers to hand-build Python dicts. Typical usage::
     # (c) Equivalent classmethod
     cfg = DMDConfig.from_yaml("/path/to/my_dmd.yaml")
 
+    # (d) PDD uses the same resolver with its own schema
+    pdd_cfg = PDDConfig.from_yaml("general/distillation/pdd_qwen_image")
+
 The loader resolves paths in two places, in order:
 
-1. ``modelopt_recipes/`` (the built-in recipes package shipped with ModelOpt) — resolved
-   via :func:`importlib.resources.files`. Suffixes ``.yml`` / ``.yaml`` may be omitted.
-2. The filesystem (absolute or working-directory-relative).
+1. The filesystem (absolute or working-directory-relative).
+2. ``modelopt_recipes/`` (the built-in recipes package shipped with ModelOpt) — resolved
+   via :func:`importlib.resources.files` for relative paths.
 
 Suffixes ``.yml`` and ``.yaml`` are both accepted.
 """
@@ -52,12 +55,12 @@ with contextlib.suppress(ImportError):
 
 import yaml
 
-from .config import DMDConfig
+from .config import DMDConfig, PDDConfig
 
 if TYPE_CHECKING:
     from importlib.abc import Traversable
 
-__all__ = ["load_config", "load_dmd_config"]
+__all__ = ["load_config", "load_dmd_config", "load_pdd_config"]
 
 
 # Root to all built-in recipes shipped with modelopt.
@@ -105,8 +108,8 @@ def load_config(config_file: str | Path) -> dict[str, Any]:
     the ExMy-num-bits post-processing that is specific to quantization recipes.
 
     Args:
-        config_file: YAML path. Suffix is optional; resolution searches the built-in
-            ``modelopt_recipes/`` package first, then the filesystem.
+        config_file: YAML path. Suffix is optional; resolution searches the filesystem
+            first, then the built-in ``modelopt_recipes/`` package.
 
     Returns:
         The parsed dictionary. An empty file yields ``{}``.
@@ -122,8 +125,8 @@ def load_config(config_file: str | Path) -> dict[str, Any]:
                 )
             return data
     raise FileNotFoundError(
-        f"Cannot locate config file {config_file!r}; searched both the built-in "
-        f"recipe library and the filesystem."
+        f"Cannot locate config file {config_file!r}; searched the filesystem and then "
+        f"the built-in recipe library."
     )
 
 
@@ -147,3 +150,9 @@ def load_dmd_config(config_file: str | Path) -> DMDConfig:
     """
     data = load_config(config_file)
     return DMDConfig(**data)
+
+
+def load_pdd_config(config_file: str | Path) -> PDDConfig:
+    """Load a YAML file and construct a validated :class:`PDDConfig`."""
+    data = load_config(config_file)
+    return PDDConfig(**data)

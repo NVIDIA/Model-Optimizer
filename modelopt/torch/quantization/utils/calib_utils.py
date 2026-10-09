@@ -136,7 +136,9 @@ class GPTQHelper:
         self.fused = fused
         in_features = module.weight.shape[-1]
         device = module.weight.device
-        if device.type == "meta" or (offload_to_cpu and get_used_gpu_mem_fraction(device) > 0.65):
+        if device.type == "meta" or (
+            offload_to_cpu and device.type == "cuda" and get_used_gpu_mem_fraction(device) > 0.65
+        ):
             device = "cpu"
         self.hessian = torch.zeros(in_features, in_features, dtype=torch.float32, device=device)
         self.n_samples = 0

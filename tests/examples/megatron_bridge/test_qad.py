@@ -15,6 +15,7 @@
 """End-to-end test for Quantization Aware Distillation (QAD): quantize + distill + export."""
 
 import json
+import warnings
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,15 @@ from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_5_moe_vl_dir,
     create_tiny_qwen3_dir,
 )
+
+# The fix ships in the nemo:26.10 container.
+# TODO(Megatron-Bridge#6243): drop this probe once the minimum Megatron-Bridge carries it.
+try:
+    from megatron.bridge.training.gpt_step import _keep_full_position_ids_for_cp  # noqa: F401
+
+    HAS_MROPE_CP_FIX = True
+except ImportError:  # Megatron-Bridge that still CP-shards mrope position ids
+    HAS_MROPE_CP_FIX = False
 
 
 @pytest.mark.timeout(720)  # Multiple steps in one test hence takes longer than the default timeout
@@ -58,6 +68,17 @@ def test_qad(tmp_path: Path, num_gpus, create_student):
     """
     hf_model_path = create_student(tmp_path)
     is_vlm = "vision_config" in (hf_model_path / "config.json").read_text()
+    # mrope rotary embeddings CP-shard themselves, so the VLM exercises the path where the batch's
+    # position ids must stay full-length. The LLM case stays on tensor parallelism.
+    cp_size = num_gpus if is_vlm and HAS_MROPE_CP_FIX else 1
+    tp_size = 1 if cp_size > 1 else num_gpus
+    # Warn only where CP coverage is actually lost: on a single GPU there is none to lose.
+    if is_vlm and num_gpus > 1 and not HAS_MROPE_CP_FIX:
+        warnings.warn(
+            "Megatron-Bridge lacks the mrope context-parallel fix (NVIDIA-NeMo/Megatron-Bridge#6243, "
+            "shipping in nemo:26.10), so this case runs at cp_size=1 and does not cover context "
+            "parallelism. If the installed Megatron-Bridge should carry the fix, this probe is stale."
+        )
     quantized_megatron_path = tmp_path / "quantized_megatron"
     distill_output_dir = tmp_path / "qad_output"
     train_iters = 3
@@ -65,10 +86,11 @@ def test_qad(tmp_path: Path, num_gpus, create_student):
 
     # Step 1: PTQ the (language) model to FP8 and save a Megatron checkpoint carrying the ModelOpt state.
     quantize_cmd = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "quantize.py", "--skip_generate"],
+        # QAD below must load this checkpoint at the same TP, so size the PTQ run to tp_size.
+        ["torchrun", f"--nproc_per_node={tp_size}", "quantize.py", "--skip_generate"],
         hf_model_name_or_path=hf_model_path,
         recipe="general/ptq/fp8_default-kv_fp8",
-        tp_size=num_gpus,
+        tp_size=tp_size,
         pp_size=1,
         calib_dataset_name="cnn_dailymail",  # text dataset -> (for VLMs) text-only LM calibration
         calib_num_samples=8,
@@ -90,12 +112,13 @@ def test_qad(tmp_path: Path, num_gpus, create_student):
         student_megatron_path=quantized_megatron_path,
         teacher_hf_path=hf_model_path,
         output_dir=distill_output_dir,
-        tp_size=num_gpus,
+        tp_size=tp_size,
         pp_size=1,
+        cp_size=cp_size,
         seq_length=16,
         mbs=1,
         gbs=4,
-        logit_kl_topk=8,
+        logit_kl_top_k=8,
         train_iters=train_iters,
         lr_warmup_iters=2,
         eval_interval=early_exit_iter,

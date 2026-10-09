@@ -269,10 +269,29 @@ def test_duplicate_fwd_hook_call(distillation_model):
     distillation_model.train()
 
     with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")  # the latch, not the interpreter, must bound the count
         distillation_model(get_input_tensor())
         distillation_model(get_input_tensor())
         distillation_model(get_input_tensor())
-        assert len(w) == 2  # one for student and one for teacher
+        stale = [x for x in w if "already has an intermediate output stored" in str(x.message)]
+        assert len(stale) == 2  # one for student and one for teacher
+        assert all("compute_kd_loss" in str(x.message) for x in stale)
+
+
+def test_stale_output_warning_rearms_after_consuming(distillation_model):
+    """Activation Checkpointing re-runs forwards, so consuming a capture must re-arm the notice."""
+    distillation_model.train()
+    input_tensor = get_input_tensor()
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        distillation_model(input_tensor)
+        distillation_model(input_tensor)  # unconsumed -> reported once per module
+        distillation_model.compute_kd_loss()
+        distillation_model(input_tensor)
+        distillation_model(input_tensor)  # unconsumed again -> reported again
+        stale = [x for x in w if "already has an intermediate output stored" in str(x.message)]
+        assert len(stale) == 4
 
 
 def test_teacher_fwd_only(distillation_model):

@@ -15,12 +15,14 @@
 
 import os
 import platform
+import sys
 from pathlib import Path
 
 import pytest
 import torch
 import torch.distributed as dist
 from _test_utils.fs_utils import assert_unmodified_tree
+from _test_utils.mlflow import FakeMlflow, pin_tracking_env
 from _test_utils.torch.distributed.utils import init_process
 
 import modelopt.torch.opt as mto
@@ -179,3 +181,14 @@ def tiny_wan22_path(tmp_path_factory):
     pipeline_dir = create_tiny_wan22_pipeline_dir(tmp_path_factory.mktemp("tiny_wan22"))
     with assert_unmodified_tree(pipeline_dir) as path:
         yield str(path)
+
+
+@pytest.fixture
+def fake_mlflow(monkeypatch):
+    """Stand in for the ``mlflow`` module; see ``_test_utils.mlflow.FakeMlflow``."""
+    # A suite that takes the fake without also importing clean_env would otherwise read the
+    # developer's own $MLFLOW_TRACKING_URI and flip the branch under test.
+    pin_tracking_env(monkeypatch)
+    fake = FakeMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", fake)
+    return fake

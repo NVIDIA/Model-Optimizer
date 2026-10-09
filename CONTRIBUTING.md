@@ -145,6 +145,8 @@ See [`modelopt/torch/quantization/utils/calib_utils.py`](./modelopt/torch/quanti
 
 We use [pytest](https://docs.pytest.org/) for all tests. For any new features / examples, make sure to add tests and that the coverage check in your PR passes. The tests are organized into the following directories:
 
+Test filenames must mirror the production module they primarily cover: tests for `foo.py` belong in `test_foo.py`. When a production module is renamed, split, or removed, rename or split its tests in the same change so test filenames do not preserve obsolete module names. A cross-module integration test may use a feature-oriented name only when no single production module owns the behavior.
+
 - `tests/unit`: Fast cpu-based unit tests for the core ModelOpt library. They should not take more than a few seconds to run.
 - `tests/gpu`: Fast GPU-based unit tests for the core ModelOpt library. In most cases, they should not take more than a few seconds to run.
 - `tests/gpu_megatron`: Fast GPU-based unit tests for the core ModelOpt library for Megatron-Core features. In most cases, they should not take more than a few seconds to run.
