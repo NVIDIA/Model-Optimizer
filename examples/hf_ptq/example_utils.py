@@ -15,14 +15,13 @@
 
 import argparse
 import copy
-import glob
 import hashlib
 import inspect
 import json
 import logging
 import os
 import warnings
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -31,9 +30,9 @@ from typing import Any
 
 import torch
 import transformers
-import yaml
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
+from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from safetensors import safe_open
 from transformers import (
     AutoConfig,
@@ -45,79 +44,17 @@ from transformers import (
     ProcessorMixin,
 )
 
-from modelopt.recipe import load_recipe
+from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
-from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
-    copy_non_safetensor_files_from_ckpt,
-    copy_off_index_safetensors,
-)
-from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
-
-try:
-    from huggingface_hub import snapshot_download
-except ImportError:
-    snapshot_download = None
-
+from modelopt.torch.models import hf_model_type
+from modelopt.torch.models.hf import checkpoint_has_mtp, prepare_model_for_loading
 from modelopt.torch.utils import distributed as dist_utils
-from modelopt.torch.utils.mlflow import (
-    MlflowRunLogger,
-    default_experiment_name,
-    validate_tracking_uri,
-)
+from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
+from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
 
 logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
-
-_HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS = [
-    "*.jinja",
-    "*.json",
-    "*.md",
-    "*.model",
-    "*.py",
-    "*.tiktoken",
-    "*.txt",
-    "LICENSE*",
-    "NOTICE*",
-]
-_HF_PTQ_WEIGHT_FILE_PATTERNS = (
-    "*.safetensors",
-    "*.safetensors.index.json",
-    "*.bin",
-    "*.bin.index.json",
-    "*.ckpt",
-    "*.gguf",
-    "*.h5",
-    "*.msgpack",
-    "*.npy",
-    "*.npz",
-    "*.onnx",
-    "*.pb",
-    "*.pickle",
-    "*.pkl",
-    "*.pt",
-    "*.pth",
-    "*.tar",
-    "*.tar.bz2",
-    "*.tar.gz",
-    "*.tar.xz",
-    "*.tflite",
-    "*.tgz",
-    "*.zip",
-)
-# Dotted like the other sidecars hf_ptq drops in the export directory, so it is ignored by
-# from_pretrained and does not look like part of the model.
-_EXPERIMENT_JSON = ".experiment.json"
-_HF_PTQ_EXPORT_OWNED_FILES = {
-    _EXPERIMENT_JSON,
-    "config.json",
-    "hf_quant_config.json",
-    "quant_config.json",
-    "quantization_config.json",
-    "quantize_config.json",
-    "recipe.yaml",
-    "recipe.yml",
-}
 
 
 @dataclass
@@ -156,7 +93,7 @@ def cleanup_distributed(args):
 def validate_fsdp2_supported(args, config):
     """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet."""
     issues = []
-    if "vila" in args.pyt_ckpt_path.lower():
+    if "vila" in args.local_checkpoint_path.lower():
         issues.append("VILA (custom builder + non-standard layer layout)")
     if is_nemotron_vl(config) or _is_multimodal_config(config):
         issues.append("multimodal / VL models (decoder layers not auto-detectable)")
@@ -166,6 +103,8 @@ def validate_fsdp2_supported(args, config):
         issues.append("speculative decoding (--specdec_offline_dataset)")
     if getattr(args, "low_memory_mode", False):
         issues.append("--low_memory_mode (redundant with FSDP2)")
+    if not issues and checkpoint_has_mtp(config.model_type, args.local_checkpoint_path):
+        issues.append("Nemotron-H MTP (auxiliary modules are not constructed by the FSDP2 loader)")
 
     if issues:
         raise NotImplementedError(
@@ -382,8 +321,7 @@ def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTok
         ckpt_path, trust_remote_code=trust_remote_code, **kwargs
     )
 
-    # can't set attribute 'pad_token' for "<unk>"
-    if tokenizer.pad_token != "<unk>" or tokenizer.pad_token is None:
+    if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     assert tokenizer.pad_token is not None, f"Pad token for {ckpt_path} cannot be set!"
@@ -457,18 +395,9 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
     if not ckpt_path:
         return
 
-    from huggingface_hub import hf_hub_download
-
-    is_local = os.path.isdir(ckpt_path)
-
     def _resolve_file(filename):
-        if is_local:
-            local = os.path.join(ckpt_path, filename)
-            return local if os.path.exists(local) else None
-        try:
-            return hf_hub_download(repo_id=ckpt_path, filename=filename)
-        except Exception:
-            return None
+        local = os.path.join(ckpt_path, filename)
+        return local if os.path.exists(local) else None
 
     # Load non-expert weights and metadata from safetensors
     checkpoint_weights = {}
@@ -604,26 +533,7 @@ def _fmt_max_memory(max_memory: dict) -> str:
     return "\n".join(parts)
 
 
-def _resolved_local_dir(ckpt_path: str) -> str:
-    """Return the local directory ``ckpt_path`` names, resolving a hub id to its snapshot.
-
-    The export re-reads the source checkpoint by path to carry over the weights the loader could
-    not place. Recording the hub id instead would leave it reading ``org/model``, which is not a
-    directory -- so every carried weight would be dropped with a warning. ``from_pretrained`` has
-    already populated the cache by the time this runs, so the lookup is local and offline.
-    """
-    if Path(ckpt_path).is_dir():
-        return str(ckpt_path)
-    if snapshot_download is None:
-        return str(ckpt_path)
-    try:
-        return snapshot_download(ckpt_path, local_files_only=True)
-    except Exception:
-        # No snapshot to point at; the export falls back to its own provenance handling.
-        return str(ckpt_path)
-
-
-def _from_pretrained_recording(auto_class, ckpt_path, **kwargs):
+def _from_pretrained_recording(auto_class, ckpt_path, *, model_type=None, **kwargs):
     """``from_pretrained`` that records what the loader could not place.
 
     ``output_loading_info=True`` makes Transformers return its own accounting of the load;
@@ -633,9 +543,17 @@ def _from_pretrained_recording(auto_class, ckpt_path, **kwargs):
     accounts for on-the-fly key conversion, which a set re-derived afterwards would have to
     replay to avoid mistaking a renamed key for an unplaced one.
     """
-    model, loading_info = auto_class.from_pretrained(ckpt_path, output_loading_info=True, **kwargs)
+    with prepare_model_for_loading(
+        model_type,
+        ckpt_path,
+        kwargs.get("trust_remote_code", False),
+        model_class=None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class,
+    ):
+        model, loading_info = auto_class.from_pretrained(
+            ckpt_path, output_loading_info=True, **kwargs
+        )
     unexpected = loading_info.get("unexpected_keys") or []
-    record_unplaced_source_keys(model, _resolved_local_dir(ckpt_path), unexpected)
+    record_unplaced_source_keys(model, str(ckpt_path), unexpected)
     if unexpected:
         print(
             f"✓ {len(unexpected)} checkpoint key(s) the model has no parameter for "
@@ -756,6 +674,7 @@ def get_model(
         model = _from_pretrained_recording(
             AutoModelForCausalLM,
             ckpt_path,
+            model_type=hf_config.model_type,
             device_map=device_map,
             **model_kwargs,
         )
@@ -766,6 +685,7 @@ def get_model(
             model = _from_pretrained_recording(
                 AutoModelForCausalLM,
                 ckpt_path,
+                model_type=hf_config.model_type,
                 device_map="auto",
                 trust_remote_code=trust_remote_code,
                 dtype="auto",
@@ -791,6 +711,7 @@ def get_model(
         model = _from_pretrained_recording(
             AutoModelForCausalLM,
             ckpt_path,
+            model_type=hf_config.model_type,
             device_map="cpu" if device == "cpu" else "sequential",
             **model_kwargs,
         )
@@ -827,7 +748,19 @@ def get_model(
             hf_config, auto_model_module, ckpt_path, config_kwargs
         )
 
-        with init_empty_weights(include_buffers=True):
+        with (
+            prepare_model_for_loading(
+                hf_config.model_type,
+                ckpt_path,
+                trust_remote_code,
+                model_class=(
+                    None
+                    if auto_model_module in (AutoModel, AutoModelForCausalLM)
+                    else auto_model_module
+                ),
+            ),
+            init_empty_weights(include_buffers=True),
+        ):
             # When computing the device_map, assuming bfloat16 precision by default,
             # unless specified by the hf_config.
             config_dtype = _get_config_dtype(config_for_init)
@@ -878,6 +811,7 @@ def get_model(
         model = _from_pretrained_recording(
             auto_model_module,
             ckpt_path,
+            model_type=hf_config.model_type,
             device_map=device_map,
             **model_kwargs2,
         )
@@ -901,165 +835,24 @@ def is_model_on_gpu(model) -> bool:
     return all("cuda" in str(param.device) for param in model.parameters())
 
 
-def is_enc_dec(model_type) -> bool:
-    """Return whether the model_type uses encoder-decoder-style preview decode.
+def is_trtllm_enc_dec_export(model_type: str | None) -> bool:
+    """Return whether the root Hugging Face model_type still exports a TensorRT-LLM checkpoint.
 
-    Controls whether ``hf_ptq.py`` slices off the prompt prefix from
-    ``.generate()`` output. ``diffusion_gemma`` is structurally encoder-decoder
-    but returns prompt+canvas concatenated, so it stays OFF this list (AR-style
-    decode applies).
+    These are the encoder-decoder families the deprecated TensorRT-LLM exporter supports. Other
+    encoder-decoder models (e.g. LongT5, PLBart, T5Gemma) use the unified HF export.
     """
-    return model_type in ["t5", "bart", "whisper"]
+    return model_type in ["t5", "mt5", "umt5", "bart", "mbart", "whisper"]
 
 
-def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False) -> str:
-    """Resolve a model name or path to a local directory path.
+def generate_excludes_prompt(model) -> bool:
+    """Return whether ``model.generate()`` returns only the decoder sequence, without the prompt.
 
-    If the input is already a local directory, returns it as-is.
-    If the input is a HuggingFace model ID, attempts to resolve it to the local cache path.
-
-    Args:
-        model_name_or_path: Either a local directory path or HuggingFace model ID
-        trust_remote_code: Whether to trust remote code when loading the model
-
-    Returns:
-        Local directory path to the model files
+    True for encoder-decoder models, so ``hf_ptq.py`` decodes their preview output whole instead
+    of slicing off a prompt-length prefix. ``diffusion_gemma`` is structurally encoder-decoder but
+    returns prompt+canvas concatenated, so it is excluded (AR-style decode applies).
     """
-    # If it's already a local directory, return as-is
-    if os.path.isdir(model_name_or_path):
-        return model_name_or_path
-
-    # Try to resolve HuggingFace model ID to local cache path
-    try:
-        # First try to load the config to trigger caching
-        config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
-
-        # The config object should have the local path information
-        # Try different ways to get the cached path
-        if hasattr(config, "_name_or_path") and os.path.isdir(config._name_or_path):
-            return config._name_or_path
-
-        # Alternative: use snapshot_download if available
-        if snapshot_download is not None:
-            try:
-                local_path = snapshot_download(
-                    repo_id=model_name_or_path,
-                    allow_patterns=_HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS,
-                )
-                return local_path
-            except Exception as e:
-                print(
-                    f"Warning: Could not download checkpoint sidecars using snapshot_download: {e}"
-                )
-
-        # Fallback: try to find in HuggingFace cache
-        from transformers.utils import TRANSFORMERS_CACHE
-
-        # Look for the model in the cache directory
-        cache_pattern = os.path.join(TRANSFORMERS_CACHE, "models--*")
-        cache_dirs = glob.glob(cache_pattern)
-
-        # Convert model name to cache directory format
-        model_cache_name = model_name_or_path.replace("/", "--")
-        for cache_dir in cache_dirs:
-            if model_cache_name in cache_dir:
-                # Look for the snapshots directory
-                snapshots_dir = os.path.join(cache_dir, "snapshots")
-                if os.path.exists(snapshots_dir):
-                    # Get the latest snapshot
-                    snapshot_dirs = [
-                        d
-                        for d in os.listdir(snapshots_dir)
-                        if os.path.isdir(os.path.join(snapshots_dir, d))
-                    ]
-                    if snapshot_dirs:
-                        latest_snapshot = max(snapshot_dirs)  # Use lexicographically latest
-                        snapshot_path = os.path.join(snapshots_dir, latest_snapshot)
-                        return snapshot_path
-
-    except Exception as e:
-        print(f"Warning: Could not resolve model path for {model_name_or_path}: {e}")
-
-    # If all else fails, return the original path
-    # This will cause the copy function to skip with a warning
-    return model_name_or_path
-
-
-def copy_custom_model_files(
-    source_path: str,
-    export_path: str,
-    trust_remote_code: bool = False,
-    exclude_files: Iterable[str] | None = None,
-    copy_off_index_weights: bool = True,
-):
-    """Copy source checkpoint sidecar files to an HF PTQ export.
-
-    The HF PTQ script writes ModelOpt-owned metadata and quantized weights first, then
-    copies source checkpoint sidecars so tokenizer/processor files, remote-code modules,
-    README assets, parser plugins, and similar deployment files are preserved for both
-    native and ``trust_remote_code`` loads. Weight and weight-index files are skipped
-    to avoid copying the unquantized source weights. Export-owned metadata (``config.json``,
-    ``hf_quant_config.json``) and stale source quantization metadata are also skipped.
-    Source tokenizer and processor files intentionally still win because Transformers may
-    not regenerate all metadata in the source format. The exported ``tokenizer_config.json``
-    wins when it has a separate chat template. Callers that write a generation config can
-    exclude it; the TensorRT-LLM export retains the source generation config.
-
-    Args:
-        source_path: Path to the original model directory or HuggingFace model ID
-        export_path: Path to the exported model directory
-        trust_remote_code: Passed to HuggingFace model-ID resolution; does not control copying.
-        exclude_files: Additional source file names to skip.
-        copy_off_index_weights: Copy safetensors the loader never opens (GLM-4.7's
-            ``mtp.safetensors``). Only the unified-HF export gives them meaning -- it seeds their
-            tensor names into ``quantization_config.ignore`` -- so a TensorRT-LLM export, whose
-            checkpoint is ``rank<N>.safetensors`` plus its own ``config.json``, should pass False
-            rather than carry gigabytes nothing there reads.
-    """
-    # Resolve the source path (handles both local paths and HF model IDs)
-    resolved_source_path = _resolve_model_path(source_path, trust_remote_code)
-
-    source_dir = Path(resolved_source_path)
-    export_dir = Path(export_path)
-
-    if not source_dir.exists():
-        if resolved_source_path != source_path:
-            print(
-                f"Warning: Could not find local cache for HuggingFace model '{source_path}' "
-                f"(resolved to '{resolved_source_path}')"
-            )
-        else:
-            print(f"Warning: Source directory '{source_path}' does not exist")
-        return
-
-    if not export_dir.exists():
-        print(f"Warning: Export directory {export_path} does not exist")
-        return
-
-    exclude_files = _HF_PTQ_EXPORT_OWNED_FILES | set(exclude_files or ())
-    if (export_dir / "chat_template.jinja").is_file():
-        exclude_files.add("tokenizer_config.json")
-
-    copied_files = copy_non_safetensor_files_from_ckpt(
-        source_dir,
-        export_dir,
-        exclude_files=exclude_files,
-        exclude_patterns=_HF_PTQ_WEIGHT_FILE_PATTERNS,
-    )
-
-    # Safetensors the loader never opens are sidecars too: untouched by quantization and absent
-    # from the export, so copy them rather than leave them behind. Skipped by the call above,
-    # which excludes every *.safetensors to avoid re-emitting the unquantized source weights.
-    copied_weights = (
-        copy_off_index_safetensors(source_dir, export_dir) if copy_off_index_weights else []
-    )
-    copied_files = [*copied_files, *copied_weights]
-    if copied_files:
-        for file_name in copied_files:
-            print(f"Copied checkpoint sidecar file: {file_name}")
-        print(f"Successfully copied {len(copied_files)} checkpoint sidecar files to {export_path}")
-    else:
-        print("No checkpoint sidecar files found to copy")
+    config = model.config
+    return bool(getattr(config, "is_encoder_decoder", False)) and not is_diffusion_gemma(config)
 
 
 def save_source_config(args, export_path) -> None:
@@ -1068,19 +861,100 @@ def save_source_config(args, export_path) -> None:
     config_kwargs = {"trust_remote_code": args.trust_remote_code}
     if args.attn_implementation is not None:
         config_kwargs["attn_implementation"] = args.attn_implementation
-    AutoConfig.from_pretrained(args.pyt_ckpt_path, **config_kwargs).save_pretrained(export_path)
+    AutoConfig.from_pretrained(args.local_checkpoint_path, **config_kwargs).save_pretrained(
+        export_path
+    )
 
 
-def save_processor_config(args, export_path) -> None:
-    """Copy the processor config, without which a VLM checkpoint cannot preprocess images."""
-    try:
-        print(f"Saving processor config to {export_path}")
-        AutoProcessor.from_pretrained(
-            args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code
-        ).save_pretrained(export_path)
-    except Exception as e:
-        print(f"Warning: Could not save processor config: {e}")
-        print("This is normal for some VLM architectures that don't use AutoProcessor")
+def _prepare_quant_cfg(
+    args: argparse.Namespace, quant_cfg: dict[str, Any], full_model: torch.nn.Module
+) -> dict[str, Any]:
+    """Apply shared checkpoint-local adjustments to a PTQ configuration."""
+    # Resolve the real export directory before resolve_checkpoint_dir hashes the config; otherwise
+    # distinct --export_path values containing the placeholder would share one checkpoint path.
+    if args.layerwise_export:
+        assert_layerwise_export_compatible(args, full_model, quant_cfg.get("algorithm"))
+        quant_cfg = set_layerwise_export_dir(quant_cfg, args.export_path)
+        print(f"Layerwise export enabled: writing quantized shards to {args.export_path}")
+        # Shards are resumable only while the manifest naming their resume point remains beside
+        # them; default the calibration checkpoint directory accordingly.
+        quant_cfg, moved = default_layerwise_resume_dir(quant_cfg, args.export_path)
+        if moved:
+            print(
+                "Layerwise checkpoint_dir co-located with the export path so a resumed run "
+                "finds its manifest next to the shards it must not overwrite."
+            )
+
+    if needs_checkpoint_path_update(quant_cfg):
+        # Named after the Hub ID when there is one: a cache path would name it by commit hash.
+        quant_cfg, resolved_dir = resolve_checkpoint_dir(
+            quant_cfg, args.hub_model_id or args.local_checkpoint_path
+        )
+        print(f"Auto-resolved layerwise checkpoint_dir: {resolved_dir}")
+
+    if args.cast_mxfp4_to_nvfp4:
+        quant_cfg = copy.deepcopy(quant_cfg)
+        force_weight_quantizers_static(quant_cfg["quant_cfg"])
+    return quant_cfg
+
+
+def assert_layerwise_export_compatible(
+    args: argparse.Namespace,
+    full_model: torch.nn.Module,
+    algorithm: str | dict | list | None,
+) -> None:
+    """Refuse layerwise export before calibration starts, not after the run is paid for.
+
+    Layerwise export writes each layer's shard during calibration and finishes the checkpoint
+    in finalize() afterwards, so anything that would rewrite or contradict that checkpoint has
+    to be caught here -- once calibration begins, the user has already paid for the whole run.
+    """
+    block = layerwise_export_block(algorithm)
+    if block is not None:
+        entries = algorithm if isinstance(algorithm, list) else [algorithm]
+        owner = next(e for e in entries if isinstance(e, dict) and e.get("layerwise") is block)
+        if not owner.get("method"):
+            raise NotImplementedError(
+                "layerwise.export_dir needs a calibration method: without one there is no "
+                "per-layer pass to write the shards, so the export would find nothing. Set "
+                "algorithm.method, or export without layerwise.export_dir."
+            )
+
+    if has_spec_opt(full_model):
+        raise NotImplementedError(
+            "layerwise.export_dir does not support speculative-decoding models: "
+            "export_speculative_decoding() would write a second checkpoint over the same "
+            "--export_path."
+        )
+
+    if args.cast_mxfp4_to_nvfp4:
+        raise NotImplementedError(
+            "layerwise.export_dir is not compatible with --cast_mxfp4_to_nvfp4: the cast "
+            "rewrites weights after calibration, by which point every shard is written."
+        )
+
+    # Mirrors export_quantized's branches: a second exporter would overwrite --export_path.
+    for flag, value, exporter in (
+        ("--vllm_fakequant_export", args.vllm_fakequant_export, "export_hf_vllm_fq_checkpoint()"),
+        ("--sparsity_fmt", args.sparsity_fmt != "dense", "export_tensorrt_llm_checkpoint()"),
+        (
+            # int8_sq is the export-format constant, int8_smoothquant the qformat preset.
+            "--qformat int8_smoothquant",
+            any(t in args.qformat for t in ("int8_sq", "int8_smoothquant")),
+            "export_tensorrt_llm_checkpoint()",
+        ),
+        (
+            "an encoder-decoder model_type",
+            is_trtllm_enc_dec_export(hf_model_type(full_model)),
+            "export_tensorrt_llm_checkpoint()",
+        ),
+    ):
+        if value:
+            raise NotImplementedError(
+                f"layerwise.export_dir is not compatible with {flag}: {exporter} would write a "
+                "second checkpoint over the same --export_path that layerwise calibration "
+                "already populated."
+            )
 
 
 def _layerwise_blocks(algorithm) -> list[dict]:
@@ -1229,198 +1103,40 @@ def set_layerwise_export_dir(quant_cfg: dict, export_path: str) -> dict:
     return quant_cfg
 
 
-def add_mlflow_args(parser: argparse.ArgumentParser) -> None:
-    """Add the MLflow tracking flags."""
-    parser.add_argument(
-        "--mlflow",
-        default=None,
-        help=(
-            "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), "
-            "uploading the command, the resolved recipe, the run log and the quantization "
-            "summaries, and writing .experiment.json into --export_path so the checkpoint "
-            "names the run that produced it. MLflow's own $MLFLOW_TRACKING_URI enables "
-            "tracking without this flag, which overrides it. A URI taken from the "
-            "environment is best-effort: if it is unusable the run warns and continues "
-            "untracked."
-        ),
-    )
-    parser.add_argument(
-        "--mlflow_experiment",
-        default=None,
-        help=(
-            "MLflow experiment name. Default: "
-            "$USER/hf_ptq/<checkpoint basename>-<recipe name, or --qformat if no --recipe>."
-        ),
-    )
-    parser.add_argument(
-        "--mlflow_run_name",
-        default=None,
-        help="MLflow run name. Default: the UTC start time as YYYYmmdd-HHMMSS.",
-    )
-
-
-def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
-    """Settle where tracking is configured from, and name the experiment."""
-    # MLflow's own variable enables tracking on its own; --mlflow overrides it. Only the
-    # flag is a deliberate request, so only the flag is fatal when the URI is unusable: the
-    # variable is commonly exported for unrelated tooling and must not fail a quantization.
-    args.mlflow_required = args.mlflow is not None
-    args.mlflow = args.mlflow or os.environ.get("MLFLOW_TRACKING_URI") or None
-    if args.mlflow:
-        try:
-            args.mlflow = validate_tracking_uri(args.mlflow)
-        except ValueError as e:
-            if args.mlflow_required:
-                parser.error(f"--mlflow: {e}")
-            warnings.warn(f"Ignoring MLFLOW_TRACKING_URI, continuing untracked: {e}")
-            args.mlflow = None
-        else:
-            args.mlflow_experiment = args.mlflow_experiment or default_experiment_name(
-                "hf_ptq",
-                args.pyt_ckpt_path,
-                Path(args.recipe).stem if args.recipe else args.qformat,
-            )
-
-
-_MLFLOW_NON_PARAM_ARGS = frozenset(
-    {
-        "checkpoint_exported",
-        "dist_state",
-        "mlflow",
-        "mlflow_experiment",
-        "mlflow_required",
-        "mlflow_run_name",
-    }
+HF_PTQ = Tool(
+    name="hf_ptq",
+    tracks=(
+        "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), "
+        "uploading the command, the resolved recipe, the run log and the quantization "
+        "summaries, and writing .experiment.json into --export_path so the checkpoint "
+        "names the run that produced it."
+    ),
+    variant_help="recipe name, or --qformat if no --recipe",
+    variant=lambda args: Path(args.recipe).stem if args.recipe else args.qformat,
+    model=lambda args: args.pyt_ckpt_path,
+    checkpoint=lambda args: args.export_path,
+    texts=lambda args: resolved_recipe_texts(args.recipe),
+    # Missing entries are skipped: the MoE table only exists for MoE models, and neither
+    # file is written under --no-verbose.
+    outputs=lambda args: {
+        "summary/quant_summary.txt": Path(args.export_path) / ".quant_summary.txt",
+        "summary/moe.html": Path(args.export_path) / ".moe.html",
+    },
+    # dist_state is an object rather than a setting, and checkpoint_exported is this
+    # script's own bookkeeping.
+    non_params=frozenset({"dist_state", "checkpoint_exported"}),
 )
-
-
-def _mlflow_run_inputs(args: argparse.Namespace) -> tuple[dict, dict]:
-    """Params and start-time artifacts describing this PTQ run."""
-    params = {k: v for k, v in vars(args).items() if k not in _MLFLOW_NON_PARAM_ARGS}
-    # dist_state is an object, so record the one field worth searching on.
-    params["world_size"] = args.dist_state.world_size
-    texts = {}
-    if args.recipe:
-        # The resolved recipe, not the source file: a recipe may be a directory or use
-        # $imports, and only the resolved form is self-contained.
-        resolved = load_recipe(args.recipe).model_dump(mode="json")
-        texts["recipe/resolved_recipe.yaml"] = yaml.safe_dump(resolved, sort_keys=False)
-    return params, texts
-
-
-def _mlflow_logger(args: argparse.Namespace) -> MlflowRunLogger:
-    """Build this run's logger; inert unless --mlflow was given and this is the main rank."""
-    return MlflowRunLogger(
-        args.mlflow,
-        args.mlflow_experiment,
-        run_name=args.mlflow_run_name,
-        enabled=bool(args.mlflow) and args.dist_state.is_main,
-        required=args.mlflow_required,
-    )
 
 
 @contextmanager
 def mlflow_run(args: argparse.Namespace) -> Iterator[None]:
-    """Track this invocation for the duration of the block, and keep the checkpoint's
-    provenance pointer honest whether or not the run is tracked."""
-    logger = _mlflow_logger(args)
-    export_path = Path(args.export_path)
-    if not logger.enabled:
-        # Gathering the inputs re-reads the recipe, so keep it off the untracked path.
-        try:
-            yield
-        finally:
-            _drop_inherited_experiment_json(args, export_path)
-        return
-    params, texts = _mlflow_run_inputs(args)
-    with logger.track(
-        params=params,
-        tags=_mlflow_run_tags(args),
-        texts=texts,
-        files=_mlflow_run_outputs(args),
+    """Track this invocation for the duration of the block; see
+    :func:`~modelopt.torch.utils.mlflow.tracked_run`."""
+    with tracked_run(
+        args,
+        HF_PTQ,
+        is_main=args.dist_state.is_main,
+        exported=lambda: args.checkpoint_exported,
+        world_size=args.dist_state.world_size,
     ):
-        try:
-            yield
-        finally:
-            _log_experiment_json(logger, args, export_path)
-
-
-def _log_experiment_json(
-    logger: MlflowRunLogger, args: argparse.Namespace, export_path: Path
-) -> None:
-    """Record which MLflow run produced this checkpoint, in the checkpoint and on the server.
-
-    The tags point from the run to the checkpoint it wrote; this file is the reverse, so a
-    checkpoint found on disk can be traced back to the run that quantized it without
-    searching the server.
-
-    The artifact goes up for any run that opened, so a failure is traceable from the server
-    side. The local copy is written only once ``export_quantized`` has returned, because the
-    file claims authorship of the checkpoint sitting next to it: ``--export_path`` existing
-    proves nothing, since ``print_quant_summary`` creates it before quantization and the
-    directory may hold a valid checkpoint from an earlier attempt whose weights this run
-    never touched.
-
-    There is nothing to record at all when the run never opened, which a URI taken from the
-    environment reaches by design: it disables tracking from inside the block rather than
-    failing the quantization.
-    """
-    info = logger.run_info
-    if not info:
-        return
-    text = json.dumps(info, indent=2) + "\n"
-    logger.log_text(_EXPERIMENT_JSON.removeprefix("."), text)
-    if not args.checkpoint_exported:
-        return
-    try:
-        (export_path / _EXPERIMENT_JSON).write_text(text)
-    except OSError as e:
-        print(f"[mlflow] WARNING: could not write {export_path / _EXPERIMENT_JSON}: {e}")
-
-
-def _drop_inherited_experiment_json(args: argparse.Namespace, export_path: Path) -> None:
-    """Remove a pointer an untracked export would otherwise inherit.
-
-    A fresh checkpoint written into a reused ``--export_path`` would keep the previous run's
-    pointer, and one quantized from a tracked source checkpoint could be handed that
-    source's pointer. Either way the file would name a run that did not produce these
-    weights. Only a completed export clears it; a failed run leaves whatever checkpoint was
-    already there, pointer included.
-    """
-    if not args.checkpoint_exported or not args.dist_state.is_main:
-        return
-    stale = export_path / _EXPERIMENT_JSON
-    try:
-        stale.unlink(missing_ok=True)
-    except OSError as e:
-        print(f"Warning: could not remove stale {stale}: {e}")
-
-
-def _mlflow_run_tags(args: argparse.Namespace) -> dict[str, str]:
-    """Tags shared with the evaluation side, so a PTQ run and the evaluations of the
-    checkpoint it produced can be found together on one tracking server.
-
-    ``checkpoint_path`` is the checkpoint this run *writes*, because that is what an
-    evaluation is later pointed at (NEL takes ``deployment.checkpoint_path``); the input is
-    kept separately. It is resolved because ``--export_path`` defaults to a relative path,
-    which is useless as a join key.
-    """
-    return {
-        "model": Path(args.pyt_ckpt_path).name,
-        "checkpoint_path": str(Path(args.export_path).resolve()),
-        "source_checkpoint_path": args.pyt_ckpt_path,
-    }
-
-
-def _mlflow_run_outputs(args: argparse.Namespace) -> dict[str, Path]:
-    """Summaries written by post_quantize, keyed by artifact path.
-
-    Uploaded without the leading dot, which is awkward to browse in the MLflow UI. Missing
-    entries are skipped: the MoE table only exists for MoE models, and neither file is
-    written under ``--no-verbose``.
-    """
-    export_path = Path(args.export_path)
-    return {
-        "summary/quant_summary.txt": export_path / ".quant_summary.txt",
-        "summary/moe.html": export_path / ".moe.html",
-    }
+        yield

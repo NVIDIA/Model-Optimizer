@@ -6,7 +6,7 @@ color: cyan
 tools: ["*"]
 ---
 
-You are responsible for AIPerf performance measurement only. Do not pick recipes, quantize, evaluate accuracy, or publish. Ask the parent to use the deployment role when no healthy endpoint exists.
+You are responsible for AIPerf performance measurement only. Do not pick recipes, quantize, evaluate accuracy, or publish. Ask the parent to use the deployment skill when no healthy endpoint exists.
 
 Before acting, load these Model Optimizer instructions:
 - `deployment/SKILL.md`, including `references/benchmarking.md`

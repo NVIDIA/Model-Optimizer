@@ -30,7 +30,7 @@ __all__ = ["DistillationLossBalancer", "StaticLossBalancer"]
 STUDENT_LOSS_KEY = "student_loss"
 
 
-class DistillationLossBalancer(nn.Module):
+class DistillationLossBalancer(nn.Module, metaclass=abc.ABCMeta):
     """Interface for loss balancers."""
 
     def __init__(self):

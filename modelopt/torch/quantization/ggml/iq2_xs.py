@@ -36,7 +36,10 @@ from ..extensions import get_cuda_ext_ggml
 from .codebooks import iq2_xs_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
-    fake_quantize_with_cache,
+    GGMLFormat,
+    chunk_importance,
+    importance_blocks,
+    iq2_tile_terms,
     narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
@@ -103,9 +106,12 @@ def _predict_iq2_xs_scales(blocks: torch.Tensor) -> torch.Tensor:
 
 
 def _encode_blocks(
-    blocks: torch.Tensor, grid: torch.Tensor, scales: torch.Tensor | None = None
+    blocks: torch.Tensor,
+    grid: torch.Tensor,
+    scales: torch.Tensor | None = None,
+    weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Encode a moderate-size batch of flattened 256-value blocks."""
+    """Encode a moderate-size batch of flattened 256-value blocks, optionally error-weighted."""
     x = narrow_to_float32(blocks)
     block_count = x.shape[0]
     vectors = x.reshape(block_count, 32, 8)
@@ -116,7 +122,7 @@ def _encode_blocks(
     d = _predict_iq2_xs_scales(x) if scales is None else scales
     d_float = d.float()
 
-    xnorm = vectors.square().sum(dim=-1)
+    xnorm = (vectors.square() if weights is None else weights * vectors.square()).sum(dim=-1)
     qnorm = grid.square().sum(dim=-1)
     best_error = torch.full((block_count, 32, 16), torch.inf, dtype=torch.float32, device=x.device)
     best_entry = torch.zeros((block_count, 32, 16), dtype=torch.int64, device=x.device)
@@ -124,10 +130,9 @@ def _encode_blocks(
     # preserves the lowest grid index on equal error, matching the CUDA key.
     for entry_start in range(0, 512, 64):
         grid_tile = grid[entry_start : entry_start + 64]
-        products = magnitudes.unsqueeze(2) * grid_tile.reshape(1, 1, -1, 8)
-        dot = products.sum(dim=-1)
-        dot = torch.where(odd_parity.unsqueeze(-1), dot - 2.0 * products.amin(dim=-1), dot)
-        tile_qnorm = qnorm[entry_start : entry_start + 64].reshape(1, 1, -1)
+        dot, tile_qnorm = iq2_tile_terms(
+            magnitudes, grid_tile, qnorm[entry_start : entry_start + 64], weights, odd_parity
+        )
 
         for local in range(16):
             scale = d_float.reshape(-1, 1, 1) * ((2 * local + 1) / 8.0)
@@ -147,7 +152,8 @@ def _encode_blocks(
     selected_entry = best_entry.gather(2, vector_local.unsqueeze(-1)).squeeze(-1)
 
     selected_grid = grid[selected_entry]
-    weakest_index = (magnitudes * selected_grid).argmin(dim=-1)
+    contribution = magnitudes * selected_grid
+    weakest_index = (contribution if weights is None else contribution * weights).argmin(dim=-1)
     flip = torch.nn.functional.one_hot(weakest_index, num_classes=8).bool()
     encoded_negative = negative ^ (flip & odd_parity.unsqueeze(-1))
     sign_bits = torch.arange(8, dtype=torch.int64, device=x.device)
@@ -164,17 +170,22 @@ def _encode_blocks(
 
 @torch.no_grad()
 def quantize_iq2_xs(
-    weight: torch.Tensor, *, block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE
+    weight: torch.Tensor,
+    *,
+    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
+    importance: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ2_XS blocks.
 
     Returned shapes are ``[*weight.shape[:-1], weight.shape[-1] // 256, 74]``
     and ``[weight.ndim]``. The packed payload remains on the weight's device;
     the logical-shape metadata is kept on CPU. Non-finite input elements are
-    treated as zero during packing.
+    treated as zero during packing. ``importance``, a non-negative per-input-column vector,
+    weights each value's squared error in the search, as llama.cpp's imatrix does.
     """
     validate_weight(weight, "IQ2_XS")
     validate_block_chunk_size(block_chunk_size)
+    block_importance = importance_blocks(importance, weight, "IQ2_XS")
 
     logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
     blocks = weight.contiguous().reshape(-1, IQ2_XS_BLOCK_SIZE)
@@ -186,7 +197,7 @@ def quantize_iq2_xs(
                 _predict_iq2_xs_scales(blocks[start : start + _SCALE_BLOCK_CHUNK_SIZE])
                 for start in range(0, blocks.shape[0], _SCALE_BLOCK_CHUNK_SIZE)
             ]
-            packed = extension.iq2_xs_pack(blocks, grid, torch.cat(scale_chunks))
+            packed = extension.iq2_xs_pack(blocks, grid, torch.cat(scale_chunks), block_importance)
             packed_shape = (
                 *weight.shape[:-1],
                 weight.shape[-1] // IQ2_XS_BLOCK_SIZE,
@@ -198,7 +209,8 @@ def quantize_iq2_xs(
     for start in range(0, blocks.shape[0], block_chunk_size):
         block_chunk = blocks[start : start + block_chunk_size]
         scales = _predict_iq2_xs_scales(block_chunk)
-        chunks.append(_encode_blocks(block_chunk, grid, scales))
+        weights = chunk_importance(block_importance, start, start + block_chunk.shape[0])
+        chunks.append(_encode_blocks(block_chunk, grid, scales, weights))
     packed_shape = (
         *weight.shape[:-1],
         weight.shape[-1] // IQ2_XS_BLOCK_SIZE,
@@ -222,6 +234,11 @@ def dequantize_iq2_xs(
     validate_block_chunk_size(block_chunk_size)
 
     blocks = packed_weights.contiguous().reshape(-1, IQ2_XS_BLOCK_BYTES)
+    if blocks.is_cuda:
+        extension = get_cuda_ext_ggml()
+        if extension is not None:
+            grid = iq2_xs_grid(blocks.device)
+            return extension.iq2_xs_unpack(blocks, grid, dtype).reshape(shape)
     bit_positions = torch.arange(8, dtype=torch.int64, device=blocks.device)
     grid = iq2_xs_grid(blocks.device)
     decoded = torch.empty((blocks.shape[0], IQ2_XS_BLOCK_SIZE), dtype=dtype, device=blocks.device)
@@ -255,22 +272,18 @@ def dequantize_iq2_xs(
     return decoded.reshape(shape)
 
 
-def iq2_xs_fake_quant(
-    inputs: torch.Tensor,
-    quantizer,
-    *,
-    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
-    decode_chunk_size: int = _DEFAULT_DECODE_CHUNK_SIZE,
-) -> torch.Tensor:
-    """IQ2_XS weight backend for TensorQuantizer, with pass-through backward."""
-    if getattr(quantizer, "num_bits", None) != "iq2_xs":
-        raise ValueError("The ggml IQ2_XS backend requires num_bits='iq2_xs'")
-    return fake_quantize_with_cache(
-        inputs,
-        quantizer,
-        format_name="iq2_xs",
-        block_chunk_size=block_chunk_size,
-        decode_chunk_size=decode_chunk_size,
-        quantize=quantize_iq2_xs,
-        dequantize=dequantize_iq2_xs,
-    )
+IQ2_XS_FORMAT = GGMLFormat(
+    name="iq2_xs",
+    block_size=IQ2_XS_BLOCK_SIZE,
+    block_bytes=IQ2_XS_BLOCK_BYTES,
+    quantize=quantize_iq2_xs,
+    dequantize=dequantize_iq2_xs,
+    block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
+    decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+    weighted=True,
+)
+
+# Kept for callers of the per-format entry point. The record captured quantize_iq2_xs and
+# dequantize_iq2_xs when it was built, so patching those module functions changes neither backend
+# dispatch nor this alias; substitute a format's encoder or decoder in GGML_FORMAT_REGISTRY.
+iq2_xs_fake_quant = IQ2_XS_FORMAT.fake_quant

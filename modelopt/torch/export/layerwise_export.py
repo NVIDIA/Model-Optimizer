@@ -36,7 +36,7 @@ from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCol
 from modelopt.torch.utils import distributed as dist
 
 from .layer_utils import sync_moe_gate_up_amax
-from .model_utils import TiedWeightMap, get_language_model_from_vl
+from .model_utils import TiedWeightMap, _release_exported_tensors, get_language_model_from_vl
 from .quant_aware_conversion import build_reverse_name_mapper, revert_quant_config_names
 from .quant_format import FUSION_FREE_FORMATS, QUANTIZATION_NVFP4
 from .quant_utils import (
@@ -98,7 +98,7 @@ def _tied_quantized_modules(model: nn.Module) -> list[str]:
 
     Grouped by name, which survives offload: a ``data_ptr`` grouping sees nothing when the
     weights are on meta and would pass vacuously. Falls back to ``data_ptr`` when the model
-    publishes no map (transformers < 5).
+    publishes no map (e.g. not a ``PreTrainedModel``).
     """
     tied_map = TiedWeightMap(model)
     groups: dict[str, list[str]] = {}
@@ -214,7 +214,7 @@ class LayerwiseExporter:
             return
         model = self._model
         assert_layerwise_export_supported(model)
-        # Splits regroup tensors across the whole state dict; no per-layer pass reverses that.
+        # Tensor transforms regroup state across keys; no per-layer pass reverses that.
         _assert_no_split_rules(model)
 
         model_type = hf_model_type(model)
@@ -262,8 +262,10 @@ class LayerwiseExporter:
         self._kv_cache_format = _get_kv_cache_postprocess_config(self._quant_config["quantization"])
 
         self._name_mapper = None
+        self._tensor_name_mapper = None
         try:
             self._name_mapper = build_reverse_name_mapper(model)
+            self._tensor_name_mapper = build_reverse_name_mapper(model, tensor_keys=True)
         except Exception as exc:
             warnings.warn(
                 f"Reverse name mapper unavailable ({exc}); exported tensor names may not "
@@ -309,16 +311,19 @@ class LayerwiseExporter:
         )
         self._unify_shared_quantization_params(layer_module, layer_inputs)
 
-        for sub_name, sub_mod in layer_module.named_modules():
-            full_name = f"{layer_name}.{sub_name}" if sub_name else layer_name
-            _dispatch_export_handler(full_name, sub_mod, self._ctx)
-        _reconstruct_fused_moe_linear(layer_module)
+        # The shard on disk is the artifact once this block closes; nothing reads the
+        # layer again.
+        with _release_exported_tensors(layer_module):
+            for sub_name, sub_mod in layer_module.named_modules():
+                full_name = f"{layer_name}.{sub_name}" if sub_name else layer_name
+                _dispatch_export_handler(full_name, sub_mod, self._ctx)
+            _reconstruct_fused_moe_linear(layer_module)
 
-        prefix = f"{layer_name}." if layer_name else ""
-        for key, tensor in layer_module.state_dict().items():
-            self._collect(tensors, prefix + key, tensor)
+            prefix = f"{layer_name}." if layer_name else ""
+            for key, tensor in layer_module.state_dict().items():
+                self._collect(tensors, prefix + key, tensor)
 
-        save_file(tensors, str(self._export_dir / layer_shard_name(layer_idx)))
+            save_file(tensors, str(self._export_dir / layer_shard_name(layer_idx)))
 
     def _unify_shared_quantization_params(
         self, layer_module: nn.Module, layer_inputs: list | None
@@ -377,7 +382,11 @@ class LayerwiseExporter:
         # Names must match the tensors', or a loader reads an excluded BF16 layer as quantized.
         if self._name_mapper is not None and quant_config:
             with contextlib.suppress(Exception):
-                revert_quant_config_names(quant_config.get("quantization", {}), self._name_mapper)
+                revert_quant_config_names(
+                    quant_config.get("quantization", {}),
+                    self._name_mapper,
+                    module_names=(name for name, _ in model.named_modules()),
+                )
         # After the reversal, not before: carried names are source-checkpoint names already, so
         # passing them through the mapper would rewrite names that are correct as they stand.
         # bind() snapshotted this config during calibration, so the carried set -- which
@@ -436,7 +445,7 @@ class LayerwiseExporter:
             self._collect(tail, name, tensor)
 
         for name, tensor in (extra_state_dict or {}).items():
-            key = self._name_mapper(name) if self._name_mapper is not None else name
+            key = self._tensor_name_mapper(name) if self._tensor_name_mapper is not None else name
             tail[key] = tensor.detach().contiguous().cpu()
 
         save_file(tail, str(self._export_dir / _TAIL_SHARD))
@@ -496,8 +505,8 @@ class LayerwiseExporter:
         )
         if new_key is None or new_value is None:
             return
-        if self._name_mapper is not None:
-            new_key = self._name_mapper(new_key)
+        if self._tensor_name_mapper is not None:
+            new_key = self._tensor_name_mapper(new_key)
         out[new_key] = new_value.detach().contiguous().cpu()
 
     def _write_index(self) -> None:

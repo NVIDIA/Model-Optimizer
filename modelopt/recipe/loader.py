@@ -397,10 +397,10 @@ def _load_recipe_from_file(
     # instance.
     if overrides:
         # Overrides have to be applied before pydantic validation.  Round-trip through
-        # ``model_dump()`` so $imports are resolved and the dict has the resolved shape;
-        # then splice the dotlist values and re-validate.
+        # ``model_dump(exclude_unset=True)`` so $imports are resolved while preserving which
+        # defaulted fields the recipe omitted; then splice the dotlist values and re-validate.
         recipe = load_config(recipe_file, schema_type=schema_class)
-        data = recipe.model_dump()
+        data = recipe.model_dump(exclude_unset=True)
         data = _apply_dotlist(data, overrides)
         return schema_class.model_validate(data)
 

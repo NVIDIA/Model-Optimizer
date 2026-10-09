@@ -135,16 +135,15 @@ class QuantCustomModule(OriginalModule):
 
 **Most MoE models are auto-detected** — ModelOpt handles two common patterns automatically:
 
-- **transformers >= 5.0**: Unified fused experts (`gate_up_proj` + `down_proj` 3D tensors) → auto-detected by `register_fused_experts_on_the_fly`, handled by `_QuantFusedExperts`. Covers Mixtral, Qwen, DeepSeek, Jamba, OlMoE, etc.
-- **transformers < 5.0**: Sequential per-expert `nn.Linear` with `gate` + `experts` → auto-detected by `register_sparse_moe_on_the_fly`.
+- **Fused experts** (`gate_up_proj` + `down_proj` 3D tensors, all native transformers MoEs) → auto-detected by `register_fused_experts_on_the_fly`, handled by `_QuantFusedExperts`. Covers Mixtral, Qwen, DeepSeek, Jamba, OlMoE, etc.
+- **Sequential per-expert `nn.Linear`** with `gate` + `experts` (e.g. remote-code models) → auto-detected by `register_sparse_moe_on_the_fly`.
 
 **Custom MoE** (non-standard layout not matching auto-detection) requires patching. Find the closest pattern in the plugin (`modelopt/torch/quantization/plugins/huggingface.py`):
 
 | MoE design | Strategy | Plugin example |
 | --- | --- | --- |
-| Fused weights + `torch.bmm` | Add `TensorQuantizer` around bmm | `_QuantLlama4TextExperts` |
+| Fused weights + `torch.bmm` | Add `TensorQuantizer` around bmm | `_QuantLlama4TextExperts` (walkthrough in `docs/source/guides/_customized_model_quantization.rst`) |
 | Fused weights + functional interception | Intercept matmul ops | `_QuantGptOssExperts` |
-| Fused 2D weights (experts stacked in rows) | Two-level expansion | `_QuantDbrxExpertGLU` |
 | Fused weights + `forward(x, expert_id)` | Expand + reconstruct on export | `_QuantMoELinear` (Step3.5) |
 
 For the full guide, see `examples/hf_ptq/README.md`.

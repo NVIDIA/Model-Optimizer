@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import warnings
 from enum import Enum
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -282,10 +282,17 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         description="Optional per-module overrides for candidate formats and BF16/no-quant "
         "selectability. Matching is performed after runtime-fusion grouping.",
     )
-    auto_quantize_method: Literal["gradient", "kl_div"] = ModeloptField(
+    auto_quantize_method: Literal["gradient", "kl_div", "aumann_shapley"] = ModeloptField(
         default="gradient",
         title="Sensitivity scoring method",
-        description="'gradient' (Taylor + Fisher, needs labels) or 'kl_div' (no labels).",
+        description="'gradient' uses task labels; 'kl_div' and 'aumann_shapley' compare the "
+        "model's own outputs without labels.",
+    )
+    method_options: dict[str, Any] | None = ModeloptField(
+        default=None,
+        title="Method-specific scoring options",
+        description="Options forwarded to the selected scoring method. Each method validates "
+        "its supported keys and values.",
     )
     score_size: int = ModeloptField(
         default=128,
@@ -312,8 +319,29 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         "the --kv_cache_qformat CLI flag when omitted.",
     )
 
+    @property
+    def uses_predicted_damage_target(self) -> bool:
+        """Whether predicted damage, rather than effective bits, is the search target."""
+        return (self.method_options or {}).get("max_predicted_damage") is not None
+
     @model_validator(mode="after")
-    def _has_search_space(self):
+    def _validate_search_targets_and_space(self):
+        if self.method_options and "method" in self.method_options:
+            raise ValueError(
+                "auto_quantize.method_options cannot contain 'method'; "
+                "use auto_quantize_method to select the scoring method."
+            )
+        if self.uses_predicted_damage_target and self.auto_quantize_method != "aumann_shapley":
+            raise ValueError(
+                "method_options.max_predicted_damage requires "
+                "auto_quantize_method='aumann_shapley'."
+            )
+        has_explicit_bit_budget = "effective_bits" in self.constraints.model_fields_set
+        if self.uses_predicted_damage_target and has_explicit_bit_budget:
+            raise ValueError(
+                "A damage-bound AutoQuantize recipe must omit constraints.effective_bits; "
+                "max_predicted_damage supplies the search target."
+            )
         if not self.candidate_formats and not self.module_search_spaces:
             raise ValueError(
                 "auto_quantize requires candidate_formats or at least one module_search_spaces "
@@ -324,6 +352,8 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
                 raise ValueError(
                     "KV-cache AutoQuant currently requires auto_quantize_method=kl_div."
                 )
+            if self.method_options:
+                raise ValueError("KV-cache AutoQuant does not accept method_options.")
             if self.module_search_spaces:
                 raise ValueError(
                     "KV-cache AutoQuant uses one candidate space for all eligible attention "
@@ -338,6 +368,10 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
                     "KV-cache AutoQuant does not support cost_excluded_layers; use "
                     "disabled_layers to exclude non-KV-cache modules from the search."
                 )
+        if self.method_options and self.auto_quantize_method != "aumann_shapley":
+            raise ValueError(
+                f"auto_quantize_method={self.auto_quantize_method!r} accepts no method_options."
+            )
         return self
 
 
@@ -351,9 +385,9 @@ class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
     quantize: QuantizeConfig | None = ModeloptField(
         default=None,
         title="Fixed PTQ baseline",
-        description="Optional normal PTQ QuantizeConfig for modules outside the explicit "
-        "AutoQuantize module_search_spaces. Fixed and searched modules are calibrated, scored, "
-        "costed, and exported in one integrated AutoQuantize operation.",
+        description="Optional normal PTQ QuantizeConfig. A weight AutoQuantize stage uses it for "
+        "modules outside explicit module_search_spaces; a KV AutoQuantize stage applies it first "
+        "as the fixed GEMM weight/activation configuration.",
     )
 
     auto_quantize: AutoQuantizeConfig = Field(
@@ -361,22 +395,42 @@ class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
         description="AutoQuantize search configuration. Required.",
     )
 
+    kv_auto_quantize: AutoQuantizeConfig | None = ModeloptField(
+        default=None,
+        title="Follow-up KV-cache AutoQuantize config",
+        description="Optional KV-cache search run after the primary weight AutoQuantize search.",
+    )
+
     @model_validator(mode="after")
     def _validate_fixed_and_searched_spaces(self):
+        primary_is_kv = self.auto_quantize.constraints.cost_model == "kv_cache"
+        if self.kv_auto_quantize is not None:
+            if primary_is_kv:
+                raise ValueError(
+                    "kv_auto_quantize cannot follow an auto_quantize stage that already searches "
+                    "the KV cache."
+                )
+            if self.kv_auto_quantize.constraints.cost_model != "kv_cache":
+                raise ValueError("kv_auto_quantize must use cost_model=kv_cache.")
+            if self.auto_quantize.kv_cache is not None:
+                raise ValueError(
+                    "A weight AutoQuantize stage followed by kv_auto_quantize must omit the "
+                    "uniform auto_quantize.kv_cache post-step."
+                )
         has_fixed_baseline = self.quantize is not None
         has_global_search = bool(self.auto_quantize.candidate_formats)
-        if has_fixed_baseline and has_global_search:
+        if not primary_is_kv and has_fixed_baseline and has_global_search:
             raise ValueError(
                 "An AutoQuantize recipe with a fixed quantize baseline must omit top-level "
                 "auto_quantize.candidate_formats and explicitly list searched modules under "
                 "auto_quantize.module_search_spaces."
             )
-        if has_fixed_baseline and not self.auto_quantize.module_search_spaces:
+        if not primary_is_kv and has_fixed_baseline and not self.auto_quantize.module_search_spaces:
             raise ValueError(
                 "An AutoQuantize recipe with a fixed quantize baseline requires at least one "
                 "auto_quantize.module_search_spaces entry."
             )
-        if not has_fixed_baseline and not has_global_search:
+        if not primary_is_kv and not has_fixed_baseline and not has_global_search:
             raise ValueError(
                 "An AutoQuantize recipe without a fixed quantize baseline requires top-level "
                 "auto_quantize.candidate_formats for unmatched modules."

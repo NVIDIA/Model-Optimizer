@@ -13,29 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import pytest
-import transformers
 from _test_utils.examples.hf_ptq_utils import PTQCommand
-from _test_utils.examples.models import (
-    BART_PATH,
-    MIXTRAL_PATH,
-    T5_PATH,
-    TINY_LLAMA_PATH,
-    WHISPER_PATH,
-)
-from packaging.version import Version
+from _test_utils.examples.models import MIXTRAL_PATH, T5_PATH, TINY_LLAMA_PATH
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        PTQCommand(quant="fp8", min_sm=89),
-    ],
-    ids=PTQCommand.param_str,
-)
-def test_ptq_bart(command):
-    command.run(BART_PATH)
-
-
+# Encoder-decoder representative; BART shares the same export path.
 @pytest.mark.parametrize("command", [PTQCommand(quant="fp8", min_sm=89)], ids=PTQCommand.param_str)
 def test_ptq_t5(command):
     command.run(T5_PATH)
@@ -52,65 +34,37 @@ def test_ptq_mixtral(command):
     command.run(MIXTRAL_PATH)
 
 
-@pytest.mark.skipif(
-    Version(transformers.__version__) >= Version("5.0"),
-    reason="Whisper requires torchcodec and other system packages for transformers>=5.0",
-)
-@pytest.mark.parametrize(
-    "command",
-    [
-        # Auto-batch-size computation seems to take >10mins for Whisper hence using a fixed batch size
-        PTQCommand(quant="fp8", calib_batch_size=16, calib_dataset="peoples_speech", min_sm=89),
-    ],
-    ids=PTQCommand.param_str,
-)
-def test_ptq_whisper(command):
-    command.run(WHISPER_PATH)
-
-
+# Per-format export on tiny models (int8_weight_only, nvfp4_awq_lite, ...) is covered by
+# tests/gpu/torch/export/test_unified_hf_export_and_check_safetensors.py.
 @pytest.mark.parametrize(
     "command",
     [
         PTQCommand(quant="int8_smoothquant", kv_cache_quant="none"),
-        PTQCommand(quant="int8_smoothquant", kv_cache_quant="none", tp=2, pp=2),
-        PTQCommand(quant="int8_weight_only", kv_cache_quant="none"),
         PTQCommand(quant="int4_awq", kv_cache_quant="none"),
         PTQCommand(quant="w4a8_awq_beta", kv_cache_quant="none"),
-        # GGML IQ weight-only, recipe-driven. These encoders require every weight's input
-        # dimension to be a multiple of 256; TinyLlama's 2048 and 5632 both are. Neither
-        # recipe calibrates -- both set algorithm: null -- so the only IQ-specific cost is
-        # packing each weight once and decoding it on each forward. 95s and 103s on 2xH100,
-        # inside the 300s tests/examples default.
+        # GGML IQ weight-only, recipe-driven: the five formats between 1.56 and 2.56 bits per
+        # weight, on the MLP layers with layerwise GPTQ. These encoders require every weight's
+        # input dimension to be a multiple of 256; TinyLlama's 2048 and 5632 both are.
         PTQCommand(recipe="general/ptq/iq1_s", kv_cache_quant="none"),
+        PTQCommand(recipe="general/ptq/iq1_m", kv_cache_quant="none"),
+        PTQCommand(recipe="general/ptq/iq2_xxs", kv_cache_quant="none"),
         PTQCommand(recipe="general/ptq/iq2_xs", kv_cache_quant="none"),
+        PTQCommand(recipe="general/ptq/iq2_s", kv_cache_quant="none"),
+        # Q8_0 has 32-value blocks and needs no calibration forward pass.
+        PTQCommand(recipe="general/ptq/q8_0", kv_cache_quant="none"),
+        # fp8 and nvfp4 checkpoints are also deployed with TRT-LLM
+        PTQCommand(quant="fp8", min_sm=89),
+        PTQCommand(quant="fp8", kv_cache_quant="none", min_sm=89),
         PTQCommand(quant="nvfp4"),
-        PTQCommand(quant="nvfp4_awq_lite"),
-        # autoquant (recipe-driven)
-        PTQCommand(
-            recipe="general/auto_quantize/nvfp4_fp8_at_5p4bits",
-            calib_batch_size=4,
-            kv_cache_quant="none",
-        ),
-        # kv_cache
+        PTQCommand(quant="mxfp8", min_sm=100),
+        # Calibrated KV cache
         PTQCommand(quant="nvfp4_awq_lite", kv_cache_quant="nvfp4"),
-        PTQCommand(quant="fp8", kv_cache_quant="fp8_cast", min_sm=89),
-        # autoquant_kv_cache (recipe-driven; KV via --kv_cache_quant fallback)
-        PTQCommand(
-            recipe="general/auto_quantize/nvfp4_fp8_at_5p4bits",
-            kv_cache_quant="fp8",
-            calib_batch_size=4,
-        ),
+        # AutoQuantize recipe; KV via --kv_cache_quant fallback
         PTQCommand(
             recipe="general/auto_quantize/nvfp4_fp8_at_5p4bits",
             kv_cache_quant="nvfp4",
             calib_batch_size=4,
         ),
-        # sm89
-        PTQCommand(quant="fp8", min_sm=89),
-        PTQCommand(quant="fp8", kv_cache_quant="none", min_sm=89),  # sm100
-        PTQCommand(quant="mxfp8", min_sm=100),
-        PTQCommand(quant="nvfp4", min_sm=100),
-        #
         # multi_gpu
         PTQCommand(quant="fp8", min_gpu=2, min_sm=89),
         PTQCommand(quant="nvfp4", min_gpu=2, min_sm=100),

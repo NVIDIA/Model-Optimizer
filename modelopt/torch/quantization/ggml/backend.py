@@ -13,27 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""TensorQuantizer backend dispatch for GGML-compatible weight-only IQ formats."""
+"""TensorQuantizer backend dispatch for GGML-compatible weight-only formats."""
 
 import torch
 
 from ..nn.modules.tensor_quantizer import register_quant_backend
-from .iq1_s import iq1_s_fake_quant
-from .iq2_xs import iq2_xs_fake_quant
+from .registry import GGML_FORMAT_REGISTRY
 
 
 def ggml_fake_quant(inputs: torch.Tensor, quantizer) -> torch.Tensor:
-    """Dispatch an IQ quantizer to its format-specific implementation."""
+    """Dispatch a GGML quantizer to its format-specific implementation."""
     num_bits = getattr(quantizer, "num_bits", None)
     extra_args = getattr(quantizer, "backend_extra_args", None) or {}
     unknown_args = set(extra_args) - {"block_chunk_size", "decode_chunk_size"}
     if unknown_args:
         raise ValueError(f"Unsupported ggml backend_extra_args: {sorted(unknown_args)}")
-    if num_bits == "iq1_s":
-        return iq1_s_fake_quant(inputs, quantizer, **extra_args)
-    if num_bits == "iq2_xs":
-        return iq2_xs_fake_quant(inputs, quantizer, **extra_args)
-    raise ValueError("The ggml backend requires num_bits='iq1_s' or 'iq2_xs'")
+    # num_bits arrives untyped from the quantizer and is a tuple for scalar formats,
+    # so narrow before the lookup rather than relying on the dict to reject it.
+    ggml_format = GGML_FORMAT_REGISTRY.get(num_bits) if isinstance(num_bits, str) else None
+    if ggml_format is None:
+        supported = ", ".join(repr(name) for name in sorted(GGML_FORMAT_REGISTRY))
+        raise ValueError(f"The ggml backend requires num_bits in ({supported})")
+    return ggml_format.fake_quant(inputs, quantizer, **extra_args)
 
 
 register_quant_backend("ggml", ggml_fake_quant)

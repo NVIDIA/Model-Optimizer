@@ -33,6 +33,7 @@ from vllm_reload_utils import (
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.plugins.vllm_fakequant_hf import is_weight_quantizer_state_key
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.plugins.vllm import (
     disable_compilation,
     post_restore_vllm_parallel_linears,
@@ -81,7 +82,6 @@ def _fakequant_run_prolog_worker(self, mlflow_tracker: FakeQuantMlflowTracker) -
             modelopt_weights = convert_dict_to_vllm(modelopt_weights, map_fun=map_fun)
             mtq.utils.set_quantizer_state_dict(model, modelopt_weights)
             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-                from modelopt.torch.quantization.nn import TensorQuantizer
                 from modelopt.torch.utils import get_unwrapped_name
 
                 loaded_keys = {
@@ -141,6 +141,12 @@ def _fakequant_run_prolog_worker(self, mlflow_tracker: FakeQuantMlflowTracker) -
             # Only barrier if distributed is actually initialized (avoids deadlocks).
             if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
                 torch.distributed.barrier()
+
+    # Quantizer buffers created while the config is applied (e.g. a ``constant_amax``) start on the
+    # CPU. Move them to the GPU now: CUDA graph capture cannot copy them on every call.
+    for module in model.modules():
+        if isinstance(module, TensorQuantizer):
+            module.to(self.device)
 
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
         mtq.print_quant_summary(model)

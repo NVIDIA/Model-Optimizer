@@ -107,6 +107,15 @@ def _assert_mamba_within_int32_indexing(model: MegatronModule, batch_size: int, 
         )
 
 
+def _masks_causally_itself(model: MegatronModule) -> bool:
+    """Whether the model's attention applies causal masking internally and rejects an explicit mask.
+
+    DeepSeek-V4 hybrid attention (``CompressedSparseAttention``) raises on any ``attention_mask``;
+    Megatron training runs it with ``attention_mask=None``.
+    """
+    return getattr(model.config, "experimental_attention_variant", None) == "dsv4_hybrid"
+
+
 def get_current_memory_info():
     """Get current memory usage."""
     remaining_mem, total_mem = torch.cuda.mem_get_info()
@@ -182,8 +191,9 @@ def megatron_prefill(
     cp_size = mpu.get_context_parallel_world_size()
 
     # Under CP a local triu mask would be wrong for the per-rank zigzag chunks; pass None and let
-    # the CP-aware causal attention build it. Without CP the causal mask must be supplied explicitly.
-    if cp_size > 1:
+    # the CP-aware causal attention build it. DeepSeek-V4 hybrid attention masks causally itself.
+    # Otherwise the causal mask must be supplied explicitly.
+    if cp_size > 1 or _masks_causally_itself(model):
         attention_mask = None
     else:
         attention_mask = (
@@ -378,8 +388,9 @@ def megatron_generate(
 
         # ModelOpt transformer_spec uses arbitrary attention mask type by default; compute causal
         # mask for prefill. During decode, attn_mask_type is overridden to "no_mask" by
-        # SelfAttention.forward() when inference_context is provided.
-        if seq_len > 1:
+        # SelfAttention.forward() when inference_context is provided. DeepSeek-V4 hybrid attention
+        # masks causally itself and rejects an explicit mask.
+        if seq_len > 1 and not _masks_causally_itself(model):
             attention_mask = (
                 torch.triu(torch.ones((batch_size, seq_len, seq_len), device=device), diagonal=1)
                 .bool()
