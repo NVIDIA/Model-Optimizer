@@ -175,6 +175,15 @@ token is appended after the response. A record longer than `--seq_length` is tru
 **start** of `"input"`, which drops any system prompt or opening role marker baked in there, so
 pre-filter or pre-truncate the corpus if that matters.
 
+To distill on **chat data** instead, pass `--sft --sft_hf_dataset <spec>`, where `<spec>` is a
+local `<file>.jsonl` of `{"messages": [{"role": ..., "content": ...}, ...]}` records or a Hugging
+Face Hub dataset `<hub_id>[:<split>]` (split defaults to `train`, and may be a slice such as
+`train[:1000]`). Each conversation is rendered with the model's own chat template, and
+`--sft_loss_mode` picks the trained tokens: every assistant turn (`assistant`, the default), only
+the last one (`last_turn`), or the whole conversation (`full`). With `--eval_iters > 0`, also pass
+`--sft_hf_validation` in the same format. This path needs a Megatron-Bridge with
+`DirectHFSFTDatasetConfig`.
+
 Teacher and student must share a tokenizer — distillation scores the teacher on the student's
 token ids, and the KD losses compare the two models' logits elementwise over the vocab dimension.
 

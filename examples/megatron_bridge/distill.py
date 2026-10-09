@@ -200,8 +200,9 @@ def get_args():
     parser.add_argument(
         "--sft",
         action="store_true",
-        help="Distill on prompt-completion jsonl from --sft_dataset_root with the loss masked to "
-        "the completion, instead of pre-tokenized --data_paths.",
+        help="Distill on SFT data with the loss masked to the responses, instead of pre-tokenized "
+        "--data_paths: prompt-completion jsonl from --sft_dataset_root, or chat data from "
+        "--sft_hf_dataset.",
     )
     parser.add_argument(
         "--sft_dataset_root",
@@ -216,7 +217,8 @@ def get_args():
         type=str,
         default=None,
         help="Chat dataset to distill on (used with --sft): a local chat '<file>.jsonl', or "
-        "'<hub_id>[:<split>]' (split defaults to train). Each conversation is rendered by the "
+        "'<hub_id>[:<split>]' (split defaults to train). Only .json/.jsonl are read as local "
+        "files; anything else is taken as a Hub id. Each conversation is rendered by the "
         "model's own chat template. Alternative to --sft_dataset_root, which expects "
         '{"input", "output"} records already preprocessed into a dataset root.',
     )
@@ -414,6 +416,8 @@ def get_args():
             )
         if args.eval_iters > 0 and not args.sft_hf_validation:
             raise ValueError("--sft_hf_dataset with --eval_iters > 0 needs --sft_hf_validation.")
+    elif args.sft_hf_validation or args.sft_loss_mode != "assistant":
+        raise ValueError("--sft_hf_validation / --sft_loss_mode require --sft_hf_dataset.")
     if args.sft and (args.data_paths or args.use_mock_data):
         raise ValueError(
             "--sft is mutually exclusive with --data_paths / --use_mock_data: the SFT branch wins "
