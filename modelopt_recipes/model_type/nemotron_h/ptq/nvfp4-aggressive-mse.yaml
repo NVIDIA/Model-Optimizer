@@ -1,0 +1,150 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# NemotronH -- aggressive NVFP4 tier, weight-MSE calibration.
+#
+# For hybrid Mamba-MoE NemotronH checkpoints, including the omni VL wrappers. Broader FP8 weight
+# coverage than the conservative tier; the MTP rules apply only when the checkpoint carries an
+# MTP tail and are inert otherwise.
+#
+#   MoE routed + shared experts   NVFP4 W4A4, static weight scales
+#   attention q/k/v/o, Mamba in/out_proj, lm_head   FP8
+#   MTP block-1 routed + shared experts   NVFP4 W4A4, static weight scales
+#   latent MoE, embeddings, router, C-RADIO vision, Parakeet audio   BF16
+#   KV cache                      FP8 (see the kv rules below)
+#
+# quant_cfg is ordered and the LAST match wins, so the blanket disable comes first and the
+# vision / MTP rules come last. Only configs/numerics/* is imported, so every rule that
+# applies to this model is visible in this file.
+
+imports:
+  nvfp4: configs/numerics/nvfp4
+  nvfp4_static: configs/numerics/nvfp4_static
+  fp8: configs/numerics/fp8
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    NemotronH aggressive tier, weight-MSE calibrated: NVFP4 routed and shared MoE experts with
+    static weight scales and dynamic NVFP4 activations, the same for the MTP block-1 experts;
+    FP8 attention projections, Mamba in/out_proj and lm_head; BF16 latent MoE and vision tower.
+    FP8 KV cache, with the backbone cast at a fixed range and MTP calibrated.
+quantize:
+  algorithm:
+    method: mse
+    # Sweeps the 128 e4m3 scale values; requires static weight quantizers (below).
+    fp8_scale_sweep: true
+    # Required for VLMs: decoder layers sit under `model.language_model.layers`,
+    # where layerwise_calibrate cannot find them.
+    layerwise:
+      enable: false
+  quant_cfg:
+    - quantizer_name: '*'
+      enable: false
+    - quantizer_name: '*.experts.*weight_quantizer'
+      cfg:
+        $import: nvfp4_static
+    - quantizer_name: '*.experts.*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*shared_experts*weight_quantizer'
+      cfg:
+        $import: nvfp4_static
+    - quantizer_name: '*shared_experts*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*[qkvo]_proj.weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*[qkvo]_proj.input_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*mixer.in_proj.weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*mixer.in_proj.input_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*mixer.out_proj.weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*mixer.out_proj.input_quantizer'
+      cfg:
+        $import: fp8
+    # Backbone KV casts at a fixed FP8 range: no _amax buffer, so no k_scale/v_scale is
+    # exported, matching configs/ptq/units/kv_fp8_cast. MTP KV below stays calibrated and
+    # keeps its pair.
+    - quantizer_name: '*[kv]_bmm_quantizer'
+      cfg:
+        $import: fp8
+        use_constant_amax: true
+    - quantizer_name: '*mtp.*'
+      enable: false
+    - quantizer_name: '*mtp.layers.1.mixer.experts.*weight_quantizer'
+      cfg:
+        $import: nvfp4_static
+    - quantizer_name: '*mtp.layers.1.mixer.experts.*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*mtp.layers.1.mixer.shared_experts.*weight_quantizer'
+      cfg:
+        $import: nvfp4_static
+    - quantizer_name: '*mtp.layers.1.mixer.shared_experts.*input_quantizer'
+      cfg:
+        $import: nvfp4
+    # Restated so this rule cannot inherit the backbone setting above.
+    - quantizer_name: '*mtp.layers.0.*[kv]_bmm_quantizer'
+      cfg:
+        $import: fp8
+        use_constant_amax: false
+    - quantizer_name: '*embed_vision*'
+      enable: false
+    - quantizer_name: '*lm_head*weight_quantizer'
+      enable: true
+      cfg:
+        $import: fp8
+    - quantizer_name: '*lm_head*input_quantizer'
+      enable: true
+      cfg:
+        $import: fp8
+    - quantizer_name: '*vision_model*'
+      enable: false
+    - quantizer_name: '*vision_projector*'
+      enable: false
+    - quantizer_name: '*radio_model*'
+      enable: false
+    - quantizer_name: '*vision_tower*'
+      enable: false
+    - quantizer_name: '*visual*'
+      enable: false
+    - quantizer_name: '*multi_modal_projector*'
+      enable: false
+    - quantizer_name: 'mlp1.*'
+      enable: false
+    - quantizer_name: '*.mlp1.*'
+      enable: false
+    # Audio branch of the omni wrapper, present when the config carries a `sound_config`.
+    # The Parakeet encoder names its projections `self_attn.{q,k,v,o,relative_k}_proj`, so the
+    # FP8 attention rules above match it, and its attention class is registered for KV-cache
+    # quantization like any other. Image calibration supplies no audio, so those input
+    # quantizers collect no amax and the export drops the input scale while still writing an
+    # FP8 weight scale -- a layer that claims W8A8 with no activation scale. Keep it BF16.
+    - quantizer_name: '*audio_tower*'
+      enable: false
+    - quantizer_name: '*sound_encoder*'
+      enable: false
+    - quantizer_name: '*sound_projector*'
+      enable: false
