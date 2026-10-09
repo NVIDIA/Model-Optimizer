@@ -23,6 +23,7 @@
 | `--criterion` | `str` | `"logits_loss"` | Distillation loss criterion. Currently only 'logits_loss' is supported. |
 | `--temperature` | `float` | `1.0` | Softmax temperature for softening logits in KD loss. Used by both standard and Liger KD loss. |
 | `--liger_jsd_beta` | `float` | `0.0` | JSD beta coefficient in [0, 1]. 0=forward KL, 1=reverse KL. Only used when --use_liger_kernel is enabled. |
+| `--kd_loss_weight` | `float` | `1.0` | Weight for KD loss in the combined training loss. The CE (cross-entropy) loss weight is (1 - kd_loss_weight). Set to 1.0 (default) for pure KD loss. Set to a value in (0, 1) to blend KD and CE losses, e.g. 0.7 for 70% KD loss + 30% CE loss. |
 
 ## DataArguments
 

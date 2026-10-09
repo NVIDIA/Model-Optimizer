@@ -577,13 +577,22 @@ def _get_scale_and_zp(
     return scale, zp
 
 
+# Consumers whose quantized weights qdq_to_dq knows how to convert.
+_REAL_QUANT_WEIGHT_CONSUMERS = {"Conv", "ConvTranspose", "Gemm", "MatMul"}
+
+
+def _quantization_axis(node: onnx.NodeProto) -> int:
+    """Returns a Q/DQ node's quantization axis; ONNX defaults the attribute to 1."""
+    return next((attr.i for attr in node.attribute if attr.name == "axis"), 1)
+
+
 def _get_successive_consumers(
     node: onnx.NodeProto, tensor_consumers: dict[str, list[onnx.NodeProto]]
 ) -> tuple[onnx.NodeProto, onnx.NodeProto]:
     """Get the DequantizeLinear node and its consumer node for a given QuantizeLinear node.
 
     This function validates and retrieves the next two nodes in the quantization chain:
-    QuantizeLinear -> DequantizeLinear -> Operation
+    QuantizeLinear -> DequantizeLinear -> [Cast | Transpose]* -> Operation
 
     Args:
         node: The QuantizeLinear node to find consumers for
@@ -601,10 +610,13 @@ def _get_successive_consumers(
     quantized_node = tensor_consumers.get(dq_node.output[0], [None])[0]
     if not quantized_node:
         raise ValueError(f"No consumer found for {dq_node.name}")
-    if quantized_node.op_type == "Cast":
+
+    while quantized_node.op_type in ("Cast", "Transpose"):
         next_node = tensor_consumers.get(quantized_node.output[0], [None])[0]
         if not next_node:
-            raise ValueError(f"No consumer found after Cast for {quantized_node.name}")
+            raise ValueError(
+                f"No consumer found after {quantized_node.op_type} for {quantized_node.name}"
+            )
         quantized_node = next_node
 
     return dq_node, quantized_node
@@ -615,6 +627,8 @@ def _convert_weight(
     scale: onnx.TensorProto,
     zp: onnx.TensorProto,
     quantized_node: onnx.NodeProto,
+    *,
+    dq_axis: int | None = None,
 ) -> np.ndarray:
     """Convert a weight tensor to INT8/FP8 format based on scale and zero point.
 
@@ -623,6 +637,7 @@ def _convert_weight(
         scale: The scale tensor for quantization
         zp: The zero point tensor for quantization
         quantized_node: The operation node that will use the converted weight
+        dq_axis: The axis declared by the source Q/DQ pair, if it declares one
 
     Returns:
         The converted weight tensor as a numpy array
@@ -634,7 +649,6 @@ def _convert_weight(
         - INT8 weights are clipped to [-128, 127]
         - FP8 weights use float8e4m3fn format
     """
-    # Per-op quantization axis mapping (must match ORT config)
     weight_shape = weight_array.shape
     op_type = quantized_node.op_type
 
@@ -642,33 +656,26 @@ def _convert_weight(
     scale_array = onnx.numpy_helper.to_array(scale)
     zp_array = onnx.numpy_helper.to_array(zp)
 
-    # Dynamically determine transB for Gemm
-    trans_b = 0
-    if op_type == "Gemm":
-        for attr in quantized_node.attribute:
-            if attr.name == "transB":
-                trans_b = attr.i
-                break
-
-    axis_map = {
-        "Conv": 0,
-        "ConvTranspose": 1,
-        "Gemm": 0 if trans_b else 1,
-        "MatMul": 1,
-    }
-
-    if op_type not in axis_map:
+    if op_type not in _REAL_QUANT_WEIGHT_CONSUMERS:
         raise ValueError(f"Unsupported op_type for real weight quantization: {op_type}")
 
-    axis = axis_map[op_type]
-
-    if scale_array.shape and scale_array.shape[0] != weight_shape[axis]:
-        raise ValueError(
-            f"Scale shape {scale_array.shape} does not match weight shape {weight_shape} along axis {axis}"
-        )
-
+    # A single scale covers the whole weight, so it broadcasts and no axis applies to it.
     reshape_dims = [1] * len(weight_shape)
-    reshape_dims[axis] = scale_array.shape[0]
+    if scale_array.size > 1:
+        # Per-axis: the DequantizeLinear left in the graph dequantizes along the axis it
+        # declares, and that axis indexes the stored weight whatever the consumer's layout is.
+        axis = 1 if dq_axis is None else dq_axis
+        if not -len(weight_shape) <= axis < len(weight_shape):
+            raise ValueError(
+                f"Quantization axis {axis} is out of range for weight shape {weight_shape}"
+            )
+        axis %= len(weight_shape)
+        if scale_array.shape[0] != weight_shape[axis]:
+            raise ValueError(
+                f"Scale shape {scale_array.shape} does not match weight shape {weight_shape} along axis {axis}"
+            )
+        reshape_dims[axis] = scale_array.shape[0]
+
     scale_array = scale_array.reshape(*reshape_dims)
     zp_array = zp_array.reshape(*reshape_dims)
 
@@ -756,8 +763,16 @@ def qdq_to_dq(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
             # Validate Q->DQ->Op pattern and get consumers
             dq_node, quantized_node = _get_successive_consumers(node, tensor_consumers)
 
-            # Convert weight
-            scaled = _convert_weight(weight_array, scale, zp, quantized_node)
+            # Convert weight. The conversion follows the DQ and drops the Q, so a per-axis
+            # pair that disagrees on the axis would silently change the output.
+            dq_axis, q_axis = _quantization_axis(dq_node), _quantization_axis(node)
+            if int(np.prod(scale.dims)) > 1 and (
+                q_axis % weight_array.ndim != dq_axis % weight_array.ndim
+            ):
+                raise ValueError(
+                    f"QuantizeLinear axis {q_axis} disagrees with DequantizeLinear axis {dq_axis}"
+                )
+            scaled = _convert_weight(weight_array, scale, zp, quantized_node, dq_axis=dq_axis)
 
             # Create and update new weight tensor
             if zp.data_type == onnx_dtype_map["Float8"]:

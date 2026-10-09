@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from types import SimpleNamespace
+from unittest.mock import PropertyMock, patch
 
 import pytest
 import torch
@@ -25,6 +26,7 @@ transformers = pytest.importorskip("transformers")
 TrainingArguments = transformers.TrainingArguments
 default_data_collator = transformers.default_data_collator
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.trainer_pt_utils import LabelSmoother
 
 from modelopt.torch.distill.losses import LogitsDistillationLoss
 from modelopt.torch.distill.plugins.huggingface import IGNORE_INDEX, KDTrainer
@@ -86,12 +88,14 @@ def _make_batch():
     return default_data_collator([_ToyDataset()[0], _ToyDataset()[1]])
 
 
-def _make_trainer(tmp_path, student, teacher, use_liger_kernel=False):
+def _make_trainer(tmp_path, student, teacher, use_liger_kernel=False, kd_loss_weight=1.0, **kwargs):
+    use_cpu = kwargs.pop("use_cpu", True)
     training_args = TrainingArguments(
         output_dir=str(tmp_path),
         per_device_eval_batch_size=2,
         report_to=[],
-        use_cpu=True,
+        use_cpu=use_cpu,
+        **kwargs,
     )
     training_args.use_liger_kernel = use_liger_kernel
     return KDTrainer(
@@ -99,7 +103,7 @@ def _make_trainer(tmp_path, student, teacher, use_liger_kernel=False):
         args=training_args,
         eval_dataset=_ToyDataset(),
         data_collator=default_data_collator,
-        distill_args={"teacher_model": teacher},
+        distill_args={"teacher_model": teacher, "kd_loss_weight": kd_loss_weight},
     )
 
 
@@ -116,7 +120,8 @@ def _manual_kd_loss(student, teacher, batch):
     return (per_token_loss * mask).sum() / mask.sum().clamp(min=1)
 
 
-def test_training_loss_is_kd_and_skips_ce(tmp_path):
+def test_training_loss_is_pure_kd_by_default(tmp_path):
+    """Default kd_loss_weight=1.0 produces pure KD loss; student is forwarded without labels."""
     events = []
     student, teacher = _make_models(events)
     batch = _make_batch()
@@ -129,6 +134,68 @@ def test_training_loss_is_kd_and_skips_ce(tmp_path):
 
     assert events == [("student", False), ("teacher", False)]
     assert loss.item() == pytest.approx(expected_kd_loss.item())
+
+
+def test_training_loss_combines_ce_and_kd_with_equal_weights(tmp_path):
+    """kd_loss_weight=0.5 blends CE and KD losses with equal weights."""
+    student, teacher = _make_models()
+    batch = _make_batch()
+    expected_kd_loss = _manual_kd_loss(student, teacher, batch)
+    expected_ce_loss = student(**batch).loss.detach()
+    trainer = _make_trainer(tmp_path, student, teacher, kd_loss_weight=0.5)
+
+    trainer.model.train()
+    loss = trainer.compute_loss(trainer.model, batch.copy())
+
+    expected = 0.5 * expected_kd_loss + 0.5 * expected_ce_loss
+    assert loss.item() == pytest.approx(expected.item())
+
+
+def test_training_loss_combines_ce_and_kd_with_custom_weights(tmp_path):
+    """kd_loss_weight=0.7 blends 70% KD + 30% CE — the config from issue #2488."""
+    student, teacher = _make_models()
+    batch = _make_batch()
+    expected_kd_loss = _manual_kd_loss(student, teacher, batch)
+    expected_ce_loss = student(**batch).loss.detach()
+    trainer = _make_trainer(tmp_path, student, teacher, kd_loss_weight=0.7)
+
+    trainer.model.train()
+    loss = trainer.compute_loss(trainer.model, batch.copy())
+
+    expected = 0.7 * expected_kd_loss + 0.3 * expected_ce_loss
+    assert loss.item() == pytest.approx(expected.item())
+
+
+def test_training_loss_preserves_label_smoothing(tmp_path):
+    """CE loss handling should preserve HF Trainer's label_smoothing_factor."""
+    student, teacher = _make_models()
+    batch = _make_batch()
+
+    trainer = _make_trainer(tmp_path, student, teacher, kd_loss_weight=0.5)
+    trainer.args.label_smoothing_factor = 0.1
+
+    smoother = LabelSmoother(epsilon=0.1)
+    trainer.label_smoother = smoother
+
+    trainer.model.train()
+    loss = trainer.compute_loss(trainer.model, batch.copy())
+
+    expected_kd_loss = _manual_kd_loss(student, teacher, batch)
+    outputs = student(**batch)
+    # The dummy model is not in HF's causal LM mapping, so HF Trainer won't pass shift_labels=True
+    expected_ce_loss = smoother(outputs, batch["labels"], shift_labels=False)
+
+    expected = 0.5 * expected_kd_loss + 0.5 * expected_ce_loss
+    assert loss.item() == pytest.approx(expected.item())
+
+
+def test_invalid_kd_loss_weight_raises(tmp_path):
+    """kd_loss_weight outside (0, 1] should raise ValueError at construction time."""
+    student, teacher = _make_models()
+    with pytest.raises(ValueError, match="kd_loss_weight"):
+        _make_trainer(tmp_path, student, teacher, kd_loss_weight=0.0)
+    with pytest.raises(ValueError, match="kd_loss_weight"):
+        _make_trainer(tmp_path, student, teacher, kd_loss_weight=1.5)
 
 
 def test_eval_loss_is_kd_and_ce_is_secondary_metric(tmp_path):
@@ -162,3 +229,38 @@ def test_standard_kd_loss_without_labels_uses_mean(tmp_path):
     ).mean()
 
     assert loss.item() == pytest.approx(expected.item())
+
+
+def test_kd_loss_ddp_scaling(tmp_path):
+    """KD loss should be scaled by world_size when average_tokens_across_devices is True."""
+    student, teacher = _make_models()
+    batch = _make_batch()
+
+    trainer_single = _make_trainer(tmp_path / "single", student, teacher, kd_loss_weight=0.5)
+    trainer_single.model.train()
+
+    mask = batch["labels"][..., 1:] != IGNORE_INDEX
+    num_items = mask.sum().item()
+
+    loss_single = trainer_single.compute_loss(
+        trainer_single.model, batch.copy(), num_items_in_batch=num_items
+    )
+
+    with patch(
+        "transformers.TrainingArguments.world_size", new_callable=PropertyMock
+    ) as mock_world_size:
+        mock_world_size.return_value = 2
+
+        trainer_ddp = _make_trainer(tmp_path / "ddp", student, teacher, kd_loss_weight=0.5)
+        trainer_ddp.args.average_tokens_across_devices = True
+        trainer_ddp.model.train()
+
+        # DDP aggregates num_items across world_size
+        loss_ddp = trainer_ddp.compute_loss(
+            trainer_ddp.model, batch.copy(), num_items_in_batch=num_items * 2
+        )
+
+    # In our dummy model, CE loss natively averages over its batch, so dividing
+    # the KD loss by (num_items * 2) and multiplying by world_size (2) should
+    # perfectly match the single-rank calculation.
+    assert loss_ddp.item() == pytest.approx(loss_single.item())

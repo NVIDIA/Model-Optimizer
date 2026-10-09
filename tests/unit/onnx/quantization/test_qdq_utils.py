@@ -1162,6 +1162,203 @@ class TestReplaceZeroScaleWithSmallestNonzero:
         assert (scale_arr > 0).all()
 
 
+def create_test_model_with_dq_transpose_matmul(
+    out_features: int,
+    in_features: int,
+    *,
+    perm: tuple[int, ...] | None = (1, 0),
+    q_axis: int = 0,
+    transpose: bool = True,
+    declare_axis: bool = True,
+    single_scale: bool = False,
+):
+    """Create weight[out, in] -> Q -> DQ -> Transpose -> MatMul, per-channel on the out axis.
+
+    This is how a torch ``Linear`` exports when the weight reaches MatMul transposed, as in
+    MaxViT's attention blocks. ``perm=None`` omits the attribute, which ONNX defines as
+    reversing the axes.
+    """
+    rng = np.random.RandomState(7)
+    weight = rng.randn(out_features, in_features).astype(np.float32)
+    if single_scale:
+        # One element: covers the whole weight and broadcasts, whatever the axis says.
+        scale = np.array([np.abs(weight).max() / 127.0], dtype=np.float32)
+        zero_point = np.zeros(1, dtype=np.int8)
+    else:
+        reduced = tuple(axis for axis in range(2) if axis != q_axis)
+        scale = (np.abs(weight).max(axis=reduced) / 127.0).astype(np.float32)
+        zero_point = np.zeros(weight.shape[q_axis], dtype=np.int8)
+
+    # ONNX defaults an omitted `axis` to 1, so a caller omitting it must pass q_axis=1.
+    axis_attr = {"axis": q_axis} if declare_axis else {}
+    nodes = [
+        helper.make_node(
+            "QuantizeLinear", ["weight", "w_scale", "w_zp"], ["w_q"], name="w_q", **axis_attr
+        ),
+        helper.make_node(
+            "DequantizeLinear", ["w_q", "w_scale", "w_zp"], ["w_dq"], name="w_dq", **axis_attr
+        ),
+    ]
+    matmul_rhs = "w_dq"
+    if transpose:
+        nodes.append(
+            helper.make_node(
+                "Transpose",
+                ["w_dq"],
+                ["w_t"],
+                name="w_t",
+                **({} if perm is None else {"perm": list(perm)}),
+            )
+        )
+        matmul_rhs = "w_t"
+    nodes.append(helper.make_node("MatMul", ["input", matmul_rhs], ["output"], name="matmul"))
+
+    rows, cols = (in_features, out_features) if transpose else (out_features, in_features)
+    graph = helper.make_graph(
+        nodes=nodes,
+        name="dq_transpose_matmul",
+        inputs=[helper.make_tensor_value_info("input", TensorProto.FLOAT, [3, rows])],
+        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [3, cols])],
+        initializer=[
+            numpy_helper.from_array(weight, "weight"),
+            numpy_helper.from_array(scale, "w_scale"),
+            numpy_helper.from_array(zero_point, "w_zp"),
+        ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+    return model
+
+
+class TestQdqToDqTranspose:
+    """qdq_to_dq must trace a Transpose and follow the Q/DQ pair's own quantization axis."""
+
+    # Square weights are the dangerous shape: the scale length matches either axis, so a
+    # wrong axis passes validation and silently changes the model's output.
+    @pytest.mark.parametrize(
+        ("out_features", "in_features", "q_axis", "transpose", "declare_axis"),
+        [
+            (96, 32, 0, True, True),
+            (32, 32, 0, True, True),
+            (32, 32, 0, False, True),
+            (32, 32, 1, True, True),
+            (32, 32, 1, True, False),
+        ],
+    )
+    def test_conversion_matches_qdq(
+        self, out_features, in_features, q_axis, transpose, declare_axis
+    ):
+        """The DequantizeLinear left in the graph dequantizes along its own axis."""
+        model = create_test_model_with_dq_transpose_matmul(
+            out_features,
+            in_features,
+            q_axis=q_axis,
+            transpose=transpose,
+            declare_axis=declare_axis,
+        )
+        rows = in_features if transpose else out_features
+        inputs = {"input": np.random.RandomState(11).randn(3, rows).astype(np.float32)}
+
+        def run(m):
+            return ort.InferenceSession(
+                m.SerializeToString(), providers=["CPUExecutionProvider"]
+            ).run(None, inputs)[0]
+
+        expected = run(model)
+        converted = qdq_to_dq(onnx.ModelProto.FromString(model.SerializeToString()))
+
+        assert not [n for n in converted.graph.node if n.op_type == "QuantizeLinear"]
+        weight = next(t for t in converted.graph.initializer if t.name == "weight")
+        assert weight.data_type == TensorProto.INT8
+        assert np.array_equal(run(converted), expected)
+
+    def test_dq_transpose_without_perm_is_traced(self):
+        """ONNX lets Transpose omit `perm`; the MatMul behind it must still be found."""
+        model = create_test_model_with_dq_transpose_matmul(96, 32, perm=None)
+        initializer = {t.name: numpy_helper.to_array(t) for t in model.graph.initializer}
+
+        converted = qdq_to_dq(model)
+
+        # onnxruntime cannot execute DQ -> Transpose(no perm) -> MatMul, so check the
+        # converted weight directly. The Q/DQ pair declares axis 0.
+        expected = np.clip(
+            np.round(initializer["weight"] / initializer["w_scale"][:, None]), -128, 127
+        ).astype(np.int8)
+        actual = next(t for t in converted.graph.initializer if t.name == "weight")
+        assert np.array_equal(numpy_helper.to_array(actual), expected)
+
+    def test_one_element_scale_is_not_per_axis(self):
+        """A one-element scale is broadcast over the whole weight, not indexed per axis."""
+        # A single-output-channel Conv: reading the (1,) scale as per-axis would pick the
+        # DQ's default axis 1 and reject a graph that converts fine.
+        weight = np.random.RandomState(3).randn(1, 3, 3, 3).astype(np.float32)
+        graph = helper.make_graph(
+            nodes=[
+                helper.make_node(
+                    "QuantizeLinear", ["weight", "w_scale", "w_zp"], ["w_q"], name="w_q"
+                ),
+                helper.make_node(
+                    "DequantizeLinear", ["w_q", "w_scale", "w_zp"], ["w_dq"], name="w_dq"
+                ),
+                helper.make_node(
+                    "Conv", ["input", "w_dq"], ["output"], name="conv", kernel_shape=[3, 3]
+                ),
+            ],
+            name="one_element_scale",
+            inputs=[helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3, 8, 8])],
+            outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 1, 6, 6])],
+            initializer=[
+                numpy_helper.from_array(weight, "weight"),
+                numpy_helper.from_array(
+                    np.array([np.abs(weight).max() / 127.0], np.float32), "w_scale"
+                ),
+                numpy_helper.from_array(np.array([0], np.int8), "w_zp"),
+            ],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
+        model.ir_version = 10
+        onnx.checker.check_model(model)
+        inputs = {"input": np.random.RandomState(5).randn(1, 3, 8, 8).astype(np.float32)}
+
+        def run(m):
+            return ort.InferenceSession(
+                m.SerializeToString(), providers=["CPUExecutionProvider"]
+            ).run(None, inputs)[0]
+
+        expected = run(model)
+        converted = qdq_to_dq(onnx.ModelProto.FromString(model.SerializeToString()))
+        assert np.array_equal(run(converted), expected)
+
+    @pytest.mark.parametrize(("out_features", "in_features"), [(1, 32), (32, 1)])
+    def test_one_element_scale_broadcasts_through_transpose(self, out_features, in_features):
+        """A single scale covers the whole weight, so no axis of it has to be length 1."""
+        model = create_test_model_with_dq_transpose_matmul(
+            out_features, in_features, single_scale=True
+        )
+        inputs = {"input": np.random.RandomState(11).randn(3, in_features).astype(np.float32)}
+
+        def run(m):
+            return ort.InferenceSession(
+                m.SerializeToString(), providers=["CPUExecutionProvider"]
+            ).run(None, inputs)[0]
+
+        expected = run(model)
+        converted = qdq_to_dq(onnx.ModelProto.FromString(model.SerializeToString()))
+
+        assert not [n for n in converted.graph.node if n.op_type == "QuantizeLinear"]
+        assert np.array_equal(run(converted), expected)
+
+    def test_disagreeing_qdq_axes_raise(self):
+        """Following the DQ while the Q declares another axis would change the output."""
+        model = create_test_model_with_dq_transpose_matmul(32, 32, q_axis=0, transpose=False)
+        q_node = next(node for node in model.graph.node if node.name == "w_q")
+        next(attr for attr in q_node.attribute if attr.name == "axis").i = 1
+
+        with pytest.raises(RuntimeError, match="disagrees with DequantizeLinear axis"):
+            qdq_to_dq(model)
+
+
 class TestQdqToDqValidation:
     """Regression tests for qdq_to_dq input validation."""
 

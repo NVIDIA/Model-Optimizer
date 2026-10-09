@@ -21,8 +21,10 @@ order. Each first import runs in a fresh interpreter: registration happens once 
 so an in-process test would only ever see the import order of whichever test ran first.
 """
 
+import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -30,6 +32,7 @@ pytest.importorskip("transformers")
 
 FIRST_IMPORTS = [
     "modelopt.torch.models.falcon.modeling_ptq",
+    "modelopt.torch.models.gpt_oss.modeling_ptq",
     "modelopt.torch.models.llama4.modeling_ptq",
     "modelopt.torch.models.nemotron_h.modeling_ptq",
     "modelopt.torch.quantization",
@@ -63,6 +66,13 @@ except ImportError:
 else:
     assert Llama4TextExperts in QuantModuleRegistry, "Llama4TextExperts not registered"
 
+try:
+    from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts
+except ImportError:
+    pass
+else:
+    assert GptOssExperts in QuantModuleRegistry, "GptOssExperts not registered"
+
 assert register_falcon_linears_on_the_fly in CUSTOM_MODEL_PLUGINS, "Falcon callback missing"
 
 # The first matching decoder discoverer wins, so Nemotron-H's must precede the generic one.
@@ -73,23 +83,29 @@ assert predicates.index(is_nemotron_h_model) < predicates.index(is_homogeneous_h
 """
 
 
+def _run_check(first_import):
+    # The child only asserts; tracing its heavy imports for coverage (inherited through
+    # COVERAGE_PROCESS_START) would just slow it down.
+    env = {k: v for k, v in os.environ.items() if k != "COVERAGE_PROCESS_START"}
+    result = subprocess.run(
+        [sys.executable, "-c", CHECK, first_import],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    return first_import, result
+
+
+# Several fresh interpreters each import torch and transformers, which outlasts the default
+# 60 s per-test cap on a small CI runner.
+@pytest.mark.timeout(300)
 def test_registration_is_independent_of_import_order():
-    # Each first import needs its own interpreter, but starting them one after another would
-    # add over a minute to the unit-test job, so launch them all and then collect the results.
-    procs = {
-        first_import: subprocess.Popen(
-            [sys.executable, "-c", CHECK, first_import],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        for first_import in FIRST_IMPORTS
-    }
-    failures = {}
-    for first_import, proc in procs.items():
-        _, stderr = proc.communicate(timeout=600)
-        if proc.returncode != 0:
-            failures[first_import] = stderr
+    # Each first import needs its own interpreter; run them in parallel, at most one per CPU,
+    # rather than one after another.
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as pool:
+        results = list(pool.map(_run_check, FIRST_IMPORTS))
+    failures = {name: result.stderr for name, result in results if result.returncode != 0}
     assert not failures, "\n\n".join(
         f"importing {name} first:\n{err}" for name, err in failures.items()
     )
