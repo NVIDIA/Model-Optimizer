@@ -331,11 +331,9 @@ class _QuantLayerNormLinearFunc(torch.autograd.Function):
             return (te_layernorm_linear.tex, "gemm")
 
     @staticmethod
-    def forward(ctx, inp, ln_weight, ln_bias, weight, *args, **kwargs):
-        input_quantizer, weight_quantizer = _QuantLayerNormLinearFunc.modelopt_quantizers
-
-        qweight = weight_quantizer(weight)
-        qweight.requires_grad = weight.requires_grad
+    def forward(ctx, inp, ln_weight, ln_bias, qweight, *args, **kwargs):
+        # The weight arrives already fake-quantized (see _QuantLayerNormLinearEntry).
+        input_quantizer, _ = _QuantLayerNormLinearFunc.modelopt_quantizers
         if ctx is not None:
             # We need to recompute the quantized input for the backward pass, so we save the input_quantizer
             ctx.modelopt_input_quantizer = input_quantizer
@@ -396,6 +394,29 @@ class _QuantLayerNormLinearFunc(torch.autograd.Function):
         return outputs
 
 
+class _QuantLayerNormLinearEntry:
+    """Stands in for TE's ``_LayerNormLinear`` while a quantized ``LayerNormLinear`` runs.
+
+    Fake-quantizes the weight before entering ``_QuantLayerNormLinearFunc``, where autograd still
+    records it, so learnable quantizer parameters (e.g. LSQ scales) receive gradients. TE calls
+    ``apply`` when grad is enabled and ``forward`` (with ``ctx=None``) otherwise.
+    """
+
+    @staticmethod
+    def apply(inp, ln_weight, ln_bias, weight, *args, **kwargs):
+        weight_quantizer = _QuantLayerNormLinearFunc.modelopt_quantizers[1]
+        return _QuantLayerNormLinearFunc.apply(
+            inp, ln_weight, ln_bias, weight_quantizer(weight), *args, **kwargs
+        )
+
+    @staticmethod
+    def forward(ctx, inp, ln_weight, ln_bias, weight, *args, **kwargs):
+        weight_quantizer = _QuantLayerNormLinearFunc.modelopt_quantizers[1]
+        return _QuantLayerNormLinearFunc.forward(
+            ctx, inp, ln_weight, ln_bias, weight_quantizer(weight), *args, **kwargs
+        )
+
+
 @QuantModuleRegistry.register({te.pytorch.LayerNormLinear: "te_LayerNormLinear"})
 class _QuantTELayerNormLinear(_ParallelLinear):
     _functionals_to_replace = []
@@ -420,7 +441,7 @@ class _QuantTELayerNormLinear(_ParallelLinear):
         with replace_function(
             te_layernorm_linear,
             "_LayerNormLinear",
-            _QuantLayerNormLinearFunc,
+            _QuantLayerNormLinearEntry,
             "_og_LayerNormLinear",
         ):
             outputs = super().forward(*args, **kwargs)

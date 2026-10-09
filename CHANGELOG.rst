@@ -76,6 +76,7 @@ Changelog
 - Fix ``fsdp2_aware_weight_update`` masking an error raised during its unshard (e.g. a CUDA OOM) with a spurious ``UnboundLocalError``.
 - EAGLE training with ``eagle_decoder_type="kimik2"`` now downloads the Kimi-K2 modeling code from a pinned ``moonshotai/Kimi-K2-Thinking`` revision and verifies its SHA-256 hashes before importing it. Offline runs need that revision in the Hugging Face cache.
 - Fix the column-major ``DequantizeLinear`` surgery leaving a negative or default ``axis`` attribute unchanged while transposing the weight it refers to, which changed the model's output. Re-run the surgery on affected models.
+- Fix learnable LSQ weight scales getting no gradient on Transformer Engine ``LayerNormLinear`` layers (Megatron ``TELayerNormColumnParallelLinear``), so scale learning left them at their PTQ values.
 
 0.48.0 (2026-10-xx)
 ^^^^^^^^^^^^^^^^^^^
