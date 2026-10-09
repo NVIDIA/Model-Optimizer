@@ -33,7 +33,7 @@ from modelopt.torch.export.unified_export_hf import (
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.nn import GroupedQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import quantizer_attr_names
 
 
@@ -268,6 +268,7 @@ def test_upcast_ggml_refuses_a_layer_before_changing_any(dtype, input_cfg, error
 def test_upcast_ggml_writes_back_an_offloaded_weight(monkeypatch, pinned):
     """The decoded values reach the offloaded copy; a payload GPTQ pinned is decoded, not redone."""
     pytest.importorskip("accelerate")
+    # Local, so importorskip can skip this test when the optional accelerate is not installed.
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
     from accelerate.utils import set_module_tensor_to_device
 
@@ -293,6 +294,28 @@ def test_upcast_ggml_writes_back_an_offloaded_weight(monkeypatch, pinned):
 
     assert linear.weight.is_meta
     assert torch.equal(weights_map["weight"], expected)
+
+
+def test_upcast_ggml_refuses_a_grouped_layout():
+    """A grouped layer keeps its GGML weights as weight0..N, not under the name it reports.
+
+    Stands in for TEGroupedLinear: one GroupedQuantizer, which weight_attr_names reports as
+    "weight", over expert weights that only its own iter_weights_for_calibration yields.
+    """
+    linear = _ggml_model("q8_0")[0]
+    linear.weight0 = linear.weight
+    del linear.weight
+    linear.weight_quantizer = GroupedQuantizer(linear.weight_quantizer)
+    linear.iter_weights_for_calibration = lambda: iter(
+        [(linear.weight0, linear.weight_quantizer[0])]
+    )
+    weight = linear.weight0.detach().clone()
+
+    with pytest.raises(NotImplementedError, match="stored under its own name"):
+        _upcast_ggml_weights(nn.Sequential(linear), torch.bfloat16)
+
+    assert torch.equal(linear.weight0, weight)
+    assert linear.weight_quantizer[0].is_enabled
 
 
 def test_upcast_ggml_warns_when_there_is_nothing_to_upcast():

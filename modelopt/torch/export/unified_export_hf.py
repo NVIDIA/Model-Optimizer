@@ -1900,14 +1900,21 @@ def _upcast_ggml_weights(model: nn.Module, dtype: torch.dtype) -> None:
                 module, quantizer_attr_names(weight_name).input_quantizer, None
             )
             validate_ggml_layer(weight_quantizer, input_quantizer)
+            name = f"{names.module_to_name.get(id(module), '')}.{weight_name}"
+            weight = getattr(module, weight_name, None)
+            if not isinstance(weight, torch.Tensor):
+                # A grouped layout, such as TEGroupedLinear's weight0..N; the packed export
+                # supports only a standard weight attribute too.
+                raise NotImplementedError(
+                    f"upcast_ggml needs each GGML weight stored under its own name, but {name} "
+                    f"of {type(module).__name__} is not a tensor."
+                )
             # Fused-expert slices and the offload and FSDP2 writebacks keep the stored dtype, so
             # the decoded values can only be written to a weight already stored in ``dtype``.
-            weight_dtype = getattr(module, weight_name).dtype
-            if weight_dtype != dtype:
+            if weight.dtype != dtype:
                 raise ValueError(
-                    f"upcast_ggml decodes to {dtype}, but "
-                    f"{names.module_to_name.get(id(module), '')}.{weight_name} is stored as "
-                    f"{weight_dtype}. Load the model in {dtype} before quantizing it."
+                    f"upcast_ggml decodes to {dtype}, but {name} is stored as {weight.dtype}. "
+                    f"Load the model in {dtype} before quantizing it."
                 )
 
     for module in ggml_modules:
