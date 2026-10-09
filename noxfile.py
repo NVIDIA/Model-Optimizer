@@ -100,6 +100,25 @@ def partial_unit(session, subset):
 # existing Python environment (e.g. /opt/venv in NeMo) instead of an isolated one.
 # Use `python -m pip/pytest` to ensure the container's active venv Python is used,
 # not a stale PATH entry (e.g. NeMo container has pip → /usr/local/bin/pip but python → /opt/venv/bin/python).
+
+# CUDA packages the gpu session compiles against the container's torch, which takes ~7 min together
+# (wheel file prefix -> requirement). CI builds them once with `nox -s gpu_wheels` into $WHEELHOUSE
+# (an Actions cache); the gpu session installs the wheels found there instead of compiling again.
+_WHEELHOUSE = os.environ.get("WHEELHOUSE")
+_CUDA_BUILDS = {
+    "fast_hadamard_transform": "git+https://github.com/Dao-AILab/fast-hadamard-transform.git",
+    # Latest *released* sdists
+    "mamba_ssm": "mamba_ssm",
+    "causal_conv1d": "causal-conv1d",
+}
+
+
+def _cuda_build(name):
+    """The wheel of ``name`` from the wheelhouse if it has one, else the requirement to build it from."""
+    wheels = sorted(glob.glob(f"{_WHEELHOUSE}/{name}-*.whl")) if _WHEELHOUSE else []
+    return wheels[-1] if wheels else _CUDA_BUILDS[name]
+
+
 # Container: nvcr.io/nvidia/pytorch:26.01-py3 or later
 @nox.session(venv_backend="none")
 def gpu(session):
@@ -111,7 +130,7 @@ def gpu(session):
         "pip",
         "install",
         "--no-build-isolation",
-        "git+https://github.com/Dao-AILab/fast-hadamard-transform.git",
+        _cuda_build("fast_hadamard_transform"),
     )
     session.run("python", "-m", "pip", "install", "-e", ".[all,dev-test,dev-fla]")
     session.run("python", "-m", "pip", "uninstall", "-y", "cupy-cuda12x")
@@ -122,11 +141,30 @@ def gpu(session):
         "pip",
         "install",
         "--no-build-isolation",
-        # Install the latest *released* sdists (built against the container torch)
-        "mamba_ssm",
-        "causal-conv1d",
+        _cuda_build("mamba_ssm"),
+        _cuda_build("causal_conv1d"),
     )
     session.run("python", "-m", "pytest", "tests/gpu", *_cov_args())
+
+
+# Container: same as gpu
+@nox.session(venv_backend="none")
+def gpu_wheels(session):
+    """Build the CUDA wheels of the gpu session into $WHEELHOUSE."""
+    if not _WHEELHOUSE:
+        session.error("Set WHEELHOUSE to the directory the wheels are built into")
+    for requirement in _CUDA_BUILDS.values():
+        session.run(
+            "python",
+            "-m",
+            "pip",
+            "wheel",
+            "--no-build-isolation",
+            "--no-deps",
+            "-w",
+            _WHEELHOUSE,
+            requirement,
+        )
 
 
 # Container: nvcr.io/nvidia/nemo:26.08 or later
