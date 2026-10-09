@@ -32,19 +32,21 @@ BATCH = 2
 SEQ = 4
 
 
-def _build_dq_matmul_model():
+def _build_dq_matmul_model(axis: int = 0):
     """Build minimal model: input -> MatMul(input, DQ(weight, scale, zp)) -> output.
 
-    Uses per-channel INT8 quantization on axis 0 of the weight [IN, OUT].
+    Uses per-channel INT8 quantization on the given (possibly negative) axis of the weight
+    [IN, OUT]. Defaults to axis 0, matching the ONNX export this surgery targets.
     """
     rng = np.random.RandomState(123)
 
     # Quantized weight [IN_FEATURES, OUT_FEATURES] int8
     w_int8 = rng.randint(-127, 127, size=(IN_FEATURES, OUT_FEATURES)).astype(np.int8)
-    # Per-channel scale along axis 0 -> shape [IN_FEATURES] (one per row)
-    scale = rng.rand(IN_FEATURES).astype(np.float32) * 0.01 + 0.001
+    # Per-channel scale along `axis` -> one value per channel on that axis
+    channels = IN_FEATURES if axis % 2 == 0 else OUT_FEATURES
+    scale = rng.rand(channels).astype(np.float32) * 0.01 + 0.001
     # Per-channel zero point
-    zp = np.zeros(IN_FEATURES, dtype=np.int8)
+    zp = np.zeros(channels, dtype=np.int8)
 
     w_init = numpy_helper.from_array(w_int8, name="weight_quantized")
     s_init = numpy_helper.from_array(scale, name="weight_scale")
@@ -55,7 +57,7 @@ def _build_dq_matmul_model():
         inputs=["weight_quantized", "weight_scale", "weight_zp"],
         outputs=["weight_dequantized"],
         name="dq_weight",
-        axis=0,
+        axis=axis,
     )
 
     matmul_node = helper.make_node(
@@ -78,7 +80,7 @@ def _build_dq_matmul_model():
     )
 
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
-    model.ir_version = 9
+    model.ir_version = 10
     onnx.checker.check_model(model)
     return model
 
@@ -174,48 +176,6 @@ class TestDqTransposeSurgery:
         np.testing.assert_allclose(orig_out, mod_out, atol=1e-5, rtol=1e-5)
 
 
-def _build_dq_matmul_model_with_axis(axis):
-    """Same graph as above, but with the given (possibly negative) quantization axis."""
-    rng = np.random.RandomState(123)
-    w_int8 = rng.randint(-127, 127, size=(IN_FEATURES, OUT_FEATURES)).astype(np.int8)
-    channels = IN_FEATURES if axis % 2 == 0 else OUT_FEATURES
-    scale = rng.rand(channels).astype(np.float32) * 0.01 + 0.001
-
-    graph = helper.make_graph(
-        [
-            helper.make_node(
-                "DequantizeLinear",
-                inputs=["weight_quantized", "weight_scale", "weight_zp"],
-                outputs=["weight_dequantized"],
-                name="dq_weight",
-                axis=axis,
-            ),
-            helper.make_node(
-                "MatMul",
-                inputs=["input", "weight_dequantized"],
-                outputs=["output"],
-                name="matmul_0",
-            ),
-        ],
-        "test_dq_transpose_axis",
-        inputs=[
-            helper.make_tensor_value_info("input", TensorProto.FLOAT, [BATCH, SEQ, IN_FEATURES])
-        ],
-        outputs=[
-            helper.make_tensor_value_info("output", TensorProto.FLOAT, [BATCH, SEQ, OUT_FEATURES])
-        ],
-        initializer=[
-            numpy_helper.from_array(w_int8, name="weight_quantized"),
-            numpy_helper.from_array(scale, name="weight_scale"),
-            numpy_helper.from_array(np.zeros(channels, dtype=np.int8), name="weight_zp"),
-        ],
-    )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
-    model.ir_version = 10
-    onnx.checker.check_model(model)
-    return model
-
-
 def _run_unoptimized(model_proto, feeds):
     """Run with graph optimization off.
 
@@ -234,7 +194,7 @@ def _run_unoptimized(model_proto, feeds):
 @pytest.mark.parametrize(("axis", "expected_axis"), [(0, 1), (1, 0), (-1, 0), (-2, 1)])
 def test_negative_axis_is_swapped(axis, expected_axis, tmp_path):
     """ONNX allows a negative axis; it still has to move when the weight is transposed."""
-    original = _build_dq_matmul_model_with_axis(axis)
+    original = _build_dq_matmul_model(axis)
     orig_path = str(tmp_path / "original.onnx")
     out_path = str(tmp_path / "transposed.onnx")
     onnx.save(original, orig_path)
