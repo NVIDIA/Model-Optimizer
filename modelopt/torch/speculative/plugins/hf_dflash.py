@@ -302,9 +302,61 @@ class HFDFlashModel(DFlashModel):
         # rope_parameters while the class default (10000.0 for Qwen3) stays visible
         # as rope_theta. rope_parameters wins, otherwise the draft trains against a
         # RoPE base 100x off the target's.
+        # Gemma 4 nests rope_parameters PER ATTENTION KIND, e.g.
+        #   {"full_attention":    {"rope_theta": 1e6, "rope_type": "proportional",
+        #                          "partial_rotary_factor": 0.25},
+        #    "sliding_attention": {"rope_theta": 1e4, "rope_type": "default"}}
+        # The flat loop below cannot express that: it collapses the two kinds to a single theta
+        # and silently drops rope_type / partial_rotary_factor, so the draft rotates every
+        # channel at default frequencies while the target rotates only a quarter of them. Hand
+        # the nested dict to the draft verbatim instead and let
+        # DFlashModule._build_gemma4_rope_kinds() build one rotary module per kind. Only the
+        # kinds the DRAFT actually uses are kept, so an all-full_attention draft never sees the
+        # sliding entry.
+        # dflash_architecture_config may name the kind to inherit from explicitly via
+        # `rope_attention_kind`. Needed because the draft's own layer_types are the wrong
+        # signal on Gemma 4: an all-`full_attention` draft would inherit theta 1e6 +
+        # proportional rope, which measured 1.2-3.4% WORSE on acceptance length than the
+        # `sliding_attention` entry's plain theta 1e4 (see the RoPE A/B). The draft is an
+        # independent small model consuming base hidden states, not a reproduction of the
+        # base's full-attention layers, so its attention kind should not dictate its RoPE.
+        _rope_kind_override = getattr(self.dflash_config, "rope_attention_kind", None)
         base_rope_params = getattr(base_config, "rope_parameters", None)
         if not isinstance(base_rope_params, dict):
             base_rope_params = {}
+        _nested_rope = None
+        if any(isinstance(v, dict) for v in base_rope_params.values()):
+            draft_layer_types = (
+                [_rope_kind_override]
+                if _rope_kind_override
+                else getattr(self.dflash_config, "layer_types", None) or list(base_rope_params)
+            )
+            _nested_rope = {
+                kind: dict(base_rope_params[kind])
+                for kind in dict.fromkeys(draft_layer_types)
+                if isinstance(base_rope_params.get(kind), dict)
+            } or None
+
+            # `rope_attention_kind` can only select a WHOLE base entry, and Gemma 4 ships
+            # theta and rope_type welded together (full_attention = 1e6 + proportional,
+            # sliding_attention = 1e4 + default). To sweep one of them independently -- e.g.
+            # theta 1e6 with plain default rope, which matches no base entry -- let the
+            # recipe override the resolved fields directly. Applied AFTER the entry is
+            # chosen, so it layers on top of whichever kind was inherited.
+            _rope_overrides = {
+                k: getattr(self.dflash_config, f"rope_override_{k}", None)
+                for k in ("rope_theta", "rope_type", "partial_rotary_factor")
+            }
+            _rope_overrides = {k: v for k, v in _rope_overrides.items() if v is not None}
+            if _rope_overrides and _nested_rope:
+                for _kind_cfg in _nested_rope.values():
+                    _kind_cfg.update(_rope_overrides)
+                    # A default-rope entry must not keep a stale partial_rotary_factor:
+                    # the rotary class would ignore it, but the exporter would emit it.
+                    if _kind_cfg.get("rope_type") == "default":
+                        _kind_cfg.pop("partial_rotary_factor", None)
+                logger.info("DFlash: RoPE overrides applied: %s", _rope_overrides)
+
         # Only rope_theta is taken from the dict. rope_parameters also carries the target's
         # scaling family and that family's own fields, and copying rope_type without them
         # builds a draft whose rotary init function looks up keys the draft config has not
@@ -341,6 +393,18 @@ class HFDFlashModel(DFlashModel):
             if isinstance(draft_rope_params, dict) and attr in draft_rope_params:
                 draft_rope_params[attr] = base_val
 
+        if _nested_rope is not None:
+            # Installed AFTER the flat loop: Qwen3Config auto-populates rope_parameters from
+            # rope_theta at construction, and the loop above refreshes that flat mirror, so
+            # assigning earlier would be overwritten by a single-kind dict.
+            self.dflash_config.rope_parameters = _nested_rope
+            _first = next(iter(_nested_rope.values()))
+            if "rope_theta" in _first:
+                # A multi-kind draft has no single theta; keep the flat mirror pointing at the
+                # first kind (layer_types order) for the exporter and for logging.
+                self.dflash_config.rope_theta = _first["rope_theta"]
+            logger.info("DFlash: per-attention-kind RoPE from base: %s", _nested_rope)
+
         self.dflash_config.head_dim = getattr(
             self.dflash_config,
             "head_dim",
@@ -357,6 +421,16 @@ class HFDFlashModel(DFlashModel):
             else base_config.num_hidden_layers
         )
         num_draft_layers = self.dflash_config.num_hidden_layers
+        # Streaming/offline runs must pass the ids the hidden-state PRODUCER actually
+        # captured (train_eagle_streaming.sh does). The trainer never indexes hidden_states
+        # itself there -- it consumes ``aux_hidden_states`` verbatim (see
+        # DFlashBaseModelOutput.from_offline_dict) -- so the computed default below is pure
+        # fiction that still lands in the exported config, where vLLM reads it to choose
+        # SERVING capture layers. Measured on Gemma-4-E4B DSpark step 7000 (80q MT-Bench,
+        # num_spec=7): serving the same weights with the invented [1,10,20,30,39] gives
+        # AL 1.4221, while the layers training was actually fed ([5,11,17,23,35]) give
+        # AL 2.5287. Nothing errors, because the two lists have equal LENGTH and the only
+        # validation is on fc's input width.
         user_target_layer_ids = config.dflash_architecture_config.get("target_layer_ids")
         if user_target_layer_ids:
             if len(user_target_layer_ids) != num_draft_layers:
