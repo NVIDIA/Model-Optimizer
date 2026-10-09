@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Speculative Decoding Optimizations."""
 
-from . import eagle, external, medusa, mode, plugins
-from .config import *
-from .speculative_decoding import *
+"""External Draft Optimization Method."""
+
+from .conversion import *
+from .external_model import *
+from .sparse_data import *
+from .vocab_swap import *

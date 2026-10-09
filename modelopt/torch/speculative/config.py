@@ -468,6 +468,83 @@ class MedusaConfig(ModeloptBaseConfig):
     )
 
 
+class ExternalDraftConfig(ModeloptBaseConfig):
+    """External (standalone) draft model config.
+
+    The converted module is a pretrained causal LM used directly as the draft. It
+    keeps its own embeddings and lm_head; the base model contributes only cached
+    hidden states, projected by the base lm_head to obtain teacher logits.
+    """
+
+    external_offline: bool = ModeloptField(
+        default=True,
+        description=(
+            "Whether the draft consumes pre-computed base hidden states instead of running "
+            "the base model in-process. Derived by ModelOptExternalDraftRecipe from "
+            "``data.mode``; not user-configurable."
+        ),
+    )
+
+    external_loss: str = ModeloptField(
+        default="tvd",
+        description=(
+            "Training objective. ``soft_ce`` matches the Eagle offline objective. "
+            "``tvd`` is total-variation distance between the two untruncated "
+            "distributions. ``tvd_deploy`` puts both through the serving filter first "
+            "(``external_top_k`` then ``external_top_p``), making it the acceptance the "
+            "deployed pair will see: ``alpha = 1 - TVD``. ``tvd_ce`` adds a cross-entropy "
+            "term. Sparse data requires one of the TVD objectives, since the dump is "
+            "already a truncated policy and ``soft_ce`` needs full base logits."
+        ),
+    )
+
+    external_vocab_swap: bool = ModeloptField(
+        default=False,
+        description=(
+            "Re-index the draft onto the base model's vocabulary when the two tokenizers "
+            "differ, instead of raising. Rebuilds the draft's embeddings, carrying over "
+            "rows for tokens both tokenizers spell identically. The replacement matrix is "
+            "``base_vocab_size * hidden_size`` parameters, so this is a large change to a "
+            "small draft; validate with an acceptance measurement, not a loss curve."
+        ),
+    )
+
+    external_tvd_alpha: float = ModeloptField(
+        default=0.9,
+        description=("Weight on the TVD term when ``external_loss='tvd_ce'``."),
+    )
+
+    external_ce_alpha: float = ModeloptField(
+        default=0.1,
+        description=(
+            "Weight on the cross-entropy term when ``external_loss='tvd_ce'``. CE is "
+            "added because TVD is bounded and so discriminates weakly between tokens "
+            "inside the base's support."
+        ),
+    )
+
+    external_top_k: int = ModeloptField(
+        default=20,
+        description=(
+            "Top-k of the serving filter, applied to *both* the base and the "
+            "draft by ``external_loss='tvd_deploy'``."
+        ),
+    )
+
+    external_top_p: float = ModeloptField(
+        default=0.95,
+        description=(
+            "Top-p of the serving filter, applied to *both* the base and the "
+            "draft by ``external_loss='tvd_deploy'``."
+        ),
+    )
+
+    external_report_acc: bool = ModeloptField(
+        default=True,
+        description=("Whether to report top-1 agreement with the base model during training."),
+    )
+
+
 class EagleConfig(ModeloptBaseConfig):
     """Eagle config."""
 

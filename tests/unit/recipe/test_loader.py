@@ -860,6 +860,7 @@ _MINIMAL_BODIES: dict[RecipeType, dict] = {
     RecipeType.SPECULATIVE_EAGLE: {},  # body sections have field defaults
     RecipeType.SPECULATIVE_DFLASH: {},
     RecipeType.SPECULATIVE_MEDUSA: {},
+    RecipeType.SPECULATIVE_EXTERNAL: {},
 }
 
 
