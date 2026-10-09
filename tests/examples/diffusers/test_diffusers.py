@@ -26,6 +26,9 @@ from _test_utils.torch.misc import minimum_sm
 # and add a network dependency without adding coverage.
 CALIB_PROMPTS_FILE = Path(__file__).parent / "calib_prompts.txt"
 
+# Run the example scripts in this process: ~20s of startup saved per step (see conftest).
+pytestmark = pytest.mark.usefixtures("in_process_examples")
+
 
 def assert_hf_ckpt_exported(hf_ckpt_dir: Path) -> None:
     assert hf_ckpt_dir.exists(), f"HF checkpoint directory was not created: {hf_ckpt_dir}"
@@ -336,6 +339,7 @@ def test_wan22_quantization(wan_model: Wan22Model, tiny_wan22_path: str, tmp_pat
         "sdxl_1.0_torch_compile",
     ],
 )
+@pytest.mark.filterwarnings("ignore:.*env= given; running this step as a subprocess")
 def test_diffusion_trt_torch(
     model_name: str,
     model_path: str,
@@ -356,7 +360,9 @@ def test_diffusion_trt_torch(
     if torch_compile:
         cmd_args.append("--torch-compile")
         # The script compiles with mode="max-autotune"; benchmarking Triton GEMM/conv templates is
-        # a large share of the run on these tiny models and covers nothing in the example.
+        # a large share of the run on these tiny models and covers nothing in the example. Passing
+        # env= also keeps this step in a subprocess, where the Inductor settings and cudagraphs
+        # belong rather than in the shared pytest process.
         env = {
             **os.environ,
             "TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS": "ATEN",
