@@ -61,6 +61,7 @@ def make_speculative_data_module(
     answer_only_loss=False,
     shift_labels=True,
     final_aux_is_base_hidden=False,
+    aux_hidden_states_optional=False,
 ) -> dict:
     """Create data module for speculative decoding training.
 
@@ -70,6 +71,8 @@ def make_speculative_data_module(
         final_aux_is_base_hidden: Streaming only. True when the draft's top aux layer is the
             base's final layer, so the last captured plane is both the final aux feature and
             the base (KD-target) hidden instead of an extra dedicated plane.
+        aux_hidden_states_optional: accept dumps written with ``--no-aux-hidden-states``.
+            Only modes that never read the aux planes may set this.
     """
     # Load chat template from file if provided
     chat_template = None
@@ -167,7 +170,10 @@ def make_speculative_data_module(
         if data_args.sample_size > 0:
             dumped_files = dumped_files[: data_args.sample_size]
         train_dataset = OfflineSupervisedDataset(
-            dumped_files, answer_only_loss=answer_only_loss, tokenizer=tokenizer
+            dumped_files,
+            answer_only_loss=answer_only_loss,
+            tokenizer=tokenizer,
+            aux_hidden_states_optional=aux_hidden_states_optional,
         )
         data_collator = EagleOfflineDataCollator(train_len=train_len)
 
