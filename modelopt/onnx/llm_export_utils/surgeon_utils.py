@@ -24,6 +24,19 @@ import torch
 from onnx_graphsurgeon.ir.tensor import LazyValues
 
 
+class LayerInfoNotFoundError(ValueError):
+    """Exception raised when layer info cannot be extracted from name."""
+
+    def __init__(self, name: str) -> None:
+        """Initialize the exception.
+
+        Args:
+            name: The layer name that doesn't contain layer info.
+        """
+        super().__init__(f"{name} does not contain layer info!")
+        self.name = name
+
+
 def clear_inputs(node: gs.Node | gs.Tensor):
     """Clear all inputs for a node or tensor in ONNX."""
     for i in node.inputs:
@@ -53,7 +66,7 @@ def extract_layer_id(name: str):
     match = re.search(r"layers\.(\d+)", name)
     if match:
         return int(match.group(1))
-    raise Exception(f"{name} does not contain layer info!")
+    raise LayerInfoNotFoundError(name)
 
 
 def no_none_elements(elements: list):
