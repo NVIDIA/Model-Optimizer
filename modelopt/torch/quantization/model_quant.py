@@ -114,6 +114,19 @@ def calibrate(
             def forward_loop(model):
                 return original_forward_loop()  # type: ignore[call-arg]
 
+    # Whether the algorithm actually invoked the loop. `max_calibrate` may skip it
+    # (`skip_forward_without_activation_calib`) when no enabled quantizer needs activation
+    # statistics, and a post-calibration check that assumed it ran would fire on every
+    # weight-only calibration.
+    forward_loop_ran = False
+    if forward_loop is not None:
+        _requested_forward_loop = forward_loop
+
+        def forward_loop(model):
+            nonlocal forward_loop_ran
+            forward_loop_ran = True
+            return _requested_forward_loop(model)
+
     # move the model to eval mode
     is_training = model.training
     model.eval()
@@ -129,6 +142,17 @@ def calibrate(
         if isinstance(module, TensorQuantizer):
             for attr_name in ["_amax", "_pre_quant_scale"]:
                 module.validate_attr(attr_name=attr_name, warn_error=True, name=name)
+
+    if forward_loop_ran:
+        # A fused-experts module the calibration forward never reached collected nothing.
+        # Surface it here rather than let the export emit weight-derived fallback scales under
+        # a warning that blames the size of the calibration set.
+        try:
+            from .plugins.huggingface import assert_fused_experts_intercepted
+        except ImportError:
+            pass  # no transformers -> no HF fused-experts modules to check
+        else:
+            assert_fused_experts_intercepted(model)
 
     # TODO: Re-enable when the CUDA error: unspecified launch failure is fixed.
     # clear_cuda_cache()
