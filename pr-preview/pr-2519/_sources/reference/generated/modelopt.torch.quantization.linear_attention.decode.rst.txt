@@ -32,7 +32,6 @@ decode
       :nosignatures:
    
       EncodedLinearAttentionTensor
-      LinearAttentionCarry
       LinearAttentionState
       ReplayEntry
    

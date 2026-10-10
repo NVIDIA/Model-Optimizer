@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>extensions - Model Optimizer 0.0.1.dev1+g09a6e025d</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="ggml" href="modelopt.torch.quantization.ggml.html" /><link rel="prev" title="export_onnx" href="modelopt.torch.quantization.export_onnx.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>extensions - Model Optimizer 0.0.1.dev1+g4a70c001a</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="ggml" href="modelopt.torch.quantization.ggml.html" /><link rel="prev" title="export_onnx" href="modelopt.torch.quantization.export_onnx.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -490,10 +490,12 @@ data-aria-dark="Switch to auto color mode">
 <span class="sig-name descname"><span class="pre">get_cuda_ext_ggml</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">raise_if_failed</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.extensions.get_cuda_ext_ggml" title="Link to this definition">#</a></dt>
 <dd><p>Return the GGML-compatible packing extension, exposing one packer per format.</p>
 <p>The formats share their packing helpers, CUDA version requirement, and build flags, so they
-build as a single extension: <code class="docutils literal notranslate"><span class="pre">iq1_s_pack(input,</span> <span class="pre">grid)</span></code>,
-<code class="docutils literal notranslate"><span class="pre">iq2_xs_pack(input,</span> <span class="pre">grid,</span> <span class="pre">scales)</span></code>, <code class="docutils literal notranslate"><span class="pre">iq2_xxs_pack(input,</span> <span class="pre">grid,</span> <span class="pre">scales)</span></code>,
-<code class="docutils literal notranslate"><span class="pre">iq2_s_pack(input,</span> <span class="pre">grid,</span> <span class="pre">scales)</span></code>, <code class="docutils literal notranslate"><span class="pre">iq1_m_pack(input,</span> <span class="pre">grid,</span> <span class="pre">scales)</span></code>, and
-<code class="docutils literal notranslate"><span class="pre">q8_0_pack(input)</span></code>. Each IQ format also has <code class="docutils literal notranslate"><span class="pre">&lt;format&gt;_unpack(payload,</span> <span class="pre">grid,</span> <span class="pre">dtype)</span></code>.</p>
+build as a single extension: <code class="docutils literal notranslate"><span class="pre">iq1_s_pack(input,</span> <span class="pre">grid,</span> <span class="pre">importance=None)</span></code>,
+<code class="docutils literal notranslate"><span class="pre">iq1_m_pack(input,</span> <span class="pre">grid,</span> <span class="pre">scales,</span> <span class="pre">importance=None)</span></code>,
+<code class="docutils literal notranslate"><span class="pre">iq2_xs_pack(input,</span> <span class="pre">grid,</span> <span class="pre">scales,</span> <span class="pre">importance=None)</span></code>,
+<code class="docutils literal notranslate"><span class="pre">iq2_xxs_pack(input,</span> <span class="pre">grid,</span> <span class="pre">scales,</span> <span class="pre">importance=None)</span></code>,
+<code class="docutils literal notranslate"><span class="pre">iq2_s_pack(input,</span> <span class="pre">grid,</span> <span class="pre">scales,</span> <span class="pre">importance=None)</span></code>, and <code class="docutils literal notranslate"><span class="pre">q8_0_pack(input)</span></code>. Each IQ format
+also has <code class="docutils literal notranslate"><span class="pre">&lt;format&gt;_unpack(payload,</span> <span class="pre">grid,</span> <span class="pre">dtype)</span></code>.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>raise_if_failed</strong> (<em>bool</em>)</p>

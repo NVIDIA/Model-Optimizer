@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Installation for Linux - Model Optimizer 0.0.1.dev1+g4a70c001a</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Installation for Windows" href="windows/_installation_for_Windows.html" /><link rel="prev" title="Installation" href="2_installation.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Quantizing a 4.9 TB Qwen3.8 Model on a Single GPU - Model Optimizer 0.0.1.dev1+g4a70c001a</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
@@ -24,7 +24,7 @@
 }
 </style>
     
-  <meta property="og:type" content="website"/><meta property="og:title" content="Installation for Linux"/>
+  <meta property="og:type" content="website"/><meta property="og:title" content="Quantizing a 4.9 TB Qwen3.8 Model on a Single GPU"/>
     <meta name="twitter:card" content="summary"/>
   </head>
 <body><div class="sy-head">
@@ -66,14 +66,14 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l1 _expand"><a class="reference internal" href="../index.html">Announcements</a></li>
 </ul>
 <p class="caption" role="heading" aria-level="3"><span class="caption-text">Getting Started</span></p>
-<ul class="current">
-<li class="toctree-l1 _expand"><a class="reference internal" href="1_overview.html">Overview</a></li>
-<li class="toctree-l1 current"><a class="reference internal" href="2_installation.html">Installation</a><ul class="current">
-<li class="toctree-l2 current"><a class="current reference internal" href="#">Installation for Linux</a></li>
-<li class="toctree-l2"><a class="reference internal" href="windows/_installation_for_Windows.html">Installation for Windows</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="windows/_installation_standalone.html">Install ModelOpt-Windows as a Standalone Toolkit</a></li>
-<li class="toctree-l3"><a class="reference internal" href="windows/_installation_windows_arm64.html">Install ModelOpt on Windows on Arm</a></li>
-<li class="toctree-l3"><a class="reference internal" href="windows/_installation_with_olive.html">Install ModelOpt-Windows with Olive</a></li>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../getting_started/_installation_for_Linux.html">Installation for Linux</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../getting_started/windows/_installation_for_Windows.html">Installation for Windows</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_standalone.html">Install ModelOpt-Windows as a Standalone Toolkit</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_windows_arm64.html">Install ModelOpt on Windows on Arm</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_with_olive.html">Install ModelOpt-Windows with Olive</a></li>
 </ul>
 </li>
 </ul>
@@ -391,10 +391,12 @@ data-aria-dark="Switch to auto color mode">
       <i class="i-lucide close"></i>
     </button>
     <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
-<li><a class="reference internal" href="#system-requirements">System requirements</a></li>
-<li><a class="reference internal" href="#environment-setup">Environment setup</a></li>
-<li><a class="reference internal" href="#install-model-optimizer">Install Model Optimizer</a></li>
-<li><a class="reference internal" href="#check-installation">Check installation</a></li>
+<li><a class="reference internal" href="#the-memory-floor-for-calibration">The memory floor for calibration</a></li>
+<li><a class="reference internal" href="#one-layer-at-a-time">One layer at a time</a></li>
+<li><a class="reference internal" href="#running-it">Running it</a></li>
+<li><a class="reference internal" href="#interrupt-it">Interrupt it</a></li>
+<li><a class="reference internal" href="#results">Results</a></li>
+<li><a class="reference internal" href="#what-you-re-trading">What you&#8217;re trading</a></li>
 </ul>
 </div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
   </aside>
@@ -412,12 +414,8 @@ data-aria-dark="Switch to auto color mode">
         <span>/</span>
         <meta itemprop="position" content="1" />
       </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
-        <a itemprop="item" href="2_installation.html"><span itemprop="name">Installation</span></a>
-        <span>/</span>
+        <strong itemprop="name">Quantizing a 4.9 TB Qwen3.8 Model on a Single GPU</strong>
         <meta itemprop="position" content="2" />
-      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
-        <strong itemprop="name">Installation for Linux</strong>
-        <meta itemprop="position" content="3" />
       </li></ol>
     <div class="xl:hidden ml-1">
       <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
@@ -429,176 +427,268 @@ data-aria-dark="Switch to auto color mode">
 </div><div class="flex flex-col break-words justify-between">
       <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
   <article class="yue dark-code" role="main">
-          <section id="installation-for-linux">
-<h1>Installation for Linux<a class="headerlink" href="#installation-for-linux" title="Link to this heading">#</a></h1>
-<section id="system-requirements">
-<h2>System requirements<a class="headerlink" href="#system-requirements" title="Link to this heading">#</a></h2>
-<p>Latest Model Optimizer (<code class="docutils literal notranslate"><span class="pre">nvidia-modelopt</span></code>) currently has the following system requirements:</p>
-<div class="table-wrapper docutils container">
-<table class="docutils align-default">
-<tbody>
-<tr class="row-odd"><td><p>OS</p></td>
-<td><p>Linux</p></td>
-</tr>
-<tr class="row-even"><td><p>Architecture</p></td>
-<td><p>x86_64, aarch64 (SBSA)</p></td>
-</tr>
-<tr class="row-odd"><td><p>Python</p></td>
-<td><p>&gt;=3.10,&lt;3.15</p></td>
-</tr>
-<tr class="row-even"><td><p>CUDA</p></td>
-<td><p>12.x, 13.x</p></td>
-</tr>
-<tr class="row-odd"><td><p>PyTorch</p></td>
-<td><p>&gt;=2.8</p></td>
-</tr>
-<tr class="row-even"><td><p>TensorRT-LLM (Optional)</p></td>
-<td><p>&gt;=1.0</p></td>
-</tr>
-<tr class="row-odd"><td><p>ONNX Runtime (Optional)</p></td>
-<td><p>1.24</p></td>
-</tr>
-<tr class="row-even"><td><p>TensorRT (Optional)</p></td>
-<td><p>&gt;=10.0</p></td>
-</tr>
-</tbody>
-</table>
-</div>
+          <section id="quantizing-a-4-9-tb-qwen3-8-model-on-a-single-gpu">
+<h1>Quantizing a 4.9 TB Qwen3.8 Model on a Single GPU<a class="headerlink" href="#quantizing-a-4-9-tb-qwen3-8-model-on-a-single-gpu" title="Link to this heading">#</a></h1>
+<dl class="field-list simple">
+<dt class="field-odd">Author<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Model Optimizer Team</p>
+</dd>
+<dt class="field-even">Date<span class="colon">:</span></dt>
+<dd class="field-even"><p>September 28, 2026</p>
+</dd>
+<dt class="field-odd">Tags<span class="colon">:</span></dt>
+<dd class="field-odd"><p>quantization, nvfp4, layerwise, moe, single-gpu, modelopt</p>
+</dd>
+</dl>
+<p>Post-training quantization needs calibration, and calibration needs forward passes over real
+data. Every batch runs through every layer, so the whole model either sits in accelerator
+memory or gets streamed back in from CPU and disk for each batch. The first option makes the
+hardware you need to <em>quantize</em> a model roughly the hardware you need to <em>serve</em> it. The second
+moves the full weight set once per batch. For a large mixture-of-experts checkpoint, an
+otherwise routine PTQ run ends up waiting on a multi-node allocation.</p>
+<p><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer" rel="noopener noreferrer" target="_blank">Model Optimizer</a> now calibrates and exports one
+decoder layer at a time. The largest layer sets the memory a calibration run needs. The floor
+drops from <em>one model</em> to <em>one layer</em>.</p>
+<p>We took <code class="docutils literal notranslate"><span class="pre">Qwen/Qwen3.8-2.4T-A95B</span></code>, a 2.4 T parameter model whose BF16 checkpoint weighs
+<strong>4.892 TB</strong> and carries 512 routed experts in each of its 92 layers, and quantized it with
+NVIDIA’s published production recipe on a <strong>single GB300</strong>. It took <strong>3 h 04 m</strong>. GPU memory
+peaked at <strong>141.7 GB</strong> of the card’s 283 GB.</p>
+<section id="the-memory-floor-for-calibration">
+<h2>The memory floor for calibration<a class="headerlink" href="#the-memory-floor-for-calibration" title="Link to this heading">#</a></h2>
+<p>Calibration has been <em>all-or-nothing</em>: every batch needs every layer, even though it only ever
+reads one layer at a time. The usual PTQ flow adds a second cost. You calibrate the whole model,
+then export the whole model, so a finished calibration still owes another full traversal before
+a single checkpoint byte reaches disk.</p>
+<p>The math requires neither. Layer <em>i</em>’s calibration statistics depend only on the activations
+entering layer <em>i</em>, and layer <em>i-1</em> has already produced those.</p>
 </section>
-<section id="environment-setup">
-<h2>Environment setup<a class="headerlink" href="#environment-setup" title="Link to this heading">#</a></h2>
-<div class="tab-set docutils container">
-<input checked="True" class="tab-input" id="tab-set--0-input--1" name="tab-set--0" type="radio" /><label class="tab-label" for="tab-set--0-input--1">Docker image (Recommended)</label><div class="tab-content docutils container">
-<p>To use Model Optimizer with full dependencies (e.g. TensorRT/TensorRT-LLM deployment), we recommend using the
-<a class="reference external" href="https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tensorrt-llm/containers/release/tags" rel="noopener noreferrer" target="_blank">TensorRT-LLM docker image</a>,
-e.g., <code class="docutils literal notranslate"><span class="pre">nvcr.io/nvidia/tensorrt-llm/release:&lt;version&gt;</span></code> (Model Optimizer pre-installed).</p>
-<p>Make sure to upgrade Model Optimizer to the latest version using <code class="docutils literal notranslate"><span class="pre">pip</span></code> as described in the next section.</p>
-<p>If relevant, you would also need to setup appropriate environment variables for the TensorRT binaries as follows:</p>
-<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nb">export</span><span class="w"> </span><span class="nv">PIP_CONSTRAINT</span><span class="o">=</span><span class="s2">""</span>
-</span><span data-line="2"><span class="nb">export</span><span class="w"> </span><span class="nv">LD_LIBRARY_PATH</span><span class="o">=</span><span class="s2">"</span><span class="si">${</span><span class="nv">LD_LIBRARY_PATH</span><span class="si">}</span><span class="s2">:/usr/include:/usr/lib/x86_64-linux-gnu"</span>
+<section id="one-layer-at-a-time">
+<h2>One layer at a time<a class="headerlink" href="#one-layer-at-a-time" title="Link to this heading">#</a></h2>
+<p>Mechanically, this is a loop interchange. Conventional calibration puts data on the outside
+and depth on the inside:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="k">for</span> <span class="n">batch</span> <span class="ow">in</span> <span class="n">calib_data</span><span class="p">:</span>           <span class="c1"># outer: data</span>
+</span><span data-line="2">    <span class="n">h</span> <span class="o">=</span> <span class="n">embed</span><span class="p">(</span><span class="n">batch</span><span class="p">)</span>
+</span><span data-line="3">    <span class="k">for</span> <span class="n">layer</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">:</span>     <span class="c1"># inner: depth</span>
+</span><span data-line="4">        <span class="n">h</span> <span class="o">=</span> <span class="n">layer</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>               <span class="c1"># all 92 layers, once per batch</span>
 </span></pre></div>
 </div>
-<p>You may need to install additional dependencies from the respective examples’s <cite>requirements.txt</cite> file.</p>
-<p><strong>Alternative NVIDIA docker images</strong></p>
-<p>For PyTorch, you can also use <a class="reference external" href="https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch/tags" rel="noopener noreferrer" target="_blank">NVIDIA NGC PyTorch container</a>
-(<code class="docutils literal notranslate"><span class="pre">nvcr.io/nvidia/pytorch:&lt;version&gt;-py3</span></code>, Model Optimizer pre-installed)
-and for NVIDIA Megatron-Bridge or Megatron-LM framework, you can use the <a class="reference external" href="https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo/tags" rel="noopener noreferrer" target="_blank">NeMo container</a>
-(<code class="docutils literal notranslate"><span class="pre">nvcr.io/nvidia/nemo:&lt;version&gt;</span></code>, Model Optimizer pre-installed).
-Make sure to update the Model Optimizer to the latest version if not already.</p>
-<p>For ONNX / TensorRT use cases, you can also use the <a class="reference external" href="https://catalog.ngc.nvidia.com/orgs/nvidia/containers/tensorrt/tags" rel="noopener noreferrer" target="_blank">TensorRT container</a>
-(<code class="docutils literal notranslate"><span class="pre">nvcr.io/nvidia/tensorrt:&lt;version&gt;-py3</span></code>), which provides superior performance to the PyTorch container.</p>
+<p>Layerwise calibration swaps them, with depth outside and data inside:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="n">acts</span> <span class="o">=</span> <span class="p">[</span><span class="n">embed</span><span class="p">(</span><span class="n">batch</span><span class="p">)</span> <span class="k">for</span> <span class="n">batch</span> <span class="ow">in</span> <span class="n">calib_data</span><span class="p">]</span>    <span class="c1"># activations at the boundary</span>
+</span><span data-line="2"><span class="k">for</span> <span class="n">layer</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">:</span>                       <span class="c1"># outer: depth</span>
+</span><span data-line="3">    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">h</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">acts</span><span class="p">):</span>                 <span class="c1"># inner: data</span>
+</span><span data-line="4">        <span class="n">acts</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">layer</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>                       <span class="c1"># one layer live at a time</span>
+</span><span data-line="5">    <span class="n">calibrate</span><span class="p">(</span><span class="n">layer</span><span class="p">);</span> <span class="n">quantize</span><span class="p">(</span><span class="n">layer</span><span class="p">);</span> <span class="n">export</span><span class="p">(</span><span class="n">layer</span><span class="p">);</span> <span class="n">release</span><span class="p">(</span><span class="n">layer</span><span class="p">)</span>
+</span></pre></div>
+</div>
+<p>Everything else follows from that swap. When a layer’s inner loop ends, the layer is finished.
+Every batch it will ever see has already gone through it, so the four calls on that last line
+are well defined, and the layer can be written out and forgotten right there.</p>
+<p>You pay at the boundary. A conventional run keeps one activation tensor in flight per batch.
+Layerwise keeps the activations for the entire calibration set between layers. That cost is
+real. It grows with the calibration set and the model’s hidden size, and the number of layers
+never enters into it.</p>
+<p>Two more pieces make it a working run.</p>
+<p><strong>Weights spill to disk.</strong> An <code class="docutils literal notranslate"><span class="pre">accelerate</span></code> device map with explicit GPU and CPU budgets
+leaves most of the checkpoint on disk or in host RAM. Only what the current step touches gets
+materialized.</p>
+<p><strong>Each layer is exported as soon as it’s finished.</strong> With <code class="docutils literal notranslate"><span class="pre">layerwise.export_dir</span></code> set, a layer
+is quantized, written to its own checkpoint shard, and released the moment calibration is done
+with it. Remember this part, because it lets one artifact handle two jobs:</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>Before pulling and using the container images, please review their respective license terms.</p>
-</div>
-</div>
-<input class="tab-input" id="tab-set--0-input--2" name="tab-set--0" type="radio" /><label class="tab-label" for="tab-set--0-input--2">Local environment (PIP / Conda)</label><div class="tab-content docutils container">
-<p><strong>Setting up a virtual environment</strong></p>
-<p>We recommend setting up a virtual environment if you don’t have one already. Run the following
-command to set up and activate a <code class="docutils literal notranslate"><span class="pre">conda</span></code> virtual environment named <code class="docutils literal notranslate"><span class="pre">modelopt</span></code> with Python 3.12:</p>
-<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span><span data-line="1">conda<span class="w"> </span>create<span class="w"> </span>-n<span class="w"> </span>modelopt<span class="w"> </span><span class="nv">python</span><span class="o">=</span><span class="m">3</span>.12<span class="w"> </span>pip
-</span><span data-line="2">conda<span class="w"> </span>activate<span class="w"> </span>modelopt
-</span></pre></div>
-</div>
-<p>(Optional) <strong>Install desired PyTorch version</strong></p>
-<p>By default, the latest PyTorch version available on <code class="docutils literal notranslate"><span class="pre">pip</span></code> will
-be installed. If you want to install a specific PyTorch version for a specific CUDA version, please first
-follow the instructions to <a class="reference external" href="https://pytorch.org/get-started/locally/" rel="noopener noreferrer" target="_blank">install your desired PyTorch version</a>.</p>
-<p>(Optional) <strong>Install other NVIDIA dependencies</strong></p>
-<p>If you wish to use ModelOpt in conjunction with other NVIDIA libraries (e.g. TensorRT, TensorRT-LLM, Megatron-Bridge, Megatron-LM, Triton, etc.),
-please make sure to check the ease of installation of these libraries in a local environment. If you face any
-issues, we recommend using a docker image for a seamless experience. You may still choose to use other ModelOpt’s
-features locally for example, quantizing a HuggingFace model and then use a docker image for deployment.</p>
-</div>
+<p><strong>The shards are the checkpoint, and most of the resume state.</strong> No full-precision scratch
+copy piles up beside the run, and nobody owes a second whole-model export pass at the end.
+A small manifest in <code class="docutils literal notranslate"><span class="pre">&lt;export_path&gt;.layerwise_resume</span></code> commits each shard and holds the
+activations entering the next layer, so keep that directory alongside the output.</p>
 </div>
 </section>
-<section id="install-model-optimizer">
-<h2>Install Model Optimizer<a class="headerlink" href="#install-model-optimizer" title="Link to this heading">#</a></h2>
-<p>Model Optimizer will download and install additional third-party open source software projects. Review the license
-terms of these open source projects before use.</p>
-<p>If you build and use ModelOpt’s docker image, you can skip this step as the image already contains ModelOpt and all
-optional dependencies pre-installed.
-If you use other suggested docker images, ModelOpt is pre-installed with some of the below optional dependencies.
-Make sure to upgrade to the latest version of ModelOpt (with appropriate optional dependencies you need) using pip as shown below.</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">pip<span class="w"> </span>install<span class="w"> </span>-U<span class="w"> </span><span class="s2">"nvidia-modelopt[all]"</span>
+<section id="running-it">
+<h2>Running it<a class="headerlink" href="#running-it" title="Link to this heading">#</a></h2>
+<p>Setting the config field turns it on. There’s no CLI flag:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nt">quantize</span><span class="p">:</span>
+</span><span data-line="2"><span class="w">  </span><span class="nt">algorithm</span><span class="p">:</span>
+</span><span data-line="3"><span class="w">    </span><span class="nt">method</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">mse</span><span class="w">                                    </span><span class="c1"># max / mse / local Hessian all work</span>
+</span><span data-line="4"><span class="w">    </span><span class="nt">fp8_scale_sweep</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span data-line="5"><span class="w">    </span><span class="nt">layerwise</span><span class="p">:</span>
+</span><span data-line="6"><span class="w">      </span><span class="nt">enable</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span data-line="7"><span class="w">      </span><span class="nt">get_qdq_activations_from_prev_layer</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">   </span><span class="c1"># next layer sees FP inputs, as in a</span>
+</span><span data-line="8"><span class="w">                                                   </span><span class="c1"># whole-model pass; use true for local Hessian</span>
+</span><span data-line="9"><span class="w">      </span><span class="nt">calib_mutates_weights</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">                 </span><span class="c1"># mse and the sweep only touch _amax</span>
+</span><span data-line="10"><span class="w">      </span><span class="nt">export_dir</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/tmp/modelopt_layerwise_export</span><span class="w">   </span><span class="c1"># presence is the switch;</span>
+</span><span data-line="11"><span class="w">                                                   </span><span class="c1"># value is replaced with --export_path</span>
+</span><span data-line="12"><span class="w">      </span><span class="c1"># checkpoint_dir omitted -&gt; derived as &lt;export_path&gt;.layerwise_resume</span>
 </span></pre></div>
 </div>
-<p>If you want to install only partial dependencies, please replace <code class="docutils literal notranslate"><span class="pre">[all]</span></code> with the desired
-optional dependencies as described below.</p>
-<p><strong>Identify correct partial dependencies</strong></p>
-<p>Note that when installing <code class="docutils literal notranslate"><span class="pre">nvidia-modelopt</span></code> without any optional dependencies, only the <code class="docutils literal notranslate"><span class="pre">modelopt.torch</span></code> package
-requirements are installed and other modules may not work without the appropriate optional
-dependencies or <code class="docutils literal notranslate"><span class="pre">[all]</span></code> optional dependencies. Below is a list of optional dependencies that
-need to be installed to correctly use the corresponding modules:</p>
-<div class="table-wrapper colwidths-given docutils container">
+<p>That block is the <strong>only</strong> difference between this run and the published whole-model recipe,
+so the single-GPU variant is a file you create: copy
+<code class="docutils literal notranslate"><span class="pre">modelopt_recipes/models/Qwen/Qwen3.8-2.4T-A95B/ptq/nvfp4_experts_mse-fp8_self_attn-fp8_linear_attn-kv_fp8_cast.yaml</span></code>
+and swap in the block above.
+<code class="docutils literal notranslate"><span class="pre">modelopt_recipes/general/ptq/nvfp4_experts_only-kv_fp8_layerwise_export.yaml</span></code> has the same
+block in a complete recipe if you want something to diff against. Everything under
+<code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> stays as published:</p>
+<div class="table-wrapper docutils container">
 <table class="docutils align-default">
-<colgroup>
-<col style="width: 50.0%" />
-<col style="width: 50.0%" />
-</colgroup>
 <thead>
-<tr class="row-odd"><th class="head"><p>Module</p></th>
-<th class="head"><p>Optional dependencies</p></th>
+<tr class="row-odd"><th class="head"><p>Scope</p></th>
+<th class="head"><p>Format</p></th>
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">modelopt.onnx</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">[onnx]</span></code></p></td>
+<tr class="row-even"><td><p>Routed experts (92 × 512)</p></td>
+<td><p>NVFP4, MSE-searched static weight scales, dynamic input scales</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">modelopt.torch._deploy</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">[onnx]</span></code></p></td>
+<tr class="row-odd"><td><p>Self-attention <code class="docutils literal notranslate"><span class="pre">q/k/v/o_proj</span></code> (23 layers)</p></td>
+<td><p>FP8 W8A8</p></td>
+</tr>
+<tr class="row-even"><td><p>Linear-attention / gated-delta path, including <code class="docutils literal notranslate"><span class="pre">conv1d</span></code> (69 layers)</p></td>
+<td><p>FP8 W8A8</p></td>
+</tr>
+<tr class="row-odd"><td><p>KV cache</p></td>
+<td><p>FP8, cast mode (constant amax, no KV calibration)</p></td>
+</tr>
+<tr class="row-even"><td><p>MTP block, router, shared experts, <code class="docutils literal notranslate"><span class="pre">lm_head</span></code>, embeddings</p></td>
+<td><p>BF16, unquantized</p></td>
 </tr>
 </tbody>
 </table>
 </div>
-<p>Additionally, we support installing dependencies for following 3rd-party packages:</p>
-<div class="table-wrapper colwidths-given docutils container">
+<p>Calibration used <strong>512 samples</strong> of
+<a class="reference external" href="https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2" rel="noopener noreferrer" target="_blank">Nemotron-Post-Training-Dataset-v2</a>
+at sequence length 512, <strong>batch size 8</strong>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><strong>Pick the batch size on purpose.</strong> For layerwise runs, <code class="docutils literal notranslate"><span class="pre">hf_ptq.py</span></code> defaults to
+<code class="docutils literal notranslate"><span class="pre">--batch_size</span> <span class="pre">1</span></code>, but only if you leave the flag at its auto-probe default. An explicit
+value passes straight through. Going to 8 cuts wall clock roughly in half. It does move the
+numbers a little. Weights, <code class="docutils literal notranslate"><span class="pre">weight_scale</span></code> and <code class="docutils literal notranslate"><span class="pre">weight_scale_2</span></code> come out bit-identical,
+but activation <code class="docutils literal notranslate"><span class="pre">input_scale</span></code> values shift slightly, because batching pads each sequence to
+the longest one in the batch and those pad positions feed the activation amax.</p>
+</div>
+<p>Then launch the run:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">python<span class="w"> </span>examples/hf_ptq/hf_ptq.py<span class="w"> </span><span class="se">\</span>
+</span><span data-line="2"><span class="w">    </span>--pyt_ckpt_path<span class="w">  </span>&lt;Qwen3.8-2.4T-A95B&gt;<span class="w"> </span><span class="se">\</span>
+</span><span data-line="3"><span class="w">    </span>--recipe<span class="w">         </span>&lt;single-gpu<span class="w"> </span>variant<span class="w"> </span>of<span class="w"> </span>the<span class="w"> </span>recipe<span class="w"> </span>above&gt;<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">    </span>--export_path<span class="w">    </span>&lt;out&gt;<span class="w"> </span><span class="se">\</span>
+</span><span data-line="5"><span class="w">    </span>--qformat<span class="w"> </span>nvfp4<span class="w"> </span>--attn_implementation<span class="w"> </span>eager<span class="w"> </span><span class="se">\</span>
+</span><span data-line="6"><span class="w">    </span>--offload_folder<span class="w"> </span>&lt;scratch&gt;<span class="w"> </span>--max_gpu_memory_gb<span class="w"> </span><span class="m">120</span><span class="w"> </span>--max_cpu_memory_gb<span class="w"> </span><span class="m">600</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="7"><span class="w">    </span>--dataset<span class="w"> </span>nemotron-post-training-dataset-v2<span class="w"> </span><span class="se">\</span>
+</span><span data-line="8"><span class="w">    </span>--calib_size<span class="w"> </span><span class="m">512</span><span class="w"> </span>--calib_seq<span class="w"> </span><span class="m">512</span><span class="w"> </span>--batch_size<span class="w"> </span><span class="m">8</span>
+</span></pre></div>
+</div>
+<p>You’ll need one GPU, GPU and CPU memory budgets of your choosing, and fast scratch space big
+enough for the checkpoint you’re writing.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><strong>This is the production recipe, calibrated from a BF16 source.</strong> <code class="docutils literal notranslate"><span class="pre">Qwen/Qwen3.8-2.4T-A95B</span></code>
+ships as plain BF16 with no <code class="docutils literal notranslate"><span class="pre">quantization_config</span></code>. Nothing in the path dequantizes, so the
+source format carries no accuracy caveat. The quantization config is the one behind the
+published <code class="docutils literal notranslate"><span class="pre">nvidia/Qwen3.8-2.4T-A95B-NVFP4</span></code> checkpoint. We picked the calibration
+hyperparameters (sample count, sequence length, batch size) for this demonstration. We don’t
+claim they reproduce the published checkpoint’s numerics.</p>
+</div>
+<p>Some configurations are refused outright, so you never get a checkpoint that’s quietly different
+from what you asked for. Check your model against this list before you commit a session to it:</p>
+<ul class="simple">
+<li><p>AWQ and SVDQuant, which need whole-model pre-quant-scale steps. These can surface at the first
+layer’s export rather than up front, once the calibrator has registered them.</p></li>
+<li><p>Models with tied weights (<code class="docutils literal notranslate"><span class="pre">tie_word_embeddings</span></code>); use <code class="docutils literal notranslate"><span class="pre">export_hf_checkpoint()</span></code> instead</p></li>
+<li><p>Multi-process jobs such as FSDP2, where every rank would write the same shards</p></li>
+</ul>
+<p><code class="docutils literal notranslate"><span class="pre">examples/hf_ptq/hf_ptq.py</span></code> refuses a few more up front, including AutoQuantize recipes,
+speculative-decoding models and <code class="docutils literal notranslate"><span class="pre">--qformat</span> <span class="pre">int8_smoothquant</span></code>, a format per-layer export can’t
+write.</p>
+<p>Per-layer export also leaves the in-memory model in export form, so <code class="docutils literal notranslate"><span class="pre">hf_ptq.py</span></code> sets
+<code class="docutils literal notranslate"><span class="pre">--skip_generate</span></code> for you.</p>
+</section>
+<section id="interrupt-it">
+<h2>Interrupt it<a class="headerlink" href="#interrupt-it" title="Link to this heading">#</a></h2>
+<p>Each layer’s shard is written first, and then the manifest in <code class="docutils literal notranslate"><span class="pre">&lt;export_path&gt;.layerwise_resume</span></code>
+commits it. As long as both directories survive, resuming takes nothing special. Rerun the exact
+same command. Committed layers get skipped, and calibration picks up at the last boundary it
+committed. A layer whose shard landed but never got committed is calibrated and exported again,
+as long as an earlier layer was committed. If the run died before its first commit, the rerun
+stops rather than overwrite those shards, and you delete the export directory to start over.</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span><span data-line="1">Checkpoint: resuming layerwise calibration from layer 42/92
+</span></pre></div>
+</div>
+<p>An earlier Qwen3.8 run on this workflow survived a CUDA OOM, a deliberate stop, a session
+teardown, and a machine rebuild that wiped site-packages mid-run, finishing across <strong>four
+process lifetimes</strong>. Every restart skipped the finished layers. Nothing was recalibrated or
+re-exported. Resume is exact, too. We killed a run right after layer 2 of 8, resumed it, and got
+a checkpoint identical, tensor for tensor, to the uninterrupted run.</p>
+<p>The resume directory stays small. In flight it holds the per-layer output shapes plus the last
+committed boundary’s activations, which scale with the calibration set, and each commit prunes
+the set before it. Once this run finished, it came to <strong>748 KB beside 1.4 TB of shards</strong>.</p>
+</section>
+<section id="results">
+<h2>Results<a class="headerlink" href="#results" title="Link to this heading">#</a></h2>
+<div class="table-wrapper docutils container">
 <table class="docutils align-default">
-<colgroup>
-<col style="width: 50.0%" />
-<col style="width: 50.0%" />
-</colgroup>
 <thead>
-<tr class="row-odd"><th class="head"><p>Third-party package</p></th>
-<th class="head"><p>Optional dependencies</p></th>
+<tr class="row-odd"><th class="head"><p><code class="docutils literal notranslate"><span class="pre">Qwen/Qwen3.8-2.4T-A95B</span></code></p></th>
+<th class="head"></th>
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p>Huggingface (<code class="docutils literal notranslate"><span class="pre">transformers</span></code>, <code class="docutils literal notranslate"><span class="pre">diffusers</span></code>, etc.)</p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">[hf]</span></code></p></td>
+<tr class="row-even"><td><p>Hardware</p></td>
+<td><p>1 × GB300 (283 GB)</p></td>
+</tr>
+<tr class="row-odd"><td><p>Source checkpoint</p></td>
+<td><p>4.892 TB BF16, 213 shards</p></td>
+</tr>
+<tr class="row-even"><td><p>Wall clock</p></td>
+<td><p>3 h 04 m (11,026 s), ≈ 120 s/layer</p></td>
+</tr>
+<tr class="row-odd"><td><p>Peak GPU</p></td>
+<td><p>141.7 GB against a 120 GB budget (mean utilization 33.8 %)</p></td>
+</tr>
+<tr class="row-even"><td><p>Peak host RSS</p></td>
+<td><p>604.8 GB against a 600 GB budget</p></td>
+</tr>
+<tr class="row-odd"><td><p>Output</p></td>
+<td><p>1.444 TB (3.4 × smaller): 92 layer shards + tail + index. All 141,312 expert
+projections (92 × 512 × 3) carry their own <code class="docutils literal notranslate"><span class="pre">input_scale</span></code> and <code class="docutils literal notranslate"><span class="pre">weight_scale</span></code>, so vLLM
+picks the FlashInfer TRT-LLM NVFP4 MoE kernel over the emulation fallback.</p></td>
 </tr>
 </tbody>
 </table>
 </div>
-<p><strong>CUDA specific dependencies</strong></p>
-<ul class="simple">
-<li><p>By default, <code class="docutils literal notranslate"><span class="pre">cupy-cuda12x</span></code> is installed for INT4 ONNX quantization. If you have CUDA 13, you need to run <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">uninstall</span> <span class="pre">-y</span> <span class="pre">cupy-cuda12x</span></code> and <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">cupy-cuda13x</span></code> after installing <code class="docutils literal notranslate"><span class="pre">nvidia-modelopt[onnx]</span></code>.</p></li>
-</ul>
-<p><strong>Accelerated Quantization with Triton Kernels</strong></p>
-<p>ModelOpt includes optimized quantization kernels implemented with Triton language that accelerate quantization
-operations by approximately 40% compared to the default implementation. These kernels are particularly
-beneficial for <a class="reference internal" href="../guides/_choosing_quant_methods.html"><span class="doc">AWQ</span></a> and Quantization-aware Training (QAT) workflows.</p>
-<p>The Triton-based kernels currently support the NVFP4 quantization format, with support for additional
-formats coming in future releases. To use these accelerated kernels, you need:</p>
-<ul class="simple">
-<li><p>CUDA device with compute capability &gt;= 8.9 (e.g. RTX 40 series, RTX 6000, NVIDIA L40 or later)</p></li>
-<li><p>Triton package installed: <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">triton</span></code></p></li>
-</ul>
-<p>No additional configuration is required - the optimized kernels are used automatically when available
-for your hardware and quantization format.</p>
+<p><strong>The budgets only govern where weights go.</strong> Both flags size <code class="docutils literal notranslate"><span class="pre">accelerate</span></code>’s device map, so
+activations, calibration buffers and the CUDA context sit on top of them. That’s why GPU peaked
+21.7 GB over budget, and host RSS, after plateauing near 600 GB as weights paged in from disk,
+peaked 4.8 GB over. Leave headroom on both instead of sizing to the machine’s exact capacity.</p>
+<p>GPU memory rises as each layer’s weights materialize and falls as they’re released, with no
+drift across all 92 layers. That flat envelope is why depth has no effect on peak memory, so
+watch the first few layers of any new model: a floor that keeps rising means something is being
+retained when it should be released.</p>
+<p>The correctness claim is narrow: <strong>per-layer export produces the same checkpoint as whole-model
+export.</strong> Across four models, the two paths matched tensor for tensor and config for config
+(123,513 tensors on a 35B MoE, 74,163 on a 30B, 0 mismatches), every <code class="docutils literal notranslate"><span class="pre">weight_map</span></code> entry
+resolved to the shard holding its tensor, and vLLM produced identical greedy generations from
+both. A reduced model with this architecture matched too before the full run: 7,933 tensors, 0
+mismatched, identical <code class="docutils literal notranslate"><span class="pre">hf_quant_config.json</span></code> and <code class="docutils literal notranslate"><span class="pre">config.json</span></code>.</p>
 </section>
-<section id="check-installation">
-<h2>Check installation<a class="headerlink" href="#check-installation" title="Link to this heading">#</a></h2>
-<div class="admonition tip">
-<p class="admonition-title">Tip</p>
-<p>When you use ModelOpt’s PyTorch quantization APIs for the first time, it will compile the fast quantization kernels
-using your installed torch and CUDA if available.
-This may take a few minutes but subsequent quantization calls will be much faster.
-To invoke the compilation and check if it is successful or pre-compile for docker builds, run the following command:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">python<span class="w"> </span>-c<span class="w"> </span><span class="s2">"import modelopt.torch.quantization.extensions as ext; ext.precompile()"</span>
-</span></pre></div>
-</div>
-</div>
+<section id="what-you-re-trading">
+<h2>What you’re trading<a class="headerlink" href="#what-you-re-trading" title="Link to this heading">#</a></h2>
+<p>All of these come straight from the design. Whether they work for you depends on your
+constraints.</p>
+<p><strong>Time.</strong> The layer walk is sequential by construction. Models in the 550–671B range take
+roughly 40–47 minutes on one GPU, and the 2.4 T run is in <em>Results</em>. You’re paying for smaller
+hardware with wall clock, which is the whole idea, but on a large model you’ll feel it. Batch
+size is the main lever inside a run (see the note under <em>Running it</em>).</p>
+<p><strong>Calibration algorithms are limited, for now.</strong> Max, MSE and local Hessian, in FP8 and NVFP4,
+only touch <code class="docutils literal notranslate"><span class="pre">_amax</span></code>, so they run with <code class="docutils literal notranslate"><span class="pre">calib_mutates_weights:</span> <span class="pre">false</span></code> and keep resume state
+small. GPTQ rewrites weights and runs layerwise with the default <code class="docutils literal notranslate"><span class="pre">true</span></code>, which snapshots each
+layer’s full weights for resume. A mutated weight is written into its shard before the layer is
+released, so per-layer export is shaped for GPTQ, but we haven’t validated the pair yet, and a
+PR doing that is on the way. The refused configurations are listed under <em>Running it</em>.</p>
+<p><strong>Serving is a separate problem.</strong> The checkpoint this produces still has to be served
+somewhere, and this workflow can’t tell you whether your hardware is up to that.</p>
+<p><strong>Layer size sets the floor.</strong> Peak memory here is a lower bound you can’t tune away. The GPU
+still has to hold one decoder layer plus its activations at once. A model built from many modest
+layers is easy. If one layer is enormous, you’ve hit the limit of this design. The same
+arithmetic tells you whether your model fits before you burn a session finding out: take the
+largest decoder layer, add its calibration activations, and compare the total against your card.</p>
 </section>
 </section>
 
@@ -607,21 +697,7 @@ To invoke the compilation and check if it is successful or pre-compile for docke
     <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
   </svg>
   <span>Back to top</span>
-</button><div class="navigation flex print:hidden"><div class="navigation-prev">
-    <a href="2_installation.html">
-      <i class="i-lucide chevron-left"></i>
-      <div class="page-info">
-        <span>Previous</span><div class="title">Installation</div></div>
-    </a>
-  </div><div class="navigation-next">
-    <a href="windows/_installation_for_Windows.html">
-      <div class="page-info">
-        <span>Next</span>
-        <div class="title">Installation for Windows</div>
-      </div>
-      <i class="i-lucide chevron-right"></i>
-    </a>
-  </div></div></div>
+</button><div class="navigation flex print:hidden"></div></div>
     </div>
   </main>
 </div>

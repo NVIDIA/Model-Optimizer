@@ -37,6 +37,7 @@ training
    .. autosummary::
       :nosignatures:
    
+      get_linear_attention_layers
       linear_attention_training_phase
    
    

@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>qdq_utils - Model Optimizer 0.0.1.dev1+g09a6e025d</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="quant_utils" href="modelopt.onnx.quantization.quant_utils.html" /><link rel="prev" title="qdq_graph" href="modelopt.onnx.quantization.qdq_graph.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>qdq_utils - Model Optimizer 0.0.1.dev1+g4a70c001a</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="quant_utils" href="modelopt.onnx.quantization.quant_utils.html" /><link rel="prev" title="qdq_graph" href="modelopt.onnx.quantization.qdq_graph.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -864,7 +864,7 @@ After:  DQ(W^T) -&gt; Transpose -&gt; W -&gt; MatMul/Gemm</p>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>name</strong> (<em>str</em>)</p></li>
 <li><p><strong>shape</strong> (<em>Sequence</em><em>[</em><em>int</em><em>]</em>)</p></li>
-<li><p><strong>dtype</strong> (<em>&lt;google.protobuf.internal.enum_type_wrapper.EnumTypeWrapper object at 0x7fbbbf6e5100&gt;</em>)</p></li>
+<li><p><strong>dtype</strong> (<em>&lt;google.protobuf.internal.enum_type_wrapper.EnumTypeWrapper object at 0x7fc00f1e70e0&gt;</em>)</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
@@ -1047,7 +1047,7 @@ For more information, see <a class="reference external" href="https://docs.nvidi
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>graph</strong> (<em>GraphProto</em>) – ONNX graph to modify</p></li>
-<li><p><strong>act_scales_dict</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>float</em><em>]</em>) – Dictionary mapping scale tensor names to their new values</p></li>
+<li><p><strong>act_scales_dict</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>float</em><em>]</em>) – Dictionary mapping original tensor names plus ‘_scale’ to new values</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>

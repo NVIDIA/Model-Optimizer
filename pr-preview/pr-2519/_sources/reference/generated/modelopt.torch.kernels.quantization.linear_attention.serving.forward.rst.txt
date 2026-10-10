@@ -37,8 +37,8 @@ forward
    .. autosummary::
       :nosignatures:
    
-      fused_gdn_gating
       prefill
       step
+      validate_profile
    
    

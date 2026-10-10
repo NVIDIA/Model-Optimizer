@@ -38,6 +38,5 @@ gdn
       :nosignatures:
    
       gdn_state_qat
-      matmul_gdn
    
    

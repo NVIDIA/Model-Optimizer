@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>serving - Model Optimizer 0.0.1.dev1+g09a6e025d</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="chunk_delta_h" href="modelopt.torch.kernels.quantization.linear_attention.serving.chunk_delta_h.html" /><link rel="prev" title="linear_attention" href="modelopt.torch.kernels.quantization.linear_attention.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>serving - Model Optimizer 0.0.1.dev1+g4a70c001a</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="forward" href="modelopt.torch.kernels.quantization.linear_attention.serving.forward.html" /><link rel="prev" title="linear_attention" href="modelopt.torch.kernels.quantization.linear_attention.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -445,13 +445,10 @@ data-aria-dark="Switch to auto color mode">
 <div class="table-wrapper autosummary longtable docutils container">
 <table class="autosummary longtable docutils align-default">
 <tbody>
-<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.kernels.quantization.linear_attention.serving.chunk_delta_h.html#module-modelopt.torch.kernels.quantization.linear_attention.serving.chunk_delta_h" title="modelopt.torch.kernels.quantization.linear_attention.serving.chunk_delta_h"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.kernels.quantization.linear_attention.serving.chunk_delta_h</span></code></a></p></td>
-<td><p>Save FP32 training intermediates using vLLM's unchanged chunk-state kernel.</p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.kernels.quantization.linear_attention.serving.forward.html#module-modelopt.torch.kernels.quantization.linear_attention.serving.forward" title="modelopt.torch.kernels.quantization.linear_attention.serving.forward"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.kernels.quantization.linear_attention.serving.forward</span></code></a></p></td>
+<td><p>Native vLLM Triton forwards; training owns private, differentiable state.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.kernels.quantization.linear_attention.serving.forward.html#module-modelopt.torch.kernels.quantization.linear_attention.serving.forward" title="modelopt.torch.kernels.quantization.linear_attention.serving.forward"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.kernels.quantization.linear_attention.serving.forward</span></code></a></p></td>
-<td><p>vLLM forward primitives with FP32 saved values; autograd lives in quantization.</p></td>
-</tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.kernels.quantization.linear_attention.serving.replay.html#module-modelopt.torch.kernels.quantization.linear_attention.serving.replay" title="modelopt.torch.kernels.quantization.linear_attention.serving.replay"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.kernels.quantization.linear_attention.serving.replay</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.kernels.quantization.linear_attention.serving.replay.html#module-modelopt.torch.kernels.quantization.linear_attention.serving.replay" title="modelopt.torch.kernels.quantization.linear_attention.serving.replay"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.kernels.quantization.linear_attention.serving.replay</span></code></a></p></td>
 <td><p>Functional training launches of the optional quantized-ReplaySSM serving kernels.</p></td>
 </tr>
 </tbody>
@@ -472,10 +469,10 @@ data-aria-dark="Switch to auto color mode">
         <span>Previous</span><div class="title">linear_attention</div></div>
     </a>
   </div><div class="navigation-next">
-    <a href="modelopt.torch.kernels.quantization.linear_attention.serving.chunk_delta_h.html">
+    <a href="modelopt.torch.kernels.quantization.linear_attention.serving.forward.html">
       <div class="page-info">
         <span>Next</span>
-        <div class="title">chunk_delta_h</div>
+        <div class="title">forward</div>
       </div>
       <i class="i-lucide chevron-right"></i>
     </a>

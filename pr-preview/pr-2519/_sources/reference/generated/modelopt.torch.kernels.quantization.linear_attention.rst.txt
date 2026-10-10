@@ -13,6 +13,10 @@ linear\_attention
 
 
 
+
+
+
+
    modelopt.torch.kernels.quantization.linear_attention.serving
 
 

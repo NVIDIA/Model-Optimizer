@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>training - Model Optimizer 0.0.1.dev1+g09a6e025d</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="utils" href="modelopt.torch.quantization.linear_attention.utils.html" /><link rel="prev" title="kda" href="modelopt.torch.quantization.linear_attention.kda.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>training - Model Optimizer 0.0.1.dev1+g4a70c001a</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="utils" href="modelopt.torch.quantization.linear_attention.utils.html" /><link rel="prev" title="kda" href="modelopt.torch.quantization.linear_attention.kda.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -391,6 +391,7 @@ data-aria-dark="Switch to auto color mode">
       <i class="i-lucide close"></i>
     </button>
     <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#modelopt.torch.quantization.linear_attention.training.get_linear_attention_layers"><code class="docutils literal notranslate"><span class="pre">get_linear_attention_layers()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.linear_attention.training.linear_attention_training_phase"><code class="docutils literal notranslate"><span class="pre">linear_attention_training_phase()</span></code></a></li>
 </ul>
 </div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
@@ -445,18 +446,38 @@ data-aria-dark="Switch to auto color mode">
 <div class="table-wrapper autosummary longtable docutils container">
 <table class="autosummary longtable docutils align-default">
 <tbody>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.linear_attention.training.linear_attention_training_phase" title="modelopt.torch.quantization.linear_attention.training.linear_attention_training_phase"><code class="xref py py-obj docutils literal notranslate"><span class="pre">linear_attention_training_phase</span></code></a></p></td>
-<td><p>Supply explicit sequence phases through forward and checkpointed backward.</p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.linear_attention.training.get_linear_attention_layers" title="modelopt.torch.quantization.linear_attention.training.get_linear_attention_layers"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_linear_attention_layers</span></code></a></p></td>
+<td><p>Return serving-policy layers from a module or iterable of model chunks.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.linear_attention.training.linear_attention_training_phase" title="modelopt.torch.quantization.linear_attention.training.linear_attention_training_phase"><code class="xref py py-obj docutils literal notranslate"><span class="pre">linear_attention_training_phase</span></code></a></p></td>
+<td><p>Supply per-sequence phases to a module or iterable of model chunks/layers.</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 <dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.linear_attention.training.get_linear_attention_layers">
+<span class="sig-name descname"><span class="pre">get_linear_attention_layers</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">enabled_only</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">unphased_only</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.linear_attention.training.get_linear_attention_layers" title="Link to this definition">#</a></dt>
+<dd><p>Return serving-policy layers from a module or iterable of model chunks.</p>
+<p>Disabled state quantizers are included by default so a baseline can use the
+same serving arithmetic and phase as QAT. Use <code class="docutils literal notranslate"><span class="pre">enabled_only</span></code> for setup checks
+and <code class="docutils literal notranslate"><span class="pre">unphased_only</span></code> to select layers needing adapter-provided defaults.</p>
+</dd></dl>
+
+<dl class="py function">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.linear_attention.training.linear_attention_training_phase">
-<span class="sig-name descname"><span class="pre">linear_attention_training_phase</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prefill_lengths</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.linear_attention.training.linear_attention_training_phase" title="Link to this definition">#</a></dt>
-<dd><p>Supply explicit sequence phases through forward and checkpointed backward.</p>
-<p>Runtime phase metadata is local to the converted layers and restored on exit.
-Keep this context active through backward when activation checkpointing is used.</p>
+<span class="sig-name descname"><span class="pre">linear_attention_training_phase</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prefill_lengths</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">sequence_lengths</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cu_seqlens</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">preserve_existing</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.linear_attention.training.linear_attention_training_phase" title="Link to this definition">#</a></dt>
+<dd><p>Supply per-sequence phases to a module or iterable of model chunks/layers.</p>
+<p>Enabled state quantization requires a phase, including calibration/eval. Disabled
+quantizers use the original module outside a phase and serving arithmetic inside.
+Megatron selective recompute captures the phase for backward after context exit.</p>
+<p><code class="docutils literal notranslate"><span class="pre">sequence_lengths</span></code> excludes right padding in dense rows or padded THD segments.
+<code class="docutils literal notranslate"><span class="pre">cu_seqlens</span></code> describes physical packed storage, including alignment padding.
+Megatron derives omitted valid lengths from unpadded <code class="docutils literal notranslate"><span class="pre">cu_seqlens_q</span></code> metadata;
+padded-only metadata requires explicit <code class="docutils literal notranslate"><span class="pre">sequence_lengths</span></code>.
+Padding produces zero attention outputs and never updates the recurrent state.
+<code class="docutils literal notranslate"><span class="pre">preserve_existing=True</span></code> installs defaults only on layers without a phase.
+Empty pipeline stages participate as no-ops.</p>
 </dd></dl>
 
 </section>

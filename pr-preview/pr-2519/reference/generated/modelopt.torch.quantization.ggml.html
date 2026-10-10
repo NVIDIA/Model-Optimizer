@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ggml - Model Optimizer 0.0.1.dev1+g09a6e025d</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="kv_cache_auto_quant" href="modelopt.torch.quantization.kv_cache_auto_quant.html" /><link rel="prev" title="extensions" href="modelopt.torch.quantization.extensions.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ggml - Model Optimizer 0.0.1.dev1+g4a70c001a</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="kv_cache_auto_quant" href="modelopt.torch.quantization.kv_cache_auto_quant.html" /><link rel="prev" title="extensions" href="modelopt.torch.quantization.extensions.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -403,6 +403,7 @@ data-aria-dark="Switch to auto color mode">
 <li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.name"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.name</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.pack"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.pack()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.quantize"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.quantize</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.weighted"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.weighted</span></code></a></li>
 </ul>
 </li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.ggml.dequantize_iq1_m"><code class="docutils literal notranslate"><span class="pre">dequantize_iq1_m()</span></code></a></li>
@@ -570,7 +571,7 @@ per-format pieces – codebook, search, payload layout – stay in the format’
 lives here is the part every format does the same way.</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.GGMLFormat.__init__">
-<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_bytes</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantize</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dequantize</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_chunk_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">decode_chunk_size</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.ggml.GGMLFormat.__init__" title="Link to this definition">#</a></dt>
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_bytes</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantize</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dequantize</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_chunk_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">decode_chunk_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weighted</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.ggml.GGMLFormat.__init__" title="Link to this definition">#</a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
@@ -581,6 +582,7 @@ lives here is the part every format does the same way.</p>
 <li><p><strong>dequantize</strong> (<em>Callable</em><em>[</em><em>[</em><em>...</em><em>]</em><em>, </em><em>Tensor</em><em>]</em>)</p></li>
 <li><p><strong>block_chunk_size</strong> (<em>int</em>)</p></li>
 <li><p><strong>decode_chunk_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>weighted</strong> (<em>bool</em>)</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
@@ -664,6 +666,11 @@ pinned to <code class="docutils literal notranslate"><span class="pre">quantizer
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.GGMLFormat.quantize">
 <span class="sig-name descname"><span class="pre">quantize</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Callable</span><span class="p"><span class="pre">[</span></span><span class="p"><span class="pre">[</span></span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">Tensor</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Tensor</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.ggml.GGMLFormat.quantize" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.GGMLFormat.weighted">
+<span class="sig-name descname"><span class="pre">weighted</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.quantization.ggml.GGMLFormat.weighted" title="Link to this definition">#</a></dt>
 <dd></dd></dl>
 
 </dd></dl>
@@ -964,15 +971,17 @@ exposes a grid accessor under its own name.</p>
 
 <dl class="py function">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.quantize_iq1_m">
-<span class="sig-name descname"><span class="pre">quantize_iq1_m</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_chunk_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1024</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.ggml.quantize_iq1_m" title="Link to this definition">#</a></dt>
+<span class="sig-name descname"><span class="pre">quantize_iq1_m</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_chunk_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1024</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">importance</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.ggml.quantize_iq1_m" title="Link to this definition">#</a></dt>
 <dd><p>Pack a floating-point weight into GGML-compatible IQ1_M blocks.</p>
 <p>Returned shapes are <code class="docutils literal notranslate"><span class="pre">[*weight.shape[:-1],</span> <span class="pre">weight.shape[-1]</span> <span class="pre">//</span> <span class="pre">256,</span> <span class="pre">56]</span></code>
-and <code class="docutils literal notranslate"><span class="pre">[weight.ndim]</span></code>.</p>
+and <code class="docutils literal notranslate"><span class="pre">[weight.ndim]</span></code>. <code class="docutils literal notranslate"><span class="pre">importance</span></code>, a non-negative per-input-column vector, weights each
+value’s squared error in the search, as llama.cpp’s imatrix does.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>weight</strong> (<em>Tensor</em>)</p></li>
 <li><p><strong>block_chunk_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>importance</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
@@ -983,17 +992,19 @@ and <code class="docutils literal notranslate"><span class="pre">[weight.ndim]</
 
 <dl class="py function">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.quantize_iq1_s">
-<span class="sig-name descname"><span class="pre">quantize_iq1_s</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_chunk_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1024</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.ggml.quantize_iq1_s" title="Link to this definition">#</a></dt>
+<span class="sig-name descname"><span class="pre">quantize_iq1_s</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_chunk_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1024</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">importance</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.ggml.quantize_iq1_s" title="Link to this definition">#</a></dt>
 <dd><p>Pack a floating-point weight into GGML-compatible IQ1_S blocks.</p>
 <p>Returned shapes are <code class="docutils literal notranslate"><span class="pre">[*weight.shape[:-1],</span> <span class="pre">weight.shape[-1]</span> <span class="pre">//</span> <span class="pre">256,</span> <span class="pre">50]</span></code>
 and <code class="docutils literal notranslate"><span class="pre">[weight.ndim]</span></code>. The packed payload remains on the weight’s device;
 the logical-shape metadata is kept on CPU. Non-finite input elements are
-treated as zero during packing.</p>
+treated as zero during packing. <code class="docutils literal notranslate"><span class="pre">importance</span></code>, a non-negative per-input-column vector,
+weights each value’s squared error in the search, as llama.cpp’s imatrix does.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>weight</strong> (<em>Tensor</em>)</p></li>
 <li><p><strong>block_chunk_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>importance</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
@@ -1004,15 +1015,17 @@ treated as zero during packing.</p>
 
 <dl class="py function">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.quantize_iq2_s">
-<span class="sig-name descname"><span class="pre">quantize_iq2_s</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_chunk_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">128</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.ggml.quantize_iq2_s" title="Link to this definition">#</a></dt>
+<span class="sig-name descname"><span class="pre">quantize_iq2_s</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_chunk_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">128</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">importance</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.ggml.quantize_iq2_s" title="Link to this definition">#</a></dt>
 <dd><p>Pack a floating-point weight into GGML-compatible IQ2_S blocks.</p>
 <p>Returned shapes are <code class="docutils literal notranslate"><span class="pre">[*weight.shape[:-1],</span> <span class="pre">weight.shape[-1]</span> <span class="pre">//</span> <span class="pre">256,</span> <span class="pre">82]</span></code>
-and <code class="docutils literal notranslate"><span class="pre">[weight.ndim]</span></code>.</p>
+and <code class="docutils literal notranslate"><span class="pre">[weight.ndim]</span></code>. <code class="docutils literal notranslate"><span class="pre">importance</span></code>, a non-negative per-input-column vector, weights each
+value’s squared error in the search, as llama.cpp’s imatrix does.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>weight</strong> (<em>Tensor</em>)</p></li>
 <li><p><strong>block_chunk_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>importance</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
@@ -1023,17 +1036,19 @@ and <code class="docutils literal notranslate"><span class="pre">[weight.ndim]</
 
 <dl class="py function">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.quantize_iq2_xs">
-<span class="sig-name descname"><span class="pre">quantize_iq2_xs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_chunk_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">256</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.ggml.quantize_iq2_xs" title="Link to this definition">#</a></dt>
+<span class="sig-name descname"><span class="pre">quantize_iq2_xs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_chunk_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">256</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">importance</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.ggml.quantize_iq2_xs" title="Link to this definition">#</a></dt>
 <dd><p>Pack a floating-point weight into GGML-compatible IQ2_XS blocks.</p>
 <p>Returned shapes are <code class="docutils literal notranslate"><span class="pre">[*weight.shape[:-1],</span> <span class="pre">weight.shape[-1]</span> <span class="pre">//</span> <span class="pre">256,</span> <span class="pre">74]</span></code>
 and <code class="docutils literal notranslate"><span class="pre">[weight.ndim]</span></code>. The packed payload remains on the weight’s device;
 the logical-shape metadata is kept on CPU. Non-finite input elements are
-treated as zero during packing.</p>
+treated as zero during packing. <code class="docutils literal notranslate"><span class="pre">importance</span></code>, a non-negative per-input-column vector,
+weights each value’s squared error in the search, as llama.cpp’s imatrix does.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>weight</strong> (<em>Tensor</em>)</p></li>
 <li><p><strong>block_chunk_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>importance</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
@@ -1044,17 +1059,19 @@ treated as zero during packing.</p>
 
 <dl class="py function">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.quantize_iq2_xxs">
-<span class="sig-name descname"><span class="pre">quantize_iq2_xxs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_chunk_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">512</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.ggml.quantize_iq2_xxs" title="Link to this definition">#</a></dt>
+<span class="sig-name descname"><span class="pre">quantize_iq2_xxs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_chunk_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">512</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">importance</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.ggml.quantize_iq2_xxs" title="Link to this definition">#</a></dt>
 <dd><p>Pack a floating-point weight into GGML-compatible IQ2_XXS blocks.</p>
 <p>Returned shapes are <code class="docutils literal notranslate"><span class="pre">[*weight.shape[:-1],</span> <span class="pre">weight.shape[-1]</span> <span class="pre">//</span> <span class="pre">256,</span> <span class="pre">66]</span></code>
 and <code class="docutils literal notranslate"><span class="pre">[weight.ndim]</span></code>. The packed payload remains on the weight’s device;
 the logical-shape metadata is kept on CPU. Non-finite input elements are
-treated as zero during packing.</p>
+treated as zero during packing. <code class="docutils literal notranslate"><span class="pre">importance</span></code>, a non-negative per-input-column vector,
+weights each value’s squared error in the search, as llama.cpp’s imatrix does.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>weight</strong> (<em>Tensor</em>)</p></li>
 <li><p><strong>block_chunk_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>importance</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>

@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>config - Model Optimizer 0.0.1.dev1+g09a6e025d</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="decode" href="modelopt.torch.quantization.linear_attention.decode.html" /><link rel="prev" title="linear_attention" href="modelopt.torch.quantization.linear_attention.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>config - Model Optimizer 0.0.1.dev1+g4a70c001a</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="decode" href="modelopt.torch.quantization.linear_attention.decode.html" /><link rel="prev" title="linear_attention" href="modelopt.torch.quantization.linear_attention.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -474,8 +474,20 @@ data-aria-dark="Switch to auto color mode">
 <dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
 <p>One execution policy shared by the chunked prefix and recurrent suffix.</p>
 <p><code class="docutils literal notranslate"><span class="pre">serving</span></code> uses native forward arithmetic with a differentiable adjoint;
-<code class="docutils literal notranslate"><span class="pre">fla</span></code> is the disabled/default path. <code class="docutils literal notranslate"><span class="pre">vllm</span></code> uses the installed vLLM’s arithmetic;
-<code class="docutils literal notranslate"><span class="pre">vllm_0_15</span></code> remains an accepted legacy spelling for existing checkpoints.
+<code class="docutils literal notranslate"><span class="pre">fla</span></code> is the disabled/default path. <code class="docutils literal notranslate"><span class="pre">vllm</span></code> targets the installed vLLM’s
+Triton prefill and single-token, non-speculative decode with BF16 operands and
+FP32 recurrent storage. Deployment must explicitly select Triton prefill
+(<code class="docutils literal notranslate"><span class="pre">gdn_prefill_backend=&quot;triton&quot;</span></code>) and enable packed recurrent decode where
+available (<code class="docutils literal notranslate"><span class="pre">VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE=1</span></code>). Mixed prefill/decode
+batches and automatic FlashInfer/CuTe dispatch are outside this profile.
+KDA uses the standalone FLA/Triton API, with no model-level serving guarantee.
+<code class="docutils literal notranslate"><span class="pre">vllm_kimi_k3</span></code> explicitly selects
+vLLM’s Kimi-K3 Triton kernels (also used by Kimi-Linear in vLLM 0.30),
+raw projections and that model package’s dependencies.
+These targets are saved in ModelOpt/Megatron policy metadata, not HF export;
+they do not configure or validate a remote server. Kimi serving must set both
+<code class="docutils literal notranslate"><span class="pre">kda_prefill_backend</span></code> and <code class="docutils literal notranslate"><span class="pre">kda_decode_backend</span></code> to <code class="docutils literal notranslate"><span class="pre">triton</span></code>;
+the supported gate is unbounded softplus.
 <code class="docutils literal notranslate"><span class="pre">replayssm</span></code> uses the serving fork’s INT8/Hadamard checkpoint and ring kernels.
 <code class="docutils literal notranslate"><span class="pre">replay_window=1</span></code> refreshes the state every token; larger windows enable replay.
 Fresh prefill has no internal state QDQ; incoming continuation state and
@@ -495,7 +507,7 @@ the handoff to a nonempty suffix use the selected checkpoint encoding.</p>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.linear_attention.config.LinearAttentionConfig.precision">
-<span class="sig-name descname"><span class="pre">precision</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'vllm'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'vllm_0_15'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'replayssm'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.linear_attention.config.LinearAttentionConfig.precision" title="Link to this definition">#</a></dt>
+<span class="sig-name descname"><span class="pre">precision</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'vllm'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'vllm_kimi_k3'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'replayssm'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.linear_attention.config.LinearAttentionConfig.precision" title="Link to this definition">#</a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
@@ -522,7 +534,8 @@ the handoff to a nonempty suffix use the selected checkpoint encoding.</p>
 <dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
 <p>Assign a complete policy to supported modules matching <code class="docutils literal notranslate"><span class="pre">module_name</span></code>.</p>
 <p>Rules apply in order: the last match wins, without merging fields.
-A rule must match at least one supported module across distributed stages.</p>
+Unmatched rules are ignored locally, as with quant_cfg, so a shared recipe
+can be applied independently to pipeline stages and virtual-pipeline chunks.</p>
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.linear_attention.config.LinearAttentionPolicyEntry.cfg">
 <span class="sig-name descname"><span class="pre">cfg</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.quantization.linear_attention.config.LinearAttentionConfig" title="modelopt.torch.quantization.linear_attention.config.LinearAttentionConfig"><span class="pre">LinearAttentionConfig</span></a></span><a class="headerlink" href="#modelopt.torch.quantization.linear_attention.config.LinearAttentionPolicyEntry.cfg" title="Link to this definition">#</a></dt>

@@ -38,6 +38,5 @@ kda
       :nosignatures:
    
       kda_state_qat
-      matmul_kda
    
    

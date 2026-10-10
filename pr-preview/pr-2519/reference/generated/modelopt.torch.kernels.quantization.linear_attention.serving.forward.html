@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>forward - Model Optimizer 0.0.1.dev1+g09a6e025d</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="replay" href="modelopt.torch.kernels.quantization.linear_attention.serving.replay.html" /><link rel="prev" title="chunk_delta_h" href="modelopt.torch.kernels.quantization.linear_attention.serving.chunk_delta_h.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>forward - Model Optimizer 0.0.1.dev1+g4a70c001a</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="replay" href="modelopt.torch.kernels.quantization.linear_attention.serving.replay.html" /><link rel="prev" title="serving" href="modelopt.torch.kernels.quantization.linear_attention.serving.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -391,9 +391,9 @@ data-aria-dark="Switch to auto color mode">
       <i class="i-lucide close"></i>
     </button>
     <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
-<li><a class="reference internal" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.fused_gdn_gating"><code class="docutils literal notranslate"><span class="pre">fused_gdn_gating()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.prefill"><code class="docutils literal notranslate"><span class="pre">prefill()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.step"><code class="docutils literal notranslate"><span class="pre">step()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.validate_profile"><code class="docutils literal notranslate"><span class="pre">validate_profile()</span></code></a></li>
 </ul>
 </div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
   </aside>
@@ -450,39 +450,39 @@ data-aria-dark="Switch to auto color mode">
   <article class="yue dark-code" role="main">
           <section id="forward">
 <h1>forward<a class="headerlink" href="#forward" title="Link to this heading">#</a></h1>
-<p id="module-modelopt.torch.kernels.quantization.linear_attention.serving.forward">vLLM forward primitives with FP32 saved values; autograd lives in quantization.</p>
+<p id="module-modelopt.torch.kernels.quantization.linear_attention.serving.forward">Native vLLM Triton forwards; training owns private, differentiable state.</p>
 <p class="rubric">Functions</p>
 <div class="table-wrapper autosummary longtable docutils container">
 <table class="autosummary longtable docutils align-default">
 <tbody>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.fused_gdn_gating" title="modelopt.torch.kernels.quantization.linear_attention.serving.forward.fused_gdn_gating"><code class="xref py py-obj docutils literal notranslate"><span class="pre">fused_gdn_gating</span></code></a></p></td>
-<td><p>Load the optional vLLM model only when Megatron needs GDN gate preparation.</p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.prefill" title="modelopt.torch.kernels.quantization.linear_attention.serving.forward.prefill"><code class="xref py py-obj docutils literal notranslate"><span class="pre">prefill</span></code></a></p></td>
+<td><p>Run the complete native chunk entry point, including raw-gate preparation.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.prefill" title="modelopt.torch.kernels.quantization.linear_attention.serving.forward.prefill"><code class="xref py py-obj docutils literal notranslate"><span class="pre">prefill</span></code></a></p></td>
-<td><p>Return one sequence's output, final state, and rounded forward intermediates.</p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.step" title="modelopt.torch.kernels.quantization.linear_attention.serving.forward.step"><code class="xref py py-obj docutils literal notranslate"><span class="pre">step</span></code></a></p></td>
+<td><p>Run native fused decode on a private cache; never mutate the incoming state.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.step" title="modelopt.torch.kernels.quantization.linear_attention.serving.forward.step"><code class="xref py py-obj docutils literal notranslate"><span class="pre">step</span></code></a></p></td>
-<td><p>Run one native token update without modifying the incoming state.</p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.validate_profile" title="modelopt.torch.kernels.quantization.linear_attention.serving.forward.validate_profile"><code class="xref py py-obj docutils literal notranslate"><span class="pre">validate_profile</span></code></a></p></td>
+<td><p>Validate the selected native serving contract before launching prefill.</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 <dl class="py function">
-<dt class="sig sig-object py" id="modelopt.torch.kernels.quantization.linear_attention.serving.forward.fused_gdn_gating">
-<span class="sig-name descname"><span class="pre">fused_gdn_gating</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">args</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.fused_gdn_gating" title="Link to this definition">#</a></dt>
-<dd><p>Load the optional vLLM model only when Megatron needs GDN gate preparation.</p>
-</dd></dl>
-
-<dl class="py function">
 <dt class="sig sig-object py" id="modelopt.torch.kernels.quantization.linear_attention.serving.forward.prefill">
-<span class="sig-name descname"><span class="pre">prefill</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">q</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">k</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">g</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">beta</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">state</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">normalize</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.prefill" title="Link to this definition">#</a></dt>
-<dd><p>Return one sequence’s output, final state, and rounded forward intermediates.</p>
+<span class="sig-name descname"><span class="pre">prefill</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">q</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">k</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">g</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">beta</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">state</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">normalize</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">gate_inputs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">kimi_k3</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.prefill" title="Link to this definition">#</a></dt>
+<dd><p>Run the complete native chunk entry point, including raw-gate preparation.</p>
 </dd></dl>
 
 <dl class="py function">
 <dt class="sig sig-object py" id="modelopt.torch.kernels.quantization.linear_attention.serving.forward.step">
-<span class="sig-name descname"><span class="pre">step</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">q</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">k</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">g</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">beta</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">state</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">normalize</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.step" title="Link to this definition">#</a></dt>
-<dd><p>Run one native token update without modifying the incoming state.</p>
+<span class="sig-name descname"><span class="pre">step</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">q</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">k</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">g</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">beta</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">state</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">normalize</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">gate_inputs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">kimi_k3</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.step" title="Link to this definition">#</a></dt>
+<dd><p>Run native fused decode on a private cache; never mutate the incoming state.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.kernels.quantization.linear_attention.serving.forward.validate_profile">
+<span class="sig-name descname"><span class="pre">validate_profile</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">gate_inputs</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">normalize</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">kimi_k3</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.kernels.quantization.linear_attention.serving.forward.validate_profile" title="Link to this definition">#</a></dt>
+<dd><p>Validate the selected native serving contract before launching prefill.</p>
 </dd></dl>
 
 </section>
@@ -493,10 +493,10 @@ data-aria-dark="Switch to auto color mode">
   </svg>
   <span>Back to top</span>
 </button><div class="navigation flex print:hidden"><div class="navigation-prev">
-    <a href="modelopt.torch.kernels.quantization.linear_attention.serving.chunk_delta_h.html">
+    <a href="modelopt.torch.kernels.quantization.linear_attention.serving.html">
       <i class="i-lucide chevron-left"></i>
       <div class="page-info">
-        <span>Previous</span><div class="title">chunk_delta_h</div></div>
+        <span>Previous</span><div class="title">serving</div></div>
     </a>
   </div><div class="navigation-next">
     <a href="modelopt.torch.kernels.quantization.linear_attention.serving.replay.html">
