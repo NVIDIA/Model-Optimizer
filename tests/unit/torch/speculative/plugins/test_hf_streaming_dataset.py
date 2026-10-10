@@ -430,6 +430,49 @@ def test_lapped_slot_is_treated_as_miss(monkeypatch):
         ds[0]
 
 
+def _first_done_raising_handler(seq, n_layers, hidden, calls):
+    """Sidecar handler whose first /done raises a transport error; ``calls`` logs the paths."""
+    inner = _rdma_sidecar_handler(seq, n_layers, hidden)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/done" and calls.count("/done") == 1:
+            raise httpx.ConnectError("simulated sidecar failure")
+        return inner(request)
+
+    return handler
+
+
+def test_failed_done_resamples_instead_of_returning_the_read(monkeypatch):
+    """The discard is a resample, not a hard failure: the next entry is fetched and returned."""
+    seq, n_layers, hidden = 8, 3, 16
+    calls: list[str] = []
+    _mock_rdma(
+        monkeypatch,
+        _first_done_raising_handler(seq, n_layers, hidden, calls),
+    )
+
+    ds = EagleVllmStreamingDataset(
+        entries=[
+            {"conversation_id": f"c-{i}", "messages": [{"role": "user", "content": "x"}]}
+            for i in range(2)
+        ],
+        tokenizer=_tokenizer_returning(seq),
+        config=EagleVllmStreamingConfig(
+            server_urls="http://mock:8000",
+            model="mock-model",
+            max_seq_len=seq,
+            fail_after_consecutive_skips=100,
+        ),
+    )
+
+    batch = ds[0]
+    assert batch["base_model_hidden_states"].shape == (seq, hidden)
+    # Two prompts posted: the first read was thrown away, the second is what came back.
+    assert calls.count("/v1/completions") == 2
+    assert calls.count("/done") == 2
+
+
 def test_oversize_server_response_raises(monkeypatch):
     """If the server captured more tokens than max_seq_len (its connector max_tokens >
     our recv buffer), reading would silently truncate the slice; fail loud instead so the

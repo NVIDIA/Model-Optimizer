@@ -205,7 +205,7 @@ class HFDFlash2Model(HFDFlashModel):
         anchor_positions,
         block_keep_mask,
         loss_mask,
-        base_logits=None,
+        *,
         draft_hidden=None,
         base_outputs=None,
     ):
@@ -222,7 +222,6 @@ class HFDFlash2Model(HFDFlashModel):
             anchor_positions,
             block_keep_mask,
             loss_mask,
-            base_logits,
             draft_hidden=draft_hidden,
             base_outputs=base_outputs,
             return_terms=True,

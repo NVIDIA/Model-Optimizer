@@ -56,8 +56,6 @@ from transformers.models.qwen3.modeling_qwen3 import (
 from transformers.models.qwen3.modeling_qwen3 import repeat_kv
 from transformers.models.qwen3.modeling_qwen3 import rotate_half as _rotate_half
 
-from .modeling_final_norm import _maybe_apply_base_final_norm
-
 __all__ = ["DFlashBaseModelOutput", "DFlashModule", "build_target_layer_ids"]
 
 
@@ -116,46 +114,31 @@ def _get_sink_attention_fn():
 
 @dataclass
 class DFlashBaseModelOutput:
-    """Output container for base model forward pass in DFlash training."""
+    """What a DFlash-family draft takes from the base model in a training step.
+
+    ``logits`` holds the full base logits when the producer already has them (DFlash's
+    online CausalLM forward, or an offline batch carrying ``base_model_logits``);
+    otherwise ``base_hidden`` stays unprojected, and ``HFDFlashModel._teacher_logits``
+    projects only the rows a loss reads.
+    """
 
     target_hidden: torch.Tensor  # concatenated hidden states from target layers [B, seq, N*H]
-    logits: torch.Tensor | None = None  # base model logits [B, seq, vocab]
+    base_hidden: torch.Tensor | None = None  # base final hidden, lm_head's input [B, seq, H]
+    base_hidden_prenorm: bool = False  # base_hidden was captured before the final norm
+    logits: torch.Tensor | None = None  # base logits [B, seq, vocab], when handed over as such
 
     @classmethod
-    def from_offline_dict(
-        cls, d: dict, base_model_norm=None, base_model_lm_head=None, need_logits=False
-    ):
+    def from_offline_dict(cls, d: dict):
         """Construct from a dict of pre-computed base model outputs (offline training).
 
         ``aux_hidden_states`` is required — missing it raises KeyError at the entry point
         rather than producing a cryptic failure deeper in the forward.
-
-        When ``need_logits`` (self-logit-distillation) and the producer didn't supply
-        ``base_model_logits``, logits are reconstructed from the captured final hidden via
-        ``base_model_lm_head`` — first re-applying the base final norm when the producer captured
-        a pre-(final-)norm hidden (``base_hidden_prenorm``), so the reconstruction is correct
-        regardless of capture format. Anything missing on that path raises rather than silently
-        yielding None logits: no ``base_model_lm_head`` (ValueError), no captured hidden
-        (KeyError), or a pre-norm hidden with no ``base_model_norm`` (feeding an un-normed hidden
-        to lm_head would be a corrupt distillation target).
         """
-        logits = d.get("base_model_logits")
-        if need_logits and logits is None:
-            if base_model_lm_head is None:
-                raise ValueError(
-                    "need_logits=True but base_model_lm_head is None; cannot reconstruct logits."
-                )
-            out_hiddens = d.get("base_model_hidden_states")
-            if out_hiddens is None:
-                raise KeyError("base_model_hidden_states")
-            # A producer can store the hidden states in a wider dtype than the target's weights.
-            # Cast before the final norm too, which online training runs in the target's dtype.
-            out_hiddens = out_hiddens.to(base_model_lm_head.weight.dtype)
-            out_hiddens = _maybe_apply_base_final_norm(out_hiddens, d, base_model_norm)
-            logits = base_model_lm_head(out_hiddens)
         return cls(
             target_hidden=d["aux_hidden_states"],
-            logits=logits,
+            base_hidden=d.get("base_model_hidden_states"),
+            base_hidden_prenorm=bool(d.get("base_hidden_prenorm", False)),
+            logits=d.get("base_model_logits"),
         )
 
 
@@ -274,7 +257,24 @@ class DFlashAttention(nn.Module):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        if self.attention_sink_bias is not None:
+        from .dflash_flex_attention import flex_attention_forward, is_block_mask
+
+        if is_block_mask(attention_mask):
+            if self.attention_sink_bias is not None:
+                # The sink is an extra softmax column the flex kernel does not have; running
+                # without it would train a sink-less draft that is exported as sink-enabled.
+                raise NotImplementedError(
+                    "dflash_use_flex_attention does not support dflash_attention_sink; "
+                    "unset one of them."
+                )
+            dropout = 0.0 if not self.training else self.attention_dropout
+            if dropout:
+                raise ValueError(
+                    "FlexAttention path does not support attention_dropout > 0 "
+                    f"(got {dropout}); unset dflash_use_flex_attention."
+                )
+            attn_output = flex_attention_forward(q, k, v, attention_mask, self.scaling)
+        elif self.attention_sink_bias is not None:
             if self.sliding_window is not None:
                 # The eager sink path applies only the caller-supplied mask; a per-layer
                 # window from config.layer_types would be silently dropped. DFlash windows
@@ -410,6 +410,7 @@ class DFlashModule(nn.Module):
         )
         self.norm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
         self._rotary_config = config  # Used by _maybe_init_rotary_emb
+        self._compiled_body = None  # set by compile_body()
 
         # Explicit weight init is needed because DFlashModule is instantiated via
         # mtsp.convert() AFTER the base model's post_init() has already run, so HF's
@@ -437,9 +438,28 @@ class DFlashModule(nn.Module):
 
     def forward(self, noise_embedding, target_hidden, position_ids, attention_mask=None):
         """Forward with feature fusion, KV injection, and position embeddings."""
+        # Outside the compiled body: lazy rotary init mutates the module.
+        self._maybe_init_rotary_emb(device=noise_embedding.device)
+        return self._body()(noise_embedding, target_hidden, position_ids, attention_mask)
+
+    def compile_body(self):
+        """Inductor-compile the draft stack; ``_body`` runs it in training only.
+
+        ``dynamic=False`` relies on the pinned block count, while generation runs at varying
+        lengths and would recompile for each.
+        """
+        self._compiled_body = torch.compile(self._forward_body, dynamic=False)
+
+    def _body(self):
+        """The compiled draft stack while training, if ``compile_body`` ran; eager otherwise."""
+        if self.training and self._compiled_body is not None:
+            return self._compiled_body
+        return self._forward_body
+
+    def _forward_body(self, noise_embedding, target_hidden, position_ids, attention_mask):
+        """Feature fusion, rotary selection, the decoder stack, and the final norm."""
         hidden_states = noise_embedding
         target_hidden = self.hidden_norm(self.fc(target_hidden))
-        self._maybe_init_rotary_emb(device=hidden_states.device)
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         for layer in self.layers:

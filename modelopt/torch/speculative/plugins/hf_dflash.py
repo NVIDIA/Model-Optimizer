@@ -96,6 +96,7 @@ from .modeling_fakebase import (
     _FINAL_NORM_PATHS,
     _LM_HEAD_PATHS,
 )
+from .modeling_final_norm import _maybe_apply_base_final_norm
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,39 @@ def _multimodal_forward_kwargs(model_kwargs: dict) -> dict:
         for name, value in model_kwargs.items()
         if name in _MULTIMODAL_FORWARD_KWARGS and value is not None
     }
+
+
+def _gather_rows(x, positions):
+    """``x[b, positions[b, ...]]`` for ``x`` [B, seq, D] and ``positions`` [B, ...]."""
+    idx = positions.reshape(positions.shape[0], -1, 1).expand(-1, -1, x.size(-1))
+    return torch.gather(x, 1, idx).reshape(*positions.shape, x.size(-1))
+
+
+def _draft_mask_mod(seq_len, anchor_positions, block_keep_mask, block_size, window, causal):
+    """The draft's attention visibility rule, as a FlexAttention ``mask_mod``.
+
+    Elementwise ops and indexing only, so the one rule feeds ``create_block_mask`` and,
+    evaluated on broadcast index grids, the dense SDPA mask.
+    """
+    # Indexed inside mask_mod, which create_block_mask runs under vmap: keep them integral.
+    anchors = anchor_positions.to(torch.int32)
+    keep = block_keep_mask.to(torch.bool)
+
+    def mask_mod(b, h, q_idx, kv_idx):
+        q_block = q_idx // block_size
+        anchor = anchors[b, q_block]
+        is_ctx = kv_idx < seq_len
+        ctx_ok = is_ctx & (kv_idx < anchor)
+        if window is not None:
+            # Window from the query's real position (anchor + position in block).
+            ctx_ok = ctx_ok & (kv_idx > anchor + (q_idx % block_size) - window)
+        draft_ok = (~is_ctx) & (q_block == (kv_idx - seq_len) // block_size)
+        if causal:
+            # Block-causal: block position i sees draft positions <= i.
+            draft_ok = draft_ok & (((kv_idx - seq_len) % block_size) <= (q_idx % block_size))
+        return (ctx_ok | draft_ok) & keep[b, q_block]
+
+    return mask_mod
 
 
 def _dpace_position_weights(
@@ -430,6 +464,8 @@ class HFDFlashModel(DFlashModel):
 
         self.is_quantized = False
         self._num_anchors = self.dflash_num_anchors
+        if self.dflash_use_torch_compile:
+            self.dflash_module.compile_body()
 
     def _build_draft_module(self, dflash_config):
         """Build the draft module. Subclasses override to use an augmented module."""
@@ -539,6 +575,9 @@ class HFDFlashModel(DFlashModel):
 
         Returns (anchor_positions [B, N], block_keep_mask [B, N]).
 
+        ``N`` is fixed by the config and ``seq_len``, not by the batch, so the compiled
+        (``dynamic=False``) draft attention sees one shape and never recompiles.
+
         TODO: Fix the random seed per epoch (change between epochs) so that anchor
         positions are deterministic within an epoch. This would allow caching the derived
         masks and position IDs across steps while preserving the same data augmentation
@@ -551,27 +590,29 @@ class HFDFlashModel(DFlashModel):
 
         valid = loss_mask[:, : max_anchor + 1] > 0.5
         valid_counts = valid.sum(dim=1)
-        max_n = min(num_anchors, int(valid_counts.max().item()) - 1)
 
-        if max_n <= 0:
-            # No valid anchors — return empty
-            anchors = torch.zeros(bsz, 1, dtype=torch.long, device=device)
-            keep = torch.zeros(bsz, 1, dtype=torch.bool, device=device)
-            return anchors, keep
+        # Also bounded by max_anchor + 1 so short sequences cannot ask for more columns.
+        max_n = min(num_anchors, max_anchor + 1)
+
+        # The data-dependent bound on sampled anchors, kept on-device so no shape depends on it.
+        cap = (valid_counts.max() - 1).clamp(min=0, max=max_n)
 
         indices = torch.arange(max_anchor + 1, device=device).unsqueeze(0).expand(bsz, -1)
-        masked_indices = torch.where(valid, indices, torch.tensor(seq_len + 1, device=device))
+        fill = torch.tensor(seq_len + 1, device=device)
+        masked_indices = torch.where(valid, indices, fill)
 
         random_vals = torch.rand(bsz, max_anchor + 1, device=device)
         random_vals = torch.where(valid, random_vals, torch.tensor(2.0, device=device))
 
         _, sorted_idx = random_vals.sort(dim=1)
         gathered = torch.gather(masked_indices, 1, sorted_idx)
-        anchors = gathered[:, :max_n].sort(dim=1).values
 
-        keep = torch.arange(max_n, device=device).unsqueeze(0) < valid_counts.unsqueeze(1).clamp(
-            max=max_n
-        )
+        # Blank past `cap` before sorting: sorting first would pull anchors from beyond the
+        # bound into the row and silently change which positions are trained on.
+        cols = torch.arange(max_n, device=device).unsqueeze(0)
+        anchors = torch.where(cols < cap, gathered[:, :max_n], fill).sort(dim=1).values
+
+        keep = cols < torch.minimum(valid_counts, cap).unsqueeze(1)
         anchors = torch.where(keep, anchors, torch.tensor(0, dtype=torch.long, device=device))
         return anchors, keep
 
@@ -609,7 +650,7 @@ class HFDFlashModel(DFlashModel):
     def _build_draft_attention_mask(
         self, seq_len, anchor_positions, block_keep_mask, n_blocks, dtype, device, window=None
     ):
-        """Build SDPA attention mask: context (causal) + draft (per ``dflash_draft_attention``).
+        """Build the draft attention mask: context (causal) + draft (per ``dflash_draft_attention``).
 
         When ``window`` is not None, all layers use sliding-window attention: each draft
         query only sees context positions within ``window`` tokens before its own position.
@@ -621,44 +662,42 @@ class HFDFlashModel(DFlashModel):
         ``"bidirectional"`` (default, MiMo-style) lets every query see the whole block, while
         ``"causal"`` restricts a query at block position ``i`` to draft positions ``<= i`` so
         the block is modelled autoregressively.
+
+        Returns a dense additive SDPA mask, or a ``BlockMask`` under
+        ``dflash_use_flex_attention``; both evaluate the one rule in ``_draft_mask_mod``.
         """
         bsz = anchor_positions.shape[0]
-        block_size = self.dflash_block_size
-        q_len = n_blocks * block_size
+        q_len = n_blocks * self.dflash_block_size
         kv_len = seq_len + q_len
+        mask_mod = _draft_mask_mod(
+            seq_len,
+            anchor_positions,
+            block_keep_mask,
+            self.dflash_block_size,
+            window,
+            causal=self.dflash_draft_attention == "causal",
+        )
 
-        q_indices = torch.arange(q_len, device=device).view(1, 1, -1, 1)
-        kv_indices = torch.arange(kv_len, device=device).view(1, 1, 1, -1)
-        q_block_ids = q_indices // block_size
+        if self.dflash_use_flex_attention:
+            from .dflash_flex_attention import build_draft_block_mask
 
-        anchor_exp = anchor_positions.view(bsz, 1, n_blocks, 1).repeat_interleave(block_size, dim=2)
+            return build_draft_block_mask(
+                mask_mod,
+                bsz,
+                q_len,
+                kv_len,
+                device,
+                head_dim=self.dflash_module.layers[0].self_attn.head_dim,
+            )
 
-        # Context: kv < S and kv < anchor
-        mask_ctx = (kv_indices < seq_len) & (kv_indices < anchor_exp)
-
-        # Sliding window on the context: keep only context kv whose real position is within
-        # `window` tokens before the query's real position (anchor + position-in-block).
-        if window is not None:
-            q_real_pos = anchor_exp + (q_indices % block_size)  # [B, 1, q_len, 1]
-            mask_ctx = mask_ctx & (kv_indices > q_real_pos - window)
-        # Draft: kv >= S and same block
-        is_draft = kv_indices >= seq_len
-        kv_block_ids = (kv_indices - seq_len) // block_size
-        mask_draft = is_draft & (q_block_ids == kv_block_ids)
-        if self.dflash_draft_attention == "causal":
-            # Autoregressive within the block: query at block position i sees draft
-            # positions <= i only. Compare positions *within* the block so the term is
-            # independent of which block the query belongs to.
-            kv_pos_in_block = (kv_indices - seq_len) % block_size
-            mask_draft = mask_draft & (kv_pos_in_block <= (q_indices % block_size))
-        # Valid block
-        valid_block = block_keep_mask.view(bsz, 1, n_blocks, 1).repeat_interleave(block_size, dim=2)
-
-        final_mask = (mask_ctx | mask_draft) & valid_block  # [B, 1, Q, KV]
-
-        # Convert bool mask to float additive mask for SDPA
+        visible = mask_mod(
+            torch.arange(bsz, device=device).view(-1, 1, 1, 1),
+            None,
+            torch.arange(q_len, device=device).view(1, 1, -1, 1),
+            torch.arange(kv_len, device=device).view(1, 1, 1, -1),
+        )  # [B, 1, Q, KV]
         attn_mask = torch.zeros(bsz, 1, q_len, kv_len, device=device, dtype=dtype)
-        attn_mask.masked_fill_(~final_mask, torch.finfo(dtype).min)
+        attn_mask.masked_fill_(~visible, torch.finfo(dtype).min)
         return attn_mask
 
     def _build_generate_swa_mask(self, ctx_len, bsz, dtype, device):
@@ -693,6 +732,40 @@ class HFDFlashModel(DFlashModel):
         attn_mask.masked_fill_(~keep, torch.finfo(dtype).min)
         return attn_mask
 
+    @torch.no_grad()
+    def _teacher_logits(self, base_outputs, positions, token_ids=None):
+        """Base-model logits at ``positions`` ([B, ...] sequence indices) -> [B, ..., vocab].
+
+        Only the requested rows of the base hidden go through the final norm and lm_head, so
+        no full-sequence logits are built from it; ``token_ids`` ([B, ..., k]) narrows the
+        projection to just those vocab entries.
+        """
+        if base_outputs.logits is not None:
+            if token_ids is None:
+                return _gather_rows(base_outputs.logits, positions)
+            batch = torch.arange(positions.shape[0], device=positions.device)
+            batch = batch.view(-1, *[1] * positions.dim())
+            return base_outputs.logits[batch, positions.unsqueeze(-1), token_ids]
+        if base_outputs.base_hidden is None:
+            raise ValueError(
+                "This objective needs the base model's distribution, but the batch carries "
+                "neither its logits nor its final hidden states (base_model_hidden_states)."
+            )
+        lm_head = self._base_model_lm_head
+        # A producer can store the hidden states in a wider dtype than the target's weights.
+        # Cast before the final norm too, which online training runs in the target's dtype.
+        rows = _gather_rows(base_outputs.base_hidden, positions).to(lm_head.weight.dtype)
+        rows = _maybe_apply_base_final_norm(
+            rows,
+            {"base_hidden_prenorm": base_outputs.base_hidden_prenorm},
+            self._base_model_norm,
+        )
+        if token_ids is None:
+            return lm_head(rows)
+        logits = torch.einsum("...h,...kh->...k", rows, lm_head.weight[token_ids])
+        bias = getattr(lm_head, "bias", None)
+        return logits if bias is None else logits + bias[token_ids]
+
     def _compute_loss(
         self,
         logits,
@@ -700,7 +773,7 @@ class HFDFlashModel(DFlashModel):
         anchor_positions,
         block_keep_mask,
         loss_mask,
-        base_logits=None,
+        *,
         draft_hidden=None,
         base_outputs=None,
         return_terms=False,
@@ -713,9 +786,10 @@ class HFDFlashModel(DFlashModel):
             anchor_positions: Anchor positions per block [B, N].
             block_keep_mask: Valid block mask [B, N].
             loss_mask: Token-level loss mask [B, seq_len].
-            base_logits: Base model logits for KD loss [B, seq_len, vocab], or None for CE.
             draft_hidden: Draft hidden states [B, N*block_size, H] behind ``logits``.
                 Unused here; passed for variants whose head consumes them.
+            base_outputs: The step's ``DFlashBaseModelOutput``: the KD teacher under
+                ``dflash_self_logit_distillation``, and read by variants.
             return_terms: Also return the unreduced pieces behind the loss, so a variant
                 can recompose the block objective from a different divergence without
                 rebuilding the target alignment and position weighting.
@@ -755,12 +829,17 @@ class HFDFlashModel(DFlashModel):
         flat_logits = logits.view(-1, logits.size(-1))
         flat_targets = target_ids.view(-1)
 
+        kd = self.dflash_self_logit_distillation
+        if kd and base_outputs is None:
+            raise ValueError(
+                "dflash_self_logit_distillation distills from base_outputs, but none was "
+                "passed; an override of _compute_loss must forward it."
+            )
         # Non-KD loss is per-token cross-entropy; compute it once (grad enabled) so the
         # D-PACE confidences below can reuse it instead of a second CE pass. The KD path
-        # (base_logits is not None) optimizes KL, so its confidences need a dedicated
-        # no_grad CE pass.
+        # optimizes KL, so its confidences need a dedicated no_grad CE pass.
         loss_per_token = None
-        if base_logits is None:
+        if not kd:
             loss_per_token = F.cross_entropy(flat_logits, flat_targets, reduction="none")
 
         # Block-position loss weighting: dynamic D-PACE weights or static exponential decay.
@@ -790,15 +869,11 @@ class HFDFlashModel(DFlashModel):
         valid_count = flat_weights.sum() + 1e-6
 
         if valid_count > 1.0:
-            if base_logits is not None:
+            if kd:
                 # KD loss: teacher logits for token anchor+k are at position anchor+k-1
                 teacher_indices = (safe_label_indices - 1).clamp(min=0)
-                teacher_logits = torch.gather(
-                    base_logits.unsqueeze(1).expand(-1, n_blocks, -1, -1),
-                    2,
-                    teacher_indices.unsqueeze(-1).expand(-1, -1, -1, base_logits.size(-1)),
-                )
-                flat_teacher = teacher_logits.reshape(-1, base_logits.size(-1)).detach()
+                flat_teacher = self._teacher_logits(base_outputs, teacher_indices)
+                flat_teacher = flat_teacher.reshape(flat_logits.shape)
                 target_soft = torch.softmax(flat_teacher, dim=-1)
                 draft_logsoft = torch.log_softmax(flat_logits, dim=-1)
                 kd_loss = -(target_soft * draft_logsoft).sum(dim=-1)
@@ -882,15 +957,14 @@ class HFDFlashModel(DFlashModel):
         # 1. Run base model → extract target hidden states
         if self.dflash_offline:
             assert "base_model_outputs" in kwargs
-            # When the loss needs them (see _needs_base_logits), from_offline_dict reconstructs
-            # base logits from the captured hidden (final norm re-applied as needed) when the producer didn't supply
-            # them, and raises if anything needed for that is missing.
-            base_outputs = DFlashBaseModelOutput.from_offline_dict(
-                kwargs["base_model_outputs"],
-                self._base_model_norm,
-                self._base_model_lm_head,
-                need_logits=self._needs_base_logits,
-            )
+            base_outputs = DFlashBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
+            # Fail at the entry point rather than in the loss, after the draft has run.
+            if (
+                self._needs_base_logits
+                and base_outputs.logits is None
+                and base_outputs.base_hidden is None
+            ):
+                raise KeyError("base_model_hidden_states")
             target_hidden = base_outputs.target_hidden
         else:
             # Multimodal models need the top-level conditional-generation forward so their
@@ -996,7 +1070,6 @@ class HFDFlashModel(DFlashModel):
             anchor_positions,
             block_keep_mask,
             loss_mask,
-            base_outputs.logits if self.dflash_self_logit_distillation else None,
             draft_hidden=hidden,
             base_outputs=base_outputs,
         )
