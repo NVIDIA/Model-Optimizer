@@ -201,6 +201,8 @@ bridge, _, models, student, _ = load_mbridge_model_from_hf(
 load_modelopt_megatron_checkpoint(models, "/path/to/output/checkpoints/iter_0000002")
 export_dir = Path("/path/to/hf-export")
 bridge.hf_pretrained.save_artifacts(export_dir)
+# Perform normalization convention changes in FP32 before writing HF weights.
+student.float()
 bridge.save_hf_weights([student], export_dir)
 torch.save(mto.modelopt_state(student), export_dir / "megatron_modelopt_state.pt")
 
@@ -215,6 +217,12 @@ mto.restore_from_modelopt_state(
 )
 dist.cleanup()
 ```
+
+This example exports FP32 weights. GDN's output norm stores a zero-centered
+weight in Megatron and a weight centered on one in HF; doing that conversion in
+BF16 can erase small training updates. FP32 preserves the effective normalization
+multiplier. Load these weights in Transformers with `dtype=torch.float32`;
+forcing BF16 can introduce rounding again.
 
 The sidecar uses ModelOpt's existing metadata format with **Megatron module names**.
 Keep it with the exported weights. Transformers can load those weights but does
@@ -238,6 +246,7 @@ is fixed at one. The available topology options do not imply multi-GPU qualifica
 The two example tests cover GDN QAT and QAD with shared compilation setup. Each
 saves a checkpoint, checks exact weight and policy restoration, resumes for one
 step, and exports/reloads HF weights with the separate Megatron ModelOpt metadata.
+The HF round trip checks all effective parameters, logits, and attention gradients.
 The QAD test also checks that the teacher stays frozen and unquantized. Run them
 in the matching Bridge/vLLM environment:
 

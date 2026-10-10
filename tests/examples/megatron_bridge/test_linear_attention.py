@@ -40,6 +40,7 @@ from transformers import AutoModelForCausalLM, Qwen3_5ForCausalLM, Qwen3_5TextCo
 
 import modelopt.torch.opt as mto
 from modelopt.recipe import load_recipe
+from modelopt.torch.quantization.linear_attention import linear_attention_training_phase
 from modelopt.torch.quantization.utils import is_quantized
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils.plugins.mbridge import (
@@ -125,6 +126,16 @@ def _train(qad, recipe, hf_model, checkpoint=None, train_iters=1):
     return captured
 
 
+def _state_logits_and_gradients(model):
+    model.eval()
+    tokens = torch.arange(16, device="cuda").unsqueeze(0)
+    parameters = tuple(model.decoder.layers[0].self_attention.parameters())
+    with linear_attention_training_phase(model, [8]), torch.autocast("cuda", dtype=torch.bfloat16):
+        logits = model(tokens, tokens, None).float()
+        gradients = torch.autograd.grad(logits[:, 8:].square().mean(), parameters)
+    return logits.detach(), gradients
+
+
 @pytest.fixture(scope="module")
 def compiled_state_training(tmp_path_factory):
     """Compile one tiny GDN shape before timing the single-GPU training checks."""
@@ -205,19 +216,23 @@ def test_state_training_checkpoint_roundtrip(compiled_state_training, qad, tmp_p
     torch.testing.assert_close(
         restored_attention.out_proj.weight, attention.out_proj.weight, rtol=0, atol=0
     )
+    expected_weights = {name: p.detach().clone() for name, p in student.named_parameters()}
+    expected_numerics = _state_logits_and_gradients(student)
     export_dir = tmp_path / "hf_export"
     bridge.hf_pretrained.save_artifacts(export_dir)
+    # Shift zero-centered norm weights in FP32 so BF16 does not erase small updates.
+    student.float()
     bridge.save_hf_weights([student], export_dir)
     # Keep Megatron metadata separate: Transformers has no GDN/KDA state-QAT adapter.
     metadata_path = export_dir / "megatron_modelopt_state.pt"
     torch.save(mto.modelopt_state(student), metadata_path)
     exported, loading = AutoModelForCausalLM.from_pretrained(
-        export_dir, dtype=torch.bfloat16, output_loading_info=True
+        export_dir, dtype=torch.float32, output_loading_info=True
     )
     assert not loading["missing_keys"] and not loading["unexpected_keys"]
     torch.testing.assert_close(
         exported.model.layers[0].linear_attn.out_proj.weight,
-        attention.out_proj.weight.cpu(),
+        attention.out_proj.weight.float().cpu(),
         rtol=0,
         atol=0,
     )
@@ -233,4 +248,13 @@ def test_state_training_checkpoint_roundtrip(compiled_state_training, qad, tmp_p
     assert reimported_attention.gdn_state_quantizer.get_modelopt_state() == quantizer_config
     torch.testing.assert_close(
         reimported_attention.out_proj.weight, attention.out_proj.weight, rtol=0, atol=0
+    )
+    for name, parameter in reimported.named_parameters():
+        expected = expected_weights[name]
+        if name.endswith(".self_attention.out_norm.weight"):
+            # HF stores gamma+1; compare the effective FP32 RMSNorm multiplier.
+            parameter, expected = parameter.float() + 1, expected.float() + 1
+        torch.testing.assert_close(parameter, expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        _state_logits_and_gradients(reimported), expected_numerics, rtol=0, atol=0
     )
