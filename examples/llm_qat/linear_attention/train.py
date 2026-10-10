@@ -45,7 +45,6 @@ from megatron.bridge.training.post_training.distillation import ModelOptDistillC
 from megatron.bridge.training.pretrain import pretrain
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
-from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.ssm import gated_delta_net
 from megatron.core.utils import unwrap_model
 from transformers import AutoTokenizer
@@ -80,16 +79,6 @@ def run_training(config, quant_config, prefill_tokens, teacher_provider=None):
                 student.requires_grad_(False)
                 for layer in layers:
                     layer.requires_grad_(True)
-                if config.model.recompute_granularity == "full":
-
-                    def require_input_grad(module, args, output):
-                        return output.requires_grad_(True) if module.training else output
-
-                    # Reentrant checkpointing needs a differentiable input with frozen embeddings.
-                    for module in student.modules():
-                        if isinstance(module, LanguageModelEmbedding):
-                            handle = module.register_forward_hook(require_input_grad)
-                            phases.callback(handle.remove)
                 if not is_quantized(student):
                     mtq.quantize(student, quant_config)
                 phases.enter_context(

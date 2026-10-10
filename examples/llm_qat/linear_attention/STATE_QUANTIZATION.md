@@ -3,7 +3,8 @@
 GDN/KDA state QAT must reproduce the state consumed by serving. This requires
 matching the quantization boundaries, scale groups, native arithmetic, and output
 read timing. The implementation combines a native chunked prefix with a recurrent
-suffix and supplies a differentiable Torch adjoint for training.
+suffix, using FLA's recurrence backward for the prefix and a Torch adjoint for
+the suffix.
 
 ## Why chunk-only quantization does not match decode
 
@@ -126,10 +127,10 @@ are separate from the public vLLM profile and ordinary state-only fake quantizat
 Temporary native cache buffers protect tensors needed by backward. The persistent
 training carry remains floating fake-QDQ data.
 
-The Torch adjoint uses saved forward values and identity STE through casts and
-QDQ. This is a training approximation to rounding, with gradients through the
-prefix, handoff, token writes, and checkpoint refreshes. It is not an exact
-derivative of the discontinuous quantizer.
+The backward uses FLA's recurrence for the prefix, a Torch adjoint for the suffix,
+and identity STE through casts and QDQ. This approximation supplies gradients
+through the prefix, handoff, token writes, and checkpoint refreshes. It is not an
+exact derivative of the discontinuous quantizer.
 
 ## Validation results
 

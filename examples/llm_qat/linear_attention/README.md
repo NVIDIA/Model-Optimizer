@@ -101,8 +101,13 @@ linear_attention:
       replay_window: 8
 ```
 
-`precision="vllm"` selects the installed public vLLM arithmetic; `vllm_0_15` is
-an accepted legacy spelling. `precision="replayssm"` selects native INT8/Hadamard
+`precision="vllm"` selects the installed vLLM's Triton GDN kernels and standalone
+KDA kernels. For GDN serving, select `gdn_prefill_backend="triton"` and enable
+`VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE=1` where available. Mixed prefill/decode
+batches are outside this profile. Standalone KDA has no model-level serving
+guarantee; Kimi-Linear/Kimi-K3 on newer vLLM requires `precision="vllm_kimi_k3"`,
+both KDA backends set to `triton`, and an unbounded softplus gate.
+`precision="replayssm"` selects native INT8/Hadamard
 checkpoints. `replay_window=1` refreshes every token; values from 2 to 64 require
 ReplaySSM. The prefill chunk size of 64 is independent of this suffix window.
 
@@ -122,7 +127,6 @@ cfg["linear_attention"][0]["cfg"]["replay_window"] = 8
 
 For the CLI, put the modified recipe in a YAML file and pass its path to
 `--recipe`. State QAT requires `backend="serving"` and explicit prefix lengths.
-Keep the legacy `gdn_w_quantizer` disabled; this workflow does not quantize W.
 
 ## Supply prefill/decode boundaries in a training loop
 
@@ -239,7 +243,9 @@ with microbatch size one and must be divisible by the data-parallel size.
 
 Choose a topology supported by the model's Bridge/Core provider. This example
 requires linear-attention layers in each local pipeline chunk. Context parallelism
-is fixed at one. The available topology options do not imply multi-GPU qualification.
+is fixed at one. State QAT supports selective GDN recomputation on compatible Core
+revisions, not full-layer recomputation. The available topology options do not
+imply multi-GPU qualification.
 
 ## Validation and limitations
 

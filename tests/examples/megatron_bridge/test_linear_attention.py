@@ -141,7 +141,7 @@ def compiled_state_training(tmp_path_factory):
     """Compile one tiny GDN shape before timing the single-GPU training checks."""
     if not torch.cuda.is_available():
         pytest.skip("Requires CUDA")
-    pytest.importorskip("vllm.model_executor.layers.fla.ops.kda", exc_type=ModuleNotFoundError)
+    pytest.importorskip("vllm", exc_type=ModuleNotFoundError)
     hf_model = tmp_path_factory.mktemp("gdn_hf")
     tokenizer = get_tiny_tokenizer()
     tokenizer.save_pretrained(hf_model)
