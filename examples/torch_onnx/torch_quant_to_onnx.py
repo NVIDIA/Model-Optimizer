@@ -27,7 +27,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "onnx_ptq"))
 
 import timm
 import torch
-import torch.multiprocessing as mp
 import torch.nn.functional as F
 from datasets import load_dataset
 from download_example_onnx import export_to_onnx
@@ -54,9 +53,6 @@ The script will:
 3. Export the quantized model to ONNX with FP16 weights.
 4. Optionally evaluate accuracy on ImageNet-1k before and after quantization.
 """
-
-
-mp.set_start_method("spawn", force=True)  # Needed for data loader with multiple workers
 
 
 _FP8_CONV_OVERRIDE: list = [
@@ -311,16 +307,17 @@ def load_calibration_data(model, data_size, batch_size, device, with_labels=Fals
     calib_tensor = [transforms(img) for img in images]
     calib_tensor = [t.to(device) for t in calib_tensor]
 
+    # The samples already sit on ``device``; worker processes would only add spawn and import cost.
     if with_labels:
         labels = dataset["train"][:data_size]["label"]
         labels = torch.tensor(labels, device=device)
         calib_dataset = [{"image": img, "label": lbl} for img, lbl in zip(calib_tensor, labels)]
         return torch.utils.data.DataLoader(
-            calib_dataset, batch_size=batch_size, shuffle=True, num_workers=4
+            calib_dataset, batch_size=batch_size, shuffle=True, num_workers=0
         )
     else:
         return torch.utils.data.DataLoader(
-            calib_tensor, batch_size=batch_size, shuffle=True, num_workers=4
+            calib_tensor, batch_size=batch_size, shuffle=True, num_workers=0
         )
 
 
