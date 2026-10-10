@@ -17,6 +17,7 @@ import os
 import pytest
 import torch
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
+from _test_utils.torch.calib_data import write_calib_jsonl
 from _test_utils.torch.transformers_models import (
     create_tiny_gpt_oss_dir,
     create_tiny_llama_dir,
@@ -24,6 +25,12 @@ from _test_utils.torch.transformers_models import (
     create_tiny_t5_dir,
 )
 from safetensors import safe_open
+
+
+@pytest.fixture(scope="module")
+def calib_jsonl(tmp_path_factory):
+    """Local calibration texts; the test checks the exported structure, so it needs no Hub dataset."""
+    return write_calib_jsonl(tmp_path_factory.mktemp("calib") / "calib.jsonl")
 
 
 # Here we map each qformat -> the suffix we expect in the generated safetensors directory
@@ -55,6 +62,7 @@ from safetensors import safe_open
 )
 def test_unified_hf_export_and_check_safetensors(
     tmp_path,
+    calib_jsonl,
     qformat,
     expected_suffix,
     fuse_input_scale,
@@ -103,11 +111,15 @@ def test_unified_hf_export_and_check_safetensors(
         pyt_ckpt_path=tiny_model_dir,
         qformat=qformat,
         export_path=output_dir,
-        dataset="cnn_dailymail",
+        dataset=calib_jsonl,
         # This test only checks the exported safetensors structure (not accuracy), so a
         # small calibration set is enough. Avoids the 1024-sample default on a toy model.
         calib_size=64,
+        # One batch holds the whole set, so hf_ptq does not probe for the largest batch.
+        batch_size=64,
     )
+    # The generate() previews before and after quantization do not affect the export.
+    cmd_parts.append("--skip_generate")
 
     # Run the command
     # current transformers T5 model seem to be incompatible with multiple GPUs
