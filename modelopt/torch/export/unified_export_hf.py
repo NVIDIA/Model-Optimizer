@@ -22,6 +22,7 @@ import json
 import os
 import re
 import tempfile
+import traceback
 import warnings
 from builtins import ValueError
 from collections import defaultdict
@@ -1087,6 +1088,40 @@ def pack_quantized_weights(
     _reconstruct_fused_moe_linear(model)
 
 
+def _hf_shard_flags(model: nn.Module) -> tuple[bool, bool]:
+    """Return ``(fsdp2_sharded, ep_sharded)`` for an HF model about to be exported.
+
+    Expert parallelism shards the experts too, just not by FSDP2: transformers pre-slices the expert
+    params across the EP group. The two are reported separately because a model can be both at once,
+    FSDP2-dense with expert-parallel experts. Neither holds without an initialized process group.
+    """
+    from modelopt.torch.utils.distributed import expert_parallel_state
+
+    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+        return False, False
+    fsdp2_sharded = is_fsdp2_model(model)
+    ep_sharded = torch.distributed.get_world_size() > 1 and expert_parallel_state(model) is not None
+    return fsdp2_sharded, ep_sharded
+
+
+def _process_hf_model_for_export(
+    model: nn.Module, dtype: torch.dtype | None = None, is_modelopt_qlora: bool = False
+) -> dict[str, Any]:
+    """Fold a quantized HF model's quantizers into its weights in place; return its quant config.
+
+    The processing half of an export, for a caller that serializes the model itself: the no-gather
+    writer, which writes each rank's shard, and the speculative-decoding exporters, which keep only
+    the draft. Afterwards the model's own state dict holds the deployment weights. Nothing is
+    gathered, so it runs on a live FSDP2 or expert-parallel model; there the fused MoE experts stay
+    fused, since each rank folds only its local shard and the writer splits them after
+    consolidation.
+    """
+    dtype, _, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
+    keep_fused_experts = any(_hf_shard_flags(model))
+    pack_quantized_weights(model, dtype, is_modelopt_qlora, keep_fused_experts=keep_fused_experts)
+    return quant_config
+
+
 def _export_transformers_checkpoint(
     model: nn.Module,
     dtype: torch.dtype | None = None,
@@ -1933,6 +1968,21 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
     return out
 
 
+def _write_base_config(model: nn.Module, export_dir: Path) -> None:
+    """Write the no-gather export's non-weight files, once every rank has written its shards.
+
+    ``save_non_weight_artifacts`` writes them, as it does for the FSDP2 streaming writer; this
+    keeps the config attributes an expert-parallel run sets out of config.json.
+    """
+    # transformers stamps a DistributedConfig on the config when it shards the model. It is not
+    # JSON-serializable, and it describes THIS RUN's mesh -- the EP degree and tp plan the export
+    # happened to use -- not a property of the checkpoint, so baking it in would mislead whoever
+    # loads it next even if it could be written.
+    if getattr(model.config, "distributed_config", None) is not None:
+        model.config.distributed_config = None
+    save_non_weight_artifacts(model, export_dir)
+
+
 def _no_gather_export_asked() -> bool:
     """Whether ``MODELOPT_FSDP2_EXPORT`` picks the no-gather writer for an FSDP2-sharded export.
 
@@ -1995,10 +2045,20 @@ def export_hf_checkpoint(
     # emits it from rank 0 alone, so on the other ranks a full read is host memory spent and thrown
     # away -- and the carried set is the large stuff. The KEY list is still resolved everywhere,
     # because get_quant_config runs per rank and the configs have to agree.
-    # How the model is distributed decides how it is exported. A diffusers pipeline is not a module,
-    # and nothing here distributes one.
-    plan = distribution_plan(model) if isinstance(model, nn.Module) else DistributionPlan()
-    _writes_extra = not plan.is_fsdp_dense or torch.distributed.get_rank() == 0
+    # Expert parallelism shards the experts too, just not by FSDP2 -- transformers pre-slices the
+    # expert params across the EP group. Computed here rather than with the other predicates below
+    # because the carry-over gate needs it and runs ahead of them (the layerwise and diffusers paths
+    # return before those are reached).
+    _fsdp2_sharded, _ep_sharded = _hf_shard_flags(model)
+    # Either form of sharding, including the hybrid where both hold: a model can be FSDP2-dense AND
+    # expert-parallel, so these are tracked separately rather than as an either/or.
+    _sharded_export = _ep_sharded or _fsdp2_sharded
+    # A sharded export writes the carried weights from rank 0 alone. This has to cover EP as well as
+    # FSDP2: under EP every OTHER rank's experts are absent from this rank's model, so they read as
+    # unplaced and each rank would carry them -- 889 tensors per rank on GLM-5.3-Flash. Every rank
+    # then hands them to the writer, whose point-to-point protocol expects one sender, and the export
+    # deadlocks with rank 0 inside the writer and the rest parked in the barrier below.
+    _writes_extra = not _sharded_export or torch.distributed.get_rank() == 0
     _carried = read_unplaced_weights(model, keys_only=not _writes_extra)
     if _writes_extra and _carried:
         extra_state_dict = {**_carried, **(extra_state_dict or {})}
@@ -2044,14 +2104,27 @@ def export_hf_checkpoint(
         )
         return
 
-    is_fsdp2_sharded = plan.is_fsdp_dense
-    # Rank 0's choice: the two writers issue different collectives, so ranks that read their
-    # environments differently would wait in collectives the others never join.
-    use_no_gather_writer = is_fsdp2_sharded and broadcast_from(
-        "MODELOPT_FSDP2_EXPORT", _no_gather_export_asked
+    is_fsdp2_sharded = _fsdp2_sharded
+
+    # An expert-parallel model is sharded too, just not by FSDP2: transformers pre-slices the expert
+    # params across the EP group, so save_pretrained sees a tensor-parallel model and refuses it
+    # outright. There is no gather fallback for that shape, so EP always takes the no-gather writer,
+    # FSDP2-sharded dense included (the hybrid is both at once). A model sharded by FSDP2 alone keeps
+    # the existing path unless MODELOPT_FSDP2_EXPORT=nogather opts it in, as rank 0 reads it: the
+    # two writers issue different collectives, so ranks that read their environments differently
+    # would wait in collectives the others never join. Derived from _ep_sharded above so the
+    # carry-over gate and this cannot disagree about what EP is.
+    is_ep_sharded = _ep_sharded
+    use_no_gather_writer = is_ep_sharded or (
+        is_fsdp2_sharded and broadcast_from("MODELOPT_FSDP2_EXPORT", _no_gather_export_asked)
     )
-    # Not the global rank: a non-FSDP2 export writes the whole checkpoint from every process.
-    rank = torch.distributed.get_rank() if is_fsdp2_sharded else 0
+
+    # The rank used to gate the single-writer steps below. It must be the real rank whenever the
+    # checkpoint is written cooperatively -- under expert parallelism every process would otherwise
+    # read 0 here, all of them would rewrite config.json at once, and one would truncate the file
+    # another was reading. A non-sharded export does write the whole checkpoint from every process,
+    # which is what the 0 is for.
+    rank = torch.distributed.get_rank() if (is_fsdp2_sharded or is_ep_sharded) else 0
     # Offloaded models take the streaming path: it materializes one layer at a time and
     # writes each straight to a shard file, so peak memory is one layer plus one shard
     # buffer instead of the whole quantized state dict.
@@ -2089,12 +2162,9 @@ def export_hf_checkpoint(
             from .distributed_writer import distributed_save_hf_checkpoint
 
             _qlora = kwargs.get("is_modelopt_qlora", False)
-            # The writer builds its own name-based tied-weight map, so this one is not handed down.
-            _dtype, _, hf_quant_config = _prepare_model_for_export(model, dtype, _qlora)
-            # Preparing the model does not pack its weights, so pack them here. keep_fused_experts
-            # leaves the MoE experts fused and sharded through the fold, so each rank folds only
-            # its local experts; the writer then splits each rank's experts into per-expert tensors.
-            pack_quantized_weights(model, _dtype, _qlora, keep_fused_experts=True)
+            # Folds in place; the model is sharded here, so the MoE experts stay fused and each rank
+            # folds only its LOCAL experts. The writer splits them after consolidation.
+            hf_quant_config = _process_hf_model_for_export(model, dtype, _qlora)
             if getattr(model, "hf_quantizer", None) is not None:
                 model.hf_quantizer = None
             reverted = distributed_save_hf_checkpoint(
@@ -2109,7 +2179,7 @@ def export_hf_checkpoint(
                 extra_state_dict=extra_state_dict,
             )
             if rank == 0:
-                save_non_weight_artifacts(model, export_dir)
+                _write_base_config(model, export_dir)
                 # As the streaming path below: every FSDP2 rank holds the same ModelOpt state.
                 if save_modelopt_state and ModeloptStateManager.is_converted(model):
                     torch.save(modelopt_state(model), export_dir / _MODELOPT_STATE_SAVE_NAME)
@@ -2206,16 +2276,25 @@ def export_hf_checkpoint(
         if rank == 0:
             _write_hf_export_config(model, hf_quant_config, export_dir)
             copy_off_index_safetensors(_source_checkpoint(model), export_dir)
-            if not (_offloaded or is_fsdp2_sharded):
-                # The streaming paths already did, from save_non_weight_artifacts.
+            if not (_offloaded or is_fsdp2_sharded or use_no_gather_writer):
+                # The streaming paths and the no-gather writer already did, from
+                # save_non_weight_artifacts.
                 _copy_non_model_files_from_source(model, export_dir)
 
     except Exception as e:
+        # Print (not just warnings.warn, which the default filter can dedupe/suppress) BEFORE the
+        # barrier below: under FSDP2/EP every other rank is still waiting there, so a failing rank
+        # that raises straight into `finally` blocks on that barrier forever without this rank's
+        # traceback ever reaching the log -- the job just hangs with no visible error.
+        _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        print(f"[export_hf_checkpoint] rank {_rank} failed:\n{traceback.format_exc()}", flush=True)
         warnings.warn(
             "Cannot export model to the model_config. The modelopt-optimized model state_dict"
             " can be saved with torch.save for further inspection."
         )
         raise e
     finally:
-        if is_fsdp2_sharded:
+        # Every rank waits for the writer to finish. Without this the ranks that wrote nothing exit
+        # first and the job hangs on the ones still writing.
+        if is_fsdp2_sharded or is_ep_sharded:
             torch.distributed.barrier()
