@@ -53,6 +53,8 @@ if TRT_AVAILABLE:
 
 TORCH_CUDA_AVAILABLE = torch.cuda.is_available()
 
+_SSH_OPTIONS = ("-oBatchMode=yes", "-oStrictHostKeyChecking=yes")
+
 
 def _validate_shape_range(min_shape: list, opt_shape: list, max_shape: list) -> None:
     """Raise ValueError if shape lengths differ or if min <= opt <= max fails at any dimension."""
@@ -371,7 +373,7 @@ class TrtExecBenchmark(Benchmark):
         try:
             upload_command = [
                 "scp",
-                "-oBatchMode=yes",
+                *_SSH_OPTIONS,
                 "-P",
                 str(config.port),
                 self.engine_path,
@@ -404,7 +406,7 @@ class TrtExecBenchmark(Benchmark):
             )
             benchmark_command = [
                 "ssh",
-                "-oBatchMode=yes",
+                *_SSH_OPTIONS,
                 "-p",
                 str(config.port),
                 config.destination,
@@ -422,7 +424,7 @@ class TrtExecBenchmark(Benchmark):
         finally:
             cleanup_command = [
                 "ssh",
-                "-oBatchMode=yes",
+                *_SSH_OPTIONS,
                 "-p",
                 str(config.port),
                 config.destination,

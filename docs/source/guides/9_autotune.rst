@@ -253,6 +253,7 @@ To use remote autotuning during Q/DQ placement optimization, run with ``trtexec`
 * TensorRT 10.15 or later
 * Valid ``ssh://`` remote autotuning configuration without a password
 * Non-interactive SSH key authentication from the host to the target
+* The target host key provisioned in the user's trusted ``known_hosts`` file; ModelOpt enforces strict host-key checking
 * ``trtexec_safe`` on the target, alongside the configured ``remote_exec_path``
 * ``--use_trtexec`` must be set (benchmarking uses ``trtexec`` instead of the TensorRT Python API)
 * ``--safe --skipInference`` must be enabled via ``--trtexec_benchmark_args``
