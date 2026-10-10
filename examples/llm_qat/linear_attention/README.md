@@ -178,6 +178,51 @@ teacher, topology, dataset, and prefix boundary. The restored checkpoint supplie
 its saved quantization policy; prefix lengths must still be supplied at runtime.
 Export to a serving model is a separate step.
 
+For a single-rank, state-only checkpoint, use Bridge to export the floating-point
+weights and ModelOpt to save the quantization metadata separately:
+
+```python
+from pathlib import Path
+
+import torch
+import modelopt.torch.opt as mto
+from modelopt.torch.utils import distributed as dist
+from modelopt.torch.utils.plugins.mbridge import (
+    load_mbridge_model_from_hf,
+    load_modelopt_megatron_checkpoint,
+)
+
+dist.setup()  # Run with torchrun --nproc-per-node=1.
+bridge, _, models, student, _ = load_mbridge_model_from_hf(
+    hf_model_name_or_path="/path/to/original-hf-model",
+    provider_overrides={"gradient_accumulation_fusion": False},
+    load_weights=False,
+)
+load_modelopt_megatron_checkpoint(models, "/path/to/output/checkpoints/iter_0000002")
+export_dir = Path("/path/to/hf-export")
+bridge.hf_pretrained.save_artifacts(export_dir)
+bridge.save_hf_weights([student], export_dir)
+torch.save(mto.modelopt_state(student), export_dir / "megatron_modelopt_state.pt")
+
+# Reimport HF weights into Megatron, then restore the saved state quantizers and policy.
+_, _, _, restored, _ = load_mbridge_model_from_hf(
+    hf_model_name_or_path=str(export_dir),
+    provider_overrides={"gradient_accumulation_fusion": False},
+    init_model_parallel=False,
+)
+mto.restore_from_modelopt_state(
+    restored, modelopt_state_path=export_dir / "megatron_modelopt_state.pt"
+)
+dist.cleanup()
+```
+
+The sidecar uses ModelOpt's existing metadata format with **Megatron module names**.
+Keep it with the exported weights. Transformers can load those weights but does
+not apply this state-QAT policy; vLLM needs its own module-name mapping and state
+adapter. HF export also omits optimizer/scheduler state: use the original Bridge
+checkpoint to resume training. This export example covers dynamic state-only
+quantization, not quantized projection weights or a packed recurrent cache.
+
 Use `--tp_size`, `--pp_size`, and `--ep_size` as in the
 [Megatron Bridge example](../../megatron_bridge/distill.py). Student and teacher
 use the same topology. Sequence parallelism is enabled when TP exceeds one;
@@ -190,9 +235,11 @@ is fixed at one. The available topology options do not imply multi-GPU qualifica
 
 ## Validation and limitations
 
-The minimal example tests run one GDN QAT step and one QAD step, with shared
-compilation setup. They check student weight updates and a frozen, unquantized
-QAD teacher. Run them in the matching Bridge/vLLM environment:
+The two example tests cover GDN QAT and QAD with shared compilation setup. Each
+saves a checkpoint, checks exact weight and policy restoration, resumes for one
+step, and exports/reloads HF weights with the separate Megatron ModelOpt metadata.
+The QAD test also checks that the teacher stays frozen and unquantized. Run them
+in the matching Bridge/vLLM environment:
 
 ```bash
 bash examples/llm_qat/linear_attention/with_vllm_defaults.sh \
