@@ -1107,3 +1107,29 @@ def test_source_checkpoint_is_none_for_a_model_built_from_config(tmp_path, monke
 
     assert _source_checkpoint(model) is None
     assert not any(export_dir.iterdir())
+
+
+def test_process_hf_model_for_export_folds_in_place_and_returns_the_quant_config():
+    """The processing half the speculative-decoding exporters call before keeping only the draft."""
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from modelopt.torch.export.unified_export_hf import _process_hf_model_for_export
+
+    config = LlamaConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+    )
+    model = LlamaForCausalLM(config).eval()
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randint(0, 64, (1, 8))))
+
+    quant_config = _process_hf_model_for_export(model, torch.float16)
+
+    assert quant_config["quantization"]["quant_algo"] == "FP8"
+    # Folded in place: the model's own state dict is now the deployment one.
+    q_proj = model.model.layers[0].self_attn.q_proj
+    assert q_proj.weight.dtype == torch.float8_e4m3fn
+    assert "model.layers.0.self_attn.q_proj.weight_scale" in model.state_dict()

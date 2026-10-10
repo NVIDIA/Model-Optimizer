@@ -17,7 +17,8 @@
 
 Every tensor is sent to exactly one owner rank over batched point-to-point sends and
 written from there, so no rank ever materializes the whole model and no unit is
-replicated across ranks. Selected by ``MODELOPT_FSDP2_EXPORT=nogather``.
+replicated across ranks. Used for every expert-parallel model; a model sharded by FSDP2 alone opts in
+with ``MODELOPT_FSDP2_EXPORT=nogather``.
 """
 
 import json
@@ -690,7 +691,7 @@ def _distributed_save_hf_checkpoint_impl(
 
       1. Fused expert weights (when present): each rank splits its LOCAL shard into per-expert keys
          with global indices and keeps them in place -- no communication. Experts are therefore
-         already disjoint across ranks.
+         already disjoint across ranks. dp-replica ranks under DP x EP skip this.
       2. Dense / non-expert weights: each fqn is assigned to exactly ONE owner rank and moved there
          (:func:`_materialize_owned`), so every tensor becomes whole on its owner while the set stays
          spread across ranks. Replicated and plain values need no transport; dim-0 shards travel
@@ -716,6 +717,50 @@ def _distributed_save_hf_checkpoint_impl(
 
     export_dir = Path(export_dir)
     rank, world = dist.get_rank(), dist.get_world_size()
+
+    # Where this rank sits in expert parallelism, if any.
+    #
+    # Under FSDP2 alone the fused 3-D expert weight is sharded on dim 0, so each per-expert key's
+    # global index is just the DTensor's own dim-0 offset and the answer below stays (0, 0).
+    #
+    # Under expert parallelism it is not: transformers pre-slices each expert param to this rank's
+    # EP group, so the EP split is INVISIBLE to the per-param DTensor -- its dim-0 offset is relative
+    # to the group, not global. Without ep_rank every group would write experts 0..n-1 over each
+    # other and the checkpoint would be quietly wrong rather than broken. The coordinate comes from
+    # the routed experts' ParallelState -- the same source calibration reads, not transformers'
+    # internal ``model._device_mesh``. An expert's data-parallel group is its expert-data-parallel one.
+    from modelopt.torch.utils.distributed import expert_parallel_state
+
+    ep_rank, dp_idx = 0, 0
+    parallel_state = expert_parallel_state(model)
+    if parallel_state is not None:
+        ep_rank = parallel_state.expert_model_parallel_group.rank()
+        edp_group = parallel_state.data_parallel_group
+        if edp_group.is_initialized():
+            # Experts are replicated across EDP, so only the first replica writes them.
+            dp_idx = edp_group.rank()
+    # Total config expert count, to tell a per-EP-group expert tensor (size < total) from one that
+    # spans all experts (classic DP x EP) when computing the per-expert global index offset.
+    _cfg = getattr(model, "config", None)
+
+    def _experts_of(c):
+        if c is None:
+            return 0
+        return int(
+            getattr(c, "num_experts", 0)
+            or getattr(c, "num_local_experts", 0)
+            or getattr(c, "n_routed_experts", 0)  # nemotron_h
+            or 0
+        )
+
+    # VLMs nest the text-model fields under ``config.text_config`` (the quantized backbone is
+    # ``model.language_model``), so fall back to it when the top-level config has no expert count.
+    total_experts = _experts_of(_cfg) or _experts_of(getattr(_cfg, "text_config", None))
+    # DP x EP: experts are dp-REPLICATED across the EDP group (each holds a full EP-sharded copy). Only
+    # the first replica (dp_idx == 0) writes them; replica ranks (dp_idx > 0) skip the per-expert split.
+    # dp_idx is the EDP-group rank resolved above -- 0 when experts are not EDP-replicated (dense /
+    # FSDP2 / EP-without-DP), so every such rank writes.
+    write_experts = dp_idx == 0
     sharded_sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
 
     # Re-materialize every inference tensor as a NORMAL one UP FRONT. A caller in inference mode hands
@@ -789,17 +834,21 @@ def _distributed_save_hf_checkpoint_impl(
         for j, k in enumerate(in_keys):
             sharded_sd[k] = stacked[j].clone()
     # (1) Experts: split this rank's local shard into per-expert keys (global idx); stays local.
-    # FSDP2 shards a fused 3-D expert weight on dim 0, the expert axis, so each per-expert key's global
-    # index is the DTensor's own dim-0 offset, which _split_local_fused_module reads.
+    # Skipped on dp-replica ranks under DP x EP (their experts are written by dp group 0).
     local_sd: dict = {}
-    for prefix in prefixes:
-        local_sd.update(_split_local_fused_module(prefix, sharded_sd))
-    local_sd = postprocess_state_dict(
-        local_sd, maxbound, kv_cache_format, is_modelopt_qlora, tied_map=tied_map
-    )
-    # In place: the split's tensors are its own copies, so one made contiguous replaces the old.
-    for _k in list(local_sd.keys()):
-        local_sd[_k] = local_sd[_k].detach().contiguous()
+    if write_experts:
+        for prefix in prefixes:
+            local_sd.update(
+                _split_local_fused_module(
+                    prefix, sharded_sd, ep_rank=ep_rank, total_experts=total_experts
+                )
+            )
+        local_sd = postprocess_state_dict(
+            local_sd, maxbound, kv_cache_format, is_modelopt_qlora, tied_map=tied_map
+        )
+        # In place: the split's tensors are its own copies, so one made contiguous replaces the old.
+        for _k in list(local_sd.keys()):
+            local_sd[_k] = local_sd[_k].detach().contiguous()
     # At this point local_sd holds ONLY this rank's (already split, per-expert) experts -- capture the
     # set so _materialize_owned can tell disjoint experts from replicated dense.
     expert_key_set = set(local_sd)
