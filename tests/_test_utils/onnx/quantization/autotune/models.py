@@ -25,13 +25,13 @@ import torch.nn as nn
 from onnx import helper
 
 
-def _create_simple_conv_onnx_model():
+def _create_simple_conv_onnx_model(batch_size=64, spatial_size=224):
     """Build ONNX model: Input -> Conv -> Relu -> Output (minimal for autotuner tests)."""
     input_tensor = helper.make_tensor_value_info(
-        "input", onnx.TensorProto.FLOAT, [64, 32, 224, 224]
+        "input", onnx.TensorProto.FLOAT, [batch_size, 32, spatial_size, spatial_size]
     )
     output_tensor = helper.make_tensor_value_info(
-        "output", onnx.TensorProto.FLOAT, [64, 64, 224, 224]
+        "output", onnx.TensorProto.FLOAT, [batch_size, 64, spatial_size, spatial_size]
     )
     conv_node = helper.make_node(
         "Conv",
