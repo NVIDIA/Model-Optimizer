@@ -17,7 +17,8 @@
 
 Every tensor is sent to exactly one owner rank over batched point-to-point sends and
 written from there, so no rank ever materializes the whole model and no unit is
-replicated across ranks. Selected by ``MODELOPT_FSDP2_EXPORT=nogather``.
+replicated across ranks. Used for every expert-parallel model; a model sharded by FSDP2 alone opts in
+with ``MODELOPT_FSDP2_EXPORT=nogather``.
 """
 
 import json
@@ -578,14 +579,27 @@ def _distributed_save_hf_checkpoint_impl(
         else torch.device("cuda", torch.cuda.current_device())
     )
 
-    # This writer targets a FULLY FSDP2-sharded model -- no expert parallelism. FSDP2
-    # shards the fused 3-D expert weight on dim 0 (the expert axis), so fused experts are just
-    # DTensors sharded across the fsdp mesh: each per-expert key's TRUE global index comes from the
-    # DTensor's own dim-0 offset (``_split_local_fused_module`` reads it), so there is no EP block base
-    # (ep_rank=0) and no dp-replica dedup (dp_idx=0 -> every rank writes its own experts). The EP-hybrid
-    # (a2a experts) path -- which resolves ep_rank/dp_idx from the parallel-group provider -- is out of
-    # scope here.
+    # Where this rank sits in expert parallelism, if any.
+    #
+    # Under FSDP2 alone the fused 3-D expert weight is sharded on dim 0, so each per-expert key's
+    # global index is just the DTensor's own dim-0 offset and the answer below stays (0, 0).
+    #
+    # Under expert parallelism it is not: transformers pre-slices each expert param to this rank's
+    # EP group, so the EP split is INVISIBLE to the per-param DTensor -- its dim-0 offset is relative
+    # to the group, not global. Without ep_rank every group would write experts 0..n-1 over each
+    # other and the checkpoint would be quietly wrong rather than broken. The coordinate comes from
+    # the routed experts' ParallelState -- the same source calibration reads, not transformers'
+    # internal ``model._device_mesh``. An expert's data-parallel group is its expert-data-parallel one.
+    from modelopt.torch.utils.distributed import expert_parallel_state
+
     ep_rank, dp_idx = 0, 0
+    parallel_state = expert_parallel_state(model)
+    if parallel_state is not None:
+        ep_rank = parallel_state.expert_model_parallel_group.rank()
+        edp_group = parallel_state.data_parallel_group
+        if edp_group.is_initialized():
+            # Experts are replicated across EDP, so only the first replica writes them.
+            dp_idx = edp_group.rank()
     # Total config expert count, to tell a per-EP-group expert tensor (size < total) from one that
     # spans all experts (classic DP x EP) when computing the per-expert global index offset.
     _cfg = getattr(model, "config", None)

@@ -50,6 +50,7 @@ __all__ = [
     "distributed_forward_loop",
     "distributed_run",
     "distribution_plan",
+    "expert_parallel_state",
     "fsdp2_wrap",
     "gather_bytes",
     "gather_state_dicts",
@@ -538,6 +539,17 @@ def distributed_run(timeout: timedelta | None = None, device: torch.device | str
             cleanup()
 
 
+def expert_parallel_state(model: torch.nn.Module) -> "ParallelState | None":
+    """Return the ``ParallelState`` of the model's routed experts, or ``None`` if they are not expert-parallel.
+
+    The expert-parallel loader seeds every routed-expert module with a ``ParallelState`` that carries the
+    expert-model-parallel group (``load_and_prepare_ep``); no other module of a HuggingFace model has one.
+    """
+    for module in model.modules():
+        state = getattr(module, "_parallel_state", None)
+        if state is not None and state.expert_model_parallel_group.is_initialized():
+            return state
+    return None
 class _StridedIterableShard(IterableDataset):
     """Rank-strided shard of a streaming ``IterableDataset`` (no ``len()`` required).
 
