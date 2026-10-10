@@ -68,8 +68,22 @@ class DistributedState:
 
 
 def setup_distributed_args(args):
-    """Initialize and attach ``args.dist_state`` (single-process if FSDP2 off)."""
-    if getattr(args, "use_fsdp2", False):
+    """Initialize and attach ``args.dist_state`` (single-process if not distributed).
+
+    When the run already entered a :func:`modelopt_session` -- which it does for any distributed
+    launch, because the expert-parallel loaders need the session object -- the state is a view of
+    that session rather than a second, independently-derived one. Two sources of rank/world would
+    be one too many.
+    """
+    mo_session = getattr(args, "mo_session", None)
+    if mo_session is not None and mo_session.distributed:
+        args.dist_state = DistributedState(
+            rank=mo_session.rank,
+            world_size=mo_session.world_size,
+            device=mo_session.device,
+            is_main=mo_session.is_main,
+        )
+    elif getattr(args, "use_fsdp2", False):
         # Raise the collective timeout above NCCL's 30-min default: rank 0's checkpoint write can
         # exceed it, and PyTorch 2.8 has no per-call barrier() timeout (must be set at PG creation).
         dist_utils.setup(timeout=timedelta(hours=2))
@@ -578,6 +592,16 @@ def get_model(
     device_map = "auto"
     if device == "cpu":
         device_map = "cpu"
+    elif ":" in str(device):
+        # A SPECIFIC device was asked for -- "cuda:<local_rank>" under torchrun. Do not fall through to
+        # "auto": accelerate runs its placement heuristic INDEPENDENTLY in every rank, and on a node
+        # whose GPUs are all idle every rank scores them identically and picks the SAME card. All ranks'
+        # weights, and with them every quantizer's _amax buffer, then live on one GPU; the first NCCL
+        # collective binds the whole data-parallel group to that single device and aborts with
+        # "Duplicate GPU detected : rank 1 and rank 0 both on CUDA device ...". Honour the caller.
+        # A dense model too large to replicate per rank wants --use_fsdp2, not "auto" sharding: under
+        # data-parallel calibration each rank must own its own GPU.
+        device_map = {"": str(device)}
 
     # Prepare config kwargs for loading
     config_kwargs = {"trust_remote_code": trust_remote_code} if trust_remote_code else {}

@@ -14,10 +14,12 @@
 # limitations under the License.
 
 import argparse
+import contextlib
 import os
 import random
 import time
 import warnings
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -92,15 +94,28 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import env, print_rank_0
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
     get_max_batch_size,
     get_supported_datasets,
 )
+from modelopt.torch.utils.distributed import (
+    ModelOptSession,
+    distributed_forward_loop,
+    is_distributed_launch,
+    modelopt_session,
+    shard_dataloader,
+)
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.mlflow import add_mlflow_args, resolve_mlflow_args
+from modelopt.torch.utils.moe import (
+    apply_distributed_support,
+    decide_distribution_plan,
+    is_expert_parallel_capable,
+    load_and_prepare_ep,
+)
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     ensure_local_checkpoint,
@@ -186,6 +201,7 @@ def make_calib_dataloader(
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
     model_type: str | None,
+    mo_session: ModelOptSession | None,
     autoquant_gradient_recipe: bool = False,
 ) -> tuple[DataLoader | _DeviceDataLoader, str | None]:
     calib_dataloader = None
@@ -260,12 +276,19 @@ def make_calib_dataloader(
             max_sample_length=args.calib_seq,
             device=device,
             include_labels=include_labels,
-            distributed=args.use_fsdp2,
-            sampler_kwargs=(
-                {"num_replicas": args.dist_state.world_size, "rank": args.dist_state.rank}
-                if args.use_fsdp2
-                else None
-            ),
+        )
+    if (
+        mo_session is not None
+        and mo_session.distributed
+        and calib_dataloader is not None
+        and isinstance(calib_dataloader, DataLoader)
+    ):
+        # Every distributed calibration path is data-parallel over the world, so each rank calibrates
+        # on its own per-rank shard (and the quantizer amax is synced across ranks): MoE expert-parallel
+        # a2a routes each token to its expert-owning rank; dense DP replicates the model per rank; FSDP2
+        # shards the params but still feeds each rank its own data.
+        calib_dataloader = shard_dataloader(
+            calib_dataloader, mo_session.rank, mo_session.world_size
         )
     return calib_dataloader, first_text_speech_dataset
 
@@ -308,12 +331,73 @@ def _validate_recipe_calibration(args: argparse.Namespace, recipe) -> None:
         )
 
 
+def _decide_expert_parallel(args: argparse.Namespace):
+    """Return ``(plan, hf_config)`` when this run should be expert-parallel, else ``(None, None)``.
+
+    The model's own expert-parallel facts are applied to the config BEFORE anything is decided: for
+    several models that is what SUPPLIES ``base_model_ep_plan`` -- stock transformers ships one for
+    some MoEs and not others -- so deciding first would read an EP-capable model as dense and
+    replicate every expert on every rank.
+    """
+    mo_session = getattr(args, "mo_session", None)
+    if mo_session is None or not mo_session.distributed:
+        return None, None
+    # --use_fsdp2 asks for the standalone FSDP2 loader explicitly; the EP
+    # auto-decision below has no way to know that, so without this it can pick EP anyway
+    # (MODELOPT_EP_DEGREE set explicitly, or "auto" resolving non-trivially for the model)
+    # and load_model's `elif args.use_fsdp2:` branch is never reached.
+    if args.use_fsdp2:
+        return None, None
+
+    hf_config = AutoConfig.from_pretrained(
+        args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
+    )
+    hf_config = apply_distributed_support(
+        hf_config.model_type,
+        hf_config,
+        ckpt_path=args.local_checkpoint_path,
+        trust_remote_code=args.trust_remote_code,
+    )
+    plan = decide_distribution_plan(
+        hf_config,
+        mo_session.world_size,
+        ep_size=env.ep_degree(),
+        fsdp_size=env.fsdp_size(),
+    )
+    if mo_session.is_main:
+        print(f"[ep] decided {plan!r}", flush=True)
+
+    if plan.is_expert_parallel:
+        return plan, hf_config
+    if is_expert_parallel_capable(hf_config) and not plan.is_fsdp_dense and not args.use_fsdp2:
+        # Neither sharding applies, so every rank would hold the whole MoE. That runs, and wastes the
+        # cluster, so say so rather than let it look like it worked.
+        raise RuntimeError(
+            f"{hf_config.model_type} can be expert-parallel, but the plan resolved to ep_size=1 with "
+            f"no dense sharding at world_size={mo_session.world_size} -- every rank would hold the "
+            "whole MoE. Set MODELOPT_EP_DEGREE>1, or MODELOPT_FSDP_SIZE=world / --use_fsdp2 to shard "
+            "it with FSDP2 instead."
+        )
+    return None, None
+
+
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
     if args.use_fsdp2 and _recipe_is_kv_auto_quantize(args.recipe):
         raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
-    if args.use_fsdp2:
+    _ep_plan, _ep_config = _decide_expert_parallel(args)
+    if _ep_plan is not None:
+        full_model = load_and_prepare_ep(
+            args.local_checkpoint_path,
+            args.mo_session,
+            _ep_plan.ep_size,
+            trust_remote_code=args.trust_remote_code,
+            attn_implementation=args.attn_implementation,
+            hf_config=_ep_config,
+            fsdp_dense=_ep_plan.is_fsdp_dense,
+        )
+    elif args.use_fsdp2:
         hf_config = AutoConfig.from_pretrained(
             args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
         )
@@ -545,6 +629,19 @@ def mono_quantize(
             # quantization target; the full forward still exercises that component's quantizers.
             if args.calib_with_images:
                 calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
+            elif getattr(args, "mo_session", None) is not None and args.mo_session.distributed:
+                # A distributed run has to calibrate through distributed_forward_loop, not the
+                # plain one: it is the only caller of _reinstall_a2a_forwards, which re-plants the
+                # torch_a2a expert/router forward wrappers that quantizer insertion clobbers on
+                # transformers >= 5.16 (where the styles install a forward rather than a pre-hook).
+                # Without it the experts forward runs with process_group=None and raises
+                # "torch_a2a experts forward requires the EP `process_group`" at calibration step 0.
+                # On <= 5.13 the wrappers are pre-hooks that survive, so the reinstall is a no-op --
+                # which is why this is invisible on older transformers and fatal on newer.
+                # It also restores the use_cache guard the plain loop does not apply.
+                calibrate_loop = distributed_forward_loop(
+                    language_model, calib_dataloader, args.mo_session
+                )
             else:
                 calibrate_loop = create_forward_loop(
                     dataloader=calib_dataloader,
@@ -1035,6 +1132,7 @@ def quantize_main(
         tokenizer,
         device,
         model_type,
+        args.mo_session,
         autoquant_gradient_recipe=(
             aq_config is not None and aq_config.auto_quantize_method == "gradient"
         ),
@@ -1481,6 +1579,21 @@ def main(args: argparse.Namespace):
     random.seed(RAND_SEED)
     np.random.seed(RAND_SEED)
 
+    # A distributed launch runs inside a ModelOptSession: it owns the process group and is what the
+    # expert-parallel loader reads its rank and device from. Entered here rather than inside
+    # load_model so cleanup still runs if loading raises -- otherwise the surviving ranks block on
+    # the first collective until the NCCL timeout.
+    with contextlib.ExitStack() as _stack:
+        if is_distributed_launch() or args.use_fsdp2:
+            args.mo_session = _stack.enter_context(
+                modelopt_session(timeout=timedelta(hours=3), device=args.device)
+            )
+        else:
+            args.mo_session = None
+        _main_inner(args)
+
+
+def _main_inner(args: argparse.Namespace):
     setup_distributed_args(args)
 
     try:
