@@ -18,7 +18,11 @@
 from typing import Any
 
 from .mcore_deepseek import deepseek_causal_lm_export, deepseek_causal_lm_import
-from .mcore_glm import glm_moe_dsa_causal_lm_export
+from .mcore_glm import (
+    GLM5_NEXT_VISION_PREFIXES,
+    glm5_next_causal_lm_export,
+    glm_moe_dsa_causal_lm_export,
+)
 from .mcore_gptoss import gptoss_causal_lm_export, gptoss_causal_lm_import
 from .mcore_llama import (
     eagle3_deep_llama_causal_lm_export,
@@ -64,6 +68,7 @@ all_mcore_hf_export_mapping: dict[str, Any] = {
     "Qwen3VLForConditionalGeneration": qwen3vl_causal_lm_export,
     "Qwen3_5ForConditionalGeneration": qwen3_5_vl_causal_lm_export,
     "Qwen3_5MoeForConditionalGeneration": qwen3_5_vl_causal_lm_export,
+    "Glm5NextForConditionalGeneration": glm5_next_causal_lm_export,
     "GlmMoeDsaForCausalLM": glm_moe_dsa_causal_lm_export,
 }
 
@@ -74,6 +79,7 @@ all_mcore_hf_vision_passthrough_mapping: dict[str, tuple[str, ...]] = {
     "Qwen3VLForConditionalGeneration": QWEN3VL_VISION_PREFIXES,
     "Qwen3_5ForConditionalGeneration": QWEN3_5_VL_VISION_PREFIXES,
     "Qwen3_5MoeForConditionalGeneration": QWEN3_5_VL_VISION_PREFIXES,
+    "Glm5NextForConditionalGeneration": GLM5_NEXT_VISION_PREFIXES,
 }
 
 all_mcore_hf_import_mapping: dict[str, Any] = {
