@@ -141,6 +141,62 @@ def _routed_expert_modules(model: "nn.Module", ep_plan: dict[str, str]) -> "dict
     }
 
 
+def apply_distributed_support(
+    model_type: str,
+    hf_config,
+    *,
+    ckpt_path: "str | None" = None,
+    trust_remote_code: bool = False,
+    keep_compressed: bool = False,
+):
+    """Prepare ``hf_config`` so ``model_type`` can be loaded expert-parallel, from its model spec.
+
+    Reads the model's :class:`~modelopt.torch.models.EPSpec` and applies it: enforce the
+    transformers floor this model's expert parallelism needs, then attach the
+    ``base_model_ep_plan`` it requires to whichever config carries its MoE -- the root for a plain
+    MoE, the nested text/LLM config for a VLM whose experts live in its language sub-model, since
+    the plan's globs are written against that module tree and a plan on the wrong config matches
+    nothing at all rather than failing.
+
+    An existing plan always wins: stock transformers ships one for some models, and overwriting it
+    would substitute our idea of the layout for the model's own.
+
+    Returns the config to load, unchanged for a model type with no spec or no EP section. The
+    generic all-to-all transport is not wired here -- it self-registers in
+    :func:`load_and_prepare_ep`, so nothing about it is per-model.
+    """
+    from modelopt.torch.models import get_spec
+
+    spec = get_spec(model_type)
+    ep = getattr(spec, "ep_spec", None) if spec is not None else None
+    if ep is None:
+        return hf_config
+
+    if ep.requires_transformers:
+        require_transformers(ep.requires_transformers, f"{model_type} expert-parallel PTQ")
+
+    if ep.base_model_ep_plan:
+        target = hf_config
+        if ep.plan_config_attr:
+            target = getattr(hf_config, ep.plan_config_attr, None)
+            if target is None:
+                raise ValueError(
+                    f"{model_type} expects its expert-parallel plan on "
+                    f"config.{ep.plan_config_attr}, which this checkpoint's config does not have."
+                )
+        if not getattr(target, "base_model_ep_plan", None):
+            target.base_model_ep_plan = dict(ep.base_model_ep_plan)
+
+    if ep.prepare is not None:
+        hf_config = ep.prepare(
+            hf_config,
+            ckpt_path=ckpt_path,
+            trust_remote_code=trust_remote_code,
+            keep_compressed=keep_compressed,
+        )
+    return hf_config
+
+
 # ---------------------------------------------------------------------------------------------------
 # DP=EP all-to-all expert transport (`torch_a2a`)
 #
