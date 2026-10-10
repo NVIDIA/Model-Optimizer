@@ -37,6 +37,10 @@ from _test_utils.examples.example_runner import (
 
 pytestmark = pytest.mark.usefixtures("skip_on_windows")
 
+# Decorators run when the module is imported, which also happens on Windows (the tests then skip),
+# and signal has no SIGKILL there.
+_SIGKILL = getattr(signal, "SIGKILL", 9)
+
 
 class _Lane:
     """One example directory of a runner, with helpers to write and run its scripts."""
@@ -448,7 +452,7 @@ def test_timeout_kills_the_hung_step_with_its_children_and_the_next_step_gets_a_
 
 @pytest.mark.parametrize(
     ("death", "returncode"),
-    [("os._exit(7)", 7), ("os.kill(os.getpid(), signal.SIGKILL)", -signal.SIGKILL)],
+    [("os._exit(7)", 7), ("os.kill(os.getpid(), signal.SIGKILL)", -_SIGKILL)],
 )
 def test_worker_death_fails_the_step_not_the_session(worker_lane, death, returncode):
     worker_lane.write("die.py", f"import os, signal\nprint('about to die', flush=True)\n{death}")
