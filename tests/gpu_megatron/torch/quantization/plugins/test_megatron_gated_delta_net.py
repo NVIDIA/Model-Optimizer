@@ -151,6 +151,9 @@ def _test_gdn_qat_helper(rank, size, checkpoint_path):
 
 
 def _check_packed_recompute(module):
+    # Older Megatron releases lack selective GDN recompute and its native core hook.
+    if not hasattr(module, "recompute_gdn") or not hasattr(GatedDeltaNet, "_forward_compute"):
+        return
     hidden = torch.randn(128, 1, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     packed = PackedSeqParams(
         qkv_format="thd",
