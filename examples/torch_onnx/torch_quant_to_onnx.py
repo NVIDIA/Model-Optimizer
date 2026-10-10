@@ -758,6 +758,10 @@ def build_trt_engine(onnx_path, optimization_level=4):
         f"--onnx={onnx_path}",
         "--stronglyTyped",
         f"--builderOptimizationLevel={optimization_level}",
+        # One inference iteration shows the engine runs; the default 3 s timed benchmark is not shown.
+        "--warmUp=0",
+        "--duration=0",
+        "--iterations=1",
     ]
     print(f"\nBuilding TensorRT engine: {' '.join(cmd)}")
     try:
