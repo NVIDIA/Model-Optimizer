@@ -260,12 +260,12 @@ def find_init(onnx_model: onnx.ModelProto, init_name: str) -> np.ndarray:
 #           conv_4
 #             |
 #
-def build_conv_concat_model():
+def build_conv_concat_model(channels=128, height=240, width=64):
     # Define your model inputs and outputs
     input_names = ["input_0"]
     output_names = ["conv4_conv/Conv2D:0"]
-    input_shapes = [(1, 128, 240, 64)]
-    output_shapes = [(1, 256, 240, 64)]
+    input_shapes = [(1, channels, height, width)]
+    output_shapes = [(1, 2 * channels, height, width)]
 
     inputs = [
         helper.make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, input_shape)
@@ -340,26 +340,26 @@ def build_conv_concat_model():
         helper.make_tensor(
             name="ReadVariableOp:0",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128, 128, 3, 3),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128 * 128 * 3 * 3),
+            dims=(channels, channels, 3, 3),
+            vals=np.random.uniform(low=0.5, high=1.0, size=channels * channels * 3 * 3),
         ),
         helper.make_tensor(
             name="ReadVariableOp:1",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128, 128, 3, 3),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128 * 128 * 3 * 3),
+            dims=(channels, channels, 3, 3),
+            vals=np.random.uniform(low=0.5, high=1.0, size=channels * channels * 3 * 3),
         ),
         helper.make_tensor(
             name="ReadVariableOp:2",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128, 128, 3, 3),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128 * 128 * 3 * 3),
+            dims=(channels, channels, 3, 3),
+            vals=np.random.uniform(low=0.5, high=1.0, size=channels * channels * 3 * 3),
         ),
         helper.make_tensor(
             name="ReadVariableOp:3",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(256, 384, 1, 1),
-            vals=np.random.uniform(low=0.5, high=1.0, size=256 * 384 * 1 * 1),
+            dims=(2 * channels, 3 * channels, 1, 1),
+            vals=np.random.uniform(low=0.5, high=1.0, size=2 * channels * 3 * channels),
         ),
     ]
 
