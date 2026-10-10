@@ -24,15 +24,16 @@ over the paged KV cache, for both prefill and decode — then this driver
 aggregates the raw counts from every tensor-parallel rank and fits the
 exponential model ``scale_factor = a * exp(b * sparsity)`` once per phase.
 
-The fitted ``(a, b)`` are written as a canonical ``sparse_attention_config``
-block (the same schema ModelOpt's HF export produces), so the serving path
-(``vllm_serve_sparse_attn.py`` / ``install_vllm_sparse_attention_from_checkpoint``)
-loads it without changes. Any exported N:M sparse-softmax groups already in
-the checkpoint config are preserved.
+The fit initializes a bounded search using actual serving-kernel tile counters.
+Export requires calibration and held-out sparsity to meet the requested
+tolerance for every requested phase. Refinement adjusts ``a`` at the selected
+target; other targets and serving schedules require separate validation.
+The canonical export schema and existing N:M groups are preserved.
 
 Usage:
     python calibrate_sparse_attn.py <ckpt> \
         --calib_data_dir <ruler-data-dir> \
+        --validation_prompts_file held_out.txt \
         --target_sparse_ratio 0.5 \
         --decode_tokens 32 \
         --update_checkpoint_config
@@ -46,10 +47,12 @@ per line) overrides the RULER set with custom calibration data.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 from modelopt.torch.sparsity.attention_sparsity.calibration.ruler_dataset import RulerDatasetBuilder
@@ -60,7 +63,17 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_calibration 
     merge_phase_counts,
 )
 
-_LOCKED_ENGINE_KWARGS = frozenset({"model", "worker_cls", "enforce_eager", "enable_prefix_caching"})
+_LOCKED_ENGINE_KWARGS = frozenset(
+    {
+        "model",
+        "worker_cls",
+        "enforce_eager",
+        "enable_prefix_caching",
+        "enable_chunked_prefill",
+        "max_num_seqs",
+        "seed",
+    }
+)
 
 
 def _sparse_ratio(value: str) -> float:
@@ -164,9 +177,11 @@ def _existing_sparse_config(ckpt: str) -> dict | None:
     return existing if isinstance(existing, dict) else None
 
 
-def _write_config(ckpt: str, sparse_config: dict, update_checkpoint: bool) -> None:
+def _write_config(
+    ckpt: str, sparse_config: dict, update_checkpoint: bool, output_dir: Path = Path(".")
+) -> None:
     """Dump the sparse_attention_config and optionally merge into config.json."""
-    out_path = Path("sparse_attention_config.json")
+    out_path = output_dir / "sparse_attention_config.json"
     out_path.write_text(json.dumps(sparse_config, indent=2))
     print(f"[ModelOpt] Wrote calibrated config to {out_path.resolve()}")
 
@@ -189,9 +204,122 @@ def _write_config(ckpt: str, sparse_config: dict, update_checkpoint: bool) -> No
     print(f"[ModelOpt] Merged sparse_attention_config into {config_json}")
 
 
+def _summarize_validation(
+    worker_stats: list[dict], target: float, tolerance: float, phases=("prefill", "decode")
+) -> dict:
+    """Combine integer counts, failing closed on missing ranks, phases, or counters."""
+    result = {}
+    for phase in phases:
+        records = [worker.get(phase, {}) for worker in worker_stats]
+        total = sum(r.get("total", 0) for r in records)
+        skipped = sum(r.get("skipped", 0) for r in records)
+        complete = bool(records) and all(
+            r.get("launches", 0) > 0
+            and r.get("total", 0) > 0
+            and r.get("unmeasured_launches", 0) == 0
+            and 0 <= r.get("skipped", -1) <= r["total"]
+            for r in records
+        )
+        achieved = skipped / total if complete else None
+        result[phase] = {
+            "target": target,
+            "total": total,
+            "skipped": skipped,
+            "achieved": achieved,
+            "error_pp": 100 * (achieved - target) if complete else None,
+            "min_seq_len": min((r.get("min_seq_len", 0) for r in records), default=0),
+            "complete": complete,
+            "passed": complete and target - tolerance <= achieved <= target + tolerance,
+        }
+    return result
+
+
+def _refine_scales(config: dict, measure, max_steps: int) -> tuple[dict, dict]:
+    """Refine prefill then decode, retaining the best measured calibration candidate."""
+    config = deepcopy(config)
+    group = config["config_groups"]["group_0"]
+    measured = measure(config)
+    for phase in ("prefill", "decode"):
+        if phase not in measured:
+            continue
+        params = group["threshold_scale_factor"][phase]
+        target = group["target_sparsity"][phase]
+        multiplier = math.exp(params["b"] * target)
+        best_a = params["a"]
+        best_error = float("inf")
+        lower = 0.0
+        # lambda >= 1 disables skipping in the serving resolver. Stay inside
+        # that domain for every request, including the shortest one.
+        upper = measured[phase]["min_seq_len"] * (1.0 - 1e-6)
+        bracketed = False
+        for step in range(max_steps + 1):
+            stats = measured[phase]
+            if not stats["complete"]:
+                if step < max_steps and upper > 0 and params["a"] * multiplier >= upper:
+                    params["a"] = upper / multiplier
+                    measured = measure(config)
+                    continue
+                break
+            error = abs(stats["error_pp"])
+            if error < best_error:
+                best_error, best_a = error, params["a"]
+            if stats["passed"] or step == max_steps:
+                break
+            scale = params["a"] * multiplier
+            if stats["achieved"] < target:
+                lower = scale
+            else:
+                upper, bracketed = scale, True
+            candidate = (lower + upper) / 2 if bracketed else min(scale * 4, upper)
+            if candidate <= 0 or math.isclose(candidate, scale, rel_tol=1e-6):
+                break
+            params["a"] = candidate / multiplier
+            measured = measure(config)
+        if params["a"] != best_a:
+            params["a"] = best_a
+            measured = measure(config)
+    return config, measured
+
+
+def _export_validated_config(
+    model: str, config: dict, report: dict, output_dir: Path, update_checkpoint: bool
+) -> None:
+    """Always retain the receipt; never export a candidate that failed the gate."""
+    passed = all(
+        report.get(split, {}).get(phase, {}).get("passed", False)
+        for split in ("calibration", "held_out")
+        for phase in report.get("phases", ("prefill", "decode"))
+    )
+    report.update({"passed": passed, "candidate_config": config})
+    report_path = output_dir / "sparse_attention_validation.json"
+    report_path.write_text(json.dumps(report, indent=2, allow_nan=False))
+    if not passed:
+        raise RuntimeError(
+            f"Sparsity validation failed; no config exported or checkpoint updated. "
+            f"See {report_path} for measured counts and every candidate."
+        )
+    _write_config(model, config, update_checkpoint, output_dir)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Calibrate skip-softmax thresholds via vLLM")
     parser.add_argument("model", type=str, help="Path to the HF checkpoint to calibrate")
+    parser.add_argument(
+        "--validation_prompts_file", required=True, help="Disjoint held-out prompts, one per line"
+    )
+    parser.add_argument(
+        "--sparsity_tolerance",
+        type=_sparse_ratio,
+        default=0.02,
+        help="Absolute ratio tolerance for each phase (0.02 = two percentage points)",
+    )
+    parser.add_argument(
+        "--max_refinement_steps",
+        type=_nonnegative_int,
+        default=10,
+        help="Maximum search steps per phase on calibration prompts",
+    )
+    parser.add_argument("--output_dir", type=Path, default=Path("."))
     parser.add_argument(
         "--prompts_file",
         type=str,
@@ -294,6 +422,24 @@ def main():
 
     # Custom prompts do not need a tokenizer, so read them eagerly as well.
     prompts = _preflight_prompt_inputs(args, parser)
+    try:
+        held_out = _load_prompts(
+            None, argparse.Namespace(prompts_file=args.validation_prompts_file)
+        )
+    except (OSError, ValueError) as err:
+        parser.error(str(err))
+    if not 0 < args.target_sparse_ratio < 1:
+        parser.error("--target_sparse_ratio must be strictly between 0 and 1 for refinement")
+    if not 0 < args.sparsity_tolerance < 1:
+        parser.error("--sparsity_tolerance must be strictly between 0 and 1")
+    if prompts is not None and set(prompts) & set(held_out):
+        parser.error("Calibration and held-out prompt files must not overlap")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    if any(
+        (args.output_dir / name).exists()
+        for name in ("sparse_attention_config.json", "sparse_attention_validation.json")
+    ):
+        parser.error("--output_dir already contains calibration artifacts; use a fresh directory")
 
     # Workers run in separate processes and must import the calibration worker.
     repo_root = str(Path(__file__).resolve().parent)
@@ -315,6 +461,9 @@ def main():
         # Shared-prefix reuse would make prefill measurements cover only the
         # non-cached suffix of each prompt; the installer rejects it.
         "enable_prefix_caching": False,
+        "enable_chunked_prefill": False,
+        "max_num_seqs": 1,
+        "seed": 0,
     }
     if args.max_model_len is not None:
         llm_kwargs["max_model_len"] = args.max_model_len
@@ -335,6 +484,8 @@ def main():
     # Built after engine init so the RULER builder reuses the engine's tokenizer.
     if prompts is None:
         prompts = _load_prompts(llm, args)
+    if set(prompts) & set(held_out):
+        parser.error("Calibration and held-out prompts must not overlap")
 
     trials = list(DEFAULT_THRESHOLD_TRIALS)
     n_layers = llm.collective_rpc("sparse_calib_enable", args=(trials,))[0]
@@ -382,7 +533,64 @@ def main():
     )
     print("[ModelOpt] Calibrated threshold_scale_factor:")
     print(json.dumps(sparse_config["config_groups"]["group_0"]["threshold_scale_factor"], indent=2))
-    _write_config(args.model, sparse_config, args.update_checkpoint_config)
+    report = {
+        "model": args.model,
+        "engine_args": llm_kwargs,
+        "decode_tokens": args.decode_tokens,
+        "phases": requested_phases,
+        "target": args.target_sparse_ratio,
+        "tolerance": args.sparsity_tolerance,
+        "refinement": {"max_steps_per_phase": args.max_refinement_steps, "expansion_factor": 4},
+        "metric": "sum(skipped_tiles) / sum(eligible_tiles), across selected layers and TP ranks",
+        "scope": "Single-sequence serving; refined coefficients validated only at this target",
+        "prompts": {
+            split: {
+                "count": len(values),
+                "sha256": hashlib.sha256(json.dumps(values).encode()).hexdigest(),
+            }
+            for split, values in (("calibration", prompts), ("held_out", held_out))
+        },
+        "initial_config": deepcopy(sparse_config),
+        "history": [],
+    }
+
+    def measure(config, *, split="calibration"):
+        layers = llm.collective_rpc("sparse_validation_enable", args=(config,))
+        if not layers or any(n <= 0 for n in layers):
+            raise RuntimeError("No selected sparse attention layers on a worker; cannot validate")
+        llm.generate(prompts if split == "calibration" else held_out, sampling)
+        counters = llm.collective_rpc("sparse_validation_collect")
+        stats = _summarize_validation(
+            counters, args.target_sparse_ratio, args.sparsity_tolerance, requested_phases
+        )
+        report["history"].append(
+            {"split": split, "config": deepcopy(config), "workers": counters, "measured": stats}
+        )
+        for phase, row in stats.items():
+            actual = f"{row['achieved']:.2%}" if row["complete"] else "UNMEASURED"
+            print(
+                f"[ModelOpt] {split} {phase}: target={args.target_sparse_ratio:.2%}, "
+                f"achieved={actual}, skipped={row['skipped']}/{row['total']}, "
+                f"passed={row['passed']}",
+                flush=True,
+            )
+        (args.output_dir / "sparse_attention_validation.json").write_text(
+            json.dumps(report, indent=2, allow_nan=False)
+        )
+        return stats
+
+    sparse_config, report["calibration"] = _refine_scales(
+        sparse_config, measure, args.max_refinement_steps
+    )
+    # Do not consume held-out data until calibration passes, or feed its results
+    # back into the threshold search.
+    if all(row["passed"] for row in report["calibration"].values()):
+        report["held_out"] = measure(sparse_config, split="held_out")
+    else:
+        report["held_out_status"] = "not_run_calibration_failed"
+    _export_validated_config(
+        args.model, sparse_config, report, args.output_dir, args.update_checkpoint_config
+    )
 
 
 if __name__ == "__main__":

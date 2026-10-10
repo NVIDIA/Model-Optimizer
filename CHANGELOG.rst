@@ -8,6 +8,7 @@ Changelog
 
 *Sparsity*
 
+- Refine vLLM skip-softmax calibration against actual serving-kernel tile counts and gate config export on calibration and held-out sparsity. The calibration CLI now requires ``--validation_prompts_file`` and uses single-sequence, unchunked eager execution; failed validation retains a diagnostic report without modifying the checkpoint.
 - Add skip-softmax threshold calibration through vLLM for FlashAttention and FlashInfer, exporting prefill and decode fits as ``sparse_attention_config``. Skip-softmax serving keeps the calibrated 128-token KV-tile granularity (and 128-row prefill Q tiles), autotunes only its execution schedule, and uses a smaller Q tile for one-token decode.
 - Sparse-only vLLM installs now reject unsupported DCP, DBO/ubatching, speculative decoding, and FULL mixed-batch CUDA graphs; calibrated decode also rejects FULL decode graphs.
 

@@ -285,6 +285,32 @@ def _resolve_forward(
     )
 
 
+def _record_sparse_validation(impl, phase: str, output, max_seq_len: int) -> None:
+    """Collect serving counters only while the calibration worker validates."""
+    stats = getattr(impl, "_sparse_validation_stats", None)
+    if stats is None:
+        return
+    record = stats.setdefault(
+        phase,
+        {
+            "total": 0,
+            "skipped": 0,
+            "launches": 0,
+            "unmeasured_launches": 0,
+            "min_seq_len": max_seq_len,
+        },
+    )
+    record["launches"] += 1
+    record["min_seq_len"] = min(record["min_seq_len"], max_seq_len)
+    total = getattr(output, "_sparsity_total", None)
+    skipped = getattr(output, "_sparsity_skipped", None)
+    if total is None or skipped is None or total <= 0 or not 0 <= skipped <= total:
+        record["unmeasured_launches"] += 1
+    else:
+        record["total"] += int(total)
+        record["skipped"] += int(skipped)
+
+
 def _calibration_active(impl) -> bool:
     """Return whether skip-softmax calibration mode is enabled on an impl."""
     return bool(getattr(impl, "_calibrate", False)) and bool(
@@ -454,6 +480,9 @@ def _forward_modelopt(
     if not _should_run_modelopt_kernel(sparse_kw, quant_active):
         # Dynamic calibration can disable sparse work for a launch. Preserve the
         # backend's native dense path when no ModelOpt transform remains active.
+        _record_sparse_validation(
+            impl, "decode" if is_decode_only else "prefill", None, max_seq_len
+        )
         return dense_fallback()
     if prepare_modelopt is not None:
         prepare_modelopt()
@@ -503,6 +532,8 @@ def _forward_modelopt(
         return output
 
     # Paged mode reads K/V through the cache. The dummy shape provides the GQA ratio.
+    if getattr(impl, "_sparse_validation_stats", None) is not None:
+        sparse_kw["measure_sparsity"] = True
     k_dummy = torch.empty(0, impl.num_kv_heads, impl.head_size, device=q.device, dtype=q.dtype)
     triton_out = triton_attention(
         q,
@@ -526,6 +557,9 @@ def _forward_modelopt(
         v_qdq_amax=v_qdq_amax,
         v_cache_quantized=v_cache_quantized,
         **sparse_kw,
+    )
+    _record_sparse_validation(
+        impl, "decode" if is_decode_only else "prefill", triton_out, max_seq_len
     )
     output[:num_actual_tokens] = triton_out
     return output
@@ -722,6 +756,12 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             output_block_scale,
         )
         if resolved is None:
+            _record_sparse_validation(
+                self,
+                "decode" if getattr(attn_metadata, "max_query_len", 0) <= 1 else "prefill",
+                None,
+                getattr(attn_metadata, "max_seq_len", 0),
+            )
             return native_forward()
 
         key_cache, value_cache = _flash_attention_kv_cache_views(kv_cache, self.head_size)
@@ -952,6 +992,12 @@ def _flashinfer_forward(
         require_flashinfer_metadata=True,
     )
     if resolved is None:
+        _record_sparse_validation(
+            impl,
+            "decode" if getattr(attn_metadata, "_modelopt_max_query_len", 0) <= 1 else "prefill",
+            None,
+            getattr(attn_metadata, "_modelopt_max_seq_len", 0),
+        )
         return dense_fallback()
 
     if kv_cache.ndim != 5 or kv_cache.shape[1] != 2:

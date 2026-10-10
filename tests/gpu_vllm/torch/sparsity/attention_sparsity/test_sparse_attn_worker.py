@@ -168,6 +168,46 @@ def test_clone_sparse_impl_rejects_non_none_sinks():
         _clone_sparse_impl(old_impl)
 
 
+@pytest.mark.parametrize("missing_layer", [False, True])
+def test_validation_applies_serving_policy_and_detects_missing_layers(missing_layer):
+    worker_module = _load_worker_module()
+    worker = object.__new__(worker_module.SkipSoftmaxCalibWorker)
+    model = torch.nn.ModuleDict(
+        {name: torch.nn.Module() for name in ("a_attn", "b_attn", "ignored_attn")}
+    )
+    for module in model.values():
+        module.impl = object.__new__(ModelOptSparseAttentionImpl)
+        module.impl._calibrate = True
+    worker.model_runner = SimpleNamespace(model=model)
+    candidate = {
+        "config_groups": {
+            "group_0": {
+                "algorithm": "skip_softmax",
+                "targets": ["Attention"],
+                "ignore": ["ignored_attn"],
+                "threshold_scale_factor": {"prefill": {"a": 4.0, "b": 0.0}},
+                "target_sparsity": {"prefill": 0.5},
+            }
+        }
+    }
+    assert worker.sparse_validation_enable(candidate) == 2
+    assert model["ignored_attn"].impl.sparse_kw == {}
+    assert model["ignored_attn"].impl._sparse_validation_stats is None
+    for module in model.values():
+        assert not module.impl._calibrate
+    for name in ("a_attn",) if missing_layer else ("a_attn", "b_attn"):
+        vllm_plugin._record_sparse_validation(
+            model[name].impl,
+            "prefill",
+            SimpleNamespace(_sparsity_total=100, _sparsity_skipped=50),
+            1024,
+        )
+    stats = worker.sparse_validation_collect()["prefill"]
+    assert stats["total"] == (100 if missing_layer else 200)
+    assert stats["unmeasured_launches"] == int(missing_layer)
+    assert all(module.impl._sparse_validation_stats is None for module in model.values())
+
+
 def _make_old_flashinfer_impl():
     """Create a bare FlashInfer impl without requiring a live vLLM config."""
     impl = object.__new__(FlashInferImpl)
