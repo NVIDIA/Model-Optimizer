@@ -575,8 +575,9 @@ class HFDFlashModel(DFlashModel):
 
         Returns (anchor_positions [B, N], block_keep_mask [B, N]).
 
-        ``N`` is fixed by the config and ``seq_len``, not by the batch, so the compiled
-        (``dynamic=False``) draft attention sees one shape and never recompiles.
+        With ``torch.compile`` (``dynamic=False``) or FlexAttention on, ``N`` is fixed by the
+        config and ``seq_len``, not by the batch, so those shape-specialized graphs see one
+        shape and never recompile. Eager attention sizes ``N`` to the batch instead.
 
         TODO: Fix the random seed per epoch (change between epochs) so that anchor
         positions are deterministic within an epoch. This would allow caching the derived
@@ -591,8 +592,13 @@ class HFDFlashModel(DFlashModel):
         valid = loss_mask[:, : max_anchor + 1] > 0.5
         valid_counts = valid.sum(dim=1)
 
-        # Also bounded by max_anchor + 1 so short sequences cannot ask for more columns.
-        max_n = min(num_anchors, max_anchor + 1)
+        if self.dflash_use_torch_compile or self.dflash_use_flex_attention:
+            # Also bounded by max_anchor + 1 so short sequences cannot ask for more columns.
+            max_n = min(num_anchors, max_anchor + 1)
+        else:
+            # Padding blocks would cost eager attention their full compute; one host sync
+            # is cheaper, e.g. with answer-only loss on short answers.
+            max_n = max(min(num_anchors, int(valid_counts.max().item()) - 1), 1)
 
         # The data-dependent bound on sampled anchors, kept on-device so no shape depends on it.
         cap = (valid_counts.max() - 1).clamp(min=0, max=max_n)

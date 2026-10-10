@@ -1246,17 +1246,19 @@ def _legacy_sample_anchor_positions(model, seq_len, loss_mask, device):
 
 
 class TestAnchorSamplingStaticShape:
-    """n_blocks is fixed by the config, and the anchors it picks are still the legacy ones."""
+    """With static shapes, n_blocks is fixed by the config; the anchors are the legacy ones."""
 
     DEVICE = torch.device("cpu")
 
     @staticmethod
-    def _model(num_anchors):
+    def _model(num_anchors, static=False):
         model = get_tiny_llama(num_hidden_layers=4)
         config = get_dflash_config(block_size=BLOCK_SIZE)
         config["dflash_num_anchors"] = num_anchors
         config["dflash_self_logit_distillation"] = False  # the padding test calls the CE loss
         mtsp.convert(model, [("dflash", config)])
+        # After conversion only the sampler reads it, so nothing gets compiled.
+        model.dflash_use_torch_compile = static
         return model
 
     @staticmethod
@@ -1268,13 +1270,14 @@ class TestAnchorSamplingStaticShape:
 
     # Each case puts the legacy bound somewhere different: under the cap, ragged across
     # rows, at 1, and in the two degenerate cases the old code special-cased.
+    @pytest.mark.parametrize("static", [False, True], ids=["eager", "static"])
     @pytest.mark.parametrize(
         "lengths",
         [(13, 13), (13, 5), (9, 9), (5, 3), (2, 1), (1, 1), (0, 0), (13, 0)],
     )
-    def test_matches_legacy_sampling(self, lengths):
+    def test_matches_legacy_sampling(self, lengths, static):
         """Same seed in, same anchors and same keep mask out -- bitwise."""
-        model = self._model(num_anchors=8)
+        model = self._model(num_anchors=8, static=static)
         loss_mask = self._loss_mask(lengths)
 
         torch.manual_seed(1234)
@@ -1285,7 +1288,7 @@ class TestAnchorSamplingStaticShape:
         anchors, keep = model._sample_anchor_positions(SEQ_LEN, loss_mask, self.DEVICE)
 
         n_old = legacy_keep.shape[1]
-        assert keep.shape[1] >= n_old
+        assert keep.shape[1] >= n_old if static else keep.shape[1] == n_old
         assert torch.equal(keep[:, :n_old], legacy_keep)
         assert torch.equal(anchors[:, :n_old], legacy_anchors)
         # Everything past the legacy bound is inert padding.
@@ -1294,7 +1297,7 @@ class TestAnchorSamplingStaticShape:
 
     def test_sort_is_truncated_before_it_widens(self):
         """The surplus columns must not pull unsampled anchors in among the kept ones."""
-        model = self._model(num_anchors=8)
+        model = self._model(num_anchors=8, static=True)
         # One long row, so the legacy bound (valid_counts.max() - 1) sits below the static
         # width and there really are surplus columns to get wrong.
         loss_mask = self._loss_mask((6, 6))
@@ -1310,7 +1313,7 @@ class TestAnchorSamplingStaticShape:
 
     def test_shape_is_independent_of_batch_contents(self):
         """The whole point: one shape, therefore one compile."""
-        model = self._model(num_anchors=8)
+        model = self._model(num_anchors=8, static=True)
         shapes = {
             model._sample_anchor_positions(SEQ_LEN, self._loss_mask(lengths), self.DEVICE)[0].shape
             for lengths in [(13, 13), (13, 5), (9, 9), (5, 3), (2, 1), (1, 1), (0, 0)]
@@ -1318,30 +1321,26 @@ class TestAnchorSamplingStaticShape:
         assert len(shapes) == 1, f"n_blocks still varies with the batch: {shapes}"
 
     def test_shape_is_min_of_num_anchors_and_sequence(self):
-        anchors, _ = self._model(num_anchors=4)._sample_anchor_positions(
+        anchors, _ = self._model(num_anchors=4, static=True)._sample_anchor_positions(
             SEQ_LEN, self._loss_mask((13, 13)), self.DEVICE
         )
         assert anchors.shape[1] == 4, "num_anchors should bind here"
-        anchors, _ = self._model(num_anchors=512)._sample_anchor_positions(
+        anchors, _ = self._model(num_anchors=512, static=True)._sample_anchor_positions(
             SEQ_LEN, self._loss_mask((13, 13)), self.DEVICE
         )
         assert anchors.shape[1] == SEQ_LEN - BLOCK_SIZE + 1, "the sequence should bind here"
 
-    def test_sampling_does_not_sync_on_the_batch(self):
-        """Anchor sampling must not read the batch back to the host."""
-        import ast
-        import inspect
-        import textwrap
+    def test_static_sampling_does_not_sync_on_the_batch(self, monkeypatch):
+        """With static shapes, anchor sampling must not read the batch back to the host."""
+        model = self._model(num_anchors=8, static=True)
 
-        tree = ast.parse(
-            textwrap.dedent(inspect.getsource(hf_dflash.HFDFlashModel._sample_anchor_positions))
-        )
-        called = {
-            node.func.attr
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        }
-        assert not called & {"item", "tolist"}, f"host sync in anchor sampling: {called}"
+        def host_read(*_args, **_kwargs):
+            raise AssertionError("anchor sampling read a tensor back to the host")
+
+        # Implicit reads too: int(t) and `if t:` sync as surely as t.item() does.
+        for name in ("item", "tolist", "__int__", "__float__", "__bool__", "__index__"):
+            monkeypatch.setattr(torch.Tensor, name, host_read)
+        model._sample_anchor_positions(SEQ_LEN, self._loss_mask((13, 5)), self.DEVICE)
 
     def test_trailing_padding_blocks_do_not_change_the_loss(self):
         """The padding the static shape introduces is weightless in the loss and accuracy.
