@@ -13,9 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Linear-attention quantization adapters for optional serving kernels.
+"""Optional vLLM forward kernels for linear-attention serving precision profiles."""
 
-Serving adapters import forward kernels only when selected; this package
-initializer has no kernel dependencies. The existing FLA chunk kernels remain
-available for direct calls with fla-core==0.5.1.
-"""
+try:
+    import vllm
+except ImportError as error:
+    raise ImportError(
+        "Linear-attention serving profiles require the optional vLLM dependency: "
+        "public vLLM for 'vllm', or the compatible quantized-ReplaySSM "
+        "vLLM fork for 'replayssm'."
+    ) from error

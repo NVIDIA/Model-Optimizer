@@ -14,12 +14,15 @@
 # limitations under the License.
 
 # Dynamic per-tile FP8 E4M3 fake quantization of the GatedDeltaNet recurrent state.
-# Recompute amax over each [K, 64] tile inside the kernel, independently per sequence and head
-# of the [N, H, K, V] state (no calibration). ``axis: [0, 1]`` specifies sequence/head grouping;
-# the kernel uses one scale per full-K by 64-value-column tile (two per head for V = 128).
-# This is the only configuration the module supports. Applied at every kernel chunk boundary
-# (64 tokens) during calibration, QAT and QAD; needs fla-core==0.5.1 and Triton.
-# See ``modelopt.torch.quantization.plugins.gated_delta_net``.
+# TensorQuantizer computes amax over each [K, BV] tile of the [N, H, K, V] state,
+# independently per sequence/head (axis: [0, 1]), without calibration.
+# Set BV through linear_attention[].cfg.state_block_v (default: 64).
+# This unit enables only the quantizer. Select backend='serving' in the execution
+# policy and provide prefill lengths through linear_attention_training_phase.
+# With precision='vllm', state QDQ applies at the handoff to a nonempty decode
+# suffix and at each suffix token's cache write; fresh prefill has no internal QDQ.
+# The serving profile requires public vLLM's GDN kernels.
+# See modelopt.torch.quantization.plugins.gdn.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
   - quantizer_name: '*gdn_state_quantizer'

@@ -62,12 +62,16 @@ __all__ = [
 
 def convert_to_quantized_model(model: ModelLikeModule, config: QuantizeConfig) -> ConvertReturnType:
     """Convert the model to a quantized one as per `config`."""
+    # Defer shared plugin imports to avoid the plugin/conversion initialization cycle.
+    from .plugins.linear_attention import _apply_linear_attention_policy, _validate_linear_attention
+
     # initialize the true module if necessary
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
     replace_quant_module(model, version=ModeloptStateManager(model).state_version)
     set_quantizer_by_cfg(model, config.get("quant_cfg", []))
-    _validate_linear_attention_quantizers(model)
+    _apply_linear_attention_policy(model, config)
+    _validate_linear_attention(model)
 
     metadata = {}
     update_quantize_metadata(model, config, metadata)
@@ -95,8 +99,16 @@ def restore_quantized_model(
     model: ModelLikeModule, config: QuantizeConfig, metadata: MetadataDict
 ) -> nn.Module:
     """Insert quantizers to the model and restore the quantizer states from the given state dict."""
+    # Defer the shared plugin import to avoid the plugin/conversion initialization cycle.
+    from .plugins.linear_attention import _apply_linear_attention_policy
+
     # initialize the true module if necessary
-    convert_to_quantized_model(model, config)
+    model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
+    replace_quant_module(model, version=ModeloptStateManager(model).state_version)
+    set_quantizer_by_cfg(model, config.get("quant_cfg", []))
+    # Current checkpoints save resolved local policies; only older ones need matching.
+    if "linear_attention" not in metadata:
+        _apply_linear_attention_policy(model, config)
 
     return restore_quantizer_state(model, config, metadata)
 
@@ -137,6 +149,13 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
     details regarding how MCore sharded checkpoint is restored,
     see modelopt.torch.opt.plugins.mcore_dist_checkpointing.restore_sharded_modelopt_state.
     """
+    # Defer shared plugin imports to avoid the plugin/conversion initialization cycle.
+    from .plugins.linear_attention import (
+        _restore_legacy_linear_attention_quantizers,
+        _restore_linear_attention_policy,
+    )
+
+    _restore_linear_attention_policy(model, metadata.get("linear_attention"))
     if "quantizer_state" not in metadata:
         # MCore sharded checkpoint (`torch-dist`) has its quantizer_state stored as the
         # extra_state of `QuantModule`. The quantizer_state is resumed with
@@ -144,13 +163,8 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
         return model
 
     quantizer_state_dict = dict(metadata["quantizer_state"])
-    # Older checkpoints predate these disabled handles; preserve their baseline path.
-    for name, module in _linear_attention_modules(model).items():
-        for handle in ("gdn_state_quantizer", "gdn_w_quantizer"):
-            key = f"{name}.{handle}" if name else handle
-            quantizer = getattr(module, handle)
-            if key not in quantizer_state_dict and not quantizer.is_enabled:
-                quantizer_state_dict[key] = quantizer.get_modelopt_state()
+    if "linear_attention" not in metadata:
+        _restore_legacy_linear_attention_quantizers(model, quantizer_state_dict)
     unmatched_keys = quantizer_state_dict.keys() - quantizer_state(model).keys()
     extra_keys = quantizer_state(model).keys() - quantizer_state_dict.keys()
 
@@ -203,27 +217,19 @@ def update_quantize_metadata(
     model: nn.Module, config: QuantizeConfig, metadata: MetadataDict
 ) -> None:
     """Update the quantizer state in the metadata dict."""
+    # Defer the shared plugin import to avoid the plugin/conversion initialization cycle.
+    from .plugins.linear_attention import _linear_attention_state
+
+    policies = _linear_attention_state(model)
+    if policies or getattr(config, "linear_attention", []):
+        metadata["linear_attention"] = policies
+    else:
+        metadata.pop("linear_attention", None)
     metadata["quantizer_state"] = quantizer_state(model)
     if shared_state_metadata := SharedWeightGlobalAmaxState.metadata(model):
         metadata["shared_quant_states"] = shared_state_metadata
     else:
         metadata.pop("shared_quant_states", None)
-
-
-def _linear_attention_modules(model):
-    # Optional framework plugins import conversion; defer this import to avoid that cycle.
-    from .plugins.gated_delta_net import GatedDeltaNetStateQuantMixin
-
-    return {
-        get_unwrapped_name(name, model): module
-        for name, module in model.named_modules()
-        if isinstance(module, GatedDeltaNetStateQuantMixin)
-    }
-
-
-def _validate_linear_attention_quantizers(model):
-    for module in _linear_attention_modules(model).values():
-        module.validate_linear_attention()
 
 
 def quantizer_state(model: nn.Module) -> dict[str, Any]:
