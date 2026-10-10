@@ -1,0 +1,1585 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="green" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Autotune (ONNX) - Model Optimizer 0.0.1.dev1+ga5b8de788</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="TensorRT-LLM" href="../deployment/1_tensorrt_llm.html" /><link rel="prev" title="AutoCast (ONNX)" href="8_autocast.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=2ceb65ce" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+    <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+    <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=948f803c" />
+    <link rel="stylesheet" type="text/css" href="../_static/announcements.css?v=3c458a87" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="Autotune (ONNX)"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      
+      
+      <strong>Model Optimizer</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials"></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="1"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Announcements</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../index.html">Announcements</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../getting_started/_installation_for_Linux.html">Installation for Linux</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../getting_started/windows/_installation_for_Windows.html">Installation for Windows</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_standalone.html">Install ModelOpt-Windows as a Standalone Toolkit</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_with_olive.html">Install ModelOpt-Windows with Olive</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Guides</span></p>
+<ul class="current">
+<li class="toctree-l1 _expand"><a class="reference internal" href="0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="10_recipes.html">Recipes</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="1_quantization.html">Quantization</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_choosing_quant_methods.html">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_pytorch_quantization.html">PyTorch Quantization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_quant_cfg.html">Quantization Configuration (quant_cfg)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_onnx_quantization.html">ONNX Quantization - Linux (Beta)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="windows_guides/_ONNX_PTQ_guide.html">ONNX Quantization - Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="3_pruning.html">Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="4_distillation.html">Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="7_nas.html">NAS</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../reference/0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.deploy.html">deploy</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.deploy.llm.html">llm</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.deploy.llm.generate.html">generate</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.onnx.html">onnx</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.html">autocast</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.graphsanitizer.html">graphsanitizer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.logging_config.html">logging_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.nodeclassifier.html">nodeclassifier</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.precisionconverter.html">precisionconverter</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.referencerunner.html">referencerunner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.html">llm_export_utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.export_utils.html">export_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.quantization_utils.html">quantization_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.surgeon_utils.html">surgeon_utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.autotune.html">autotune</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.calib_utils.html">calib_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.fp8.html">fp8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.graph_utils.html">graph_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.gs_patching.html">gs_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.int4.html">int4</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.int8.html">int8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.operators.html">operators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.qdq_utils.html">qdq_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.quantize.html">modelopt.onnx.quantization.quantize</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.torch.html">torch</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.html">distill</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.distillation_model.html">distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.layerwise_distillation_model.html">layerwise_distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.loss_balancers.html">loss_balancers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.registry.html">registry</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.export.html">export</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.convert_hf_config.html">convert_hf_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.diffusers_utils.html">diffusers_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.distribute.html">distribute</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.hf_config_map.html">hf_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.hf_export_handlers.html">hf_export_handlers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.layer_utils.html">layer_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.layerwise_export.html">layerwise_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.mcore_config_map.html">mcore_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.model_config.html">model_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.model_config_export.html">model_config_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.model_config_utils.html">model_config_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.model_utils.html">model_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.moe_utils.html">moe_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.postprocess.html">postprocess</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.tensorrt_llm_type.html">tensorrt_llm_type</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.tensorrt_llm_utils.html">tensorrt_llm_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_hf.html">unified_export_hf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_hf_streaming.html">unified_export_hf_streaming</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_megatron.html">unified_export_megatron</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.html">fastgen</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.discriminators.html">discriminators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.ema.html">ema</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.factory.html">factory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.flow_matching.html">flow_matching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.loader.html">loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.methods.html">methods</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.pipeline.html">pipeline</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.html">kernels</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.common.html">common</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.quantization.html">quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.sparsity.html">sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.html">nas</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.autonas.html">autonas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.hparams.html">hparams</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.patch.html">patch</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.traced_hp.html">traced_hp</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.html">opt</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.config_loader.html">config_loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.dynamic.html">dynamic</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.hparam.html">hparam</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.searcher.html">searcher</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.html">peft</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.custom.html">custom</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.lora.html">lora</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.mode.html">mode</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.html">prune</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.fastnas.html">fastnas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.importance_hooks.html">importance_hooks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.pruning.html">pruning</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.html">puzzletron</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.build_library_and_stats.html">build_library_and_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.entrypoint.html">entrypoint</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.puzzletron_nas_plugin.html">puzzletron_nas_plugin</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.sewing_kit.html">sewing_kit</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.backends.html">backends</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.calib.html">calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.compress.html">modelopt.torch.quantization.compress</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.export_onnx.html">export_onnx</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_calib.html">model_calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_quant.html">model_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.nn.html">nn</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.qtensor.html">qtensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.tensor_quant.html">tensor_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.html">sparsity</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.attention_sparsity.html">attention_sparsity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.weight_sparsity.html">weight_sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.html">speculative</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.dflash.html">dflash</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.medusa.html">medusa</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.speculative_decoding.html">speculative_decoding</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.html">trace</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.analyzer.html">analyzer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.symbols.html">symbols</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.tracer.html">tracer</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.html">utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.cpp_extension.html">cpp_extension</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.dataset_utils.html">dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.distributed.html">distributed</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.graph.html">graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.import_utils.html">import_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.list.html">list</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.logging.html">logging</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.network.html">network</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.perf.html">perf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.random.html">random</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.regex.html">regex</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.robust_json.html">robust_json</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.serialization.html">serialization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.speech_dataset_utils.html">speech_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.tensor.html">tensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.vlm_dataset_utils.html">vlm_dataset_utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#overview">Overview</a></li>
+<li><a class="reference internal" href="#quick-start">Quick Start</a><ul>
+<li><a class="reference internal" href="#command-line-interface">Command-Line Interface</a></li>
+<li><a class="reference internal" href="#python-api">Python API</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#how-it-works">How It Works</a></li>
+<li><a class="reference internal" href="#advanced-usage">Advanced Usage</a><ul>
+<li><a class="reference internal" href="#warm-start-with-pattern-cache">Warm-Start with Pattern Cache</a></li>
+<li><a class="reference internal" href="#import-patterns-from-existing-qdq-models">Import Patterns from Existing QDQ Models</a></li>
+<li><a class="reference internal" href="#resume-after-interruption">Resume After Interruption</a></li>
+<li><a class="reference internal" href="#custom-tensorrt-plugins">Custom TensorRT Plugins</a></li>
+<li><a class="reference internal" href="#remote-autotuning">Remote Autotuning</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#low-level-api-usage">Low-Level API Usage</a><ul>
+<li><a class="reference internal" href="#basic-workflow">Basic Workflow</a></li>
+<li><a class="reference internal" href="#state-management">State Management</a></li>
+<li><a class="reference internal" href="#pattern-cache-management">Pattern Cache Management</a></li>
+<li><a class="reference internal" href="#import-from-a-q-dq-baseline">Import from a Q/DQ Baseline</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#configuration-options">Configuration Options</a><ul>
+<li><a class="reference internal" href="#config-class">Config Class</a></li>
+<li><a class="reference internal" href="#command-line-arguments">Command-Line Arguments</a><ul>
+<li><a class="reference internal" href="#python-m-modelopt.onnx.quantization.autotune-named-arguments">Named Arguments</a></li>
+<li><a class="reference internal" href="#python-m-modelopt.onnx.quantization.autotune-model-and-output">Model and Output</a></li>
+<li><a class="reference internal" href="#python-m-modelopt.onnx.quantization.autotune-autotuning-strategy">Autotuning Strategy</a></li>
+<li><a class="reference internal" href="#python-m-modelopt.onnx.quantization.autotune-quantization">Quantization</a></li>
+<li><a class="reference internal" href="#python-m-modelopt.onnx.quantization.autotune-tensorrt-benchmark">TensorRT Benchmark</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><a class="reference internal" href="#best-practices">Best Practices</a><ul>
+<li><a class="reference internal" href="#choosing-scheme-count">Choosing Scheme Count</a></li>
+<li><a class="reference internal" href="#managing-optimization-time">Managing Optimization Time</a></li>
+<li><a class="reference internal" href="#using-the-pattern-cache-effectively">Using the Pattern Cache Effectively</a></li>
+<li><a class="reference internal" href="#interpreting-results">Interpreting Results</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#deploying-optimized-models">Deploying Optimized Models</a><ul>
+<li><a class="reference internal" href="#using-trtexec">Using Trtexec</a></li>
+<li><a class="reference internal" href="#using-tensorrt-python-api">Using TensorRT Python API</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#troubleshooting">Troubleshooting</a><ul>
+<li><a class="reference internal" href="#common-issues">Common Issues</a></li>
+<li><a class="reference internal" href="#debugging">Debugging</a><ul>
+<li><a class="reference internal" href="#inspect-region-discovery">Inspect Region Discovery</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><a class="reference internal" href="#architecture-and-workflow">Architecture and Workflow</a><ul>
+<li><a class="reference internal" href="#design-rationale">Design Rationale</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#limitations-and-future-work">Limitations and Future Work</a></li>
+<li><a class="reference internal" href="#glossary">Glossary</a></li>
+<li><a class="reference internal" href="#references">References</a></li>
+<li><a class="reference internal" href="#frequently-asked-questions">Frequently Asked Questions</a></li>
+<li><a class="reference internal" href="#examples">Examples</a><ul>
+<li><a class="reference internal" href="#example-1-basic-optimization">Example 1: Basic Optimization</a></li>
+<li><a class="reference internal" href="#example-2-transfer-learning-with-pattern-cache">Example 2: Transfer Learning with Pattern Cache</a></li>
+<li><a class="reference internal" href="#example-3-import-from-manual-baseline">Example 3: Import from Manual Baseline</a></li>
+<li><a class="reference internal" href="#example-4-full-python-workflow">Example 4: Full Python Workflow</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#conclusion">Conclusion</a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">Model Optimizer</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">Autotune (ONNX)</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue dark-code" role="main">
+          <section id="autotune-onnx">
+<h1>Autotune (ONNX)<a class="headerlink" href="#autotune-onnx" title="Link to this heading">#</a></h1>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>Direct Autotune is an advanced ONNX quantization subtool for optimizing Q/DQ placement using TensorRT latency measurements. It does not replace the full calibrated ONNX quantization workflow.</p>
+<p>To quantize an ONNX model taking into consideration accuracy, please use <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">modelopt.onnx.quantization</span> <span class="pre">...</span> <span class="pre">--autotune=&lt;quick|default|extensive&gt;</span></code> with representative calibration data. See the <a class="reference external" href="_onnx_quantization.html#python-m-modelopt.onnx.quantization-autotune-only-applicable-when-autotune-is-set" rel="noopener noreferrer" target="_blank">ONNX quantization Autotune options</a>.</p>
+</div>
+<nav class="contents local" id="table-of-contents">
+<p class="topic-title">Table of Contents</p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#overview" id="id3">Overview</a></p></li>
+<li><p><a class="reference internal" href="#quick-start" id="id4">Quick Start</a></p>
+<ul>
+<li><p><a class="reference internal" href="#command-line-interface" id="id5">Command-Line Interface</a></p></li>
+<li><p><a class="reference internal" href="#python-api" id="id6">Python API</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#how-it-works" id="id7">How It Works</a></p></li>
+<li><p><a class="reference internal" href="#advanced-usage" id="id8">Advanced Usage</a></p>
+<ul>
+<li><p><a class="reference internal" href="#warm-start-with-pattern-cache" id="id9">Warm-Start with Pattern Cache</a></p></li>
+<li><p><a class="reference internal" href="#import-patterns-from-existing-qdq-models" id="id10">Import Patterns from Existing QDQ Models</a></p></li>
+<li><p><a class="reference internal" href="#resume-after-interruption" id="id11">Resume After Interruption</a></p></li>
+<li><p><a class="reference internal" href="#custom-tensorrt-plugins" id="id12">Custom TensorRT Plugins</a></p></li>
+<li><p><a class="reference internal" href="#remote-autotuning" id="id13">Remote Autotuning</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#low-level-api-usage" id="id14">Low-Level API Usage</a></p>
+<ul>
+<li><p><a class="reference internal" href="#basic-workflow" id="id15">Basic Workflow</a></p></li>
+<li><p><a class="reference internal" href="#state-management" id="id16">State Management</a></p></li>
+<li><p><a class="reference internal" href="#pattern-cache-management" id="id17">Pattern Cache Management</a></p></li>
+<li><p><a class="reference internal" href="#import-from-a-q-dq-baseline" id="id18">Import from a Q/DQ Baseline</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#configuration-options" id="id19">Configuration Options</a></p>
+<ul>
+<li><p><a class="reference internal" href="#config-class" id="id20">Config Class</a></p></li>
+<li><p><a class="reference internal" href="#command-line-arguments" id="id21">Command-Line Arguments</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#best-practices" id="id22">Best Practices</a></p>
+<ul>
+<li><p><a class="reference internal" href="#choosing-scheme-count" id="id23">Choosing Scheme Count</a></p></li>
+<li><p><a class="reference internal" href="#managing-optimization-time" id="id24">Managing Optimization Time</a></p></li>
+<li><p><a class="reference internal" href="#using-the-pattern-cache-effectively" id="id25">Using the Pattern Cache Effectively</a></p></li>
+<li><p><a class="reference internal" href="#interpreting-results" id="id26">Interpreting Results</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#deploying-optimized-models" id="id27">Deploying Optimized Models</a></p>
+<ul>
+<li><p><a class="reference internal" href="#using-trtexec" id="id28">Using Trtexec</a></p></li>
+<li><p><a class="reference internal" href="#using-tensorrt-python-api" id="id29">Using TensorRT Python API</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#troubleshooting" id="id30">Troubleshooting</a></p>
+<ul>
+<li><p><a class="reference internal" href="#common-issues" id="id31">Common Issues</a></p></li>
+<li><p><a class="reference internal" href="#debugging" id="id32">Debugging</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#architecture-and-workflow" id="id33">Architecture and Workflow</a></p>
+<ul>
+<li><p><a class="reference internal" href="#design-rationale" id="id34">Design Rationale</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#limitations-and-future-work" id="id35">Limitations and Future Work</a></p></li>
+<li><p><a class="reference internal" href="#glossary" id="id36">Glossary</a></p></li>
+<li><p><a class="reference internal" href="#references" id="id37">References</a></p></li>
+<li><p><a class="reference internal" href="#frequently-asked-questions" id="id38">Frequently Asked Questions</a></p></li>
+<li><p><a class="reference internal" href="#examples" id="id39">Examples</a></p>
+<ul>
+<li><p><a class="reference internal" href="#example-1-basic-optimization" id="id40">Example 1: Basic Optimization</a></p></li>
+<li><p><a class="reference internal" href="#example-2-transfer-learning-with-pattern-cache" id="id41">Example 2: Transfer Learning with Pattern Cache</a></p></li>
+<li><p><a class="reference internal" href="#example-3-import-from-manual-baseline" id="id42">Example 3: Import from Manual Baseline</a></p></li>
+<li><p><a class="reference internal" href="#example-4-full-python-workflow" id="id43">Example 4: Full Python Workflow</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#conclusion" id="id44">Conclusion</a></p></li>
+</ul>
+</nav>
+<section id="overview">
+<h2><a class="toc-backref" href="#id3" role="doc-backlink">Overview</a><a class="headerlink" href="#overview" title="Link to this heading">#</a></h2>
+<p>The <code class="docutils literal notranslate"><span class="pre">modelopt.onnx.quantization.autotune</span></code> module automates Q/DQ (Quantize/Dequantize) placement optimization in ONNX models. It explores placement strategies and uses TensorRT latency measurements to choose a configuration that minimizes inference time.</p>
+<p><strong>Key Features:</strong></p>
+<ul class="simple">
+<li><p><strong>Automatic Region Discovery</strong>: Intelligently partitions the model into optimization regions</p></li>
+<li><p><strong>Pattern-Based Optimization</strong>: Groups structurally similar regions and optimizes them together</p></li>
+<li><p><strong>TensorRT Performance Measurement</strong>: Uses actual inference latency (not theoretical estimates)</p></li>
+<li><p><strong>Crash Recovery</strong>: Checkpoint/resume capability for long-running optimizations</p></li>
+<li><p><strong>Warm-Start Support</strong>: Reuses learned patterns from previous runs</p></li>
+<li><p><strong>Multiple Quantization Types</strong>: Supports INT8 and FP8 quantization</p></li>
+</ul>
+<p><strong>When to Use This Tool:</strong></p>
+<ul class="simple">
+<li><p>Debugging or developing the Q/DQ placement autotuning algorithm</p></li>
+<li><p>Running the lower-level workflow without invoking the full quantization CLI</p></li>
+<li><p>Programmatic experiments with direct Autotune classes and workflow functions</p></li>
+<li><p>Expert workflows that intentionally start from already-quantized or pre-patterned Q/DQ models</p></li>
+</ul>
+</section>
+<section id="quick-start">
+<h2><a class="toc-backref" href="#id4" role="doc-backlink">Quick Start</a><a class="headerlink" href="#quick-start" title="Link to this heading">#</a></h2>
+<section id="command-line-interface">
+<h3><a class="toc-backref" href="#id5" role="doc-backlink">Command-Line Interface</a><a class="headerlink" href="#command-line-interface" title="Link to this heading">#</a></h3>
+<p>The easiest way to use the autotuner is via the command-line interface:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># Basic usage - INT8 quantization (output default: ./autotuner_output)</span>
+</span><span data-line="2">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span>--onnx_path<span class="w"> </span>model.onnx
+</span><span data-line="3">
+</span><span data-line="4"><span class="c1"># Specify output dir and FP8 with more schemes</span>
+</span><span data-line="5">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="6"><span class="w">    </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="7"><span class="w">    </span>--output_dir<span class="w"> </span>./results<span class="w"> </span><span class="se">\</span>
+</span><span data-line="8"><span class="w">    </span>--quant_type<span class="w"> </span>fp8<span class="w"> </span><span class="se">\</span>
+</span><span data-line="9"><span class="w">    </span>--schemes_per_region<span class="w"> </span><span class="m">50</span>
+</span></pre></div>
+</div>
+<p>The command will:</p>
+<ol class="arabic simple">
+<li><p>Discover regions in the model automatically</p></li>
+<li><p>Measure baseline performance (no quantization)</p></li>
+<li><p>Test different Q/DQ placement schemes for each region pattern</p></li>
+<li><p>Select the best scheme based on TensorRT latency measurements</p></li>
+<li><p>Export an optimized ONNX model with Q/DQ nodes</p></li>
+</ol>
+<p>Autotune searches for Q/DQ placement schemes that improve TensorRT runtime. It does not by itself define the full calibration and quantization policy for an accuracy-sensitive deployment. For end-to-end ONNX PTQ that starts from an unquantized model, run ONNX quantization with calibration data and enable <code class="docutils literal notranslate"><span class="pre">--autotune</span></code> there. See the <a class="reference external" href="_onnx_quantization.html#python-m-modelopt.onnx.quantization-autotune-only-applicable-when-autotune-is-set" rel="noopener noreferrer" target="_blank">ONNX quantization Autotune options</a>.</p>
+<p><strong>Output Files:</strong></p>
+<p>Files are written under the output directory (default <code class="docutils literal notranslate"><span class="pre">./autotuner_output</span></code>, or the path given by <code class="docutils literal notranslate"><span class="pre">--output_dir</span></code>):</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span><span data-line="1">autotuner_output/                         # default; or the path passed to --output_dir
+</span><span data-line="2">├── autotuner_state.yaml                  # Checkpoint for resuming
+</span><span data-line="3">├── autotuner_state_pattern_cache.yaml    # Pattern cache for future runs
+</span><span data-line="4">├── baseline.onnx                         # Unquantized baseline
+</span><span data-line="5">├── optimized_final.onnx                  # Final optimized model
+</span><span data-line="6">├── logs/                                 # TensorRT build logs
+</span><span data-line="7">│   ├── baseline.log
+</span><span data-line="8">│   ├── region_*_scheme_*.log
+</span><span data-line="9">│   └── final.log
+</span><span data-line="10">└── region_models/                        # Best model per region
+</span><span data-line="11">    └── region_*_level_*.onnx
+</span></pre></div>
+</div>
+</section>
+<section id="python-api">
+<h3><a class="toc-backref" href="#id6" role="doc-backlink">Python API</a><a class="headerlink" href="#python-api" title="Link to this heading">#</a></h3>
+<p>For programmatic control, use the workflow function:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span data-line="2"><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.quantization.autotune.workflows</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+</span><span data-line="3">    <span class="n">region_pattern_autotuning_workflow</span><span class="p">,</span>
+</span><span data-line="4">    <span class="n">init_benchmark_instance</span>
+</span><span data-line="5"><span class="p">)</span>
+</span><span data-line="6">
+</span><span data-line="7"><span class="c1"># When using the CLI, the benchmark is initialized automatically. When calling the</span>
+</span><span data-line="8"><span class="c1"># workflow from Python, call init_benchmark_instance first:</span>
+</span><span data-line="9"><span class="n">init_benchmark_instance</span><span class="p">(</span>
+</span><span data-line="10">    <span class="n">use_trtexec</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+</span><span data-line="11">    <span class="n">timing_cache_file</span><span class="o">=</span><span class="s2">"timing.cache"</span><span class="p">,</span>
+</span><span data-line="12">    <span class="n">warmup_runs</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+</span><span data-line="13">    <span class="n">timing_runs</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span>
+</span><span data-line="14"><span class="p">)</span>
+</span><span data-line="15">
+</span><span data-line="16"><span class="c1"># Run autotuning workflow</span>
+</span><span data-line="17"><span class="n">autotuner</span> <span class="o">=</span> <span class="n">region_pattern_autotuning_workflow</span><span class="p">(</span>
+</span><span data-line="18">    <span class="n">model_path</span><span class="o">=</span><span class="s2">"model.onnx"</span><span class="p">,</span>
+</span><span data-line="19">    <span class="n">output_dir</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">"./results"</span><span class="p">),</span>
+</span><span data-line="20">    <span class="n">num_schemes_per_region</span><span class="o">=</span><span class="mi">30</span><span class="p">,</span>
+</span><span data-line="21">    <span class="n">quant_type</span><span class="o">=</span><span class="s2">"int8"</span><span class="p">,</span>
+</span><span data-line="22"><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="how-it-works">
+<h2><a class="toc-backref" href="#id7" role="doc-backlink">How It Works</a><a class="headerlink" href="#how-it-works" title="Link to this heading">#</a></h2>
+<p>The autotuner uses a pattern-based approach that makes optimization both efficient and consistent:</p>
+<ol class="arabic">
+<li><p><strong>Region Discovery Phase</strong></p>
+<p>The model’s computation graph is automatically partitioned into hierarchical regions. Each region is a subgraph containing related operations (e.g., a Conv-BatchNorm-ReLU block).</p>
+</li>
+<li><p><strong>Pattern Identification Phase</strong></p>
+<p>Regions with identical structural patterns are grouped together. For example, all Convolution-&gt;BatchNormalization-&gt;ReLU blocks in the model share the same pattern.</p>
+</li>
+<li><p><strong>Scheme Generation Phase</strong></p>
+<p>For each unique pattern, multiple Q/DQ insertion schemes are generated. Each scheme specifies different locations to insert Q/DQ nodes.</p>
+</li>
+<li><p><strong>Performance Measurement Phase</strong></p>
+<p>Each scheme is evaluated by:</p>
+<ul class="simple">
+<li><p>Exporting the ONNX model with Q/DQ nodes applied</p></li>
+<li><p>Building a TensorRT engine</p></li>
+<li><p>Measuring actual inference latency</p></li>
+</ul>
+</li>
+<li><p><strong>Best Scheme Selection</strong></p>
+<p>The scheme with the lowest latency is selected for each pattern. This scheme automatically applies to all regions matching that pattern.</p>
+</li>
+<li><p><strong>Model Export</strong></p>
+<p>The final model includes the best Q/DQ scheme for each pattern, resulting in an optimized quantized model.</p>
+</li>
+</ol>
+<p><strong>Why pattern-based?</strong></p>
+<p>The autotuner optimizes each unique pattern once; the chosen scheme then applies to every region that matches that pattern. So runtime scales with the number of <em>patterns</em>, not regions. Models with repeated structure (e.g. transformers) benefit most; highly diverse graphs have more patterns and take longer.</p>
+</section>
+<section id="advanced-usage">
+<h2><a class="toc-backref" href="#id8" role="doc-backlink">Advanced Usage</a><a class="headerlink" href="#advanced-usage" title="Link to this heading">#</a></h2>
+<section id="warm-start-with-pattern-cache">
+<h3><a class="toc-backref" href="#id9" role="doc-backlink">Warm-Start with Pattern Cache</a><a class="headerlink" href="#warm-start-with-pattern-cache" title="Link to this heading">#</a></h3>
+<p>Pattern cache files store the best Q/DQ schemes from previous optimization runs. These patterns can be reused on similar models or model versions:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># First optimization (cold start)</span>
+</span><span data-line="2">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="3"><span class="w">    </span>--onnx_path<span class="w"> </span>model_v1.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">    </span>--output_dir<span class="w"> </span>./run1
+</span><span data-line="5">
+</span><span data-line="6"><span class="c1"># The pattern cache is saved to ./run1/autotuner_state_pattern_cache.yaml</span>
+</span><span data-line="7">
+</span><span data-line="8"><span class="c1"># Second optimization with warm-start</span>
+</span><span data-line="9">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="10"><span class="w">    </span>--onnx_path<span class="w"> </span>model_v2.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="11"><span class="w">    </span>--output_dir<span class="w"> </span>./run2<span class="w"> </span><span class="se">\</span>
+</span><span data-line="12"><span class="w">    </span>--pattern_cache<span class="w"> </span>./run1/autotuner_state_pattern_cache.yaml
+</span></pre></div>
+</div>
+<p>The second run tests cached schemes first and can reach a good configuration faster.</p>
+<p><strong>When to use pattern cache:</strong></p>
+<ul class="simple">
+<li><p>Optimizing multiple versions of the same model</p></li>
+<li><p>Optimizing models from the same family (e.g., different BERT variants)</p></li>
+<li><p>Transferring learned patterns across models</p></li>
+</ul>
+</section>
+<section id="import-patterns-from-existing-qdq-models">
+<h3><a class="toc-backref" href="#id10" role="doc-backlink">Import Patterns from Existing QDQ Models</a><a class="headerlink" href="#import-patterns-from-existing-qdq-models" title="Link to this heading">#</a></h3>
+<p>With a pre-quantized baseline model (e.g., from manual optimization or another tool), its Q/DQ patterns can be imported:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="2"><span class="w">    </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="3"><span class="w">    </span>--output_dir<span class="w"> </span>./results<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">    </span>--qdq_baseline<span class="w"> </span>manually_quantized.onnx
+</span></pre></div>
+</div>
+<p>The workflow extracts Q/DQ insertion points from the baseline, maps them to region patterns, and uses them as seed schemes. Useful when:</p>
+<ul class="simple">
+<li><p>Starting from expert-tuned quantization schemes</p></li>
+<li><p>Comparing against reference implementations</p></li>
+<li><p>Fine-tuning existing quantized models</p></li>
+</ul>
+</section>
+<section id="resume-after-interruption">
+<h3><a class="toc-backref" href="#id11" role="doc-backlink">Resume After Interruption</a><a class="headerlink" href="#resume-after-interruption" title="Link to this heading">#</a></h3>
+<p>A long run can be interrupted (Ctrl+C, preemption, or crash) and resumed later:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># Start optimization</span>
+</span><span data-line="2">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="3"><span class="w">    </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">    </span>--output_dir<span class="w"> </span>./results
+</span><span data-line="5">
+</span><span data-line="6"><span class="c1"># ... interrupted after 2 hours ...</span>
+</span><span data-line="7">
+</span><span data-line="8"><span class="c1"># Resume from checkpoint (just run the same command)</span>
+</span><span data-line="9">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="10"><span class="w">    </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="11"><span class="w">    </span>--output_dir<span class="w"> </span>./results
+</span></pre></div>
+</div>
+<p>When rerun with the same <code class="docutils literal notranslate"><span class="pre">--output_dir</span></code>, the autotuner detects <code class="docutils literal notranslate"><span class="pre">autotuner_state.yaml</span></code>, restores progress, and continues from the next unprofiled region.</p>
+</section>
+<section id="custom-tensorrt-plugins">
+<h3><a class="toc-backref" href="#id12" role="doc-backlink">Custom TensorRT Plugins</a><a class="headerlink" href="#custom-tensorrt-plugins" title="Link to this heading">#</a></h3>
+<p>If the model uses custom TensorRT operations, provide the plugin libraries:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="2"><span class="w">    </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="3"><span class="w">    </span>--output_dir<span class="w"> </span>./results<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">    </span>--plugin_libraries<span class="w"> </span>/path/to/plugin1.so<span class="w"> </span>/path/to/plugin2.so
+</span></pre></div>
+</div>
+</section>
+<section id="remote-autotuning">
+<h3><a class="toc-backref" href="#id13" role="doc-backlink">Remote Autotuning</a><a class="headerlink" href="#remote-autotuning" title="Link to this heading">#</a></h3>
+<p>TensorRT 10.15+ supports remote autotuning in safety mode (<code class="docutils literal notranslate"><span class="pre">--safe</span></code>), which allows TensorRT’s optimization process to be offloaded to a remote hardware. This is useful when optimizing models for different target GPUs without having direct access to them.</p>
+<p>To use remote autotuning during Q/DQ placement optimization, run with <code class="docutils literal notranslate"><span class="pre">trtexec</span></code> and pass extra args:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="2"><span class="w">    </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="3"><span class="w">    </span>--output_dir<span class="w"> </span>./model_remote_autotuned<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">    </span>--schemes_per_region<span class="w"> </span><span class="m">50</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="5"><span class="w">    </span>--use_trtexec<span class="w"> </span><span class="se">\</span>
+</span><span data-line="6"><span class="w">    </span>--trtexec_benchmark_args<span class="w"> </span><span class="s2">"--remoteAutoTuningConfig=\"&lt;remote autotuning config&gt;\" --safe --skipInference"</span>
+</span></pre></div>
+</div>
+<p><strong>Requirements:</strong></p>
+<ul class="simple">
+<li><p>TensorRT 10.15 or later</p></li>
+<li><p>Valid remote autotuning configuration</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--use_trtexec</span></code> must be set (benchmarking uses <code class="docutils literal notranslate"><span class="pre">trtexec</span></code> instead of the TensorRT Python API)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--safe</span> <span class="pre">--skipInference</span></code> must be enabled via <code class="docutils literal notranslate"><span class="pre">--trtexec_benchmark_args</span></code></p></li>
+</ul>
+<p>Replace <code class="docutils literal notranslate"><span class="pre">&lt;remote</span> <span class="pre">autotuning</span> <span class="pre">config&gt;</span></code> with an actual remote autotuning configuration string (see <code class="docutils literal notranslate"><span class="pre">trtexec</span> <span class="pre">--help</span></code> for more details). Other TensorRT benchmark options (e.g. <code class="docutils literal notranslate"><span class="pre">--timing_cache</span></code>, <code class="docutils literal notranslate"><span class="pre">--warmup_runs</span></code>, <code class="docutils literal notranslate"><span class="pre">--timing_runs</span></code>, <code class="docutils literal notranslate"><span class="pre">--plugin_libraries</span></code>) are also available; run <code class="docutils literal notranslate"><span class="pre">--help</span></code> for details.</p>
+</section>
+</section>
+<section id="low-level-api-usage">
+<h2><a class="toc-backref" href="#id14" role="doc-backlink">Low-Level API Usage</a><a class="headerlink" href="#low-level-api-usage" title="Link to this heading">#</a></h2>
+<p>For fine-grained control over the autotune process (e.g. driving it step-by-step or customizing regions and schemes), use the autotuner classes directly:</p>
+<section id="basic-workflow">
+<h3><a class="toc-backref" href="#id15" role="doc-backlink">Basic Workflow</a><a class="headerlink" href="#basic-workflow" title="Link to this heading">#</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">import</span><span class="w"> </span><span class="nn">onnx</span>
+</span><span data-line="2"><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.quantization.autotune</span><span class="w"> </span><span class="kn">import</span> <span class="n">QDQAutotuner</span><span class="p">,</span> <span class="n">Config</span>
+</span><span data-line="3"><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.quantization.autotune.workflows</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+</span><span data-line="4">    <span class="n">init_benchmark_instance</span><span class="p">,</span>
+</span><span data-line="5">    <span class="n">benchmark_onnx_model</span><span class="p">,</span>
+</span><span data-line="6"><span class="p">)</span>
+</span><span data-line="7">
+</span><span data-line="8"><span class="c1"># Initialize global benchmark (required before benchmark_onnx_model)</span>
+</span><span data-line="9"><span class="n">init_benchmark_instance</span><span class="p">(</span>
+</span><span data-line="10">    <span class="n">use_trtexec</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+</span><span data-line="11">    <span class="n">timing_cache_file</span><span class="o">=</span><span class="s2">"timing.cache"</span><span class="p">,</span>
+</span><span data-line="12">    <span class="n">warmup_runs</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+</span><span data-line="13">    <span class="n">timing_runs</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span>
+</span><span data-line="14"><span class="p">)</span>
+</span><span data-line="15">
+</span><span data-line="16"><span class="c1"># Load model</span>
+</span><span data-line="17"><span class="n">model</span> <span class="o">=</span> <span class="n">onnx</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="s2">"model.onnx"</span><span class="p">)</span>
+</span><span data-line="18">
+</span><span data-line="19"><span class="c1"># Initialize autotuner with automatic region discovery</span>
+</span><span data-line="20"><span class="n">autotuner</span> <span class="o">=</span> <span class="n">QDQAutotuner</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+</span><span data-line="21"><span class="n">config</span> <span class="o">=</span> <span class="n">Config</span><span class="p">(</span><span class="n">default_quant_type</span><span class="o">=</span><span class="s2">"int8"</span><span class="p">,</span> <span class="n">verbose</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span data-line="22"><span class="n">autotuner</span><span class="o">.</span><span class="n">initialize</span><span class="p">(</span><span class="n">config</span><span class="p">)</span>
+</span><span data-line="23">
+</span><span data-line="24"><span class="c1"># Measure baseline (no Q/DQ)</span>
+</span><span data-line="25"><span class="n">autotuner</span><span class="o">.</span><span class="n">export_onnx</span><span class="p">(</span><span class="s2">"baseline.onnx"</span><span class="p">,</span> <span class="n">insert_qdq</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+</span><span data-line="26"><span class="n">baseline_latency</span> <span class="o">=</span> <span class="n">benchmark_onnx_model</span><span class="p">(</span><span class="s2">"baseline.onnx"</span><span class="p">)</span>
+</span><span data-line="27"><span class="n">autotuner</span><span class="o">.</span><span class="n">submit</span><span class="p">(</span><span class="n">baseline_latency</span><span class="p">)</span>
+</span><span data-line="28"><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Baseline: </span><span class="si">{</span><span class="n">baseline_latency</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2"> ms"</span><span class="p">)</span>
+</span><span data-line="29">
+</span><span data-line="30"><span class="c1"># Profile each region</span>
+</span><span data-line="31"><span class="n">regions</span> <span class="o">=</span> <span class="n">autotuner</span><span class="o">.</span><span class="n">regions</span>
+</span><span data-line="32"><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Found </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">regions</span><span class="p">)</span><span class="si">}</span><span class="s2"> regions to optimize"</span><span class="p">)</span>
+</span><span data-line="33">
+</span><span data-line="34"><span class="k">for</span> <span class="n">region_idx</span><span class="p">,</span> <span class="n">region</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">regions</span><span class="p">):</span>
+</span><span data-line="35">    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="se">\n</span><span class="s2">Region </span><span class="si">{</span><span class="n">region_idx</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="si">}</span><span class="s2">/</span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">regions</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+</span><span data-line="36">
+</span><span data-line="37">    <span class="c1"># Set current profile region</span>
+</span><span data-line="38">    <span class="n">autotuner</span><span class="o">.</span><span class="n">set_profile_region</span><span class="p">(</span><span class="n">region</span><span class="p">,</span> <span class="n">commit</span><span class="o">=</span><span class="p">(</span><span class="n">region_idx</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">))</span>
+</span><span data-line="39">
+</span><span data-line="40">    <span class="c1"># After set_profile_region(), None means this region's pattern was already</span>
+</span><span data-line="41">    <span class="c1"># profiled (e.g. from a loaded state file). There are no new schemes to</span>
+</span><span data-line="42">    <span class="c1"># generate, so skip to the next region.</span>
+</span><span data-line="43">    <span class="k">if</span> <span class="n">autotuner</span><span class="o">.</span><span class="n">current_profile_pattern_schemes</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+</span><span data-line="44">        <span class="nb">print</span><span class="p">(</span><span class="s2">"  Already profiled, skipping"</span><span class="p">)</span>
+</span><span data-line="45">        <span class="k">continue</span>
+</span><span data-line="46">
+</span><span data-line="47">    <span class="c1"># Generate and test schemes</span>
+</span><span data-line="48">    <span class="k">for</span> <span class="n">scheme_num</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">30</span><span class="p">):</span>  <span class="c1"># Test 30 schemes per region</span>
+</span><span data-line="49">        <span class="n">scheme_idx</span> <span class="o">=</span> <span class="n">autotuner</span><span class="o">.</span><span class="n">generate</span><span class="p">()</span>
+</span><span data-line="50">
+</span><span data-line="51">        <span class="k">if</span> <span class="n">scheme_idx</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">:</span>
+</span><span data-line="52">            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"  No more unique schemes after </span><span class="si">{</span><span class="n">scheme_num</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+</span><span data-line="53">            <span class="k">break</span>
+</span><span data-line="54">
+</span><span data-line="55">        <span class="c1"># Export model with Q/DQ nodes</span>
+</span><span data-line="56">        <span class="n">model_bytes</span> <span class="o">=</span> <span class="n">autotuner</span><span class="o">.</span><span class="n">export_onnx</span><span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">insert_qdq</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span data-line="57">
+</span><span data-line="58">        <span class="c1"># Measure performance</span>
+</span><span data-line="59">        <span class="n">latency</span> <span class="o">=</span> <span class="n">benchmark_onnx_model</span><span class="p">(</span><span class="n">model_bytes</span><span class="p">)</span>
+</span><span data-line="60">        <span class="n">success</span> <span class="o">=</span> <span class="n">latency</span> <span class="o">!=</span> <span class="nb">float</span><span class="p">(</span><span class="s1">'inf'</span><span class="p">)</span>
+</span><span data-line="61">        <span class="n">autotuner</span><span class="o">.</span><span class="n">submit</span><span class="p">(</span><span class="n">latency</span><span class="p">,</span> <span class="n">success</span><span class="o">=</span><span class="n">success</span><span class="p">)</span>
+</span><span data-line="62">
+</span><span data-line="63">        <span class="k">if</span> <span class="n">success</span><span class="p">:</span>
+</span><span data-line="64">            <span class="n">speedup</span> <span class="o">=</span> <span class="n">baseline_latency</span> <span class="o">/</span> <span class="n">latency</span>
+</span><span data-line="65">            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"  Scheme </span><span class="si">{</span><span class="n">scheme_idx</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">latency</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2"> ms (</span><span class="si">{</span><span class="n">speedup</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">x)"</span><span class="p">)</span>
+</span><span data-line="66">
+</span><span data-line="67">    <span class="c1"># Best scheme is automatically selected</span>
+</span><span data-line="68">    <span class="n">ps</span> <span class="o">=</span> <span class="n">autotuner</span><span class="o">.</span><span class="n">current_profile_pattern_schemes</span>
+</span><span data-line="69">    <span class="k">if</span> <span class="n">ps</span> <span class="ow">and</span> <span class="n">ps</span><span class="o">.</span><span class="n">best_scheme</span><span class="p">:</span>
+</span><span data-line="70">        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"  Best: </span><span class="si">{</span><span class="n">ps</span><span class="o">.</span><span class="n">best_scheme</span><span class="o">.</span><span class="n">latency_ms</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2"> ms"</span><span class="p">)</span>
+</span><span data-line="71">
+</span><span data-line="72"><span class="c1"># Commit final region</span>
+</span><span data-line="73"><span class="n">autotuner</span><span class="o">.</span><span class="n">set_profile_region</span><span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">commit</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span data-line="74">
+</span><span data-line="75"><span class="c1"># Export optimized model</span>
+</span><span data-line="76"><span class="n">autotuner</span><span class="o">.</span><span class="n">export_onnx</span><span class="p">(</span><span class="s2">"optimized_final.onnx"</span><span class="p">,</span> <span class="n">insert_qdq</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span data-line="77"><span class="nb">print</span><span class="p">(</span><span class="s2">"</span><span class="se">\n</span><span class="s2">Optimization complete!"</span><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+<section id="state-management">
+<h3><a class="toc-backref" href="#id16" role="doc-backlink">State Management</a><a class="headerlink" href="#state-management" title="Link to this heading">#</a></h3>
+<p>Save and load optimization state for crash recovery:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># Save state after each region</span>
+</span><span data-line="2"><span class="n">autotuner</span><span class="o">.</span><span class="n">save_state</span><span class="p">(</span><span class="s2">"autotuner_state.yaml"</span><span class="p">)</span>
+</span><span data-line="3">
+</span><span data-line="4"><span class="c1"># Load state to resume</span>
+</span><span data-line="5"><span class="n">autotuner</span> <span class="o">=</span> <span class="n">QDQAutotuner</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+</span><span data-line="6"><span class="n">autotuner</span><span class="o">.</span><span class="n">initialize</span><span class="p">(</span><span class="n">config</span><span class="p">)</span>
+</span><span data-line="7"><span class="n">autotuner</span><span class="o">.</span><span class="n">load_state</span><span class="p">(</span><span class="s2">"autotuner_state.yaml"</span><span class="p">)</span>
+</span><span data-line="8">
+</span><span data-line="9"><span class="c1"># Continue optimization from last checkpoint</span>
+</span><span data-line="10"><span class="c1"># (regions already profiled will be skipped)</span>
+</span></pre></div>
+</div>
+</section>
+<section id="pattern-cache-management">
+<h3><a class="toc-backref" href="#id17" role="doc-backlink">Pattern Cache Management</a><a class="headerlink" href="#pattern-cache-management" title="Link to this heading">#</a></h3>
+<p>Create and use pattern caches:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.quantization.autotune</span><span class="w"> </span><span class="kn">import</span> <span class="n">PatternCache</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="c1"># Load existing cache</span>
+</span><span data-line="4"><span class="n">cache</span> <span class="o">=</span> <span class="n">PatternCache</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="s2">"autotuner_state_pattern_cache.yaml"</span><span class="p">)</span>
+</span><span data-line="5"><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Loaded </span><span class="si">{</span><span class="n">cache</span><span class="o">.</span><span class="n">num_patterns</span><span class="si">}</span><span class="s2"> patterns"</span><span class="p">)</span>
+</span><span data-line="6">
+</span><span data-line="7"><span class="c1"># Initialize autotuner with cache</span>
+</span><span data-line="8"><span class="n">autotuner</span> <span class="o">=</span> <span class="n">QDQAutotuner</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+</span><span data-line="9"><span class="n">autotuner</span><span class="o">.</span><span class="n">initialize</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="n">pattern_cache</span><span class="o">=</span><span class="n">cache</span><span class="p">)</span>
+</span><span data-line="10">
+</span><span data-line="11"><span class="c1"># After optimization, pattern cache is automatically saved</span>
+</span><span data-line="12"><span class="c1"># when save_state() is called</span>
+</span><span data-line="13"><span class="n">autotuner</span><span class="o">.</span><span class="n">save_state</span><span class="p">(</span><span class="s2">"autotuner_state.yaml"</span><span class="p">)</span>
+</span><span data-line="14"><span class="c1"># This also saves: autotuner_state_pattern_cache.yaml</span>
+</span></pre></div>
+</div>
+</section>
+<section id="import-from-a-q-dq-baseline">
+<h3><a class="toc-backref" href="#id18" role="doc-backlink">Import from a Q/DQ Baseline</a><a class="headerlink" href="#import-from-a-q-dq-baseline" title="Link to this heading">#</a></h3>
+<p>To seed the autotuner from a pre-quantized model (e.g. from another tool or manual tuning), extract quantized tensor names and pass them in:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">import</span><span class="w"> </span><span class="nn">onnx</span>
+</span><span data-line="2"><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.quantization.qdq_utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_quantized_tensors</span>
+</span><span data-line="3">
+</span><span data-line="4"><span class="c1"># Load baseline model with Q/DQ nodes</span>
+</span><span data-line="5"><span class="n">baseline_model</span> <span class="o">=</span> <span class="n">onnx</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="s2">"quantized_baseline.onnx"</span><span class="p">)</span>
+</span><span data-line="6">
+</span><span data-line="7"><span class="c1"># Extract quantized tensor names</span>
+</span><span data-line="8"><span class="n">quantized_tensors</span> <span class="o">=</span> <span class="n">get_quantized_tensors</span><span class="p">(</span><span class="n">baseline_model</span><span class="p">)</span>
+</span><span data-line="9"><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Found </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">quantized_tensors</span><span class="p">)</span><span class="si">}</span><span class="s2"> quantized tensors"</span><span class="p">)</span>
+</span><span data-line="10">
+</span><span data-line="11"><span class="c1"># Import into autotuner</span>
+</span><span data-line="12"><span class="n">autotuner</span> <span class="o">=</span> <span class="n">QDQAutotuner</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+</span><span data-line="13"><span class="n">autotuner</span><span class="o">.</span><span class="n">initialize</span><span class="p">(</span><span class="n">config</span><span class="p">)</span>
+</span><span data-line="14"><span class="n">autotuner</span><span class="o">.</span><span class="n">import_insertion_points</span><span class="p">(</span><span class="n">quantized_tensors</span><span class="p">)</span>
+</span><span data-line="15">
+</span><span data-line="16"><span class="c1"># These patterns will be tested first during optimization</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="configuration-options">
+<h2><a class="toc-backref" href="#id19" role="doc-backlink">Configuration Options</a><a class="headerlink" href="#configuration-options" title="Link to this heading">#</a></h2>
+<section id="config-class">
+<h3><a class="toc-backref" href="#id20" role="doc-backlink">Config Class</a><a class="headerlink" href="#config-class" title="Link to this heading">#</a></h3>
+<p>The <code class="docutils literal notranslate"><span class="pre">Config</span></code> class controls autotuner behavior:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.quantization.autotune</span><span class="w"> </span><span class="kn">import</span> <span class="n">Config</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="n">config</span> <span class="o">=</span> <span class="n">Config</span><span class="p">(</span>
+</span><span data-line="4">    <span class="n">default_quant_type</span><span class="o">=</span><span class="s2">"int8"</span><span class="p">,</span>             <span class="c1"># "int8" or "fp8"</span>
+</span><span data-line="5">    <span class="n">default_dq_dtype</span><span class="o">=</span><span class="s2">"float32"</span><span class="p">,</span>            <span class="c1"># float16, float32, bfloat16 (bfloat16 needs NumPy with np.bfloat16)</span>
+</span><span data-line="6">    <span class="n">default_q_scale</span><span class="o">=</span><span class="mf">0.1</span><span class="p">,</span>
+</span><span data-line="7">    <span class="n">default_q_zero_point</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span>
+</span><span data-line="8">    <span class="n">top_percent_to_mutate</span><span class="o">=</span><span class="mf">0.1</span><span class="p">,</span>
+</span><span data-line="9">    <span class="n">minimum_schemes_to_mutate</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span>
+</span><span data-line="10">    <span class="n">maximum_mutations</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+</span><span data-line="11">    <span class="n">maximum_generation_attempts</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span>
+</span><span data-line="12">    <span class="n">pattern_cache_minimum_distance</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+</span><span data-line="13">    <span class="n">pattern_cache_max_entries_per_pattern</span><span class="o">=</span><span class="mi">32</span><span class="p">,</span>
+</span><span data-line="14">    <span class="n">maximum_sequence_region_size</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span>
+</span><span data-line="15">    <span class="n">minimum_topdown_search_size</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span>
+</span><span data-line="16">    <span class="n">verbose</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span data-line="17"><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+<section id="command-line-arguments">
+<h3><a class="toc-backref" href="#id21" role="doc-backlink">Command-Line Arguments</a><a class="headerlink" href="#command-line-arguments" title="Link to this heading">#</a></h3>
+<p>Arguments use underscores. Short options: <code class="docutils literal notranslate"><span class="pre">-m</span></code> (onnx_path), <code class="docutils literal notranslate"><span class="pre">-o</span></code> (output_dir), <code class="docutils literal notranslate"><span class="pre">-s</span></code> (schemes_per_region), <code class="docutils literal notranslate"><span class="pre">-v</span></code> (verbose). Run <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">modelopt.onnx.quantization.autotune</span> <span class="pre">--help</span></code> for full help.</p>
+<div class="highlight-default notranslate" id="python-m-modelopt.onnx.quantization.autotune"><div class="highlight"><pre><span></span><span data-line="1"><span class="n">usage</span><span class="p">:</span> <span class="n">python</span> <span class="o">-</span><span class="n">m</span> <span class="n">modelopt</span><span class="o">.</span><span class="n">onnx</span><span class="o">.</span><span class="n">quantization</span><span class="o">.</span><span class="n">autotune</span> <span class="p">[</span><span class="o">-</span><span class="n">h</span><span class="p">]</span> <span class="o">--</span><span class="n">onnx_path</span>
+</span><span data-line="2">                                                     <span class="n">ONNX_PATH</span>
+</span><span data-line="3">                                                     <span class="p">[</span><span class="o">--</span><span class="n">output_dir</span> <span class="n">OUTPUT_DIR</span><span class="p">]</span>
+</span><span data-line="4">                                                     <span class="p">[</span><span class="o">--</span><span class="n">mode</span> <span class="p">{</span><span class="n">quick</span><span class="p">,</span><span class="n">default</span><span class="p">,</span><span class="n">extensive</span><span class="p">}]</span>
+</span><span data-line="5">                                                     <span class="p">[</span><span class="o">--</span><span class="n">schemes_per_region</span> <span class="n">NUM_SCHEMES</span><span class="p">]</span>
+</span><span data-line="6">                                                     <span class="p">[</span><span class="o">--</span><span class="n">pattern_cache</span> <span class="n">PATTERN_CACHE_FILE</span><span class="p">]</span>
+</span><span data-line="7">                                                     <span class="p">[</span><span class="o">--</span><span class="n">qdq_baseline</span> <span class="n">QDQ_BASELINE</span><span class="p">]</span>
+</span><span data-line="8">                                                     <span class="p">[</span><span class="o">--</span><span class="n">state_file</span> <span class="n">STATE_FILE</span><span class="p">]</span>
+</span><span data-line="9">                                                     <span class="p">[</span><span class="o">--</span><span class="n">node_filter_list</span> <span class="n">NODE_FILTER_LIST</span><span class="p">]</span>
+</span><span data-line="10">                                                     <span class="p">[</span><span class="o">--</span><span class="n">quant_type</span> <span class="p">{</span><span class="n">int8</span><span class="p">,</span><span class="n">fp8</span><span class="p">}]</span>
+</span><span data-line="11">                                                     <span class="p">[</span><span class="o">--</span><span class="n">default_dq_dtype</span> <span class="p">{</span><span class="n">float16</span><span class="p">,</span><span class="n">float32</span><span class="p">,</span><span class="n">bfloat16</span><span class="p">}]</span>
+</span><span data-line="12">                                                     <span class="p">[</span><span class="o">--</span><span class="n">use_trtexec</span><span class="p">]</span>
+</span><span data-line="13">                                                     <span class="p">[</span><span class="o">--</span><span class="n">timing_cache</span> <span class="n">TIMING_CACHE</span><span class="p">]</span>
+</span><span data-line="14">                                                     <span class="p">[</span><span class="o">--</span><span class="n">warmup_runs</span> <span class="n">WARMUP_RUNS</span><span class="p">]</span>
+</span><span data-line="15">                                                     <span class="p">[</span><span class="o">--</span><span class="n">timing_runs</span> <span class="n">TIMING_RUNS</span><span class="p">]</span>
+</span><span data-line="16">                                                     <span class="p">[</span><span class="o">--</span><span class="n">plugin_libraries</span> <span class="n">PLUGIN_LIBRARIES</span> <span class="p">[</span><span class="n">PLUGIN_LIBRARIES</span> <span class="o">...</span><span class="p">]]</span>
+</span><span data-line="17">                                                     <span class="p">[</span><span class="o">--</span><span class="n">trtexec_benchmark_args</span> <span class="n">TRTEXEC_BENCHMARK_ARGS</span><span class="p">]</span>
+</span><span data-line="18">                                                     <span class="p">[</span><span class="o">--</span><span class="n">verbose</span><span class="p">]</span>
+</span></pre></div>
+</div>
+<section id="python-m-modelopt.onnx.quantization.autotune-named-arguments">
+<span id="modelopt.onnx.quantization.autotune.__main__-get_parser-named-arguments"></span><h4>Named Arguments<a class="headerlink" href="#python-m-modelopt.onnx.quantization.autotune-named-arguments" title="Link to this heading">#</a></h4>
+<dl class="option-list">
+<dt><kbd>--verbose, -v</kbd></dt>
+<dd><p>Enable verbose DEBUG logging</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p>
+</dd>
+</dl>
+</section>
+<section id="python-m-modelopt.onnx.quantization.autotune-model-and-output">
+<span id="modelopt.onnx.quantization.autotune.__main__-get_parser-model-and-output"></span><h4>Model and Output<a class="headerlink" href="#python-m-modelopt.onnx.quantization.autotune-model-and-output" title="Link to this heading">#</a></h4>
+<dl class="option-list">
+<dt><kbd>--onnx_path, -m</kbd></dt>
+<dd><p>Path to ONNX model file</p>
+</dd>
+<dt><kbd>--output_dir, -o</kbd></dt>
+<dd><p>Output directory for results (default: ./autotuner_output)</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">'./autotuner_output'</span></code></p>
+</dd>
+</dl>
+</section>
+<section id="python-m-modelopt.onnx.quantization.autotune-autotuning-strategy">
+<span id="modelopt.onnx.quantization.autotune.__main__-get_parser-autotuning-strategy"></span><h4>Autotuning Strategy<a class="headerlink" href="#python-m-modelopt.onnx.quantization.autotune-autotuning-strategy" title="Link to this heading">#</a></h4>
+<dl class="option-list">
+<dt><kbd>--mode</kbd></dt>
+<dd><p>Possible choices: quick, default, extensive</p>
+<p>Preset for schemes_per_region, warmup_runs, and timing_runs. ‘quick’: fewer schemes/runs for fast iteration; ‘default’: balanced; ‘extensive’: more schemes/runs for thorough tuning. Explicit –schemes_per_region, –warmup_runs, –timing_runs override the preset.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">'default'</span></code></p>
+</dd>
+<dt><kbd>--schemes_per_region, -s</kbd></dt>
+<dd><p>Schemes per region (default: 50; preset from –mode if not set)</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">50</span></code></p>
+</dd>
+<dt><kbd>--pattern_cache</kbd></dt>
+<dd><p>Path to pattern cache YAML for warm-start (optional)</p>
+</dd>
+<dt><kbd>--qdq_baseline</kbd></dt>
+<dd><p>Path to QDQ baseline ONNX model to import quantization patterns (optional)</p>
+</dd>
+<dt><kbd>--state_file</kbd></dt>
+<dd><p>State file path for resume capability (default: &lt;output_dir&gt;/autotuner_state.yaml)</p>
+</dd>
+<dt><kbd>--node_filter_list</kbd></dt>
+<dd><p>Path to a file containing wildcard patterns to filter ONNX nodes (one pattern per line). Regions without any matching nodes are skipped during autotuning.</p>
+</dd>
+</dl>
+</section>
+<section id="python-m-modelopt.onnx.quantization.autotune-quantization">
+<span id="modelopt.onnx.quantization.autotune.__main__-get_parser-quantization"></span><h4>Quantization<a class="headerlink" href="#python-m-modelopt.onnx.quantization.autotune-quantization" title="Link to this heading">#</a></h4>
+<dl class="option-list">
+<dt><kbd>--quant_type</kbd></dt>
+<dd><p>Possible choices: int8, fp8</p>
+<p>Quantization data type (default: int8)</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">'int8'</span></code></p>
+</dd>
+<dt><kbd>--default_dq_dtype</kbd></dt>
+<dd><p>Possible choices: float16, float32, bfloat16</p>
+<p>Default DQ output dtype if cannot be deduced (optional)</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">'float32'</span></code></p>
+</dd>
+</dl>
+</section>
+<section id="python-m-modelopt.onnx.quantization.autotune-tensorrt-benchmark">
+<span id="modelopt.onnx.quantization.autotune.__main__-get_parser-tensorrt-benchmark"></span><h4>TensorRT Benchmark<a class="headerlink" href="#python-m-modelopt.onnx.quantization.autotune-tensorrt-benchmark" title="Link to this heading">#</a></h4>
+<dl class="option-list">
+<dt><kbd>--use_trtexec</kbd></dt>
+<dd><p>Use trtexec for benchmarking (default: False)</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p>
+</dd>
+<dt><kbd>--timing_cache</kbd></dt>
+<dd><p>TensorRT timing cache file (default: /tmp/trtexec_timing.cache)</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">'/tmp/trtexec_timing.cache'</span></code></p>
+</dd>
+<dt><kbd>--warmup_runs</kbd></dt>
+<dd><p>Number of warmup runs (default: 50; preset from –mode applies if not set)</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">50</span></code></p>
+</dd>
+<dt><kbd>--timing_runs</kbd></dt>
+<dd><p>Number of timing runs (default: 100; preset from –mode applies if not set)</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">100</span></code></p>
+</dd>
+<dt><kbd>--plugin_libraries, --plugins</kbd></dt>
+<dd><p>TensorRT plugin libraries (.so files) to load (optional, space-separated)</p>
+</dd>
+<dt><kbd>--trtexec_benchmark_args</kbd></dt>
+<dd><p>Additional command-line arguments to pass to trtexec as a single quoted string. Example: –trtexec_benchmark_args ‘–fp16 –workspace=4096 –verbose’</p>
+</dd>
+</dl>
+</section>
+</section>
+</section>
+<section id="best-practices">
+<h2><a class="toc-backref" href="#id22" role="doc-backlink">Best Practices</a><a class="headerlink" href="#best-practices" title="Link to this heading">#</a></h2>
+<section id="choosing-scheme-count">
+<h3><a class="toc-backref" href="#id23" role="doc-backlink">Choosing Scheme Count</a><a class="headerlink" href="#choosing-scheme-count" title="Link to this heading">#</a></h3>
+<p>The <code class="docutils literal notranslate"><span class="pre">--schemes_per_region</span></code> (or <code class="docutils literal notranslate"><span class="pre">-s</span></code>) parameter controls exploration depth. Typical values:</p>
+<ul class="simple">
+<li><p><strong>15–30 schemes</strong> (e.g. <code class="docutils literal notranslate"><span class="pre">-s</span> <span class="pre">30</span></code>): Quick exploration; good for trying the tool or small models</p></li>
+<li><p><strong>50 schemes</strong> (default, <code class="docutils literal notranslate"><span class="pre">-s</span> <span class="pre">50</span></code>): Default; Recommended for most cases</p></li>
+<li><p><strong>100–200+ schemes</strong> (e.g. <code class="docutils literal notranslate"><span class="pre">-s</span> <span class="pre">200</span></code>): Extensive search; consider using a pattern cache to avoid re-exploring</p></li>
+</ul>
+<p>Use fewer schemes when there are many small regions or limited time; use more for large or critical regions.</p>
+</section>
+<section id="managing-optimization-time">
+<span id="id2"></span><h3><a class="toc-backref" href="#id24" role="doc-backlink">Managing Optimization Time</a><a class="headerlink" href="#managing-optimization-time" title="Link to this heading">#</a></h3>
+<p>Optimization time depends on:</p>
+<ul class="simple">
+<li><p><strong>Number of unique patterns</strong> (not total regions)</p></li>
+<li><p><strong>Schemes per region</strong></p></li>
+<li><p><strong>TensorRT engine build time</strong> (model complexity)</p></li>
+</ul>
+<p><strong>Time Estimation Formula:</strong></p>
+<p>Total time ≈ (m unique patterns) × (n schemes per region) × (t seconds per benchmark) + baseline measurement</p>
+<p>Where:
+- <strong>m</strong> = number of unique region patterns in the model
+- <strong>n</strong> = schemes per region (e.g., 30)
+- <strong>t</strong> = average benchmark time (typically 3-10 seconds, depends on model size)</p>
+<p><strong>Example Calculations:</strong></p>
+<p>Assuming t = 5 seconds per benchmark:</p>
+<ul class="simple">
+<li><p>Small model: 10 patterns × 30 schemes × 5s = <strong>25 minutes</strong></p></li>
+<li><p>Medium model: 50 patterns × 30 schemes × 5s = <strong>2.1 hours</strong></p></li>
+<li><p>Large model: 100 patterns × 30 schemes × 5s = <strong>4.2 hours</strong></p></li>
+</ul>
+<p>Note: Actual benchmark times may depend on TensorRT engine build complexity and GPU hardware.</p>
+<p><strong>Ways to reduce time:</strong> Use a pattern cache from a similar model (warm-start), use fewer schemes per region for initial runs, or rely on checkpoint/resume to split work across sessions.</p>
+</section>
+<section id="using-the-pattern-cache-effectively">
+<h3><a class="toc-backref" href="#id25" role="doc-backlink">Using the Pattern Cache Effectively</a><a class="headerlink" href="#using-the-pattern-cache-effectively" title="Link to this heading">#</a></h3>
+<p>The pattern cache helps most when models share structure (e.g. BERT → RoBERTa), when iterating on the same model (v1 → v2), or when optimizing a family of models.</p>
+<p><strong>Example: building a pattern library</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># Optimize first model and save patterns</span>
+</span><span data-line="2">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="3"><span class="w">    </span>--onnx_path<span class="w"> </span>bert_base.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">    </span>--output_dir<span class="w"> </span>./bert_base_run<span class="w"> </span><span class="se">\</span>
+</span><span data-line="5"><span class="w">    </span>--schemes_per_region<span class="w"> </span><span class="m">50</span>
+</span><span data-line="6">
+</span><span data-line="7"><span class="c1"># Use patterns for similar models</span>
+</span><span data-line="8">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="9"><span class="w">    </span>--onnx_path<span class="w"> </span>bert_large.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="10"><span class="w">    </span>--output_dir<span class="w"> </span>./bert_large_run<span class="w"> </span><span class="se">\</span>
+</span><span data-line="11"><span class="w">    </span>--pattern_cache<span class="w"> </span>./bert_base_run/autotuner_state_pattern_cache.yaml
+</span><span data-line="12">
+</span><span data-line="13">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="14"><span class="w">    </span>--onnx_path<span class="w"> </span>roberta_base.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="15"><span class="w">    </span>--output_dir<span class="w"> </span>./roberta_run<span class="w"> </span><span class="se">\</span>
+</span><span data-line="16"><span class="w">    </span>--pattern_cache<span class="w"> </span>./bert_base_run/autotuner_state_pattern_cache.yaml
+</span></pre></div>
+</div>
+</section>
+<section id="interpreting-results">
+<h3><a class="toc-backref" href="#id26" role="doc-backlink">Interpreting Results</a><a class="headerlink" href="#interpreting-results" title="Link to this heading">#</a></h3>
+<p>The autotuner reports speedup ratios:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span><span data-line="1">Baseline: 12.50 ms
+</span><span data-line="2">Final: 9.80 ms (1.276x speedup)
+</span></pre></div>
+</div>
+<p><strong>What the speedup ratio means:</strong> Baseline ÷ final latency (e.g. 1.276x = final is about 22% faster than baseline).</p>
+<p><strong>If speedup is low (&lt;1.1x):</strong></p>
+<ul class="simple">
+<li><p>Model may already be memory-bound (not compute-bound)</p></li>
+<li><p>Q/DQ overhead dominates small operations</p></li>
+<li><p>TensorRT may not fully exploit quantization for this architecture</p></li>
+<li><p>Try FP8 instead of INT8</p></li>
+</ul>
+</section>
+</section>
+<section id="deploying-optimized-models">
+<h2><a class="toc-backref" href="#id27" role="doc-backlink">Deploying Optimized Models</a><a class="headerlink" href="#deploying-optimized-models" title="Link to this heading">#</a></h2>
+<p>The optimized ONNX model includes Q/DQ nodes and can be used with TensorRT as follows.</p>
+<section id="using-trtexec">
+<h3><a class="toc-backref" href="#id28" role="doc-backlink">Using Trtexec</a><a class="headerlink" href="#using-trtexec" title="Link to this heading">#</a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># Build TensorRT engine from optimized ONNX</span>
+</span><span data-line="2">trtexec<span class="w"> </span>--onnx<span class="o">=</span>optimized_final.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="3"><span class="w">        </span>--saveEngine<span class="o">=</span>model.engine<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">        </span>--stronglyTyped
+</span><span data-line="5">
+</span><span data-line="6"><span class="c1"># Run inference</span>
+</span><span data-line="7">trtexec<span class="w"> </span>--loadEngine<span class="o">=</span>model.engine
+</span></pre></div>
+</div>
+</section>
+<section id="using-tensorrt-python-api">
+<h3><a class="toc-backref" href="#id29" role="doc-backlink">Using TensorRT Python API</a><a class="headerlink" href="#using-tensorrt-python-api" title="Link to this heading">#</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">import</span><span class="w"> </span><span class="nn">tensorrt</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">trt</span>
+</span><span data-line="2"><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+</span><span data-line="3">
+</span><span data-line="4"><span class="c1"># Create builder and logger</span>
+</span><span data-line="5"><span class="n">logger</span> <span class="o">=</span> <span class="n">trt</span><span class="o">.</span><span class="n">Logger</span><span class="p">(</span><span class="n">trt</span><span class="o">.</span><span class="n">Logger</span><span class="o">.</span><span class="n">WARNING</span><span class="p">)</span>
+</span><span data-line="6"><span class="n">builder</span> <span class="o">=</span> <span class="n">trt</span><span class="o">.</span><span class="n">Builder</span><span class="p">(</span><span class="n">logger</span><span class="p">)</span>
+</span><span data-line="7"><span class="n">network</span> <span class="o">=</span> <span class="n">builder</span><span class="o">.</span><span class="n">create_network</span><span class="p">(</span>
+</span><span data-line="8">    <span class="mi">1</span> <span class="o">&lt;&lt;</span> <span class="nb">int</span><span class="p">(</span><span class="n">trt</span><span class="o">.</span><span class="n">NetworkDefinitionCreationFlag</span><span class="o">.</span><span class="n">EXPLICIT_BATCH</span><span class="p">)</span>
+</span><span data-line="9">    <span class="o">|</span> <span class="mi">1</span> <span class="o">&lt;&lt;</span> <span class="nb">int</span><span class="p">(</span><span class="n">trt</span><span class="o">.</span><span class="n">NetworkDefinitionCreationFlag</span><span class="o">.</span><span class="n">STRONGLY_TYPED</span><span class="p">)</span>
+</span><span data-line="10"><span class="p">)</span>
+</span><span data-line="11"><span class="n">parser</span> <span class="o">=</span> <span class="n">trt</span><span class="o">.</span><span class="n">OnnxParser</span><span class="p">(</span><span class="n">network</span><span class="p">,</span> <span class="n">logger</span><span class="p">)</span>
+</span><span data-line="12">
+</span><span data-line="13"><span class="c1"># Parse optimized ONNX model</span>
+</span><span data-line="14"><span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"optimized_final.onnx"</span><span class="p">,</span> <span class="s2">"rb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+</span><span data-line="15">    <span class="k">if</span> <span class="ow">not</span> <span class="n">parser</span><span class="o">.</span><span class="n">parse</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">read</span><span class="p">()):</span>
+</span><span data-line="16">        <span class="k">for</span> <span class="n">error</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">parser</span><span class="o">.</span><span class="n">num_errors</span><span class="p">):</span>
+</span><span data-line="17">            <span class="nb">print</span><span class="p">(</span><span class="n">parser</span><span class="o">.</span><span class="n">get_error</span><span class="p">(</span><span class="n">error</span><span class="p">))</span>
+</span><span data-line="18">        <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">"Failed to parse ONNX"</span><span class="p">)</span>
+</span><span data-line="19">
+</span><span data-line="20"><span class="c1"># Build engine</span>
+</span><span data-line="21"><span class="n">config</span> <span class="o">=</span> <span class="n">builder</span><span class="o">.</span><span class="n">create_builder_config</span><span class="p">()</span>
+</span><span data-line="22"><span class="n">engine</span> <span class="o">=</span> <span class="n">builder</span><span class="o">.</span><span class="n">build_serialized_network</span><span class="p">(</span><span class="n">network</span><span class="p">,</span> <span class="n">config</span><span class="p">)</span>
+</span><span data-line="23"><span class="k">if</span> <span class="n">engine</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+</span><span data-line="24">    <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">"TensorRT engine build failed"</span><span class="p">)</span>
+</span><span data-line="25">
+</span><span data-line="26"><span class="c1"># Save engine</span>
+</span><span data-line="27"><span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"model.engine"</span><span class="p">,</span> <span class="s2">"wb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+</span><span data-line="28">    <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">engine</span><span class="p">)</span>
+</span><span data-line="29">
+</span><span data-line="30"><span class="nb">print</span><span class="p">(</span><span class="s2">"TensorRT engine built successfully!"</span><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="troubleshooting">
+<h2><a class="toc-backref" href="#id30" role="doc-backlink">Troubleshooting</a><a class="headerlink" href="#troubleshooting" title="Link to this heading">#</a></h2>
+<section id="common-issues">
+<h3><a class="toc-backref" href="#id31" role="doc-backlink">Common Issues</a><a class="headerlink" href="#common-issues" title="Link to this heading">#</a></h3>
+<p><strong>Issue: “Benchmark instance not initialized”</strong></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># Solution: Initialize benchmark before running workflow</span>
+</span><span data-line="2"><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.quantization.autotune.workflows</span><span class="w"> </span><span class="kn">import</span> <span class="n">init_benchmark_instance</span>
+</span><span data-line="3"><span class="n">init_benchmark_instance</span><span class="p">()</span>
+</span></pre></div>
+</div>
+<p><strong>Issue: All schemes show inf latency</strong></p>
+<p>Possible causes:</p>
+<ul class="simple">
+<li><p>TensorRT cannot parse the ONNX model</p></li>
+<li><p>Model contains unsupported operations</p></li>
+<li><p>Missing custom plugin libraries</p></li>
+<li><p>cuda-python package not installed when using TensorRTPyBenchmark</p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># Solution: Check TensorRT logs in output_dir/logs/</span>
+</span><span data-line="2"><span class="c1"># Add plugins if needed</span>
+</span><span data-line="3">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">    </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="5"><span class="w">    </span>--plugin_libraries<span class="w"> </span>/path/to/plugin.so
+</span></pre></div>
+</div>
+<p><strong>Issue: Optimization is very slow</strong></p>
+<ul class="simple">
+<li><p>Check number of unique patterns (shown at start)</p></li>
+<li><p>Reduce schemes per region for faster exploration</p></li>
+<li><p>Use pattern cache from similar model</p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># Faster exploration with fewer schemes</span>
+</span><span data-line="2">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="3"><span class="w">    </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">    </span>--schemes_per_region<span class="w"> </span><span class="m">15</span>
+</span></pre></div>
+</div>
+<p><strong>Issue: Out of GPU memory during optimization</strong></p>
+<p>TensorRT engine building is GPU memory intensive:</p>
+<ul class="simple">
+<li><p>Close other GPU processes</p></li>
+<li><p>Use smaller batch size in ONNX model if applicable</p></li>
+<li><p>Run optimization on a GPU with more memory</p></li>
+</ul>
+<p><strong>Issue: Final speedup is negative (slowdown)</strong></p>
+<p>The model may not benefit from quantization:</p>
+<ul class="simple">
+<li><p>Try FP8 instead of INT8</p></li>
+<li><p>Check if model is memory-bound (not compute-bound)</p></li>
+<li><p>Verify TensorRT can optimize the quantized operations</p></li>
+</ul>
+<p><strong>Issue: Resume doesn’t work after interruption</strong></p>
+<ul class="simple">
+<li><p>Use the same <code class="docutils literal notranslate"><span class="pre">--output_dir</span></code> (and <code class="docutils literal notranslate"><span class="pre">--onnx_path</span></code>) as the original run</p></li>
+<li><p>Confirm <code class="docutils literal notranslate"><span class="pre">autotuner_state.yaml</span></code> exists in that directory</p></li>
+<li><p>If the state file is corrupted, remove it and start over</p></li>
+</ul>
+</section>
+<section id="debugging">
+<h3><a class="toc-backref" href="#id32" role="doc-backlink">Debugging</a><a class="headerlink" href="#debugging" title="Link to this heading">#</a></h3>
+<p>Enable verbose logging to see detailed information:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="2"><span class="w">    </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="3"><span class="w">    </span>--verbose
+</span></pre></div>
+</div>
+<p>Check TensorRT build logs for each scheme (under the output directory, default <code class="docutils literal notranslate"><span class="pre">./autotuner_output</span></code>):</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># Logs are saved per scheme (replace autotuner_output with your --output_dir if different)</span>
+</span><span data-line="2">ls<span class="w"> </span>./autotuner_output/logs/
+</span><span data-line="3"><span class="c1"># baseline.log</span>
+</span><span data-line="4"><span class="c1"># region_0_scheme_0.log</span>
+</span><span data-line="5"><span class="c1"># region_0_scheme_1.log</span>
+</span><span data-line="6"><span class="c1"># ...</span>
+</span><span data-line="7">
+</span><span data-line="8"><span class="c1"># View a specific log</span>
+</span><span data-line="9">cat<span class="w"> </span>./autotuner_output/logs/region_0_scheme_0.log
+</span></pre></div>
+</div>
+<section id="inspect-region-discovery">
+<h4>Inspect Region Discovery<a class="headerlink" href="#inspect-region-discovery" title="Link to this heading">#</a></h4>
+<p>To understand how the autotuner partitions the model into regions, use the region inspection tool:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># Basic inspection - shows region hierarchy and statistics</span>
+</span><span data-line="2">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune.region_inspect<span class="w"> </span>--model<span class="w"> </span>model.onnx
+</span><span data-line="3">
+</span><span data-line="4"><span class="c1"># Verbose mode for detailed debug information</span>
+</span><span data-line="5">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune.region_inspect<span class="w"> </span>--model<span class="w"> </span>model.onnx<span class="w"> </span>--verbose
+</span><span data-line="6">
+</span><span data-line="7"><span class="c1"># Custom maximum sequence size (default: 10)</span>
+</span><span data-line="8">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune.region_inspect<span class="w"> </span>--model<span class="w"> </span>model.onnx<span class="w"> </span>--max-sequence-size<span class="w"> </span><span class="m">20</span>
+</span><span data-line="9">
+</span><span data-line="10"><span class="c1"># Include all regions (even without quantizable operations)</span>
+</span><span data-line="11">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune.region_inspect<span class="w"> </span>--model<span class="w"> </span>model.onnx<span class="w"> </span>--include-all-regions
+</span></pre></div>
+</div>
+<p><strong>What this tool shows:</strong></p>
+<ul class="simple">
+<li><p><strong>Region hierarchy</strong>: How the model is partitioned into LEAF and COMPOSITE regions</p></li>
+<li><p><strong>Region types</strong>: Convergence patterns (divergence→branches→convergence) vs sequences</p></li>
+<li><p><strong>Node counts</strong>: Number of operations in each region</p></li>
+<li><p><strong>Input/output tensors</strong>: Data flow boundaries for each region</p></li>
+<li><p><strong>Coverage statistics</strong>: Percentage of nodes in the model covered by regions</p></li>
+<li><p><strong>Size distribution</strong>: Histogram showing region sizes</p></li>
+</ul>
+<p><strong>When to use:</strong></p>
+<ul class="simple">
+<li><p>Before optimization: Understand how many unique patterns to expect</p></li>
+<li><p>Slow optimization: Check if model has too many unique patterns</p></li>
+<li><p>Debugging: Verify region discovery is working correctly</p></li>
+<li><p>Model analysis: Understand computational structure</p></li>
+</ul>
+<p><strong>Example output:</strong></p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span><span data-line="1">Phase 1 complete: 45 regions, 312/312 nodes (100.0%)
+</span><span data-line="2">Phase 2 complete: refined 40 regions, skipped 5
+</span><span data-line="3">Summary: 85 regions (80 LEAF, 5 COMPOSITE), 312/312 nodes (100.0%)
+</span><span data-line="4">LEAF region sizes: min=1, max=15, avg=3.9
+</span><span data-line="5">
+</span><span data-line="6">├─ Region 0 (Level 0, Type: COMPOSITE)
+</span><span data-line="7">│  ├─ Direct nodes: 0
+</span><span data-line="8">│  ├─ Total nodes (recursive): 28
+</span><span data-line="9">│  ├─ Children: 4
+</span><span data-line="10">│  ├─ Inputs: 3 tensors
+</span><span data-line="11">│  └─ Outputs: 2 tensors
+</span><span data-line="12">│    ├─ Region 1 (Level 1, Type: LEAF)
+</span><span data-line="13">│    │  ├─ Direct nodes: 5
+</span><span data-line="14">│    │  ├─ Nodes: Conv, BatchNormalization, Relu
+</span><span data-line="15">│    ...
+</span></pre></div>
+</div>
+<p>Use this to see how many unique patterns to expect (more patterns → longer optimization), whether region sizes need tuning (e.g. <code class="docutils literal notranslate"><span class="pre">--max-sequence-size</span></code> in region_inspect), and where branches or skip connections appear.</p>
+</section>
+</section>
+</section>
+<section id="architecture-and-workflow">
+<h2><a class="toc-backref" href="#id33" role="doc-backlink">Architecture and Workflow</a><a class="headerlink" href="#architecture-and-workflow" title="Link to this heading">#</a></h2>
+<p>The autotuner partitions the ONNX graph into regions, groups regions by structural pattern, and for each pattern tests multiple Q/DQ insertion schemes via TensorRT benchmarking. The following diagram summarizes the end-to-end process:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span><span data-line="1">┌─────────────────────────────────────────────────────────────┐
+</span><span data-line="2">│ 1. Model Loading &amp; Initialization                           │
+</span><span data-line="3">│    • Load ONNX model                                        │
+</span><span data-line="4">│    • Create QDQAutotuner instance                           │
+</span><span data-line="5">│    • Run automatic region discovery                         │
+</span><span data-line="6">│    • Load pattern cache (warm-start)                        │
+</span><span data-line="7">│    • Import patterns from QDQ baseline (optional)           │
+</span><span data-line="8">└────────────────────┬────────────────────────────────────────┘
+</span><span data-line="9">                     │
+</span><span data-line="10">                     ▼
+</span><span data-line="11">┌─────────────────────────────────────────────────────────────┐
+</span><span data-line="12">│ 2. Baseline Measurement                                     │
+</span><span data-line="13">│    • Export model without Q/DQ nodes                        │
+</span><span data-line="14">│    • Build TensorRT engine                                  │
+</span><span data-line="15">│    • Measure baseline latency                               │
+</span><span data-line="16">└────────────────────┬────────────────────────────────────────┘
+</span><span data-line="17">                     │
+</span><span data-line="18">                     ▼
+</span><span data-line="19">┌─────────────────────────────────────────────────────────────┐
+</span><span data-line="20">│ 3. Pattern-Based Region Profiling                           │
+</span><span data-line="21">│    For each region: set profile region, generate schemes,   │
+</span><span data-line="22">│    benchmark each scheme, commit best, save state           │
+</span><span data-line="23">└────────────────────┬────────────────────────────────────────┘
+</span><span data-line="24">                     │
+</span><span data-line="25">                     ▼
+</span><span data-line="26">┌─────────────────────────────────────────────────────────────┐
+</span><span data-line="27">│ 4. Finalization                                             │
+</span><span data-line="28">│    • Export optimized model with all best schemes           │
+</span><span data-line="29">│    • Save state and pattern cache                           │
+</span><span data-line="30">└─────────────────────────────────────────────────────────────┘
+</span></pre></div>
+</div>
+<section id="design-rationale">
+<h3><a class="toc-backref" href="#id34" role="doc-backlink">Design Rationale</a><a class="headerlink" href="#design-rationale" title="Link to this heading">#</a></h3>
+<ul class="simple">
+<li><p><strong>Pattern-based</strong>: One optimization per pattern; the chosen scheme applies to every matching region, reducing work and keeping behavior consistent.</p></li>
+<li><p><strong>Hierarchical regions</strong>: LEAF (single ops or short sequences) and COMPOSITE (nested subgraphs) allow tuning at different granularities.</p></li>
+<li><p><strong>Incremental state</strong>: Progress is saved after each region so runs can be resumed after interruption.</p></li>
+</ul>
+</section>
+</section>
+<section id="limitations-and-future-work">
+<h2><a class="toc-backref" href="#id35" role="doc-backlink">Limitations and Future Work</a><a class="headerlink" href="#limitations-and-future-work" title="Link to this heading">#</a></h2>
+<p><strong>Current limitations:</strong></p>
+<ul class="simple">
+<li><p>Random scheme sampling may miss optimal configurations; number of schemes per region is fixed.</p></li>
+<li><p>Structural similarity is assumed to imply similar performance; context (input/output) can vary.</p></li>
+<li><p>Uniform quantization per scheme (no mixed-precision within a scheme).</p></li>
+<li><p>TensorRT engine build time dominates; each scheme requires a full engine build.</p></li>
+<li><p>Performance is measured with default/dummy inputs and may not generalize to all distributions.</p></li>
+</ul>
+<p><strong>Possible future enhancements:</strong></p>
+<ul class="simple">
+<li><p>Advanced search (e.g. Bayesian optimization, evolutionary algorithms).</p></li>
+<li><p>Mixed-precision and per-layer bit-width.</p></li>
+<li><p>Accuracy constraints and multi-objective (latency + accuracy) optimization.</p></li>
+</ul>
+</section>
+<section id="glossary">
+<h2><a class="toc-backref" href="#id36" role="doc-backlink">Glossary</a><a class="headerlink" href="#glossary" title="Link to this heading">#</a></h2>
+<dl class="simple glossary">
+<dt id="term-Q-DQ-Nodes">Q/DQ Nodes<a class="headerlink" href="#term-Q-DQ-Nodes" title="Link to this term">#</a></dt><dd><p>QuantizeLinear (Q) and DequantizeLinear (DQ) nodes in ONNX that convert between
+floating-point and quantized integer representations.</p>
+</dd>
+<dt id="term-Region">Region<a class="headerlink" href="#term-Region" title="Link to this term">#</a></dt><dd><p>A hierarchical subgraph in an ONNX computation graph with well-defined input and
+output boundaries. Can be LEAF (atomic), COMPOSITE (containing child regions), or ROOT.</p>
+</dd>
+<dt id="term-Pattern">Pattern<a class="headerlink" href="#term-Pattern" title="Link to this term">#</a></dt><dd><p>A structural signature of a region. Regions with identical patterns can share insertion schemes.</p>
+</dd>
+<dt id="term-Insertion-Scheme">Insertion Scheme<a class="headerlink" href="#term-Insertion-Scheme" title="Link to this term">#</a></dt><dd><p>A collection of insertion points specifying where to insert Q/DQ nodes within a region.
+Schemes use pattern-relative addressing for portability.</p>
+</dd>
+<dt id="term-Pattern-Cache">Pattern Cache<a class="headerlink" href="#term-Pattern-Cache" title="Link to this term">#</a></dt><dd><p>Collection of top-performing insertion schemes for multiple patterns, used to
+warm-start optimization on similar models.</p>
+</dd>
+<dt id="term-Baseline-Latency">Baseline Latency<a class="headerlink" href="#term-Baseline-Latency" title="Link to this term">#</a></dt><dd><p>Inference latency of the model without any Q/DQ nodes, used as reference for speedup.</p>
+</dd>
+<dt id="term-TensorRT-Timing-Cache">TensorRT Timing Cache<a class="headerlink" href="#term-TensorRT-Timing-Cache" title="Link to this term">#</a></dt><dd><p>Persistent cache of kernel performance measurements used by TensorRT to speed up engine builds.</p>
+</dd>
+</dl>
+</section>
+<section id="references">
+<h2><a class="toc-backref" href="#id37" role="doc-backlink">References</a><a class="headerlink" href="#references" title="Link to this heading">#</a></h2>
+<ul class="simple">
+<li><p><strong>ONNX</strong>: <a class="reference external" href="https://onnx.ai/" rel="noopener noreferrer" target="_blank">https://onnx.ai/</a></p></li>
+<li><p><strong>ONNX Technical Details</strong>: <a class="reference external" href="https://onnx.ai/onnx/technical/index.html" rel="noopener noreferrer" target="_blank">https://onnx.ai/onnx/technical/index.html</a></p></li>
+<li><p><strong>TensorRT Documentation</strong>: <a class="reference external" href="https://docs.nvidia.com/deeplearning/tensorrt/" rel="noopener noreferrer" target="_blank">https://docs.nvidia.com/deeplearning/tensorrt/</a></p></li>
+<li><p><strong>NVIDIA Model Optimizer (ModelOpt)</strong>: <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer" rel="noopener noreferrer" target="_blank">https://github.com/NVIDIA/Model-Optimizer</a></p></li>
+<li><p><strong>ONNX GraphSurgeon</strong>: <a class="reference external" href="https://github.com/NVIDIA/TensorRT/tree/main/tools/onnx-graphsurgeon" rel="noopener noreferrer" target="_blank">https://github.com/NVIDIA/TensorRT/tree/main/tools/onnx-graphsurgeon</a></p></li>
+</ul>
+</section>
+<section id="frequently-asked-questions">
+<h2><a class="toc-backref" href="#id38" role="doc-backlink">Frequently Asked Questions</a><a class="headerlink" href="#frequently-asked-questions" title="Link to this heading">#</a></h2>
+<p><strong>Q: How long does optimization take?</strong></p>
+<p>A: Time ≈ (unique patterns) × (schemes per region) × (time per benchmark). See <a class="reference internal" href="#managing-optimization-time"><span class="std std-ref">Managing Optimization Time</span></a> for a formula and examples. Use a pattern cache when re-running on similar models to reduce time.</p>
+<p><strong>Q: Can I stop optimization early?</strong></p>
+<p>A: Yes. Press Ctrl+C to interrupt. Progress is saved and the run can be resumed later.</p>
+<p><strong>Q: Do I need calibration data?</strong></p>
+<p>A: No, the autotuner focuses on Q/DQ placement optimization, not calibration. Calibration scales are added when the Q/DQ nodes are inserted. For best accuracy, run calibration separately after optimization.</p>
+<p><strong>Q: Can I use this with PyTorch models?</strong></p>
+<p>A: Export the PyTorch model to ONNX first using <code class="docutils literal notranslate"><span class="pre">torch.onnx.export()</span></code>, then run the autotuner on the ONNX model.</p>
+<p><strong>Q: What’s the difference from modelopt.onnx.quantization.quantize()?</strong></p>
+<p>A: <code class="docutils literal notranslate"><span class="pre">quantize()</span></code> is a fast PTQ tool that uses heuristics for Q/DQ placement. The autotuner uses TensorRT measurements to optimize placement for best performance. Use <code class="docutils literal notranslate"><span class="pre">quantize()</span></code> for quick results, autotuner for maximum performance.</p>
+<p><strong>Q: Can I customize region discovery?</strong></p>
+<p>A: Yes. Subclass <code class="docutils literal notranslate"><span class="pre">QDQAutotunerBase</span></code> and supply custom regions instead of using automatic discovery:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.quantization.autotune</span><span class="w"> </span><span class="kn">import</span> <span class="n">QDQAutotunerBase</span><span class="p">,</span> <span class="n">Region</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="k">class</span><span class="w"> </span><span class="nc">CustomAutotuner</span><span class="p">(</span><span class="n">QDQAutotunerBase</span><span class="p">):</span>
+</span><span data-line="4">    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">model</span><span class="p">,</span> <span class="n">custom_regions</span><span class="p">):</span>
+</span><span data-line="5">        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+</span><span data-line="6">        <span class="bp">self</span><span class="o">.</span><span class="n">regions</span> <span class="o">=</span> <span class="n">custom_regions</span>  <span class="c1"># Custom regions</span>
+</span></pre></div>
+</div>
+<p><strong>Q: Does this work with dynamic shapes?</strong></p>
+<p>A: The autotuner uses TensorRT for benchmarking, which requires fixed shapes. Set fixed input shapes in the ONNX model before optimization. If the model was exported with dynamic shapes, one option is to use Polygraphy to fix them to static shapes, for example:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">$<span class="w"> </span>polygraphy<span class="w"> </span>surgeon<span class="w"> </span>sanitize<span class="w"> </span>--override-input-shapes<span class="w"> </span>x:<span class="o">[</span><span class="m">128</span>,3,1024,1024<span class="o">]</span><span class="w"> </span>-o<span class="w"> </span>model_bs128.onnx<span class="w"> </span>model.onnx
+</span></pre></div>
+</div>
+<p><strong>Q: Can I optimize for accuracy instead of latency?</strong></p>
+<p>A: Currently, the autotuner optimizes for latency only.</p>
+</section>
+<section id="examples">
+<h2><a class="toc-backref" href="#id39" role="doc-backlink">Examples</a><a class="headerlink" href="#examples" title="Link to this heading">#</a></h2>
+<section id="example-1-basic-optimization">
+<h3><a class="toc-backref" href="#id40" role="doc-backlink">Example 1: Basic Optimization</a><a class="headerlink" href="#example-1-basic-optimization" title="Link to this heading">#</a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># Optimize a ResNet model with INT8 quantization</span>
+</span><span data-line="2">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="3"><span class="w">    </span>--onnx_path<span class="w"> </span>resnet50.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">    </span>--output_dir<span class="w"> </span>./resnet50_optimized<span class="w"> </span><span class="se">\</span>
+</span><span data-line="5"><span class="w">    </span>--quant_type<span class="w"> </span>int8<span class="w"> </span><span class="se">\</span>
+</span><span data-line="6"><span class="w">    </span>--schemes_per_region<span class="w"> </span><span class="m">30</span>
+</span></pre></div>
+</div>
+</section>
+<section id="example-2-transfer-learning-with-pattern-cache">
+<h3><a class="toc-backref" href="#id41" role="doc-backlink">Example 2: Transfer Learning with Pattern Cache</a><a class="headerlink" href="#example-2-transfer-learning-with-pattern-cache" title="Link to this heading">#</a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># Optimize GPT-2 small</span>
+</span><span data-line="2">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="3"><span class="w">    </span>--onnx_path<span class="w"> </span>gpt2_small.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">    </span>--output_dir<span class="w"> </span>./gpt2_small_run<span class="w"> </span><span class="se">\</span>
+</span><span data-line="5"><span class="w">    </span>--quant_type<span class="w"> </span>fp8<span class="w"> </span><span class="se">\</span>
+</span><span data-line="6"><span class="w">    </span>--schemes_per_region<span class="w"> </span><span class="m">50</span>
+</span><span data-line="7">
+</span><span data-line="8"><span class="c1"># Reuse patterns for GPT-2 medium (much faster)</span>
+</span><span data-line="9">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="10"><span class="w">    </span>--onnx_path<span class="w"> </span>gpt2_medium.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="11"><span class="w">    </span>--output_dir<span class="w"> </span>./gpt2_medium_run<span class="w"> </span><span class="se">\</span>
+</span><span data-line="12"><span class="w">    </span>--quant_type<span class="w"> </span>fp8<span class="w"> </span><span class="se">\</span>
+</span><span data-line="13"><span class="w">    </span>--pattern_cache<span class="w"> </span>./gpt2_small_run/autotuner_state_pattern_cache.yaml
+</span></pre></div>
+</div>
+</section>
+<section id="example-3-import-from-manual-baseline">
+<h3><a class="toc-backref" href="#id42" role="doc-backlink">Example 3: Import from Manual Baseline</a><a class="headerlink" href="#example-3-import-from-manual-baseline" title="Link to this heading">#</a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># With a manually quantized baseline</span>
+</span><span data-line="2"><span class="c1"># Import its patterns as starting point</span>
+</span><span data-line="3">python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantization.autotune<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">    </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="5"><span class="w">    </span>--output_dir<span class="w"> </span>./auto_optimized<span class="w"> </span><span class="se">\</span>
+</span><span data-line="6"><span class="w">    </span>--qdq_baseline<span class="w"> </span>manually_quantized.onnx<span class="w"> </span><span class="se">\</span>
+</span><span data-line="7"><span class="w">    </span>--schemes_per_region<span class="w"> </span><span class="m">40</span>
+</span></pre></div>
+</div>
+</section>
+<section id="example-4-full-python-workflow">
+<h3><a class="toc-backref" href="#id43" role="doc-backlink">Example 4: Full Python Workflow</a><a class="headerlink" href="#example-4-full-python-workflow" title="Link to this heading">#</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span data-line="2"><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.quantization.autotune.workflows</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+</span><span data-line="3">    <span class="n">region_pattern_autotuning_workflow</span><span class="p">,</span>
+</span><span data-line="4">    <span class="n">init_benchmark_instance</span>
+</span><span data-line="5"><span class="p">)</span>
+</span><span data-line="6">
+</span><span data-line="7"><span class="c1"># Initialize TensorRT benchmark</span>
+</span><span data-line="8"><span class="n">init_benchmark_instance</span><span class="p">(</span>
+</span><span data-line="9">    <span class="n">timing_cache_file</span><span class="o">=</span><span class="s2">"/tmp/trt_cache.cache"</span><span class="p">,</span>
+</span><span data-line="10">    <span class="n">warmup_runs</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+</span><span data-line="11">    <span class="n">timing_runs</span><span class="o">=</span><span class="mi">20</span>
+</span><span data-line="12"><span class="p">)</span>
+</span><span data-line="13">
+</span><span data-line="14"><span class="c1"># Run optimization (only non-defaults shown; see API for all options)</span>
+</span><span data-line="15"><span class="n">autotuner</span> <span class="o">=</span> <span class="n">region_pattern_autotuning_workflow</span><span class="p">(</span>
+</span><span data-line="16">    <span class="n">model_path</span><span class="o">=</span><span class="s2">"model.onnx"</span><span class="p">,</span>
+</span><span data-line="17">    <span class="n">output_dir</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">"./results"</span><span class="p">),</span>
+</span><span data-line="18">    <span class="n">num_schemes_per_region</span><span class="o">=</span><span class="mi">30</span><span class="p">,</span>
+</span><span data-line="19"><span class="p">)</span>
+</span><span data-line="20">
+</span><span data-line="21"><span class="c1"># Access results</span>
+</span><span data-line="22"><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Baseline latency: </span><span class="si">{</span><span class="n">autotuner</span><span class="o">.</span><span class="n">baseline_latency_ms</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2"> ms"</span><span class="p">)</span>
+</span><span data-line="23"><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Number of patterns: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">autotuner</span><span class="o">.</span><span class="n">profiled_patterns</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+</span><span data-line="24">
+</span><span data-line="25"><span class="c1"># Pattern cache is automatically saved during workflow</span>
+</span><span data-line="26"><span class="c1"># Check the output directory for autotuner_state_pattern_cache.yaml</span>
+</span><span data-line="27"><span class="k">if</span> <span class="n">autotuner</span><span class="o">.</span><span class="n">pattern_cache</span><span class="p">:</span>
+</span><span data-line="28">    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Pattern cache contains </span><span class="si">{</span><span class="n">autotuner</span><span class="o">.</span><span class="n">pattern_cache</span><span class="o">.</span><span class="n">num_patterns</span><span class="si">}</span><span class="s2"> patterns"</span><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="conclusion">
+<h2><a class="toc-backref" href="#id44" role="doc-backlink">Conclusion</a><a class="headerlink" href="#conclusion" title="Link to this heading">#</a></h2>
+<p>The <code class="docutils literal notranslate"><span class="pre">modelopt.onnx.quantization.autotune</span></code> module provides a powerful automated approach to Q/DQ placement optimization. By combining automatic region discovery, pattern-based optimization, and TensorRT performance measurement, it finds optimal quantization strategies without manual tuning.</p>
+<p><strong>Next steps:</strong> Run the quick start on a model, try different <code class="docutils literal notranslate"><span class="pre">--schemes_per_region</span></code> values, build a pattern cache for the model family, then integrate the optimized model into the deployment pipeline.</p>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="8_autocast.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">AutoCast (ONNX)</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="../deployment/1_tensorrt_llm.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">TensorRT-LLM</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2023-2025, NVIDIA Corporation</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials"></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script src="../_static/shibuya.js?v=50760d75"></script>
+      <script src="../_static/announcements.js?v=d94b986f"></script></body>
+</html>

@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="green" data-content_root="../../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>graph_surgery - Model Optimizer 0.0.1.dev1+g5e39d4ca1</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="llm_export_utils" href="modelopt.onnx.llm_export_utils.html" /><link rel="prev" title="export" href="modelopt.onnx.export.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../../_static/shibuya.css?v=2ceb65ce" />
+    <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+    <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+    <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+    <link media="print" rel="stylesheet" type="text/css" href="../../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=948f803c" />
+    <link rel="stylesheet" type="text/css" href="../../_static/announcements.css?v=3c458a87" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="graph_surgery"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../../index.html">
+      
+      
+      <strong>Model Optimizer</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials"></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="1"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Announcements</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../index.html">Announcements</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../getting_started/_installation_for_Linux.html">Installation for Linux</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../getting_started/windows/_installation_for_Windows.html">Installation for Windows</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../getting_started/windows/_installation_standalone.html">Install ModelOpt-Windows as a Standalone Toolkit</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../getting_started/windows/_installation_with_olive.html">Install ModelOpt-Windows with Olive</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_choosing_quant_methods.html">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_pytorch_quantization.html">PyTorch Quantization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_quant_cfg.html">Quantization Configuration (quant_cfg)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_onnx_quantization.html">ONNX Quantization - Linux (Beta)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/windows_guides/_ONNX_PTQ_guide.html">ONNX Quantization - Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1 _expand"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.deploy.llm.html">llm</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.deploy.llm.generate.html">generate</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.onnx.html">onnx</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.autocast.html">autocast</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.graphsanitizer.html">graphsanitizer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.logging_config.html">logging_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.nodeclassifier.html">nodeclassifier</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.precisionconverter.html">precisionconverter</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.referencerunner.html">referencerunner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.llm_export_utils.html">llm_export_utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.llm_export_utils.export_utils.html">export_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.llm_export_utils.quantization_utils.html">quantization_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.llm_export_utils.surgeon_utils.html">surgeon_utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.autotune.html">autotune</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.calib_utils.html">calib_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.fp8.html">fp8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.graph_utils.html">graph_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.gs_patching.html">gs_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int4.html">int4</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int8.html">int8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.operators.html">operators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.qdq_utils.html">qdq_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.quantize.html">modelopt.onnx.quantization.quantize</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.torch.html">torch</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.distillation_model.html">distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.layerwise_distillation_model.html">layerwise_distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.loss_balancers.html">loss_balancers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.registry.html">registry</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.convert_hf_config.html">convert_hf_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.diffusers_utils.html">diffusers_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.distribute.html">distribute</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.hf_config_map.html">hf_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.hf_export_handlers.html">hf_export_handlers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.layer_utils.html">layer_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.mcore_config_map.html">mcore_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config.html">model_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config_export.html">model_config_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config_utils.html">model_config_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_utils.html">model_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.moe_utils.html">moe_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.postprocess.html">postprocess</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.tensorrt_llm_type.html">tensorrt_llm_type</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.tensorrt_llm_utils.html">tensorrt_llm_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_hf.html">unified_export_hf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_hf_streaming.html">unified_export_hf_streaming</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_megatron.html">unified_export_megatron</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.fastgen.html">fastgen</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.discriminators.html">discriminators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.ema.html">ema</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.factory.html">factory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.flow_matching.html">flow_matching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.loader.html">loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.methods.html">methods</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.pipeline.html">pipeline</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.kernels.common.html">common</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.kernels.quantization.html">quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.kernels.sparsity.html">sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.autonas.html">autonas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.hparams.html">hparams</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.patch.html">patch</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.traced_hp.html">traced_hp</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.config_loader.html">config_loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.dynamic.html">dynamic</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.hparam.html">hparam</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.searcher.html">searcher</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.custom.html">custom</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.lora.html">lora</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.mode.html">mode</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.fastnas.html">fastnas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.importance_hooks.html">importance_hooks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.pruning.html">pruning</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_coverage.html">artifact_coverage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import.html">artifact_import</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import_contract.html">artifact_import_contract</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_inventory.html">artifact_inventory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.benchmarks.html">benchmarks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.campaigns.html">campaigns</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.candidates.html">candidates</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.checkpoint_transactions.html">checkpoint_transactions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.depth.html">depth</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.diagnostics.html">diagnostics</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distributed_eval.html">distributed_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.evaluation.html">evaluation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.execution_record.html">execution_record</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.export.html">export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.granularity.html">granularity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.identity.html">identity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.manifest.html">manifest</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.orchestration.html">orchestration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pipeline_config.html">pipeline_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.post_mip.html">post_mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.rpc_eval.html">rpc_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.sampling.html">sampling</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scenarios.html">scenarios</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring_parent.html">scoring_parent</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.security_policy.html">security_policy</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.solution_registry.html">solution_registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stage_runner.html">stage_runner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stages.html">stages</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.backends.html">backends</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.calib.html">calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.compress.html">modelopt.torch.quantization.compress</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.export_onnx.html">export_onnx</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_calib.html">model_calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_quant.html">model_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.nn.html">nn</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.qtensor.html">qtensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.tensor_quant.html">tensor_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.sparsity.attention_sparsity.html">attention_sparsity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.sparsity.weight_sparsity.html">weight_sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.dflash.html">dflash</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.medusa.html">medusa</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.speculative_decoding.html">speculative_decoding</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.analyzer.html">analyzer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.symbols.html">symbols</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.tracer.html">tracer</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.cpp_extension.html">cpp_extension</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.dataset_utils.html">dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.distributed.html">distributed</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.graph.html">graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.import_utils.html">import_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.list.html">list</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.logging.html">logging</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.network.html">network</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.random.html">random</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.regex.html">regex</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.robust_json.html">robust_json</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.serialization.html">serialization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.speech_dataset_utils.html">speech_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.tensor.html">tensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.vlm_dataset_utils.html">vlm_dataset_utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#modelopt.onnx.graph_surgery.add_cross_kv_to_encoder"><code class="docutils literal notranslate"><span class="pre">add_cross_kv_to_encoder()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.onnx.graph_surgery.convert_fp16_to_bf16"><code class="docutils literal notranslate"><span class="pre">convert_fp16_to_bf16()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.onnx.graph_surgery.get_available_surgeries"><code class="docutils literal notranslate"><span class="pre">get_available_surgeries()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.onnx.graph_surgery.replace_attention_with_gqa"><code class="docutils literal notranslate"><span class="pre">replace_attention_with_gqa()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.onnx.graph_surgery.run_graph_surgery"><code class="docutils literal notranslate"><span class="pre">run_graph_surgery()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.onnx.graph_surgery.transpose_dequantize_linear_weights"><code class="docutils literal notranslate"><span class="pre">transpose_dequantize_linear_weights()</span></code></a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../../index.html"><span itemprop="name">Model Optimizer</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../1_modelopt_api.html"><span itemprop="name">modelopt API</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="2" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="modelopt.onnx.html"><span itemprop="name">onnx</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="3" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">graph_surgery</strong>
+        <meta itemprop="position" content="4" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue dark-code" role="main">
+          <section id="graph-surgery">
+<h1>graph_surgery<a class="headerlink" href="#graph-surgery" title="Link to this heading">#</a></h1>
+<p id="module-modelopt.onnx.graph_surgery">Graph surgery module for post-processing ONNX models.</p>
+<p>This module provides utilities for performing graph-level transformations on ONNX models
+after export. Common use cases include:</p>
+<ul class="simple">
+<li><p>Replacing standard attention patterns with GroupQueryAttention (GQA) for LLMs</p></li>
+<li><p>Adding cross-attention KV cache outputs to encoder models</p></li>
+<li><p>Converting model precision (e.g., FP16 to BF16)</p></li>
+<li><p>Transposing DequantizeLinear weights for column-major storage optimization</p></li>
+<li><p>Graph cleanup and optimization</p></li>
+</ul>
+<dl>
+<dt>Example usage:</dt><dd><div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.graph_surgery</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+</span><span data-line="2"><span class="gp">... </span>    <span class="n">replace_attention_with_gqa</span><span class="p">,</span>
+</span><span data-line="3"><span class="gp">... </span>    <span class="n">convert_fp16_to_bf16</span><span class="p">,</span>
+</span><span data-line="4"><span class="gp">... </span>    <span class="n">transpose_dequantize_linear_weights</span><span class="p">,</span>
+</span><span data-line="5"><span class="gp">... </span>    <span class="n">add_cross_kv_to_encoder</span><span class="p">,</span>
+</span><span data-line="6"><span class="gp">... </span><span class="p">)</span>
+</span><span data-line="7"><span class="gp">&gt;&gt;&gt; </span><span class="c1"># Replace attention with GQA for LLMs (FP16 model)</span>
+</span><span data-line="8"><span class="gp">&gt;&gt;&gt; </span><span class="n">replace_attention_with_gqa</span><span class="p">(</span>
+</span><span data-line="9"><span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">"model_fp16.onnx"</span><span class="p">,</span>
+</span><span data-line="10"><span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">"model_gqa.onnx"</span><span class="p">,</span>
+</span><span data-line="11"><span class="gp">... </span>    <span class="n">hf_model_id</span><span class="o">=</span><span class="s2">"meta-llama/Llama-2-7b-hf"</span><span class="p">,</span>
+</span><span data-line="12"><span class="gp">... </span>    <span class="n">io_dtype</span><span class="o">=</span><span class="s2">"float16"</span><span class="p">,</span>
+</span><span data-line="13"><span class="gp">... </span><span class="p">)</span>
+</span><span data-line="14"><span class="gp">&gt;&gt;&gt; </span><span class="c1"># Replace attention with GQA and convert to BF16 in one step</span>
+</span><span data-line="15"><span class="gp">&gt;&gt;&gt; </span><span class="n">replace_attention_with_gqa</span><span class="p">(</span>
+</span><span data-line="16"><span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">"model_fp16.onnx"</span><span class="p">,</span>
+</span><span data-line="17"><span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">"model_gqa_bf16.onnx"</span><span class="p">,</span>
+</span><span data-line="18"><span class="gp">... </span>    <span class="n">hf_model_id</span><span class="o">=</span><span class="s2">"meta-llama/Llama-2-7b-hf"</span><span class="p">,</span>
+</span><span data-line="19"><span class="gp">... </span>    <span class="n">io_dtype</span><span class="o">=</span><span class="s2">"bfloat16"</span><span class="p">,</span>  <span class="c1"># Automatically converts FP16 to BF16</span>
+</span><span data-line="20"><span class="gp">... </span><span class="p">)</span>
+</span><span data-line="21"><span class="gp">&gt;&gt;&gt; </span><span class="c1"># Add cross-attention KV cache outputs to encoder (GenAI compatible)</span>
+</span><span data-line="22"><span class="gp">&gt;&gt;&gt; </span><span class="n">add_cross_kv_to_encoder</span><span class="p">(</span>
+</span><span data-line="23"><span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">"encoder_model.onnx"</span><span class="p">,</span>
+</span><span data-line="24"><span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">"encoder_with_kv.onnx"</span><span class="p">,</span>
+</span><span data-line="25"><span class="gp">... </span>    <span class="n">hf_model_id</span><span class="o">=</span><span class="s2">"openai/whisper-large-v3-turbo"</span><span class="p">,</span>
+</span><span data-line="26"><span class="gp">... </span><span class="p">)</span>
+</span><span data-line="27"><span class="gp">&gt;&gt;&gt; </span><span class="c1"># Standalone FP16 to BF16 conversion</span>
+</span><span data-line="28"><span class="gp">&gt;&gt;&gt; </span><span class="n">convert_fp16_to_bf16</span><span class="p">(</span>
+</span><span data-line="29"><span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">"model_fp16.onnx"</span><span class="p">,</span>
+</span><span data-line="30"><span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">"model_bf16.onnx"</span><span class="p">,</span>
+</span><span data-line="31"><span class="gp">... </span><span class="p">)</span>
+</span><span data-line="32"><span class="gp">&gt;&gt;&gt;</span>
+</span><span data-line="33"><span class="gp">&gt;&gt;&gt; </span><span class="c1"># Transpose DequantizeLinear weights for column-major storage</span>
+</span><span data-line="34"><span class="gp">&gt;&gt;&gt; </span><span class="n">transpose_dequantize_linear_weights</span><span class="p">(</span>
+</span><span data-line="35"><span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">"model_quantized.onnx"</span><span class="p">,</span>
+</span><span data-line="36"><span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">"model_quantized_transposed.onnx"</span><span class="p">,</span>
+</span><span data-line="37"><span class="gp">... </span><span class="p">)</span>
+</span></pre></div>
+</div>
+</dd>
+</dl>
+<p class="rubric">Functions</p>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.graph_surgery.add_cross_kv_to_encoder" title="modelopt.onnx.graph_surgery.add_cross_kv_to_encoder"><code class="xref py py-obj docutils literal notranslate"><span class="pre">add_cross_kv_to_encoder</span></code></a></p></td>
+<td><p>Add cross-attention KV cache outputs to encoder model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.graph_surgery.convert_fp16_to_bf16" title="modelopt.onnx.graph_surgery.convert_fp16_to_bf16"><code class="xref py py-obj docutils literal notranslate"><span class="pre">convert_fp16_to_bf16</span></code></a></p></td>
+<td><p>Convert an ONNX model from FP16 to BF16.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.graph_surgery.get_available_surgeries" title="modelopt.onnx.graph_surgery.get_available_surgeries"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_available_surgeries</span></code></a></p></td>
+<td><p>Return a list of all registered graph surgery names.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.graph_surgery.replace_attention_with_gqa" title="modelopt.onnx.graph_surgery.replace_attention_with_gqa"><code class="xref py py-obj docutils literal notranslate"><span class="pre">replace_attention_with_gqa</span></code></a></p></td>
+<td><p>Replace attention subgraphs with GroupQueryAttention (GQA) in an ONNX model.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.graph_surgery.run_graph_surgery" title="modelopt.onnx.graph_surgery.run_graph_surgery"><code class="xref py py-obj docutils literal notranslate"><span class="pre">run_graph_surgery</span></code></a></p></td>
+<td><p>Run a graph surgery by name.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.graph_surgery.transpose_dequantize_linear_weights" title="modelopt.onnx.graph_surgery.transpose_dequantize_linear_weights"><code class="xref py py-obj docutils literal notranslate"><span class="pre">transpose_dequantize_linear_weights</span></code></a></p></td>
+<td><p>Transpose weights in DequantizeLinear nodes for column-major storage.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.graph_surgery.add_cross_kv_to_encoder">
+<span class="sig-name descname"><span class="pre">add_cross_kv_to_encoder</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hf_model_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hidden_state_output_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'last_hidden_state'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rename_input_features</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_external_data</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">external_data_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">decoder_filename</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'decoder_with_past_model.onnx'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">generate_genai_config</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">provider</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'cuda'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">verbose</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trust_remote_code</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.graph_surgery.add_cross_kv_to_encoder" title="Link to this definition">#</a></dt>
+<dd><p>Add cross-attention KV cache outputs to encoder model.</p>
+<p>This function transforms an Optimum-exported encoder model by adding
+cross-attention Key/Value projection outputs. This is required for
+ONNX Runtime GenAI compatibility where the decoder expects pre-computed
+encoder K/V caches.</p>
+<p>The transformation:
+1. Renames input_features -&gt; audio_features (optional)
+2. Renames last_hidden_state -&gt; encoder_hidden_states
+3. Adds K/V projection weights from HuggingFace model
+4. Adds MatMul -&gt; Reshape -&gt; Transpose subgraph for each layer
+5. Adds outputs: present_key_cross_X, present_value_cross_X
+6. Generates genai_config.json and audio_processor_config.json (optional)</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model_path</strong> (<em>str</em>) – Path to encoder ONNX model.</p></li>
+<li><p><strong>output_path</strong> (<em>str</em>) – Path to save modified encoder.</p></li>
+<li><p><strong>hf_model_id</strong> (<em>str</em>) – HuggingFace model ID for loading cross-attention weights.</p></li>
+<li><p><strong>hidden_state_output_name</strong> (<em>str</em>) – Name of encoder hidden state output.</p></li>
+<li><p><strong>rename_input_features</strong> (<em>bool</em>) – Whether to rename input_features to audio_features.</p></li>
+<li><p><strong>use_external_data</strong> (<em>bool</em>) – Whether to save weights as external data.</p></li>
+<li><p><strong>external_data_name</strong> (<em>str</em><em> | </em><em>None</em>) – Name for external data file.</p></li>
+<li><p><strong>decoder_filename</strong> (<em>str</em>) – Filename for decoder model in genai_config.json.
+Default is “decoder_with_past_model.onnx”.</p></li>
+<li><p><strong>generate_genai_config</strong> (<em>bool</em>) – Whether to generate genai_config.json.</p></li>
+<li><p><strong>provider</strong> (<em>str</em>) – Execution provider for genai_config.json (“cuda”, “cpu”, “NvTensorRtRtx”).</p></li>
+<li><p><strong>verbose</strong> (<em>bool</em>) – Whether to print progress messages.</p></li>
+<li><p><strong>trust_remote_code</strong> (<em>bool</em>) – Whether to trust remote code in HuggingFace model.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Modified encoder model with cross-attention KV cache outputs.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>ModelProto</em></p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.graph_surgery</span><span class="w"> </span><span class="kn">import</span> <span class="n">add_cross_kv_to_encoder</span>
+</span><span data-line="2"><span class="gp">&gt;&gt;&gt; </span><span class="n">model</span> <span class="o">=</span> <span class="n">add_cross_kv_to_encoder</span><span class="p">(</span>
+</span><span data-line="3"><span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">"encoder_model.onnx"</span><span class="p">,</span>
+</span><span data-line="4"><span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">"encoder_model_with_kv.onnx"</span><span class="p">,</span>
+</span><span data-line="5"><span class="gp">... </span>    <span class="n">hf_model_id</span><span class="o">=</span><span class="s2">"openai/whisper-large-v3-turbo"</span><span class="p">,</span>
+</span><span data-line="6"><span class="gp">... </span><span class="p">)</span>
+</span></pre></div>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.graph_surgery.convert_fp16_to_bf16">
+<span class="sig-name descname"><span class="pre">convert_fp16_to_bf16</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">external_data</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">verbose</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.graph_surgery.convert_fp16_to_bf16" title="Link to this definition">#</a></dt>
+<dd><p>Convert an ONNX model from FP16 to BF16.</p>
+<p>This function converts:
+1. All FP16 initializers (weights) to BF16
+2. All FP16 value_info (intermediate tensors) to BF16
+3. All FP16 graph inputs/outputs to BF16
+4. All Cast nodes that target FP16 to target BF16</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model_path</strong> (<em>str</em>) – Path to input FP16 ONNX model.</p></li>
+<li><p><strong>output_path</strong> (<em>str</em>) – Path to output BF16 ONNX model.</p></li>
+<li><p><strong>external_data</strong> (<em>bool</em>) – Whether to save weights as external data.</p></li>
+<li><p><strong>verbose</strong> (<em>bool</em>) – Whether to print progress messages.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary with conversion statistics.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>int</em>]</p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="gp">&gt;&gt;&gt; </span><span class="n">stats</span> <span class="o">=</span> <span class="n">convert_fp16_to_bf16</span><span class="p">(</span>
+</span><span data-line="2"><span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">"model_fp16.onnx"</span><span class="p">,</span>
+</span><span data-line="3"><span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">"model_bf16.onnx"</span><span class="p">,</span>
+</span><span data-line="4"><span class="gp">... </span><span class="p">)</span>
+</span><span data-line="5"><span class="gp">&gt;&gt;&gt; </span><span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Converted </span><span class="si">{</span><span class="n">stats</span><span class="p">[</span><span class="s1">'initializers_converted'</span><span class="p">]</span><span class="si">}</span><span class="s2"> initializers"</span><span class="p">)</span>
+</span></pre></div>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.graph_surgery.get_available_surgeries">
+<span class="sig-name descname"><span class="pre">get_available_surgeries</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.graph_surgery.get_available_surgeries" title="Link to this definition">#</a></dt>
+<dd><p>Return a list of all registered graph surgery names.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.graph_surgery.replace_attention_with_gqa">
+<span class="sig-name descname"><span class="pre">replace_attention_with_gqa</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hf_model_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_seq_len</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">4096</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">io_dtype</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'float16'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_external_data</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">external_data_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ir_version</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pack_qkv</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">verbose</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trust_remote_code</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.graph_surgery.replace_attention_with_gqa" title="Link to this definition">#</a></dt>
+<dd><p>Replace attention subgraphs with GroupQueryAttention (GQA) in an ONNX model.</p>
+<p>This function transforms an ONNX model exported from HuggingFace/Optimum
+to use Microsoft’s GroupQueryAttention operator, which is optimized for
+inference with ONNX Runtime.</p>
+<p>The transformation includes:
+- Converting weights to target dtype (FP16/BF16) [non-quantized models only]
+- Adding RoPE cos/sin caches
+- Replacing attention patterns with GQA for all layers
+- Fusing Q/K/V projections into single MatMul [non-quantized models only]
+- Concatenating Q/K/V outputs for GQA [quantized models only]
+- Adding past/present KV cache inputs/outputs</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model_path</strong> (<em>str</em>) – Path to input ONNX model.</p></li>
+<li><p><strong>output_path</strong> (<em>str</em>) – Path to save modified model.</p></li>
+<li><p><strong>hf_model_id</strong> (<em>str</em>) – HuggingFace model ID for config.</p></li>
+<li><p><strong>max_seq_len</strong> (<em>int</em>) – Maximum sequence length for caches.</p></li>
+<li><p><strong>io_dtype</strong> (<em>str</em>) – Data type for I/O tensors (“float16”, “float32”, or “bfloat16”).
+If the model has FP16 initializers and “bfloat16” is specified,
+they are automatically converted to BF16.</p></li>
+<li><p><strong>use_external_data</strong> (<em>bool</em>) – Save weights as external data file.</p></li>
+<li><p><strong>external_data_name</strong> (<em>str</em><em> | </em><em>None</em>) – Name for external data file (default: model.onnx_data).</p></li>
+<li><p><strong>ir_version</strong> (<em>int</em><em> | </em><em>None</em>) – If specified, set the ONNX IR version to this value. Useful for
+compatibility with older ONNX Runtime versions (e.g., set to 9 for ORT 1.16).</p></li>
+<li><p><strong>verbose</strong> (<em>bool</em>) – Whether to print progress messages.</p></li>
+<li><p><strong>trust_remote_code</strong> (<em>bool</em>) – Whether to trust remote code in HuggingFace model config.</p></li>
+<li><p><strong>pack_qkv</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Modified ONNX model.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>ModelProto</em></p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.graph_surgery</span><span class="w"> </span><span class="kn">import</span> <span class="n">replace_attention_with_gqa</span>
+</span><span data-line="2"><span class="gp">&gt;&gt;&gt; </span><span class="n">model</span> <span class="o">=</span> <span class="n">replace_attention_with_gqa</span><span class="p">(</span>
+</span><span data-line="3"><span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">"model_fp16.onnx"</span><span class="p">,</span>
+</span><span data-line="4"><span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">"model_gqa.onnx"</span><span class="p">,</span>
+</span><span data-line="5"><span class="gp">... </span>    <span class="n">hf_model_id</span><span class="o">=</span><span class="s2">"meta-llama/Llama-2-7b-hf"</span><span class="p">,</span>
+</span><span data-line="6"><span class="gp">... </span>    <span class="n">max_seq_len</span><span class="o">=</span><span class="mi">4096</span><span class="p">,</span>
+</span><span data-line="7"><span class="gp">... </span>    <span class="n">io_dtype</span><span class="o">=</span><span class="s2">"float16"</span><span class="p">,</span>
+</span><span data-line="8"><span class="gp">... </span><span class="p">)</span>
+</span></pre></div>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.graph_surgery.run_graph_surgery">
+<span class="sig-name descname"><span class="pre">run_graph_surgery</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">surgery_name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_path</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.graph_surgery.run_graph_surgery" title="Link to this definition">#</a></dt>
+<dd><p>Run a graph surgery by name.</p>
+<p>This is the unified entry point for all graph surgeries. It dispatches
+to the appropriate surgery function based on the surgery name.</p>
+<p>When new surgeries are added to the registry, they are automatically
+available through this function without any changes to calling code.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>surgery_name</strong> (<em>str</em>) – Name of the surgery to run (e.g. ‘replace-gqa’, ‘transpose-dq’).
+Use get_available_surgeries() to see all available options.</p></li>
+<li><p><strong>model_path</strong> (<em>str</em>) – Path to the input ONNX model.</p></li>
+<li><p><strong>output_path</strong> (<em>str</em>) – Path to save the output ONNX model.</p></li>
+<li><p><strong>**kwargs</strong> – Surgery-specific parameters. Passed directly to the surgery function.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The return value of the surgery function (typically ModelProto or dict).</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>ValueError</strong> – If surgery_name is not registered.</p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.graph_surgery</span><span class="w"> </span><span class="kn">import</span> <span class="n">run_graph_surgery</span><span class="p">,</span> <span class="n">get_available_surgeries</span>
+</span><span data-line="2"><span class="gp">&gt;&gt;&gt; </span><span class="nb">print</span><span class="p">(</span><span class="n">get_available_surgeries</span><span class="p">())</span>
+</span><span data-line="3"><span class="go">['replace-gqa', 'add-cross-kv', 'convert-bf16', 'transpose-dq']</span>
+</span><span data-line="4"><span class="gp">&gt;&gt;&gt; </span><span class="n">run_graph_surgery</span><span class="p">(</span>
+</span><span data-line="5"><span class="gp">... </span>    <span class="s2">"replace-gqa"</span><span class="p">,</span>
+</span><span data-line="6"><span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">"model.onnx"</span><span class="p">,</span>
+</span><span data-line="7"><span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">"model_gqa.onnx"</span><span class="p">,</span>
+</span><span data-line="8"><span class="gp">... </span>    <span class="n">hf_model_id</span><span class="o">=</span><span class="s2">"meta-llama/Llama-2-7b-hf"</span><span class="p">,</span>
+</span><span data-line="9"><span class="gp">... </span><span class="p">)</span>
+</span></pre></div>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.graph_surgery.transpose_dequantize_linear_weights">
+<span class="sig-name descname"><span class="pre">transpose_dequantize_linear_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_external_data</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">external_data_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">verbose</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.graph_surgery.transpose_dequantize_linear_weights" title="Link to this definition">#</a></dt>
+<dd><p>Transpose weights in DequantizeLinear nodes for column-major storage.</p>
+<p>This function transforms a quantized ONNX model by:
+1. Finding all DequantizeLinear nodes that feed into MatMul/Gemm
+2. Transposing the quantized weights, scales, and zero points
+3. Updating the axis attribute (0 -&gt; 1)
+4. Adding Transpose nodes after DequantizeLinear to recover original shape</p>
+<p>This optimization is useful for backends that prefer column-major weight
+storage, such as NvTensorRtRtx.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model_path</strong> (<em>str</em>) – Path to input quantized ONNX model.</p></li>
+<li><p><strong>output_path</strong> (<em>str</em>) – Path to save modified model.</p></li>
+<li><p><strong>use_external_data</strong> (<em>bool</em>) – Whether to save weights as external data.</p></li>
+<li><p><strong>external_data_name</strong> (<em>str</em><em> | </em><em>None</em>) – Name for external data file.</p></li>
+<li><p><strong>verbose</strong> (<em>bool</em>) – Whether to print progress messages.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Modified ONNX model.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>ModelProto</em></p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.graph_surgery</span><span class="w"> </span><span class="kn">import</span> <span class="n">transpose_dequantize_linear_weights</span>
+</span><span data-line="2"><span class="gp">&gt;&gt;&gt; </span><span class="n">model</span> <span class="o">=</span> <span class="n">transpose_dequantize_linear_weights</span><span class="p">(</span>
+</span><span data-line="3"><span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">"model_quantized.onnx"</span><span class="p">,</span>
+</span><span data-line="4"><span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">"model_quantized_transposed.onnx"</span><span class="p">,</span>
+</span><span data-line="5"><span class="gp">... </span><span class="p">)</span>
+</span></pre></div>
+</div>
+</dd></dl>
+
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="modelopt.onnx.export.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">export</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="modelopt.onnx.llm_export_utils.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">llm_export_utils</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2023-2025, NVIDIA Corporation</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials"></div>
+    </div>
+  </div>
+</footer>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script src="../../_static/shibuya.js?v=50760d75"></script>
+      <script src="../../_static/announcements.js?v=d94b986f"></script></body>
+</html>

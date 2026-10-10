@@ -1,0 +1,558 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PyTorch Quantization &mdash; Model Optimizer 0.0.1.dev1+ga38e667b1</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Quantization Configuration (quant_cfg)" href="_quant_cfg.html" />
+    <link rel="prev" title="Best practices to choose the right quantization methods" href="_choosing_quant_methods.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="1_quantization.html">Quantization</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_choosing_quant_methods.html">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">PyTorch Quantization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#apply-post-training-quantization-ptq">Apply Post Training Quantization (PTQ)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#quantization-aware-training-qat">Quantization-aware Training (QAT)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#storing-and-restoring-quantized-model">Storing and restoring quantized model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#optimal-partial-quantization-using-auto-quantize">Optimal Partial Quantization using <code class="docutils literal notranslate"><span class="pre">auto_quantize</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#advanced-topics">Advanced Topics</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#tensorquantizer">TensorQuantizer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#customizing-quantizer-configuration">Customizing Quantizer Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#custom-quantized-module-and-quantizer-placement">Custom quantized module and quantizer placement</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#custom-calibration-algorithm">Custom calibration algorithm</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#fast-evaluation">Fast evaluation</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="_quant_cfg.html">Quantization Configuration (quant_cfg)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_onnx_quantization.html">ONNX Quantization - Linux (Beta)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="windows_guides/_ONNX_PTQ_guide.html">ONNX Quantization - Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="1_quantization.html">Quantization</a></li>
+      <li class="breadcrumb-item active">PyTorch Quantization</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/guides/_pytorch_quantization.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="pytorch-quantization">
+<h1>PyTorch Quantization<a class="headerlink" href="#pytorch-quantization" title="Link to this heading"></a></h1>
+<p>Key advantages offered by ModelOpt’s PyTorch quantization:</p>
+<ol class="arabic simple">
+<li><p>Support advanced quantization formats, e.g., Block-wise Int4 and FP8.</p></li>
+<li><p>Native support for LLM models in Hugging Face, Megatron-Bridge and Megatron-LM.</p></li>
+<li><p>Advanced Quantization algorithms, e.g., SmoothQuant, AWQ.</p></li>
+<li><p>Deployment support to ONNX and NVIDIA TensorRT.</p></li>
+</ol>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>ModelOpt quantization is fake quantization, which means it only simulates the low-precision computation in PyTorch.
+Real speedup and memory saving should be achieved by exporting the model to deployment frameworks.</p>
+</div>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>This guide covers the usage of ModelOpt quantization. For details on the quantization formats and recommended use cases,
+please refer to <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html#quantization-formats"><span class="std std-ref">Quantization Formats</span></a>.</p>
+</div>
+<section id="apply-post-training-quantization-ptq">
+<h2>Apply Post Training Quantization (PTQ)<a class="headerlink" href="#apply-post-training-quantization-ptq" title="Link to this heading"></a></h2>
+<p>PTQ can be achieved with simple calibration on a small set of training or evaluation data (typically 128-512 samples) after converting a regular PyTorch model to a quantized model.
+The simplest way to quantize a model using ModelOpt is to use <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.quantize" title="modelopt.torch.quantization.model_quant.quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtq.quantize()</span></code></a>.</p>
+<p><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtq.quantize()</span></code> takes a model, a quantization config and a forward loop callable as input.  The quantization config specifies the layers to quantize, their quantization formats as well as the algorithm to use for calibration. Please
+refer to <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html#quantization-configs"><span class="std std-ref">Quantization Configs</span></a> for the list of quantization configs supported by default. You may also define your own quantization config as
+described in <a class="reference internal" href="#customize-quantizer-config"><span class="std std-ref">customizing quantizer config</span></a>.</p>
+<p>ModelOpt supports algorithms such as AWQ, SmoothQuant, SVDQuant or max for calibration. Please refer to <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.calibrate" title="modelopt.torch.quantization.model_quant.calibrate"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtq.calibrate</span></code></a>
+for more details.</p>
+<p>The forward loop is used to pass data through the model in-order to collect statistics for calibration.
+It should wrap around the calibration dataloader and the model.</p>
+<p>Here is an example of performing PTQ using ModelOpt:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.quantization</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtq</span>
+
+<span class="c1"># Setup the model</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">get_model</span><span class="p">()</span>
+
+<span class="c1"># Select quantization config</span>
+<span class="n">config</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">INT8_SMOOTHQUANT_CFG</span>
+
+<span class="c1"># Quantization need calibration data. Setup calibration data loader</span>
+<span class="c1"># An example of creating a calibration data loader looks like the following:</span>
+<span class="n">data_loader</span> <span class="o">=</span> <span class="n">get_dataloader</span><span class="p">(</span><span class="n">num_samples</span><span class="o">=</span><span class="n">calib_size</span><span class="p">)</span>
+
+
+<span class="c1"># Define forward_loop. Please wrap the data loader in the forward_loop</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">forward_loop</span><span class="p">(</span><span class="n">model</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">batch</span> <span class="ow">in</span> <span class="n">data_loader</span><span class="p">:</span>
+        <span class="n">model</span><span class="p">(</span><span class="n">batch</span><span class="p">)</span>
+
+
+<span class="c1"># Quantize the model and perform calibration (PTQ)</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">quantize</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">config</span><span class="p">,</span> <span class="n">forward_loop</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>To verify that the quantizer nodes are placed correctly in the model, let’s print the quantized model summary as show below:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Print quantization summary after successfully quantizing the model with mtq.quantize</span>
+<span class="c1"># This will show the quantizers inserted in the model and their configurations</span>
+<span class="n">mtq</span><span class="o">.</span><span class="n">print_quant_summary</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>After PTQ, the model can be exported to ONNX with the normal PyTorch ONNX export flow.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">torch</span><span class="o">.</span><span class="n">onnx</span><span class="o">.</span><span class="n">export</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">sample_input</span><span class="p">,</span> <span class="n">onnx_file</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>ModelOpt also supports direct export of Huggingface or Megatron-Bridge/Megatron-LM LLM models to TensorRT-LLM for deployment.
+Please see <a class="reference internal" href="../deployment/1_tensorrt_llm.html"><span class="doc">TensorRT-LLM Deployment</span></a> for more details.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>To reduce the memory footprint of the quantized model, please refer to <a class="reference internal" href="_compress_quantized_models.html"><span class="doc">Compress Quantized Models</span></a>.</p>
+</div>
+</section>
+<section id="quantization-aware-training-qat">
+<h2>Quantization-aware Training (QAT)<a class="headerlink" href="#quantization-aware-training-qat" title="Link to this heading"></a></h2>
+<p>QAT is the technique of fine-tuning a quantized model to recover model quality degradation due to quantization.
+While QAT requires much more compute resources than PTQ, it is highly effective in recovering model quality.</p>
+<p>A model quantized using  <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.quantize" title="modelopt.torch.quantization.model_quant.quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtq.quantize()</span></code></a> could be directly fine-tuned with QAT.
+Typically during QAT, the quantizer states are frozen and the model weights are fine-tuned.</p>
+<p>Here is an example of performing QAT:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.quantization</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtq</span>
+
+<span class="c1"># Select quantization config</span>
+<span class="n">config</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">INT8_DEFAULT_CFG</span>
+
+
+<span class="c1"># Define forward loop for calibration</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">forward_loop</span><span class="p">(</span><span class="n">model</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">data</span> <span class="ow">in</span> <span class="n">calib_set</span><span class="p">:</span>
+        <span class="n">model</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+
+
+<span class="c1"># QAT after replacement of regular modules to quantized modules</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">quantize</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">config</span><span class="p">,</span> <span class="n">forward_loop</span><span class="p">)</span>
+
+<span class="c1"># Fine-tune with original training pipeline</span>
+<span class="c1"># Adjust learning rate and training duration</span>
+<span class="n">train</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">train_loader</span><span class="p">,</span> <span class="n">optimizer</span><span class="p">,</span> <span class="n">scheduler</span><span class="p">,</span> <span class="o">...</span><span class="p">)</span>
+</pre></div>
+</div>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>We recommend QAT for 10% of the original training epochs. For LLMs, we find that QAT fine-tuning for even
+less than 1% of the original pre-training duration is often sufficient to recover the model quality.</p>
+</div>
+</section>
+<section id="storing-and-restoring-quantized-model">
+<h2>Storing and restoring quantized model<a class="headerlink" href="#storing-and-restoring-quantized-model" title="Link to this heading"></a></h2>
+<p>The model weights and quantizer states need to saved for future use or to resume training.
+Please see <a class="reference internal" href="2_save_load.html#save-restore"><span class="std std-ref">saving and restoring of ModelOpt-modified models</span></a> to learn
+how to save and restore the quantized model.</p>
+</section>
+<section id="optimal-partial-quantization-using-auto-quantize">
+<h2>Optimal Partial Quantization using <code class="docutils literal notranslate"><span class="pre">auto_quantize</span></code><a class="headerlink" href="#optimal-partial-quantization-using-auto-quantize" title="Link to this heading"></a></h2>
+<p><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize" title="modelopt.torch.quantization.model_quant.auto_quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">auto_quantize</span></code></a> is a PTQ algorithm from ModelOpt which
+quantizes a model by searching for the best quantization format per-layer
+while meeting the performance constraint specified by the user. <code class="docutils literal notranslate"><span class="pre">auto_quantize</span></code> enables to trade-off model accuracy
+for performance. Please see <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize" title="modelopt.torch.quantization.model_quant.auto_quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">auto_quantize</span></code></a> for more details
+on the API usage.</p>
+<p>Currently <code class="docutils literal notranslate"><span class="pre">auto_quantize</span></code> supports only <code class="docutils literal notranslate"><span class="pre">effective_bits</span></code> as the performance constraint (for both weight-only
+quantization and weight &amp; activation quantization). <code class="docutils literal notranslate"><span class="pre">effective_bits</span></code> constraint specifies the effective number of bits for the quantized model.</p>
+<p>You may specify a <code class="docutils literal notranslate"><span class="pre">effective_bits</span></code> constraint such as 4.8 for mixed precision quantization using  <code class="xref py py-attr docutils literal notranslate"><span class="pre">NVFP4_DEFAULT_CFG</span></code> &amp; <code class="xref py py-attr docutils literal notranslate"><span class="pre">FP8_DEFAULT_CFG</span></code>.
+<code class="docutils literal notranslate"><span class="pre">AutoQuantize</span></code> will automatically quantize highly sensitive layers in <code class="xref py py-attr docutils literal notranslate"><span class="pre">FP8_DEFAULT_CFG</span></code> while keeping less sensitive layers in <code class="xref py py-attr docutils literal notranslate"><span class="pre">NVFP4_DEFAULT_CFG</span></code>
+(and even skip quantization for any extremely sensitive layers) so that
+the the final mixed precision quantized model has an effective quantized bits of 4.8.
+This model would give a better accuracy than the model quantized with vanilla <code class="xref py py-attr docutils literal notranslate"><span class="pre">NVFP4_DEFAULT_CFG</span></code> since
+the more aggressive <code class="xref py py-attr docutils literal notranslate"><span class="pre">NVFP4_DEFAULT_CFG</span></code> quantization was not applied for the highly sensitive layers.</p>
+<p>Here is how to perform <code class="docutils literal notranslate"><span class="pre">auto_quantize</span></code>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.quantization</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtq</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.opt</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mto</span>
+
+<span class="c1"># Define the model &amp; calibration dataloader</span>
+<span class="n">model</span> <span class="o">=</span> <span class="o">...</span>
+<span class="n">calib_dataloader</span> <span class="o">=</span> <span class="o">...</span>
+
+<span class="c1"># Define forward_step function.</span>
+<span class="c1"># forward_step should take the model and data as input and return the output</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">forward_step</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+    <span class="n">output</span> <span class="o">=</span>  <span class="n">model</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">output</span>
+
+<span class="c1"># Define loss function which takes the model output and data as input and returns the loss</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">loss_func</span><span class="p">(</span><span class="n">output</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+    <span class="n">loss</span> <span class="o">=</span> <span class="o">...</span>
+    <span class="k">return</span> <span class="n">loss</span>
+
+
+<span class="c1"># Perform auto_quantize</span>
+<span class="n">model</span><span class="p">,</span> <span class="n">search_state_dict</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">auto_quantize</span><span class="p">(</span>
+    <span class="n">model</span><span class="p">,</span>
+    <span class="n">constraints</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;effective_bits&quot;</span><span class="p">:</span> <span class="mf">4.8</span><span class="p">},</span>
+    <span class="c1"># supported quantization formats are listed in `modelopt.torch.quantization.config.choices`</span>
+    <span class="n">quantization_formats</span> <span class="o">=</span> <span class="p">[</span><span class="n">mtq</span><span class="o">.</span><span class="n">NVFP4_DEFAULT_CFG</span><span class="p">,</span> <span class="n">mtq</span><span class="o">.</span><span class="n">FP8_DEFAULT_CFG</span><span class="p">]</span>
+    <span class="n">data_loader</span> <span class="o">=</span> <span class="n">calib_dataloader</span><span class="p">,</span>
+    <span class="n">forward_step</span><span class="o">=</span><span class="n">forward_step</span><span class="p">,</span>
+    <span class="n">loss_func</span><span class="o">=</span><span class="n">loss_func</span><span class="p">,</span>
+    <span class="o">...</span>
+    <span class="p">)</span>
+
+<span class="c1"># Save the searched model for future use</span>
+<span class="n">mto</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="s2">&quot;auto_quantize_model.pt&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="advanced-topics">
+<h2>Advanced Topics<a class="headerlink" href="#advanced-topics" title="Link to this heading"></a></h2>
+<section id="tensorquantizer">
+<h3>TensorQuantizer<a class="headerlink" href="#tensorquantizer" title="Link to this heading"></a></h3>
+<p>Under the hood, ModelOpt <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.quantize" title="modelopt.torch.quantization.model_quant.quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtq.quantize()</span></code></a> inserts
+<a class="reference internal" href="../reference/generated/modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code></a>
+(quantizer modules) into the model layers like linear layer, conv layer etc. and patches their forward method to perform quantization.</p>
+<p>The quantization parameters are as described in <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a>.
+They can be set at initialization by passing <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a>
+or later by calling  <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.set_from_attribute_config" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.set_from_attribute_config"><code class="xref py py-meth docutils literal notranslate"><span class="pre">TensorQuantizer.set_from_attribute_config()</span></code></a>.
+If the quantization parameters are not set explicitly, the quantizer will use the default values.</p>
+<p>Here is an example of creating a quantizer module:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.quantization.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">QuantizerAttributeConfig</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.quantization.nn</span><span class="w"> </span><span class="kn">import</span> <span class="n">TensorQuantizer</span>
+
+<span class="c1"># Create quantizer module with default quantization parameters</span>
+<span class="n">quantizer</span> <span class="o">=</span> <span class="n">TensorQuantizer</span><span class="p">()</span>
+
+<span class="n">quant_x</span> <span class="o">=</span> <span class="n">quantizer</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>  <span class="c1"># Quantize input x</span>
+
+<span class="c1"># Create quantizer module with custom quantization parameters</span>
+<span class="c1"># Example setting for INT4 block-wise quantization</span>
+<span class="n">quantizer_custom</span> <span class="o">=</span> <span class="n">TensorQuantizer</span><span class="p">(</span><span class="n">QuantizerAttributeConfig</span><span class="p">(</span><span class="n">num_bits</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span> <span class="n">block_sizes</span><span class="o">=</span><span class="p">{</span><span class="o">-</span><span class="mi">1</span><span class="p">:</span> <span class="mi">128</span><span class="p">}))</span>
+
+<span class="c1"># Quantize input with custom quantization parameters</span>
+<span class="n">quant_x</span> <span class="o">=</span> <span class="n">quantizer_custom</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>  <span class="c1"># Quantize input x</span>
+</pre></div>
+</div>
+</section>
+<section id="customizing-quantizer-configuration">
+<span id="customize-quantizer-config"></span><h3>Customizing Quantizer Configuration<a class="headerlink" href="#customizing-quantizer-configuration" title="Link to this heading"></a></h3>
+<p>ModelOpt inserts input quantizer, weight quantizer and output quantizer into Pytorch building blocks such as <code class="docutils literal notranslate"><span class="pre">nn.Linear</span></code>, <code class="docutils literal notranslate"><span class="pre">nn.Conv&lt;N&gt;d</span></code> layers.
+By default the output quantizer is disabled.</p>
+<p>The following examples demonstrate how to customize quantization behavior.</p>
+<section id="basic-configuration-modification">
+<h4>Basic Configuration Modification<a class="headerlink" href="#basic-configuration-modification" title="Link to this heading"></a></h4>
+<p>For debugging purposes or simple customizations, you can modify an existing configuration:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">copy</span>
+
+<span class="c1"># Create a deep copy of the default INT8 configuration</span>
+<span class="n">config</span> <span class="o">=</span> <span class="n">copy</span><span class="o">.</span><span class="n">deepcopy</span><span class="p">(</span><span class="n">mtq</span><span class="o">.</span><span class="n">INT8_DEFAULT_CFG</span><span class="p">)</span>
+
+<span class="c1"># Disable input quantizers for all layers (appended last, so it takes precedence)</span>
+<span class="n">config</span><span class="p">[</span><span class="s2">&quot;quant_cfg&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">({</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*input_quantizer&quot;</span><span class="p">,</span> <span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">})</span>
+
+<span class="c1"># Disable all quantizers for layers matching the pattern &quot;layer1.*&quot;</span>
+<span class="n">config</span><span class="p">[</span><span class="s2">&quot;quant_cfg&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">({</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*layer1.*&quot;</span><span class="p">,</span> <span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">})</span>
+</pre></div>
+</div>
+</section>
+<section id="advanced-configuration-creation">
+<h4>Advanced Configuration Creation<a class="headerlink" href="#advanced-configuration-creation" title="Link to this heading"></a></h4>
+<p>For exploring new quantization recipes, you can compose a completely new configuration. The example below creates a custom configuration with INT4 block-wise weight quantization and INT8 token-wise dynamic activation quantization:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.quantization.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">_default_disabled_quantizer_cfg</span>
+
+<span class="c1"># Custom configuration for INT4 block-wise weights and INT8 dynamic activations</span>
+<span class="n">MY_CUSTOM_CONFIG</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;quant_cfg&quot;</span><span class="p">:</span> <span class="p">[</span>
+        <span class="c1"># Disable all quantizers by default, then enable selectively</span>
+        <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*&quot;</span><span class="p">,</span> <span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">},</span>
+
+        <span class="c1"># Configure weight quantizers with 4-bit precision and 128-element blocks</span>
+        <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*weight_quantizer&quot;</span><span class="p">,</span> <span class="s2">&quot;cfg&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="mi">4</span><span class="p">,</span> <span class="s2">&quot;block_sizes&quot;</span><span class="p">:</span> <span class="p">{</span><span class="o">-</span><span class="mi">1</span><span class="p">:</span> <span class="mi">128</span><span class="p">}},</span> <span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">},</span>
+
+        <span class="c1"># Configure input quantizers with 8-bit dynamic quantization</span>
+        <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*input_quantizer&quot;</span><span class="p">,</span> <span class="s2">&quot;cfg&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="mi">8</span><span class="p">,</span> <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;dynamic&quot;</span><span class="p">,</span> <span class="s2">&quot;block_sizes&quot;</span><span class="p">:</span> <span class="p">{</span><span class="o">-</span><span class="mi">1</span><span class="p">:</span> <span class="kc">None</span><span class="p">}}},</span>
+
+        <span class="c1"># Include default disabled quantizer configurations</span>
+        <span class="o">*</span><span class="n">_default_disabled_quantizer_cfg</span><span class="p">,</span>
+    <span class="p">],</span>
+    <span class="s2">&quot;algorithm&quot;</span><span class="p">:</span> <span class="s2">&quot;max&quot;</span><span class="p">,</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>For a detailed explanation of each configuration field, please refer to the source code in
+<code class="docutils literal notranslate"><span class="pre">modelopt/torch/quantization/config.py</span></code>.</p>
+</div>
+</section>
+</section>
+<section id="custom-quantized-module-and-quantizer-placement">
+<span id="custom-quantied-module"></span><h3>Custom quantized module and quantizer placement<a class="headerlink" href="#custom-quantized-module-and-quantizer-placement" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">modelopt.torch.quantization</span></code> has a default set of quantized modules (see <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.nn.modules.html#module-modelopt.torch.quantization.nn.modules" title="modelopt.torch.quantization.nn.modules"><code class="xref py py-mod docutils literal notranslate"><span class="pre">modelopt.torch.quantization.nn.modules</span></code></a> for a detailed list) and quantizer placement rules (input, output and weight quantizers).
+However, there might be cases where you want to define a custom quantized module and/or customize the quantizer placement.</p>
+<p>ModelOpt provides a way to define custom quantized modules and register them with the quantization framework. This allows you to:</p>
+<ol class="arabic simple">
+<li><p>Handle unsupported modules, e.g., a subclassed Linear layer that require quantization.</p></li>
+<li><p>Customize the quantizer placement, e.g., placing the quantizer in special places like the KV Cache of an Attention layer.</p></li>
+</ol>
+<p>The custom quantized modules must have a <code class="docutils literal notranslate"><span class="pre">_setup</span></code> method which instantiates the quantizers that are called in the forward method.</p>
+<p>Here is an example of defining a custom quantized linear module:</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>ModelOpt assigns a <code class="docutils literal notranslate"><span class="pre">parallel_state</span></code> of type <a class="reference internal" href="../reference/generated/modelopt.torch.utils.distributed.html#modelopt.torch.utils.distributed.ParallelState" title="modelopt.torch.utils.distributed.ParallelState"><code class="xref py py-class docutils literal notranslate"><span class="pre">ParallelState</span></code></a>
+to each module. The <code class="docutils literal notranslate"><span class="pre">parallel_state</span></code> of each module specifies its distributed parallelism such as <code class="docutils literal notranslate"><span class="pre">data_parallel_group</span></code> and <code class="docutils literal notranslate"><span class="pre">tensor_parallel_group</span></code>.</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">parallel_state</span></code> groups are used to correctly synchronize the quantization parameters across different process groups during calibration.</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">parallel_state</span></code> by default configures the default PyTorch distributed process group as the <code class="docutils literal notranslate"><span class="pre">data_parallel_group</span></code> - the specialized process groups such as <code class="docutils literal notranslate"><span class="pre">tensor_parallel_group</span></code> are
+set to <code class="docutils literal notranslate"><span class="pre">-1</span></code> which means this parallelism is not used.</p>
+<p>When working with distributed training or inference with specialized parallelism like tensor parallelism,
+you need to initialize the correct <code class="docutils literal notranslate"><span class="pre">parallel_state</span></code> in the <code class="docutils literal notranslate"><span class="pre">_setup</span></code> method. This will override the default <code class="docutils literal notranslate"><span class="pre">parallel_state</span></code>
+and use the correct parallel groups for that module. ModelOpt provides built-in support for common parallel libraries
+like Megatron-LM, APEX, FairScale etc, through plugin modules <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.plugins.html#module-modelopt.torch.quantization.plugins" title="modelopt.torch.quantization.plugins"><code class="xref py py-mod docutils literal notranslate"><span class="pre">plugins</span></code></a> that automatically handle
+the correct parallel state initialization.</p>
+</div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.quantization.nn</span><span class="w"> </span><span class="kn">import</span> <span class="n">TensorQuantizer</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.utils.distributed</span><span class="w"> </span><span class="kn">import</span> <span class="n">ParallelState</span>
+
+<span class="c1"># Quantized module for `CustomColumnParallelLinear`</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">QuantColumnParallelLinear</span><span class="p">(</span><span class="n">CustomColumnParallelLinear</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">in_features</span><span class="p">,</span> <span class="n">out_features</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">in_features</span><span class="p">,</span> <span class="n">out_features</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_setup</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_setup</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="c1"># Method to setup the quantizers</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">input_quantizer</span> <span class="o">=</span> <span class="n">TensorQuantizer</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">weight_quantizer</span> <span class="o">=</span> <span class="n">TensorQuantizer</span><span class="p">()</span>
+
+        <span class="c1"># Optional step for specialized distributed parallel training/inference</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parallel_state</span> <span class="o">=</span> <span class="n">ParallelState</span><span class="p">(</span>
+            <span class="n">data_parallel_group</span><span class="o">=</span><span class="n">data_parallel_group</span><span class="p">,</span> <span class="c1"># specify the data parallel group (user defined)</span>
+            <span class="n">tensor_parallel_group</span><span class="o">=</span><span class="n">tensor_parallel_group</span><span class="p">,</span> <span class="c1"># specify the tensor parallel group (user defined)</span>
+        <span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="nb">input</span><span class="p">):</span>
+        <span class="c1"># You can customize the quantizer placement anywhere in the forward method</span>
+        <span class="nb">input</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">input_quantizer</span><span class="p">(</span><span class="nb">input</span><span class="p">)</span>
+        <span class="n">weight</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">weight_quantizer</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">weight</span><span class="p">)</span>
+        <span class="c1"># Call the unquantized forward method, for example</span>
+        <span class="k">return</span> <span class="n">custom_tensor_parallel_linear_func</span><span class="p">(</span><span class="nb">input</span><span class="p">,</span> <span class="n">weight</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">bias</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>After defining the custom quantized module, you need to register this module so <code class="docutils literal notranslate"><span class="pre">mtq.quantize</span></code> API will automatically replace the original module with the quantized version.
+Here is the code to register the custom quantized module:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.quantization</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtq</span>
+
+<span class="c1"># Register the custom quantized module</span>
+<span class="n">mtq</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="n">original_cls</span><span class="o">=</span><span class="n">CustomColumnParallelLinear</span><span class="p">,</span> <span class="n">quantized_cls</span><span class="o">=</span><span class="n">QuantColumnParallelLinear</span><span class="p">)</span>
+
+<span class="c1"># Perform PTQ</span>
+<span class="c1"># CustomColumnParallelLinear modules in the model will be replaced with the QuantColumnParallelLinear module</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">quantize</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">config</span><span class="p">,</span> <span class="n">forward_loop</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>The quantization config might need to be customized if you define a custom quantized module. Please see
+<a class="reference internal" href="#customize-quantizer-config"><span class="std std-ref">customizing quantizer config</span></a> for more details.</p>
+</section>
+<section id="custom-calibration-algorithm">
+<span id="id1"></span><h3>Custom calibration algorithm<a class="headerlink" href="#custom-calibration-algorithm" title="Link to this heading"></a></h3>
+<p>ModelOpt provides a set of quantization calibration algorithms such as awq, smoothquant, and max calibration. However, there might be cases where you want to define a custom calibration algorithm for quantizing your model. You can do this by creating a custom calibration algorithm derived from <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.mode.html#modelopt.torch.quantization.mode.BaseCalibrateModeDescriptor" title="modelopt.torch.quantization.mode.BaseCalibrateModeDescriptor"><code class="xref py py-mod docutils literal notranslate"><span class="pre">BaseCalibrateModeDescriptor</span></code></a> and registering to <code class="xref py py-mod docutils literal notranslate"><span class="pre">CalibrateModeRegistry</span></code>.
+Write a custom calibration class derived from <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.mode.html#modelopt.torch.quantization.mode.BaseCalibrateModeDescriptor" title="modelopt.torch.quantization.mode.BaseCalibrateModeDescriptor"><code class="xref py py-mod docutils literal notranslate"><span class="pre">BaseCalibrateModeDescriptor</span></code></a> and it should define attributes such as <code class="docutils literal notranslate"><span class="pre">convert</span></code>, <code class="docutils literal notranslate"><span class="pre">config_class</span></code>, <code class="docutils literal notranslate"><span class="pre">restore</span></code> etc. Find more details on these functions and their arguments in <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.mode.html#modelopt.torch.quantization.mode.BaseCalibrateModeDescriptor" title="modelopt.torch.quantization.mode.BaseCalibrateModeDescriptor"><code class="xref py py-mod docutils literal notranslate"><span class="pre">BaseCalibrateModeDescriptor</span></code></a> and <a class="reference internal" href="../reference/generated/modelopt.torch.opt.mode.html#modelopt.torch.opt.mode.ModeDescriptor" title="modelopt.torch.opt.mode.ModeDescriptor"><code class="xref py py-mod docutils literal notranslate"><span class="pre">ModeDescriptor</span></code></a>.</p>
+<p>Here is an example of creating custom calibration mode:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.opt.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">ModeloptField</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.quantization.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">QuantizeAlgorithmConfig</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.quantization.mode</span><span class="w"> </span><span class="kn">import</span> <span class="n">CalibrateModeRegistry</span><span class="p">,</span> <span class="n">BaseCalibrateModeDescriptor</span>
+<span class="c1"># custom configuration comprising of method name and</span>
+<span class="c1"># any other parameters required by custom calibration function</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">CustomConfig</span><span class="p">(</span><span class="n">QuantizeAlgorithmConfig</span><span class="p">):</span>
+    <span class="n">method</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="s2">&quot;custom_calib&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">ModeloptField</span><span class="p">(</span><span class="s2">&quot;custom_calib&quot;</span><span class="p">)</span>
+    <span class="o">...</span>
+
+<span class="c1"># custom calibration mode class to register to base calibrator</span>
+<span class="nd">@CalibrateModeRegistry</span><span class="o">.</span><span class="n">register_mode</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">CustomCalibrateModeDescriptor</span><span class="p">(</span><span class="n">BaseCalibrateModeDescriptor</span><span class="p">):</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">config_class</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">QuantizeAlgorithmConfig</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Specifies the config class.&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="n">CustomConfig</span>
+
+    <span class="c1"># define attributes such as `convert`, `restore`, `update_for_save`</span>
+    <span class="c1"># see `BaseCalibrateModeDescriptor` for more details</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">convert</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ConvertEntrypoint</span><span class="p">:</span>
+    <span class="o">...</span>
+</pre></div>
+</div>
+<p>You can specify <code class="docutils literal notranslate"><span class="pre">custom_calib</span></code> as <code class="docutils literal notranslate"><span class="pre">algorithm</span></code> in <code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> to use it. Here is an example of using a custom calibrator to quantize your model:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># create quantization configuration with &quot;custom_calib&quot; method</span>
+<span class="n">quant_cfg</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s1">&#39;quant_cfg&#39;</span><span class="p">:</span> <span class="p">[</span>
+        <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*weight_quantizer&quot;</span><span class="p">,</span> <span class="s2">&quot;cfg&quot;</span><span class="p">:</span> <span class="p">{</span><span class="o">...</span><span class="p">}},</span>
+    <span class="p">],</span>
+    <span class="s1">&#39;algorithm&#39;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;method&quot;</span><span class="p">:</span> <span class="s1">&#39;custom_calib&#39;</span><span class="p">},</span>
+<span class="p">}</span>
+
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">quantize</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">quant_cfg</span><span class="p">,</span> <span class="n">forward_loop</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="fast-evaluation">
+<h3>Fast evaluation<a class="headerlink" href="#fast-evaluation" title="Link to this heading"></a></h3>
+<p>Weight folding avoids repeated quantization of weights during each inference forward pass and speedup evaluation. This can be done with the following code:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Fold quantizer together with weight tensor</span>
+<span class="n">mtq</span><span class="o">.</span><span class="n">fold_weight</span><span class="p">(</span><span class="n">quantized_model</span><span class="p">)</span>
+
+<span class="c1"># Run model evaluation</span>
+<span class="n">user_evaluate_func</span><span class="p">(</span><span class="n">quantized_model</span><span class="p">)</span>
+</pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>After weight folding, the model can no longer be exported to ONNX or fine-tuned with QAT.</p>
+</div>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="_choosing_quant_methods.html" class="btn btn-neutral float-left" title="Best practices to choose the right quantization methods" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="_quant_cfg.html" class="btn btn-neutral float-right" title="Quantization Configuration (quant_cfg)" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

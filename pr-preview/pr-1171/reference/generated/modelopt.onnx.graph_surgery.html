@@ -1,0 +1,494 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>graph_surgery &mdash; Model Optimizer 0.0.1.dev1+g2cfe65c6d</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="llm_export_utils" href="modelopt.onnx.llm_export_utils.html" />
+    <link rel="prev" title="export" href="modelopt.onnx.export.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.onnx.html">onnx</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.autocast.html">autocast</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">graph_surgery</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.graph_surgery.add_cross_kv_to_encoder"><code class="docutils literal notranslate"><span class="pre">add_cross_kv_to_encoder()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.graph_surgery.convert_fp16_to_bf16"><code class="docutils literal notranslate"><span class="pre">convert_fp16_to_bf16()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.graph_surgery.get_available_surgeries"><code class="docutils literal notranslate"><span class="pre">get_available_surgeries()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.graph_surgery.replace_attention_with_gqa"><code class="docutils literal notranslate"><span class="pre">replace_attention_with_gqa()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.graph_surgery.run_graph_surgery"><code class="docutils literal notranslate"><span class="pre">run_graph_surgery()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.graph_surgery.transpose_dequantize_linear_weights"><code class="docutils literal notranslate"><span class="pre">transpose_dequantize_linear_weights()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.llm_export_utils.html">llm_export_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.torch.html">torch</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.onnx.html">onnx</a></li>
+      <li class="breadcrumb-item active">graph_surgery</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.onnx.graph_surgery.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="graph-surgery">
+<h1>graph_surgery<a class="headerlink" href="#graph-surgery" title="Link to this heading"></a></h1>
+<p id="module-modelopt.onnx.graph_surgery">Graph surgery module for post-processing ONNX models.</p>
+<p>This module provides utilities for performing graph-level transformations on ONNX models
+after export. Common use cases include:</p>
+<ul class="simple">
+<li><p>Replacing standard attention patterns with GroupQueryAttention (GQA) for LLMs</p></li>
+<li><p>Adding cross-attention KV cache outputs to encoder models</p></li>
+<li><p>Converting model precision (e.g., FP16 to BF16)</p></li>
+<li><p>Transposing DequantizeLinear weights for column-major storage optimization</p></li>
+<li><p>Graph cleanup and optimization</p></li>
+</ul>
+<dl>
+<dt>Example usage:</dt><dd><div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.graph_surgery</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+<span class="gp">... </span>    <span class="n">replace_attention_with_gqa</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">convert_fp16_to_bf16</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">transpose_dequantize_linear_weights</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">add_cross_kv_to_encoder</span><span class="p">,</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Replace attention with GQA for LLMs (FP16 model)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">replace_attention_with_gqa</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">&quot;model_fp16.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">&quot;model_gqa.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">hf_model_id</span><span class="o">=</span><span class="s2">&quot;meta-llama/Llama-2-7b-hf&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">io_dtype</span><span class="o">=</span><span class="s2">&quot;float16&quot;</span><span class="p">,</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Replace attention with GQA and convert to BF16 in one step</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">replace_attention_with_gqa</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">&quot;model_fp16.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">&quot;model_gqa_bf16.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">hf_model_id</span><span class="o">=</span><span class="s2">&quot;meta-llama/Llama-2-7b-hf&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">io_dtype</span><span class="o">=</span><span class="s2">&quot;bfloat16&quot;</span><span class="p">,</span>  <span class="c1"># Automatically converts FP16 to BF16</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Add cross-attention KV cache outputs to encoder (GenAI compatible)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">add_cross_kv_to_encoder</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">&quot;encoder_model.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">&quot;encoder_with_kv.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">hf_model_id</span><span class="o">=</span><span class="s2">&quot;openai/whisper-large-v3-turbo&quot;</span><span class="p">,</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Standalone FP16 to BF16 conversion</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">convert_fp16_to_bf16</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">&quot;model_fp16.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">&quot;model_bf16.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Transpose DequantizeLinear weights for column-major storage</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">transpose_dequantize_linear_weights</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">&quot;model_quantized.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">&quot;model_quantized_transposed.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span><span class="p">)</span>
+</pre></div>
+</div>
+</dd>
+</dl>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.graph_surgery.add_cross_kv_to_encoder" title="modelopt.onnx.graph_surgery.add_cross_kv_to_encoder"><code class="xref py py-obj docutils literal notranslate"><span class="pre">add_cross_kv_to_encoder</span></code></a></p></td>
+<td><p>Add cross-attention KV cache outputs to encoder model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.graph_surgery.convert_fp16_to_bf16" title="modelopt.onnx.graph_surgery.convert_fp16_to_bf16"><code class="xref py py-obj docutils literal notranslate"><span class="pre">convert_fp16_to_bf16</span></code></a></p></td>
+<td><p>Convert an ONNX model from FP16 to BF16.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.graph_surgery.get_available_surgeries" title="modelopt.onnx.graph_surgery.get_available_surgeries"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_available_surgeries</span></code></a></p></td>
+<td><p>Return a list of all registered graph surgery names.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.graph_surgery.replace_attention_with_gqa" title="modelopt.onnx.graph_surgery.replace_attention_with_gqa"><code class="xref py py-obj docutils literal notranslate"><span class="pre">replace_attention_with_gqa</span></code></a></p></td>
+<td><p>Replace attention subgraphs with GroupQueryAttention (GQA) in an ONNX model.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.graph_surgery.run_graph_surgery" title="modelopt.onnx.graph_surgery.run_graph_surgery"><code class="xref py py-obj docutils literal notranslate"><span class="pre">run_graph_surgery</span></code></a></p></td>
+<td><p>Run a graph surgery by name.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.graph_surgery.transpose_dequantize_linear_weights" title="modelopt.onnx.graph_surgery.transpose_dequantize_linear_weights"><code class="xref py py-obj docutils literal notranslate"><span class="pre">transpose_dequantize_linear_weights</span></code></a></p></td>
+<td><p>Transpose weights in DequantizeLinear nodes for column-major storage.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.graph_surgery.add_cross_kv_to_encoder">
+<span class="sig-name descname"><span class="pre">add_cross_kv_to_encoder</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hf_model_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hidden_state_output_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'last_hidden_state'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rename_input_features</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_external_data</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">external_data_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">decoder_filename</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'decoder_with_past_model.onnx'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">generate_genai_config</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">provider</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'cuda'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">verbose</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trust_remote_code</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.graph_surgery.add_cross_kv_to_encoder" title="Link to this definition"></a></dt>
+<dd><p>Add cross-attention KV cache outputs to encoder model.</p>
+<p>This function transforms an Optimum-exported encoder model by adding
+cross-attention Key/Value projection outputs. This is required for
+ONNX Runtime GenAI compatibility where the decoder expects pre-computed
+encoder K/V caches.</p>
+<p>The transformation:
+1. Renames input_features -&gt; audio_features (optional)
+2. Renames last_hidden_state -&gt; encoder_hidden_states
+3. Adds K/V projection weights from HuggingFace model
+4. Adds MatMul -&gt; Reshape -&gt; Transpose subgraph for each layer
+5. Adds outputs: present_key_cross_X, present_value_cross_X
+6. Generates genai_config.json and audio_processor_config.json (optional)</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model_path</strong> (<em>str</em>) – Path to encoder ONNX model.</p></li>
+<li><p><strong>output_path</strong> (<em>str</em>) – Path to save modified encoder.</p></li>
+<li><p><strong>hf_model_id</strong> (<em>str</em>) – HuggingFace model ID for loading cross-attention weights.</p></li>
+<li><p><strong>hidden_state_output_name</strong> (<em>str</em>) – Name of encoder hidden state output.</p></li>
+<li><p><strong>rename_input_features</strong> (<em>bool</em>) – Whether to rename input_features to audio_features.</p></li>
+<li><p><strong>use_external_data</strong> (<em>bool</em>) – Whether to save weights as external data.</p></li>
+<li><p><strong>external_data_name</strong> (<em>str</em><em> | </em><em>None</em>) – Name for external data file.</p></li>
+<li><p><strong>decoder_filename</strong> (<em>str</em>) – Filename for decoder model in genai_config.json.
+Default is “decoder_with_past_model.onnx”.</p></li>
+<li><p><strong>generate_genai_config</strong> (<em>bool</em>) – Whether to generate genai_config.json.</p></li>
+<li><p><strong>provider</strong> (<em>str</em>) – Execution provider for genai_config.json (“cuda”, “cpu”, “NvTensorRtRtx”).</p></li>
+<li><p><strong>verbose</strong> (<em>bool</em>) – Whether to print progress messages.</p></li>
+<li><p><strong>trust_remote_code</strong> (<em>bool</em>) – Whether to trust remote code in HuggingFace model.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Modified encoder model with cross-attention KV cache outputs.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>ModelProto</em></p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.graph_surgery</span><span class="w"> </span><span class="kn">import</span> <span class="n">add_cross_kv_to_encoder</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">model</span> <span class="o">=</span> <span class="n">add_cross_kv_to_encoder</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">&quot;encoder_model.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">&quot;encoder_model_with_kv.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">hf_model_id</span><span class="o">=</span><span class="s2">&quot;openai/whisper-large-v3-turbo&quot;</span><span class="p">,</span>
+<span class="gp">... </span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.graph_surgery.convert_fp16_to_bf16">
+<span class="sig-name descname"><span class="pre">convert_fp16_to_bf16</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">external_data</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">verbose</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.graph_surgery.convert_fp16_to_bf16" title="Link to this definition"></a></dt>
+<dd><p>Convert an ONNX model from FP16 to BF16.</p>
+<p>This function converts:
+1. All FP16 initializers (weights) to BF16
+2. All FP16 value_info (intermediate tensors) to BF16
+3. All FP16 graph inputs/outputs to BF16
+4. All Cast nodes that target FP16 to target BF16</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model_path</strong> (<em>str</em>) – Path to input FP16 ONNX model.</p></li>
+<li><p><strong>output_path</strong> (<em>str</em>) – Path to output BF16 ONNX model.</p></li>
+<li><p><strong>external_data</strong> (<em>bool</em>) – Whether to save weights as external data.</p></li>
+<li><p><strong>verbose</strong> (<em>bool</em>) – Whether to print progress messages.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary with conversion statistics.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>int</em>]</p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="n">stats</span> <span class="o">=</span> <span class="n">convert_fp16_to_bf16</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">&quot;model_fp16.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">&quot;model_bf16.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Converted </span><span class="si">{</span><span class="n">stats</span><span class="p">[</span><span class="s1">&#39;initializers_converted&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> initializers&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.graph_surgery.get_available_surgeries">
+<span class="sig-name descname"><span class="pre">get_available_surgeries</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.graph_surgery.get_available_surgeries" title="Link to this definition"></a></dt>
+<dd><p>Return a list of all registered graph surgery names.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.graph_surgery.replace_attention_with_gqa">
+<span class="sig-name descname"><span class="pre">replace_attention_with_gqa</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hf_model_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_seq_len</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">4096</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">io_dtype</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'float16'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_external_data</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">external_data_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ir_version</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pack_qkv</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">verbose</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trust_remote_code</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.graph_surgery.replace_attention_with_gqa" title="Link to this definition"></a></dt>
+<dd><p>Replace attention subgraphs with GroupQueryAttention (GQA) in an ONNX model.</p>
+<p>This function transforms an ONNX model exported from HuggingFace/Optimum
+to use Microsoft’s GroupQueryAttention operator, which is optimized for
+inference with ONNX Runtime.</p>
+<p>The transformation includes:
+- Converting weights to target dtype (FP16/BF16) [non-quantized models only]
+- Adding RoPE cos/sin caches
+- Replacing attention patterns with GQA for all layers
+- Fusing Q/K/V projections into single MatMul [non-quantized models only]
+- Concatenating Q/K/V outputs for GQA [quantized models only]
+- Adding past/present KV cache inputs/outputs</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model_path</strong> (<em>str</em>) – Path to input ONNX model.</p></li>
+<li><p><strong>output_path</strong> (<em>str</em>) – Path to save modified model.</p></li>
+<li><p><strong>hf_model_id</strong> (<em>str</em>) – HuggingFace model ID for config.</p></li>
+<li><p><strong>max_seq_len</strong> (<em>int</em>) – Maximum sequence length for caches.</p></li>
+<li><p><strong>io_dtype</strong> (<em>str</em>) – Data type for I/O tensors (“float16”, “float32”, or “bfloat16”).
+If the model has FP16 initializers and “bfloat16” is specified,
+they are automatically converted to BF16.</p></li>
+<li><p><strong>use_external_data</strong> (<em>bool</em>) – Save weights as external data file.</p></li>
+<li><p><strong>external_data_name</strong> (<em>str</em><em> | </em><em>None</em>) – Name for external data file (default: model.onnx_data).</p></li>
+<li><p><strong>ir_version</strong> (<em>int</em><em> | </em><em>None</em>) – If specified, set the ONNX IR version to this value. Useful for
+compatibility with older ONNX Runtime versions (e.g., set to 9 for ORT 1.16).</p></li>
+<li><p><strong>verbose</strong> (<em>bool</em>) – Whether to print progress messages.</p></li>
+<li><p><strong>trust_remote_code</strong> (<em>bool</em>) – Whether to trust remote code in HuggingFace model config.</p></li>
+<li><p><strong>pack_qkv</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Modified ONNX model.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>ModelProto</em></p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.graph_surgery</span><span class="w"> </span><span class="kn">import</span> <span class="n">replace_attention_with_gqa</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">model</span> <span class="o">=</span> <span class="n">replace_attention_with_gqa</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">&quot;model_fp16.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">&quot;model_gqa.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">hf_model_id</span><span class="o">=</span><span class="s2">&quot;meta-llama/Llama-2-7b-hf&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">max_seq_len</span><span class="o">=</span><span class="mi">4096</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">io_dtype</span><span class="o">=</span><span class="s2">&quot;float16&quot;</span><span class="p">,</span>
+<span class="gp">... </span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.graph_surgery.run_graph_surgery">
+<span class="sig-name descname"><span class="pre">run_graph_surgery</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">surgery_name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_path</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.graph_surgery.run_graph_surgery" title="Link to this definition"></a></dt>
+<dd><p>Run a graph surgery by name.</p>
+<p>This is the unified entry point for all graph surgeries. It dispatches
+to the appropriate surgery function based on the surgery name.</p>
+<p>When new surgeries are added to the registry, they are automatically
+available through this function without any changes to calling code.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>surgery_name</strong> (<em>str</em>) – Name of the surgery to run (e.g. ‘replace-gqa’, ‘transpose-dq’).
+Use get_available_surgeries() to see all available options.</p></li>
+<li><p><strong>model_path</strong> (<em>str</em>) – Path to the input ONNX model.</p></li>
+<li><p><strong>output_path</strong> (<em>str</em>) – Path to save the output ONNX model.</p></li>
+<li><p><strong>**kwargs</strong> – Surgery-specific parameters. Passed directly to the surgery function.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The return value of the surgery function (typically ModelProto or dict).</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>ValueError</strong> – If surgery_name is not registered.</p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.graph_surgery</span><span class="w"> </span><span class="kn">import</span> <span class="n">run_graph_surgery</span><span class="p">,</span> <span class="n">get_available_surgeries</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">print</span><span class="p">(</span><span class="n">get_available_surgeries</span><span class="p">())</span>
+<span class="go">[&#39;replace-gqa&#39;, &#39;add-cross-kv&#39;, &#39;convert-bf16&#39;, &#39;transpose-dq&#39;]</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">run_graph_surgery</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="s2">&quot;replace-gqa&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">&quot;model.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">&quot;model_gqa.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">hf_model_id</span><span class="o">=</span><span class="s2">&quot;meta-llama/Llama-2-7b-hf&quot;</span><span class="p">,</span>
+<span class="gp">... </span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.graph_surgery.transpose_dequantize_linear_weights">
+<span class="sig-name descname"><span class="pre">transpose_dequantize_linear_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_external_data</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">external_data_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">verbose</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.graph_surgery.transpose_dequantize_linear_weights" title="Link to this definition"></a></dt>
+<dd><p>Transpose weights in DequantizeLinear nodes for column-major storage.</p>
+<p>This function transforms a quantized ONNX model by:
+1. Finding all DequantizeLinear nodes that feed into MatMul/Gemm
+2. Transposing the quantized weights, scales, and zero points
+3. Updating the axis attribute (0 -&gt; 1)
+4. Adding Transpose nodes after DequantizeLinear to recover original shape</p>
+<p>This optimization is useful for backends that prefer column-major weight
+storage, such as NvTensorRtRtx.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model_path</strong> (<em>str</em>) – Path to input quantized ONNX model.</p></li>
+<li><p><strong>output_path</strong> (<em>str</em>) – Path to save modified model.</p></li>
+<li><p><strong>use_external_data</strong> (<em>bool</em>) – Whether to save weights as external data.</p></li>
+<li><p><strong>external_data_name</strong> (<em>str</em><em> | </em><em>None</em>) – Name for external data file.</p></li>
+<li><p><strong>verbose</strong> (<em>bool</em>) – Whether to print progress messages.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Modified ONNX model.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>ModelProto</em></p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.graph_surgery</span><span class="w"> </span><span class="kn">import</span> <span class="n">transpose_dequantize_linear_weights</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">model</span> <span class="o">=</span> <span class="n">transpose_dequantize_linear_weights</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">model_path</span><span class="o">=</span><span class="s2">&quot;model_quantized.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">output_path</span><span class="o">=</span><span class="s2">&quot;model_quantized_transposed.onnx&quot;</span><span class="p">,</span>
+<span class="gp">... </span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.onnx.export.html" class="btn btn-neutral float-left" title="export" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.onnx.llm_export_utils.html" class="btn btn-neutral float-right" title="llm_export_utils" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

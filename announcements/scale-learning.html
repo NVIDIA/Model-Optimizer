@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="green" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Scale Learning: Training NVFP4 Block Scales to Recover Accuracy - Model Optimizer 0.0.1.dev1+g4c1f81382</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=2ceb65ce" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+    <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+    <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=948f803c" />
+    <link rel="stylesheet" type="text/css" href="../_static/announcements.css?v=7f656fee" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="Scale Learning: Training NVFP4 Block Scales to Recover Accuracy"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      
+      
+      <strong>Model Optimizer</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials"></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="1"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Announcements</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../index.html">Announcements</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../getting_started/_installation_for_Linux.html">Installation for Linux</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../getting_started/windows/_installation_for_Windows.html">Installation for Windows</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_standalone.html">Install ModelOpt-Windows as a Standalone Toolkit</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_windows_arm64.html">Install ModelOpt on Windows on Arm</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_with_olive.html">Install ModelOpt-Windows with Olive</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/quantization_aware_training_and_distillation.html">Quick Start: QAT and QAD</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/1_quantization.html">Quantization</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_choosing_quant_methods.html">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_pytorch_quantization.html">PyTorch Quantization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_quant_cfg.html">Quantization Configuration (quant_cfg)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_onnx_quantization.html">ONNX Quantization - Linux (Beta)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/windows_guides/_ONNX_PTQ_guide.html">ONNX Quantization - Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/quantization_aware_training_and_distillation.html">Quantization-Aware Training and Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/9_autotune.html">Autotune (ONNX)</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/11_config_system.html">ModelOpt Config System</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../reference/0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.deploy.html">deploy</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.deploy.llm.html">llm</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.deploy.llm.generate.html">generate</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.onnx.html">onnx</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.html">autocast</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.graphsanitizer.html">graphsanitizer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.logging_config.html">logging_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.nodeclassifier.html">nodeclassifier</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.precisionconverter.html">precisionconverter</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.referencerunner.html">referencerunner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.html">llm_export_utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.export_utils.html">export_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.quantization_utils.html">quantization_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.surgeon_utils.html">surgeon_utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.autotune.html">autotune</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.calib_utils.html">calib_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.fp8.html">fp8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.graph_indexing.html">graph_indexing</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.graph_rewrites.html">graph_rewrites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.graph_selection.html">graph_selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.gs_patching.html">gs_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.int4.html">int4</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.int8.html">int8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.operators.html">operators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_calibration.html">ort_calibration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_calibration_per_node.html">ort_calibration_per_node</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_patches.html">ort_patches</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_quantization.html">ort_quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_session.html">ort_session</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.precision_utils.html">precision_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.qdq_graph.html">qdq_graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.qdq_utils.html">qdq_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.quantize.html">modelopt.onnx.quantization.quantize</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.torch.html">torch</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.html">distill</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.distillation_model.html">distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.layerwise_distillation_model.html">layerwise_distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.loss_balancers.html">loss_balancers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.registry.html">registry</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.export.html">export</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.convert_hf_config.html">convert_hf_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.diffusers_utils.html">diffusers_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.hf_export_handlers.html">hf_export_handlers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.layer_utils.html">layer_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.layerwise_export.html">layerwise_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.model_utils.html">model_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.moe_utils.html">moe_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_format.html">quant_format</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.trtllm.html">trtllm</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_hf.html">unified_export_hf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_hf_streaming.html">unified_export_hf_streaming</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_megatron.html">unified_export_megatron</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.html">fastgen</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.discriminators.html">discriminators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.ema.html">ema</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.factory.html">factory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.flow_matching.html">flow_matching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.loader.html">loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.methods.html">methods</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.pipeline.html">pipeline</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.html">kernels</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.common.html">common</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.quantization.html">quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.sparsity.html">sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.models.html">models</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.html">nas</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.autonas.html">autonas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.hparams.html">hparams</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.patch.html">patch</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.traced_hp.html">traced_hp</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.html">opt</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.config_loader.html">config_loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.dynamic.html">dynamic</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.hparam.html">hparam</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.searcher.html">searcher</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.html">peft</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.custom.html">custom</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.lora.html">lora</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.mode.html">mode</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.html">prune</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.fastnas.html">fastnas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.importance_hooks.html">importance_hooks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.pruning.html">pruning</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.html">puzzletron</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.build_library_and_stats.html">build_library_and_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.entrypoint.html">entrypoint</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.puzzletron_nas_plugin.html">puzzletron_nas_plugin</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.sewing_kit.html">sewing_kit</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.backends.html">backends</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.calib.html">calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.compress.html">modelopt.torch.quantization.compress</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.export_onnx.html">export_onnx</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.ggml.html">ggml</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.kv_cache_auto_quant.html">kv_cache_auto_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.linear_attention.html">linear_attention</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_calib.html">model_calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_quant.html">model_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.nn.html">nn</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.qtensor.html">qtensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.tensor_quant.html">tensor_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.html">sparsity</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.attention_sparsity.html">attention_sparsity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.weight_sparsity.html">weight_sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.html">speculative</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.dflash.html">dflash</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.medusa.html">medusa</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.speculative_decoding.html">speculative_decoding</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.html">trace</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.analyzer.html">analyzer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.symbols.html">symbols</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.tracer.html">tracer</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.html">utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.cpp_extension.html">cpp_extension</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.dataset_utils.html">dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.distributed.html">distributed</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.graph.html">graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.import_utils.html">import_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.list.html">list</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.logging.html">logging</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.network.html">network</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.perf.html">perf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.random.html">random</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.regex.html">regex</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.robust_json.html">robust_json</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.serialization.html">serialization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.speech_dataset_utils.html">speech_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.tensor.html">tensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.vlm_dataset_utils.html">vlm_dataset_utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#how-scale-learning-works">How Scale Learning Works</a></li>
+<li><a class="reference internal" href="#results">Results</a><ul>
+<li><a class="reference internal" href="#nemotron-3-5-lightning">Nemotron 3.5 Lightning</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#recommendations">Recommendations</a></li>
+<li><a class="reference internal" href="#using-scale-learning">Using Scale Learning</a></li>
+<li><a class="reference internal" href="#next-steps">Next steps</a></li>
+<li><a class="reference internal" href="#references">References</a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">Model Optimizer</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">Scale Learning: Training NVFP4 Block Scales to Recover Accuracy</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue dark-code" role="main">
+          <section id="scale-learning-training-nvfp4-block-scales-to-recover-accuracy">
+<h1>Scale Learning: Training NVFP4 Block Scales to Recover Accuracy<a class="headerlink" href="#scale-learning-training-nvfp4-block-scales-to-recover-accuracy" title="Link to this heading">#</a></h1>
+<dl class="field-list simple">
+<dt class="field-odd">Author<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Model Optimizer Team</p>
+</dd>
+<dt class="field-even">Date<span class="colon">:</span></dt>
+<dd class="field-even"><p>September 16, 2026</p>
+</dd>
+<dt class="field-odd">Tags<span class="colon">:</span></dt>
+<dd class="field-odd"><p>scale-learning, quantization, nvfp4, qad, modelopt</p>
+</dd>
+</dl>
+<p>How we set scales in blockwise quantization plays an important role in
+determining the quality of the quantized model. In this blog we introduce scale
+learning, which makes NVFP4 per-block scales trainable parameters and learns
+optimal per-block scales through a training loop.</p>
+<p>There are two types of scale learning: scale-only learning and full parameter
+scale learning. In scale-only learning, we train only scales and leave weights
+frozen. We can think of this as an enhancement of scale setting methods based
+on search like MSE or Local-Hessian, where we use scale setting to initialize
+scales, and then run scale-only learning to further optimize them.</p>
+<p>In full parameter scale learning, we co-train scales and weights together. This
+can serve as an enhancement of traditional Quantization-Aware Distillation
+(QAD) with additional trainable parameters.</p>
+<section id="how-scale-learning-works">
+<h2>How Scale Learning Works<a class="headerlink" href="#how-scale-learning-works" title="Link to this heading">#</a></h2>
+<p>The idea of scale learning is to make the NVFP4 per-block scales trainable. We
+need to be able to compute the gradient of a loss function <span class="math notranslate nohighlight">\(L\)</span> with
+respect to a per-block scale <span class="math notranslate nohighlight">\(s\)</span> via backpropagation. We use the usual
+QAT approach, where we do fake-quantization in the forward pass and
+backpropagate with straight-through estimators. During a forward pass,
+instead of a weight <span class="math notranslate nohighlight">\(x\)</span> we use a fake-quantized weight
+<span class="math notranslate nohighlight">\(\tilde{x}\)</span>, given by</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[\tilde{x} = s \cdot \operatorname{clamp}\!\left(
+\operatorname{round}\!\left(\frac{x}{s}\right), q_{\min}, q_{\max}\right).\]</div>
+</div>
+<p>Here <span class="math notranslate nohighlight">\(x\)</span> is a single weight and <span class="math notranslate nohighlight">\(s\)</span> its corresponding scale
+(omitting the global scale for simplicity). In NVFP4 <a class="footnote-reference brackets" href="#id3" id="id1" role="doc-noteref"><span class="fn-bracket">[</span>1<span class="fn-bracket">]</span></a>, every block of
+sixteen weights shares a single scale, <span class="math notranslate nohighlight">\(q_{\min}\)</span> and <span class="math notranslate nohighlight">\(q_{\max}\)</span>
+are <span class="math notranslate nohighlight">\(-6\)</span> and <span class="math notranslate nohighlight">\(6\)</span> respectively, and <span class="math notranslate nohighlight">\(\operatorname{round}\)</span>
+rounds to the nearest E2M1 value.</p>
+<p>To train the scale we need <span class="math notranslate nohighlight">\(\partial L/\partial s\)</span>, which we can compute
+via the chain rule:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[\frac{\partial L}{\partial s}
+= \sum_{\tilde{x} \in s\text{-block}}
+  \frac{\partial L}{\partial \tilde{x}} \cdot
+  \frac{\partial \tilde{x}}{\partial s}.\]</div>
+</div>
+<p><span class="math notranslate nohighlight">\(\partial L/\partial \tilde{x}\)</span> can be computed via backpropagation the
+usual way in neural network training. To compute
+<span class="math notranslate nohighlight">\(\partial\tilde{x}/\partial s\)</span> we use a straight-through estimator: the
+derivative of <span class="math notranslate nohighlight">\(\operatorname{round}\)</span> is taken to be 1. Applying the
+product rule to <span class="math notranslate nohighlight">\(s \cdot \operatorname{round}\!\left(\tfrac{x}{s}\right)\)</span>
+then yields</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[\begin{split}\frac{\partial \tilde{x}}{\partial s}
+= \begin{cases}
+    q_{\min}, &amp; \dfrac{x}{s} &lt; q_{\min}, \\[2ex]
+    \operatorname{round}\!\left(\dfrac{x}{s}\right) - \dfrac{x}{s},
+      &amp; q_{\min} \le \dfrac{x}{s} \le q_{\max}, \\[2ex]
+    q_{\max}, &amp; q_{\max} &lt; \dfrac{x}{s}.
+  \end{cases}\end{split}\]</div>
+</div>
+<p>This is the general idea, although it is slightly more complicated since the
+scale <span class="math notranslate nohighlight">\(s\)</span> is also quantized (to FP8), so we have to apply
+straight-through estimators there as well.</p>
+<p>We also have a version of scale learning with “dual scales”, where during fake
+quantization the scale we divide by (the “pre-scale”) and the scale we later
+multiply by (the “post-scale”) are independent. In other words,</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[\tilde{x} = s_{\mathrm{post}} \cdot \operatorname{clamp}\!\left(
+\operatorname{round}\!\left(\frac{x}{s_{\mathrm{pre}}}\right),
+q_{\min}, q_{\max}\right).\]</div>
+</div>
+<p>Then we can compute partial derivatives the same way as before, and obtain</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[\frac{\partial \tilde{x}}{\partial s_{\mathrm{post}}}
+= \operatorname{clamp}\!\left(
+\operatorname{round}\!\left(\frac{x}{s_{\mathrm{pre}}}\right),
+q_{\min}, q_{\max}\right)\]</div>
+</div>
+<p>and</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[\begin{split}\frac{\partial \tilde{x}}{\partial s_{\mathrm{pre}}}
+= \begin{cases}
+    0, &amp; \dfrac{x}{s_{\mathrm{pre}}} &lt; q_{\min}, \\[2ex]
+    -\,\dfrac{s_{\mathrm{post}}\, x}{s_{\mathrm{pre}}^{2}},
+      &amp; q_{\min} \le \dfrac{x}{s_{\mathrm{pre}}} \le q_{\max}, \\[2ex]
+    0, &amp; q_{\max} &lt; \dfrac{x}{s_{\mathrm{pre}}}.
+  \end{cases}\end{split}\]</div>
+</div>
+<p>During export, the post-scale is baked into the checkpoint and the pre-scale is
+discarded.</p>
+<p>ModelOpt implements both forms via the
+<a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_calib.html#modelopt.torch.quantization.model_calib.lsq" title="modelopt.torch.quantization.model_calib.lsq"><code class="xref py py-func docutils literal notranslate"><span class="pre">lsq</span></code></a> API <a class="footnote-reference brackets" href="#id4" id="id2" role="doc-noteref"><span class="fn-bracket">[</span>2<span class="fn-bracket">]</span></a>. In the
+implementation we reparameterize the trained quantity as <code class="docutils literal notranslate"><span class="pre">amax</span></code> rather than
+the scale itself.
+The field <code class="docutils literal notranslate"><span class="pre">tied_amax</span></code> controls whether we have dual scales or a single “tied”
+scale. (i.e. we set <code class="docutils literal notranslate"><span class="pre">tied_amax:</span> <span class="pre">false</span></code> for dual scales).</p>
+</section>
+<section id="results">
+<h2>Results<a class="headerlink" href="#results" title="Link to this heading">#</a></h2>
+<section id="nemotron-3-5-lightning">
+<h3>Nemotron 3.5 Lightning<a class="headerlink" href="#nemotron-3-5-lightning" title="Link to this heading">#</a></h3>
+<p>Scale-only learning can significantly improve accuracy of NVFP4 quantized
+Nemotron 3.5 Lightning. In this example, the PTQ recipe is W4A4 routed experts
+and W8A8 attention and Mamba cache, using MSE for scale setting.</p>
+<p>After PTQ, we run scale-only QAD. Plotting the train and validation loss, we
+see stable convergence:</p>
+<a class="reference internal image-reference" href="../_images/W4A4-scale-only-loss.png"><img alt="Train and validation KL loss falling from 0.090 at iteration 0 to about 0.045 by iteration 175 during W4A4 scale-only learning" src="../_images/W4A4-scale-only-loss.png" style="width: 100%;" />
+</a>
+<p>Table 1 compares scale-only learning against the PTQ baseline on Nemotron 3.5
+Lightning, with the BF16 model as reference, on various benchmarks.</p>
+<div class="table-wrapper docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Method</p></th>
+<th class="head"><p>GPQA Diamond <span class="table-header-note">(w/o tools) (x8)</span></p></th>
+<th class="head"><p>SciCode <span class="table-header-note">(x8)</span></p></th>
+<th class="head"><p>AA-LCR <span class="table-header-note">(x16)</span></p></th>
+<th class="head"><p>HLE <span class="table-header-note">(w/o tools)</span></p></th>
+<th class="head"><p>Tau2 Telecom <span class="table-header-note">(x8)</span></p></th>
+<th class="head"><p>Tau3 Banking <span class="table-header-note">(x5)</span></p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>BF16 reference</p></td>
+<td><p>76.45</p></td>
+<td><p>32.51</p></td>
+<td><p>52.38</p></td>
+<td><p>17.47</p></td>
+<td><p>59.65</p></td>
+<td><p>9.897</p></td>
+</tr>
+<tr class="row-odd"><td><p>PTQ</p></td>
+<td><p>73.3</p></td>
+<td><p>33.42</p></td>
+<td><p>47.38</p></td>
+<td><p>9.361</p></td>
+<td><p>59.43</p></td>
+<td><p>7.216</p></td>
+</tr>
+<tr class="row-even"><td><p>Scale-only learning</p></td>
+<td><p>75</p></td>
+<td><p>35.42</p></td>
+<td><p>51.44</p></td>
+<td><p>10.19</p></td>
+<td><p>61.07</p></td>
+<td><p>7.216</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p class="table-note"><strong>Table 1: Nemotron 3.5 Lightning, PTQ versus scale-only learning.</strong> All scores
+are accuracy in percent, higher is better.</p>
+</section>
+</section>
+<section id="recommendations">
+<h2>Recommendations<a class="headerlink" href="#recommendations" title="Link to this heading">#</a></h2>
+<p>In general, we have found that scale-only learning is a highly useful technique
+and outperforms traditional scale setting methods and recovers more accuracy,
+across a variety of models and contexts. It improves accuracy more consistently
+than QAD, which can cause regressions on benchmarks as the weights shift during
+training. Full parameter scale learning can outperform ordinary QAD (i.e.
+with frozen scales) for many models in our experiments, but doesn’t work for
+all models.</p>
+<p>A higher learning rate is needed for scales: we recommend 1e-4. A smaller
+number of steps (sometimes just 50) is needed for scale-only learning to
+converge compared to QAT/QAD. Dual scales sometimes outperforms tied scales,
+but for other models can cause distribution shift where tied scales improves
+accuracy: neither is universally better.</p>
+</section>
+<section id="using-scale-learning">
+<h2>Using Scale Learning<a class="headerlink" href="#using-scale-learning" title="Link to this heading">#</a></h2>
+<p>Scale learning is a training-time algorithm: the scales are learnt during
+QAT/QAD, so these recipes are not usable as calibration-only PTQ. Scale-only
+learning involves 1/16th as many trainable parameters as regular QAT/QAD, so it
+uses a sixteenth of the gradient state and optimizer memory. Since we need to
+still compute all partial derivatives with respect to the fake-quant weights,
+the compute requirement is the same (although we tend to need fewer steps for
+scale-only learning).</p>
+<p>After scales are learnt, there is no deployment cost – learned scales are
+folded into the exported checkpoint and are the same FP8 block scales the
+format already carries, so the deployed graph is unchanged.</p>
+<p>To use it in your own configuration, set the <code class="docutils literal notranslate"><span class="pre">algorithm</span></code> field:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.quantization</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtq</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="n">config</span> <span class="o">=</span> <span class="p">{</span>
+</span><span data-line="4">    <span class="s2">"quant_cfg"</span><span class="p">:</span> <span class="p">[</span><span class="o">...</span><span class="p">],</span>  <span class="c1"># quantizer configuration</span>
+</span><span data-line="5">    <span class="s2">"algorithm"</span><span class="p">:</span> <span class="p">{</span>
+</span><span data-line="6">        <span class="s2">"method"</span><span class="p">:</span> <span class="s2">"lsq"</span><span class="p">,</span>
+</span><span data-line="7">        <span class="s2">"learnable_amax"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"pre"</span><span class="p">,</span> <span class="s2">"post"</span><span class="p">],</span>
+</span><span data-line="8">        <span class="s2">"tied_amax"</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+</span><span data-line="9">        <span class="s2">"scale_algorithm"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"method"</span><span class="p">:</span> <span class="s2">"mse"</span><span class="p">,</span> <span class="s2">"fp8_scale_sweep"</span><span class="p">:</span> <span class="kc">True</span><span class="p">},</span>
+</span><span data-line="10">    <span class="p">},</span>
+</span><span data-line="11"><span class="p">}</span>
+</span><span data-line="12">
+</span><span data-line="13"><span class="n">model</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">quantize</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">config</span><span class="p">,</span> <span class="n">forward_loop</span><span class="p">)</span>
+</span></pre></div>
+</div>
+<p>See <a class="reference internal" href="../guides/_quant_cfg.html#quant-cfg"><span class="std std-ref">Quantization Configuration (quant_cfg)</span></a> for how to write the <code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> field, and the
+<a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_calib.html#modelopt.torch.quantization.model_calib.lsq" title="modelopt.torch.quantization.model_calib.lsq"><code class="xref py py-func docutils literal notranslate"><span class="pre">lsq</span> <span class="pre">API</span></code></a> for the
+calibration entry point.</p>
+<p>This call configures fake quantization and initializes the learnable scales; it
+does not train them. Continue with QAT or QAD, updating only scale parameters
+for scale-only learning or both weights and scales for full parameter scale
+learning.</p>
+<p>The shipped recipes cover the two variants:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">modelopt_recipes/general/qad/nvfp4_lsq-mse_init-fp8_kv.yaml</span></code> — one shared
+pre- and post-quantization scale.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">modelopt_recipes/general/qad/nvfp4_dual_lsq-mse_init-fp8_kv.yaml</span></code>
+— separate pre- and post-quantization scales.</p></li>
+</ul>
+<p>With the <code class="docutils literal notranslate"><span class="pre">examples/llm_qat</span></code> entry points, run from that directory:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># 1. Quantize. The LSQ recipe initializes the block scales with MSE and</span>
+</span><span data-line="2"><span class="c1">#    installs the learnable amax parameters.</span>
+</span><span data-line="3">python<span class="w"> </span>quantize.py<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">  </span>--model_name_or_path<span class="w"> </span>Qwen/Qwen3-8B<span class="w"> </span><span class="se">\</span>
+</span><span data-line="5"><span class="w">  </span>--dataset_config<span class="w"> </span>configs/dataset/blend.yaml<span class="w"> </span><span class="se">\</span>
+</span><span data-line="6"><span class="w">  </span>--recipe<span class="w"> </span>general/qad/nvfp4_lsq-mse_init-fp8_kv<span class="w"> </span><span class="se">\</span>
+</span><span data-line="7"><span class="w">  </span>--output_dir<span class="w"> </span>qwen3-8b-lsq-quantized
+</span><span data-line="8">
+</span><span data-line="9"><span class="c1"># 2. Scale-only learning. Trains just the amax parameters installed above,</span>
+</span><span data-line="10"><span class="c1">#    distilling from the BF16 model.</span>
+</span><span data-line="11">accelerate<span class="w"> </span>launch<span class="w"> </span>--config-file<span class="w"> </span>configs/accelerate/fsdp2.yaml<span class="w"> </span>train.py<span class="w"> </span><span class="se">\</span>
+</span><span data-line="12"><span class="w">  </span>--config<span class="w"> </span>configs/train/qad_scale_only.yaml<span class="w"> </span><span class="se">\</span>
+</span><span data-line="13"><span class="w">  </span>--model_name_or_path<span class="w"> </span>qwen3-8b-lsq-quantized<span class="w"> </span><span class="se">\</span>
+</span><span data-line="14"><span class="w">  </span>--teacher_model<span class="w"> </span>Qwen/Qwen3-8B<span class="w"> </span><span class="se">\</span>
+</span><span data-line="15"><span class="w">  </span>--output_dir<span class="w"> </span>qwen3-8b-scale-only
+</span><span data-line="16">
+</span><span data-line="17"><span class="c1"># 3. Export for deployment.</span>
+</span><span data-line="18">python<span class="w"> </span>export.py<span class="w"> </span><span class="se">\</span>
+</span><span data-line="19"><span class="w">  </span>--pyt_ckpt_path<span class="w"> </span>qwen3-8b-scale-only<span class="w"> </span><span class="se">\</span>
+</span><span data-line="20"><span class="w">  </span>--export_path<span class="w"> </span>qwen3-8b-scale-only-deploy
+</span></pre></div>
+</div>
+<p>For full parameter scale learning, swap the step 2 config for
+<code class="docutils literal notranslate"><span class="pre">configs/train/qad_with_learnt_amax.yaml</span></code>, which trains weights and scales
+together. For dual scales, swap the step 1 recipe for
+<code class="docutils literal notranslate"><span class="pre">general/qad/nvfp4_dual_lsq-mse_init-fp8_kv</span></code>.</p>
+</section>
+<section id="next-steps">
+<h2>Next steps<a class="headerlink" href="#next-steps" title="Link to this heading">#</a></h2>
+<p>Current Model-Optimizer scale learning implementation only applies to NVFP4
+per-block weight scales. In the future, we can apply the idea of scale learning
+to global weight scales, or (global) input activation scales. There is
+potential to optimize these through training as well.</p>
+</section>
+<section id="references">
+<span id="scale-learning-references"></span><h2>References<a class="headerlink" href="#references" title="Link to this heading">#</a></h2>
+<aside class="footnote-list brackets">
+<aside class="footnote brackets" id="id3" role="doc-footnote">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id1">1</a><span class="fn-bracket">]</span></span>
+<p>E. Alvarez, O. Almog, E. Chung, S. Layton, D. Stosic, R. Krashinsky,
+and K. Aubrey. <a class="reference external" href="https://developer.nvidia.com/blog/introducing-nvfp4-for-efficient-and-accurate-low-precision-inference/" rel="noopener noreferrer" target="_blank">Introducing NVFP4 for Efficient and Accurate Low-Precision
+Inference</a>.
+NVIDIA Technical Blog, 2025.</p>
+</aside>
+<aside class="footnote brackets" id="id4" role="doc-footnote">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id2">2</a><span class="fn-bracket">]</span></span>
+<p>S. K. Esser, J. L. McKinstry, D. Bablani, R. Appuswamy, and D. S.
+Modha. <a class="reference external" href="https://arxiv.org/abs/1902.08153" rel="noopener noreferrer" target="_blank">Learned Step Size Quantization</a>. ICLR, 2020.</p>
+</aside>
+</aside>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2023-2025, NVIDIA Corporation</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials"></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script src="../_static/shibuya.js?v=50760d75"></script>
+      <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
+      <script src="../_static/announcements.js?v=d94b986f"></script></body>
+</html>
