@@ -15,7 +15,8 @@
 
 """Nemotron-H specs (HF model type ``nemotron_h``)."""
 
-from ..specs import ExportSpec, ModelSpec, MoESpec, register
+from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, register
+from .ep import BASE_MODEL_EP_PLAN, prepare
 
 __all__: list[str] = []
 
@@ -24,6 +25,7 @@ register(
         model_type="nemotron_h",
         min_transformers_version="5.5",
         export_spec=ExportSpec(grouped_expert_export=True),
+        ep_spec=EPSpec(base_model_ep_plan=BASE_MODEL_EP_PLAN, prepare=prepare),
         moe_spec=MoESpec(
             # NemotronHMOE experts (NemotronHMLP) use up_proj and down_proj only (no gate).
             block_names=("NemotronHMOE",),
