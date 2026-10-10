@@ -15,12 +15,19 @@
 
 """vLLM worker lifecycle wiring for ModelOpt attention transforms."""
 
+from types import SimpleNamespace
+
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
 from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_calibration import (
     DEFAULT_THRESHOLD_TRIALS,
 )
+from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_config import (
+    load_from_checkpoint_metadata,
+    match_sparse_config,
+)
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
+    _build_sparse_kw,
     collect_calibration_counts,
     disable_calibration,
     enable_calibration,
@@ -128,6 +135,60 @@ class SkipSoftmaxCalibWorker(BaseWorker):
         model = _unwrapped_model(self)
         disable_calibration(list(iter_sparse_impls(model)))
         return collect_calibration_counts(model)
+
+    def sparse_validation_enable(self, sparse_config: dict) -> int:
+        """Apply the candidate through the serving loader and reset tile counters."""
+        model = _unwrapped_model(self)
+        impls = list(iter_sparse_impls(model))
+        detected = load_from_checkpoint_metadata(
+            SimpleNamespace(sparse_attention_config=sparse_config)
+        )
+        if detected is None:
+            raise ValueError("Candidate has no serving sparse attention configuration")
+        resolved, _ = detected
+        disable_calibration(impls)
+        impl_ids = {id(impl) for impl in impls}
+        selected = 0
+        self._sparse_validation_phases = tuple(
+            sparse_config["config_groups"]["group_0"]["target_sparsity"]
+        )
+        for name, module in model.named_modules():
+            impl = getattr(module, "impl", None)
+            if impl is None or id(impl) not in impl_ids:
+                continue
+            cfg = match_sparse_config(name, resolved)
+            impl.sparse_kw = _build_sparse_kw(cfg) if cfg and cfg.get("enable", True) else {}
+            active = "threshold_scale_factor" in impl.sparse_kw
+            impl._sparse_validation_stats = {} if active else None
+            selected += int(active)
+        return selected
+
+    def sparse_validation_collect(self) -> dict[str, dict[str, int]]:
+        """Sum counters across selected layers, rejecting any missing layer/phase."""
+        result: dict[str, dict[str, int]] = {}
+        for impl in iter_sparse_impls(_unwrapped_model(self)):
+            stats_by_phase = getattr(impl, "_sparse_validation_stats", None)
+            if stats_by_phase is None:
+                continue
+            for phase in self._sparse_validation_phases:
+                stats = stats_by_phase.get(phase, {})
+                record = result.setdefault(
+                    phase,
+                    {
+                        "total": 0,
+                        "skipped": 0,
+                        "launches": 0,
+                        "unmeasured_launches": 0,
+                        "min_seq_len": stats.get("min_seq_len", 0),
+                    },
+                )
+                for key in ("total", "skipped", "launches", "unmeasured_launches"):
+                    record[key] += stats.get(key, 0)
+                if stats.get("launches", 0) == 0:
+                    record["unmeasured_launches"] += 1
+                record["min_seq_len"] = min(record["min_seq_len"], stats.get("min_seq_len", 0))
+            impl._sparse_validation_stats = None
+        return result
 
 
 class QuantSparseAttnWorker(BaseWorker):

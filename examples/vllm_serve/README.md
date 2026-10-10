@@ -402,11 +402,14 @@ bash examples/llm_sparsity/attention_sparsity/download_ruler_data.sh
 
 python3 examples/vllm_serve/calibrate_sparse_attn.py <CKPT> \
   --calib_data_dir examples/llm_sparsity/attention_sparsity/data \
+  --validation_prompts_file held_out.txt \
   --target_sparse_ratio 0.5 \
+  --sparsity_tolerance 0.02 --output_dir calibration_run \
   --decode_tokens 32 --tensor_parallel_size 8 --update_checkpoint_config
 ```
 
-Calibration always writes `sparse_attention_config.json` in the current directory.
+Calibration exports `sparse_attention_config.json` into `--output_dir` only when
+the measured sparsity passes validation on calibration and held-out prompts.
 `--update_checkpoint_config` also merges that configuration into `<CKPT>/config.json` in
 place, which lets `vllm_serve_sparse_attn.py` load it automatically. This option requires
 `<CKPT>` to be a local checkpoint directory; without it, merge the generated configuration
@@ -414,9 +417,17 @@ into the checkpoint manually before serving.
 
 Calibration prompts default to the **RULER dataset** via the same `RulerDatasetBuilder` the HF calibration path uses (`--calib_samples` / `--calib_max_seqlen` mirror the HF defaults of 24 / 32768), so vLLM- and PyTorch-calibrated thresholds are fit on identical data. `--prompts_file` (one prompt per line) substitutes custom calibration data.
 
-`install_vllm_skip_softmax_calibration` (called by `sparse_attn_worker.SkipSoftmaxCalibWorker` at model load) swaps calibration adapters onto each attention layer not listed in the checkpoint's existing skip-softmax `ignore` policy after validating all selected layers — eager execution is required, model and KV-cache dtypes must be fp16/bf16, and no attention Q/K/P/V fakequant may be active. During `llm.generate`, the paged Triton calibration kernel computes full dense attention — no sparsification is applied to generation, though the dense kernel's numerics differ slightly from the native backend's — while counting, per candidate threshold, how many KV tiles the skip criterion would drop. The driver then collects **raw tile counts from every TP rank** (each rank only measures its head shard), merges them, fits `scale_factor = a * exp(b * sparsity)` once per phase, and writes the same canonical `sparse_attention_config` block the HF export produces — preserving the existing skip-softmax layer policy and any exported N:M sparse-softmax groups — so the serving workflow above picks it up unchanged.
+`install_vllm_skip_softmax_calibration` (called by `sparse_attn_worker.SkipSoftmaxCalibWorker` at model load) swaps calibration adapters onto each attention layer not listed in the checkpoint's existing skip-softmax `ignore` policy after validating all selected layers. Eager execution is required, model and KV-cache dtypes must be fp16/bf16, and no attention Q/K/P/V fakequant may be active. The initial sweep computes dense attention while counting candidate tile skips. The driver merges raw counts across TP ranks and fits `scale_factor = a * exp(b * sparsity)` once per phase.
 
-Calibration and serving use the same 128-token KV-tile skip granularity and the same 128-row Q tile for prefill, so serving realizes the calibrated skip decision. One-token decode uses a 16-row Q compute tile because its padding rows cannot affect the decision. Serving autotunes only the execution schedule (`num_warps` / `num_stages`); measurement remains a single fixed launch because its counters have side effects.
+The fit is only an initial guess. The driver next executes actual sparse serving, measures total skipped tiles divided by total eligible tiles across selected layers and TP ranks, and refines the scale separately for prefill and decode. Sparse refinement can change generated tokens. Only calibration prompts drive the bounded search; `--max_refinement_steps` defaults to 10 per phase. Refinement adjusts `a` at the selected target, not the entire fitted curve.
+
+`--validation_prompts_file` is required, contains one prompt per line, and must be disjoint from the calibration prompts. After calibration passes, the frozen candidate is measured once on these held-out prompts. Every requested phase must pass on both splits; the default tolerance is two percentage points, and missing measurements fail. `--decode_tokens 0` requests prefill-only calibration and validation.
+
+`sparse_attention_validation.json` retains candidate history, counts, prompt hashes, and pass/fail results. Failed validation exits nonzero without exporting a serving config or updating the checkpoint. Use a fresh output directory to avoid confusing an old export with a failed run. Successful exports preserve the canonical schema, existing skip-softmax layer policy, and N:M groups.
+
+Validation fixes the schedule to one sequence at a time, disables prefix caching and chunked prefill, and uses eager execution. Different batching, hardware, TP sizes, targets, or context distributions require separate validation. Passing this sparsity gate is not a model-quality or speedup result.
+
+Calibration and serving use the same 128-token KV-tile skip granularity and the same 128-row Q tile for prefill. One-token decode uses a 16-row Q compute tile because its padding rows cannot affect the decision. Serving autotunes only the execution schedule (`num_warps` / `num_stages`); measurement remains a single fixed launch because its counters have side effects.
 
 The reusable serving policies live in `modelopt/torch/sparsity/attention_sparsity/plugins/vllm_runtime.py`. `install_vllm_sparse_attention_from_checkpoint` installs checkpoint-driven sparse-only attention, while `install_vllm_nvfp4_attention` installs fixed NVFP4 Q/K/P/V with optional checkpoint sparsity. Both validate every selected layer before publishing any replacement implementation and return a `VllmAttentionInstallReport` with the installed layer names and backend counts.
 
