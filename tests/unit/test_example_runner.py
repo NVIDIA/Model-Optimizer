@@ -28,7 +28,12 @@ from pathlib import Path
 
 import pytest
 from _test_utils.examples import run_command
-from _test_utils.examples.example_runner import ExampleRunner, StepFailed, StepTimeout
+from _test_utils.examples.example_runner import (
+    ExampleRunner,
+    StepFailed,
+    StepTimeout,
+    keep_post_conversion_plugins,
+)
 
 pytestmark = pytest.mark.usefixtures("skip_on_windows")
 
@@ -384,6 +389,23 @@ def test_failing_hook_fails_the_step(tmp_path):
             lane.run("s.py")
     assert "hook failed" in failure.value.output
     assert "ran" not in failure.value.output
+
+
+def test_keep_post_conversion_plugins_undoes_the_registrations_of_a_step(tmp_path):
+    from modelopt.torch.quantization.plugins.custom import CUSTOM_POST_CONVERSION_PLUGINS
+
+    before = set(CUSTOM_POST_CONVERSION_PLUGINS)
+    with _in_process_lane(tmp_path, (keep_post_conversion_plugins,)) as lane:
+        lane.write(
+            "s.py",
+            """
+            from modelopt.torch.quantization.plugins.custom import CUSTOM_POST_CONVERSION_PLUGINS
+
+            CUSTOM_POST_CONVERSION_PLUGINS.add(lambda model: None)
+            """,
+        )
+        lane.run("s.py")
+    assert before == CUSTOM_POST_CONVERSION_PLUGINS
 
 
 def test_worker_is_reused_until_a_step_fails(worker_lane):

@@ -241,6 +241,23 @@ def run_step(
     return returncode, _drain(sink)
 
 
+@contextlib.contextmanager
+def keep_post_conversion_plugins():
+    """Hook undoing a step's ``CUSTOM_POST_CONVERSION_PLUGINS.add`` calls.
+
+    torch_quant_to_onnx.py registers a ResNet plugin there, which would apply to every later step.
+    """
+    from modelopt.torch.quantization.plugins import custom
+
+    plugins = custom.CUSTOM_POST_CONVERSION_PLUGINS
+    saved = set(plugins)
+    try:
+        yield
+    finally:
+        plugins.clear()
+        plugins.update(saved)
+
+
 def _preload(modules: Iterable[str]) -> None:
     """Import what ``_restored_state`` snapshots, so a first step cannot change it unnoticed."""
     for name in modules:
