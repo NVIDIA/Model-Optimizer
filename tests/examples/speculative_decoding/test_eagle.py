@@ -230,7 +230,6 @@ def test_convert_to_vllm_ckpt(tiny_llama_path, eagle_output_dir):
 @pytest.mark.parametrize(
     ("model_source", "use_fake_base"),
     [
-        (None, False),  # tiny_llama (from fixture), no FakeBase
         pytest.param("moonshotai/Kimi-K2.5", True),  # remote HF repo, FakeBaseModel
         pytest.param(  # remote HF repo, no FakeBaseModel
             "moonshotai/Kimi-K2-Thinking",
@@ -243,22 +242,23 @@ def test_convert_to_vllm_ckpt(tiny_llama_path, eagle_output_dir):
             marks=pytest.mark.manual(reason="skip redundand test, too slow"),
         ),
     ],
-    ids=["tinyllama", "kimi-k2.5", "kimi-k2-thinking", "minimax-m2.5"],
+    ids=["kimi-k2.5", "kimi-k2-thinking", "minimax-m2.5"],
 )
 def test_offline_eagle3_training(
-    tiny_llama_path,
     tiny_daring_anteater_path,
     tmp_path,
     eagle_output_dir,
     model_source,
     use_fake_base,
 ):
-    """Test Eagle3 training with pre-computed hidden states (offline mode / FakeBaseModel)."""
-    model_path = tiny_llama_path if model_source is None else model_source
-    model_id = "tinyllama" if model_source is None else model_source.split("/")[-1]
+    """Test Eagle3 training with pre-computed hidden states on a FakeBaseModel.
+
+    Offline training on a real base model is covered by test_eagle_offline_ptq.py.
+    """
+    model_id = model_source.split("/")[-1]
     output_subdir = eagle_output_dir / f"eagle-{model_id}-offline"
 
-    cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    cfg = AutoConfig.from_pretrained(model_source, trust_remote_code=True)
     if hasattr(cfg, "text_config"):  # vlm: get text_config
         cfg = cfg.text_config
 
@@ -270,7 +270,7 @@ def test_offline_eagle3_training(
     )
 
     overrides = [
-        f"model.model_name_or_path={model_path}",
+        f"model.model_name_or_path={model_source}",
         "model.trust_remote_code=true",
         f"model.use_fake_base_for_offline={str(use_fake_base).lower()}",
         f"data.data_path={tiny_daring_anteater_path}",
