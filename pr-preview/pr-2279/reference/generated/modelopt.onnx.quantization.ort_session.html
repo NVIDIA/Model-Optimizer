@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ort_patching - Model Optimizer 0.0.1.dev1+g0e4754aa0</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="ort_utils" href="modelopt.onnx.quantization.ort_utils.html" /><link rel="prev" title="operators" href="modelopt.onnx.quantization.operators.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ort_session - Model Optimizer 0.0.1.dev1+gd2c3552c9</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="ort_utils" href="modelopt.onnx.quantization.ort_utils.html" /><link rel="prev" title="ort_quantization" href="modelopt.onnx.quantization.ort_quantization.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -24,7 +24,7 @@
 }
 </style>
     
-  <meta property="og:type" content="website"/><meta property="og:title" content="ort_patching"/>
+  <meta property="og:type" content="website"/><meta property="og:title" content="ort_session"/>
     <meta name="twitter:card" content="summary"/>
   </head>
 <body><div class="sy-head">
@@ -168,7 +168,11 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int4.html">int4</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int8.html">int8</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.operators.html">operators</a></li>
-<li class="toctree-l4 current"><a class="current reference internal" href="#">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration.html">ort_calibration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration_per_node.html">ort_calibration_per_node</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patches.html">ort_patches</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_quantization.html">ort_quantization</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">ort_session</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.precision_utils.html">precision_utils</a></li>
@@ -386,11 +390,7 @@ data-aria-dark="Switch to auto color mode">
     <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
       <i class="i-lucide close"></i>
     </button>
-    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
-<li><a class="reference internal" href="#modelopt.onnx.quantization.ort_patching.load_model_with_shape_infer"><code class="docutils literal notranslate"><span class="pre">load_model_with_shape_infer()</span></code></a></li>
-<li><a class="reference internal" href="#modelopt.onnx.quantization.ort_patching.patch_ort_modules"><code class="docutils literal notranslate"><span class="pre">patch_ort_modules()</span></code></a></li>
-</ul>
-</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
   </aside>
   <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
   <main class="sy-main w-full max-sm:max-w-full print:pt-6">
@@ -418,7 +418,7 @@ data-aria-dark="Switch to auto color mode">
         <span>/</span>
         <meta itemprop="position" content="4" />
       </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
-        <strong itemprop="name">ort_patching</strong>
+        <strong itemprop="name">ort_session</strong>
         <meta itemprop="position" content="5" />
       </li></ol>
     <div class="xl:hidden ml-1">
@@ -431,47 +431,9 @@ data-aria-dark="Switch to auto color mode">
 </div><div class="flex flex-col break-words justify-between">
       <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
   <article class="yue dark-code" role="main">
-          <section id="ort-patching">
-<h1>ort_patching<a class="headerlink" href="#ort-patching" title="Link to this heading">#</a></h1>
-<p id="module-modelopt.onnx.quantization.ort_patching">This module contains all the patched functions from ORT.</p>
-<p class="rubric">Functions</p>
-<div class="table-wrapper autosummary longtable docutils container">
-<table class="autosummary longtable docutils align-default">
-<tbody>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.ort_patching.load_model_with_shape_infer" title="modelopt.onnx.quantization.ort_patching.load_model_with_shape_infer"><code class="xref py py-obj docutils literal notranslate"><span class="pre">load_model_with_shape_infer</span></code></a></p></td>
-<td><p>Load model while performing symbolic shape infer and ONNX shape inference.</p></td>
-</tr>
-<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.ort_patching.patch_ort_modules" title="modelopt.onnx.quantization.ort_patching.patch_ort_modules"><code class="xref py py-obj docutils literal notranslate"><span class="pre">patch_ort_modules</span></code></a></p></td>
-<td><p>Patches the ORT modules.</p></td>
-</tr>
-</tbody>
-</table>
-</div>
-<dl class="py function">
-<dt class="sig sig-object py" id="modelopt.onnx.quantization.ort_patching.load_model_with_shape_infer">
-<span class="sig-name descname"><span class="pre">load_model_with_shape_infer</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_path</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.ort_patching.load_model_with_shape_infer" title="Link to this definition">#</a></dt>
-<dd><p>Load model while performing symbolic shape infer and ONNX shape inference.</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><p><strong>model_path</strong> (<em>Path</em>)</p>
-</dd>
-<dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><em>ModelProto</em></p>
-</dd>
-</dl>
-</dd></dl>
-
-<dl class="py function">
-<dt class="sig sig-object py" id="modelopt.onnx.quantization.ort_patching.patch_ort_modules">
-<span class="sig-name descname"><span class="pre">patch_ort_modules</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">calibrate_per_node</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.ort_patching.patch_ort_modules" title="Link to this definition">#</a></dt>
-<dd><p>Patches the ORT modules.</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><p><strong>calibrate_per_node</strong> (<em>bool</em>)</p>
-</dd>
-</dl>
-</dd></dl>
-
+          <section id="ort-session">
+<h1>ort_session<a class="headerlink" href="#ort-session" title="Link to this heading">#</a></h1>
+<p id="module-modelopt.onnx.quantization.ort_session">ONNX Runtime model loading and inference-session setup.</p>
 </section>
 
         </article><button class="back-to-top" type="button">
@@ -480,10 +442,10 @@ data-aria-dark="Switch to auto color mode">
   </svg>
   <span>Back to top</span>
 </button><div class="navigation flex print:hidden"><div class="navigation-prev">
-    <a href="modelopt.onnx.quantization.operators.html">
+    <a href="modelopt.onnx.quantization.ort_quantization.html">
       <i class="i-lucide chevron-left"></i>
       <div class="page-info">
-        <span>Previous</span><div class="title">operators</div></div>
+        <span>Previous</span><div class="title">ort_quantization</div></div>
     </a>
   </div><div class="navigation-next">
     <a href="modelopt.onnx.quantization.ort_utils.html">

@@ -17,6 +17,10 @@ methods
 
 
 
+   modelopt.torch.fastgen.methods.pdd
+
+
+
 
 .. Autodoc anything defined in the module itself
 

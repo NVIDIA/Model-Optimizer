@@ -1,5 +1,5 @@
-ort\_patching
-=============
+ort\_calibration\_per\_node
+===========================
 
 .. List the submodules
 
@@ -15,7 +15,7 @@ ort\_patching
    __module__ should be manually overridden -- i.e. in the ``__init__.py`` which contains ``from xxx import YYY``,
    add in ``YYY.__module__ = __name__``.
 
-.. automodule:: modelopt.onnx.quantization.ort_patching
+.. automodule:: modelopt.onnx.quantization.ort_calibration_per_node
    :members:
    :undoc-members:
 
@@ -31,13 +31,5 @@ ort\_patching
 
    .. Overview table of available functions in the module
    
-   
-   .. rubric:: Functions
-
-   .. autosummary::
-      :nosignatures:
-   
-      load_model_with_shape_infer
-      patch_ort_modules
    
    

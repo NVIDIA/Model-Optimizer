@@ -32,7 +32,6 @@ ggml
       :nosignatures:
    
       GGMLFormat
-      IQFormat
    
    
 

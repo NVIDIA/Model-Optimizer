@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>qdq_graph - Model Optimizer 0.0.1.dev1+g0e4754aa0</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="qdq_utils" href="modelopt.onnx.quantization.qdq_utils.html" /><link rel="prev" title="precision_utils" href="modelopt.onnx.quantization.precision_utils.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>qdq_graph - Model Optimizer 0.0.1.dev1+gd2c3552c9</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="qdq_utils" href="modelopt.onnx.quantization.qdq_utils.html" /><link rel="prev" title="precision_utils" href="modelopt.onnx.quantization.precision_utils.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -168,7 +168,11 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int4.html">int4</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int8.html">int8</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.operators.html">operators</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration.html">ort_calibration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration_per_node.html">ort_calibration_per_node</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patches.html">ort_patches</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_quantization.html">ort_quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_session.html">ort_session</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.precision_utils.html">precision_utils</a></li>
@@ -397,6 +401,7 @@ data-aria-dark="Switch to auto color mode">
 <li><a class="reference internal" href="#modelopt.onnx.quantization.qdq_graph.get_layer_precision_mapping"><code class="docutils literal notranslate"><span class="pre">get_layer_precision_mapping()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.onnx.quantization.qdq_graph.get_resize_scales"><code class="docutils literal notranslate"><span class="pre">get_resize_scales()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.onnx.quantization.qdq_graph.print_stat"><code class="docutils literal notranslate"><span class="pre">print_stat()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.onnx.quantization.qdq_graph.remove_dla_scalar_input_qdq"><code class="docutils literal notranslate"><span class="pre">remove_dla_scalar_input_qdq()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.onnx.quantization.qdq_graph.remove_partial_input_qdq"><code class="docutils literal notranslate"><span class="pre">remove_partial_input_qdq()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.onnx.quantization.qdq_graph.should_quantize_to_8bit"><code class="docutils literal notranslate"><span class="pre">should_quantize_to_8bit()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.onnx.quantization.qdq_graph.validate_8bit_layers"><code class="docutils literal notranslate"><span class="pre">validate_8bit_layers()</span></code></a></li>
@@ -479,13 +484,16 @@ data-aria-dark="Switch to auto color mode">
 <tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.qdq_graph.print_stat" title="modelopt.onnx.quantization.qdq_graph.print_stat"><code class="xref py py-obj docutils literal notranslate"><span class="pre">print_stat</span></code></a></p></td>
 <td><p>Collect and print stats of the quantized model.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.qdq_graph.remove_partial_input_qdq" title="modelopt.onnx.quantization.qdq_graph.remove_partial_input_qdq"><code class="xref py py-obj docutils literal notranslate"><span class="pre">remove_partial_input_qdq</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.qdq_graph.remove_dla_scalar_input_qdq" title="modelopt.onnx.quantization.qdq_graph.remove_dla_scalar_input_qdq"><code class="xref py py-obj docutils literal notranslate"><span class="pre">remove_dla_scalar_input_qdq</span></code></a></p></td>
+<td><p>Keep scalar Mul/Div coefficients and Pad fill values constant for DLA.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.qdq_graph.remove_partial_input_qdq" title="modelopt.onnx.quantization.qdq_graph.remove_partial_input_qdq"><code class="xref py py-obj docutils literal notranslate"><span class="pre">remove_partial_input_qdq</span></code></a></p></td>
 <td><p>Modifies the onnx model by removing QDQ nodes from the marked inputs, ex.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.qdq_graph.should_quantize_to_8bit" title="modelopt.onnx.quantization.qdq_graph.should_quantize_to_8bit"><code class="xref py py-obj docutils literal notranslate"><span class="pre">should_quantize_to_8bit</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.qdq_graph.should_quantize_to_8bit" title="modelopt.onnx.quantization.qdq_graph.should_quantize_to_8bit"><code class="xref py py-obj docutils literal notranslate"><span class="pre">should_quantize_to_8bit</span></code></a></p></td>
 <td><p>Check if layer should be quantized to 8 bits.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.qdq_graph.validate_8bit_layers" title="modelopt.onnx.quantization.qdq_graph.validate_8bit_layers"><code class="xref py py-obj docutils literal notranslate"><span class="pre">validate_8bit_layers</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.qdq_graph.validate_8bit_layers" title="modelopt.onnx.quantization.qdq_graph.validate_8bit_layers"><code class="xref py py-obj docutils literal notranslate"><span class="pre">validate_8bit_layers</span></code></a></p></td>
 <td><p>Validate the format of layers_8bit string.</p></td>
 </tr>
 </tbody>
@@ -704,6 +712,23 @@ it becomes 0.85693 but 7 * 0.85693 = 5.9985 &lt; 6.</p>
 <dt class="sig sig-object py" id="modelopt.onnx.quantization.qdq_graph.print_stat">
 <span class="sig-name descname"><span class="pre">print_stat</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.qdq_graph.print_stat" title="Link to this definition">#</a></dt>
 <dd><p>Collect and print stats of the quantized model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>graph</strong> (<em>Graph</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.qdq_graph.remove_dla_scalar_input_qdq">
+<span class="sig-name descname"><span class="pre">remove_dla_scalar_input_qdq</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.qdq_graph.remove_dla_scalar_input_qdq" title="Link to this definition">#</a></dt>
+<dd><p>Keep scalar Mul/Div coefficients and Pad fill values constant for DLA.</p>
+<p>Q/DQ turns these constants into tensor inputs, preventing DLA from evaluating
+Pad’s fill value or broadcasting a scalar coefficient. Bypass only the
+relevant consumer edge so shared Conv weights and activation Q/DQ stay intact.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>graph</strong> (<em>Graph</em>)</p>

@@ -57,7 +57,23 @@ quantization
 
 
 
-   modelopt.onnx.quantization.ort_patching
+   modelopt.onnx.quantization.ort_calibration
+
+
+
+   modelopt.onnx.quantization.ort_calibration_per_node
+
+
+
+   modelopt.onnx.quantization.ort_patches
+
+
+
+   modelopt.onnx.quantization.ort_quantization
+
+
+
+   modelopt.onnx.quantization.ort_session
 
 
 

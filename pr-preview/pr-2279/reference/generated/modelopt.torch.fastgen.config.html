@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>config - Model Optimizer 0.0.1.dev1+g0e4754aa0</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="discriminators" href="modelopt.torch.fastgen.discriminators.html" /><link rel="prev" title="fastgen" href="modelopt.torch.fastgen.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>config - Model Optimizer 0.0.1.dev1+gd2c3552c9</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="discriminators" href="modelopt.torch.fastgen.discriminators.html" /><link rel="prev" title="fastgen" href="modelopt.torch.fastgen.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -168,7 +168,11 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int4.html">int4</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int8.html">int8</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.operators.html">operators</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration.html">ort_calibration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration_per_node.html">ort_calibration_per_node</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patches.html">ort_patches</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_quantization.html">ort_quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_session.html">ort_session</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.precision_utils.html">precision_utils</a></li>
@@ -424,6 +428,20 @@ data-aria-dark="Switch to auto color mode">
 <li><a class="reference internal" href="#modelopt.torch.fastgen.config.EMAConfig.type"><code class="docutils literal notranslate"><span class="pre">EMAConfig.type</span></code></a></li>
 </ul>
 </li>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.config.PDDConfig"><code class="docutils literal notranslate"><span class="pre">PDDConfig</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.config.PDDConfig.block_size_max"><code class="docutils literal notranslate"><span class="pre">PDDConfig.block_size_max</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.config.PDDConfig.block_size_min"><code class="docutils literal notranslate"><span class="pre">PDDConfig.block_size_min</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.config.PDDConfig.data_free"><code class="docutils literal notranslate"><span class="pre">PDDConfig.data_free</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.config.PDDConfig.flow_shift"><code class="docutils literal notranslate"><span class="pre">PDDConfig.flow_shift</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.config.PDDConfig.from_yaml"><code class="docutils literal notranslate"><span class="pre">PDDConfig.from_yaml()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.config.PDDConfig.grid_max_t"><code class="docutils literal notranslate"><span class="pre">PDDConfig.grid_max_t</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.config.PDDConfig.grid_size"><code class="docutils literal notranslate"><span class="pre">PDDConfig.grid_size</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.config.PDDConfig.guidance_scale"><code class="docutils literal notranslate"><span class="pre">PDDConfig.guidance_scale</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.config.PDDConfig.inference_blocks"><code class="docutils literal notranslate"><span class="pre">PDDConfig.inference_blocks</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.config.PDDConfig.model_config"><code class="docutils literal notranslate"><span class="pre">PDDConfig.model_config</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.config.PDDConfig.teacher_integrator"><code class="docutils literal notranslate"><span class="pre">PDDConfig.teacher_integrator</span></code></a></li>
+</ul>
+</li>
 <li><a class="reference internal" href="#modelopt.torch.fastgen.config.SampleTimestepConfig"><code class="docutils literal notranslate"><span class="pre">SampleTimestepConfig</span></code></a><ul>
 <li><a class="reference internal" href="#modelopt.torch.fastgen.config.SampleTimestepConfig.max_t"><code class="docutils literal notranslate"><span class="pre">SampleTimestepConfig.max_t</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.fastgen.config.SampleTimestepConfig.min_t"><code class="docutils literal notranslate"><span class="pre">SampleTimestepConfig.min_t</span></code></a></li>
@@ -480,10 +498,9 @@ data-aria-dark="Switch to auto color mode">
           <section id="config">
 <h1>config<a class="headerlink" href="#config" title="Link to this heading">#</a></h1>
 <p id="module-modelopt.torch.fastgen.config">Pydantic configuration classes for the fastgen distillation pipelines.</p>
-<p>Configurations are layered so a method-specific config (e.g. <a class="reference internal" href="#modelopt.torch.fastgen.config.DMDConfig" title="modelopt.torch.fastgen.config.DMDConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">DMDConfig</span></code></a>) inherits
-shared diffusion-distillation hyperparameters from <a class="reference internal" href="#modelopt.torch.fastgen.config.DistillationConfig" title="modelopt.torch.fastgen.config.DistillationConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">DistillationConfig</span></code></a>. All classes
-inherit <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">modelopt.torch.opt.config.ModeloptBaseConfig</span></code></a>, which provides torch-safe
-serialization and dict-like iteration.</p>
+<p>Configurations inherit <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">modelopt.torch.opt.config.ModeloptBaseConfig</span></code></a>, which provides
+torch-safe serialization and dict-like iteration. DMD builds on shared diffusion-distillation
+settings, while PDD exposes only its fixed-grid method settings.</p>
 <p>The default values in <a class="reference internal" href="#modelopt.torch.fastgen.config.DMDConfig" title="modelopt.torch.fastgen.config.DMDConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">DMDConfig</span></code></a> mirror the FastGen Wan 2.2 5B experiment at
 <code class="docutils literal notranslate"><span class="pre">FastGen/fastgen/configs/experiments/WanT2V/config_dmd2_wan22_5b.py</span></code>.</p>
 <p class="rubric">Classes</p>
@@ -499,7 +516,10 @@ serialization and dict-like iteration.</p>
 <tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.config.EMAConfig" title="modelopt.torch.fastgen.config.EMAConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">EMAConfig</span></code></a></p></td>
 <td><p>Exponential moving average (EMA) hyperparameters for the student network.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.config.SampleTimestepConfig" title="modelopt.torch.fastgen.config.SampleTimestepConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">SampleTimestepConfig</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.config.PDDConfig" title="modelopt.torch.fastgen.config.PDDConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">PDDConfig</span></code></a></p></td>
+<td><p>Hyperparameters for Parallel Decoding Distillation (PDD).</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.config.SampleTimestepConfig" title="modelopt.torch.fastgen.config.SampleTimestepConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">SampleTimestepConfig</span></code></a></p></td>
 <td><p>Timestep sampling distribution for diffusion training.</p></td>
 </tr>
 </tbody>
@@ -532,8 +552,8 @@ See <code class="docutils literal notranslate"><span class="pre">FastGen/fastgen
 <span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">from_yaml</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config_file</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.config.DMDConfig.from_yaml" title="Link to this definition">#</a></dt>
 <dd><p>Construct a <a class="reference internal" href="#modelopt.torch.fastgen.config.DMDConfig" title="modelopt.torch.fastgen.config.DMDConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">DMDConfig</span></code></a> from a YAML file.</p>
 <p>Thin wrapper around <a class="reference internal" href="modelopt.torch.fastgen.loader.html#modelopt.torch.fastgen.loader.load_dmd_config" title="modelopt.torch.fastgen.loader.load_dmd_config"><code class="xref py py-func docutils literal notranslate"><span class="pre">modelopt.torch.fastgen.loader.load_dmd_config()</span></code></a>.
-The resolver searches the built-in <code class="docutils literal notranslate"><span class="pre">modelopt_recipes/</span></code> package first, then
-the filesystem. Suffixes (<code class="docutils literal notranslate"><span class="pre">.yml</span></code> / <code class="docutils literal notranslate"><span class="pre">.yaml</span></code>) may be omitted.</p>
+The resolver searches the filesystem first, then the built-in
+<code class="docutils literal notranslate"><span class="pre">modelopt_recipes/</span></code> package. Suffixes (<code class="docutils literal notranslate"><span class="pre">.yml</span></code> / <code class="docutils literal notranslate"><span class="pre">.yaml</span></code>) may be omitted.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>config_file</strong> (<em>str</em><em> | </em><em>Path</em>)</p>
@@ -582,8 +602,7 @@ the filesystem. Suffixes (<code class="docutils literal notranslate"><span class
 <span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">DistillationConfig</span></span><a class="headerlink" href="#modelopt.torch.fastgen.config.DistillationConfig" title="Link to this definition">#</a></dt>
 <dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
 <p>Shared hyperparameters for diffusion step-distillation methods.</p>
-<p>Concrete methods subclass this config to add method-specific fields
-(see <a class="reference internal" href="#modelopt.torch.fastgen.config.DMDConfig" title="modelopt.torch.fastgen.config.DMDConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">DMDConfig</span></code></a>).</p>
+<p>DMD subclasses this config to add method-specific fields.</p>
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.fastgen.config.DistillationConfig.guidance_scale">
 <span class="sig-name descname"><span class="pre">guidance_scale</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.fastgen.config.DistillationConfig.guidance_scale" title="Link to this definition">#</a></dt>
@@ -681,6 +700,81 @@ the filesystem. Suffixes (<code class="docutils literal notranslate"><span class
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.fastgen.config.EMAConfig.type">
 <span class="sig-name descname"><span class="pre">type</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'constant'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'halflife'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'power'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.fastgen.config.EMAConfig.type" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.config.PDDConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">PDDConfig</span></span><a class="headerlink" href="#modelopt.torch.fastgen.config.PDDConfig" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>Hyperparameters for Parallel Decoding Distillation (PDD).</p>
+<p>PDD trains one velocity head per interval on a fixed shifted rectified-flow
+grid. The explicit inference block schedule partitions that same grid; it does
+not define a second timestep schedule.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.config.PDDConfig.block_size_max">
+<span class="sig-name descname"><span class="pre">block_size_max</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.fastgen.config.PDDConfig.block_size_max" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.config.PDDConfig.block_size_min">
+<span class="sig-name descname"><span class="pre">block_size_min</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.fastgen.config.PDDConfig.block_size_min" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.config.PDDConfig.data_free">
+<span class="sig-name descname"><span class="pre">data_free</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.fastgen.config.PDDConfig.data_free" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.config.PDDConfig.flow_shift">
+<span class="sig-name descname"><span class="pre">flow_shift</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.fastgen.config.PDDConfig.flow_shift" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.config.PDDConfig.from_yaml">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">from_yaml</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config_file</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.config.PDDConfig.from_yaml" title="Link to this definition">#</a></dt>
+<dd><p>Construct a <a class="reference internal" href="#modelopt.torch.fastgen.config.PDDConfig" title="modelopt.torch.fastgen.config.PDDConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">PDDConfig</span></code></a> from a filesystem or built-in YAML file.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>config_file</strong> (<em>str</em><em> | </em><em>Path</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.fastgen.config.PDDConfig" title="modelopt.torch.fastgen.config.PDDConfig"><em>PDDConfig</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.config.PDDConfig.grid_max_t">
+<span class="sig-name descname"><span class="pre">grid_max_t</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.fastgen.config.PDDConfig.grid_max_t" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.config.PDDConfig.grid_size">
+<span class="sig-name descname"><span class="pre">grid_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.fastgen.config.PDDConfig.grid_size" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.config.PDDConfig.guidance_scale">
+<span class="sig-name descname"><span class="pre">guidance_scale</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.fastgen.config.PDDConfig.guidance_scale" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.config.PDDConfig.inference_blocks">
+<span class="sig-name descname"><span class="pre">inference_blocks</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.fastgen.config.PDDConfig.inference_blocks" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.config.PDDConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.fastgen.config.PDDConfig.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.config.PDDConfig.teacher_integrator">
+<span class="sig-name descname"><span class="pre">teacher_integrator</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'euler'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'midpoint'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.fastgen.config.PDDConfig.teacher_integrator" title="Link to this definition">#</a></dt>
 <dd></dd></dl>
 
 </dd></dl>

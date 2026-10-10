@@ -38,6 +38,9 @@ flow\_matching
       :nosignatures:
    
       add_noise
+      fusion_coefficients
+      integrate_interval_velocities
+      make_shifted_flow_grid
       pred_noise_to_pred_x0
       pred_x0_from_flow
       rf_alpha

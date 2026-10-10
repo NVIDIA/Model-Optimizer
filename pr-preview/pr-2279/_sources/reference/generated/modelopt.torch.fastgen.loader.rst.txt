@@ -39,5 +39,6 @@ loader
    
       load_config
       load_dmd_config
+      load_pdd_config
    
    

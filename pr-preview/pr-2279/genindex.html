@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="./">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Index - Model Optimizer 0.0.1.dev1+g0e4754aa0</title><link rel="index" title="Index" href="#" /><link rel="search" title="Search" href="search.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Index - Model Optimizer 0.0.1.dev1+gd2c3552c9</title><link rel="index" title="Index" href="#" /><link rel="search" title="Search" href="search.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="_static/pygments.css?v=e1a1ceaf" />
@@ -353,6 +353,14 @@ data-aria-dark="Switch to auto color mode">
         <li><a href="reference/generated/modelopt.onnx.quantization.autotune.html#modelopt.onnx.quantization.autotune.PatternCache.__init__">(PatternCache method)</a>
 </li>
         <li><a href="reference/generated/modelopt.onnx.quantization.autotune.html#modelopt.onnx.quantization.autotune.PatternSchemes.__init__">(PatternSchemes method)</a>
+</li>
+        <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDLayerSpec.__init__">(PDDLayerSpec method)</a>
+</li>
+        <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDModelAdapter.__init__">(PDDModelAdapter method)</a>
+</li>
+        <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDOutputProjection.__init__">(PDDOutputProjection method)</a>
+</li>
+        <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDPipeline.__init__">(PDDPipeline method)</a>
 </li>
         <li><a href="reference/generated/modelopt.onnx.autocast.precisionconverter.html#modelopt.onnx.autocast.precisionconverter.PrecisionConverter.__init__">(PrecisionConverter method)</a>
 </li>
@@ -921,10 +929,10 @@ data-aria-dark="Switch to auto color mode">
 </li>
       <li><a href="reference/generated/modelopt.torch.quantization.ggml.html#modelopt.torch.quantization.ggml.GGMLFormat.block_bytes">block_bytes (GGMLFormat attribute)</a>
 </li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="reference/generated/modelopt.torch.quantization.ggml.html#modelopt.torch.quantization.ggml.GGMLFormat.block_chunk_size">block_chunk_size (GGMLFormat attribute)</a>
 </li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="reference/generated/modelopt.torch.export.trtllm.model_config.html#modelopt.torch.export.trtllm.model_config.DecoderLayerConfig.block_config">block_config (DecoderLayerConfig attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.html#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.block_config_to_layer_overrides">block_config_to_layer_overrides() (GptOssModelDescriptor static method)</a>
@@ -968,6 +976,10 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.RotateConfig.block_size">block_size (RotateConfig attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.sparsity.attention_sparsity.config.html#modelopt.torch.sparsity.attention_sparsity.config.VSAAttributeConfig.block_size_3d">block_size_3d (VSAAttributeConfig attribute)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.PDDConfig.block_size_max">block_size_max (PDDConfig attribute)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.PDDConfig.block_size_min">block_size_min (PDDConfig attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerAttributeConfig.block_sizes">block_sizes (QuantizerAttributeConfig attribute)</a>
 
@@ -1289,6 +1301,8 @@ data-aria-dark="Switch to auto color mode">
 </li>
       <li><a href="reference/generated/modelopt.torch.prune.importance_hooks.compare_module_outputs.html#modelopt.torch.prune.importance_hooks.compare_module_outputs.compute_cosine_similarity">compute_cosine_similarity() (in module modelopt.torch.prune.importance_hooks.compare_module_outputs)</a>
 </li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDPipeline.compute_data_free_loss">compute_data_free_loss() (PDDPipeline method)</a>
+</li>
       <li><a href="reference/generated/modelopt.torch.fastgen.methods.dmd.html#modelopt.torch.fastgen.methods.dmd.DMDPipeline.compute_discriminator_loss">compute_discriminator_loss() (DMDPipeline method)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.quantization.calib.bias.html#modelopt.torch.quantization.calib.bias.BiasCalibrator.compute_dynamic_bias">compute_dynamic_bias() (BiasCalibrator method)</a>
@@ -1302,6 +1316,8 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.torch.distill.distillation_model.html#modelopt.torch.distill.distillation_model.DistillationModel.compute_kd_loss">compute_kd_loss() (DistillationModel method)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.prune.importance_hooks.compare_module_outputs.html#modelopt.torch.prune.importance_hooks.compare_module_outputs.compute_layer_metrics">compute_layer_metrics() (in module modelopt.torch.prune.importance_hooks.compare_module_outputs)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDPipeline.compute_loss">compute_loss() (PDDPipeline method)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.compute_quantization_mse">compute_quantization_mse() (in module modelopt.torch.quantization.model_quant)</a>
 </li>
@@ -1343,6 +1359,8 @@ data-aria-dark="Switch to auto color mode">
 </li>
       <li><a href="reference/generated/modelopt.torch.fastgen.methods.dmd.html#modelopt.torch.fastgen.methods.dmd.DMDPipeline.config">config (DMDPipeline attribute)</a>
 </li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="reference/generated/modelopt.torch.opt.dynamic.html#modelopt.torch.opt.dynamic.DynamicSpace.config">config() (DynamicSpace method)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.nas.autonas.html#modelopt.torch.nas.autonas.AutoNASModeDescriptor.config_class">config_class (AutoNASModeDescriptor property)</a>
@@ -1383,8 +1401,6 @@ data-aria-dark="Switch to auto color mode">
         <li><a href="reference/generated/modelopt.torch.sparsity.weight_sparsity.mode.html#modelopt.torch.sparsity.weight_sparsity.mode.SparseMagnitudeModeDescriptor.config_class">(SparseMagnitudeModeDescriptor property)</a>
 </li>
       </ul></li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="reference/generated/modelopt.torch.quantization.export_onnx.html#modelopt.torch.quantization.export_onnx.configure_linear_module_onnx_quantizers">configure_linear_module_onnx_quantizers() (in module modelopt.torch.quantization.export_onnx)</a>
 </li>
       <li><a href="reference/generated/modelopt.onnx.autocast.logging_config.html#modelopt.onnx.autocast.logging_config.configure_logging">configure_logging() (in module modelopt.onnx.autocast.logging_config)</a>
@@ -1527,6 +1543,8 @@ data-aria-dark="Switch to auto color mode">
 </li>
       <li><a href="reference/generated/modelopt.onnx.autocast.convert.html#modelopt.onnx.autocast.convert.convert_to_mixed_precision">convert_to_mixed_precision() (in module modelopt.onnx.autocast.convert)</a>
 </li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.convert_to_pdd_output_projection">convert_to_pdd_output_projection() (in module modelopt.torch.fastgen.methods.pdd)</a>
+</li>
       <li><a href="reference/generated/modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer.convert_to_single_quantizer">convert_to_single_quantizer() (SequentialQuantizer static method)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.sparsity.attention_sparsity.conversion.html#modelopt.torch.sparsity.attention_sparsity.conversion.convert_to_sparse_attention_model">convert_to_sparse_attention_model() (in module modelopt.torch.sparsity.attention_sparsity.conversion)</a>
@@ -1595,18 +1613,12 @@ data-aria-dark="Switch to auto color mode">
       </ul></li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.tools.bypassed_training.child_init.html#modelopt.torch.puzzletron.tools.bypassed_training.child_init.create_child_state_dict">create_child_state_dict() (in module modelopt.torch.puzzletron.tools.bypassed_training.child_init)</a>
 </li>
-      <li><a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.html#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.create_dummy_block">create_dummy_block() (GptOssModelDescriptor class method)</a>
+      <li><a href="reference/generated/modelopt.torch.puzzletron.anymodel.model_descriptor.base.html#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.create_dummy_block">create_dummy_block() (ModelDescriptor class method)</a>
 
       <ul>
-        <li><a href="reference/generated/modelopt.torch.puzzletron.anymodel.model_descriptor.base.html#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.create_dummy_block">(ModelDescriptor class method)</a>
-</li>
         <li><a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.html#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.create_dummy_block">(NemotronHModelDescriptor class method)</a>
 </li>
         <li><a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2.nemotron_h_v2_model_descriptor.html#modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2.nemotron_h_v2_model_descriptor.NemotronHV2ModelDescriptor.create_dummy_block">(NemotronHV2ModelDescriptor class method)</a>
-</li>
-        <li><a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.qwen2.qwen2_model_descriptor.html#modelopt.torch.puzzletron.anymodel.models.qwen2.qwen2_model_descriptor.Qwen2ModelDescriptor.create_dummy_block">(Qwen2ModelDescriptor class method)</a>
-</li>
-        <li><a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor.html#modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor.Qwen3ModelDescriptor.create_dummy_block">(Qwen3ModelDescriptor class method)</a>
 </li>
       </ul></li>
       <li><a href="reference/generated/modelopt.torch.fastgen.factory.html#modelopt.torch.fastgen.factory.create_fake_score">create_fake_score() (in module modelopt.torch.fastgen.factory)</a>
@@ -1662,6 +1674,8 @@ data-aria-dark="Switch to auto color mode">
 <table style="width: 100%" class="indextable genindextable"><tr>
   <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="reference/generated/modelopt.torch.sparsity.attention_sparsity.config.html#modelopt.torch.sparsity.attention_sparsity.config.CalibrationConfig.data_dir">data_dir (CalibrationConfig attribute)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.PDDConfig.data_free">data_free (PDDConfig attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.puzzletron_nas_plugin.html#modelopt.torch.puzzletron.puzzletron_nas_plugin.PuzzletronConfig.dataset_path">dataset_path (PuzzletronConfig attribute)</a>
 </li>
@@ -1882,6 +1896,8 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.torch.speculative.config.html#modelopt.torch.speculative.config.DFlashConfig.dflash_lambda_base_start">dflash_lambda_base_start (DFlashConfig attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.speculative.config.html#modelopt.torch.speculative.config.DFlashConfig.dflash_lilicorr_margin">dflash_lilicorr_margin (DFlashConfig attribute)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.speculative.config.html#modelopt.torch.speculative.config.DFlashConfig.dflash_lilicorr_w_cal">dflash_lilicorr_w_cal (DFlashConfig attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.speculative.config.html#modelopt.torch.speculative.config.DFlashConfig.dflash_lilicorr_w_ce">dflash_lilicorr_w_ce (DFlashConfig attribute)</a>
 </li>
@@ -2587,6 +2603,8 @@ data-aria-dark="Switch to auto color mode">
 </li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.block_config.html#modelopt.torch.puzzletron.block_config.Llama4AttentionConfig.floor_scale">floor_scale (Llama4AttentionConfig attribute)</a>
 </li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.PDDConfig.flow_shift">flow_shift (PDDConfig attribute)</a>
+</li>
       <li><a href="reference/generated/modelopt.torch.utils.logging.html#modelopt.torch.utils.logging.TeeStream.flush">flush() (TeeStream method)</a>
 </li>
       <li><a href="reference/generated/modelopt.onnx.utils.html#modelopt.onnx.utils.fold_dq_fp32_to_fp16_casts">fold_dq_fp32_to_fp16_casts() (in module modelopt.onnx.utils)</a>
@@ -2619,10 +2637,10 @@ data-aria-dark="Switch to auto color mode">
 </li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.utils.parsing.html#modelopt.torch.puzzletron.utils.parsing.format_stitched_losses">format_stitched_losses() (in module modelopt.torch.puzzletron.utils.parsing)</a>
 </li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="reference/generated/modelopt.onnx.quantization.autotune.html#modelopt.onnx.quantization.autotune.RegionPattern.format_tree">format_tree() (RegionPattern method)</a>
 </li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="reference/generated/modelopt.torch.quantization.nn.functional.html#modelopt.torch.quantization.nn.functional.ClipFunction.forward">forward() (ClipFunction static method)</a>
 
       <ul>
@@ -2661,6 +2679,8 @@ data-aria-dark="Switch to auto color mode">
         <li><a href="reference/generated/modelopt.torch.distill.losses.html#modelopt.torch.distill.losses.MGDLoss.forward">(MGDLoss method)</a>
 </li>
         <li><a href="reference/generated/modelopt.torch.puzzletron.sewing_kit.passage.html#modelopt.torch.puzzletron.sewing_kit.passage.Passage.forward">(Passage method)</a>
+</li>
+        <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDOutputProjection.forward">(PDDOutputProjection method)</a>
 </li>
         <li><a href="reference/generated/modelopt.torch.quantization.nn.modules.quant_module.html#modelopt.torch.quantization.nn.modules.quant_module.QuantInputBase.forward">(QuantInputBase method)</a>
 </li>
@@ -2757,6 +2777,8 @@ data-aria-dark="Switch to auto color mode">
         <li><a href="reference/generated/modelopt.onnx.quantization.autotune.html#modelopt.onnx.quantization.autotune.ResolvedInsertionPoint.from_dict">(ResolvedInsertionPoint class method)</a>
 </li>
       </ul></li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDOutputProjection.from_linear">from_linear() (PDDOutputProjection class method)</a>
+</li>
       <li><a href="reference/generated/modelopt.torch.export.quant_utils.html#modelopt.torch.export.quant_utils.from_quantized_weight">from_quantized_weight() (in module modelopt.torch.export.quant_utils)</a>
 </li>
       <li><a href="reference/generated/modelopt.onnx.quantization.autotune.html#modelopt.onnx.quantization.autotune.RegionPattern.from_region">from_region() (RegionPattern class method)</a>
@@ -2766,7 +2788,11 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.torch.puzzletron.sewing_kit.passage.html#modelopt.torch.puzzletron.sewing_kit.passage.InputArgs.from_value">from_value() (InputArgs class method)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.DMDConfig.from_yaml">from_yaml() (DMDConfig class method)</a>
+
+      <ul>
+        <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.PDDConfig.from_yaml">(PDDConfig class method)</a>
 </li>
+      </ul></li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.pruning.pruning_utils.html#modelopt.torch.puzzletron.pruning.pruning_utils.LinearInitMode.FromTeacher">FromTeacher (LinearInitMode attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.EMAConfig.fsdp2">fsdp2 (EMAConfig attribute)</a>
@@ -2798,6 +2824,8 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.torch.export.quant_aware_conversion.html#modelopt.torch.export.quant_aware_conversion.SplitRule.fused_suffix">fused_suffix (SplitRule attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.export.trtllm.tensorrt_llm_type.html#modelopt.torch.export.trtllm.tensorrt_llm_type.MLPType.FusedGatedMLP">FusedGatedMLP (MLPType attribute)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.flow_matching.html#modelopt.torch.fastgen.flow_matching.fusion_coefficients">fusion_coefficients() (in module modelopt.torch.fastgen.flow_matching)</a>
 </li>
   </ul></td>
 </tr></table>
@@ -3345,6 +3373,10 @@ data-aria-dark="Switch to auto color mode">
 </li>
       <li><a href="reference/generated/modelopt.onnx.autocast.graphsanitizer.html#modelopt.onnx.autocast.graphsanitizer.GraphSanitizer">GraphSanitizer (class in modelopt.onnx.autocast.graphsanitizer)</a>
 </li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.PDDConfig.grid_max_t">grid_max_t (PDDConfig attribute)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.PDDConfig.grid_size">grid_size (PDDConfig attribute)</a>
+</li>
       <li><a href="reference/generated/modelopt.torch.export.model_utils.html#modelopt.torch.export.model_utils.TiedWeightMap.group_key">group_key() (TiedWeightMap method)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.models.html#modelopt.torch.models.ExportSpec.grouped_expert_export">grouped_expert_export (ExportSpec attribute)</a>
@@ -3354,7 +3386,11 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.torch.export.trtllm.tensorrt_llm_type.html#modelopt.torch.export.trtllm.tensorrt_llm_type.LayerNormType.GroupNorm">GroupNorm (LayerNormType attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.DistillationConfig.guidance_scale">guidance_scale (DistillationConfig attribute)</a>
+
+      <ul>
+        <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.PDDConfig.guidance_scale">(PDDConfig attribute)</a>
 </li>
+      </ul></li>
   </ul></td>
 </tr></table>
 
@@ -3394,6 +3430,8 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.onnx.quantization.autotune.html#modelopt.onnx.quantization.autotune.InsertionScheme.hash">hash (InsertionScheme property)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.block_config.html#modelopt.torch.puzzletron.block_config.MambaConfig.head_dim">head_dim (MambaConfig attribute)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDLayerSpec.head_layout">head_layout (PDDLayerSpec attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.models.html#modelopt.torch.models.hf_model_type">hf_model_type() (in module modelopt.torch.models)</a>
 </li>
@@ -3471,6 +3509,8 @@ data-aria-dark="Switch to auto color mode">
         <li><a href="reference/generated/modelopt.torch.quantization.algorithms.html#modelopt.torch.quantization.algorithms.QuantRecipeHparam.importance">(QuantRecipeHparam property)</a>
 </li>
       </ul></li>
+      <li><a href="reference/generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.GPTQCalibConfig.importance_weighted">importance_weighted (GPTQCalibConfig attribute)</a>
+</li>
       <li><a href="reference/generated/modelopt.torch.opt.hparam.html#modelopt.torch.opt.hparam.Hparam.ImportanceEstimator">ImportanceEstimator (Hparam attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.onnx.autocast.nodeclassifier.html#modelopt.onnx.autocast.nodeclassifier.IncludeNodeNameRegexRule">IncludeNodeNameRegexRule (class in modelopt.onnx.autocast.nodeclassifier)</a>
@@ -3500,6 +3540,8 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.onnx.utils.html#modelopt.onnx.utils.infer_types_verification">infer_types_verification() (in module modelopt.onnx.utils)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.tools.common.html#modelopt.torch.puzzletron.tools.common.infer_weights_dtype">infer_weights_dtype() (in module modelopt.torch.puzzletron.tools.common)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.PDDConfig.inference_blocks">inference_blocks (PDDConfig attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.nas.utils.html#modelopt.torch.nas.utils.inference_flops">inference_flops() (in module modelopt.torch.nas.utils)</a>
 </li>
@@ -3631,6 +3673,8 @@ data-aria-dark="Switch to auto color mode">
 </li>
       <li><a href="reference/generated/modelopt.torch.quantization.tensor_quant.html#modelopt.torch.quantization.tensor_quant.IntCastSTEFunction">IntCastSTEFunction (class in modelopt.torch.quantization.tensor_quant)</a>
 </li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.flow_matching.html#modelopt.torch.fastgen.flow_matching.integrate_interval_velocities">integrate_interval_velocities() (in module modelopt.torch.fastgen.flow_matching)</a>
+</li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.block_config.html#modelopt.torch.puzzletron.block_config.FFNConfig.intermediate_size">intermediate_size (FFNConfig attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.onnx.trt_utils.html#modelopt.onnx.trt_utils.interpret_trt_plugins_precision_flag">interpret_trt_plugins_precision_flag() (in module modelopt.onnx.trt_utils)</a>
@@ -3660,8 +3704,6 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.torch.quantization.ggml.html#modelopt.torch.quantization.ggml.iq2_xxs_fake_quant">iq2_xxs_fake_quant() (in module modelopt.torch.quantization.ggml)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.quantization.ggml.html#modelopt.torch.quantization.ggml.iq2_xxs_grid">iq2_xxs_grid() (in module modelopt.torch.quantization.ggml)</a>
-</li>
-      <li><a href="reference/generated/modelopt.torch.quantization.ggml.html#modelopt.torch.quantization.ggml.IQFormat">IQFormat (in module modelopt.torch.quantization.ggml)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.sewing_kit.utils.html#modelopt.torch.puzzletron.sewing_kit.utils.ActivityContext.is_active">is_active() (ActivityContext method)</a>
 
@@ -3693,14 +3735,14 @@ data-aria-dark="Switch to auto color mode">
       </ul></li>
       <li><a href="reference/generated/modelopt.onnx.quantization.graph_indexing.html#modelopt.onnx.quantization.graph_indexing.is_const_input">is_const_input() (in module modelopt.onnx.quantization.graph_indexing)</a>
 </li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="reference/generated/modelopt.torch.trace.modules.concat.html#modelopt.torch.trace.modules.concat.ConcatSymbol.is_constant">is_constant (ConcatSymbol property)</a>
 
       <ul>
         <li><a href="reference/generated/modelopt.torch.trace.symbols.html#modelopt.torch.trace.symbols.Symbol.is_constant">(Symbol property)</a>
 </li>
       </ul></li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="reference/generated/modelopt.onnx.op_types.html#modelopt.onnx.op_types.is_control_flow_op">is_control_flow_op() (in module modelopt.onnx.op_types)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.export.trtllm.layer_utils.html#modelopt.torch.export.trtllm.layer_utils.is_conv">is_conv() (in module modelopt.torch.export.trtllm.layer_utils)</a>
@@ -4243,13 +4285,13 @@ data-aria-dark="Switch to auto color mode">
         <li><a href="reference/generated/modelopt.torch.puzzletron.tools.checkpoint_utils_hf.html#modelopt.torch.puzzletron.tools.checkpoint_utils_hf.load_model_config">(in module modelopt.torch.puzzletron.tools.checkpoint_utils_hf)</a>
 </li>
       </ul></li>
-      <li><a href="reference/generated/modelopt.onnx.quantization.ort_patching.html#modelopt.onnx.quantization.ort_patching.load_model_with_shape_infer">load_model_with_shape_infer() (in module modelopt.onnx.quantization.ort_patching)</a>
-</li>
       <li><a href="reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.load_modelopt_state">load_modelopt_state() (in module modelopt.torch.opt.conversion)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.subblock_stats.calc_subblock_params_and_memory.html#modelopt.torch.puzzletron.subblock_stats.calc_subblock_params_and_memory.load_moe_stats">load_moe_stats() (in module modelopt.torch.puzzletron.subblock_stats.calc_subblock_params_and_memory)</a>
 </li>
       <li><a href="reference/generated/modelopt.onnx.trt_utils.html#modelopt.onnx.trt_utils.load_onnx_model">load_onnx_model() (in module modelopt.onnx.trt_utils)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.loader.html#modelopt.torch.fastgen.loader.load_pdd_config">load_pdd_config() (in module modelopt.torch.fastgen.loader)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.tools.validate_puzzle_with_multi_replacements.html#modelopt.torch.puzzletron.tools.validate_puzzle_with_multi_replacements.load_puzzle_solutions">load_puzzle_solutions() (in module modelopt.torch.puzzletron.tools.validate_puzzle_with_multi_replacements)</a>
 </li>
@@ -4386,6 +4428,8 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.onnx.quantization.qdq_utils.html#modelopt.onnx.quantization.qdq_utils.make_gs_scale">make_gs_scale() (in module modelopt.onnx.quantization.qdq_utils)</a>
 </li>
       <li><a href="reference/generated/modelopt.onnx.quantization.qdq_utils.html#modelopt.onnx.quantization.qdq_utils.make_gs_zp">make_gs_zp() (in module modelopt.onnx.quantization.qdq_utils)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.flow_matching.html#modelopt.torch.fastgen.flow_matching.make_shifted_flow_grid">make_shifted_flow_grid() (in module modelopt.torch.fastgen.flow_matching)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.block_config.html#modelopt.torch.puzzletron.block_config.AttentionConfig.mamba">mamba (AttentionConfig attribute)</a>
 </li>
@@ -4702,6 +4746,8 @@ data-aria-dark="Switch to auto color mode">
 </li>
         <li><a href="reference/generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.NVFP4ActHeadroomCalibConfig.model_config">(NVFP4ActHeadroomCalibConfig attribute)</a>
 </li>
+        <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.PDDConfig.model_config">(PDDConfig attribute)</a>
+</li>
         <li><a href="reference/generated/modelopt.torch.peft.config.html#modelopt.torch.peft.config.PEFTAttributeConfig.model_config">(PEFTAttributeConfig attribute)</a>
 </li>
         <li><a href="reference/generated/modelopt.torch.peft.config.html#modelopt.torch.peft.config.PEFTConfig.model_config">(PEFTConfig attribute)</a>
@@ -4996,10 +5042,38 @@ data-aria-dark="Switch to auto color mode">
 </li>
       </ul></li>
       <li>
-    modelopt.onnx.quantization.ort_patching
+    modelopt.onnx.quantization.ort_calibration
 
       <ul>
-        <li><a href="reference/generated/modelopt.onnx.quantization.ort_patching.html#module-modelopt.onnx.quantization.ort_patching">module</a>
+        <li><a href="reference/generated/modelopt.onnx.quantization.ort_calibration.html#module-modelopt.onnx.quantization.ort_calibration">module</a>
+</li>
+      </ul></li>
+      <li>
+    modelopt.onnx.quantization.ort_calibration_per_node
+
+      <ul>
+        <li><a href="reference/generated/modelopt.onnx.quantization.ort_calibration_per_node.html#module-modelopt.onnx.quantization.ort_calibration_per_node">module</a>
+</li>
+      </ul></li>
+      <li>
+    modelopt.onnx.quantization.ort_patches
+
+      <ul>
+        <li><a href="reference/generated/modelopt.onnx.quantization.ort_patches.html#module-modelopt.onnx.quantization.ort_patches">module</a>
+</li>
+      </ul></li>
+      <li>
+    modelopt.onnx.quantization.ort_quantization
+
+      <ul>
+        <li><a href="reference/generated/modelopt.onnx.quantization.ort_quantization.html#module-modelopt.onnx.quantization.ort_quantization">module</a>
+</li>
+      </ul></li>
+      <li>
+    modelopt.onnx.quantization.ort_session
+
+      <ul>
+        <li><a href="reference/generated/modelopt.onnx.quantization.ort_session.html#module-modelopt.onnx.quantization.ort_session">module</a>
 </li>
       </ul></li>
       <li>
@@ -5420,6 +5494,13 @@ data-aria-dark="Switch to auto color mode">
 
       <ul>
         <li><a href="reference/generated/modelopt.torch.fastgen.methods.dmd.html#module-modelopt.torch.fastgen.methods.dmd">module</a>
+</li>
+      </ul></li>
+      <li>
+    modelopt.torch.fastgen.methods.pdd
+
+      <ul>
+        <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#module-modelopt.torch.fastgen.methods.pdd">module</a>
 </li>
       </ul></li>
       <li>
@@ -6535,6 +6616,8 @@ data-aria-dark="Switch to auto color mode">
         <li><a href="reference/generated/modelopt.torch.puzzletron.tools.hydra_utils.html#module-modelopt.torch.puzzletron.tools.hydra_utils">module</a>
 </li>
       </ul></li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li>
     modelopt.torch.puzzletron.tools.kd_model
 
@@ -6549,8 +6632,6 @@ data-aria-dark="Switch to auto color mode">
         <li><a href="reference/generated/modelopt.torch.puzzletron.tools.post_init_sparse.html#module-modelopt.torch.puzzletron.tools.post_init_sparse">module</a>
 </li>
       </ul></li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li>
     modelopt.torch.puzzletron.tools.sharded_checkpoint_utils
 
@@ -7570,7 +7651,15 @@ data-aria-dark="Switch to auto color mode">
 </li>
         <li><a href="reference/generated/modelopt.onnx.quantization.operators.html#module-modelopt.onnx.quantization.operators">modelopt.onnx.quantization.operators</a>
 </li>
-        <li><a href="reference/generated/modelopt.onnx.quantization.ort_patching.html#module-modelopt.onnx.quantization.ort_patching">modelopt.onnx.quantization.ort_patching</a>
+        <li><a href="reference/generated/modelopt.onnx.quantization.ort_calibration.html#module-modelopt.onnx.quantization.ort_calibration">modelopt.onnx.quantization.ort_calibration</a>
+</li>
+        <li><a href="reference/generated/modelopt.onnx.quantization.ort_calibration_per_node.html#module-modelopt.onnx.quantization.ort_calibration_per_node">modelopt.onnx.quantization.ort_calibration_per_node</a>
+</li>
+        <li><a href="reference/generated/modelopt.onnx.quantization.ort_patches.html#module-modelopt.onnx.quantization.ort_patches">modelopt.onnx.quantization.ort_patches</a>
+</li>
+        <li><a href="reference/generated/modelopt.onnx.quantization.ort_quantization.html#module-modelopt.onnx.quantization.ort_quantization">modelopt.onnx.quantization.ort_quantization</a>
+</li>
+        <li><a href="reference/generated/modelopt.onnx.quantization.ort_session.html#module-modelopt.onnx.quantization.ort_session">modelopt.onnx.quantization.ort_session</a>
 </li>
         <li><a href="reference/generated/modelopt.onnx.quantization.ort_utils.html#module-modelopt.onnx.quantization.ort_utils">modelopt.onnx.quantization.ort_utils</a>
 </li>
@@ -7691,6 +7780,8 @@ data-aria-dark="Switch to auto color mode">
         <li><a href="reference/generated/modelopt.torch.fastgen.methods.html#module-modelopt.torch.fastgen.methods">modelopt.torch.fastgen.methods</a>
 </li>
         <li><a href="reference/generated/modelopt.torch.fastgen.methods.dmd.html#module-modelopt.torch.fastgen.methods.dmd">modelopt.torch.fastgen.methods.dmd</a>
+</li>
+        <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#module-modelopt.torch.fastgen.methods.pdd">modelopt.torch.fastgen.methods.pdd</a>
 </li>
         <li><a href="reference/generated/modelopt.torch.fastgen.pipeline.html#module-modelopt.torch.fastgen.pipeline">modelopt.torch.fastgen.pipeline</a>
 </li>
@@ -8791,6 +8882,8 @@ data-aria-dark="Switch to auto color mode">
 </li>
       <li><a href="reference/generated/modelopt.torch.trace.symbols.html#modelopt.torch.trace.symbols.Symbol.CLType.OUTGOING">OUTGOING (Symbol.CLType attribute)</a>
 </li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDLayerSpec.output_channels">output_channels (PDDLayerSpec attribute)</a>
+</li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.html#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.output_embedding_name">output_embedding_name() (GptOssModelDescriptor static method)</a>
 
       <ul>
@@ -8913,11 +9006,11 @@ data-aria-dark="Switch to auto color mode">
 </li>
       <li><a href="reference/generated/modelopt.torch.nas.patch.html#modelopt.torch.nas.patch.PatchManager.patch_data_or_empty">patch_data_or_empty (PatchManager property)</a>
 </li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDOutputProjection.patch_factor">patch_factor (PDDOutputProjection property)</a>
+</li>
       <li><a href="reference/generated/modelopt.onnx.quantization.gs_patching.html#modelopt.onnx.quantization.gs_patching.patch_gs_modules">patch_gs_modules() (in module modelopt.onnx.quantization.gs_patching)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.sewing_kit.passage.html#modelopt.torch.puzzletron.sewing_kit.passage.patch_module">patch_module() (in module modelopt.torch.puzzletron.sewing_kit.passage)</a>
-</li>
-      <li><a href="reference/generated/modelopt.onnx.quantization.ort_patching.html#modelopt.onnx.quantization.ort_patching.patch_ort_modules">patch_ort_modules() (in module modelopt.onnx.quantization.ort_patching)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.speculative.utils.html#modelopt.torch.speculative.utils.patch_transformers5_params_loading">patch_transformers5_params_loading() (in module modelopt.torch.speculative.utils)</a>
 </li>
@@ -8946,6 +9039,16 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.onnx.quantization.autotune.html#modelopt.onnx.quantization.autotune.PatternCache">PatternCache (class in modelopt.onnx.quantization.autotune)</a>
 </li>
       <li><a href="reference/generated/modelopt.onnx.quantization.autotune.html#modelopt.onnx.quantization.autotune.PatternSchemes">PatternSchemes (class in modelopt.onnx.quantization.autotune)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.PDDConfig">PDDConfig (class in modelopt.torch.fastgen.config)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDLayerSpec">PDDLayerSpec (class in modelopt.torch.fastgen.methods.pdd)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDModelAdapter">PDDModelAdapter (class in modelopt.torch.fastgen.methods.pdd)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDOutputProjection">PDDOutputProjection (class in modelopt.torch.fastgen.methods.pdd)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDPipeline">PDDPipeline (class in modelopt.torch.fastgen.methods.pdd)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.utils.memory_monitor.html#modelopt.torch.utils.memory_monitor.GPUMemoryMonitor.peak_memory">peak_memory (GPUMemoryMonitor attribute)</a>
 </li>
@@ -8989,6 +9092,8 @@ data-aria-dark="Switch to auto color mode">
         <li><a href="reference/generated/modelopt.torch.export.trtllm.tensorrt_llm_type.html#modelopt.torch.export.trtllm.tensorrt_llm_type.LayerNormPositionType.post_layernorm">(LayerNormPositionType attribute)</a>
 </li>
       </ul></li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="reference/generated/modelopt.torch.trace.modules.concat.html#modelopt.torch.trace.modules.concat.ConcatNodeProcessor.post_process">post_process() (ConcatNodeProcessor method)</a>
 
       <ul>
@@ -9005,8 +9110,6 @@ data-aria-dark="Switch to auto color mode">
         <li><a href="reference/generated/modelopt.onnx.export.html#modelopt.onnx.export.ONNXQuantExporter.post_process">(ONNXQuantExporter static method)</a>
 </li>
       </ul></li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.postprocess_amax">postprocess_amax() (in module modelopt.torch.quantization.model_quant)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.export.trtllm.postprocess.html#modelopt.torch.export.trtllm.postprocess.postprocess_model_config">postprocess_model_config() (in module modelopt.torch.export.trtllm.postprocess)</a>
@@ -9113,6 +9216,8 @@ data-aria-dark="Switch to auto color mode">
         <li><a href="reference/generated/modelopt.torch.export.trtllm.model_config.html#modelopt.torch.export.trtllm.model_config.MLPConfig.proj">(MLPConfig attribute)</a>
 </li>
       </ul></li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDLayerSpec.projection_path">projection_path (PDDLayerSpec attribute)</a>
+</li>
       <li><a href="reference/generated/modelopt.torch.quantization.utils.html#modelopt.torch.quantization.utils.promote_nvfp4_static_quantizers">promote_nvfp4_static_quantizers() (in module modelopt.torch.quantization.utils)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.quantization.utils.html#modelopt.torch.quantization.utils.promote_static_block_weight_quantizers">promote_static_block_weight_quantizers() (in module modelopt.torch.quantization.utils)</a>
@@ -9577,6 +9682,8 @@ data-aria-dark="Switch to auto color mode">
 </li>
       <li><a href="reference/generated/modelopt.onnx.autocast.graphsanitizer.html#modelopt.onnx.autocast.graphsanitizer.GraphSanitizer.remove_disconnected_outputs">remove_disconnected_outputs() (GraphSanitizer method)</a>
 </li>
+      <li><a href="reference/generated/modelopt.onnx.quantization.qdq_graph.html#modelopt.onnx.quantization.qdq_graph.remove_dla_scalar_input_qdq">remove_dla_scalar_input_qdq() (in module modelopt.onnx.quantization.qdq_graph)</a>
+</li>
       <li><a href="reference/generated/modelopt.onnx.quantization.qdq_utils.html#modelopt.onnx.quantization.qdq_utils.remove_graph_input_q">remove_graph_input_q() (in module modelopt.onnx.quantization.qdq_utils)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.quantization.utils.html#modelopt.torch.quantization.utils.SharedQuantState.remove_hooks">remove_hooks() (SharedQuantState method)</a>
@@ -9963,6 +10070,8 @@ data-aria-dark="Switch to auto color mode">
         <li><a href="reference/generated/modelopt.torch.utils.random.html#modelopt.torch.utils.random.sample">(in module modelopt.torch.utils.random)</a>
 </li>
         <li><a href="reference/generated/modelopt.torch.nas.autonas.html#modelopt.torch.nas.autonas.IterativeSearcher.sample">(IterativeSearcher method)</a>
+</li>
+        <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDPipeline.sample">(PDDPipeline method)</a>
 </li>
         <li><a href="reference/generated/modelopt.torch.nas.autonas.html#modelopt.torch.nas.autonas.RandomSearcher.sample">(RandomSearcher method)</a>
 </li>
@@ -10411,6 +10520,10 @@ data-aria-dark="Switch to auto color mode">
 </li>
       <li><a href="reference/generated/modelopt.torch.nas.conversion.html#modelopt.torch.nas.conversion.ExportConfig.strict">strict (ExportConfig attribute)</a>
 </li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDModelAdapter.student_all_heads">student_all_heads() (PDDModelAdapter method)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDModelAdapter.student_fused_block">student_fused_block() (PDDModelAdapter method)</a>
+</li>
       <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.DistillationConfig.student_sample_steps">student_sample_steps (DistillationConfig attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.DistillationConfig.student_sample_type">student_sample_type (DistillationConfig attribute)</a>
@@ -10505,12 +10618,16 @@ data-aria-dark="Switch to auto color mode">
       </ul></li>
       <li><a href="reference/generated/modelopt.torch.sparsity.attention_sparsity.config.html#modelopt.torch.sparsity.attention_sparsity.config.CalibrationConfig.target_sparse_ratio">target_sparse_ratio (CalibrationConfig attribute)</a>
 </li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.PDDConfig.teacher_integrator">teacher_integrator (PDDConfig attribute)</a>
+</li>
       <li><a href="reference/generated/modelopt.torch.distill.distillation_model.html#modelopt.torch.distill.distillation_model.DistillationModel.teacher_model">teacher_model (DistillationModel property)</a>
 
       <ul>
         <li><a href="reference/generated/modelopt.torch.distill.config.html#modelopt.torch.distill.config.KDLossConfig.teacher_model">(KDLossConfig attribute)</a>
 </li>
       </ul></li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDModelAdapter.teacher_velocity">teacher_velocity() (PDDModelAdapter method)</a>
+</li>
       <li><a href="reference/generated/modelopt.torch.utils.logging.html#modelopt.torch.utils.logging.TeeStream">TeeStream (class in modelopt.torch.utils.logging)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.temporarily_fold_weights">temporarily_fold_weights() (in module modelopt.torch.quantization.model_quant)</a>
@@ -10550,6 +10667,8 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.torch.export.model_utils.html#modelopt.torch.export.model_utils.TiedWeightMap">TiedWeightMap (class in modelopt.torch.export.model_utils)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.SampleTimestepConfig.time_dist_type">time_dist_type (SampleTimestepConfig attribute)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.fastgen.methods.pdd.html#modelopt.torch.fastgen.methods.pdd.PDDPipeline.time_grid">time_grid() (PDDPipeline method)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.utils.perf.html#modelopt.torch.utils.perf.Timer">Timer (class in modelopt.torch.utils.perf)</a>
 </li>
@@ -11006,6 +11125,8 @@ data-aria-dark="Switch to auto color mode">
   </ul></td>
   <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="reference/generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.NVFP4ActHeadroomCalibConfig.weight_scale_algorithm">weight_scale_algorithm (NVFP4ActHeadroomCalibConfig attribute)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.quantization.ggml.html#modelopt.torch.quantization.ggml.GGMLFormat.weighted">weighted (GGMLFormat attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.replacement_library.replacement_utils.html#modelopt.torch.puzzletron.replacement_library.replacement_utils.weights_path_to_checkpoint_dir">weights_path_to_checkpoint_dir() (in module modelopt.torch.puzzletron.replacement_library.replacement_utils)</a>
 </li>

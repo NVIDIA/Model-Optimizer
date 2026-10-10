@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>qwen3_model_descriptor - Model Optimizer 0.0.1.dev1+g0e4754aa0</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="qwen3_vl" href="modelopt.torch.puzzletron.anymodel.models.qwen3_vl.html" /><link rel="prev" title="qwen3_converter" href="modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_converter.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>qwen3_model_descriptor - Model Optimizer 0.0.1.dev1+gd2c3552c9</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="qwen3_vl" href="modelopt.torch.puzzletron.anymodel.models.qwen3_vl.html" /><link rel="prev" title="qwen3_converter" href="modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_converter.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -168,7 +168,11 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int4.html">int4</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int8.html">int8</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.operators.html">operators</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration.html">ort_calibration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration_per_node.html">ort_calibration_per_node</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patches.html">ort_patches</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_quantization.html">ort_quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_session.html">ort_session</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.precision_utils.html">precision_utils</a></li>
@@ -404,7 +408,6 @@ data-aria-dark="Switch to auto color mode">
 <li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor.Qwen3ModelDescriptor"><code class="docutils literal notranslate"><span class="pre">Qwen3ModelDescriptor</span></code></a><ul>
 <li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor.Qwen3ModelDescriptor.attn_no_op_post_init"><code class="docutils literal notranslate"><span class="pre">Qwen3ModelDescriptor.attn_no_op_post_init()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor.Qwen3ModelDescriptor.block_config_to_layer_overrides"><code class="docutils literal notranslate"><span class="pre">Qwen3ModelDescriptor.block_config_to_layer_overrides()</span></code></a></li>
-<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor.Qwen3ModelDescriptor.create_dummy_block"><code class="docutils literal notranslate"><span class="pre">Qwen3ModelDescriptor.create_dummy_block()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor.Qwen3ModelDescriptor.decoder_layer_cls"><code class="docutils literal notranslate"><span class="pre">Qwen3ModelDescriptor.decoder_layer_cls()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor.Qwen3ModelDescriptor.final_norm_name"><code class="docutils literal notranslate"><span class="pre">Qwen3ModelDescriptor.final_norm_name()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor.Qwen3ModelDescriptor.init_rotary_embedding"><code class="docutils literal notranslate"><span class="pre">Qwen3ModelDescriptor.init_rotary_embedding()</span></code></a></li>
@@ -585,24 +588,6 @@ data-aria-dark="Switch to auto color mode">
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>block_config</strong> (<a class="reference internal" href="modelopt.torch.puzzletron.block_config.html#modelopt.torch.puzzletron.block_config.BlockConfig" title="modelopt.torch.puzzletron.block_config.BlockConfig"><em>BlockConfig</em></a>)</p>
-</dd>
-</dl>
-</dd></dl>
-
-<dl class="py method">
-<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor.Qwen3ModelDescriptor.create_dummy_block">
-<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">create_dummy_block</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">original_layer</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor.Qwen3ModelDescriptor.create_dummy_block" title="Link to this definition">#</a></dt>
-<dd><p>Create a dummy block that preserves Qwen3-specific attributes like attention_type.</p>
-<p>Qwen3’s forward pass accesses decoder_layer.attention_type for attention mask selection.</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>original_layer</strong> (<em>Module</em>)</p></li>
-<li><p><strong>block_index</strong> (<em>int</em>)</p></li>
-</ul>
-</dd>
-<dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><em>Module</em></p>
 </dd>
 </dl>
 </dd></dl>

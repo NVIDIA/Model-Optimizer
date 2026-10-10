@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>quantization - Model Optimizer 0.0.1.dev1+g0e4754aa0</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="autotune" href="modelopt.onnx.quantization.autotune.html" /><link rel="prev" title="op_types" href="modelopt.onnx.op_types.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>quantization - Model Optimizer 0.0.1.dev1+gd2c3552c9</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="autotune" href="modelopt.onnx.quantization.autotune.html" /><link rel="prev" title="op_types" href="modelopt.onnx.op_types.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -168,7 +168,11 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int4.html">int4</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int8.html">int8</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.operators.html">operators</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration.html">ort_calibration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration_per_node.html">ort_calibration_per_node</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patches.html">ort_patches</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_quantization.html">ort_quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_session.html">ort_session</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.precision_utils.html">precision_utils</a></li>
@@ -462,8 +466,20 @@ data-aria-dark="Switch to auto color mode">
 <tr class="row-odd"><td><p><a class="reference internal" href="modelopt.onnx.quantization.operators.html#module-modelopt.onnx.quantization.operators" title="modelopt.onnx.quantization.operators"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.onnx.quantization.operators</span></code></a></p></td>
 <td><p>Additional or modified QDQ operators on top of ORT quantized operators.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="modelopt.onnx.quantization.ort_patching.html#module-modelopt.onnx.quantization.ort_patching" title="modelopt.onnx.quantization.ort_patching"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.onnx.quantization.ort_patching</span></code></a></p></td>
-<td><p>This module contains all the patched functions from ORT.</p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration.html#module-modelopt.onnx.quantization.ort_calibration" title="modelopt.onnx.quantization.ort_calibration"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.onnx.quantization.ort_calibration</span></code></a></p></td>
+<td><p>Ordinary ONNX Runtime calibration patches.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration_per_node.html#module-modelopt.onnx.quantization.ort_calibration_per_node" title="modelopt.onnx.quantization.ort_calibration_per_node"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.onnx.quantization.ort_calibration_per_node</span></code></a></p></td>
+<td><p>Per-node ONNX Runtime calibration patches.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.onnx.quantization.ort_patches.html#module-modelopt.onnx.quantization.ort_patches" title="modelopt.onnx.quantization.ort_patches"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.onnx.quantization.ort_patches</span></code></a></p></td>
+<td><p>Composition of ModelOpt's ONNX Runtime monkey patches.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.onnx.quantization.ort_quantization.html#module-modelopt.onnx.quantization.ort_quantization" title="modelopt.onnx.quantization.ort_quantization"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.onnx.quantization.ort_quantization</span></code></a></p></td>
+<td><p>Static Q/DQ quantization built on ONNX Runtime.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.onnx.quantization.ort_session.html#module-modelopt.onnx.quantization.ort_session" title="modelopt.onnx.quantization.ort_session"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.onnx.quantization.ort_session</span></code></a></p></td>
+<td><p>ONNX Runtime model loading and inference-session setup.</p></td>
 </tr>
 <tr class="row-odd"><td><p><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html#module-modelopt.onnx.quantization.ort_utils" title="modelopt.onnx.quantization.ort_utils"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.onnx.quantization.ort_utils</span></code></a></p></td>
 <td><p>Provides basic ORT inference utils, should be replaced by modelopt.torch.ort_client.</p></td>

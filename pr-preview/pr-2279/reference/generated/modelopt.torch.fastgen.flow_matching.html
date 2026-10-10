@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>flow_matching - Model Optimizer 0.0.1.dev1+g0e4754aa0</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="loader" href="modelopt.torch.fastgen.loader.html" /><link rel="prev" title="factory" href="modelopt.torch.fastgen.factory.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>flow_matching - Model Optimizer 0.0.1.dev1+gd2c3552c9</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="loader" href="modelopt.torch.fastgen.loader.html" /><link rel="prev" title="factory" href="modelopt.torch.fastgen.factory.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -168,7 +168,11 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int4.html">int4</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int8.html">int8</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.operators.html">operators</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration.html">ort_calibration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration_per_node.html">ort_calibration_per_node</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patches.html">ort_patches</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_quantization.html">ort_quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_session.html">ort_session</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.precision_utils.html">precision_utils</a></li>
@@ -388,6 +392,9 @@ data-aria-dark="Switch to auto color mode">
     </button>
     <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
 <li><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.add_noise"><code class="docutils literal notranslate"><span class="pre">add_noise()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.fusion_coefficients"><code class="docutils literal notranslate"><span class="pre">fusion_coefficients()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.integrate_interval_velocities"><code class="docutils literal notranslate"><span class="pre">integrate_interval_velocities()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.make_shifted_flow_grid"><code class="docutils literal notranslate"><span class="pre">make_shifted_flow_grid()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.pred_noise_to_pred_x0"><code class="docutils literal notranslate"><span class="pre">pred_noise_to_pred_x0()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.pred_x0_from_flow"><code class="docutils literal notranslate"><span class="pre">pred_x0_from_flow()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.rf_alpha"><code class="docutils literal notranslate"><span class="pre">rf_alpha()</span></code></a></li>
@@ -445,8 +452,9 @@ data-aria-dark="Switch to auto color mode">
 handful of primitives that DMD2 actually needs as plain functions, so callers can plug
 fastgen into any training stack without adopting a new scheduler object.</p>
 <p>RF convention used throughout: <code class="docutils literal notranslate"><span class="pre">alpha_t</span> <span class="pre">=</span> <span class="pre">1</span> <span class="pre">-</span> <span class="pre">t</span></code> and <code class="docutils literal notranslate"><span class="pre">sigma_t</span> <span class="pre">=</span> <span class="pre">t</span></code>, so
-<code class="docutils literal notranslate"><span class="pre">x_t</span> <span class="pre">=</span> <span class="pre">(1</span> <span class="pre">-</span> <span class="pre">t)</span> <span class="pre">*</span> <span class="pre">x_0</span> <span class="pre">+</span> <span class="pre">t</span> <span class="pre">*</span> <span class="pre">eps</span></code> with <code class="docutils literal notranslate"><span class="pre">t</span> <span class="pre">in</span> <span class="pre">[0,</span> <span class="pre">1]</span></code>. Internally all arithmetic is in
-<code class="docutils literal notranslate"><span class="pre">float64</span></code> for numerical stability, and the result is cast back to the input dtype.</p>
+<code class="docutils literal notranslate"><span class="pre">x_t</span> <span class="pre">=</span> <span class="pre">(1</span> <span class="pre">-</span> <span class="pre">t)</span> <span class="pre">*</span> <span class="pre">x_0</span> <span class="pre">+</span> <span class="pre">t</span> <span class="pre">*</span> <span class="pre">eps</span></code> with <code class="docutils literal notranslate"><span class="pre">t</span> <span class="pre">in</span> <span class="pre">[0,</span> <span class="pre">1]</span></code>. Existing RF conversions use
+<code class="docutils literal notranslate"><span class="pre">float64</span></code> intermediates and cast back to the input dtype. PDD grid and interval helpers
+instead preserve float32-or-higher outputs because their result remains in the decoding path.</p>
 <p class="rubric">Functions</p>
 <div class="table-wrapper autosummary longtable docutils container">
 <table class="autosummary longtable docutils align-default">
@@ -454,28 +462,37 @@ fastgen into any training stack without adopting a new scheduler object.</p>
 <tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.add_noise" title="modelopt.torch.fastgen.flow_matching.add_noise"><code class="xref py py-obj docutils literal notranslate"><span class="pre">add_noise</span></code></a></p></td>
 <td><p>Forward process under rectified flow: <code class="docutils literal notranslate"><span class="pre">x_t</span> <span class="pre">=</span> <span class="pre">(1</span> <span class="pre">-</span> <span class="pre">t)</span> <span class="pre">*</span> <span class="pre">x_0</span> <span class="pre">+</span> <span class="pre">t</span> <span class="pre">*</span> <span class="pre">eps</span></code>.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.pred_noise_to_pred_x0" title="modelopt.torch.fastgen.flow_matching.pred_noise_to_pred_x0"><code class="xref py py-obj docutils literal notranslate"><span class="pre">pred_noise_to_pred_x0</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.fusion_coefficients" title="modelopt.torch.fastgen.flow_matching.fusion_coefficients"><code class="xref py py-obj docutils literal notranslate"><span class="pre">fusion_coefficients</span></code></a></p></td>
+<td><p>Return step-width-normalized coefficients for a contiguous block <code class="docutils literal notranslate"><span class="pre">[start,</span> <span class="pre">end)</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.integrate_interval_velocities" title="modelopt.torch.fastgen.flow_matching.integrate_interval_velocities"><code class="xref py py-obj docutils literal notranslate"><span class="pre">integrate_interval_velocities</span></code></a></p></td>
+<td><p>Integrate per-sample velocity heads over half-open blocks <code class="docutils literal notranslate"><span class="pre">[start,</span> <span class="pre">end)</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.make_shifted_flow_grid" title="modelopt.torch.fastgen.flow_matching.make_shifted_flow_grid"><code class="xref py py-obj docutils literal notranslate"><span class="pre">make_shifted_flow_grid</span></code></a></p></td>
+<td><p>Construct the fixed decreasing shifted rectified-flow grid.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.pred_noise_to_pred_x0" title="modelopt.torch.fastgen.flow_matching.pred_noise_to_pred_x0"><code class="xref py py-obj docutils literal notranslate"><span class="pre">pred_noise_to_pred_x0</span></code></a></p></td>
 <td><p>Convert an <code class="docutils literal notranslate"><span class="pre">eps</span></code>-parameterized prediction to an <code class="docutils literal notranslate"><span class="pre">x_0</span></code> prediction under RF.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.pred_x0_from_flow" title="modelopt.torch.fastgen.flow_matching.pred_x0_from_flow"><code class="xref py py-obj docutils literal notranslate"><span class="pre">pred_x0_from_flow</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.pred_x0_from_flow" title="modelopt.torch.fastgen.flow_matching.pred_x0_from_flow"><code class="xref py py-obj docutils literal notranslate"><span class="pre">pred_x0_from_flow</span></code></a></p></td>
 <td><p>Convert a flow-parameterized prediction (<code class="docutils literal notranslate"><span class="pre">v</span> <span class="pre">=</span> <span class="pre">eps</span> <span class="pre">-</span> <span class="pre">x_0</span></code>) to an <code class="docutils literal notranslate"><span class="pre">x_0</span></code> prediction.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.rf_alpha" title="modelopt.torch.fastgen.flow_matching.rf_alpha"><code class="xref py py-obj docutils literal notranslate"><span class="pre">rf_alpha</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.rf_alpha" title="modelopt.torch.fastgen.flow_matching.rf_alpha"><code class="xref py py-obj docutils literal notranslate"><span class="pre">rf_alpha</span></code></a></p></td>
 <td><p>Rectified-flow data coefficient <code class="docutils literal notranslate"><span class="pre">alpha_t</span> <span class="pre">=</span> <span class="pre">1</span> <span class="pre">-</span> <span class="pre">t</span></code>.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.rf_sigma" title="modelopt.torch.fastgen.flow_matching.rf_sigma"><code class="xref py py-obj docutils literal notranslate"><span class="pre">rf_sigma</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.rf_sigma" title="modelopt.torch.fastgen.flow_matching.rf_sigma"><code class="xref py py-obj docutils literal notranslate"><span class="pre">rf_sigma</span></code></a></p></td>
 <td><p>Rectified-flow noise coefficient <code class="docutils literal notranslate"><span class="pre">sigma_t</span> <span class="pre">=</span> <span class="pre">t</span></code>.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.sample_from_t_list" title="modelopt.torch.fastgen.flow_matching.sample_from_t_list"><code class="xref py py-obj docutils literal notranslate"><span class="pre">sample_from_t_list</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.sample_from_t_list" title="modelopt.torch.fastgen.flow_matching.sample_from_t_list"><code class="xref py py-obj docutils literal notranslate"><span class="pre">sample_from_t_list</span></code></a></p></td>
 <td><p>Sample <code class="docutils literal notranslate"><span class="pre">n</span></code> starting timesteps uniformly from <code class="docutils literal notranslate"><span class="pre">t_list[:-1]</span></code>.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.sample_timesteps" title="modelopt.torch.fastgen.flow_matching.sample_timesteps"><code class="xref py py-obj docutils literal notranslate"><span class="pre">sample_timesteps</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.sample_timesteps" title="modelopt.torch.fastgen.flow_matching.sample_timesteps"><code class="xref py py-obj docutils literal notranslate"><span class="pre">sample_timesteps</span></code></a></p></td>
 <td><p>Sample <code class="docutils literal notranslate"><span class="pre">n</span></code> training timesteps according to <code class="docutils literal notranslate"><span class="pre">cfg</span></code>.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.x0_to_eps" title="modelopt.torch.fastgen.flow_matching.x0_to_eps"><code class="xref py py-obj docutils literal notranslate"><span class="pre">x0_to_eps</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.x0_to_eps" title="modelopt.torch.fastgen.flow_matching.x0_to_eps"><code class="xref py py-obj docutils literal notranslate"><span class="pre">x0_to_eps</span></code></a></p></td>
 <td><p>Invert the RF forward process: <code class="docutils literal notranslate"><span class="pre">eps</span> <span class="pre">=</span> <span class="pre">(x_t</span> <span class="pre">-</span> <span class="pre">(1</span> <span class="pre">-</span> <span class="pre">t)</span> <span class="pre">*</span> <span class="pre">x_0)</span> <span class="pre">/</span> <span class="pre">t</span></code>.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.x0_to_flow" title="modelopt.torch.fastgen.flow_matching.x0_to_flow"><code class="xref py py-obj docutils literal notranslate"><span class="pre">x0_to_flow</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.flow_matching.x0_to_flow" title="modelopt.torch.fastgen.flow_matching.x0_to_flow"><code class="xref py py-obj docutils literal notranslate"><span class="pre">x0_to_flow</span></code></a></p></td>
 <td><p>Convert an <code class="docutils literal notranslate"><span class="pre">x_0</span></code> prediction back into a flow-parameterized prediction under RF.</p></td>
 </tr>
 </tbody>
@@ -494,6 +511,72 @@ cast back to <code class="docutils literal notranslate"><span class="pre">x_0</s
 <li><p><strong>x0</strong> (<em>Tensor</em>)</p></li>
 <li><p><strong>eps</strong> (<em>Tensor</em>)</p></li>
 <li><p><strong>t</strong> (<em>Tensor</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.flow_matching.fusion_coefficients">
+<span class="sig-name descname"><span class="pre">fusion_coefficients</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">grid</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">start</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">end</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.flow_matching.fusion_coefficients" title="Link to this definition">#</a></dt>
+<dd><p>Return step-width-normalized coefficients for a contiguous block <code class="docutils literal notranslate"><span class="pre">[start,</span> <span class="pre">end)</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>grid</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>start</strong> (<em>int</em>)</p></li>
+<li><p><strong>end</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.flow_matching.integrate_interval_velocities">
+<span class="sig-name descname"><span class="pre">integrate_interval_velocities</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">velocities</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">grid</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">start</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">end</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.flow_matching.integrate_interval_velocities" title="Link to this definition">#</a></dt>
+<dd><p>Integrate per-sample velocity heads over half-open blocks <code class="docutils literal notranslate"><span class="pre">[start,</span> <span class="pre">end)</span></code>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">state</span></code> is batch-first with shape <code class="docutils literal notranslate"><span class="pre">[B,</span> <span class="pre">...]</span></code> and <code class="docutils literal notranslate"><span class="pre">velocities</span></code> has shape
+<code class="docutils literal notranslate"><span class="pre">[B,</span> <span class="pre">N,</span> <span class="pre">...]</span></code>. <code class="docutils literal notranslate"><span class="pre">start</span></code> and <code class="docutils literal notranslate"><span class="pre">end</span></code> may be scalar integers or integer
+tensors of shape <code class="docutils literal notranslate"><span class="pre">[B]</span></code>. The empty block <code class="docutils literal notranslate"><span class="pre">start</span> <span class="pre">==</span> <span class="pre">end</span></code> returns <code class="docutils literal notranslate"><span class="pre">state</span></code>
+promoted to the PDD math dtype.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>state</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>velocities</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>grid</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>start</strong> (<em>int</em><em> | </em><em>Tensor</em>)</p></li>
+<li><p><strong>end</strong> (<em>int</em><em> | </em><em>Tensor</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.flow_matching.make_shifted_flow_grid">
+<span class="sig-name descname"><span class="pre">make_shifted_flow_grid</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">grid_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">shift</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_t</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">device</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dtype</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">torch.float32</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.flow_matching.make_shifted_flow_grid" title="Link to this definition">#</a></dt>
+<dd><p>Construct the fixed decreasing shifted rectified-flow grid.</p>
+<p>Schedule construction and upper clamps use float64, matching FastGen’s RF
+scheduler. The completed grid is cast to the requested PDD math dtype. Low
+precision requests are promoted to float32 so distinct early intervals do not
+collapse for the canonical 128-node, shift-5 schedule.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>grid_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>shift</strong> (<em>float</em>)</p></li>
+<li><p><strong>max_t</strong> (<em>float</em>)</p></li>
+<li><p><strong>device</strong> (<em>device</em><em> | </em><em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>dtype</strong> (<em>dtype</em>)</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>

@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>loader - Model Optimizer 0.0.1.dev1+g0e4754aa0</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="losses" href="modelopt.torch.fastgen.losses.html" /><link rel="prev" title="flow_matching" href="modelopt.torch.fastgen.flow_matching.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>loader - Model Optimizer 0.0.1.dev1+gd2c3552c9</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="losses" href="modelopt.torch.fastgen.losses.html" /><link rel="prev" title="flow_matching" href="modelopt.torch.fastgen.flow_matching.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -168,7 +168,11 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int4.html">int4</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int8.html">int8</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.operators.html">operators</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration.html">ort_calibration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_calibration_per_node.html">ort_calibration_per_node</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patches.html">ort_patches</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_quantization.html">ort_quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_session.html">ort_session</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.precision_utils.html">precision_utils</a></li>
@@ -389,6 +393,7 @@ data-aria-dark="Switch to auto color mode">
     <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
 <li><a class="reference internal" href="#modelopt.torch.fastgen.loader.load_config"><code class="docutils literal notranslate"><span class="pre">load_config()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.fastgen.loader.load_dmd_config"><code class="docutils literal notranslate"><span class="pre">load_dmd_config()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.fastgen.loader.load_pdd_config"><code class="docutils literal notranslate"><span class="pre">load_pdd_config()</span></code></a></li>
 </ul>
 </div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
   </aside>
@@ -434,9 +439,9 @@ data-aria-dark="Switch to auto color mode">
           <section id="loader">
 <h1>loader<a class="headerlink" href="#loader" title="Link to this heading">#</a></h1>
 <p id="module-modelopt.torch.fastgen.loader">YAML-driven configuration loading for fastgen distillation pipelines.</p>
-<p>YAML is the first-class entry point for DMD configurations — the fastgen library
+<p>YAML is the first-class entry point for fastgen configurations — the library
 does not expect callers to hand-build Python dicts. Typical usage:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.fastgen</span><span class="w"> </span><span class="kn">import</span> <span class="n">DMDConfig</span><span class="p">,</span> <span class="n">load_dmd_config</span>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.fastgen</span><span class="w"> </span><span class="kn">import</span> <span class="n">DMDConfig</span><span class="p">,</span> <span class="n">PDDConfig</span><span class="p">,</span> <span class="n">load_dmd_config</span><span class="p">,</span> <span class="n">load_pdd_config</span>
 </span><span data-line="2">
 </span><span data-line="3"><span class="c1"># (a) Load a built-in recipe by relative path</span>
 </span><span data-line="4"><span class="n">cfg</span> <span class="o">=</span> <span class="n">load_dmd_config</span><span class="p">(</span><span class="s2">"general/distillation/dmd2_qwen_image"</span><span class="p">)</span>
@@ -446,13 +451,16 @@ does not expect callers to hand-build Python dicts. Typical usage:</p>
 </span><span data-line="8">
 </span><span data-line="9"><span class="c1"># (c) Equivalent classmethod</span>
 </span><span data-line="10"><span class="n">cfg</span> <span class="o">=</span> <span class="n">DMDConfig</span><span class="o">.</span><span class="n">from_yaml</span><span class="p">(</span><span class="s2">"/path/to/my_dmd.yaml"</span><span class="p">)</span>
+</span><span data-line="11">
+</span><span data-line="12"><span class="c1"># (d) PDD uses the same resolver with its own schema</span>
+</span><span data-line="13"><span class="n">pdd_cfg</span> <span class="o">=</span> <span class="n">PDDConfig</span><span class="o">.</span><span class="n">from_yaml</span><span class="p">(</span><span class="s2">"general/distillation/pdd_qwen_image"</span><span class="p">)</span>
 </span></pre></div>
 </div>
 <p>The loader resolves paths in two places, in order:</p>
 <ol class="arabic simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">modelopt_recipes/</span></code> (the built-in recipes package shipped with ModelOpt) — resolved
-via <code class="xref py py-func docutils literal notranslate"><span class="pre">importlib.resources.files()</span></code>. Suffixes <code class="docutils literal notranslate"><span class="pre">.yml</span></code> / <code class="docutils literal notranslate"><span class="pre">.yaml</span></code> may be omitted.</p></li>
 <li><p>The filesystem (absolute or working-directory-relative).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">modelopt_recipes/</span></code> (the built-in recipes package shipped with ModelOpt) — resolved
+via <code class="xref py py-func docutils literal notranslate"><span class="pre">importlib.resources.files()</span></code> for relative paths.</p></li>
 </ol>
 <p>Suffixes <code class="docutils literal notranslate"><span class="pre">.yml</span></code> and <code class="docutils literal notranslate"><span class="pre">.yaml</span></code> are both accepted.</p>
 <p class="rubric">Functions</p>
@@ -465,6 +473,9 @@ via <code class="xref py py-func docutils literal notranslate"><span class="pre"
 <tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.loader.load_dmd_config" title="modelopt.torch.fastgen.loader.load_dmd_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">load_dmd_config</span></code></a></p></td>
 <td><p>Load a YAML file and construct a <code class="xref py py-class docutils literal notranslate"><span class="pre">DMDConfig</span></code>.</p></td>
 </tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.fastgen.loader.load_pdd_config" title="modelopt.torch.fastgen.loader.load_pdd_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">load_pdd_config</span></code></a></p></td>
+<td><p>Load a YAML file and construct a validated <code class="xref py py-class docutils literal notranslate"><span class="pre">PDDConfig</span></code>.</p></td>
+</tr>
 </tbody>
 </table>
 </div>
@@ -476,8 +487,8 @@ via <code class="xref py py-func docutils literal notranslate"><span class="pre"
 the ExMy-num-bits post-processing that is specific to quantization recipes.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><p><strong>config_file</strong> (<em>str</em><em> | </em><em>Path</em>) – YAML path. Suffix is optional; resolution searches the built-in
-<code class="docutils literal notranslate"><span class="pre">modelopt_recipes/</span></code> package first, then the filesystem.</p>
+<dd class="field-odd"><p><strong>config_file</strong> (<em>str</em><em> | </em><em>Path</em>) – YAML path. Suffix is optional; resolution searches the filesystem
+first, then the built-in <code class="docutils literal notranslate"><span class="pre">modelopt_recipes/</span></code> package.</p>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
 <dd class="field-even"><p>The parsed dictionary. An empty file yields <code class="docutils literal notranslate"><span class="pre">{}</span></code>.</p>
@@ -512,6 +523,20 @@ raise <code class="docutils literal notranslate"><span class="pre">ValidationErr
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
 <dd class="field-even"><p><a class="reference internal" href="modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.DMDConfig" title="modelopt.torch.fastgen.config.DMDConfig"><em>DMDConfig</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.fastgen.loader.load_pdd_config">
+<span class="sig-name descname"><span class="pre">load_pdd_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config_file</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.fastgen.loader.load_pdd_config" title="Link to this definition">#</a></dt>
+<dd><p>Load a YAML file and construct a validated <code class="xref py py-class docutils literal notranslate"><span class="pre">PDDConfig</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>config_file</strong> (<em>str</em><em> | </em><em>Path</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.PDDConfig" title="modelopt.torch.fastgen.config.PDDConfig"><em>PDDConfig</em></a></p>
 </dd>
 </dl>
 </dd></dl>
