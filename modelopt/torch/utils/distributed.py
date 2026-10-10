@@ -22,7 +22,7 @@ import sys
 import time
 import traceback
 from collections.abc import Callable, Iterator
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import timedelta
 from typing import Any
 from warnings import warn
@@ -34,16 +34,22 @@ from torch.distributed.tensor import DTensor
 
 __all__ = [
     "DistributedProcessGroup",
+    "DistributionPlan",
+    "ModelOptSession",
     "ParallelState",
     "backend",
     "barrier",
     "fsdp2_wrap",
     "gather_bytes",
     "gather_state_dicts",
+    "get_active_mo_session",
     "is_available",
+    "is_distributed_launch",
+    "is_distributed_run",
     "is_fsdp2_model",
     "is_initialized",
     "is_master",
+    "modelopt_session",
     "rank",
     "size",
 ]
@@ -96,6 +102,26 @@ def is_master(group=None) -> bool:
 def is_last_process(group=None) -> bool:
     """Returns whether the current process is the last process."""
     return rank(group=group) == size(group=group) - 1
+
+
+def is_distributed_launch() -> bool:
+    """True if launched distributed (WORLD_SIZE>1), readable BEFORE the process group is set up.
+
+    Env-based (does NOT touch the guarded session -- see :func:`get_active_mo_session`), so parse-time code
+    can detect the launch mode before :func:`modelopt_session` exists. After the session is entered, prefer
+    ``get_active_mo_session().distributed``.
+    """
+    return int(os.environ.get("WORLD_SIZE", "1")) > 1
+
+
+def is_distributed_run() -> bool:
+    """True if a real multi-rank job is running: the process group is initialized and world size > 1.
+
+    Runtime state (checks the live process group), unlike :func:`is_distributed_launch` which reads
+    only the launch env. A single process or a 1-rank group returns False. Backend-agnostic -- true
+    for any backend that initialized ``torch.distributed`` (HF EP/DP loader, Megatron, plain DDP).
+    """
+    return is_initialized() and size() > 1
 
 
 def _serialize(obj: Any) -> torch.Tensor:
@@ -267,6 +293,212 @@ def setup(timeout: timedelta | None = None):
     torch.cuda.set_device(local_rank())
     if not is_initialized():
         torch.distributed.init_process_group("cpu:gloo,cuda:nccl", timeout=timeout)
+
+
+class DistributionPlan:
+    """How a HuggingFace MoE model is distributed for PTQ, as decided by ``decide_distribution_plan``.
+
+    * ``ep_size``   -- expert-parallel degree: the routed experts are sharded over ``ep_size`` ranks.
+    * ``fsdp_size`` -- dense-FSDP degree: ``1`` replicates the dense (non-expert) part on every rank; ``>1``
+                       FSDP2-shards it alongside the expert-parallel experts.
+
+    Every rank calibrates on its own data, so data-parallelism spans the whole world, and each expert
+    shard is replicated ``edp = world_size / ep_size`` times.
+    """
+
+    def __init__(self, world_size: int, ep_size: int = 1, fsdp_size: int = 1) -> None:
+        """Build the plan, rejecting an expert-parallel degree that cannot divide the world."""
+        if world_size % ep_size != 0:
+            raise ValueError(f"ep_size={ep_size} must divide world_size={world_size}")
+        self.world_size = world_size
+        self.ep_size = ep_size
+        self.fsdp_size = fsdp_size
+
+    @property
+    def edp(self) -> int:
+        """Expert-data-parallel degree: how many ranks hold a replica of each expert shard."""
+        return self.world_size // self.ep_size
+
+    @property
+    def is_expert_parallel(self) -> bool:
+        """Whether routed experts are sharded across ranks."""
+        return self.ep_size > 1
+
+    @property
+    def is_fsdp_dense(self) -> bool:
+        """Whether the dense part is FSDP-sharded rather than replicated."""
+        return self.fsdp_size > 1
+
+    def __repr__(self) -> str:
+        dense = f"fsdp_size={self.fsdp_size}" if self.is_fsdp_dense else "dense=replicate"
+        return (
+            f"DistributionPlan(world={self.world_size}, ep_size={self.ep_size}, edp={self.edp}, "
+            f"{dense})"
+        )
+
+
+class ModelOptSession:
+    """The live distributed session of a PTQ run: this process's identity, plus the model's EP mesh.
+
+    One class covers both cases: ``distributed`` is False for a single process (``WORLD_SIZE==1``) and
+    True for a real ``torch.distributed`` launch (``WORLD_SIZE>1``). Two parts, with different lifetimes:
+
+    * process IDENTITY (``distributed``/``rank``/``world_size``/``local_rank``/``device``/``is_main``) --
+      stable for the whole run, populated once by :func:`modelopt_session`. Reading ANY before
+      initialization raises, so code cannot silently consume a stale/zero default before the process
+      group is set up.
+    * ``ep_mesh`` -- the expert-parallel device mesh of the loaded model, set by ``load_and_prepare_ep``
+      (``None`` until then, and for a model loaded without expert parallelism).
+    """
+
+    def __init__(self) -> None:
+        """Create an empty (uninitialized) session; populate identity with :meth:`initialize`."""
+        self._values: dict[str, Any] | None = None
+        self.ep_mesh = None
+
+    def initialize(
+        self,
+        *,
+        distributed: bool,
+        rank: int,
+        world_size: int,
+        local_rank: int,
+        device,
+        is_main: bool,
+    ) -> None:
+        """Populate the session fields (called by ``modelopt_session``, or directly for tests)."""
+        self._values = {
+            "distributed": distributed,
+            "rank": rank,
+            "world_size": world_size,
+            "local_rank": local_rank,
+            "device": device,
+            "is_main": is_main,
+        }
+
+    def _reset(self) -> None:
+        self._values = None
+        self.ep_mesh = None
+
+    @property
+    def initialized(self) -> bool:
+        """Whether ``modelopt_session`` has populated the state."""
+        return self._values is not None
+
+    def _get(self, key: str):
+        if self._values is None:
+            raise RuntimeError(
+                "session accessed before initialization; enter "
+                "modelopt.torch.utils.distributed.modelopt_session() first"
+            )
+        return self._values[key]
+
+    @property
+    def distributed(self) -> bool:
+        """True for a distributed launch (WORLD_SIZE>1), False for single-process."""
+        return self._get("distributed")
+
+    @property
+    def rank(self) -> int:
+        """Global rank of this process (0 single-process)."""
+        return self._get("rank")
+
+    @property
+    def world_size(self) -> int:
+        """Total number of processes (1 single-process)."""
+        return self._get("world_size")
+
+    @property
+    def local_rank(self) -> int:
+        """Node-local rank of this process (0 single-process)."""
+        return self._get("local_rank")
+
+    @property
+    def device(self):
+        """This process's torch device (``cuda:local_rank`` distributed; the caller default otherwise)."""
+        return self._get("device")
+
+    @property
+    def is_main(self) -> bool:
+        """Whether this is the main process (rank 0)."""
+        return self._get("is_main")
+
+
+# The process-wide ACTIVE session: a single STABLE object created once at import and NEVER rebound.
+# :func:`modelopt_session` mutates it in place via :meth:`ModelOptSession.initialize` / ``_reset`` rather
+# than assigning a new object -- so any held reference stays valid and never goes stale. Module-PRIVATE
+# (not exported): reach it only through :func:`get_active_mo_session`. It exists before initialization;
+# reading its IDENTITY fields (``rank`` etc.) then raises via the per-field guard.
+_active_mo_session: ModelOptSession = ModelOptSession()
+
+
+def get_active_mo_session(required: bool = True) -> ModelOptSession:
+    """Return the process-wide session.
+
+    * ``required=True`` (default) -- fail-fast: raise if no session has been entered yet by
+      :func:`modelopt_session`. Use when the caller genuinely needs a live session.
+    * ``required=False`` -- return the singleton regardless of initialization. Its ``ep_mesh`` is
+      readable (``None``) even before a session is entered, so this is for defensive reads deep in public
+      APIs (export / calibration) that may run with no active session.
+    """
+    if required and not _active_mo_session.initialized:
+        raise RuntimeError(
+            "no active session; enter modelopt.torch.utils.distributed.modelopt_session() first"
+        )
+    return _active_mo_session
+
+
+@contextmanager
+def modelopt_session(timeout: timedelta | None = None, device=None):
+    """Populate the active session for the block, then tear down.
+
+    On a distributed launch (WORLD_SIZE>1) this initializes the process group (binding the local CUDA
+    device) with ``timeout`` and records rank/world_size/local_rank/``cuda:local_rank``/is_main; it
+    DESTROYS the group on exit even if the body raises. Single-process records the trivial single-rank
+    topology -- with ``device`` as the device (the caller's default, e.g. the ``--device`` CLI value, since
+    there is no local rank to derive one) -- and enter/exit are no-ops around the body.
+
+    Yields the session (also reachable via :func:`get_active_mo_session`); it is reset on exit.
+    """
+    owns_group = is_distributed_launch()
+    if owns_group:
+        setup(timeout=timeout)
+        _active_mo_session.initialize(
+            distributed=True,
+            rank=rank(),
+            world_size=size(),
+            local_rank=local_rank(),
+            device=torch.device(f"cuda:{local_rank()}"),
+            is_main=rank() == 0,
+        )
+    else:
+        _active_mo_session.initialize(
+            distributed=False,
+            rank=0,
+            world_size=1,
+            local_rank=0,
+            device=torch.device(device) if device is not None else None,
+            is_main=True,
+        )
+    try:
+        yield _active_mo_session
+    finally:
+        # If the body is unwinding due to an exception, PRINT it here BEFORE cleanup()'s collective
+        # barrier. A per-rank exception (only some ranks raise) otherwise makes those ranks enter the
+        # cleanup barrier while the rest are still inside a calibration a2a collective -> cross-rank
+        # DEADLOCK, with the original exception never surfaced (pending behind the hung barrier).
+        exc = sys.exc_info()[1]
+        if exc is not None:
+            print(
+                f"[modelopt_session][rank {os.environ.get('RANK', '?')}] body raised "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            traceback.print_exc()
+            sys.stderr.flush()
+        if owns_group:
+            cleanup()
+        _active_mo_session._reset()
 
 
 def cleanup():
