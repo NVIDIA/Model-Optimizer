@@ -151,7 +151,7 @@ def gpu_trtllm(session):
 # Pin must stay in sync with examples/vllm_serve/Dockerfile.
 @nox.session(venv_backend="none")
 def gpu_vllm(session):
-    session.run("python3", "-m", "pip", "install", "-e", ".[hf,puzzletron,dev-test]")
+    session.run("python3", "-m", "pip", "install", "-e", ".[hf,puzzletron,dev-test,dev-fla]")
     session.run("python3", "-m", "pytest", "tests/gpu_vllm", *_cov_args())
 
 
