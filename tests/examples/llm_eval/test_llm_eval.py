@@ -63,9 +63,9 @@ def test_qwen3_eval_fp8(tmp_path):
             simple_eval_tasks="humaneval",
             lm_eval_limit=16,
             simple_eval_limit=16,
-            # MMLU has no inherent sample cap and otherwise evaluates the full ~14k-question
-            # test set; limit it like lm_eval/simple_eval to keep this a fast smoke test.
-            mmlu_limit=16,
+            # mmlu.py applies the limit per subject (57 of them), one TRT-LLM call per prompt:
+            # 1 still exercises every subject, 16 would be 912 sequential calls.
+            mmlu_limit=1,
             output=128,  # Cap generation length: gsm8k/humaneval otherwise generate up to 1024 tokens/sample
             batch=8,
         )
