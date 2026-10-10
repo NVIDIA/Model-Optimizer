@@ -124,6 +124,7 @@ dev-test = [
     "pytest-cov~=7.1.0",
     "pytest-instafail==0.5.0",
     "pytest-timeout~=2.4.0",
+    "pytest-xdist~=3.8.0",
     "tomli; python_version < '3.11'",
     "uv",
     # test-specific dependencies
@@ -357,8 +358,9 @@ skips = [
 [tool.pytest.ini_options]
 # Default additional options
 # Show a short test summary info for all except passed tests with -ra flag
-# print execution time for 50 slowest tests and generate coverage reports
-addopts = "-v -ra --instafail --cov-report=term-missing --cov-report=html --cov-report=xml:coverage.xml --cov-config=pyproject.toml --durations=50 --strict-markers"
+# print execution time for 50 slowest tests and write the coverage.xml that CI uploads
+# (add --cov-report=html or --cov-report=term-missing locally; each adds 5-20 s to the end of a run)
+addopts = "-v -ra --instafail --cov-report=xml:coverage.xml --cov-config=pyproject.toml --durations=50 --strict-markers"
 pythonpath = ["tests/"]
 # Apply per-test timeouts (see tests/conftest.py) to the test call only, not fixture setup/teardown
 timeout_func_only = true

@@ -61,6 +61,10 @@ _DFLASH_OVERRIDES = [
     "dflash.dflash_architecture_config.num_hidden_layers=2",
 ]
 
+# Steps, not epochs: accelerate runs one process per GPU, so an epoch is 500 steps on 1 GPU, 250 on 2.
+_TRAIN_STEPS = 500
+_RESUME_STEPS = 20
+
 
 @pytest.fixture(scope="session")
 def qwen3_model_name():
@@ -80,8 +84,8 @@ def test_dflash_training(qwen3_model_name, dflash_output_dir):
     overrides = [
         f"model.model_name_or_path={qwen3_model_name}",
         f"training.output_dir={output_dir}",
-        "training.num_train_epochs=3",
-        "training.save_steps=500",
+        f"training.max_steps={_TRAIN_STEPS}",
+        f"training.save_steps={_TRAIN_STEPS}",
         *_DFLASH_OVERRIDES,
     ]
 
@@ -108,7 +112,7 @@ def test_dflash_training(qwen3_model_name, dflash_output_dir):
     first_loss = float(logs[0]["loss"])
     final_loss = float(logs[-1]["loss"])
     assert final_loss < first_loss, f"Loss did not decrease: {first_loss:.3f} -> {final_loss:.3f}"
-    # Sanity: final loss should be reasonable (baseline: ~1.1 on L40)
+    # Sanity: final loss should be reasonable (baseline: ~1.8 at step 500 on L40)
     assert final_loss < 3.0, f"Final loss {final_loss:.3f} too high (expected < 3.0)"
 
 
@@ -118,7 +122,7 @@ def test_dflash_resume(qwen3_model_name, dflash_output_dir):
     overrides = [
         f"model.model_name_or_path={qwen3_model_name}",
         f"training.output_dir={output_dir}",
-        "training.num_train_epochs=4",
+        f"training.max_steps={_TRAIN_STEPS + _RESUME_STEPS}",
         "training.save_steps=5000",
         *_DFLASH_OVERRIDES,
     ]
@@ -127,6 +131,11 @@ def test_dflash_resume(qwen3_model_name, dflash_output_dir):
         ["./launch_train.sh", "--config", DFLASH_YAML, *overrides],
         "speculative_decoding",
     )
+
+    with open(os.path.join(output_dir, "trainer_state.json")) as f:
+        state = json.load(f)
+    assert state["global_step"] == _TRAIN_STEPS + _RESUME_STEPS, state["global_step"]
+    assert any(h["step"] > _TRAIN_STEPS for h in state["log_history"]), "no log entry after resume"
 
 
 def test_dflash_export(dflash_output_dir):

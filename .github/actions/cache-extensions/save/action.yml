@@ -1,0 +1,31 @@
+name: Save extension caches
+description: Save the JIT caches that cache-extensions did not restore with an exact key match. Run it under always() so a failed or cancelled run still
+  seeds the next one.
+
+inputs:
+  ext-key:
+    description: The ext-key output of cache-extensions.
+    required: true
+  ext-hit:
+    description: The ext-hit output of cache-extensions.
+    required: true
+  triton-key:
+    description: The triton-key output of cache-extensions.
+    required: true
+  triton-hit:
+    description: The triton-hit output of cache-extensions.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - if: inputs.ext-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: /root/.cache/torch_extensions
+        key: ${{ inputs.ext-key }}
+    - if: inputs.triton-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: /root/.cache/triton
+        key: ${{ inputs.triton-key }}

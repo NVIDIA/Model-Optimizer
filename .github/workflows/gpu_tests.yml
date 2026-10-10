@@ -72,6 +72,8 @@ jobs:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
         # Build CUDA kernels only for the runner's RTX PRO 6000 (sm_120), not the image's ~6 archs.
         TORCH_CUDA_ARCH_LIST: "12.0"
+        # Where the gpu lane keeps the CUDA wheels it would otherwise compile (see noxfile.py).
+        WHEELHOUSE: /root/.cache/wheelhouse
     steps:
       - name: Install git
         # The vllm container ships without git; needed for a real checkout (correct
@@ -80,19 +82,61 @@ jobs:
         run: apt-get update && apt-get install -y git
       - uses: actions/checkout@v6
       - uses: nv-gha-runners/setup-proxy-cache@main
-      - uses: ./.github/actions/cache-extensions
+      - id: jit-cache
+        uses: ./.github/actions/cache-extensions
         with:
-          cache-key: rtxpro6000-${{ matrix.container_image }}
+          # One entry per lane: lanes sharing an image (gpu_megatron and the megatron_bridge
+          # example) would otherwise share one immutable, partially filled entry.
+          cache-key: rtxpro6000-${{ matrix.example }}-${{ matrix.container_image }}
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+      # The gpu lane compiles mamba_ssm, causal-conv1d and fast-hadamard-transform, 6-8 min. The
+      # nightly run on main builds them once per container image and ISO week (so new releases
+      # are picked up) and saves the wheels; every other run restores them. Without a cached
+      # wheelhouse the gpu session compiles them itself.
+      - name: Get the ISO week
+        id: week
+        if: matrix.example == 'gpu'
+        run: echo "iso=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+      - name: Restore CUDA wheels
+        id: wheelhouse
+        if: matrix.example == 'gpu'
+        uses: actions/cache/restore@v6
+        with:
+          path: /root/.cache/wheelhouse
+          key: wheelhouse-${{ matrix.container_image }}-${{ steps.week.outputs.iso }}-${{ hashFiles('noxfile.py') }}
+      - name: Build CUDA wheels
+        if: matrix.example == 'gpu' && github.ref == 'refs/heads/main' && steps.wheelhouse.outputs.cache-hit != 'true'
+        run: python3 -m pip install nox && nox -s gpu_wheels
+      - name: Save CUDA wheels
+        if: matrix.example == 'gpu' && github.ref == 'refs/heads/main' && steps.wheelhouse.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: /root/.cache/wheelhouse
+          key: ${{ steps.wheelhouse.outputs.cache-primary-key }}
       - name: Run gpu tests
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
+          # sys.monitoring records the same lines as the default C tracer at a fraction of the
+          # overhead on import-heavy worker processes. Needs Python 3.12+.
+          COVERAGE_CORE: sysmon
+          # Tests marked `release` (real-weight downloads and the like) run on nightly and
+          # on-demand runs, not on pull requests.
+          PYTEST_ADDOPTS: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') && '--run-release' || '' }}
         run: |
           # Use `python3` (the vllm image has no `python` on PATH)
           python3 -m pip install nox && nox -s ${{ matrix.example }}
+      - name: Save JIT caches
+        # Also after a failed or cancelled run, so the next run starts warm
+        if: always()
+        uses: ./.github/actions/cache-extensions/save
+        with:
+          ext-key: ${{ steps.jit-cache.outputs.ext-key }}
+          ext-hit: ${{ steps.jit-cache.outputs.ext-hit }}
+          triton-key: ${{ steps.jit-cache.outputs.triton-key }}
+          triton-hit: ${{ steps.jit-cache.outputs.triton-hit }}
       - name: Upload GPU coverage to Codecov
         uses: codecov/codecov-action@v7
         with:

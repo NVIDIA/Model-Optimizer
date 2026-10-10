@@ -23,7 +23,7 @@ import modelopt.torch.quantization as mtq
 
 from .models import SimpleConv, SimpleConvLinear, SimpleLinear
 
-TEST_MODELS = {SimpleLinear, SimpleConv, SimpleConvLinear}
+TEST_MODELS = (SimpleLinear, SimpleConv, SimpleConvLinear)
 
 
 def onnx_export_tester(model, device, num_bits, per_channel_quantization, constant_folding, dtype):

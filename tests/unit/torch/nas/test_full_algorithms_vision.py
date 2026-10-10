@@ -117,7 +117,7 @@ def test_searched_model_constraints(get_model_and_input, variant):
         pytest.param(False, False, marks=pytest.mark.manual),
     ],
 )
-def test_search_constraints(flops_only: bool, bounded_latency: bool):
+def test_search_constraints(flops_only: bool, bounded_latency: bool, monkeypatch):
     def _fake_latency(self, model, precomputed=None):
         coeff_params = 0.00 if flops_only else 0.75
         if not hasattr(_fake_latency, "call_counter"):
@@ -130,8 +130,9 @@ def test_search_constraints(flops_only: bool, bounded_latency: bool):
     dummy_input = (*args, kwargs)
     model = mtn.convert(model, mode="autonas")
 
-    # get fake latency and spoof ConstraintsFunc class
-    ConstraintsFunc._get_true_latency = _fake_latency
+    # get fake latency and spoof ConstraintsFunc class (undone after the test: a class-level patch
+    # that stays behind changes the latency of every later test in the same process)
+    monkeypatch.setattr(ConstraintsFunc, "_get_true_latency", _fake_latency)
 
     # now setup constraints functor
     constraints_func = ConstraintsFunc(model, {}, dummy_input, {"device": None})
