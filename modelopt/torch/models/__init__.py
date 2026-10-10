@@ -89,6 +89,8 @@ from . import (  # isort: skip
     phimoe,
     nemotron,
     nemotron_h,
+    minimax_m3_vl,
+    llama4_text,
     nemotron_h_omni,
     qwen2_moe,
     qwen3,

@@ -13,9 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Llama4 specs (HF model type ``llama4``)."""
+"""Llama4 specs (HF model type ``llama4``).
 
-from ..specs import ModelSpec, MoESpec, register
+Llama-4 is the one MoE that does not follow the transformers sparse-dispatch convention -- its MoE
+block routes inline and computes every expert densely -- so making it expert-parallel is an adapter
+rather than a plan, and lives in ``ep.py``.
+"""
+
+from ..specs import EPSpec, ModelSpec, MoESpec, register
+from .ep import prepare
 
 __all__: list[str] = []
 
@@ -27,6 +33,9 @@ register(
     ModelSpec(
         model_type="llama4",
         min_transformers_version="5.5",
+        ep_spec=EPSpec(
+            plan_config_attr="text_config", requires_transformers="5.6", prepare=prepare
+        ),
         moe_spec=MoESpec(
             block_names=("Llama4TextMoe",),
             expert_linear_names=("gate_up_proj", "down_proj"),
