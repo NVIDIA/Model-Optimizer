@@ -1040,9 +1040,10 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
 
     ``capture(weight_quantizer, weight, inputs)`` runs on every forward of a weight whose quantizer
     is enabled: dense quantized linears hook the layer input; HF fused-MoE experts hook the shared
-    input quantizers, keyed by the active expert (``_current_expert_idx``). Weights without a hook
-    (conv, SequentialQuantizer, non-eager experts) are never captured. ``on_weight(name, weight,
-    weight_quantizer)``, if given, is called once per hooked weight. Returns removable handles.
+    input quantizers, keyed by the active expert (``_current_expert_idx``) when eager, or split per
+    expert by ``_grouped_offs`` under ``grouped_mm``. Weights without a hook (conv,
+    SequentialQuantizer) are never captured. ``on_weight(name, weight, weight_quantizer)``, if
+    given, is called once per hooked weight. Returns removable handles.
     """
     handles: list = []
 
@@ -1054,6 +1055,33 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
             if idx in enabled:
                 # Read the weight fresh (valid under accelerate/FSDP re-materialization).
                 capture(quantizers[idx], getattr(expert_module, weight_name)[idx], args[0])
+
+        return _expert_hook
+
+    def _make_grouped_expert_hook(expert_module, weight_name, quantizers, enabled):
+        """Per-expert capture for the grouped_mm backend.
+
+        ``grouped_mm_experts_forward`` feeds the input quantizer a single
+        expert-sorted batch ``(S, cin)`` rather than one call per expert, so we
+        split it back into per-expert chunks using ``_grouped_offs`` (cumulative
+        tokens-per-expert, stashed by the _QuantFusedExperts grouped interceptor).
+        Rows beyond ``offs[-1]`` (EP sentinels) belong to no expert and are skipped.
+        """
+
+        def _expert_hook(_input_quantizer, args):
+            if not args:
+                return
+            offs = expert_module._grouped_offs
+            if offs is None:
+                return
+            x = args[0]
+            weight = getattr(expert_module, weight_name)
+            start = 0
+            for idx, end in enumerate(offs.tolist()):
+                if end > start:
+                    if idx in enabled:
+                        capture(quantizers[idx], weight[idx], x[start:end])
+                    start = end
 
         return _expert_hook
 
@@ -1085,11 +1113,16 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
                     enabled = {i for i, q in enumerate(quantizers) if q.is_enabled}
                     if not enabled:
                         continue
+                    # grouped_mm feeds one expert-sorted batch per projection; eager feeds one
+                    # call per expert keyed by _current_expert_idx.
+                    make_hook = (
+                        _make_grouped_expert_hook
+                        if getattr(module, "_running_grouped_mm", False)
+                        else _make_expert_hook
+                    )
                     handles.append(
                         input_quantizer.register_forward_pre_hook(
-                            _WeightInputHook(
-                                _make_expert_hook(module, weight_name, quantizers, enabled)
-                            )
+                            _WeightInputHook(make_hook(module, weight_name, quantizers, enabled))
                         )
                     )
     return handles
