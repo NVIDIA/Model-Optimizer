@@ -89,6 +89,14 @@ The generated configuration records ``quant_method: modelopt``, ``packing: ggml`
 block size, and the payload byte count. GGML payloads are not represented as compressed-tensors
 integer ``weights`` groups because all scales and indices are embedded in each packed block.
 
+To evaluate a GGML-quantized model in a runtime without GGML kernels, such as vLLM, pass
+``upcast_ggml="bf16"`` to ``export_hf_checkpoint`` (``--upcast_ggml bf16`` in
+``examples/hf_ptq/hf_ptq.py``). Each GGML weight, which must be stored in BF16, is then written
+as the BF16 values its packed blocks decode to, and those layers are left out of the quantization
+configuration. Layers quantized in other formats, and a quantized KV cache, export as usual; a
+model with none loads as an ordinary unquantized checkpoint. The upcast weights are no smaller
+than the original ones: use the checkpoint for accuracy evaluation, not deployment.
+
 Each 74-byte IQ2_XS block represents 256 logical weights:
 
 * bytes 0--1 are the little-endian FP16 super-block scale ``d``;

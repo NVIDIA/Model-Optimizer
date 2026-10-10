@@ -69,7 +69,7 @@ from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
-from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import QuantModule, SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
@@ -77,8 +77,13 @@ from modelopt.torch.quantization.utils import (
     fsdp2_aware_weight_update,
     module_name_maps,
     quantizer_attr_names,
+    representative_weight_quantizer,
+    weight_attr_names,
 )
-from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
+from modelopt.torch.quantization.utils.core_utils import (
+    enable_weight_access_and_writeback,
+    has_accelerate_offload,
+)
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import is_fsdp2_model
@@ -131,6 +136,7 @@ from .quant_utils import (
     preprocess_linear_fusion,
     sync_tied_input_amax,
     to_quantized_weight,
+    validate_ggml_layer,
 )
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
 
@@ -1852,6 +1858,71 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
     return out
 
 
+# What export_hf_checkpoint(upcast_ggml=...) can decode GGML weights to.
+_GGML_UPCAST_DTYPES: dict[str, torch.dtype] = {"bf16": torch.bfloat16}
+
+
+def _is_ggml_weight_quantizer(quantizer) -> bool:
+    """Whether ``quantizer`` is an enabled GGML weight quantizer."""
+    # getattr: a SequentialQuantizer has no num_bits, and is never GGML.
+    return getattr(quantizer, "num_bits", None) in GGML_FORMATS and quantizer.is_enabled
+
+
+@torch.no_grad()
+def _upcast_ggml_weights(model: nn.Module, dtype: torch.dtype) -> None:
+    """Decode each GGML-quantized weight to ``dtype`` in place and disable its quantizer.
+
+    The weight becomes what its packed export payload decodes to -- the payload fake quant cached
+    or GPTQ pinned, when there is one. With its quantizer disabled, the layer then exports as an
+    unquantized one and stays out of the quantization config, so a runtime without GGML kernels,
+    such as vLLM, loads the checkpoint as plain weights.
+    """
+    names = module_name_maps(model)
+    # Read only the quantizers here, so an offloaded module is materialized only if it has work.
+    ggml_modules = [
+        module
+        for module in model.modules()
+        if isinstance(module, QuantModule)
+        and any(map(_is_ggml_weight_quantizer, module.iter_weight_quantizers_for_calibration()))
+    ]
+    if not ggml_modules:
+        warnings.warn("upcast_ggml is set, but the model has no GGML-quantized weights.")
+        return
+
+    # Check every layer before changing any, so a refusal leaves the model as it was.
+    for module in ggml_modules:
+        for weight_name in weight_attr_names(module):
+            weight_quantizer = representative_weight_quantizer(module, weight_name)
+            if not _is_ggml_weight_quantizer(weight_quantizer):
+                continue
+            # Disabling the quantizer would skip the checks the packed export runs on the layer.
+            input_quantizer = getattr(
+                module, quantizer_attr_names(weight_name).input_quantizer, None
+            )
+            validate_ggml_layer(weight_quantizer, input_quantizer)
+            # Fused-expert slices and the offload and FSDP2 writebacks keep the stored dtype, so
+            # the decoded values can only be written to a weight already stored in ``dtype``.
+            weight_dtype = getattr(module, weight_name).dtype
+            if weight_dtype != dtype:
+                raise ValueError(
+                    f"upcast_ggml decodes to {dtype}, but "
+                    f"{names.module_to_name.get(id(module), '')}.{weight_name} is stored as "
+                    f"{weight_dtype}. Load the model in {dtype} before quantizing it."
+                )
+
+    for module in ggml_modules:
+        with enable_weight_access_and_writeback(module, model, names):
+            for weight, quantizer in module.iter_weights_for_calibration():
+                if not _is_ggml_weight_quantizer(quantizer):
+                    continue
+                ggml_format = GGML_FORMAT_REGISTRY[quantizer.num_bits]
+                packed_weight = ggml_format.pack(weight, quantizer)
+                weight.data.copy_(
+                    ggml_format.dequantize(packed_weight, torch.tensor(weight.shape), dtype=dtype)
+                )
+                quantizer.disable()
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -1860,6 +1931,7 @@ def export_hf_checkpoint(
     components: list[str] | None = None,
     extra_state_dict: dict[str, torch.Tensor] | None = None,
     max_shard_size: int | str = "10GB",
+    upcast_ggml: str | None = None,
     **kwargs,
 ):
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
@@ -1883,6 +1955,12 @@ def export_hf_checkpoint(
             to export. If None, all quantized components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
         max_shard_size: Maximum size of each safetensors shard file. Defaults to "10GB".
+        upcast_ggml: The dtype to upcast GGML-quantized weights to, currently only ``"bf16"``.
+            Each GGML weight (the IQ formats and Q8_0) is written as the values its packed blocks
+            decode to in that dtype, rather than as the blocks, and is left out of the
+            quantization config. Runtimes without GGML kernels, such as vLLM, can then load the
+            checkpoint to evaluate the quantized model. Not supported for diffusers pipelines or
+            a ``layerwise.export_dir`` export.
         **kwargs: Runtime-specific post-processing options forwarded to
             :func:`_postprocess_safetensors` for diffusion model exports.
             See its docstring for supported keys.
@@ -1916,6 +1994,18 @@ def export_hf_checkpoint(
     from .layerwise_export import LAYERWISE_EXPORTER_ATTR
 
     exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
+    if upcast_ggml is not None:
+        if upcast_ggml not in _GGML_UPCAST_DTYPES:
+            raise ValueError(
+                f"upcast_ggml must be one of {sorted(_GGML_UPCAST_DTYPES)}, got {upcast_ggml!r}"
+            )
+        if exporter is not None or (HAS_DIFFUSERS and is_diffusers_object(model)):
+            raise NotImplementedError(
+                "upcast_ggml supports transformers models only, and not a layerwise.export_dir "
+                "export, whose layer shards calibration already wrote packed."
+            )
+        _upcast_ggml_weights(model, _GGML_UPCAST_DTYPES[upcast_ggml])
+
     if exporter is not None:
         # Per-layer export wrote the shards during calibration; this writes the rest.
         exporter.finalize(extra_state_dict=extra_state_dict)
