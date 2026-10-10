@@ -25,7 +25,12 @@ from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.quantization.config import QuantizeConfig  # noqa: TC001
-from modelopt.torch.speculative.config import DFlashConfig, EagleConfig, MedusaConfig
+from modelopt.torch.speculative.config import (
+    DFlashConfig,
+    EagleConfig,
+    ExternalDraftConfig,
+    MedusaConfig,
+)
 from modelopt.torch.speculative.plugins.hf_training_args import DataArguments as SpecDataArgs
 from modelopt.torch.speculative.plugins.hf_training_args import ModelArguments as SpecModelArgs
 from modelopt.torch.speculative.plugins.hf_training_args import (
@@ -58,6 +63,7 @@ class RecipeType(str, Enum):
     SPECULATIVE_EAGLE = "speculative_eagle"
     SPECULATIVE_DFLASH = "speculative_dflash"
     SPECULATIVE_MEDUSA = "speculative_medusa"
+    SPECULATIVE_EXTERNAL = "speculative_external"
     # QAT = "qat" # Not implemented yet, will be added in the future.
 
 
@@ -524,6 +530,39 @@ class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
         return self
 
 
+class ModelOptExternalDraftRecipe(ModelOptSpeculativeRecipeBase):
+    """Our config class for external (standalone) draft speculative decoding recipes."""
+
+    RECIPE_TYPE: ClassVar[RecipeType] = RecipeType.SPECULATIVE_EXTERNAL
+
+    metadata: RecipeMetadataConfig = _metadata_field()
+
+    external: ExternalDraftConfig = ModeloptField(
+        default=ExternalDraftConfig(),
+        title="External draft config",
+        description="External (standalone) draft model configuration.",
+        validate_default=True,
+    )
+
+    draft_model_name_or_path: str | None = ModeloptField(
+        default=None,
+        title="Draft model",
+        description=(
+            "Path or HF id of the pretrained draft model to train. Unlike the head-based "
+            "recipes, ``model.model_name_or_path`` refers to the *base* model, which is "
+            "used only for its lm_head and vocabulary."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _derive_external_offline(self) -> ModelOptExternalDraftRecipe:
+        # Mirrors ModelOptEagleRecipe._derive_eagle_offline: offline (dumped .pt) and
+        # streaming both feed pre-computed base hidden states to the draft; only a
+        # fully-online run would execute the base model.
+        self.external.external_offline = self.data.mode != "online"
+        return self
+
+
 class ModelOptMedusaRecipe(ModelOptSpeculativeRecipeBase):
     """Our config class for Medusa speculative decoding recipes."""
 
@@ -547,4 +586,5 @@ RECIPE_TYPE_TO_CLASS: dict[RecipeType, type[ModelOptRecipeBase]] = {
     RecipeType.SPECULATIVE_EAGLE: ModelOptEagleRecipe,
     RecipeType.SPECULATIVE_DFLASH: ModelOptDFlashRecipe,
     RecipeType.SPECULATIVE_MEDUSA: ModelOptMedusaRecipe,
+    RecipeType.SPECULATIVE_EXTERNAL: ModelOptExternalDraftRecipe,
 }

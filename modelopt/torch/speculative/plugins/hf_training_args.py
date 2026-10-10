@@ -58,9 +58,14 @@ class DataArguments(BaseModel):
 
     # Derived in ``_check_mode_requirements`` from the data-source fields; accepted as input
     # only for backward compatibility (existing ``mode:`` keys / overrides), then overwritten.
-    mode: Literal["online", "offline", "streaming"] | None = None
+    mode: Literal["online", "offline", "streaming", "sparse"] | None = None
     data_path: str | None = None
     offline_data_path: str | None = None
+    # Dumped top-k teacher deployment policy (external draft mode); see sparse_data.py.
+    sparse_data_path: str | None = None
+    # Oversample sources by their ``source`` field, e.g. {"cnn": 5.0}. Weight by tokens,
+    # not rows: response lengths differ by an order of magnitude across sources.
+    sparse_source_weights: dict[str, float] | None = None
     lazy_preprocess: bool = True
     draft_vocab_cache: str | None = None
     chat_template: str | None = None
@@ -89,11 +94,21 @@ class DataArguments(BaseModel):
         # override round-trip and silently select the wrong training path.
         has_offline = self.offline_data_path is not None
         has_streaming = self.streaming_server_url is not None
-        if has_offline and has_streaming:
+        has_sparse = self.sparse_data_path is not None
+        if sum([has_offline, has_streaming, has_sparse]) > 1:
             raise ValueError(
-                "ambiguous: set only one of data.offline_data_path / data.streaming_server_url"
+                "ambiguous: set only one of data.offline_data_path / "
+                "data.streaming_server_url / data.sparse_data_path"
             )
-        self.mode = "offline" if has_offline else "streaming" if has_streaming else "online"
+        self.mode = (
+            "sparse"
+            if has_sparse
+            else "offline"
+            if has_offline
+            else "streaming"
+            if has_streaming
+            else "online"
+        )
         if self.mode == "streaming" and not self.streaming_model_name:
             raise ValueError(
                 "data.mode='streaming' requires data.streaming_server_url and "
