@@ -22,7 +22,8 @@ The process is as follows:
 
 The HuggingFace unified exporter does not gather tensor-parallel-sharded weights, so this script
 always loads the checkpoint at tensor_model_parallel_size=1 (re-sharding from whatever TP was used
-during quantization). Use --pp_size to shard a large model across GPUs for export.
+during quantization). Use --pp_size and/or --ep_size to shard a large model across GPUs for
+export; --ep_size needs grouped-GEMM experts (not --no_moe_grouped_gemm).
 
 Example usage to export an FP8 checkpoint produced by quantize.py:
 
@@ -49,6 +50,7 @@ from mlflow_utils import (
     resolve_mlflow_args,
 )
 
+import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import export_mcore_gpt_to_hf
 from modelopt.torch.utils import print_args, print_rank_0
@@ -110,8 +112,14 @@ def get_args() -> argparse.Namespace:
         help="Export extra modules such as Medusa heads, EAGLE, or MTP.",
     )
 
-    # Only Pipeline parallelism is supported for export
+    # Only pipeline and expert parallelism are supported for export
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
+    parser.add_argument(
+        "--ep_size",
+        type=int,
+        default=1,
+        help="Expert parallel size (grouped-GEMM experts only); shards the experts across ranks",
+    )
     parser.add_argument(
         "--num_layers_in_first_pipeline_stage",
         type=int,
@@ -156,7 +164,7 @@ def main(args: argparse.Namespace):
         provider_overrides={
             "tensor_model_parallel_size": 1,  # Tensor parallelism is not supported
             "pipeline_model_parallel_size": args.pp_size,
-            "expert_model_parallel_size": 1,  # Expert parallelism is not supported
+            "expert_model_parallel_size": args.ep_size,
             "expert_tensor_parallel_size": 1,  # Expert tensor parallelism is not supported
             "num_layers_in_first_pipeline_stage": args.num_layers_in_first_pipeline_stage,
             "num_layers_in_last_pipeline_stage": args.num_layers_in_last_pipeline_stage,
@@ -171,6 +179,7 @@ def main(args: argparse.Namespace):
     print_rank_0(f"Loading quantized Megatron checkpoint from {args.megatron_path}...")
     load_modelopt_megatron_checkpoint(model, args.megatron_path)
     unwrapped_model = unwrap_model(model[0])
+    mtq.merge_quant_lora(unwrapped_model)
 
     # Extra modules (Medusa / EAGLE / MTP) only exist on the last pipeline stage. Use an all-reduce
     # MAX over all ranks (rather than a broadcast from a hard-coded source rank) so the decision is

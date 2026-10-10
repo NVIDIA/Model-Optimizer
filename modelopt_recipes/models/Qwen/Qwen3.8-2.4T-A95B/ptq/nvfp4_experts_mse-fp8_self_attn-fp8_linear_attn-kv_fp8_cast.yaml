@@ -44,10 +44,10 @@
 # `configs/ptq/units/default_disabled_quantizers` and the `qwen3_5` / `qwen3_5_moe` family
 # recipes leave those three disabled; this recipe enables them to match the published checkpoint.
 #
-# The source checkpoint ships as native block-FP8 (`quant_method=fp8`,
-# `weight_block_size [128, 128]`, dynamic activations). The loader dequantizes it to
-# BF16 before quantizers are inserted, so the scales below are calibrated against BF16
-# weights rather than against the shipped FP8.
+# The source checkpoint, Qwen/Qwen3.8-2.4T-A95B, ships as plain BF16 with no
+# `quantization_config`, so the scales below are calibrated directly against the BF16
+# weights. The block-FP8 Qwen/Qwen3.8-2.4T-A95B-FP8 is a separate release and is not the
+# source this recipe was validated on.
 
 # modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:

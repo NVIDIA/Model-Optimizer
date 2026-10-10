@@ -129,14 +129,17 @@ class GPTQHelper:
 
     CACHE_NAME = "_forward_no_gptq_hessian"
 
-    def __init__(self, module, name, offload_to_cpu=False, fused=False):
+    def __init__(self, module, name, offload_to_cpu=False, fused=False, importance_weighted=False):
         """Initialize GPTQHelper with module state and Hessian storage."""
         self.module = module
         self.name = name
         self.fused = fused
+        self.importance_weighted = importance_weighted
         in_features = module.weight.shape[-1]
         device = module.weight.device
-        if device.type == "meta" or (offload_to_cpu and get_used_gpu_mem_fraction(device) > 0.65):
+        if device.type == "meta" or (
+            offload_to_cpu and device.type == "cuda" and get_used_gpu_mem_fraction(device) > 0.65
+        ):
             device = "cpu"
         self.hessian = torch.zeros(in_features, in_features, dtype=torch.float32, device=device)
         self.n_samples = 0

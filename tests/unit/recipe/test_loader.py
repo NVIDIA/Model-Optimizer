@@ -25,6 +25,7 @@ from importlib.resources import files
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 import modelopt.recipe.loader
 import modelopt.torch.quantization.config as qcfg
@@ -47,6 +48,7 @@ from modelopt.recipe.loader import (
     load_config,
     load_recipe,
 )
+from modelopt.torch.fastgen import PDDConfig, load_pdd_config
 from modelopt.torch.opt.config_loader import (
     _MODELOPT_SCHEMA_RE,
     _alias_builtin_recipe_prefix,
@@ -91,6 +93,18 @@ metadata:
   recipe_type: unknown_type
 quantize: {}
 """
+
+
+def test_load_pdd_config_builtin_recipe():
+    """The public PDD loader resolves and validates its built-in recipe."""
+    config = load_pdd_config("general/distillation/pdd_qwen_image")
+
+    assert isinstance(config, PDDConfig)
+    assert config.guidance_scale == 4.0
+    assert config.grid_max_t == 0.999
+    assert "grid_max_t" in config.model_fields_set
+    assert config.inference_blocks == (32, 32, 32, 32)
+
 
 QUANTIZER_ATTRIBUTE_SCHEMA = (
     "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
@@ -2390,6 +2404,106 @@ _AQ_MINIMAL_BODY = (
 )
 
 
+def test_load_recipe_autoquantize_method_options(tmp_path):
+    """Method-specific settings load from an AutoQuantize recipe."""
+    recipe_file = tmp_path / "aq_opts.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY
+        + "  auto_quantize_method: aumann_shapley\n"
+        + "  method_options:\n"
+        + "    num_path_nodes: 2\n"
+        + "    damage_link: additive\n"
+    )
+    aq = load_recipe(recipe_file).auto_quantize
+
+    assert aq.auto_quantize_method == "aumann_shapley"
+    assert aq.method_options == {"num_path_nodes": 2, "damage_link": "additive"}
+
+
+def test_load_recipe_autoquantize_method_options_cannot_select_method(tmp_path):
+    """The dedicated method field remains the single source of truth."""
+    recipe_file = tmp_path / "aq_opts.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY
+        + "  auto_quantize_method: aumann_shapley\n"
+        + "  method_options:\n"
+        + "    method: gradient\n"
+    )
+
+    with pytest.raises(ValueError, match="method_options cannot contain 'method'"):
+        load_recipe(recipe_file)
+
+
+@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+def test_load_recipe_autoquantize_rejects_options_for_methods_without_options(tmp_path, method):
+    recipe_file = tmp_path / "aq_opts.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY
+        + f"  auto_quantize_method: {method}\n"
+        + "  method_options:\n"
+        + "    num_path_nodes: 2\n"
+    )
+
+    with pytest.raises(ValueError, match=rf"auto_quantize_method='{method}'.*no method_options"):
+        load_recipe(recipe_file)
+
+
+def test_load_recipe_autoquantize_rejects_two_search_targets(tmp_path):
+    recipe_file = tmp_path / "aq_opts.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY
+        + "  auto_quantize_method: aumann_shapley\n"
+        + "  method_options:\n"
+        + "    max_predicted_damage: 0.05\n"
+    )
+
+    with pytest.raises(ValueError, match=r"must omit constraints\.effective_bits"):
+        load_recipe(recipe_file)
+
+
+def test_load_recipe_autoquantize_damage_bound_requires_aumann_shapley(tmp_path):
+    recipe_file = tmp_path / "aq_opts.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY.replace("  constraints:\n    effective_bits: 4.8\n", "  constraints: {}\n")
+        + "  method_options:\n"
+        + "    max_predicted_damage: 0.05\n"
+    )
+
+    with pytest.raises(ValueError, match="requires auto_quantize_method='aumann_shapley'"):
+        load_recipe(recipe_file)
+
+
+def test_load_recipe_autoquantize_damage_bound_without_bit_budget(tmp_path):
+    recipe_file = tmp_path / "aq_opts.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY.replace("  constraints:\n    effective_bits: 4.8\n", "  constraints: {}\n")
+        + "  auto_quantize_method: aumann_shapley\n"
+        + "  method_options:\n"
+        + "    max_predicted_damage: 0.05\n"
+    )
+    aq = load_recipe(recipe_file).auto_quantize
+
+    assert aq.constraints.effective_bits == 4.8
+    assert "effective_bits" not in aq.constraints.model_fields_set
+    assert aq.method_options == {"max_predicted_damage": 0.05}
+
+
+def test_load_recipe_autoquantize_damage_bound_survives_override_round_trip(tmp_path):
+    recipe_file = tmp_path / "aq_opts.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY.replace("  constraints:\n    effective_bits: 4.8\n", "  constraints: {}\n")
+        + "  auto_quantize_method: aumann_shapley\n"
+        + "  method_options:\n"
+        + "    max_predicted_damage: 0.05\n"
+    )
+
+    aq = load_recipe(recipe_file, overrides=["auto_quantize.score_size=64"]).auto_quantize
+
+    assert aq.score_size == 64
+    assert "effective_bits" not in aq.constraints.model_fields_set
+    assert aq.method_options == {"max_predicted_damage": 0.05}
+
+
 def test_load_recipe_autoquantize_minimal(tmp_path):
     """Minimal AutoQuantize recipe loads with the right type and field defaults."""
     recipe_file = tmp_path / "aq.yml"
@@ -2400,6 +2514,7 @@ def test_load_recipe_autoquantize_minimal(tmp_path):
     assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
     aq = recipe.auto_quantize
     assert aq.auto_quantize_method == "gradient"
+    assert aq.method_options is None
     assert aq.score_size == 128
     assert aq.kv_cache is None
     assert aq.constraints.effective_bits == 4.8
@@ -2423,6 +2538,14 @@ def test_autoquantize_constraints_use_effective_bits_for_kv_cost_model():
             cost_model="kv_cache",
             cost=AutoQuantizeCost(active_moe_expert_ratio=0.5),
         )
+
+
+def test_kv_autoquantize_rejects_method_options():
+    config = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits").auto_quantize
+    values = {name: getattr(config, name) for name in type(config).model_fields}
+
+    with pytest.raises(ValueError, match="does not accept method_options"):
+        AutoQuantizeConfig.model_validate({**values, "method_options": {"num_path_nodes": 2}})
 
 
 def test_load_recipe_autoquantize_active_moe_cost_roundtrip(tmp_path):
@@ -2562,8 +2685,10 @@ def test_load_recipe_autoquantize_fixed_baseline_requires_explicit_search(tmp_pa
 @pytest.mark.parametrize(
     "recipe_path",
     [
+        "general/auto_quantize/fp8_ptq_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
         "general/auto_quantize/nvfp4_fp8_at_5p4bits",
         "general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits",
+        "general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
         "general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
         "general/auto_quantize/nvfp4_mse_fp8_at_6p0bits",
         "general/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits",
@@ -2605,6 +2730,91 @@ def test_load_recipe_kv_autoquantize_contract():
             assert not entry.cfg.use_constant_amax
             assert entry.cfg.constant_amax == 448.0
         assert fmt.algorithm is None
+
+
+@pytest.mark.parametrize(
+    ("recipe_path", "kv_stage"),
+    [
+        (
+            "general/auto_quantize/fp8_ptq_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+            "auto_quantize",
+        ),
+        (
+            "general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+            "kv_auto_quantize",
+        ),
+    ],
+)
+def test_builtin_composed_kv_recipes_use_calibration_free_cast_candidates(recipe_path, kv_stage):
+    aq = getattr(load_recipe(recipe_path), kv_stage)
+
+    assert aq is not None
+    assert aq.constraints.cost_model == "kv_cache"
+    assert all(candidate.algorithm is None for candidate in aq.candidate_formats)
+    assert all(
+        candidate.quant_cfg[0].cfg.constant_amax == 448.0 for candidate in aq.candidate_formats
+    )
+
+
+def _weight_autoquantize_test_config(**updates):
+    config = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(effective_bits=8.0),
+        candidate_formats=[qcfg.QuantizeConfig(quant_cfg=[], algorithm="max")],
+    )
+    return config.model_copy(update=updates)
+
+
+def _kv_autoquantize_test_config(**updates):
+    config = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(effective_bits=8.0, cost_model="kv_cache"),
+        candidate_formats=[
+            qcfg.QuantizeConfig(
+                quant_cfg=[
+                    {
+                        "quantizer_name": "*[kv]_bmm_quantizer",
+                        "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                    }
+                ],
+                algorithm=None,
+                effective_bits=8.0,
+            )
+        ],
+        auto_quantize_method="kl_div",
+    )
+    return config.model_copy(update=updates)
+
+
+def test_autoquantize_recipe_rejects_second_kv_search():
+    with pytest.raises(ValidationError, match=r"cannot follow.*already searches the KV cache"):
+        ModelOptAutoQuantizeRecipe(
+            auto_quantize=_kv_autoquantize_test_config(),
+            kv_auto_quantize=_kv_autoquantize_test_config(),
+        )
+
+
+def test_autoquantize_recipe_rejects_non_kv_followup():
+    with pytest.raises(ValidationError, match="must use cost_model=kv_cache"):
+        ModelOptAutoQuantizeRecipe(
+            auto_quantize=_weight_autoquantize_test_config(),
+            kv_auto_quantize=_weight_autoquantize_test_config(),
+        )
+
+
+def test_autoquantize_recipe_rejects_uniform_and_searched_kv():
+    uniform_kv = qcfg.QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+            }
+        ],
+        algorithm=None,
+    )
+    with pytest.raises(ValidationError, match=r"must omit.*uniform auto_quantize.kv_cache"):
+        ModelOptAutoQuantizeRecipe(
+            auto_quantize=_weight_autoquantize_test_config(kv_cache=uniform_kv),
+            kv_auto_quantize=_kv_autoquantize_test_config(),
+        )
 
 
 def test_kv_autoquantize_rejects_cost_excluded_layers():

@@ -322,7 +322,8 @@ class DFlashConfig(ModeloptBaseConfig):
         description=(
             "LiLiCorr only: absolute weight of the cross-entropy term on the reranker's "
             "per-slot conditional. The objective is "
-            "loss = dflash_loss + w_ce*CE + w_margin*hinge + w_pen*penalty. The weights are "
+            "loss = dflash_loss + w_ce*CE + w_margin*hinge + w_pen*penalty "
+            "(+ w_cal*calibration, see dflash_lilicorr_w_cal). The weights are "
             "absolute — there is no outer multiplier scaling the three terms as a group — so "
             "each is the coefficient with which its term enters the total, and "
             "`loss == origin_loss + lilicorr_loss` holds exactly. Both halves and all three "
@@ -369,9 +370,70 @@ class DFlashConfig(ModeloptBaseConfig):
             "reranker's expected target-rejection over its own candidate distribution. Each "
             "competing candidate is weighted by the target model's logit gap to the ground "
             "truth, so candidates the target finds plausible are penalized lightly and "
-            "confident wrong ones hard. Requires the target's logits, hence online training "
-            "(dflash_offline=False). Both shipped variants use 0.25. "
+            "confident wrong ones hard. Requires the target's logits: online training reads "
+            "them directly, offline training reconstructs them from the captured final hidden "
+            "state. Both shipped variants use 0.25. "
             "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
+    dflash_lilicorr_w_cal: float = ModeloptField(
+        default=0.0,
+        ge=0.0,
+        allow_inf_nan=False,
+        description=(
+            "LiLiCorr only: absolute weight of the optional calibration term, a KL divergence "
+            "from the target's distribution renormalized over each slot's k candidates to "
+            "the reranker's. An alternative to w_pen whose gradient does not scale with the "
+            "target's logit gap. Requires the target's logits, like w_pen. 0.0 (default) is a "
+            "no-op, and it is not part of the three weights' all-or-nothing validation. "
+            "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
+    dflash_lk_loss_type: Literal["ce", "tv", "lambda"] = ModeloptField(
+        default="ce",
+        description=(
+            "DFlash2 only: which divergence the block objective minimizes against the "
+            "hard target. 'ce' is -log q(gold), today's behavior. 'tv' is 1 - q(gold), the "
+            "total variation to the one-hot target, which is also the per-position expected "
+            "acceptance loss. 'lambda' anneals between them: the CE share is "
+            "dflash_lk_ce_scale * exp(-dflash_lk_ce_decay * a), where a is the mean q(gold) "
+            "over supervised positions, so the objective moves from fitting the "
+            "distribution to maximizing acceptance as acceptance improves. "
+            "'lambda' and 'tv' require dflash_self_logit_distillation=false: both read "
+            "q(gold) from the per-position cross-entropy, which the KD path does not "
+            "produce. Ignored unless dflash_architecture_config.projector_type == 'dflash2'."
+        ),
+    )
+
+    dflash_lk_ce_scale: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "DFlash2 only: scale of the CE share in the dflash_lk_loss_type='lambda' "
+            "blend. 1.0 starts the run as pure CE. Ignored for other loss types."
+        ),
+    )
+
+    dflash_lk_ce_decay: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "DFlash2 only: how fast the CE share decays as acceptance rises in the "
+            "dflash_lk_loss_type='lambda' blend. 0 pins the blend at dflash_lk_ce_scale. "
+            "Ignored for other loss types."
+        ),
+    )
+
+    dflash_selector_loss_alpha: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "DFlash2 only: weight of the candidate-selector cross-entropy term, added to "
+            "the backbone loss. The selector re-ranks the backbone's top-k candidates per "
+            "block position; 0 trains the backbone and convolutions only. "
+            "Ignored unless dflash_architecture_config.projector_type == 'dflash2'."
         ),
     )
 

@@ -29,6 +29,7 @@ from _test_utils.torch.quantization.iq_llama_cpp_vectors import (
     packed_blocks,
 )
 
+import modelopt.torch.quantization.ggml.iq1_m as iq1_m_module
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
 import modelopt.torch.quantization.ggml.iq2_s as iq2_s_module
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
@@ -40,6 +41,7 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 # name -> (module, packed bytes per block, codebook entries, bits per weight)
 FORMATS = {
     "iq1_s": (iq1_s_module, 50, 2048, 1.5625),
+    "iq1_m": (iq1_m_module, 56, 2048, 1.75),
     "iq2_xxs": (iq2_xxs_module, 66, 256, 2.0625),
     "iq2_xs": (iq2_xs_module, 74, 512, 2.3125),
     "iq2_s": (iq2_s_module, 82, 1024, 2.5625),
@@ -49,7 +51,18 @@ NAMES = sorted(FORMATS)
 # tests that go through TensorQuantizer iterate these rather than every codec above.
 DISPATCHED = sorted(IQ_FORMAT_REGISTRY)
 # IQ1 grids are ternary; IQ2 grids hold the magnitudes 8, 25 and 43.
-TERNARY = {"iq1_s"}
+TERNARY = {"iq1_s", "iq1_m"}
+# name -> (largest representable magnitude, scale anchor at peak-to-RMS 1, 4, 8 and 16), where the
+# anchor is d * native max / amax. IQ1_S is flat; IQ1_M rises with peak-to-RMS and the IQ2 formats
+# fall with it, each clamped at both ends. Written out rather than read from the modules, so a
+# changed constant fails here.
+ANCHORS = {
+    "iq1_s": (15 * 1.125, (0.61, 0.61, 0.61, 0.61)),
+    "iq1_m": (15 * 1.125, (0.65, 0.72, 0.86, 0.95)),
+    "iq2_xxs": (43 * 31 / 8, (0.92, 0.86, 0.72, 0.65)),
+    "iq2_xs": (43 * 31 / 8, (0.92, 0.86, 0.72, 0.65)),
+    "iq2_s": (43 * 31 / 8, (0.92, 0.86, 0.72, 0.65)),
+}
 
 
 def _parts(name):
@@ -83,9 +96,11 @@ def test_canonical_grid(name):
 @pytest.mark.parametrize("name", NAMES)
 def test_grid_normalizes_unindexed_cuda_device(monkeypatch, name):
     module, _, _, grid_fn, _, _, _ = _parts(name)
+    # IQ1_M shares the IQ1_S cache, being the same table.
+    cache_owner = iq1_s_module if name == "iq1_m" else module
     cached = torch.empty(0)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 7)
-    monkeypatch.setitem(module._GRID_CACHE, torch.device("cuda", 7), cached)
+    monkeypatch.setitem(cache_owner._GRID_CACHE, torch.device("cuda", 7), cached)
 
     assert grid_fn("cuda") is cached
 
@@ -240,6 +255,25 @@ def test_search_is_independent_of_default_dtype(name):
         torch.set_default_dtype(torch.float32)
 
 
+@pytest.mark.parametrize("name", NAMES)
+def test_scale_anchor_follows_peak_to_rms(name):
+    """The predicted block scale must follow the format's anchor, through both clamps.
+
+    The anchor is an encoder choice: it changes quality without touching the layout, so no
+    round-trip or conformance test would notice it drifting. k equal unit spikes among 256 zeros
+    have a peak-to-RMS of exactly 16 / sqrt(k).
+    """
+    native_max, anchors = ANCHORS[name]
+    blocks = torch.zeros(4, 256)
+    for row, spikes in enumerate((256, 16, 4, 1)):
+        blocks[row, :spikes] = 1.0
+    d = getattr(FORMATS[name][0], f"_predict_{name}_scales")(blocks)
+
+    assert d.dtype == torch.float16
+    # rtol covers the FP16 rounding of d, under 0.1%; a flat 0.61 anchor misses IQ1_M by 6% or more.
+    torch.testing.assert_close(d.float() * native_max, torch.tensor(anchors), rtol=2**-10, atol=0)
+
+
 @pytest.mark.parametrize("name", formats())
 def test_decoder_matches_llama_cpp_on_captured_blocks(name):
     """Decode bytes we did not produce and match llama.cpp's own output exactly.
@@ -284,3 +318,52 @@ def test_error_decreases_with_bit_width():
 def test_every_registered_format_is_covered():
     """A format registered for dispatch must also be listed here, or it escapes this contract."""
     assert set(IQ_FORMAT_REGISTRY) <= set(FORMATS)
+
+
+# Formats whose encoder takes a per-input-column importance, read from the registry so a format
+# that starts declaring it is covered here.
+WEIGHTED = sorted(name for name, fmt in IQ_FORMAT_REGISTRY.items() if fmt.weighted)
+
+
+def _importance(columns, seed=0):
+    generator = torch.Generator().manual_seed(seed)
+    return torch.randn(columns, generator=generator).mul(1.5).exp()
+
+
+@pytest.mark.parametrize("name", WEIGHTED)
+def test_uniform_importance_matches_the_unweighted_search(name):
+    _, quantize, *_ = _parts(name)
+    weight = torch.randn((8, 512), generator=torch.Generator().manual_seed(0))
+
+    assert torch.equal(quantize(weight, importance=torch.ones(512))[0], quantize(weight)[0])
+
+
+@pytest.mark.parametrize("name", WEIGHTED)
+def test_importance_lowers_the_importance_weighted_error(name):
+    _, quantize, dequantize, *_ = _parts(name)
+    weight = torch.randn((16, 1024), generator=torch.Generator().manual_seed(1))
+    importance = _importance(1024)
+
+    def weighted_error(packed, shape):
+        return (((dequantize(packed, shape, dtype=torch.float32) - weight) ** 2) * importance).sum()
+
+    unweighted = weighted_error(*quantize(weight))
+    weighted = weighted_error(*quantize(weight, importance=importance))
+    assert weighted < 0.75 * unweighted
+
+
+@pytest.mark.parametrize("name", WEIGHTED)
+@pytest.mark.parametrize(
+    ("importance", "match"),
+    [
+        (torch.ones(256), "must be a floating-point \\[512\\] vector"),
+        (torch.ones(512, dtype=torch.int64), "must be a floating-point \\[512\\] vector"),
+        (-torch.ones(512), "must be finite and non-negative"),
+        (torch.full((512,), float("nan")), "must be finite and non-negative"),
+    ],
+)
+def test_rejects_invalid_importance(name, importance, match):
+    _, quantize, *_ = _parts(name)
+
+    with pytest.raises(ValueError, match=match):
+        quantize(torch.randn(4, 512), importance=importance)

@@ -15,11 +15,12 @@
 
 """Hugging Face checkpoint utility.
 
-General-purpose logic about the on-disk shape of an HF checkpoint (index, shards, sidecars) --
-not export-specific, so it lives under ``modelopt.torch.utils.plugins`` alongside
-``model_load_utils`` rather than under ``modelopt.torch.export``. Deliberately independent of
-that module's ``transformers``/``accelerate`` module-scope imports; only needs
-``huggingface_hub`` + ``safetensors``.
+General-purpose logic about the on-disk shape of an HF checkpoint (index, shards, off-index
+weight files, non-model files) -- not export-specific, so it lives under
+``modelopt.torch.utils.plugins`` alongside ``model_load_utils`` rather than under
+``modelopt.torch.export``. Deliberately independent of that module's
+``transformers``/``accelerate`` module-scope imports: beyond ``torch``, it needs only
+``huggingface_hub`` and ``safetensors``.
 """
 
 import contextlib
@@ -30,16 +31,100 @@ import re
 import shutil
 import warnings
 from collections.abc import Callable, Iterable
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import torch
-from huggingface_hub import snapshot_download
-from huggingface_hub.errors import LocalEntryNotFoundError
+from huggingface_hub import HfApi, snapshot_download
+from huggingface_hub.errors import (
+    GatedRepoError,
+    HFValidationError,
+    LocalEntryNotFoundError,
+    RepositoryNotFoundError,
+    RevisionNotFoundError,
+)
 from safetensors.torch import safe_open
 from tqdm import tqdm
 
+from modelopt.torch.utils.mlflow import EXPERIMENT_JSON
+
 _HF_HUB_OFFLINE_TRUE_VALUES = {"1", "ON", "YES", "TRUE"}
+
+# Standard HF weight-file names: ``model.safetensors`` or ``model-00001-of-00005.safetensors``.
+_IS_MAIN_WEIGHT_SHARD = re.compile(r"model(-\d{5}-of-\d{5})?\.safetensors")
+
+# Off-index files that re-ship weights rather than add new ones. ``consolidated*.safetensors``
+# is Mistral's second full copy of the model (vLLM's mistral load-format looks for it BY NAME,
+# so copying it into an export is not inert -- it can be served in place of the quantized
+# weights). ``adapter_model.safetensors`` is a PEFT adapter, whose tensor names do not overlap
+# the index, so only a name rule catches it.
+_IS_WEIGHT_DUPLICATE = re.compile(r"(consolidated[^/]*|adapter_model)\.safetensors")
+
+# How long the other ranks wait for rank 0 to make a checkpoint local: long enough for a large
+# model's download, which the default process-group timeout would not survive.
+_CHECKPOINT_DOWNLOAD_TIMEOUT = timedelta(hours=24)
+
+# Default size cap for a file read through ``resolve_checkpoint_file``: it bounds metadata reads
+# (indexes, configs); callers copying weight files pass ``max_bytes=None``.
+_MAX_CHECKPOINT_METADATA_BYTES = 128 * 1024 * 1024
+
+# --- Model files vs non-model files ------------------------------------------------------------
+# An export splits a checkpoint's files in two:
+#
+# * MODEL files are what the export writes itself: the weights, in any format
+#   (``_WEIGHT_FILE_PATTERNS``), and the metadata describing them (``_EXPORT_OWNED_FILES``). They
+#   are never copied from the source, since the source's versions describe the unquantized model.
+#   Off-index weight files such as GLM-4.7's ``mtp.safetensors`` are model files too; the exporter
+#   carries them over itself with :func:`copy_off_index_safetensors`.
+#
+# * NON-MODEL files are everything else the checkpoint ships: tokenizer and processor files,
+#   remote-code ``*.py`` and parser plugins, chat templates, README, LICENSE, and assets in
+#   subdirectories. The export does not produce them, so :func:`copy_non_model_files` carries them
+#   over verbatim. ``generation_config.json`` falls in between: some exports write their own, which
+#   then wins, and the source's is copied only when they do not.
+
+# Weight files in any format, at any depth in the checkpoint.
+_WEIGHT_FILE_PATTERNS = (
+    "*.safetensors",
+    "*.safetensors.index.json",
+    "*.bin",
+    "*.bin.index.json",
+    "*.ckpt",
+    "*.gguf",
+    "*.h5",
+    "*.msgpack",
+    "*.npy",
+    "*.npz",
+    "*.onnx",
+    "*.pb",
+    "*.pickle",
+    "*.pkl",
+    "*.pt",
+    "*.pth",
+    "*.tar",
+    "*.tar.bz2",
+    "*.tar.gz",
+    "*.tar.xz",
+    "*.tflite",
+    "*.tgz",
+    "*.zip",
+)
+
+# Top-level metadata an export writes itself, or that describes the source's own quantization and
+# would mislabel the export if copied.
+_EXPORT_OWNED_FILES = frozenset(
+    {
+        EXPERIMENT_JSON,
+        "config.json",
+        "hf_quant_config.json",
+        "quant_config.json",
+        "quantization_config.json",
+        "quantize_config.json",
+        "recipe.yaml",
+        "recipe.yml",
+    }
+)
 
 
 def _as_nonnegative_int(value: Any) -> int | None:
@@ -155,6 +240,9 @@ def copy_hf_ckpt_remote_code(
     snapshot is resolved first and Python files are copied from that snapshot. When
     ``HF_HUB_OFFLINE`` is set, the snapshot must already be available in the local
     Hugging Face cache.
+
+    To carry over every non-model file of the checkpoint rather than only its code, use
+    :func:`copy_non_model_files`.
 
     Args:
         pretrained_model_path: Local path to the pretrained model or HuggingFace Hub model ID.
@@ -298,17 +386,6 @@ def _matches_any_pattern(file_name: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatchcase(file_name, pattern) for pattern in patterns)
 
 
-# Standard HF weight-file names: ``model.safetensors`` or ``model-00001-of-00005.safetensors``.
-_IS_MAIN_WEIGHT_SHARD = re.compile(r"model(-\d{5}-of-\d{5})?\.safetensors")
-
-# Off-index files that re-ship weights rather than add new ones. ``consolidated*.safetensors``
-# is Mistral's second full copy of the model (vLLM's mistral load-format looks for it BY NAME,
-# so copying it into an export is not inert -- it can be served in place of the quantized
-# weights). ``adapter_model.safetensors`` is a PEFT adapter, whose tensor names do not overlap
-# the index, so only a name rule catches it.
-_IS_WEIGHT_DUPLICATE = re.compile(r"(consolidated[^/]*|adapter_model)\.safetensors")
-
-
 # --- What reaches the export without passing through quantization --------------------------
 # Two disjoint sets, distinguished by what the LOADER did with the file. That difference decides
 # both how we find them and how we move them, so it is worth keeping straight:
@@ -319,10 +396,10 @@ _IS_WEIGHT_DUPLICATE = re.compile(r"(consolidated[^/]*|adapter_model)\.safetenso
 #      holds them and merged into the exporter's ``extra_state_dict``.
 #      Found by: ``read_unplaced_weights`` / ``carryable_unplaced_keys`` / ``locate_source_keys``.
 #
-#   2. OFF-INDEX sidecars. The index never names the file, so the loader never opened it and never
-#      had the chance to call anything unexpected -- GLM-4.7 keeps its MTP head in a standalone
-#      ``mtp.safetensors`` exactly this way. Moved as FILES: copied byte for byte, so no host
-#      memory is spent re-serialising tensors the export does not otherwise touch.
+#   2. OFF-INDEX weight files. The index never names the file, so the loader never opened it and
+#      never had the chance to call anything unexpected -- GLM-4.7 keeps its MTP head in a
+#      standalone ``mtp.safetensors`` exactly this way. Moved as FILES: copied byte for byte, so
+#      no host memory is spent re-serialising tensors the export does not otherwise touch.
 #      Found by: ``off_index_safetensors_files`` / ``off_index_tensor_names``.
 #
 # The index is what separates them, and it is NOT an inventory of the checkpoint: a tensor missing
@@ -339,7 +416,6 @@ _IS_WEIGHT_DUPLICATE = re.compile(r"(consolidated[^/]*|adapter_model)\.safetenso
 # "inside the checkpoint" has to mean the snapshot dir OR that blob root. Getting this wrong
 # in either direction is costly: reject links and no hub checkpoint works, follow them blindly
 # and a checkpoint can name any file on the host.
-_MAX_CHECKPOINT_METADATA_BYTES = 128 * 1024 * 1024
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
@@ -382,7 +458,7 @@ def resolve_checkpoint_file(
     return resolved_src
 
 
-def off_index_safetensors_files(src: "str | os.PathLike") -> list[str]:
+def off_index_safetensors_files(src: "str | os.PathLike | None") -> list[str]:
     """Safetensors files in a checkpoint that model loading never opens.
 
     Transformers reads the shards named in ``model.safetensors.index.json`` -- or the single
@@ -390,7 +466,7 @@ def off_index_safetensors_files(src: "str | os.PathLike") -> list[str]:
     GLM-4.7 keeps its MTP head in a standalone ``mtp.safetensors``. Those tensors are never loaded,
     never quantized, and never reported as ``unexpected_keys`` (the loader did not see them to call
     them unexpected), so they are not "the unquantized source weights" the export must avoid
-    re-emitting -- they are untouched sidecars that happen to be in safetensors format. See
+    re-emitting -- they are untouched weight files the export carries over as they are. See
     :func:`~modelopt.torch.utils.plugins.model_load_utils.record_unplaced_source_keys` for why
     "never opened" is a property of the FILE rather than of the individual tensor: a tensor the
     index omits from a file it DOES open is reported, and is carried rather than copied.
@@ -403,6 +479,8 @@ def off_index_safetensors_files(src: "str | os.PathLike") -> list[str]:
     (``consolidated.safetensors``, ``adapter_model.safetensors``) and by tensor-name overlap for
     the ones we do not. See :func:`_without_reshipped_weights`.
     """
+    if src is None:
+        return []
     d = Path(src)
     if not d.is_dir():
         return []
@@ -441,12 +519,13 @@ def _without_reshipped_weights(
     The name rules above only catch conventions we know. A checkpoint free to invent its own
     filename can still carry a second copy of the indexed weights, and copying that into an
     export puts unquantized tensors beside the quantized ones. Overlapping tensor names are the
-    general signal: a genuine sidecar (an MTP head) holds names the index does not have, which
-    is exactly why the loader never placed them.
+    general signal: a genuine off-index file (an MTP head) holds names the index does not have,
+    which is exactly why the loader never placed them.
 
     Best-effort. Reads safetensors headers, never tensor data, and keeps any candidate whose
-    header cannot be read: refusing to copy a real sidecar because of an unreadable header would
-    silently drop weights from the export, which is the failure this whole path exists to avoid.
+    header cannot be read: refusing to copy a real off-index file because of an unreadable header
+    would silently drop weights from the export, which is the failure this whole path exists to
+    avoid.
     """
     if not candidates or not indexed_tensors:
         return candidates
@@ -582,14 +661,19 @@ def locate_source_keys(ckpt: "str | Path", keys: list[str]) -> dict[str, str]:
     return located
 
 
-def copy_off_index_safetensors(src: "str | os.PathLike", dst: "str | os.PathLike") -> list[str]:
+def copy_off_index_safetensors(
+    src: "str | os.PathLike | None", dst: "str | os.PathLike"
+) -> list[str]:
     """Copy the safetensors files model loading never reads, verbatim.
 
     Copying beats reading them into a state dict and re-serialising: no host memory is spent on
     tensors the export does not touch, the bytes and the file layout are preserved exactly, and a
-    consumer that finds them by filename (vLLM looks for the MTP sidecar) sees what it saw in the
-    source. See :func:`off_index_safetensors_files` for how "never reads" is decided.
+    consumer that finds them by filename (vLLM looks for the MTP file) sees what it saw in the
+    source. See :func:`off_index_safetensors_files` for how "never reads" is decided. A ``src``
+    that is ``None`` or not a local directory (e.g. a Hub model ID) has nothing to copy.
     """
+    if src is None:
+        return []
     names = off_index_safetensors_files(src)
     copied = []
     for name in names:
@@ -600,8 +684,8 @@ def copy_off_index_safetensors(src: "str | os.PathLike", dst: "str | os.PathLike
         # copy whatever that names into the export under an approved-looking name. The question
         # is where the link LANDS, not whether it is a link: a Hugging Face snapshot stores every
         # file as a symlink into ``../../blobs/<sha>``, so refusing links outright drops the
-        # sidecar of every hub-downloaded checkpoint -- the GLM-4.7 ``mtp.safetensors`` this path
-        # exists to carry included.
+        # off-index weights of every hub-downloaded checkpoint -- the GLM-4.7 ``mtp.safetensors``
+        # this path exists to carry included.
         #
         # resolve_checkpoint_file already draws that line and is tested against both shapes: it
         # resolves strictly, demands a regular file, and demands the target sit under the
@@ -614,6 +698,8 @@ def copy_off_index_safetensors(src: "str | os.PathLike", dst: "str | os.PathLike
             continue
         shutil.copy2(source, target)
         copied.append(name)
+    if copied:
+        print(f"Copied off-index safetensors into {dst}: {copied}")
     return copied
 
 
@@ -660,3 +746,204 @@ def copy_non_safetensor_files_from_ckpt(
             continue
         copied_files.append(entry)
     return copied_files
+
+
+def _snapshot_download(hub_model_id: str) -> str:
+    """``snapshot_download``, but warn when it unexpectedly falls back to the cache.
+
+    ``snapshot_download`` silently returns whatever snapshot is cached when the Hub cannot be
+    reached; ask the Hub first so that case is visible. A missing repo or revision still raises.
+    With ``HF_HUB_OFFLINE`` set the cache is the user's choice, so it is used without a warning.
+    """
+    if _is_hf_hub_offline():
+        try:
+            return snapshot_download(hub_model_id, local_files_only=True)
+        except LocalEntryNotFoundError as error:
+            raise RuntimeError(
+                f"HF_HUB_OFFLINE is set and {hub_model_id!r} is not in the local cache."
+            ) from error
+    try:
+        HfApi().repo_info(hub_model_id)
+    except (RepositoryNotFoundError, RevisionNotFoundError):
+        raise
+    except Exception as error:  # offline, unreachable, or refused: only the cache is left
+        hub_error = f"{type(error).__name__}: {error}"
+        try:
+            local_checkpoint_path = snapshot_download(hub_model_id, local_files_only=True)
+        except LocalEntryNotFoundError:
+            raise RuntimeError(
+                f"Could not reach the Hugging Face Hub for {hub_model_id!r} ({hub_error}), and it "
+                "is not in the local cache."
+            ) from error
+        warnings.warn(
+            f"Could not reach the Hugging Face Hub for {hub_model_id!r} ({hub_error}); using its "
+            "cached snapshot as it is. It may lack files, e.g. non-model files an earlier "
+            "from_pretrained did not need."
+        )
+        return local_checkpoint_path
+    return snapshot_download(hub_model_id)
+
+
+def _make_local(model_name_or_path: str | os.PathLike) -> tuple[str | None, str]:
+    """``(hub_model_id, local_checkpoint_path)`` on this rank alone.
+
+    See :func:`ensure_local_checkpoint`.
+    """
+    if os.path.isdir(model_name_or_path):
+        return None, str(model_name_or_path)
+    hub_model_id = str(model_name_or_path)
+    try:
+        return hub_model_id, _snapshot_download(hub_model_id)
+    except GatedRepoError:
+        raise
+    except (HFValidationError, RepositoryNotFoundError) as error:
+        # A mistyped local path lands here as a Hub ID; say both lookups failed.
+        raise ValueError(
+            f"{hub_model_id!r} is not a local directory, and is not a model ID the Hugging Face "
+            "Hub can access."
+        ) from error
+
+
+def ensure_local_checkpoint(
+    model_name_or_path: str | os.PathLike,
+    group: "torch.distributed.ProcessGroup | None" = None,
+) -> tuple[str | None, str]:
+    """Ensure the whole checkpoint is on local storage.
+
+    Returns ``(hub_model_id, local_checkpoint_path)``: the Hub model ID, or ``None`` when
+    ``model_name_or_path`` is already a local directory, and the local checkpoint directory. Read
+    checkpoint files from ``local_checkpoint_path``; use ``hub_model_id`` where a portable name is
+    wanted (a record that outlives this host's cache), falling back to ``local_checkpoint_path``
+    for a local checkpoint.
+
+    A local directory is returned as-is. A Hub model ID resolves to its snapshot in the Hugging
+    Face cache, downloading only what is not cached yet. The whole repo is made local, not a
+    subset: guessing which files are redundant would risk dropping ones the checkpoint needs.
+    Exporters read the source checkpoint only from local disk (see :func:`copy_non_model_files`),
+    so call this before loading a Hub model that will be exported.
+
+    With ``HF_HUB_OFFLINE`` set, the cached snapshot is used as it is. With the Hub unexpectedly
+    unreachable it is too, but with a warning: nothing can tell whether it is complete, and one
+    filled by an earlier ``from_pretrained`` holds only the files loading needed, so non-model files
+    may be missing. A path that is neither a local directory nor a model ID the Hub can access (a
+    mistyped local path, say) raises ``ValueError``; a gated repo raises ``GatedRepoError``.
+
+    Under ``torch.distributed`` rank 0 of ``group`` resolves the checkpoint -- whether it is a local
+    directory, and if not, downloading it once -- and the other ranks of ``group`` wait for its
+    result, so every rank of ``group`` (and only those) must call this. The checkpoint, or the
+    Hugging Face cache it lands in, must then be on storage all of them can see.
+
+    Args:
+        model_name_or_path: Hub model ID or local checkpoint directory.
+        group: Process group sharing the download. Its timeout must outlast the download, since
+            the other ranks wait in it. ``None`` means every rank of the default group, waiting on
+            a temporary gloo group whose timeout does.
+
+    Returns:
+        ``(hub_model_id, local_checkpoint_path)``.
+    """
+    if group is None and not (
+        torch.distributed.is_available() and torch.distributed.is_initialized()
+    ):
+        return _make_local(model_name_or_path)
+
+    # Rank 0 decides even for a local path: ranks that each checked for themselves could disagree
+    # (a directory on one node's local disk) and part of them would wait here forever. Without a
+    # caller's group, the others wait on a gloo group of their own, whose timeout outlasts a large
+    # download; the default group's would not. Rank 0 sends its error too, so a failure does not
+    # strand them.
+    own_group = group is None
+    if own_group:
+        group = torch.distributed.new_group(backend="gloo", timeout=_CHECKPOINT_DOWNLOAD_TIMEOUT)
+    try:
+        # (hub_model_id, local_checkpoint_path, error): local_checkpoint_path or error is set.
+        result: list[tuple[str | None, str | None, str | None]] = [(None, None, None)]
+        if torch.distributed.get_rank(group) == 0:
+            try:
+                result = [(*_make_local(model_name_or_path), None)]
+            except Exception as error:
+                result = [(None, None, f"{type(error).__name__}: {error}")]
+        torch.distributed.broadcast_object_list(result, group=group, group_src=0)
+    finally:
+        if own_group:
+            torch.distributed.destroy_process_group(group)
+    hub_model_id, local_checkpoint_path, error_message = result[0]
+    if local_checkpoint_path is None:
+        raise RuntimeError(
+            f"Rank 0 could not make {str(model_name_or_path)!r} local: {error_message}"
+        )
+    if not os.path.isdir(local_checkpoint_path):
+        raise RuntimeError(
+            f"Rank 0 has {str(model_name_or_path)!r} at {local_checkpoint_path}, which this rank "
+            "cannot see. Put the checkpoint, or the Hugging Face cache (HF_HOME) it downloads "
+            "into, on storage shared by every node."
+        )
+    return hub_model_id, local_checkpoint_path
+
+
+def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLike) -> list[str]:
+    """Copy the source checkpoint's non-model files into an export, verbatim.
+
+    See "Model files vs non-model files" at the top of this module: the export writes the model
+    files (weights and the metadata describing them); this carries over everything else --
+    tokenizer and processor files, remote code, chat templates, README, subdirectory assets. It
+    copies every file under ``source`` except:
+
+    * model files: weight files in any format (``_WEIGHT_FILE_PATTERNS``) and top-level export
+      metadata (``_EXPORT_OWNED_FILES``);
+    * files the export already wrote (e.g. its own ``generation_config.json``), so call this after
+      the export has written its files, and paths that are links in the export;
+    * files under ``export_dir`` when it lies inside ``source``, e.g. an earlier export;
+    * files under hidden directories (``.git``, ``.cache``), which are version-control or download
+      state rather than part of the checkpoint;
+    * links that resolve outside the checkpoint (or, for a Hub snapshot, its ``blobs/``), and
+      dangling links, each with a warning.
+
+    Args:
+        source: Local checkpoint directory. Download a Hub model first with
+            :func:`ensure_local_checkpoint`.
+        export_dir: Export directory; created if missing.
+
+    Returns:
+        The copied paths, relative to the checkpoint root and ``/``-separated on every platform.
+    """
+    source_dir = Path(source)
+    if not source_dir.is_dir():
+        raise ValueError(
+            f"{source!s} is not a local checkpoint directory; get one with "
+            "ensure_local_checkpoint()."
+        )
+    export_dir = Path(export_dir)
+    source_root, export_root = source_dir.resolve(), export_dir.resolve()
+    copied = []
+    for src in sorted(source_dir.rglob("*")):
+        rel = src.relative_to(source_dir)
+        if (
+            src.is_dir()
+            or (source_root / rel).is_relative_to(export_root)
+            or any(part.startswith(".") for part in rel.parts[:-1])
+            or (len(rel.parts) == 1 and rel.name in _EXPORT_OWNED_FILES)
+            or _matches_any_pattern(rel.name, _WEIGHT_FILE_PATTERNS)
+        ):
+            continue
+        dst = export_dir / rel
+        # A dangling link fails exists(); copying through it would write outside the export.
+        if dst.exists() or dst.is_symlink():
+            continue
+        # A link is followed only to where a checkpoint file may live -- the checkpoint itself or,
+        # for a Hub snapshot, its blobs/ directory -- or the export could copy any file on the host.
+        try:
+            resolved = resolve_checkpoint_file(source_dir, rel, max_bytes=None)
+        except ValueError as error:
+            warnings.warn(f"Skipping {rel}: {error}")
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(resolved, dst)
+        except OSError as error:
+            dst.unlink(missing_ok=True)  # or a rerun would keep the partial file
+            warnings.warn(f"Failed to copy checkpoint file {rel}: {error}")
+            continue
+        copied.append(rel.as_posix())
+    print(f"Copied {len(copied)} source checkpoint file(s) to {export_dir}: {copied}")
+    return copied

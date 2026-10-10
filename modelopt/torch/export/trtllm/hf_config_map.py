@@ -66,8 +66,8 @@ HF_CONFIG_MAP = [
     (
         ["num_local_experts", "moe_num_experts"],
         "moe_num_experts",
-    ),  # Mixture of Experts (Mixtral, DBRX)
-    (["num_experts_per_tok", "moe_top_k"], "moe_top_k"),  # Mixture of Experts (Mixtral, DBRX)
+    ),  # Mixture of Experts (Mixtral)
+    (["num_experts_per_tok", "moe_top_k"], "moe_top_k"),  # Mixture of Experts (Mixtral)
     (["model_type"], "qwen_type"),  # qwen
     (["lru_width"], "rnn_hidden_size"),  # Recurrent Gemma
     (["embeddings_scale_by_sqrt_dim"], "emb_scale_by_sqrt_dim"),  # Recurrent Gemma
@@ -76,7 +76,7 @@ HF_CONFIG_MAP = [
     (["final_logit_softcapping"], "final_logit_softcapping"),  # Gemma2
     (["attn_logit_softcapping"], "attn_logit_softcapping"),  # Gemma2
     (["query_pre_attn_scalar"], "query_pre_attn_scalar"),  # Gemma2
-    (["clip_qkv"], "clip_qkv"),  # DBRX
+    (["clip_qkv"], "clip_qkv"),  # MPT
     (["rope_scaling"], "rope_scaling"),  # Llama 3.1
     (["cross_attention_layers"], "cross_attention_layers"),  # Mllama
     (["vision_output_dim"], "vision_output_dim"),  # Mllama

@@ -293,7 +293,9 @@ def _needs_activation_forward_for_max_calib(model: nn.Module) -> bool:
             continue
         # Weight quantizers (incl. SequentialQuantizer stages named ``weight_quantizer.<i>``)
         # are calibrated on the weight tensor directly, not via the data forward.
-        if any(part.endswith("weight_quantizer") for part in name.split(".")):
+        if any(
+            part.endswith(("weight_quantizer", "weight_quantizers")) for part in name.split(".")
+        ):
             continue
 
         is_constant = (
@@ -939,6 +941,16 @@ def _is_quant_fused_experts(module: nn.Module) -> bool:
     )
 
 
+class _LocalHessianInputHook:
+    """Identify active input collectors so auxiliary modules can request a calibration forward."""
+
+    def __init__(self, hook: Callable):
+        self.hook = hook
+
+    def __call__(self, module, args):
+        self.hook(module, args)
+
+
 def _register_local_hessian_input_hooks(model, names, capture, block_size, warned):
     """Register forward hooks feeding each weight's input activations to ``capture``.
 
@@ -976,7 +988,7 @@ def _register_local_hessian_input_hooks(model, names, capture, block_size, warne
                 if args:
                     capture(linear.weight_quantizer, linear.weight, args[0])
 
-            handles.append(module.register_forward_pre_hook(_dense_hook))
+            handles.append(module.register_forward_pre_hook(_LocalHessianInputHook(_dense_hook)))
         elif _is_quant_fused_experts(module):
             with enable_weight_access_and_writeback(module, model, names):
                 first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
@@ -999,9 +1011,13 @@ def _register_local_hessian_input_hooks(model, names, capture, block_size, warne
                     # Snapshot which experts are enabled now, before the caching forward silences
                     # all weight quantizers — so we don't capture (and discard) disabled experts.
                     enabled = {i for i, q in enumerate(quantizers) if q.is_enabled}
+                    if not enabled:
+                        continue
                     handles.append(
                         input_quantizer.register_forward_pre_hook(
-                            _make_expert_hook(module, weight_name, quantizers, enabled)
+                            _LocalHessianInputHook(
+                                _make_expert_hook(module, weight_name, quantizers, enabled)
+                            )
                         )
                     )
     return handles
@@ -2258,6 +2274,7 @@ def gptq(
     perc_damp: float = 0.01,
     block_size: int = 128,
     fused: bool = False,
+    importance_weighted: bool = False,
 ):
     """GPTQ quantization.
 
@@ -2287,6 +2304,8 @@ def gptq(
         perc_damp: Percentage of avg Hessian diagonal for damping (default: 0.01).
         block_size: Block size for GPTQ weight update.
         fused: If True, use fused Triton kernel for NVFP4 static quantization.
+        importance_weighted: If True, formats whose codebook search takes a per-input-column
+            importance weight it by the square root of the Hessian diagonal.
     """
     total_start = time.time()
 
@@ -2308,7 +2327,9 @@ def gptq(
             cls = GPTQHelper
         else:
             cls = _GPTQ_HELPER_REGISTRY.get(backend, GPTQHelper)
-        return cls(m, name, offload_to_cpu=True, fused=fused)
+        return cls(
+            m, name, offload_to_cpu=True, fused=fused, importance_weighted=importance_weighted
+        )
 
     gptq_handles = {name: _make_gptq_handle(name, m) for name, m in quantized_layers}
     for handle in gptq_handles.values():

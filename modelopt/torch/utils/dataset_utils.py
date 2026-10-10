@@ -1080,6 +1080,32 @@ def get_max_batch_size(
         return 512
 
 
+def _slice_batch(batch_data, start, end):
+    """Return rows [start, end) of a batch, leaving None entries as they are.
+
+    Args:
+        batch_data: Dictionary containing the batch data
+        start: First row of the slice
+        end: One past the last row of the slice
+
+    Returns:
+        A dictionary holding the slice
+    """
+    sliced = {}
+    for key, data in batch_data.items():
+        if data is None:
+            sliced[key] = None
+        elif torch.is_tensor(data):
+            sliced[key] = data[start:end, ...]
+        else:
+            raise ValueError(
+                f"Cannot split a batch holding the non-tensor key '{key}'. Its rows cannot be "
+                "sliced, so a sub-batch would not line up with the inputs. Reduce the "
+                "dataloader's batch size so the batch fits without splitting."
+            )
+    return sliced
+
+
 def _process_batch(
     batch_data, infer_method, max_working_batch_size=None, allowed_non_tensor_keys=None
 ):
@@ -1104,19 +1130,17 @@ def _process_batch(
 
     # If we know a smaller batch size works, preemptively split
     if max_working_batch_size is not None and batch_size > max_working_batch_size:
-        # Split the batch to avoid OOM
-        for i in range(0, batch_size, max_working_batch_size):
-            end_idx = min(i + max_working_batch_size, batch_size)
-            split_data = {}
-            for key in batch_data:
-                if batch_data[key] is None:
-                    split_data[key] = None
-                else:
-                    split_data[key] = batch_data[key][i:end_idx, ...]
-
+        # Walk by the width actually used: a recursive call can come back with a
+        # smaller size than this walk started with, and a stride fixed up front
+        # would then step over the rows between the two widths.
+        offset = 0
+        while offset < batch_size:
+            width = min(max_working_batch_size, batch_size - offset)
+            split_data = _slice_batch(batch_data, offset, offset + width)
             max_working_batch_size = _process_batch(
                 split_data, infer_method, max_working_batch_size, allowed_non_tensor_keys
             )
+            offset += width
 
         return max_working_batch_size
 
@@ -1139,8 +1163,8 @@ def _process_batch(
     # Split the batch in half
     mid = (batch_size + 1) // 2
     warn_rank_0(f"CUDA out of memory with batch size {batch_size}, trying with batch size {mid}")
-    split_data_1 = {key: batch_data[key][:mid, ...] for key in batch_data}
-    split_data_2 = {key: batch_data[key][mid:, ...] for key in batch_data}
+    split_data_1 = _slice_batch(batch_data, 0, mid)
+    split_data_2 = _slice_batch(batch_data, mid, batch_size)
 
     # Recursively process each half and track max working batch size
     max_working_batch_size = _process_batch(

@@ -779,6 +779,8 @@ def test_layerwise_finalize_sees_the_carried_keys(tmp_path, monkeypatch):
     seen = {}
 
     class _Exporter:
+        export_dir = tmp_path
+
         def finalize(self, extra_state_dict=None):
             seen["keys"] = getattr(model, "_modelopt_carried_over_names", "<unset>")
             return {}
@@ -795,6 +797,94 @@ def test_layerwise_finalize_sees_the_carried_keys(tmp_path, monkeypatch):
     assert seen["keys"] == ["model.mtp.eh_proj.weight"], (
         f"finalize() saw {seen['keys']!r}; the carried set must be recorded before dispatch"
     )
+
+
+def test_export_writes_the_off_index_safetensors(tmp_path, monkeypatch):
+    """Off-index safetensors (GLM-4.7's mtp.safetensors) are weights, so the export writes them.
+
+    Their tensors are already seeded into exclude_modules by off_index_tensor_names; if the files
+    themselves did not reach the export, the checkpoint would name exclusions for weights it lacks.
+    On the layerwise path they must land where finalize() wrote -- the exporter's own directory,
+    which a recipe's layerwise.export_dir can set apart from the export_dir argument.
+    """
+    from modelopt.torch.export import unified_export_hf as uehf
+    from modelopt.torch.export.layerwise_export import LAYERWISE_EXPORTER_ATTR
+
+    ckpt, export = tmp_path / "ckpt", tmp_path / "export"
+    ckpt.mkdir()
+    export.mkdir()  # LayerwiseExporter creates it when it binds, before calibration
+    save_file({"a.weight": torch.zeros(2)}, str(ckpt / "model-00001-of-00001.safetensors"))
+    (ckpt / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}'
+    )
+    save_file({"model.mtp.eh_proj.weight": torch.ones(2)}, str(ckpt / "mtp.safetensors"))
+
+    class _Exporter:
+        export_dir = export
+
+        def finalize(self, extra_state_dict=None):
+            return {}
+
+    model = _ProvenanceModel(name_or_path=ckpt)
+    model._modelopt_source_checkpoint = str(ckpt)
+    setattr(model, LAYERWISE_EXPORTER_ATTR, _Exporter())
+    monkeypatch.setattr(uehf, "read_unplaced_weights", lambda m, **kw: {})
+
+    uehf.export_hf_checkpoint(model, export_dir=tmp_path / "elsewhere")
+
+    assert sorted(p.name for p in export.iterdir()) == ["mtp.safetensors"]
+    assert model._modelopt_carried_over_names == ["model.mtp.eh_proj.weight"]
+
+
+def test_exporters_copy_non_model_files_from_a_local_source(tmp_path):
+    from modelopt.torch.export import unified_export_hf as uehf
+
+    ckpt, export = tmp_path / "ckpt", tmp_path / "export"
+    ckpt.mkdir()
+    export.mkdir()
+    (ckpt / "tokenizer.json").write_text("{}")
+    (ckpt / "model.safetensors").write_text("weights")
+
+    uehf._copy_non_model_files_from_source(_ProvenanceModel(name_or_path=ckpt), export)
+
+    assert sorted(p.name for p in export.iterdir()) == ["tokenizer.json"]
+
+
+def test_export_hf_checkpoint_copies_the_source_non_model_files(tmp_path):
+    """The regular (non-streaming, non-layerwise) path copies them after save_pretrained."""
+    from _test_utils.torch.transformers_models import create_tiny_llama_dir
+    from transformers import AutoModelForCausalLM
+
+    from modelopt.torch.export import export_hf_checkpoint
+
+    source = create_tiny_llama_dir(tmp_path)
+    (source / "README.md").write_text("# source\n")
+    (source / "assets").mkdir()
+    (source / "assets" / "notes.txt").write_text("asset\n")
+    model = AutoModelForCausalLM.from_pretrained(source)
+    export = tmp_path / "export"
+
+    export_hf_checkpoint(model, export_dir=export)
+
+    assert (export / "README.md").read_text() == "# source\n"
+    assert (export / "assets" / "notes.txt").read_text() == "asset\n"
+    # The export's own config, not the source's.
+    assert (export / "config.json").read_text() != (source / "config.json").read_text()
+
+
+def test_exporters_warn_rather_than_fetch_for_a_hub_source(tmp_path, monkeypatch):
+    """A model loaded by Hub ID has only what loading needed in its cache: warn, do not download."""
+    from modelopt.torch.export import unified_export_hf as uehf
+    from modelopt.torch.utils.plugins import hf_checkpoint_utils
+
+    def fail(*args, **kwargs):
+        raise AssertionError("an exporter must not download")
+
+    monkeypatch.setattr(hf_checkpoint_utils, "snapshot_download", fail)
+
+    with pytest.warns(UserWarning, match="ensure_local_checkpoint"):
+        uehf._copy_non_model_files_from_source(_ProvenanceModel(name_or_path="org/model"), tmp_path)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_carries_a_key_the_index_does_not_list(tmp_path):

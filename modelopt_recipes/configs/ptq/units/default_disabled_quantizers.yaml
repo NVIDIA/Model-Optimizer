@@ -16,6 +16,11 @@
 # QuantizerCfgList snippet for standard module patterns that should remain unquantized.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+  # Linear-attention numerical emulation is opt-in, independently of projection quantization.
+  - quantizer_name: '*gdn_state_quantizer'
+    enable: false
+  - quantizer_name: '*gdn_w_quantizer'
+    enable: false
   - quantizer_name: '*block_sparse_moe.gate*'
     enable: false
   - quantizer_name: '*linear_attn.conv1d*'

@@ -48,11 +48,12 @@ These instructions apply to AI-assisted work in this repository.
 
 ## Sizing and splitting PRs
 
-- **Keep each PR that goes up for review under ~500 changed lines of source.**
+- **Keep each PR that goes up for review under ~500 added lines of source.**
   Large PRs stall in review; exceed the budget only when the change genuinely
   cannot be split — a mechanical rename, generated files, or a self-contained
   drop such as a new example or a new model/backend that has no working
-  intermediate state. Check the size with `git diff --stat <base>...HEAD`
+  intermediate state. Deletions, tests, and docs don't count; check the
+  insertions from `git diff --shortstat <base>...HEAD -- . ':!tests' ':!docs'`
   before opening.
 - **Propose the split before opening an oversized PR.** When the work in flight
   is already over budget, offer a series of smaller PRs and, once the user
@@ -67,6 +68,13 @@ These instructions apply to AI-assisted work in this repository.
   order in each description.
 - **Prefix titles with `[x/N]`** — e.g. `[2/4] Add NVFP4 export path` — so
   reviewers know it is one slice of a planned split, and link the sibling PRs.
+- **Optional but strongly recommended: build and ship the series with `gh stack`**
+  (the `github/gh-stack` extension). `gh stack init <branch1 ... branchN>` (bottom
+  to top) turns the split branches into a linear stack, `gh stack submit` pushes
+  them and opens the PRs in order with the stack cross-links added automatically —
+  you still write each `[x/N]` title and description in its editor — and
+  `gh stack sync` / `gh stack rebase` keep the upper slices consistent as the lower
+  ones merge. Pushing and wiring each PR by hand works too.
 - **Every sub-PR stands on its own:** it builds, it carries unit tests for the
   code it introduces, and CI passes on it without the later PRs.
 - **When a split makes the whole hard to follow, the full change may also go

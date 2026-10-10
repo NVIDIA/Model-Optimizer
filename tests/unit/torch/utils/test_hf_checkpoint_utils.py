@@ -16,12 +16,18 @@
 """Tests for modelopt/torch/utils/plugins/hf_checkpoint_utils.py"""
 
 import json
+import os
 import sys
+import warnings
+from functools import partial
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
+import torch.distributed as dist
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from safetensors.torch import save_file
 
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
@@ -35,6 +41,7 @@ pytest.importorskip("huggingface_hub")
 hf_hub_errors = pytest.importorskip("huggingface_hub.errors")
 LocalEntryNotFoundError = hf_hub_errors.LocalEntryNotFoundError
 
+from modelopt.torch.utils.mlflow import EXPERIMENT_JSON
 from modelopt.torch.utils.plugins import hf_checkpoint_utils
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_hf_ckpt_remote_code,
@@ -86,6 +93,26 @@ def test_copy_non_safetensor_files_from_ckpt_continues_after_copy_failure(tmp_pa
     monkeypatch.setattr(hf_checkpoint_utils.shutil, "copy2", copy2)
     with pytest.warns(UserWarning, match="bad.py"):
         copied_files = copy_non_safetensor_files_from_ckpt(src_dir, tmp_path / "dst")
+
+    assert copied_files == ["good.py"]
+
+
+def test_copy_non_model_files_continues_after_copy_failure(tmp_path, monkeypatch):
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "bad.py").write_text("bad")
+    (src_dir / "good.py").write_text("good")
+
+    original_copy2 = hf_checkpoint_utils.shutil.copy2
+
+    def copy2(source, *args, **kwargs):
+        if str(source).endswith("bad.py"):
+            raise PermissionError("unreadable")
+        return original_copy2(source, *args, **kwargs)
+
+    monkeypatch.setattr(hf_checkpoint_utils.shutil, "copy2", copy2)
+    with pytest.warns(UserWarning, match="bad.py"):
+        copied_files = hf_checkpoint_utils.copy_non_model_files(src_dir, tmp_path / "dst")
 
     assert copied_files == ["good.py"]
 
@@ -607,3 +634,345 @@ def test_read_safetensors_subset(tmp_path):
     assert set(result.keys()) == {"a.weight", "a.bias"}
     assert torch.equal(result["a.weight"], torch.tensor([1.0, 2.0]))
     assert torch.equal(result["a.bias"], torch.tensor([3.0]))
+
+
+def test_copy_non_model_files_copies_everything_the_export_does_not_own(tmp_path):
+    source_dir = tmp_path / "source"
+    export_dir = tmp_path / "export"
+    source_dir.mkdir()
+    export_dir.mkdir()
+
+    source_files = {
+        "super_v3_reasoning_parser.py": "class Parser: pass\n",
+        "modeling_custom.py": "class Model: pass\n",
+        "README.md": "# Source model\n",
+        "LICENSE": "license text\n",
+        ".gitattributes": "*.safetensors filter=lfs\n",
+        "chat_template.jinja": "{{ messages }}\n",
+        "tokenizer_config.json": '{"chat_template": "source"}\n',
+        "assets/audio/config.json": '{"nested": "config"}\n',
+        "generation_config.json": '{"source": "generation"}\n',
+        "config.json": '{"source": "config"}\n',
+        "hf_quant_config.json": '{"source": "quant"}\n',
+        "quant_config.json": '{"source": "stale quant"}\n',
+        "quantize_config.json": '{"source": "stale quant"}\n',
+        "recipe.yaml": "quantize: {}\n",
+        ".experiment.json": '{"run_id": "source"}\n',
+        "model.safetensors.index.json": '{"weight_map": {}}\n',
+        "model-00001-of-00001.safetensors": "source weights\n",
+        "mtp.safetensors": "off-index weights\n",
+        "pytorch_model.bin": "source weights\n",
+        "original/consolidated.00.pth": "source weights\n",
+        ".git/lfs/objects/blob": "source weights\n",
+        ".cache/huggingface/download/README.md.metadata": "download state\n",
+    }
+    for file_name, contents in source_files.items():
+        (source_dir / file_name).parent.mkdir(parents=True, exist_ok=True)
+        (source_dir / file_name).write_text(contents)
+
+    export_files = {
+        "config.json": '{"export": "config"}\n',
+        "generation_config.json": '{"export": "generation"}\n',
+    }
+    for file_name, contents in export_files.items():
+        (export_dir / file_name).write_text(contents)
+
+    copied = hf_checkpoint_utils.copy_non_model_files(str(source_dir), str(export_dir))
+
+    expected = [
+        ".gitattributes",
+        "LICENSE",
+        "README.md",
+        "assets/audio/config.json",
+        "chat_template.jinja",
+        "modeling_custom.py",
+        "super_v3_reasoning_parser.py",
+        "tokenizer_config.json",
+    ]
+    assert sorted(copied) == expected
+    for file_name in expected:
+        assert (export_dir / file_name).read_text() == source_files[file_name]
+    for file_name, contents in export_files.items():
+        assert (export_dir / file_name).read_text() == contents
+    exported = {p.relative_to(export_dir).as_posix() for p in export_dir.rglob("*") if p.is_file()}
+    assert exported == {*expected, *export_files}
+
+
+def test_copy_non_model_files_skips_an_export_inside_the_source(tmp_path):
+    """An earlier export saved inside the checkpoint is not part of it."""
+    source_dir = tmp_path / "source"
+    (source_dir / "quantized").mkdir(parents=True)
+    (source_dir / "tokenizer.json").write_text("{}")
+    (source_dir / "quantized" / "tokenizer.json").write_text("{}")
+
+    copied = hf_checkpoint_utils.copy_non_model_files(source_dir, source_dir / "quantized")
+
+    assert copied == []
+    assert not (source_dir / "quantized" / "quantized").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_copy_non_model_files_does_not_write_through_an_export_link(tmp_path):
+    source_dir, export_dir, outside = tmp_path / "source", tmp_path / "export", tmp_path / "outside"
+    source_dir.mkdir()
+    export_dir.mkdir()
+    (source_dir / "tokenizer.json").write_text("{}")
+    (export_dir / "tokenizer.json").symlink_to(outside)  # dangling: exists() is False
+
+    assert hf_checkpoint_utils.copy_non_model_files(source_dir, export_dir) == []
+    assert not outside.exists()
+
+
+def test_copy_non_model_files_removes_a_partial_copy(monkeypatch, tmp_path):
+    source_dir, export_dir = tmp_path / "source", tmp_path / "export"
+    source_dir.mkdir()
+    (source_dir / "tokenizer.json").write_text("{}")
+
+    def failing_copy(src, dst):
+        Path(dst).write_text("{")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(hf_checkpoint_utils.shutil, "copy2", failing_copy)
+    with pytest.warns(UserWarning, match="disk full"):
+        assert hf_checkpoint_utils.copy_non_model_files(source_dir, export_dir) == []
+    assert not (export_dir / "tokenizer.json").exists()
+
+
+def test_ensure_local_checkpoint_returns_a_local_dir_untouched(monkeypatch, tmp_path):
+    def fail(*args, **kwargs):
+        raise AssertionError("a local checkpoint must not hit the hub")
+
+    monkeypatch.setattr(hf_checkpoint_utils, "snapshot_download", fail)
+    assert hf_checkpoint_utils.ensure_local_checkpoint(str(tmp_path)) == (None, str(tmp_path))
+
+
+class _FakeHfApi:
+    """``HfApi`` whose ``repo_info`` raises ``error``, or succeeds when it is None."""
+
+    error: Exception | None = None
+
+    def repo_info(self, repo_id):
+        if self.error is not None:
+            raise self.error
+
+
+def _fake_hub(monkeypatch, tmp_path, error=None):
+    # tests/unit/conftest.py sets HF_HUB_OFFLINE for the session; these tests model a live Hub.
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    calls = []
+
+    def fake_snapshot_download(*args, **kwargs):
+        calls.append((args, kwargs))
+        return str(tmp_path)
+
+    monkeypatch.setattr(hf_checkpoint_utils, "snapshot_download", fake_snapshot_download)
+    monkeypatch.setattr(hf_checkpoint_utils, "HfApi", type("Api", (_FakeHfApi,), {"error": error}))
+    return calls
+
+
+def test_ensure_local_checkpoint_fetches_a_hub_id_in_full(monkeypatch, tmp_path):
+    calls = _fake_hub(monkeypatch, tmp_path)
+
+    assert hf_checkpoint_utils.ensure_local_checkpoint("org/model") == ("org/model", str(tmp_path))
+    assert calls == [(("org/model",), {})]
+
+
+def test_ensure_local_checkpoint_warns_when_only_the_cache_is_left(monkeypatch, tmp_path):
+    """snapshot_download falls back to the cache silently; the fallback must be visible."""
+    calls = _fake_hub(monkeypatch, tmp_path, error=ConnectionError("no route to host"))
+
+    with pytest.warns(UserWarning, match="cached snapshot"):
+        result = hf_checkpoint_utils.ensure_local_checkpoint("org/model")
+
+    assert result == ("org/model", str(tmp_path))
+    assert calls == [(("org/model",), {"local_files_only": True})]
+
+
+def test_ensure_local_checkpoint_uses_the_cache_quietly_when_offline(monkeypatch, tmp_path):
+    """HF_HUB_OFFLINE is the user's choice: do not ask the Hub, and do not warn on every run."""
+    calls = _fake_hub(monkeypatch, tmp_path, error=AssertionError("the Hub must not be asked"))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = hf_checkpoint_utils.ensure_local_checkpoint("org/model")
+
+    assert result == ("org/model", str(tmp_path))
+    assert calls == [(("org/model",), {"local_files_only": True})]
+
+
+def test_ensure_local_checkpoint_offline_and_uncached_raises(monkeypatch, tmp_path):
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+
+    def not_cached(*args, **kwargs):
+        raise hf_hub_errors.LocalEntryNotFoundError("not in cache")
+
+    monkeypatch.setattr(hf_checkpoint_utils, "snapshot_download", not_cached)
+
+    with pytest.raises(RuntimeError, match="HF_HUB_OFFLINE is set"):
+        hf_checkpoint_utils.ensure_local_checkpoint("org/model")
+
+
+def test_ensure_local_checkpoint_names_the_hub_error_when_nothing_is_cached(monkeypatch, tmp_path):
+    _fake_hub(monkeypatch, tmp_path, error=ConnectionError("no route to host"))
+
+    def not_cached(*args, **kwargs):
+        raise hf_hub_errors.LocalEntryNotFoundError("not in cache")
+
+    monkeypatch.setattr(hf_checkpoint_utils, "snapshot_download", not_cached)
+
+    with pytest.raises(RuntimeError, match=r"no route to host.*not in the local cache"):
+        hf_checkpoint_utils.ensure_local_checkpoint("org/model")
+
+
+def test_ensure_local_checkpoint_raises_for_a_missing_repo(monkeypatch, tmp_path):
+    # Its constructor wants an HTTP response; only the type matters here.
+    missing = hf_hub_errors.RepositoryNotFoundError.__new__(hf_hub_errors.RepositoryNotFoundError)
+    calls = _fake_hub(monkeypatch, tmp_path, error=missing)
+
+    with pytest.raises(ValueError, match="not a local directory") as excinfo:
+        hf_checkpoint_utils.ensure_local_checkpoint("org/typo")
+    assert isinstance(excinfo.value.__cause__, hf_hub_errors.RepositoryNotFoundError)
+    assert calls == []
+
+
+def test_ensure_local_checkpoint_raises_for_a_gated_repo_unchanged(monkeypatch, tmp_path):
+    gated = hf_hub_errors.GatedRepoError.__new__(hf_hub_errors.GatedRepoError)
+    _fake_hub(monkeypatch, tmp_path, error=gated)
+
+    with pytest.raises(hf_hub_errors.GatedRepoError):
+        hf_checkpoint_utils.ensure_local_checkpoint("org/gated")
+
+
+def test_ensure_local_checkpoint_names_a_missing_local_path(tmp_path):
+    """A mistyped path is not a valid Hub ID either; the error must say it is not a directory."""
+    missing = tmp_path / "ckpt-typo"
+
+    with pytest.raises(ValueError, match="not a local directory") as excinfo:
+        hf_checkpoint_utils.ensure_local_checkpoint(str(missing))
+    assert isinstance(excinfo.value.__cause__, hf_hub_errors.HFValidationError)
+
+
+def test_copy_non_model_files_never_fetches_from_the_hub(monkeypatch, tmp_path):
+    """Exporters read the source from local disk only; a Hub ID is the caller's to download."""
+
+    def fail(*args, **kwargs):
+        raise AssertionError("copy_non_model_files must not download")
+
+    monkeypatch.setattr(hf_checkpoint_utils, "snapshot_download", fail)
+
+    with pytest.raises(ValueError, match="ensure_local_checkpoint"):
+        hf_checkpoint_utils.copy_non_model_files("org/model", tmp_path / "export")
+
+
+def test_experiment_json_is_export_owned():
+    """copy_non_model_files copies dotfiles, so without this the source checkpoint's MLflow pointer
+    would follow it into every derived checkpoint."""
+    assert EXPERIMENT_JSON in hf_checkpoint_utils._EXPORT_OWNED_FILES
+
+
+def test_copy_non_model_files_follows_links_only_within_the_checkpoint(tmp_path):
+    src_dir, export = tmp_path / "src", tmp_path / "export"
+    src_dir.mkdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("host file")
+    (src_dir / "README.md").write_text("readme")
+    (src_dir / "LICENSE").symlink_to(src_dir / "README.md")
+    (src_dir / "notes.txt").symlink_to(outside)
+    (src_dir / "gone.txt").symlink_to(tmp_path / "missing.txt")
+
+    with pytest.warns(UserWarning) as record:
+        copied = hf_checkpoint_utils.copy_non_model_files(src_dir, export)
+
+    assert sorted(copied) == ["LICENSE", "README.md"]
+    assert (export / "LICENSE").read_text() == "readme"
+    assert not (export / "notes.txt").exists()
+    assert not (export / "gone.txt").exists()
+    warned = " ".join(str(w.message) for w in record)
+    assert "notes.txt" in warned and "gone.txt" in warned
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
+def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path):
+    repo = tmp_path / "models--org--model"
+    snapshot, blobs = repo / "snapshots" / "abc123", repo / "blobs"
+    snapshot.mkdir(parents=True)
+    blobs.mkdir()
+    (blobs / "sha-tokenizer").write_text("{}")
+    (snapshot / "tokenizer.json").symlink_to("../../blobs/sha-tokenizer")
+
+    copied = hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "export")
+
+    assert copied == ["tokenizer.json"]
+    assert (tmp_path / "export" / "tokenizer.json").read_text() == "{}"
+
+
+def _ensure_local_checkpoint_job(tmp_path, fail, group_ranks, rank, size):
+    utils = hf_checkpoint_utils
+    snapshot = tmp_path / "snapshot"
+
+    def fake_snapshot_download(repo_id, **kwargs):
+        (tmp_path / f"downloaded-by-rank{rank}").write_text(repo_id)
+        if fail:
+            raise OSError("hub unreachable")
+        snapshot.mkdir(exist_ok=True)
+        return str(snapshot)
+
+    utils.snapshot_download = fake_snapshot_download
+    utils.HfApi = _FakeHfApi
+    os.environ.pop("HF_HUB_OFFLINE", None)  # inherited from tests/unit/conftest.py
+    # new_group is collective over every rank, members or not.
+    group = None if group_ranks is None else dist.new_group(group_ranks, backend="gloo")
+    if group_ranks is not None and rank not in group_ranks:
+        return
+    if fail:
+        with pytest.raises(RuntimeError, match="hub unreachable"):
+            utils.ensure_local_checkpoint("org/model", group=group)
+    else:
+        result = utils.ensure_local_checkpoint("org/model", group=group)
+        assert result == ("org/model", str(snapshot))
+
+
+def _ensure_local_checkpoint_local_path_job(tmp_path, hidden_from_rank1, rank, size):
+    utils = hf_checkpoint_utils
+
+    def fail(*args, **kwargs):
+        raise AssertionError("a local path must not be downloaded")
+
+    utils.snapshot_download = fail
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir(exist_ok=True)
+    if hidden_from_rank1 and rank == 1:
+        # As if the directory sat on rank 0's node-local disk only.
+        isdir = os.path.isdir
+        utils.os.path.isdir = lambda path: path != str(checkpoint) and isdir(path)
+        with pytest.raises(RuntimeError, match="this rank cannot see"):
+            utils.ensure_local_checkpoint(str(checkpoint))
+    else:
+        assert utils.ensure_local_checkpoint(str(checkpoint)) == (None, str(checkpoint))
+
+
+@pytest.mark.parametrize("hidden_from_rank1", [False, True])
+def test_ensure_local_checkpoint_lets_rank_0_resolve_a_local_path(tmp_path, hidden_from_rank1):
+    """Ranks that each checked a local path could disagree about it and strand one another in the
+    collective; rank 0 decides, and a rank that cannot see its answer raises instead."""
+    job = partial(_ensure_local_checkpoint_local_path_job, tmp_path, hidden_from_rank1)
+    spawn_multiprocess_job(2, job, backend="gloo")
+
+
+@pytest.mark.parametrize(
+    ("fail", "group_ranks", "downloader"),
+    [
+        (False, None, "rank0"),
+        (True, None, "rank0"),
+        (False, [0, 1], "rank0"),
+        # Rank 0 of the group, not of the world: global rank 1.
+        (False, [1], "rank1"),
+    ],
+)
+def test_ensure_local_checkpoint_downloads_once_per_group(tmp_path, fail, group_ranks, downloader):
+    """Rank 0 of the group downloads once and every member gets its result -- including its
+    failure, so the waiting ranks raise instead of hanging."""
+    job = partial(_ensure_local_checkpoint_job, tmp_path, fail, group_ranks)
+    spawn_multiprocess_job(2, job, backend="gloo")
+    assert [p.name for p in tmp_path.glob("downloaded-by-*")] == [f"downloaded-by-{downloader}"]

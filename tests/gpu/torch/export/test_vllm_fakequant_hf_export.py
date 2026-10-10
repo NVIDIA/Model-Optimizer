@@ -16,7 +16,6 @@ from copy import deepcopy
 
 import pytest
 import torch
-import transformers
 from _test_utils.torch.quantization.offload import make_cpu_offloaded_model, make_layerwise_cfg
 from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_qwen3_moe_dir
 from transformers import AutoModelForCausalLM
@@ -222,9 +221,9 @@ def test_hf_vllm_export_tiny_llama(tmp_path, quant_cfg):
     _test_hf_vllm_export(tmp_path, quant_cfg, tiny_model_dir)
 
 
-@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.INT4_AWQ_CFG])
+@pytest.mark.parametrize(
+    "quant_cfg", [mtq.FP8_DEFAULT_CFG]
+)  # INT4_AWQ_CFG is unsupported on fused MoE
 def test_hf_vllm_export_tiny_qwen3_moe(tmp_path, quant_cfg):
-    if quant_cfg == mtq.INT4_AWQ_CFG and transformers.__version__.startswith("5."):
-        pytest.skip("INT4_AWQ_CFG is not supported for Qwen3 MoE in transformers > 5.x")
     tiny_model_dir = create_tiny_qwen3_moe_dir(tmp_path, num_hidden_layers=2)
     _test_hf_vllm_export(tmp_path, quant_cfg, tiny_model_dir)

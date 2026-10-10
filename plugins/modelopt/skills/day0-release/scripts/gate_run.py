@@ -28,10 +28,14 @@ The run summary is a dict with, per task:
           "expected_samples": int,
           "scored_samples": int,
           "score": float | null,          # canonical score, if extracted
-          "errors": [str, ...]            # judge/parse/sample errors, if any
+          "errors": [str, ...],           # unresolved validation blockers
+          "warnings": [str, ...]          # policy-validated failure diagnostics
         }
       }
     }
+Apply run-validation.md's bounded failure policy before constructing this
+summary; this gate does not verify failure rates or raw evidence. Preserve
+accepted failures in warnings and their original artifacts, never erase blockers.
 Only a terminal SUCCESS with complete, numeric scores passes. Non-terminal
 statuses (RUNNING/PENDING/TIMEOUT/RESUMING) do NOT pass — the run hasn't
 finished — but they classify as INFRA_TRANSIENT (wait for NEL to resume/finish;

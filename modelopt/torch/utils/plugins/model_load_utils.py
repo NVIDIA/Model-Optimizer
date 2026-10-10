@@ -30,12 +30,8 @@ if TYPE_CHECKING:
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM
-
-try:
-    from transformers.conversion_mapping import get_model_conversion_mapping
-    from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
-except ImportError:  # transformers<5 has no weight-conversion engine
-    get_model_conversion_mapping = rename_source_key = WeightConverter = dot_natural_key = None
+from transformers.conversion_mapping import get_model_conversion_mapping
+from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
 
 from modelopt.torch.utils.distributed import (
     barrier,
@@ -94,12 +90,12 @@ def _promote_non_dtensor_to_gpu(model: nn.Module, device: torch.device) -> None:
 def _conversion_plan(model: nn.Module) -> dict | None:
     """Transformers' own conversion mapping for ``model``, or ``None`` if nothing needs converting.
 
-    ``legacy_renames`` (``_checkpoint_conversion_mapping``) covers transformers<5; on 5+ the
+    ``legacy_renames`` covers a remote-code model's ``_checkpoint_conversion_mapping``; the
     ``renamings``/``converters`` from HF's engine drive renaming + MoE weight fusion directly.
     """
     legacy_renames = dict(getattr(model, "_checkpoint_conversion_mapping", None) or {})
     renamings, converters = [], []
-    for entry in get_model_conversion_mapping(model) if get_model_conversion_mapping else []:
+    for entry in get_model_conversion_mapping(model):
         (converters if isinstance(entry, WeightConverter) else renamings).append(entry)
     if not (legacy_renames or renamings or converters):
         return None
@@ -119,8 +115,6 @@ def _resolve_target(plan: dict, key: str) -> tuple[str, str | None]:
     """
     for old, new in plan["legacy_renames"].items():
         key = re.sub(old, new, key)
-    if rename_source_key is None:  # transformers<5: legacy renames only, no converters
-        return key, None
     return rename_source_key(
         key, plan["renamings"], plan["converters"], plan["prefix"], plan["meta_state_dict"]
     )
@@ -128,8 +122,6 @@ def _resolve_target(plan: dict, key: str) -> tuple[str, str | None]:
 
 def _convert_keys(plan: dict, state: dict) -> dict:
     """Rename 1:1 keys and fuse per-expert keys by driving transformers' own conversion ops."""
-    if rename_source_key is None:  # transformers<5: legacy renames only, no fusion
-        return {_resolve_target(plan, k)[0]: v for k, v in state.items()}
     result: dict = {}
     collected: dict = {}  # target -> (converter, {source_pattern: [(sort_key, tensor)]})
     for key in sorted(state, key=dot_natural_key):
@@ -172,12 +164,12 @@ def build_meta_causal_lm(
     elif attn_implementation is not None:
         # Honor the override even when the caller passed in a pre-fetched config.
         hf_config._attn_implementation = attn_implementation
-    dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
+    dtype = getattr(hf_config, "dtype", None) or torch.bfloat16
     from accelerate import init_empty_weights  # only real callers of this function need it
 
     with init_empty_weights(include_buffers=False):
         model = AutoModelForCausalLM.from_config(
-            hf_config, torch_dtype=dtype, trust_remote_code=trust_remote_code
+            hf_config, dtype=dtype, trust_remote_code=trust_remote_code
         )
     model.eval()
     return model
@@ -395,8 +387,8 @@ def parallel_load_and_prepare_fsdp2(
     module_to_name = {m: n for n, m in model.named_modules()}
     layer_prefixes = [module_to_name[layer] + "." for layer in decoder_layers]
 
-    # transformers>=5 fuses/renames checkpoint keys so they no longer match param names 1:1
-    # (None => the pre-5.x identity path).
+    # transformers fuses/renames checkpoint keys so they no longer match param names 1:1
+    # (None => nothing to convert).
     plan = _conversion_plan(model)
 
     # Valid targets; keys converting to anything else are aux weights (e.g. an MTP head) we skip.

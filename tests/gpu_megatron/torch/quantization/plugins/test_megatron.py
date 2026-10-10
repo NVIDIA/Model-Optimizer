@@ -17,7 +17,7 @@ import copy
 import math
 import sys
 import types
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -60,12 +60,14 @@ from megatron.core.parallel_state import (
 )
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.transformer import MegatronModule, TransformerConfig
+from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
 from megatron.core.transformer.moe.router import TopKRouter
 
 import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
     restore_sharded_modelopt_state,
     save_sharded_modelopt_state,
@@ -85,6 +87,11 @@ from modelopt.torch.quantization.plugins.megatron import (
     megatron_replace_quant_module_hook,
     quant_module_get_extra_state,
 )
+from modelopt.torch.quantization.plugins.megatron_indexer import (
+    CSAIndexer,
+    _QuantMegatronIndexer,
+    rotate_activation,
+)
 from modelopt.torch.quantization.plugins.transformer_engine import (
     _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV,
 )
@@ -98,6 +105,13 @@ try:
     HAS_TE = True
 except ImportError:
     HAS_TE = False
+
+try:
+    from megatron.core.transformer.experimental_attention_variant.dsa import hadamard_transform
+
+    HAS_HADAMARD = hadamard_transform is not None
+except ImportError:
+    HAS_HADAMARD = False
 
 SEED = 1234
 
@@ -1856,6 +1870,323 @@ def test_kv_cache_quant(dist_workers_size_1, config):
     is only available with transformer_impl="modelopt" or "transformer_engine" (not "local").
     """
     dist_workers_size_1.run(partial(_test_kv_cache_quant_helper, config))
+
+
+INDEXER_FP8_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*indexer_q_quantizer", "cfg": {"num_bits": (4, 3)}, "enable": True},
+        {"quantizer_name": "*indexer_k_quantizer", "cfg": {"num_bits": (4, 3)}, "enable": True},
+    ],
+    "algorithm": "max",
+}
+INDEXER_QUANTIZERS = ("indexer_q_quantizer", "indexer_k_quantizer")
+# The KV-cache preset merged onto a disable-all base, as every model recipe does.
+KV_ONLY_FP8_CFG = {
+    "quant_cfg": [{"quantizer_name": "*", "enable": False}, *mtq.FP8_KV_CFG["quant_cfg"]],
+    "algorithm": "max",
+}
+
+
+def _indexers(model):
+    return [m for m in model.modules() if isinstance(m, _QuantMegatronIndexer)]
+
+
+def _fp8_grid_error(x, amax):
+    """Mean distance of ``x`` from the per-tensor FP8 E4M3 grid, relative to its mean magnitude."""
+    scaled = (x.float() * (448.0 / amax.float())).clamp(-448.0, 448.0)
+    return (
+        (scaled - scaled.to(torch.float8_e4m3fn).float()).abs().mean() / scaled.abs().mean()
+    ).item()
+
+
+def _returned_queries_and_keys(model, forward):
+    """``(indexer, query, key)`` for every ``forward_before_topk`` call of ``forward(model)``."""
+    outputs = []
+    with ExitStack() as stack:
+        for module in _indexers(model):
+
+            def spy(*args, _original=module.forward_before_topk, _module=module, **kwargs):
+                q, k, weights = _original(*args, **kwargs)
+                outputs.append((_module, q, k))
+                return q, k, weights
+
+            stack.enter_context(patch.object(module, "forward_before_topk", spy))
+        forward(model)
+    assert outputs
+    return outputs
+
+
+def _assert_quantized_in_serving_basis(model, forward):
+    """The query and key every indexer returns are fake-quantized before the Hadamard rotation.
+
+    vLLM quantizes the DeepSeek-V4 query and key unrotated. After FP8 fake quantization in that
+    basis the unrotated tensor lies on the FP8 grid while the rotated one does not.
+    """
+    for module, query, key in _returned_queries_and_keys(model, forward):
+        for x, quantizer in (
+            (query, module.indexer_q_quantizer),
+            (key, module.indexer_k_quantizer),
+        ):
+            assert _fp8_grid_error(rotate_activation(x), quantizer.amax) < 0.01
+            assert _fp8_grid_error(x, quantizer.amax) > 0.01  # the check tells the bases apart
+
+
+def _csa_indexer_model():
+    """A standalone DeepSeek-V4 CSA indexer (compress ratio 4), as built by the dsv4_hybrid spec."""
+    # Imported here: CSA (older megatron-core) and Transformer Engine are optional; the test skips.
+    from megatron.core.extensions.transformer_engine import TELinear, TENorm
+    from megatron.core.models.common.embeddings import RotaryEmbedding
+    from megatron.core.process_groups_config import ProcessGroupCollection
+    from megatron.core.transformer.experimental_attention_variant.csa import (
+        Compressor,
+        CompressorSubmodules,
+        CSAIndexerSubmodules,
+    )
+    from megatron.core.transformer.spec_utils import ModuleSpec
+    from megatron.core.transformer.transformer_config import MLATransformerConfig
+
+    config = MLATransformerConfig(
+        num_layers=2,
+        hidden_size=256,
+        num_attention_heads=16,
+        use_cpu_initialization=True,
+        bf16=True,
+        params_dtype=torch.bfloat16,
+        q_lora_rank=64,
+        kv_lora_rank=64,
+        qk_head_dim=32,
+        qk_pos_emb_head_dim=32,
+        v_head_dim=64,
+        rope_type="rope",
+        rotary_base=10000,
+        rotary_percent=1.0,
+        multi_latent_attention=True,
+        csa_compress_ratios=[4, 4],
+        dsa_indexer_n_heads=8,
+        dsa_indexer_head_dim=64,
+        dsa_indexer_topk=8,
+        dsa_indexer_loss_coeff=0.0,
+    )
+    pg_collection = ProcessGroupCollection.use_mpu_process_groups(required_pgs=["tp", "cp"])
+    compressor = partial(
+        Compressor,
+        submodules=CompressorSubmodules(
+            linear_wkv=ModuleSpec(module=TELinear),
+            linear_wgate=ModuleSpec(module=TELinear),
+            norm=ModuleSpec(module=TENorm),
+        ),
+    )
+    # A MegatronModule parent provides the sharded_state_dict of torch-dist checkpoints.
+    model = MegatronModule(config=config)
+    model.indexer = CSAIndexer(
+        config=config,
+        submodules=CSAIndexerSubmodules(
+            linear_wq_b=ModuleSpec(module=TELinear),
+            linear_weights_proj=ModuleSpec(module=TELinear),
+            compressor=compressor,
+        ),
+        compress_ratio=4,
+        rotary_pos_emb=RotaryEmbedding(
+            config.qk_pos_emb_head_dim,
+            rotary_percent=1.0,
+            rotary_base=10000,
+            cp_group=pg_collection.cp,
+        ),
+        pg_collection=pg_collection,
+    )
+    return model.cuda()
+
+
+def _test_csa_indexer_quant_helper(tmp_path, rank, size):
+    initialize_for_megatron(
+        tensor_model_parallel_size=size, pipeline_model_parallel_size=1, seed=SEED
+    )
+    x = torch.randn(64, 2, 256, dtype=torch.bfloat16, device="cuda")
+    qr = torch.randn(64, 2, 64, dtype=torch.bfloat16, device="cuda")
+
+    def forward(model):
+        return model.indexer(x, qr)
+
+    # The KV-cache glob does not match the indexer query and key.
+    kv_model = mtq.quantize(_csa_indexer_model(), KV_ONLY_FP8_CFG, forward)
+    assert _indexers(kv_model) and not any(
+        getattr(m, name).is_enabled for m in _indexers(kv_model) for name in INDEXER_QUANTIZERS
+    )
+
+    model = _csa_indexer_model()
+    with torch.no_grad():
+        rotated_query, rotated_key, _ = model.indexer.forward_before_topk(x, qr)
+    model = mtq.quantize(model, INDEXER_FP8_CFG, forward)
+    (indexer,) = _indexers(model)
+    # Calibrated on the unrotated query and key that vLLM quantizes, not on the rotated ones the
+    # scores use.
+    for name, rotated in zip(INDEXER_QUANTIZERS, (rotated_query, rotated_key)):
+        unrotated_amax = rotate_activation(rotated).abs().amax().float()
+        assert torch.allclose(getattr(indexer, name).amax.float(), unrotated_amax, rtol=0.02)
+    _assert_quantized_in_serving_basis(model, forward)
+    sharded_keys = list(model.sharded_state_dict())
+    assert any(k.endswith("indexer._extra_state") for k in sharded_keys)
+    for name in INDEXER_QUANTIZERS:
+        assert any(k.endswith(f"indexer.{name}._amax") for k in sharded_keys)
+
+    # Megatron resumes in two passes: the extra state recreates the quantizer buffers from their
+    # metadata (and must place them on device), then the full state dict fills in the values.
+    amaxes = {name: getattr(indexer, name).amax.clone() for name in INDEXER_QUANTIZERS}
+    state_dict = indexer.state_dict()
+    indexer.allow_post_restore = True
+    indexer.set_extra_state(indexer.get_extra_state())
+    for name, amax in amaxes.items():
+        quantizer = getattr(indexer, name)
+        assert quantizer.is_enabled
+        assert quantizer.amax.is_cuda
+        assert quantizer.amax.shape == amax.shape
+    indexer.load_state_dict(state_dict)
+    for name, amax in amaxes.items():
+        assert torch.equal(getattr(indexer, name).amax, amax)
+
+    def query_key_weights(model):
+        """A float output that depends on every indexer parameter, for the round-trip checks."""
+        return torch.cat([t.float().flatten() for t in model.indexer.forward_before_topk(x, qr)])
+
+    # torch-dist checkpoint + sharded modelopt_state round trip into a fresh model.
+    (tmp_path / "enabled").mkdir()
+    (tmp_path / "disabled").mkdir()
+    model_test = _csa_indexer_model()
+    sharded_state_dict_test_helper(tmp_path / "enabled", model, model_test, query_key_weights)
+    assert all(
+        getattr(m, name).is_enabled for m in _indexers(model_test) for name in INDEXER_QUANTIZERS
+    )
+
+    # A quantizer toggled outside the recipe (auto_quantize does this) must survive the round trip:
+    # the extra state, not the quant_cfg, is the record of the enabled flag.
+    mtq.disable_quantizer(model, "*indexer_k_quantizer")
+    model_test = _csa_indexer_model()
+    sharded_state_dict_test_helper(tmp_path / "disabled", model, model_test, query_key_weights)
+    assert all(
+        m.indexer_q_quantizer.is_enabled and not m.indexer_k_quantizer.is_enabled
+        for m in _indexers(model_test)
+    )
+
+
+@pytest.mark.skipif(not HAS_TE, reason="the CSA indexer is built from Transformer Engine layers")
+@pytest.mark.skipif(CSAIndexer is None, reason="megatron-core without Compressed Sparse Attention")
+@pytest.mark.skipif(not HAS_HADAMARD, reason="rotate_activation needs fast_hadamard_transform")
+def test_csa_indexer_quant(dist_workers_size_1, tmp_path):
+    """The DeepSeek-V4 CSA indexer query and key are fake-quantized before the Hadamard rotation,
+    and their quantizer state survives save/restore."""
+    dist_workers_size_1.run(partial(_test_csa_indexer_quant_helper, tmp_path))
+
+
+def test_registered_megatron_quant_modules_checkpoint_quantizer_state():
+    """Quantizer state rides in ``_extra_state``, which torch saves only for classes overriding it.
+
+    ``register_modelopt_extra_state_callbacks`` binds the hooks per instance, so a registered class
+    without a class-level ``get/set_extra_state`` silently drops its amax from checkpoints (as
+    DSAttention did). Containers whose child linears hold all quantizers are exempt.
+    """
+    containers = {MLP, SequentialMLP, TEGroupedMLP}
+    base = torch.nn.Module
+    missing = []
+    for cls, quant_cls in QuantModuleRegistry._registry.items():
+        if not issubclass(cls, MegatronModule) or cls in containers:
+            continue
+        if issubclass(cls, DynamicModule):
+            continue  # e.g. LoRA wrappers: the runtime class also includes the wrapped Megatron layer
+        routes = all(
+            any(getattr(c, attr) is not getattr(base, attr) for c in (quant_cls, cls))
+            for attr in ("get_extra_state", "set_extra_state")
+        )
+        if not routes:
+            missing.append(cls.__name__)
+    assert not missing, f"quantizer state would be dropped from checkpoints for: {missing}"
+
+
+def _get_tiny_dsa_gpt_model():
+    """Tiny GPT with DSA sparse attention (AbsorbedMLASelfAttention + DSAttention + indexer)."""
+    # Local: DSA is optional; test_dsa_kv_cache_quant importorskips it before calling this.
+    from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+        get_transformer_block_with_experimental_attention_variant_spec,
+    )
+    from megatron.core.transformer.transformer_config import MLATransformerConfig
+
+    config = MLATransformerConfig(
+        num_layers=2,
+        hidden_size=64,
+        num_attention_heads=4,
+        ffn_hidden_size=128,
+        q_lora_rank=32,
+        kv_lora_rank=16,
+        qk_head_dim=16,
+        qk_pos_emb_head_dim=16,
+        v_head_dim=16,
+        experimental_attention_variant="dsa",
+        dsa_indexer_n_heads=2,
+        dsa_indexer_head_dim=32,
+        dsa_indexer_topk=8,
+        normalization="RMSNorm",
+        add_bias_linear=False,
+        hidden_dropout=0.0,  # deterministic forward for the checkpoint round-trip comparison
+        attention_dropout=0.0,
+        bf16=True,
+        params_dtype=torch.bfloat16,
+    )
+    spec = get_transformer_block_with_experimental_attention_variant_spec(config)
+    return GPTModel(
+        config=config,
+        transformer_layer_spec=spec,
+        vocab_size=64,
+        max_sequence_length=64,
+        position_embedding_type="rope",
+        # Tied so a checkpoint round-trip restores the output layer too.
+        share_embeddings_and_output_weights=True,
+    ).cuda()
+
+
+def _test_dsa_kv_cache_quant_helper(tmp_path, rank, size):
+    # Local: DSA is optional; test_dsa_kv_cache_quant importorskips it before calling this.
+    from megatron.core.transformer.experimental_attention_variant.dsa import DSAttention
+
+    initialize_for_megatron(tensor_model_parallel_size=1, pipeline_model_parallel_size=1, seed=SEED)
+    model, model_test = _get_tiny_dsa_gpt_model(), _get_tiny_dsa_gpt_model()
+    forward = get_forward(model)
+    # Calibrated (not constant-amax) FP8 KV cache: the case that needs a real V amax to export.
+    kv_fp8_calibrated = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, kv_fp8_calibrated, forward)
+
+    dsa_modules = [m for m in model.modules() if isinstance(m, DSAttention)]
+    assert dsa_modules, "DSAttention was not converted for KV-cache quantization"
+    for module in dsa_modules:
+        assert module.k_bmm_quantizer.is_enabled and module.v_bmm_quantizer.is_enabled
+        # Absorbed MLA passes value=None; V is calibrated on the shared KV latent like K, so a
+        # calibrated FP8 KV cache still exports a v_scale.
+        assert module.k_bmm_quantizer.amax is not None
+        assert torch.equal(module.v_bmm_quantizer.amax, module.k_bmm_quantizer.amax)
+
+    # The KV quantizer state (incl. amax) survives a torch-dist round-trip alongside the indexer.
+    # DSA trains its indexer through a separate indexer loss, so the LM-loss backward in the helper
+    # gives it no gradient; exclude it from that check.
+    for name, param in model_test.named_parameters():
+        if ".indexer." in name:
+            param.requires_grad_(False)
+    sharded_state_dict_test_helper(tmp_path, model, model_test, forward)
+    # The helper compares every restored tensor (incl. K/V amax), but V is unused in the forward
+    # pass, so also check both quantizers came back enabled.
+    restored = [m for m in model_test.modules() if isinstance(m, DSAttention)]
+    assert len(restored) == len(dsa_modules)
+    assert all(m.k_bmm_quantizer.is_enabled and m.v_bmm_quantizer.is_enabled for m in restored)
+
+
+def test_dsa_kv_cache_quant(dist_workers_size_1, tmp_path):
+    """DSAttention gets calibrated K/V KV-cache quantizers that survive a checkpoint round-trip."""
+    pytest.importorskip("megatron.core.transformer.experimental_attention_variant.dsa")
+    dist_workers_size_1.run(partial(_test_dsa_kv_cache_quant_helper, tmp_path))
 
 
 def _test_kv_cache_amax_sync_helper(config, rank, size, tensor_model_parallel_size=1):

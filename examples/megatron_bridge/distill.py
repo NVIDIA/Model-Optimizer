@@ -208,9 +208,11 @@ def get_args():
         "--train_iters", type=int, required=True, help="Number of training iterations"
     )
     parser.add_argument(
-        "--no_skip_lm_loss", action="store_true", help="Disable skipping language model loss"
+        "--kd_loss_alpha",
+        type=float,
+        default=1.0,
+        help="KD loss weight alpha in (1 - alpha) * lm_loss + alpha * kd_loss. 1.0 skips the LM loss entirely.",
     )
-    parser.add_argument("--kd_loss_scale", type=float, default=1.0, help="KD loss weight")
     parser.add_argument(
         "--no_async_save",
         action="store_true",
@@ -218,11 +220,24 @@ def get_args():
         "CUDA context, which fails when the training process already fills the GPU.",
     )
     parser.add_argument(
-        "--logit_kl_topk",
+        "--logit_kl_top_k",
         type=int,
         default=None,
-        help="Restrict the logit KL loss to the teacher's top-k vocabulary entries, "
-        "replacing the full-vocab temporaries with [seq, k] ones.",
+        help="Restrict the logit KL loss to the teacher's top-k vocabulary entries plus a residual "
+        "bucket for the remaining probability mass (distributions are still normalized over the full vocab).",
+    )
+    parser.add_argument(
+        "--logit_kl_top_p",
+        type=float,
+        default=None,
+        help="Nucleus threshold in (0, 1] applied on top of --logit_kl_top_k: only the smallest prefix "
+        "of the sorted top-k whose cumulative teacher probability reaches this value is distilled.",
+    )
+    parser.add_argument(
+        "--logit_kl_top_p_min_k",
+        type=int,
+        default=1,
+        help="Minimum number of top-k entries kept per token when --logit_kl_top_p is active.",
     )
     parser.add_argument("--lr", type=float, default=1e-4, help="Peak learning rate")
     parser.add_argument("--min_lr", type=float, default=1e-5, help="Minimum learning rate")
@@ -474,9 +489,10 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         )
 
     kd_config = ModelOptDistillConfig(
-        skip_lm_loss=not args.no_skip_lm_loss,
-        kd_loss_scale=args.kd_loss_scale,
-        logit_kl_topk=args.logit_kl_topk,
+        kd_loss_alpha=args.kd_loss_alpha,
+        logit_kl_topk=args.logit_kl_top_k,
+        logit_kl_top_p=args.logit_kl_top_p,
+        logit_kl_top_p_min_k=args.logit_kl_top_p_min_k,
     )
 
     # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under

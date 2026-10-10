@@ -37,9 +37,14 @@ https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015
 
 import torch
 
+from ..extensions import get_cuda_ext_ggml
 from .codebooks import iq2_s_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
+    GGMLFormat,
+    chunk_importance,
+    importance_blocks,
+    iq2_tile_terms,
     narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
@@ -51,6 +56,7 @@ __all__ = [
     "IQ2_S_BLOCK_SIZE",
     "IQ2_S_EFFECTIVE_BITS",
     "dequantize_iq2_s",
+    "iq2_s_fake_quant",
     "iq2_s_grid",
     "quantize_iq2_s",
 ]
@@ -69,6 +75,7 @@ _IQ2_S_PEAK_TO_RMS_TAPER = 0.035
 # The grid is twice IQ2_XS's, so the same search tile costs twice the memory.
 _DEFAULT_BLOCK_CHUNK_SIZE = 128
 _DEFAULT_DECODE_CHUNK_SIZE = 4096
+_SCALE_BLOCK_CHUNK_SIZE = 4096
 
 _GRID_CACHE: dict[torch.device, torch.Tensor] = {}
 
@@ -98,8 +105,10 @@ def _predict_iq2_s_scales(blocks: torch.Tensor) -> torch.Tensor:
     return ((amax / _IQ2_S_NATIVE_MAX) * anchor_ratio).clamp(max=65504.0).to(torch.float16)
 
 
-def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
-    """Encode a moderate-size batch of flattened 256-value blocks."""
+def _encode_blocks(
+    blocks: torch.Tensor, grid: torch.Tensor, weights: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Encode a moderate-size batch of flattened 256-value blocks, optionally error-weighted."""
     x = narrow_to_float32(blocks)
     block_count = x.shape[0]
     vectors = x.reshape(block_count, _IQ2_S_GROUPS, 8)
@@ -109,7 +118,7 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
     d = _predict_iq2_s_scales(x)
     d_float = d.float()
 
-    xnorm = vectors.square().sum(dim=-1)
+    xnorm = (vectors.square() if weights is None else weights * vectors.square()).sum(dim=-1)
     qnorm = grid.square().sum(dim=-1)
     shape = (block_count, _IQ2_S_GROUPS, _IQ2_S_LOCAL_SCALES)
     best_error = torch.full(shape, torch.inf, dtype=torch.float32, device=x.device)
@@ -117,8 +126,9 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
     # All eight signs are storable, so the search compares magnitudes directly.
     for entry_start in range(0, _IQ2_S_GRID_ENTRIES, 64):
         grid_tile = grid[entry_start : entry_start + 64]
-        dot = (magnitudes.unsqueeze(2) * grid_tile.reshape(1, 1, -1, 8)).sum(dim=-1)
-        tile_qnorm = qnorm[entry_start : entry_start + 64].reshape(1, 1, -1)
+        dot, tile_qnorm = iq2_tile_terms(
+            magnitudes, grid_tile, qnorm[entry_start : entry_start + 64], weights
+        )
 
         for local in range(_IQ2_S_LOCAL_SCALES):
             scale = d_float.reshape(-1, 1, 1) * ((2 * local + 1) / 8.0)
@@ -155,22 +165,43 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def quantize_iq2_s(
-    weight: torch.Tensor, *, block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE
+    weight: torch.Tensor,
+    *,
+    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
+    importance: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ2_S blocks.
 
     Returned shapes are ``[*weight.shape[:-1], weight.shape[-1] // 256, 82]``
-    and ``[weight.ndim]``.
+    and ``[weight.ndim]``. ``importance``, a non-negative per-input-column vector, weights each
+    value's squared error in the search, as llama.cpp's imatrix does.
     """
     validate_weight(weight, "IQ2_S")
     validate_block_chunk_size(block_chunk_size)
+    block_importance = importance_blocks(importance, weight, "IQ2_S")
 
     logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
     blocks = weight.contiguous().reshape(-1, IQ2_S_BLOCK_SIZE)
     grid = iq2_s_grid(weight.device)
     packed_shape = (*weight.shape[:-1], weight.shape[-1] // IQ2_S_BLOCK_SIZE, IQ2_S_BLOCK_BYTES)
+    if weight.is_cuda:
+        extension = get_cuda_ext_ggml()
+        if extension is not None:
+            scale_chunks = [
+                _predict_iq2_s_scales(blocks[start : start + _SCALE_BLOCK_CHUNK_SIZE])
+                for start in range(0, blocks.shape[0], _SCALE_BLOCK_CHUNK_SIZE)
+            ]
+            packed = extension.iq2_s_pack(blocks, grid, torch.cat(scale_chunks), block_importance)
+            return packed.reshape(packed_shape), logical_shape
+
     chunks = [
-        _encode_blocks(blocks[start : start + block_chunk_size], grid)
+        _encode_blocks(
+            blocks[start : start + block_chunk_size],
+            grid,
+            chunk_importance(
+                block_importance, start, min(start + block_chunk_size, blocks.shape[0])
+            ),
+        )
         for start in range(0, blocks.shape[0], block_chunk_size)
     ]
     return torch.cat(chunks).reshape(packed_shape), logical_shape
@@ -191,6 +222,11 @@ def dequantize_iq2_s(
     validate_block_chunk_size(block_chunk_size)
 
     blocks = packed_weights.contiguous().reshape(-1, IQ2_S_BLOCK_BYTES)
+    if blocks.is_cuda:
+        extension = get_cuda_ext_ggml()
+        if extension is not None:
+            grid = iq2_s_grid(blocks.device)
+            return extension.iq2_s_unpack(blocks, grid, dtype).reshape(shape)
     bit_positions = torch.arange(8, dtype=torch.int64, device=blocks.device)
     high_shifts = torch.tensor([0, 2, 4, 6], dtype=torch.int64, device=blocks.device)
     grid = iq2_s_grid(blocks.device)
@@ -215,3 +251,20 @@ def dequantize_iq2_s(
         chunk_decoded = values.reshape(count, 16, 2, 8) * scales.unsqueeze(-1).unsqueeze(-1)
         decoded[start:stop] = chunk_decoded.reshape(-1, IQ2_S_BLOCK_SIZE)
     return decoded.reshape(shape)
+
+
+IQ2_S_FORMAT = GGMLFormat(
+    name="iq2_s",
+    block_size=IQ2_S_BLOCK_SIZE,
+    block_bytes=IQ2_S_BLOCK_BYTES,
+    quantize=quantize_iq2_s,
+    dequantize=dequantize_iq2_s,
+    block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
+    decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+    weighted=True,
+)
+
+# Kept for callers of the per-format entry point. The record captured quantize_iq2_s and
+# dequantize_iq2_s when it was built, so patching those module functions changes neither backend
+# dispatch nor this alias; substitute a format's encoder or decoder in IQ_FORMAT_REGISTRY.
+iq2_s_fake_quant = IQ2_S_FORMAT.fake_quant

@@ -19,7 +19,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List
 
-from torch import nn
 from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3DecoderLayer,
     Qwen3ForCausalLM,
@@ -29,7 +28,6 @@ from transformers.models.qwen3.modeling_qwen3 import (
 from ....block_config import BlockConfig
 from ....pruning.ffn_intermediate_pruning_mixin import FFNIntermediateLayerDescriptor
 from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor
-from ....utils.dummy_modules import DummyBlock
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
 
@@ -45,18 +43,6 @@ class Qwen3ModelDescriptor(ModelDescriptor):
     @staticmethod
     def decoder_layer_cls():
         return Qwen3DecoderLayer
-
-    @classmethod
-    def create_dummy_block(cls, original_layer: nn.Module, block_index: int) -> nn.Module:
-        """Create a dummy block that preserves Qwen3-specific attributes like attention_type.
-
-        Qwen3's forward pass accesses decoder_layer.attention_type for attention mask selection.
-        """
-        dummy = DummyBlock(block_index=block_index)
-        # Copy attention_type from original layer (required by Qwen3's forward pass)
-        if hasattr(original_layer, "attention_type"):
-            dummy.attention_type = original_layer.attention_type
-        return dummy
 
     @staticmethod
     def block_config_to_layer_overrides(block_config: BlockConfig):

@@ -13,12 +13,13 @@
 # either. It is a standalone recipe because recipes do not compose; keep the two files in
 # sync when editing shared fields.
 #
-# THE INIT IS THE ONE DELIBERATE DIFFERENCE FROM DFlash2. `conv_projection_init_std: 0.0`
-# zeroes `kernel_projection`, and `base_kernel` is identity at tap 0, so the wrapper is an
-# EXACT identity at step 0: a run from this recipe begins as the plain reranker and any
-# difference is attributable to the convolutions rather than to a perturbed start. DFlash2
-# draws the same projection from `normal_(0, initializer_range)` and is therefore not the
-# identity at init. Do not "align" the two -- they answer different questions.
+# THE INIT IS THIS RECIPE'S OWN. `conv_projection_init_std: 0.0` zeroes
+# `kernel_projection`, and `base_kernel` is identity at tap 0, so the wrapper is an EXACT
+# identity at step 0: a run from this recipe begins as the plain reranker and any
+# difference is attributable to the convolutions rather than to a perturbed start.
+# `_install_sublayer_convs` assigns the weight explicitly, so this holds whatever
+# `DFlashGroupedConv` does for DFlash2 -- which since the DFlash2 merge also zeroes it.
+# Raise this key if you want a perturbed start instead.
 #
 # MEMORY. The convolutions add ~42M trainable parameters (20 tensors for a 5-layer draft),
 # and the activations they hold are the binding constraint. At an 8B target, combined with

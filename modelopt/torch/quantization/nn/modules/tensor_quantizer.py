@@ -736,7 +736,9 @@ class TensorQuantizer(nn.Module):
     def _get_amax(self, inputs):
         """Get amax from buffer or compute it dynamically."""
         if self._use_constant_amax:
-            return torch.tensor(torch.finfo(torch.float8_e4m3fn).max, device=inputs.device)
+            # torch.full fills on the device; torch.tensor would copy from the host on every call,
+            # which CUDA graph capture rejects.
+            return torch.full((), torch.finfo(torch.float8_e4m3fn).max, device=inputs.device)
         if hasattr(self, "_amax"):
             amax = self._amax
             # A constant_amax buffer is registered at config time (on CPU) and may not have

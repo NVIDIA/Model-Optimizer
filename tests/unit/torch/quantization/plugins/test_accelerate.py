@@ -20,10 +20,11 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import QuantLinearConvBase, TensorQuantizer
 
 try:
-    from accelerate.hooks import ModelHook, add_hook_to_module
+    from accelerate.hooks import AlignDevicesHook, ModelHook, add_hook_to_module
 except ImportError:
     pytest.skip("accelerate not available", allow_module_level=True)
 
@@ -80,3 +81,35 @@ def test_tensor_quantizer_modelopt_state_with_accelerate_hook():
 
     # The state dict must be picklable (torch.save uses pickle internally)
     pickle.dumps(state)
+
+
+def test_buffer_registered_during_weight_access_survives_buffer_offload():
+    """GPTQ's payload pin is registered while the offloaded weight is materialized; the hook must
+    still be able to reload it after offloading the module again."""
+    torch.manual_seed(0)
+    model = nn.Linear(512, 8, bias=False)
+    inputs = torch.randn(128, 512)
+    iq1_s_weights = {"num_bits": "iq1_s", "block_sizes": {-1: 256}, "backend": "ggml"}
+    quant_cfg = [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*weight_quantizer", "cfg": iq1_s_weights, "enable": True},
+    ]
+    mtq.quantize(model, {"quant_cfg": quant_cfg, "algorithm": "max"}, lambda m: m(inputs))
+    weights_map = {name: value.detach().clone() for name, value in model.state_dict().items()}
+    hook = AlignDevicesHook(
+        execution_device="cpu",
+        offload=True,
+        offload_buffers=True,
+        place_submodules=True,
+        weights_map=weights_map,
+    )
+    add_hook_to_module(model, hook)
+
+    gptq = {"method": "gptq", "block_size": 256, "perc_damp": 0.3}
+    mtq.calibrate(model, algorithm=gptq, forward_loop=lambda m: m(inputs))
+
+    (pin_key,) = [key for key in weights_map if key.endswith("_ggml_pinned_iq1_s")]
+    decoded = GGML_FORMAT_REGISTRY["iq1_s"].dequantize(
+        weights_map[pin_key], torch.tensor((8, 512)), dtype=torch.float32
+    )
+    torch.testing.assert_close(model(inputs), inputs @ decoded.T)

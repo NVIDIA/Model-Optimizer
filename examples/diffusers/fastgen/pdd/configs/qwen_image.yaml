@@ -1,0 +1,95 @@
+# Qwen-Image PDD training recipe.
+
+seed: 42
+
+model:
+  # Create this once with pdd/prepare_qwen_image.py. AutoModel then sees the final
+  # parameter structure before FSDP and optimizer construction.
+  pretrained_model_name_or_path: models/qwen_image_pdd_student
+  teacher_model_name_or_path: Qwen/Qwen-Image
+  teacher_revision: 75e0b4be04f60ec59a75f475837eced720f823b6
+  torch_dtype: float32
+  compute_dtype: bfloat16
+  mode: finetune
+  transformer_engine_linear: false
+  fuse_qkv_projections: false
+  # Native Qwen-Image latent shape at 1024x1024.
+  latent_shape: [16, 128, 128]
+
+pdd:
+  guidance_scale: 4.0
+  grid_size: 128
+  grid_max_t: 0.999
+  flow_shift: 5.0
+  block_size_min: 16
+  block_size_max: 64
+  teacher_integrator: midpoint
+  inference_blocks: [32, 32, 32, 32]
+  data_free: true
+
+optim:
+  learning_rate: 1.0e-5
+  clip_grad: 1.0
+  optimizer:
+    _target_: torch.optim.AdamW
+    weight_decay: 0.0
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    amsgrad: false
+    capturable: false
+    differentiable: false
+    foreach: false
+    fused: false
+    maximize: false
+
+lr_scheduler:
+  lr_decay_style: constant
+  lr_warmup_steps: 0
+  lr_decay_steps: 3000
+  init_lr: 1.0e-5
+  max_lr: 1.0e-5
+  min_lr: 1.0e-5
+
+# PDD supplies the loss; AutoModel owns the ordinary diffusion training lifecycle.
+flow_matching:
+  adapter_type: qwen_image
+
+step_scheduler:
+  max_steps: 3000
+  num_epochs: 200
+  log_every: 10
+  ckpt_every_steps: 250
+  local_batch_size: 4
+  save_checkpoint_every_epoch: false
+  global_batch_size: 2048
+
+fsdp:
+  dp_size:
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  ep_size: 1
+  # The PDD recipe enables Qwen's native block checkpointing after binding the PDD forward.
+  activation_checkpointing: false
+
+data:
+  dataloader:
+    _target_: fastgen_data.build_text_to_image_multiresolution_dataloader
+    cache_dir: data/qwen_image_cache
+    prompt_only: true
+    base_resolution: [1024, 1024]
+    batch_size: 4
+    drop_last: true
+    shuffle: true
+    dynamic_batch_size: false
+    sampler_seed: 42
+    loader_seed: 42
+    negative_prompt_embedding_path: negative_prompt_embedding.pt
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: checkpoints/pdd_qwen_image_data_free_midpoint_3k
+  model_save_format: safetensors
+  save_consolidated: final
+  diffusers_compatible: true
+  restore_from:
