@@ -19,6 +19,7 @@ import json
 import pytest
 import torch
 from _test_utils.examples.run_command import run_example_command
+from _test_utils.fs_utils import assert_unmodified_tree
 from safetensors.torch import load_file
 
 # Mapping from backend name to accelerate config file
@@ -102,6 +103,38 @@ def _run_export(ckpt_dir: str, export_dir: str):
     )
 
 
+@pytest.fixture(scope="module")
+def dataset_cache_dir(tmp_path_factory):
+    """Tokenized-dataset cache for every quantize/train run below.
+
+    The cache key covers the tokenizer, max length and blend (not the command), so the dataset is
+    built once for quantize.py (8192) and once for train.py (128) instead of once per command.
+    """
+    return str(tmp_path_factory.mktemp("dataset_cache"))
+
+
+@pytest.fixture(scope="module")
+def nvfp4_ptq_dir(tiny_qwen3_path, tmp_path_factory, dataset_cache_dir):
+    """NVFP4 PTQ checkpoint shared by the QAT and QAD tests, which only read it.
+
+    quantize.py ignores the QAD-only config keys, so qat_nvfp4.yaml and qad_nvfp4.yaml give the
+    same arguments and one run serves both.
+    """
+    ptq_dir = tmp_path_factory.mktemp("ptq")
+    _run_quantize(
+        "configs/train/qat_nvfp4.yaml",
+        [
+            "--model_name_or_path", tiny_qwen3_path,
+            "--recipe", "general/ptq/nvfp4_default-kv_fp8",
+            "--calib_size", "64",
+            "--output_dir", str(ptq_dir),
+        ],
+        cache_dir=dataset_cache_dir,
+    )
+    with assert_unmodified_tree(ptq_dir) as path:
+        yield str(path)
+
+
 def test_dataset_utils_pretokenize(tiny_qwen3_path, tmp_path):
     """Test dataset_utils.py standalone CLI pre-tokenization."""
     cache_dir = tmp_path / "dataset_cache"
@@ -122,33 +155,18 @@ def test_dataset_utils_pretokenize(tiny_qwen3_path, tmp_path):
     "deepspeed",
     "ddp",
 ])
-def test_qwen3_qat_nvfp4(tiny_qwen3_path, tmp_path, backend):
-    ptq_output_dir = tmp_path / "ptq"
+def test_qwen3_qat_nvfp4(nvfp4_ptq_dir, dataset_cache_dir, tmp_path, backend):
     qat_output_dir = tmp_path / "qat"
-    cache_dir = str(tmp_path / "dataset_cache")
 
-    # Step 1: Quantize
-    _run_quantize(
-        "configs/train/qat_nvfp4.yaml",
-        [
-            "--model_name_or_path", tiny_qwen3_path,
-            "--recipe", "general/ptq/nvfp4_default-kv_fp8",
-            "--calib_size", "64",
-            "--output_dir", str(ptq_output_dir),
-        ],
-        cache_dir=cache_dir,
-    )
-
-    # Step 2: QAT
     _run_train(
         "configs/train/qat_nvfp4.yaml",
         [
-            "--model_name_or_path", str(ptq_output_dir),
+            "--model_name_or_path", nvfp4_ptq_dir,
             "--do_train", "True",
             "--output_dir", str(qat_output_dir),
         ],
         backend=backend,
-        cache_dir=cache_dir,
+        cache_dir=dataset_cache_dir,
     )
 
 @pytest.mark.skip(reason="FSDP2 LoRA checkpoint save omits adapter_model.safetensors")
@@ -211,43 +229,28 @@ def test_qwen3_lora_qat_nvfp4(tiny_qwen3_path, tmp_path):
     "fsdp2",
     "deepspeed",
 ])
-def test_qwen3_qad_nvfp4(tiny_qwen3_path, tmp_path, backend):
-    ptq_output_dir = tmp_path / "ptq"
+def test_qwen3_qad_nvfp4(tiny_qwen3_path, nvfp4_ptq_dir, dataset_cache_dir, tmp_path, backend):
     qad_output_dir = tmp_path / "qad"
-    cache_dir = str(tmp_path / "dataset_cache")
 
-    # Step 1: Quantize student
-    _run_quantize(
-        "configs/train/qad_nvfp4.yaml",
-        [
-            "--model_name_or_path", tiny_qwen3_path,
-            "--recipe", "general/ptq/nvfp4_default-kv_fp8",
-            "--calib_size", "64",
-            "--output_dir", str(ptq_output_dir),
-        ],
-        cache_dir=cache_dir,
-    )
-
-    # Step 2: QAD (quantization-aware distillation)
+    # QAD (quantization-aware distillation) of the shared quantized student
     _run_train(
         "configs/train/qad_nvfp4.yaml",
         [
-            "--model_name_or_path", str(ptq_output_dir),
+            "--model_name_or_path", nvfp4_ptq_dir,
             "--do_train", "True",
             "--output_dir", str(qad_output_dir),
             "--distill", "True",
             "--teacher_model", tiny_qwen3_path,
         ],
         backend=backend,
-        cache_dir=cache_dir,
+        cache_dir=dataset_cache_dir,
     )
 
 
-def test_qwen3_qlora_nvfp4(tiny_qwen3_path, tmp_path):
+def test_qwen3_qlora_nvfp4(tiny_qwen3_path, dataset_cache_dir, tmp_path):
     ptq_output_dir = tmp_path / "ptq"
-    cache_dir = str(tmp_path / "dataset_cache")
 
-    # Step 1: Quantize with compression for QLoRA
+    # Step 1: Quantize with compression for QLoRA (its own checkpoint: the others are not compressed)
     _run_quantize(
         "configs/train/qlora_nvfp4.yaml",
         [
@@ -257,7 +260,7 @@ def test_qwen3_qlora_nvfp4(tiny_qwen3_path, tmp_path):
             "--compress", "True",
             "--output_dir", str(ptq_output_dir),
         ],
-        cache_dir=cache_dir,
+        cache_dir=dataset_cache_dir,
     )
 
     # Step 2: QLoRA training
@@ -271,7 +274,7 @@ def test_qwen3_qlora_nvfp4(tiny_qwen3_path, tmp_path):
             "--output_dir", str(qlora_output_dir),
         ],
         backend="ddp",
-        cache_dir=cache_dir,
+        cache_dir=dataset_cache_dir,
     )
 
     # Step 3: Export the QLoRA checkpoint for deployment
