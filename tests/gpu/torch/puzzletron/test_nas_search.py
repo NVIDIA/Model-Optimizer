@@ -76,9 +76,16 @@ def _test_nas_search_multiprocess_job(
     )
 
     #
-    # Check assertions for mtn.search() step
+    # Check assertions for the mtn.convert() and mtn.search() steps
     #
     if rank == 0:
+        # assertions for the score_pruning_activations step of mtn.convert()
+        rank_filepath = "pruning/pruning_scores/ffn_iterative/100samples_diverse_mini/rank_0.pth"
+        assert (puzzle_dir / rank_filepath).is_file()
+
+        # assertions for the pruning_ckpts step of mtn.convert()
+        assert (puzzle_dir / "ckpts/ffn_256_attn_no_op").exists()
+
         # assertions for the build_library_and_stats step
         assert (puzzle_dir / "replacement_library.json").is_file()
         assert (puzzle_dir / "subblock_stats.json").is_file()
