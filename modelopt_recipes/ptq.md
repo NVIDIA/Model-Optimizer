@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 32 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 33 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -60,9 +60,10 @@ supported combinations.
 | `mxfp4_mlp_weight_only` | MXFP4 W4A16, MLP + MoE weights only | none | none (no calibration) |
 | `iq1_s` | IQ1_S W1A16, MLP + MoE weights only | none | GPTQ (layerwise) |
 | `iq1_m` | IQ1_M W1A16 (1.75 bpw), MLP + MoE weights only | none | GPTQ (layerwise) |
-| `iq2_xxs` | IQ2_XXS W2A16 (2.06 bpw), MLP + MoE weights only | none | GPTQ (layerwise) |
-| `iq2_xs` | IQ2_XS W2A16 (2.31 bpw), MLP + MoE weights only | none | GPTQ (layerwise) |
-| `iq2_s` | IQ2_S W2A16 (2.56 bpw), MLP + MoE weights only | none | GPTQ (layerwise) |
+| `iq2_xxs` | IQ2_XXS W2A16 (2.06 bpw), MLP + MoE weights only | none | GPTQ, then imatrix for fused MoE experts (layerwise) |
+| `iq2_xxs_experts_only` | IQ2_XXS W2A16 (2.06 bpw), MoE routed experts only | none | imatrix (layerwise) |
+| `iq2_xs` | IQ2_XS W2A16 (2.31 bpw), MLP + MoE weights only | none | GPTQ, then imatrix for fused MoE experts (layerwise) |
+| `iq2_s` | IQ2_S W2A16 (2.56 bpw), MLP + MoE weights only | none | GPTQ, then imatrix for fused MoE experts (layerwise) |
 | `q8_0` | Q8_0 W8A16 (8.5 bpw), eligible linears | none | none (no calibration) |
 
 </details>
@@ -148,11 +149,16 @@ activations and tensor-core math are what deliver the throughput.
   `conv1d` and the vision branch stay in BF16. The formats trade size against
   accuracy in order: 1.56, 1.75, 2.06, 2.31 and 2.56 bits per weight. Weights are
   calibrated with layerwise GPTQ (`block_size: 256`, `perc_damp: 0.3`), so calibration
-  data is required; fused-MoE experts are quantized without the GPTQ update. Quantized
-  weights must have a final dimension divisible by 256.
+  data is required. GPTQ does not reach fused-MoE experts: the IQ2 recipes follow it with
+  imatrix, which weights each expert's search by the tokens routed to it, while the IQ1
+  recipes still encode them without calibration. Quantized weights must have a final
+  dimension divisible by 256.
   Unified HF export writes the packed GGML blocks; Megatron export additionally
   requires tensor and pipeline parallel sizes of 1, and does not support
   fused-MoE experts.
+- **`iq2_xxs_experts_only`** — IQ2_XXS on the MoE routed experts only (`*.experts.*`,
+  `*block_sparse_moe*`), calibrated with imatrix alone; shared experts, dense layers and
+  attention stay in BF16.
 - **`q8_0`** — GGML-compatible weight-only quantization on eligible linear layers,
   with BF16 activations; `lm_head`, MoE routers, `conv1d` and the vision branch stay
   in BF16. Q8_0 uses 8.5 bits per weight and requires no calibration data. Quantized

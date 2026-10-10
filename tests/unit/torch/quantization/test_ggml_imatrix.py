@@ -24,6 +24,7 @@ import torch.nn.functional as F
 from torch import nn
 
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.nn import QuantModuleRegistry
@@ -159,15 +160,26 @@ class _FusedExperts(nn.Module):
         return output
 
 
-class _MoE(nn.Module):
+class _MoEBlock(nn.Module):
     """Routes token ``t`` to expert ``t % 3``, so the last expert receives no token."""
 
     def __init__(self):
         super().__init__()
         self.experts = _FusedExperts()
+        self.shared_expert = nn.Linear(HIDDEN, HIDDEN, bias=False)
 
     def forward(self, hidden_states):
-        return self.experts(hidden_states, torch.arange(len(hidden_states)) % 3)
+        routed = self.experts(hidden_states, torch.arange(len(hidden_states)) % 3)
+        return routed + self.shared_expert(hidden_states)
+
+
+class _MoE(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mlp = _MoEBlock()
+
+    def forward(self, hidden_states):
+        return self.mlp(hidden_states)
 
 
 @pytest.fixture
@@ -180,14 +192,21 @@ def moe():
 
 
 def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
-    original = copy.deepcopy(moe.experts)
+    original = copy.deepcopy(moe.mlp)
     inputs = _inputs(rows=96, columns=HIDDEN)
     calls = _record_importance(monkeypatch)
-    mtq.quantize(moe, _config(IMATRIX, "*experts*weight_quantizer"), lambda m: m(inputs))
+    # The shipped experts-only recipe's quantizers, calibrated in one pass (no decoder layers here).
+    recipe = load_recipe("general/ptq/iq2_xxs_experts_only").quantize.model_dump()
+    assert recipe["algorithm"]["method"] == "imatrix"
+    mtq.quantize(moe, {**recipe, "algorithm": IMATRIX}, lambda m: m(inputs))
+
+    # The shared expert stays in BF16.
+    assert not moe.mlp.shared_expert.weight_quantizer.is_enabled
+    assert torch.equal(moe.mlp.shared_expert.weight, original.shared_expert.weight)
 
     # One encode per expert and projection: gate_up for experts 0..3, then down for 0..3.
     gate_up_calls, down_calls = calls[-8:-4], calls[-4:]
-    experts = moe.experts
+    experts = moe.mlp.experts
     for idx in range(NUM_EXPERTS):
         tokens = inputs[idx::3] if idx < 3 else inputs[:0]
         if len(tokens) == 0:
@@ -195,7 +214,7 @@ def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
             assert gate_up_calls[idx] is None
             assert down_calls[idx] is None
         else:
-            gate, up = F.linear(tokens, original.gate_up_proj[idx]).chunk(2, dim=-1)
+            gate, up = F.linear(tokens, original.experts.gate_up_proj[idx]).chunk(2, dim=-1)
             torch.testing.assert_close(gate_up_calls[idx], _importance(tokens.square().mean(dim=0)))
             torch.testing.assert_close(
                 down_calls[idx], _importance((F.silu(gate) * up).square().mean(dim=0))
