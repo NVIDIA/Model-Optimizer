@@ -18,6 +18,7 @@ import time
 
 import pytest
 import torch
+from _test_utils.torch.calib_data import write_calib_jsonl
 from _test_utils.torch.transformers_models import get_tiny_llama
 from conftest import requires_triton
 
@@ -130,14 +131,14 @@ def test_gptq_export_roundtrip():
 @pytest.mark.parametrize(
     "quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG]
 )
-def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer):
+def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer, tmp_path):
     model = get_tiny_llama(vocab_size=tiny_tokenizer.vocab_size).to("cuda")
     model.eval()
 
     quant_cfg = copy.deepcopy(quant_cfg)
     quant_cfg["algorithm"] = {"method": "gptq", "layerwise": {"enable": True}}
     calib_dataloader = get_dataset_dataloader(
-        dataset_name="cnn_dailymail",
+        dataset_name=write_calib_jsonl(tmp_path / "calib.jsonl", num_samples=8),
         tokenizer=tiny_tokenizer,
         batch_size=2,
         num_samples=8,
