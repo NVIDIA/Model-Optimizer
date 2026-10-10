@@ -15,12 +15,15 @@
 
 import torch
 import torch.distributed as dist
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.quantization.models import SimpleLinear
 from torch.nn.parallel import DistributedDataParallel
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils import unwrap_model
+from modelopt.torch.utils.distributed import DistributedProcessGroup
 
 
 def _test_data_parallel_helper(rank, size):
@@ -51,3 +54,17 @@ def _test_data_parallel_helper(rank, size):
 
 def test_data_parallel(cpu_dist_workers):
     cpu_dist_workers.run(_test_data_parallel_helper)
+
+
+def _test_uneven_amax_sync_helper(rank, size):
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
+    if rank == 0:
+        quantizer._set_buffer("_amax", torch.tensor(7.0))
+    quantizer.sync_amax_across_distributed_group(DistributedProcessGroup(dist.group.WORLD))
+    assert quantizer.amax.item() == 7.0
+    dist.destroy_process_group()
+
+
+def test_amax_sync_with_a_rank_that_never_calibrated(skip_on_windows):
+    """The rank without an amax still joins the sync, contributing a zero on the group's device."""
+    spawn_multiprocess_job(2, _test_uneven_amax_sync_helper, backend="gloo")
