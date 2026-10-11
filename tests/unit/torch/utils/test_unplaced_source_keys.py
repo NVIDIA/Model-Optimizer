@@ -59,13 +59,15 @@ def test_fp8_block_scales_folded_in_at_load_are_placed(tmp_path):
     """DeepSeek-V3 style FP8: dequantizing folds every ``weight_scale_inv`` into its weight."""
     from transformers import FineGrainedFP8Config, LlamaConfig, LlamaForCausalLM
 
+    # Every projection a whole number of 128x128 blocks: transformers before 5.10.1 cannot
+    # dequantize a partial block (a 2-head k_proj would be 64x128).
     config = LlamaConfig(
         vocab_size=64,
         hidden_size=128,
         intermediate_size=256,
         num_hidden_layers=1,
         num_attention_heads=4,
-        num_key_value_heads=2,
+        num_key_value_heads=4,
         tie_word_embeddings=False,
     )
     state = {}
