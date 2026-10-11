@@ -170,6 +170,11 @@ def apply_distributed_support(
     if ep is None:
         return hf_config
 
+    if ep.unsupported:
+        raise NotImplementedError(
+            f"{model_type} cannot be quantized expert-parallel yet: {ep.unsupported} Quantize it "
+            "without expert parallelism, e.g. with FSDP2 (--use_fsdp2 in examples/hf_ptq/hf_ptq.py)."
+        )
     if ep.requires_transformers:
         require_transformers(ep.requires_transformers, f"{model_type} expert-parallel PTQ")
 

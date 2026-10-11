@@ -24,10 +24,11 @@ register(
         model_type="gpt_oss",
         min_transformers_version="5.5",
         ep_spec=EPSpec(
-            # Rides the generic transport unmodified: transformers ships the plan, and GptOssExperts
-            # already dispatches through ExpertsInterface. Its two specifics -- per-expert biases and
-            # native mxfp4 weights -- are handled generically in the transport and the loader.
-            requires_transformers="5.6",
+            unsupported=(
+                "GPT-OSS stores its experts transposed, (num_experts, in, out), with gate and up "
+                "interleaved in gate_up_proj, and the expert-parallel export cannot write that "
+                "layout."
+            ),
         ),
         moe_spec=MoESpec(
             # GPT-OSS fuses gate and up into a single gate_up_proj.
