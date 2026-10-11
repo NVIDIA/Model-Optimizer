@@ -1923,6 +1923,61 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
     return out
 
 
+# Config attributes a distributed load sets to describe THIS RUN rather than the checkpoint: the
+# DistributedConfig transformers stamps on the config when it shards the model (the EP degree and tp
+# plan the export happened to use; not JSON-serializable either), and the base_model_ep_plan the EP
+# loader swapped to the torch_a2a styles, which exist only while ModelOpt is imported.
+_DISTRIBUTED_RUN_CONFIG_ATTRS = ("distributed_config", "base_model_ep_plan")
+
+
+@contextlib.contextmanager
+def _source_distributed_config_attrs(model: nn.Module):
+    """Within the block, every config holds the run attributes its source ``config.json`` declared.
+
+    transformers drops ``base_model_tp_plan`` and ``base_model_pp_plan`` when it serializes a config,
+    but not ``base_model_ep_plan``, so without this the export ships a plan whose styles nothing but
+    ModelOpt can load. Each config -- the root and every nested one, e.g. a VLM's ``text_config``,
+    where the plan lives -- gets the value its source ``config.json`` holds at the same place, or
+    loses the attribute when the source has none: the config a single-GPU export writes. A source
+    that cannot be read counts as having none. The run's values come back on exit, since the
+    sharded model still reads them (transformers' ``tp_plan`` checks ``distributed_config``).
+    """
+    from transformers import PretrainedConfig
+
+    source: Any = {}
+    ckpt = _source_checkpoint(model)
+    if ckpt and Path(ckpt, "config.json").is_file():
+        with contextlib.suppress(OSError, ValueError):
+            source = json.loads(Path(ckpt, "config.json").read_text())
+
+    _missing = object()
+    saved: list[tuple[Any, str, Any]] = []
+
+    def use_source(config: Any, source: Any) -> None:
+        source = source if isinstance(source, dict) else {}
+        for attr in _DISTRIBUTED_RUN_CONFIG_ATTRS:
+            if attr in vars(config) or attr in source:
+                saved.append((config, attr, vars(config).get(attr, _missing)))
+                if attr in source:
+                    setattr(config, attr, source[attr])
+                elif attr in vars(config):
+                    delattr(config, attr)
+        for key, sub_config in list(vars(config).items()):
+            if isinstance(sub_config, PretrainedConfig):
+                use_source(sub_config, source.get(key))
+
+    try:
+        use_source(model.config, source)
+        yield
+    finally:
+        for config, attr, value in reversed(saved):
+            if value is _missing:
+                if attr in vars(config):
+                    delattr(config, attr)
+            else:
+                setattr(config, attr, value)
+
+
 def _write_base_config(model: nn.Module, export_dir: "Path | str") -> None:
     """Write config.json + generation_config for the no-gather distributed export path.
 
@@ -1930,13 +1985,8 @@ def _write_base_config(model: nn.Module, export_dir: "Path | str") -> None:
     ``save_pretrained`` would have. The weight half of ``save_pretrained`` must NOT run: the
     weights are already on disk and the model may still be sharded.
     """
-    # transformers stamps a DistributedConfig on the config when it shards the model. It is not
-    # JSON-serializable, and it describes THIS RUN's mesh -- the EP degree and tp plan the export
-    # happened to use -- not a property of the checkpoint, so baking it in would mislead whoever
-    # loads it next even if it could be written.
-    if getattr(model.config, "distributed_config", None) is not None:
-        model.config.distributed_config = None
-    model.config.save_pretrained(export_dir)
+    with _source_distributed_config_attrs(model):
+        model.config.save_pretrained(export_dir)
     if model.can_generate() and getattr(model, "generation_config", None) is not None:
         try:
             # Same strict-validate trip as every other save site: a config carrying top_p/top_k
