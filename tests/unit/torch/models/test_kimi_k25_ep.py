@@ -31,8 +31,11 @@ transformers = pytest.importorskip("transformers")
 
 from packaging.version import Version
 
-if Version(transformers.__version__) < Version("5.6"):
-    pytest.skip("Kimi-K2.7 expert parallelism needs transformers >= 5.6", allow_module_level=True)
+if Version(transformers.__version__) < Version("5.8"):
+    pytest.skip(
+        "Kimi-K2.5 expert parallelism needs transformers >= 5.8, for the decompression",
+        allow_module_level=True,
+    )
 
 import transformers.dynamic_module_utils as dmu
 from transformers import DeepseekV3Config, DeepseekV3ForCausalLM, PretrainedConfig
