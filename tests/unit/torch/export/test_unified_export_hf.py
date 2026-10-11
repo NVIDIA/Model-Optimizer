@@ -1133,3 +1133,39 @@ def test_process_hf_model_for_export_folds_in_place_and_returns_the_quant_config
     q_proj = model.model.layers[0].self_attn.q_proj
     assert q_proj.weight.dtype == torch.float8_e4m3fn
     assert "model.layers.0.self_attn.q_proj.weight_scale" in model.state_dict()
+
+
+@pytest.mark.parametrize("source_plan", [None, {"layers.*.feed_forward.experts": "grouped_gemm"}])
+def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_path, source_plan):
+    """The EP load's DistributedConfig and torch_a2a plan stay out of config.json, the source's own
+    plan survives, and the live configs keep the run's values afterwards."""
+    from transformers import AutoConfig, Llama4Config
+    from transformers.distributed import DistributedConfig
+
+    from modelopt.torch.export.unified_export_hf import _write_base_config
+
+    source = tmp_path / "source"
+    Llama4Config().save_pretrained(source)
+    if source_plan is not None:
+        config_json = json.loads((source / "config.json").read_text())
+        config_json["text_config"]["base_model_ep_plan"] = source_plan
+        (source / "config.json").write_text(json.dumps(config_json))
+    AutoConfig.from_pretrained(source).save_pretrained(tmp_path / "single_gpu")
+
+    # What the EP load leaves behind: the stamped DistributedConfig and the swapped plan.
+    config = AutoConfig.from_pretrained(source)
+    distributed_config = DistributedConfig(enable_expert_parallel=True)
+    swapped_plan = {"layers.*.feed_forward.experts": "torch_a2a_experts"}
+    config.distributed_config = distributed_config
+    config.text_config.base_model_ep_plan = swapped_plan
+    model = SimpleNamespace(
+        config=config, _modelopt_source_checkpoint=str(source), can_generate=lambda: False
+    )
+
+    _write_base_config(model, tmp_path / "export")
+
+    written = json.loads((tmp_path / "export" / "config.json").read_text())
+    assert written == json.loads((tmp_path / "single_gpu" / "config.json").read_text())
+    assert written["text_config"].get("base_model_ep_plan") == source_plan
+    assert config.distributed_config is distributed_config
+    assert config.text_config.base_model_ep_plan is swapped_plan
