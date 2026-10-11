@@ -20,8 +20,11 @@ import warnings
 
 import torch.nn as nn
 
+from modelopt.torch.quantization.utils import fsdp2_aware_weight_update
+from modelopt.torch.utils.distributed import is_fsdp2_model
+
 from .layer_utils import get_expert_linear_names, is_quantlinear, set_expert_quantizer_amax
-from .moe_utils import _export_fused_experts
+from .moe_utils import _export_fused_experts, _export_fused_experts_keep_fused
 from .quant_format import QUANTIZATION_NONE
 from .quant_utils import get_quantization_format
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
@@ -34,6 +37,30 @@ def _has_fused_experts_quantizers(module: nn.Module) -> bool:
     return hasattr(module, f"{first_proj_attr}_weight_quantizers")
 
 
+def _fsdp2_weight_window(model: nn.Module, module: nn.Module):
+    """``fsdp2_aware_weight_update`` on the FSDP2 unit that owns ``module``'s weights.
+
+    That is ``model`` when the model itself is wrapped. Expert parallelism FSDP2-shards only the dense
+    layers and leaves the root unwrapped, and a window opened on an unwrapped root does nothing: the
+    weight stays a sharded DTensor, which packing mishandles (``DTensor << int`` is a silent no-op in
+    torch 2.11, so NVFP4 packed unrelated codes next to correct scales). So open it on the enclosing
+    unit instead.
+    """
+    from torch.distributed.fsdp import FSDPModule
+
+    root = model
+    if not isinstance(model, FSDPModule):
+        root = next(
+            (
+                unit
+                for unit in model.modules()
+                if isinstance(unit, FSDPModule) and any(m is module for m in unit.modules())
+            ),
+            model,
+        )
+    return fsdp2_aware_weight_update(root, module)
+
+
 def _export_weight(
     module: nn.Module,
     ctx: ExportContext,
@@ -42,6 +69,17 @@ def _export_weight(
     # Imported lazily to avoid a cycle: unified_export_hf imports this module to
     # install the built-in handlers while retaining this legacy helper's import path.
     from .unified_export_hf import _export_quantized_weight
+
+    # The no-gather writer packs while the model is still sharded, so unlike the
+    # collect_export_tensors path there is no open weight-access window here and the weight is a
+    # DTensor. FP8 tolerates that; NVFP4 does not -- get_weights_scaling_factor does an
+    # index_put_, which DTensor cannot dispatch. Open a window per module for that path only, and
+    # reshard on the way out: a layer left unsharded holds all of its weights on every rank, and
+    # FSDP2 later puts its own shards back over anything packed in it outside a window.
+    if ctx.keep_fused_experts and is_fsdp2_model(ctx.model):
+        with _fsdp2_weight_window(ctx.model, module):
+            _export_quantized_weight(module, ctx.dtype, weight_name)
+        return
 
     _export_quantized_weight(module, ctx.dtype, weight_name)
 
@@ -138,8 +176,24 @@ def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContex
 
     Tied experts are packed independently and their duplicate keys are dropped by name
     in postprocess_state_dict; no per-module dedup cache is used.
+
+    Distributed no-gather export (``ctx.keep_fused_experts``) folds the quantizers into the fused
+    weight IN PLACE, quantizing only this rank's local experts and keeping the result ``Shard(0)`` --
+    the per-expert split happens later on the sharded weight (``split_fused_experts_state_dict``).
+    Otherwise (single process, or gather export) it splits into full per-expert submodules here.
     """
-    _export_fused_experts(module, ctx.dtype)
+    if ctx.keep_fused_experts and is_fsdp2_model(ctx.model):
+        # FSDP2 owns the fused weights here: fold them inside a weight-update window, which hands
+        # FSDP2 the packed weights. Replaced behind its back, they would be overwritten with its
+        # original shards the next time the layer reshards, and exported unquantized.
+        with _fsdp2_weight_window(ctx.model, module):
+            _export_fused_experts_keep_fused(module, ctx.dtype)
+    elif ctx.keep_fused_experts:
+        # No-gather distributed export: fold each rank's LOCAL experts and leave the weight
+        # fused + sharded; the per-expert split happens after consolidation.
+        _export_fused_experts_keep_fused(module, ctx.dtype)
+    else:
+        _export_fused_experts(module, ctx.dtype)
 
 
 @ExportModuleRegistry.register(predicate=is_quantlinear)
