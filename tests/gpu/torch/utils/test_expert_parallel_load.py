@@ -58,7 +58,7 @@ def _local(tensor):
     return tensor.to_local() if isinstance(tensor, DTensor) else tensor
 
 
-def _sharded_model_matches_the_whole_one(rank, size, ckpt_dir):
+def _sharded_model_matches_the_whole_one(rank, size, ckpt_dir, ep_degree):
     device = torch.device(f"cuda:{rank}")
     session = ModelOptSession()
     session.initialize(
@@ -70,12 +70,14 @@ def _sharded_model_matches_the_whole_one(rank, size, ckpt_dir):
         is_main=rank == 0,
     )
     config = AutoConfig.from_pretrained(ckpt_dir)  # carries qwen3_moe's own base_model_ep_plan
-    model = load_and_prepare_ep(ckpt_dir, session, size, hf_config=config).eval()
+    model = load_and_prepare_ep(ckpt_dir, session, ep_degree, hf_config=config).eval()
     whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16).to(device).eval()
 
-    # Each rank holds its contiguous share of every layer's experts.
-    per_rank = NUM_EXPERTS // size
-    owned = slice(rank * per_rank, (rank + 1) * per_rank)
+    # Each rank holds its contiguous share of every layer's experts within its EP group, whose
+    # ranks are consecutive.
+    per_rank = NUM_EXPERTS // ep_degree
+    ep_rank = rank % ep_degree
+    owned = slice(ep_rank * per_rank, (ep_rank + 1) * per_rank)
     for layer, whole_layer in zip(model.model.layers, whole.model.layers):
         for name in ("gate_up_proj", "down_proj"):
             local = _local(getattr(layer.mlp.experts, name))
@@ -91,10 +93,13 @@ def _sharded_model_matches_the_whole_one(rank, size, ckpt_dir):
     torch.testing.assert_close(sharded.float(), reference.float(), atol=2e-2, rtol=2e-2)
 
 
-def test_expert_parallel_model_matches_the_whole_model(need_2_gpus, dist_workers, tmp_path):
-    if NUM_EXPERTS % dist_workers.world_size:
-        pytest.skip(
-            f"{NUM_EXPERTS} experts do not shard evenly over {dist_workers.world_size} GPUs"
-        )
+@pytest.mark.parametrize("ep_share", [1, 2], ids=["ep-world", "ep-half"])
+def test_expert_parallel_model_matches_the_whole_model(
+    need_2_gpus, dist_workers, tmp_path, ep_share
+):
+    """With the experts sharded over every rank, or over half of them and replicated across the halves."""
+    ep_degree = dist_workers.world_size // ep_share
+    if ep_degree < 2 or dist_workers.world_size % ep_share or NUM_EXPERTS % ep_degree:
+        pytest.skip(f"{NUM_EXPERTS} experts do not shard over EP {ep_degree} on these GPUs")
     _save_tiny_qwen3_moe(tmp_path)
-    dist_workers.run(_sharded_model_matches_the_whole_one, str(tmp_path))
+    dist_workers.run(_sharded_model_matches_the_whole_one, str(tmp_path), ep_degree)
