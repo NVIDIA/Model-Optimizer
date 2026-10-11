@@ -26,11 +26,14 @@ if the routing weights were transported with a plain (non-autograd) collective, 
 receive ~zero gradient and the ``assert ... > 0`` below (and the all-reduced comparison) would fail.
 """
 
+import warnings
+
 import pytest
 import torch
 import torch.distributed as dist
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 
+import modelopt.torch.utils.moe as moe
 from modelopt.torch.utils.moe import a2a_moe
 
 # Small, fully-deterministic problem. E must be divisible by every world size under test.
@@ -135,3 +138,62 @@ def _a2a_moe_fwd_bwd_job(rank, size):
 def test_a2a_moe_forward_backward(world_size, skip_on_windows):
     """a2a_moe forward + backward (hidden, expert, router grads) match a dense reference."""
     spawn_multiprocess_job(world_size, _a2a_moe_fwd_bwd_job, backend="gloo")
+
+
+def _identity_experts(sorted_tok, offsets):
+    return sorted_tok
+
+
+def _chunked_hops_job(rank, size):
+    """Shrinking the per-hop element limit splits every 2-D hop along the hidden dim -- the guard
+    against int32 offset overflow, at a size a unit test can afford -- without changing the result."""
+    gen = torch.Generator().manual_seed(rank)
+    x = torch.randn(T, H, generator=gen)
+    ti = torch.randint(0, E, (T, TOP_K), generator=gen)
+    tw = torch.rand(T, TOP_K, generator=gen)
+    hops = []
+    real = dist.all_to_all_single
+
+    def counting(*args, **kwargs):
+        hops.append(1)
+        return real(*args, **kwargs)
+
+    dist.all_to_all_single = counting
+    try:
+        with torch.no_grad():
+            whole = a2a_moe(dist.group.WORLD, x, ti, tw, E, E // size, _identity_experts)
+            n_whole = len(hops)
+            hops.clear()
+            moe._A2A_MAX_HOP_ELEMENTS = 7
+            chunked = a2a_moe(dist.group.WORLD, x, ti, tw, E, E // size, _identity_experts)
+            n_chunked = len(hops)
+    finally:
+        dist.all_to_all_single = real
+        moe._A2A_MAX_HOP_ELEMENTS = 2**31 - 1
+    assert n_chunked > n_whole
+    torch.testing.assert_close(chunked, whole, atol=0, rtol=0)
+    dist.destroy_process_group()
+
+
+def test_a2a_moe_chunks_hops_past_the_element_limit(skip_on_windows):
+    spawn_multiprocess_job(2, _chunked_hops_job, backend="gloo")
+
+
+def _skewed_routing_job(rank, size):
+    """Rank 1 sends four times rank 0's tokens, all to an expert rank 0 owns: rank 0 receives five
+    times what it sent and warns before allocating for it; rank 1, which receives nothing, does not."""
+    tokens = T if rank == 0 else 4 * T
+    x = torch.randn(tokens, H)
+    ti = torch.zeros(tokens, 1, dtype=torch.int64)
+    tw = torch.ones(tokens, 1)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with torch.no_grad():
+            a2a_moe(dist.group.WORLD, x, ti, tw, E, E // size, _identity_experts)
+    imbalance = [w for w in caught if "imbalance" in str(w.message)]
+    assert len(imbalance) == (1 if rank == 0 else 0), [str(w.message) for w in caught]
+    dist.destroy_process_group()
+
+
+def test_a2a_moe_warns_when_a_rank_receives_far_more_than_it_sent(skip_on_windows):
+    spawn_multiprocess_job(2, _skewed_routing_job, backend="gloo")
