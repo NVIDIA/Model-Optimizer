@@ -592,15 +592,15 @@ def get_model(
     device_map = "auto"
     if device == "cpu":
         device_map = "cpu"
-    elif ":" in str(device):
-        # A SPECIFIC device was asked for -- "cuda:<local_rank>" under torchrun. Do not fall through to
+    elif ":" in str(device) and dist_utils.size() > 1:
+        # Under torchrun each rank asks for its own "cuda:<local_rank>". Do not fall through to
         # "auto": accelerate runs its placement heuristic INDEPENDENTLY in every rank, and on a node
         # whose GPUs are all idle every rank scores them identically and picks the SAME card. All ranks'
         # weights, and with them every quantizer's _amax buffer, then live on one GPU; the first NCCL
         # collective binds the whole data-parallel group to that single device and aborts with
         # "Duplicate GPU detected : rank 1 and rank 0 both on CUDA device ...". Honour the caller.
         # A dense model too large to replicate per rank wants --use_fsdp2, not "auto" sharding: under
-        # data-parallel calibration each rank must own its own GPU.
+        # data-parallel calibration each rank must own its own GPU. A single process keeps "auto".
         device_map = {"": str(device)}
 
     # Prepare config kwargs for loading

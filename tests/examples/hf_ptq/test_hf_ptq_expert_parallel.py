@@ -305,17 +305,21 @@ def test_load_model_hands_an_expert_parallel_plan_to_the_ep_loader(hf_ptq, monke
 
 
 @pytest.mark.parametrize(
-    ("device", "device_map"),
+    ("device", "world_size", "device_map"),
     [
-        ("cuda:1", {"": "cuda:1"}),
-        (torch.device("cuda:1"), {"": "cuda:1"}),
-        ("cuda", "auto"),
+        ("cuda:1", 4, {"": "cuda:1"}),
+        (torch.device("cuda:1"), 4, {"": "cuda:1"}),
+        ("cuda", 4, "auto"),
+        ("cuda:1", 1, "auto"),
     ],
-    ids=["str", "torch_device", "unindexed"],
+    ids=["str", "torch_device", "unindexed", "single_process"],
 )
-def test_a_specific_device_pins_the_whole_model_to_it(monkeypatch, tmp_path, device, device_map):
+def test_a_rank_device_pins_the_whole_model_to_it(
+    monkeypatch, tmp_path, device, world_size, device_map
+):
     """Under torchrun each rank asks for its own cuda:<local_rank>; "auto" would let every rank's
-    accelerate pick the same idle GPU. An unindexed "cuda" still spreads the model over the GPUs."""
+    accelerate pick the same idle GPU. An unindexed "cuda" still spreads the model over the GPUs,
+    and so does a single process, whatever device it names."""
     LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
     placed = []
 
@@ -324,6 +328,7 @@ def test_a_specific_device_pins_the_whole_model_to_it(monkeypatch, tmp_path, dev
         return torch.nn.Linear(1, 1)
 
     monkeypatch.setattr(example_utils, "_from_pretrained_recording", from_pretrained)
+    monkeypatch.setattr(example_utils.dist_utils, "size", lambda group=None: world_size)
 
     example_utils.get_model(str(tmp_path), device=device)
 
