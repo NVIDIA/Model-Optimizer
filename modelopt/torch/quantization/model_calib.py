@@ -16,7 +16,6 @@
 """Calibration utilities."""
 
 import fnmatch
-import gc
 import math
 import time
 import warnings
@@ -389,17 +388,6 @@ def max_calibrate(
         _finalize_with_shared_state(model, weight_patterns)
         return
 
-    # The calibration forward leaves large activation tensors held in the caching allocator. The
-    # distributed amax sync below issues NCCL collectives whose comm buffers are allocated lazily via
-    # cudaMalloc (outside the caching allocator). Under the memory pressure of long calib sequences this
-    # can OOM on a single rank when NCCL first allocates -- and since sync_amax_across_distributed_group
-    # re-raises on collective failure, that rank aborts mid-collective and takes down the group. Return the
-    # cached activation memory to CUDA first so NCCL has room. (gc.collect() first to drop any cycle-held
-    # activation references the calibration closures/calibrators may still own.)
-    if torch.cuda.is_available():
-        gc.collect()
-        torch.cuda.empty_cache()
-
     # Share the input (activation) amax across EP-sharded routed experts. In a sparse a2a/EP calibration
     # each expert sees ONLY the tokens routed to it, so an expert (or a whole rank's experts) that received
     # none has an uncalibrated input_quantizer -- while its weight_quantizer is always calibrated from the
@@ -409,9 +397,14 @@ def max_calibrate(
     # amax is dropped group-wide). Expert WEIGHT amax is intentionally NOT shared over EP (per-rank shards
     # differ). This mirrors main's _should_sync_amax_across_ep / sync_moe_expert_amax input-amax sharing,
     # which the a2a fused-experts path would otherwise miss -> some experts left with no scale. Must run
-    # BEFORE the completeness check so shared-in experts count as calibrated.
+    # BEFORE the completeness check so shared-in experts count as calibrated. Only modules that opt in
+    # (``_share_input_amax_across_ep``): Megatron's experts keep main's check-then-sync behavior.
     for name, module in model.named_modules():
-        if isinstance(module, QuantModule) and _has_expert_parallelism(module):
+        if (
+            isinstance(module, QuantModule)
+            and getattr(module, "_share_input_amax_across_ep", False)
+            and _has_expert_parallelism(module)
+        ):
             assert module.parallel_state is not None  # _has_expert_parallelism checked it
             ep_group = module.parallel_state.expert_model_parallel_group
             for child_name, child in module.named_children():
