@@ -1481,8 +1481,9 @@ def _fused_experts_wrapper(module):
     * ungated (:class:`_QuantNemotronHExperts`): a 3-D ``up_proj`` and neither ``gate_proj`` nor
       ``gate_up_proj``. Matches NemotronH ``NemotronHExperts``.
 
-    Returns ``None`` for non-standard layouts (GptOss, GraniteMoE,
-    Llama4TextExperts) which have their own explicit registrations.
+    Matching is by shape alone, so GptOss and Llama4TextExperts -- transposed layouts with their own
+    explicit registrations -- match too; :func:`register_fused_experts_on_the_fly` never reaches
+    them while those registrations stand.
 
     ``act_fn`` is not required: these wrappers only intercept the two ``F.linear``
     calls, so modules with a custom gated activation (e.g. ``MiniMaxM3VLExperts``)
@@ -1493,8 +1494,7 @@ def _fused_experts_wrapper(module):
     # module's OWN forward. Models with a custom activation applied inline -- e.g. MiniMax-M3's SwiGLU via
     # ``_apply_gate`` (``swiglu_alpha``/``swiglu_limit``, no ``act_fn``) -- are otherwise standard fused
     # experts, so gate on the STRUCTURAL signature (num_experts + two 3-D fused projections) and treat
-    # ``act_fn`` as optional. GptOss/Llama4 (non-standard layouts) are excluded upstream by their own
-    # explicit QuantModuleRegistry registrations (checked before this in register_fused_experts_on_the_fly).
+    # ``act_fn`` as optional.
     if not hasattr(module, "num_experts"):
         return None
     down = getattr(module, "down_proj", None)
@@ -1539,16 +1539,15 @@ def register_fused_experts_on_the_fly(model):
         wrapper = _fused_experts_wrapper(module)
         if wrapper is not None and getattr(module, "is_transposed", False):
             # `_fused_experts_wrapper` matches on parameter SHAPE only, so it also claims a
-            # transposed `(num_experts, in_dim, out_dim)` container. The export path then splits
-            # gate/up by slicing dim 1 at `intermediate_dim` (see `_reject_transposed_fused_experts`
-            # in export/moe_utils.py), which is the wrong axis for that layout and yields silently
-            # wrong weights. GptOss/Llama4 avoid this only via their own explicit registrations.
+            # transposed `(num_experts, in_dim, out_dim)` container. The fused-experts export
+            # (export/moe_utils.py) then splits gate/up by slicing dim 1 at `intermediate_dim`, the
+            # wrong axis for that layout, and writes silently wrong weights.
             raise NotImplementedError(
                 f"Fused MoE experts '{name}' ({mod_type.__name__}) store their weights transposed "
                 "(num_experts, in_dim, out_dim), which the generic _QuantFusedExperts export path "
                 "does not support: it splits gate/up along dim 1, which is the input dim for this "
-                "layout. Register an explicit quantized wrapper for this class (as GptOssExperts "
-                "and Llama4TextExperts have) instead of relying on shape-based auto-detection."
+                "layout. Such a class needs its own quantized wrapper, as GptOssExperts and "
+                "Llama4TextExperts have."
             )
         if wrapper is not None:
             print(

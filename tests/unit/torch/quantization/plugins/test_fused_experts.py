@@ -536,6 +536,40 @@ class TestQuantFusedExperts:
         assert QuantModuleRegistry.get(block_type) is None
         self._cleanup_registry(expert_type)
 
+    def test_transposed_fused_experts_are_refused(self):
+        """Matched by shape, a transposed container would export with gate/up split along its input
+        dim; registration refuses it rather than let export write wrong weights."""
+
+        class _TransposedExperts(_SyntheticFusedExperts):
+            is_transposed = True
+
+        model = nn.Module()
+        model.experts = _TransposedExperts()
+
+        with pytest.raises(NotImplementedError, match="store their weights transposed"):
+            register_fused_experts_on_the_fly(model)
+        assert QuantModuleRegistry.get(_TransposedExperts) is None
+
+    def test_a_transposed_class_with_its_own_wrapper_is_left_to_it(self):
+        """GptOssExperts and Llama4TextExperts are transposed and registered explicitly."""
+
+        class _RegisteredTransposedExperts(_SyntheticFusedExperts):
+            is_transposed = True
+
+        QuantModuleRegistry.register({_RegisteredTransposedExperts: "test.RegisteredTransposed"})(
+            _QuantFusedExperts
+        )
+        try:
+            model = nn.Module()
+            model.experts = _RegisteredTransposedExperts()
+            registered = QuantModuleRegistry.get(_RegisteredTransposedExperts)
+
+            register_fused_experts_on_the_fly(model)
+
+            assert QuantModuleRegistry.get(_RegisteredTransposedExperts) is registered
+        finally:
+            self._cleanup_registry(_RegisteredTransposedExperts)
+
     def test_convert_creates_quantizers(self):
         """After conversion, fused experts should have shared input and per-expert weight quantizers."""
         model = _TinyMoEModel()
