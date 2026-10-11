@@ -1137,8 +1137,8 @@ def test_process_hf_model_for_export_folds_in_place_and_returns_the_quant_config
 
 @pytest.mark.parametrize("source_plan", [None, {"layers.*.feed_forward.experts": "grouped_gemm"}])
 def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_path, source_plan):
-    """The EP load's DistributedConfig and torch_a2a plan stay out of config.json, the source's own
-    plan survives, and the live configs keep the run's values afterwards."""
+    """The EP load's DistributedConfig, torch_a2a plan and load-time renames stay out of config.json,
+    the source's own plan survives, and the live configs keep the run's values afterwards."""
     from transformers import AutoConfig, Llama4Config
     from transformers.distributed import DistributedConfig
 
@@ -1152,12 +1152,16 @@ def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_pat
         (source / "config.json").write_text(json.dumps(config_json))
     AutoConfig.from_pretrained(source).save_pretrained(tmp_path / "single_gpu")
 
-    # What the EP load leaves behind: the stamped DistributedConfig and the swapped plan.
+    # What the EP load leaves behind: the stamped DistributedConfig, the swapped plan, and the
+    # renames a prepare hook installs on both configs (as Kimi-K3's does).
     config = AutoConfig.from_pretrained(source)
     distributed_config = DistributedConfig(enable_expert_parallel=True)
     swapped_plan = {"layers.*.feed_forward.experts": "torch_a2a_experts"}
+    renames = {r"experts\.(\d+)\.w1\.": r"experts.\1.gate_proj."}
     config.distributed_config = distributed_config
     config.text_config.base_model_ep_plan = swapped_plan
+    config._checkpoint_conversion_mapping = renames
+    config.text_config._checkpoint_conversion_mapping = renames
     model = SimpleNamespace(
         config=config, _modelopt_source_checkpoint=str(source), can_generate=lambda: False
     )
@@ -1169,3 +1173,5 @@ def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_pat
     assert written["text_config"].get("base_model_ep_plan") == source_plan
     assert config.distributed_config is distributed_config
     assert config.text_config.base_model_ep_plan is swapped_plan
+    assert config._checkpoint_conversion_mapping is renames
+    assert config.text_config._checkpoint_conversion_mapping is renames
