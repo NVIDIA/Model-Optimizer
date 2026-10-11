@@ -305,6 +305,27 @@ def test_load_names_leave_already_real_params_untouched(tmp_path):
         assert torch.equal(params[name], ref[name]), name
 
 
+class _Router(nn.Module):
+    """A router whose bias correction is a param ``from_pretrained`` loads, beside a meta weight."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(4, 4, device="meta"))
+        self.e_score_correction_bias = nn.Parameter(torch.arange(4.0))
+
+
+def test_a_real_param_beside_a_meta_one_keeps_its_value(tmp_path):
+    """Materializing the router re-empties all of its params, but only ``weight`` is reloaded."""
+    model = nn.Module()
+    model.gate = _Router()
+    ckpt = {"gate.weight": torch.randn(4, 4), "gate.e_score_correction_bias": torch.zeros(4)}
+
+    _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu", load_names={"gate.weight"})
+
+    assert torch.equal(model.gate.weight, ckpt["gate.weight"])
+    assert torch.equal(model.gate.e_score_correction_bias, torch.arange(4.0))
+
+
 class _DenseAndExpert(nn.Module):
     """A dense param the EP-dense load fills and an expert one ``from_pretrained`` already placed."""
 

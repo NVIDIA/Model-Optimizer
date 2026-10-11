@@ -685,16 +685,29 @@ def _meta_dcp_load(
     # returns wrong keys). The PARTIAL case (EP-dense: dense meta, experts already real) MUST be selective so
     # the real experts are not re-emptied -- there no root is fully_shard'd, so per-module to_empty is safe.
     saved_buffers = {n: b.detach().clone() for n, b in model.named_buffers() if not b.is_meta}
+    # A module's ``to_empty`` re-empties every direct param, so a param already real beside a meta one
+    # (a router's ``e_score_correction_bias`` next to its meta ``weight``) is kept here too: nothing
+    # outside ``load_names`` would refill it.
+    saved_params: dict[str, torch.Tensor] = {}
     if load_names is None:
         model.to_empty(device=device)
     else:
-        for m in model.modules():
-            if any(p.is_meta for p in m.parameters(recurse=False)):
+        for name, m in model.named_modules():
+            direct = dict(m.named_parameters(recurse=False))
+            if any(p.is_meta for p in direct.values()):
+                prefix = f"{name}." if name else ""
+                saved_params.update(
+                    (prefix + n, p.detach().clone()) for n, p in direct.items() if not p.is_meta
+                )
                 m.to_empty(device=device, recurse=False)
     for n, b in model.named_buffers():
         src = saved_buffers.get(n)
         if src is not None:
             b.copy_(src.to(device=b.device, dtype=b.dtype))
+    with torch.no_grad():
+        for n, src in saved_params.items():
+            p = model.get_parameter(n)
+            p.copy_(src.to(device=p.device, dtype=p.dtype))
 
     # ``dcp.load`` matches state_dict entries to checkpoint entries BY NAME, but a checkpoint's stored key
     # names can differ from the built model's ``state_dict`` names, and from_pretrained bridges the gap on
