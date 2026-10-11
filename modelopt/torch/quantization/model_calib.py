@@ -412,6 +412,7 @@ def max_calibrate(
     # BEFORE the completeness check so shared-in experts count as calibrated.
     for name, module in model.named_modules():
         if isinstance(module, QuantModule) and _has_expert_parallelism(module):
+            assert module.parallel_state is not None  # _has_expert_parallelism checked it
             ep_group = module.parallel_state.expert_model_parallel_group
             for child_name, child in module.named_children():
                 if isinstance(child, (TensorQuantizer, SequentialQuantizer)) and (
