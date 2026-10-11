@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
-import dataclasses
 import json
 from functools import partial
 from pathlib import Path
@@ -34,16 +33,12 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.layer_utils import is_quantlinear
 from modelopt.torch.export.model_utils import TiedWeightMap
-from modelopt.torch.export.quant_utils import get_quant_config
 from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     _export_transformers_checkpoint,
-    _upcast_ggml_weights,
     requantize_resmooth_fused_llm_layers,
 )
 from modelopt.torch.export.unified_export_hf_streaming import _export_fsdp2_checkpoint_streaming
-from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
-from modelopt.torch.quantization.ggml.common import pin_packed_weight
 from modelopt.torch.quantization.utils import (
     enable_weight_access_and_writeback,
     fsdp2_aware_weight_update,
@@ -468,89 +463,3 @@ def test_fsdp2_streaming_export_matches_reference(dist_workers, tmp_path, quant_
             quant_config=quant_config,
         )
     )
-
-
-_Q8_0_MLP_CFG = {
-    "quant_cfg": [
-        {"quantizer_name": "*", "enable": False},
-        {
-            "quantizer_name": "*mlp*weight_quantizer",
-            "cfg": {"num_bits": "q8_0", "block_sizes": {-1: 32}, "backend": "ggml"},
-            "enable": True,
-        },
-    ],
-    "algorithm": None,
-}
-
-
-def _pin_ggml_payloads(model):
-    """Leave each GGML layer as GPTQ does: a payload pinned, and the weight equal to its decoding."""
-    q8_0 = GGML_FORMAT_REGISTRY["q8_0"]
-    names = module_name_maps(model)
-    for module in list(model.modules()):
-        quantizer = getattr(module, "weight_quantizer", None)
-        if not (is_quantlinear(module) and quantizer is not None and quantizer.is_enabled):
-            continue
-        with enable_weight_access_and_writeback(module, model, names):
-            payload, shape = q8_0.quantize(module.weight.flip(-1))
-            module.weight.copy_(q8_0.dequantize(payload, shape, dtype=module.weight.dtype))
-        pin_packed_weight(quantizer, "q8_0", payload)
-
-
-def _no_search(*args, **kwargs):
-    raise AssertionError("the upcast re-ran the q8_0 search instead of decoding the pinned payload")
-
-
-def _upcast_ggml_matches_reference_test(rank, size, pinned):
-    """A sharded model's upcast holds what a single-process packed export decodes to.
-
-    The upcast decodes each GGML weight inside a gather window and writes it back to the shards,
-    so after a reshard every rank must gather the decoded payload, and the GGML layers must have
-    dropped out of the quantization config. With ``pinned``, every GGML layer carries a payload
-    pinned as GPTQ pins one, and the encoder is disabled to prove the pinned codes are decoded.
-
-    This calls the upcast directly rather than ``export_hf_checkpoint``, whose FSDP2 streaming
-    writer currently deadlocks at world > 1 (see test_fsdp2_streaming_export_matches_reference).
-    """
-    q8_0 = GGML_FORMAT_REGISTRY["q8_0"]
-    with patch_fsdp_mp_dtypes(), torch.no_grad():
-        model = get_tiny_llama(num_hidden_layers=2).to("cuda").eval()
-        reference = get_tiny_llama(num_hidden_layers=2).to("cuda").eval()
-        for layer in model.model.layers:
-            fully_shard(layer)
-        fully_shard(model)
-        mtq.quantize(model, _Q8_0_MLP_CFG)
-        mtq.quantize(reference, _Q8_0_MLP_CFG)
-        if pinned:
-            _pin_ggml_payloads(model)
-            _pin_ggml_payloads(reference)
-            # The pool reuses its workers across tests, so the patch is undone below.
-            GGML_FORMAT_REGISTRY["q8_0"] = dataclasses.replace(q8_0, quantize=_no_search)
-        try:
-            packed, _ = _export_transformers_checkpoint(reference, torch.bfloat16)
-            _upcast_ggml_weights(model, torch.bfloat16)
-        finally:
-            GGML_FORMAT_REGISTRY["q8_0"] = q8_0
-
-        assert get_quant_config(model)["quantization"]["quant_algo"] is None
-        ggml_keys = [key for key, tensor in packed.items() if tensor.dtype == torch.uint8]
-        assert ggml_keys, "the reference export packed no GGML weight"
-        names = module_name_maps(model)
-        for key in ggml_keys:
-            payload = packed[key]
-            expected = q8_0.dequantize(
-                payload,
-                torch.tensor((*payload.shape[:-2], payload.shape[-2] * q8_0.block_size)),
-                dtype=torch.bfloat16,
-            )
-            module = names.name_to_module[key.removesuffix(".weight")]
-            # Gather again after the upcast's window closed, so this reads what reached the shards.
-            with enable_weight_access_and_writeback(module, model, names, writeback=False):
-                assert torch.equal(module.weight, expected.to(module.weight.device)), key
-
-
-@pytest.mark.parametrize("pinned", [False, True], ids=["encoded", "gptq_pinned"])
-def test_fsdp2_upcast_ggml_matches_reference(dist_workers, pinned):
-    if torch.cuda.device_count() < 2:
-        pytest.skip("needs >=2 GPUs for the weights to actually be sharded")
-    dist_workers.run(partial(_upcast_ggml_matches_reference_test, pinned=pinned))

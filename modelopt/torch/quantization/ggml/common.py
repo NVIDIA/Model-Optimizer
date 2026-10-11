@@ -305,8 +305,10 @@ class GGMLFormat:
         """The pinned payload of ``weight``, a view of the pinned weight or rows taken from it.
 
         Fake quant hands over the pinned weight itself in 256-value rows; export may hand over row
-        slices of it, such as the gate and up halves of a fused projection. The comparison syncs,
-        but it only runs for weights the identity cache has not seen.
+        slices of it, such as the gate and up halves of a fused projection. Folding hands over a
+        float32 copy of a narrower weight, which holds the decoding rounded to that narrower dtype,
+        so a float32 weight also matches the decoding rounded through BF16 or FP16. The comparison
+        syncs, but it only runs for weights the identity cache has not seen.
         """
         pinned = pinned_packed_weight(quantizer, self.name)
         width = weight.shape[-1] // self.block_size
@@ -317,17 +319,22 @@ class GGMLFormat:
         ):
             return None
         pinned = pinned.to(weight.device).reshape(-1, width, self.block_bytes)
-        table = self.dequantize(
+        decoded = self.dequantize(
             pinned, torch.tensor((pinned.shape[0], weight.shape[-1])), dtype=torch.float32
-        ).to(weight.dtype)
+        )
         rows = weight.reshape(-1, weight.shape[-1])
-        if rows.shape == table.shape and torch.equal(rows, table):
-            index = slice(None)
-        else:
-            index = _matching_rows(table, rows)
-            if index is None:
-                return None
-        return pinned[index].reshape(*weight.shape[:-1], width, self.block_bytes)
+        storage_dtypes = [weight.dtype]
+        if weight.dtype == torch.float32:
+            storage_dtypes += [torch.bfloat16, torch.float16]
+        for storage_dtype in storage_dtypes:
+            table = decoded.to(storage_dtype).to(weight.dtype)
+            if rows.shape == table.shape and torch.equal(rows, table):
+                index = slice(None)
+            else:
+                index = _matching_rows(table, rows)
+            if index is not None:
+                return pinned[index].reshape(*weight.shape[:-1], width, self.block_bytes)
+        return None
 
 
 def narrow_to_float32(blocks: torch.Tensor) -> torch.Tensor:
