@@ -120,6 +120,24 @@ def test_iterable_shards_are_strided_cover_every_sample_once_and_replay():
         assert _batches(shard) == _batches(shard) == [[r, r + 3], [r + 6, r + 9]]
 
 
+def test_iterable_shards_split_their_groups_across_worker_processes():
+    """Each worker process iterates its own copy of the stream. Unless the workers split the groups
+    between them, every one yields the whole shard and each sample comes out once per worker."""
+    n, world_size = 16, 2
+    shards = [
+        _ids(
+            shard_dataloader(
+                DataLoader(_Stream(n), batch_size=2, collate_fn=_collate, num_workers=2),
+                r,
+                world_size,
+            )
+        )
+        for r in range(world_size)
+    ]
+
+    assert [sorted(ids) for ids in shards] == [list(range(r, n, world_size)) for r in range(2)]
+
+
 def test_iterable_uneven_split_drops_the_trailing_partial_group():
     """Equal counts without ``len()``: the last ``n % world_size`` samples go to no rank."""
     n, world_size = 10, 4
