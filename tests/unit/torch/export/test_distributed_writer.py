@@ -13,24 +13,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The pieces of the no-gather HF checkpoint writer (``modelopt.torch.export.distributed_writer``).
+"""The no-gather FSDP2 HF checkpoint writer (``modelopt.torch.export.distributed_writer``) on CPU.
 
 The writer moves every tensor to exactly one owner rank and writes it from there, so what it can
 get wrong is structural: a tensor missing, duplicated, mis-assembled from its shards, renamed, or
-left out of the weight index. These tests drive each piece directly, on CPU.
+left out of the weight index. The helpers are tested directly; the writer itself runs end to end on
+a gloo process group -- one rank in process, two spawned ranks where shards actually travel -- and
+the written checkpoint is reloaded and compared with the source checkpoint or with what the
+single-process export writes for the same model.
 """
 
 import contextlib
+import copy
 import json
 import math
 import os
 import types
+from datetime import timedelta
+from functools import partial
 from unittest import mock
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import bounded_collectives
+import torch.distributed as dist
+from _test_utils.torch.distributed.utils import bounded_collectives, spawn_multiprocess_job
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.multiprocessing.reductions import StorageWeakRef
@@ -38,9 +46,10 @@ from torch.multiprocessing.reductions import StorageWeakRef
 pytest.importorskip("safetensors")
 pytest.importorskip("transformers")
 from safetensors.torch import load_file, save_file
-from transformers import AutoModelForCausalLM, LlamaConfig, MixtralConfig
+from transformers import AutoModelForCausalLM, LlamaConfig, MixtralConfig, Qwen3MoeConfig
 from transformers.core_model_loading import Chunk, WeightConverter
 
+import modelopt.torch.quantization as mtq
 from modelopt.torch.export.distributed_writer import (
     _even_bins,
     _is_full_world_shard0,
@@ -49,7 +58,35 @@ from modelopt.torch.export.distributed_writer import (
     _nbytes,
     _revert_whole_sd,
     _write_even_shards,
+    distributed_save_hf_checkpoint,
 )
+from modelopt.torch.export.quant_aware_conversion import revert_weight_conversion_quant_aware
+from modelopt.torch.export.unified_export_hf import (
+    _export_transformers_checkpoint,
+    export_hf_checkpoint,
+)
+
+
+def _cpu_device_query():
+    """The writer asks CUDA which device to all-reduce MoE expert input scales on.
+
+    Nothing written in this file has expert input scales, so on a CPU-only host any answer works.
+    """
+    return mock.patch.object(torch.cuda, "current_device", return_value=0)
+
+
+def _write(model, export_dir, **kwargs):
+    with _cpu_device_query():
+        distributed_save_hf_checkpoint(
+            model, export_dir, maxbound=448, kv_cache_format=None, max_shard_size="8KB", **kwargs
+        )
+
+
+def _nogather_export(model, export_dir, **kwargs):
+    with _cpu_device_query(), mock.patch.dict(os.environ, {"MODELOPT_FSDP2_EXPORT": "nogather"}):
+        export_hf_checkpoint(
+            model, dtype=torch.bfloat16, export_dir=export_dir, max_shard_size="16KB", **kwargs
+        )
 
 _WRITER = "modelopt.torch.export.distributed_writer"
 
@@ -81,6 +118,16 @@ def _load_checkpoint(export_dir):
     return tensors
 
 
+def _save(config, path):
+    torch.manual_seed(0)
+    AutoModelForCausalLM.from_config(config, dtype=torch.bfloat16).save_pretrained(path)
+    return path
+
+
+def _load(path):
+    return AutoModelForCausalLM.from_pretrained(path, dtype=torch.bfloat16).eval()
+
+
 def _mixtral_config(**overrides):
     """A tiny Mixtral: fused experts in memory, per-expert ``block_sparse_moe`` names on the hub."""
     kwargs = {
@@ -109,6 +156,28 @@ def _llama_config():
         num_key_value_heads=2,
         max_position_embeddings=32,
     )
+
+
+def _fsdp2_shard(model, mesh, wrap_root=True):
+    """Shard each decoder layer, and the root too unless ``wrap_root`` is off (as expert parallelism
+    leaves it, sharding only the dense layers)."""
+    for layer in model.model.layers:
+        fully_shard(layer, mesh=mesh)
+    if wrap_root:
+        fully_shard(model, mesh=mesh)
+    return model
+
+
+def _quantize_with_reference(model, quant_cfg):
+    """Quantize ``model`` and return what the single-process export writes for a copy of it."""
+    torch.manual_seed(1)
+    batch = torch.randint(0, model.config.vocab_size, (2, 8))
+    mtq.quantize(model, quant_cfg, lambda m: m(batch))
+    ref = copy.deepcopy(model)
+    want, _ = _export_transformers_checkpoint(ref, torch.bfloat16)
+    want = revert_weight_conversion_quant_aware(ref, dict(want))
+    assert any(v.dtype in (torch.float8_e4m3fn, torch.uint8) for v in want.values())
+    return want
 
 
 # ------------------------------------------------------------------ pure helpers
@@ -752,3 +821,190 @@ def test_a_name_two_ranks_both_write_fails_the_write_on_every_rank(cpu_dist_work
     cpu_dist_workers.run(_cross_rank_collision_job, tmp_dir=tmp_path)
 
     assert not list(tmp_path.glob("*.safetensors"))
+
+
+# ------------------------------------------------------------------ the writer, one rank
+
+
+@pytest.mark.parametrize("tie", [True, False], ids=["tied", "untied"])
+def test_distributed_save_writes_the_hub_checkpoint_of_a_sharded_moe(
+    gloo_world_of_one, tmp_path, tie
+):
+    """Fused experts are split, every name is reverse-converted, and a declared tie is dropped."""
+    src = _save(_mixtral_config(tie_word_embeddings=tie), tmp_path / "src")
+    model = _fsdp2_shard(_load(src), gloo_world_of_one)
+
+    _write(model, tmp_path / "export")
+
+    assert len(list((tmp_path / "export").glob("*.safetensors"))) > 1
+    want = load_file(str(src / "model.safetensors"))
+    _assert_byte_identical(_load_checkpoint(tmp_path / "export"), want)
+
+
+def test_distributed_save_runs_from_inside_inference_mode(gloo_world_of_one, tmp_path):
+    """A caller in inference mode hands the writer inference tensors, which its writes reject."""
+    src = _save(_mixtral_config(), tmp_path / "src")
+    model = _fsdp2_shard(_load(src), gloo_world_of_one)
+
+    with torch.inference_mode():
+        # Made in inference mode, like the scales an inference-mode pack registers.
+        model.model.norm.register_buffer("weight_scale", torch.full((), 0.5))
+        _write(model, tmp_path / "export")
+
+    want = {
+        **load_file(str(src / "model.safetensors")),
+        "model.norm.weight_scale": torch.tensor(0.5),
+    }
+    _assert_byte_identical(_load_checkpoint(tmp_path / "export"), want)
+
+
+def test_distributed_save_writes_extra_state_dict_under_its_own_names(gloo_world_of_one, tmp_path):
+    """Extra tensors already carry hub names, so the reverse conversion must not rename them.
+
+    The first is named like an in-memory Mixtral expert weight, which the reverse would turn into
+    ``block_sparse_moe.experts.0.w1``.
+    """
+    src = _save(_mixtral_config(), tmp_path / "src")
+    model = _fsdp2_shard(_load(src), gloo_world_of_one)
+    extra = {
+        "model.layers.9.mlp.experts.0.gate_proj.weight": torch.arange(
+            64, dtype=torch.bfloat16
+        ).reshape(8, 8),
+        "model.mtp.norm.weight": torch.full((8,), 3.0, dtype=torch.bfloat16),
+    }
+
+    _write(model, tmp_path / "export", extra_state_dict=extra)
+
+    want = {**load_file(str(src / "model.safetensors")), **extra}
+    _assert_byte_identical(_load_checkpoint(tmp_path / "export"), want)
+
+
+def test_distributed_save_rejects_extra_state_dict_that_overlaps_the_model(
+    gloo_world_of_one, tmp_path
+):
+    model = _fsdp2_shard(_load(_save(_mixtral_config(), tmp_path / "src")), gloo_world_of_one)
+
+    with pytest.raises(RuntimeError, match="overlaps the exported model weights"):
+        _write(model, tmp_path / "export", extra_state_dict={"model.norm.weight": torch.ones(32)})
+
+
+@pytest.mark.parametrize("wrap_root", [True, False], ids=["root-wrapped", "layers-only"])
+@pytest.mark.parametrize(
+    "quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG], ids=["fp8", "nvfp4"]
+)
+def test_nogather_export_writes_what_the_single_process_export_writes(
+    gloo_world_of_one, tmp_path, quant_cfg, wrap_root
+):
+    src = _save(_llama_config(), tmp_path / "src")
+    sidecar = src / "chat_template.jinja"  # a source file only the exporter carries over
+    sidecar.write_text("{{ messages }}")
+    model = _load(src)
+    want = _quantize_with_reference(model, quant_cfg)
+
+    _nogather_export(_fsdp2_shard(model, gloo_world_of_one, wrap_root), tmp_path / "export")
+
+    _assert_byte_identical(_load_checkpoint(tmp_path / "export"), want)
+    for name in ("config.json", "generation_config.json", "hf_quant_config.json"):
+        assert (tmp_path / "export" / name).is_file(), name
+    assert (tmp_path / "export" / sidecar.name).read_text() == sidecar.read_text()
+
+
+def test_nogather_export_rejects_save_modelopt_state(gloo_world_of_one, tmp_path):
+    """The path never runs ``save_pretrained``, which writes that state: refuse, not drop it."""
+    model = _fsdp2_shard(_load(_save(_llama_config(), tmp_path / "src")), gloo_world_of_one)
+
+    with pytest.raises(NotImplementedError, match="save_modelopt_state"):
+        _nogather_export(model, tmp_path / "export", save_modelopt_state=True)
+
+
+@pytest.mark.parametrize(
+    "quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG], ids=["fp8", "nvfp4"]
+)
+def test_nogather_export_writes_moe_experts_quantized(gloo_world_of_one, tmp_path, quant_cfg):
+    config = Qwen3MoeConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=32,
+        moe_intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        num_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=32,
+    )
+    model = _load(_save(config, tmp_path / "src"))
+    # Weight-only experts: expert input scales would need the writer's CUDA-only all-reduce.
+    quant_cfg = copy.deepcopy(quant_cfg)
+    quant_cfg["quant_cfg"].append({"quantizer_name": "*experts*input_quantizer", "enable": False})
+    want = _quantize_with_reference(model, quant_cfg)
+
+    _nogather_export(_fsdp2_shard(model, gloo_world_of_one), tmp_path / "export")
+
+    _assert_byte_identical(_load_checkpoint(tmp_path / "export"), want)
+
+
+# ------------------------------------------------------------------ the writer, two ranks
+
+
+def _two_rank_job(rank, world_size, tmp_dir):
+    mesh = init_device_mesh("cpu", (world_size,))
+
+    # An unquantized MoE whose vocab rows and experts split unevenly; the test compares what the
+    # two ranks wrote between them with the source checkpoint.
+    _write(_fsdp2_shard(_load(tmp_dir / "moe"), mesh), tmp_dir / "moe_export")
+
+    # A quantized dense model through the export entry point: fp8 weights and bf16 norms travel
+    # in separate per-dtype buckets. Every rank quantizes identically, so rank 0's single-process
+    # export of its own copy is the reference.
+    model = _load(tmp_dir / "dense")
+    want = _quantize_with_reference(model, mtq.FP8_DEFAULT_CFG)
+    _nogather_export(_fsdp2_shard(model, mesh), tmp_dir / "dense_export")
+    if rank == 0:
+        _assert_byte_identical(_load_checkpoint(tmp_dir / "dense_export"), want)
+
+    # Each dense tensor ends up whole on exactly one rank, and the owners are spread out.
+    full = {f"t{i}": torch.full((4, 2), float(i)) for i in range(8)}
+    sd = {k: distribute_tensor(v, mesh, [Shard(0)]) for k, v in full.items()}
+    _materialize_owned(sd, set(), rank, world_size)
+    owned = [None] * world_size
+    dist.all_gather_object(owned, sorted(sd))
+    assert all(owned), f"a rank owns nothing: {owned}"
+    assert sorted(k for keys in owned for k in keys) == sorted(full)
+    assert all(torch.equal(v, full[k]) for k, v in sd.items())
+
+    # Ranks that disagree must fail with a diagnosis, not hang in a collective or drop a tensor.
+    sd = {"shared": torch.ones(2), f"rank{rank}": torch.ones(2)}
+    with pytest.raises(RuntimeError, match="dense key sets differ"):
+        _materialize_owned(sd, set(), rank, world_size)
+    w = torch.ones(1, 2)
+    if rank == 0:
+        w = DTensor.from_local(w, mesh, [Shard(0)], run_check=False)
+    with pytest.raises(RuntimeError, match="disagree on which tensors are dim-0 sharded"):
+        _materialize_owned({"w": w}, set(), rank, world_size)
+    sd = {"model.norm.weight": torch.full((2,), float(rank))}
+    if rank == 0:
+        with pytest.raises(RuntimeError, match="name collision across ranks"):
+            _write_even_shards(sd, tmp_dir / "collision", "1MB", rank, world_size)
+        dist.barrier()  # releases the other rank from the writer's closing barrier
+    else:
+        _write_even_shards(sd, tmp_dir / "collision", "1MB", rank, world_size)
+
+
+def test_two_ranks_write_one_checkpoint_and_reject_inconsistent_state(skip_on_windows, tmp_path):
+    """Shards cross ranks point to point, each tensor gets one owner, files share one numbering.
+
+    Spawning ranks dominates the cost, so one job also checks the cross-rank consistency errors.
+    """
+    src = _save(_mixtral_config(vocab_size=63, num_local_experts=3), tmp_path / "moe")
+    _save(_llama_config(), tmp_path / "dense")
+
+    spawn_multiprocess_job(2, partial(_two_rank_job, tmp_dir=tmp_path), backend="gloo")
+
+    shards = sorted(p.name for p in (tmp_path / "moe_export").glob("*.safetensors"))
+    n = len(shards)
+    assert n > 2, "both ranks should have written several files"
+    assert shards == [f"model-{i:05d}-of-{n:05d}.safetensors" for i in range(1, n + 1)]
+    want = load_file(str(src / "model.safetensors"))
+    _assert_byte_identical(_load_checkpoint(tmp_path / "moe_export"), want)

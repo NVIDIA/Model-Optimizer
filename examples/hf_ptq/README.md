@@ -654,6 +654,8 @@ Qwen checkpoints with `model_type` `qwen3_5` or `qwen3_5_moe` support this path 
 
 > *Performance Note: FSDP2 is designed for training workloads and may result in longer calibration and export times. For faster calibration, maximize the batch size based on available GPU memory and choose the right number of GPUs to avoid unnecessary communication.*
 
+> *Set `MODELOPT_FSDP2_EXPORT=nogather` to have every rank write its own shards of the checkpoint in parallel instead of gathering the full state dict on one host.*
+
 ## Evaluate Accuracy
 
 ### TensorRT-LLM Validation
