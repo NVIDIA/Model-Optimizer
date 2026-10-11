@@ -62,8 +62,9 @@ def test_a_spec_declares_a_plan_a_floor_a_prepare_or_a_refusal(model_type):
 
 
 def test_models_whose_own_plan_would_misroute_them_are_refused():
-    """GPT-OSS ships a plan of its own, so only its refusal keeps it off the expert-parallel path."""
-    assert "gpt_oss" in EP_REFUSED_MODEL_TYPES
+    """GPT-OSS and Llama-4 ship plans of their own, so only their refusal keeps them off the
+    expert-parallel path."""
+    assert {"gpt_oss", "llama4", "llama4_text"} <= set(EP_REFUSED_MODEL_TYPES)
 
 
 def test_the_omni_vlm_reuses_the_text_models_plan():

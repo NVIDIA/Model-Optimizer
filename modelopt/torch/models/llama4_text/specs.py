@@ -15,11 +15,11 @@
 
 """Llama-4 text-only specs (HF model type ``llama4_text``).
 
-The same architecture as ``llama4`` reached through ``Llama4ForCausalLM``, so it shares the adapter.
-The plan sits on the config itself rather than a nested text config -- there is no VLM wrapper here.
+The same architecture as ``llama4`` reached through ``Llama4ForCausalLM``, with its own
+``base_model_ep_plan`` on the root config, so it is refused expert parallelism the same way.
 """
 
-from ..llama4.ep import prepare
+from ..llama4.specs import EP_UNSUPPORTED
 from ..specs import EPSpec, ModelSpec, register
 
 __all__: list[str] = []
@@ -27,7 +27,7 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="llama4_text",
-        min_transformers_version="5.6",
-        ep_spec=EPSpec(requires_transformers="5.6", prepare=prepare),
+        min_transformers_version="5.5",
+        ep_spec=EPSpec(unsupported=EP_UNSUPPORTED),
     )
 )
