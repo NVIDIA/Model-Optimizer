@@ -596,8 +596,6 @@ def _source_experts_fused_on_disk(ckpt_path: "str | None") -> bool:
     )
 
 
-# The two ways the DENSE (non-expert) modules can be placed/loaded in the EP hybrid. Experts are ALWAYS
-# EP-sharded by from_pretrained; only the dense modules vary:
 def load_and_prepare_ep(
     ckpt_path: str,
     mo_session: "ModelOptSession",
