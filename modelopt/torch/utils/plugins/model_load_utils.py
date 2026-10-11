@@ -87,15 +87,22 @@ def _promote_non_dtensor_to_gpu(model: nn.Module, device: torch.device) -> None:
             module._buffers[name] = buf.to(device)
 
 
-def _conversion_plan(model: nn.Module) -> dict | None:
+def _conversion_plan(model: nn.Module, conversions: list | None = None) -> dict | None:
     """Transformers' own conversion mapping for ``model``, or ``None`` if nothing needs converting.
 
     ``legacy_renames`` covers a remote-code model's ``_checkpoint_conversion_mapping``; the
     ``renamings``/``converters`` from HF's engine drive renaming + MoE weight fusion directly.
+    ``conversions`` replaces the model's stock mapping with a given list, such as the one
+    ``from_pretrained`` records of what it ran; that record is complete, so no legacy renames are
+    layered on top of it.
     """
-    legacy_renames = dict(getattr(model, "_checkpoint_conversion_mapping", None) or {})
+    if conversions is None:
+        legacy_renames = dict(getattr(model, "_checkpoint_conversion_mapping", None) or {})
+        conversions = get_model_conversion_mapping(model)
+    else:
+        legacy_renames = {}
     renamings, converters = [], []
-    for entry in get_model_conversion_mapping(model):
+    for entry in conversions:
         (converters if isinstance(entry, WeightConverter) else renamings).append(entry)
     if not (legacy_renames or renamings or converters):
         return None
@@ -328,6 +335,15 @@ def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
 
     Architecture-agnostic by construction -- it asks whether a target parameter exists, not whether
     the key looks like an MTP head or an auxiliary tower.
+
+    A key is placed if either of two replays of the load resolves it to a parameter. The model's
+    stock conversion mapping misses whatever loading added to it: a dequantizing quantizer folds
+    FP8 ``weight_scale_inv`` and MXFP4 ``*_blocks``/``*_scales`` tensors into the weights, and a
+    patched mapping can feed compressed ``weight_packed`` experts in. Replayed alone, it called all
+    of those unplaced, and the export carried them beside the weights they became. The conversions
+    ``from_pretrained`` actually ran are recorded on the model (``_weight_conversions``, what
+    transformers' own save path replays), additions included -- but only those some key used, so
+    the stock mapping still answers for weights a loader of our own placed.
     """
     weight_map = indexed_weight_map(ckpt_path)
     if not weight_map:
@@ -335,14 +351,18 @@ def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
             f"No safetensors checkpoint at {ckpt_path} "
             "(expected model.safetensors or model.safetensors.index.json)."
         )
-    plan = _conversion_plan(model)
+    plans = [_conversion_plan(model)]
+    if getattr(model, "_weight_conversions", None):
+        plans.append(_conversion_plan(model, model._weight_conversions))
+    plans = [plan for plan in plans if plan is not None]
     model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
-    return [
-        ckpt_key
-        for ckpt_key in weight_map
-        if ckpt_key not in model_param_names
-        and (_resolve_target(plan, ckpt_key)[0] if plan else ckpt_key) not in model_param_names
-    ]
+
+    def placed(ckpt_key: str) -> bool:
+        if ckpt_key in model_param_names:
+            return True
+        return any(_resolve_target(plan, ckpt_key)[0] in model_param_names for plan in plans)
+
+    return [ckpt_key for ckpt_key in weight_map if not placed(ckpt_key)]
 
 
 def parallel_load_and_prepare_fsdp2(
