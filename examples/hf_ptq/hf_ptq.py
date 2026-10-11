@@ -639,8 +639,8 @@ def mono_quantize(
             # quantization target; the full forward still exercises that component's quantizers.
             if args.calib_with_images:
                 calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
-            elif getattr(args, "mo_session", None) is not None and args.mo_session.distributed:
-                # A distributed run has to calibrate through distributed_forward_loop, not the
+            elif getattr(getattr(args, "mo_session", None), "ep_mesh", None) is not None:
+                # An expert-parallel run has to calibrate through distributed_forward_loop, not the
                 # plain one: it is the only caller of _reinstall_a2a_forwards, which re-plants the
                 # torch_a2a expert/router forward wrappers that quantizer insertion clobbers on
                 # transformers >= 5.16 (where the styles install a forward rather than a pre-hook).
@@ -648,7 +648,8 @@ def mono_quantize(
                 # "torch_a2a experts forward requires the EP `process_group`" at calibration step 0.
                 # On <= 5.13 the wrappers are pre-hooks that survive, so the reinstall is a no-op --
                 # which is why this is invisible on older transformers and fatal on newer.
-                # It also restores the use_cache guard the plain loop does not apply.
+                # It also restores the use_cache guard the plain loop does not apply. Other
+                # distributed runs (FSDP2) keep the plain loop and its split-on-OOM retry.
                 calibrate_loop = distributed_forward_loop(
                     language_model, calib_dataloader, args.mo_session
                 )
