@@ -1891,15 +1891,9 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
 
 # Config attributes a distributed load sets to describe THIS RUN rather than the checkpoint: the
 # DistributedConfig transformers stamps on the config when it shards the model (the EP degree and tp
-# plan the export happened to use; not JSON-serializable either), the base_model_ep_plan the EP
-# loader swapped to the torch_a2a styles, which exist only while ModelOpt is imported, and the
-# _checkpoint_conversion_mapping a model's expert-parallel prepare hook installs to rename the
-# source's tensors on load (Kimi-K3's per-expert w1/w3/w2), which names nothing in the export.
-_DISTRIBUTED_RUN_CONFIG_ATTRS = (
-    "distributed_config",
-    "base_model_ep_plan",
-    "_checkpoint_conversion_mapping",
-)
+# plan the export happened to use; not JSON-serializable either), and the base_model_ep_plan the EP
+# loader swapped to the torch_a2a styles, which exist only while ModelOpt is imported.
+_DISTRIBUTED_RUN_CONFIG_ATTRS = ("distributed_config", "base_model_ep_plan")
 
 
 @contextlib.contextmanager
