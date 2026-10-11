@@ -1419,18 +1419,17 @@ class TensorQuantizer(nn.Module):
             )
 
     def sync_amax_across_distributed_group(self, parallel_group: DistributedProcessGroup):
-        """Synchronize amax across all ranks in ``parallel_group`` via a single symmetric MAX all-reduce.
+        """Synchronize amax across all ranks in ``parallel_group`` with a MAX all-reduce every rank joins.
 
         With data-parallel calibration a module can be activated on some ranks but not others (a
-        sparsely-routed MoE expert, or any module a rank's calib batch never exercises), so ``_amax`` ends
-        up present on only a SUBSET of the group's ranks. Every rank must still join the collective or the
-        participant set mismatches and NCCL deadlocks -- so a rank lacking a local amax contributes a zero
-        of the amax's shape. That shape is known LOCALLY from the quantizer's own config (a per-tensor amax
-        is scalar), so NO peer metadata exchange is needed to discover it. (Non-per-tensor quantizers --
-        e.g. weights -- are calibrated from their weight on every rank, so they are never ``None`` here.)
-        The MAX picks up the real amax from the ranks that have it (zero is the identity for max over
-        non-negative amax); if no rank in the group has one, the all-reduced result is zero and the
-        uncalibrated amax is dropped so downstream ``amax is None`` handling still applies.
+        sparsely-routed MoE expert, or any module a rank's calib batch never exercises), so ``_amax``
+        ends up present on only a SUBSET of the group's ranks. Every rank must still join the
+        collective or the participant set mismatches and NCCL deadlocks.
+
+        The ranks agree on whether anyone calibrated the quantizer from a presence flag, never from
+        the amax value: a calibrated amax can legitimately be zero (an all-zero weight). A quantizer
+        that no rank calibrated keeps no amax, so downstream ``amax is None`` handling still applies.
+        A calibrated amax keeps its own dtype and device, exactly as an in-place reduce leaves it.
         """
         if not parallel_group.is_initialized():
             return
@@ -1454,7 +1453,7 @@ class TensorQuantizer(nn.Module):
             #   - none present -> the quantizer is uncalibrated group-wide (a module that no rank's calib
             #     data exercised, e.g. a VLM path never hit by the image-text batches); skip the sync and
             #     leave ``_amax`` None so downstream ``amax is None`` handling applies.
-            #   - all present  -> fall through to the shared MAX all-reduce below.
+            #   - all present  -> reduce the amax itself below.
             #   - some present -> genuinely uneven calibration whose amax shape the have-nots cannot recover;
             #     every rank raises together (symmetric, no deadlock).
             present = 1.0 if amax is not None else 0.0
@@ -1470,39 +1469,36 @@ class TensorQuantizer(nn.Module):
                     "some ranks calibrated it but others did not, and its amax shape is not locally known on "
                     "the have-nots. Ensure every rank calibrates it (e.g. increase --calib-size)."
                 )
-        elif amax is None:
-            # Per-tensor (or dynamic-block, whose stored amax is a scalar) amax, so a rank that never
-            # calibrated it can still join the collective with a locally-known scalar zero (the identity for
-            # MAX over non-negative amax).
-            self._set_buffer("_amax", torch.zeros((), dtype=torch.float32, device=device))
-            amax = self._amax
-        assert amax is not None  # calibrated here, or the zero just above
-        # NCCL requires every rank to contribute the same DTYPE as well as the same shape, and the two
-        # sides of this collective get their amax from different places: a rank that calibrated the
-        # quantizer keeps the calibrator's dtype (``_amax_setter_helper`` stores
-        # ``value.clone().detach()``), while a rank that did not synthesises float32 just above. When a
-        # group splits across the two -- exactly the sparsely-routed MoE case this path exists to serve --
-        # the all_reduce pairs mismatched dtypes, which NCCL HANGS on rather than raising.
-        # Observed on Kimi-K3 (NVFP4, EP64): for the first expert input_quantizer 8 ranks held a
-        # calibrated amax and 56 held none, and the collective never returned. The device must agree
-        # for the same reason, so a calibrated amax moves to the device the have-nots synthesise on.
-        if amax.dtype != torch.float32 or amax.device != device:
-            self._set_buffer("_amax", amax.to(device=device, dtype=torch.float32))
-            amax = self._amax
-        try:
-            dist.all_reduce(amax, op=dist.ReduceOp.MAX, group=group)
-        except RuntimeError as e:
-            raise RuntimeError(
-                f"Failed to synchronize amax across the calibration group: {e}. This is commonly a CUDA "
-                "OOM when NCCL lazily allocates communication buffers under calibration memory pressure; "
-                "free cached activations (gc.collect()/torch.cuda.empty_cache()) before the sync or reduce "
-                "the calibration sequence length / batch size."
-            ) from e
-        if not bool(torch.any(amax)):
-            # No rank in the group had a (positive) amax -> uncalibrated across the whole group. Drop it so
-            # downstream ``amax is None`` handling applies (a real amax is strictly positive). The
-            # all-reduced value is identical on every rank, so this decision is symmetric.
-            delattr(self, "_amax")
+            assert amax is not None  # all_present
+            # Every rank calibrated it with the same calibrator, so shapes and dtypes agree.
+            reduced = amax.to(device=device)  # the backend's device; a no-op when already there
+            _all_reduce_amax(reduced, group)
+            if reduced is not amax:
+                amax.copy_(reduced)
+            return
+
+        # Per-tensor (or dynamic-block, whose stored amax is a scalar): one all-reduce carries the value,
+        # whether this rank calibrated the quantizer, and the dtype it did so in, so a rank that never
+        # calibrated it joins with a locally known scalar and still ends up with the group's amax.
+        # float32 throughout: NCCL hangs rather than raising when ranks pair mismatched dtypes, which a
+        # group split between calibrated and uncalibrated ranks otherwise would (Kimi-K3, NVFP4, EP64:
+        # 8 ranks held an expert input amax and 56 did not).
+        packed = torch.zeros(3, dtype=torch.float32, device=device)
+        if amax is not None:
+            packed[0] = amax.detach().reshape(()).to(device=device, dtype=torch.float32)
+            packed[1] = 1.0
+            packed[2] = (
+                float(_AMAX_DTYPES.index(amax.dtype) + 1) if amax.dtype in _AMAX_DTYPES else 0.0
+            )
+        _all_reduce_amax(packed, group)
+        if not bool(packed[1] > 0):
+            return  # no rank calibrated it
+        if amax is not None:
+            amax.copy_(packed[0])
+        else:
+            dtype_code = int(packed[2].item())
+            dtype = _AMAX_DTYPES[dtype_code - 1] if dtype_code > 0 else torch.float32
+            self._set_buffer("_amax", packed[0].to(dtype))
 
     @contextlib.contextmanager
     def disable_pre_quant_scale(self):
@@ -1599,6 +1595,23 @@ def _to_local(t: torch.Tensor) -> torch.Tensor:
     if DTensor is not None and isinstance(t, DTensor):
         return t.to_local()
     return t
+
+
+# The dtypes a calibrated amax can have, so a rank that never calibrated a quantizer adopts the same one.
+_AMAX_DTYPES = (torch.float32, torch.bfloat16, torch.float16, torch.float64)
+
+
+def _all_reduce_amax(tensor: torch.Tensor, group) -> None:
+    """MAX all-reduce ``tensor`` in place, naming the likely cause of a failure."""
+    try:
+        dist.all_reduce(tensor, op=dist.ReduceOp.MAX, group=group)
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"Failed to synchronize amax across the calibration group: {e}. This is commonly a CUDA "
+            "OOM when NCCL lazily allocates communication buffers under calibration memory pressure; "
+            "free cached activations (gc.collect()/torch.cuda.empty_cache()) before the sync or reduce "
+            "the calibration sequence length / batch size."
+        ) from e
 
 
 def _collective_device(group) -> torch.device:
