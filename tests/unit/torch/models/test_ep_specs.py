@@ -19,6 +19,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip("transformers")
+
 from modelopt.torch.models import EPSpec, ModelSpec, get_spec, get_specs
 from modelopt.torch.utils.moe import apply_distributed_support
 
