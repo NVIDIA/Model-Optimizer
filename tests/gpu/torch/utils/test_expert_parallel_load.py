@@ -62,10 +62,10 @@ def _local(tensor):
     return tensor.to_local() if isinstance(tensor, DTensor) else tensor
 
 
-def _sharded_model_matches_the_whole_one(rank, size, ckpt_dir, ep_degree):
+def _sharded_model_matches_the_whole_one(rank, size, ckpt_dir, fsdp_dense, ep_degree):
     device = torch.device(f"cuda:{rank}")
     config = AutoConfig.from_pretrained(ckpt_dir)  # carries qwen3_moe's own base_model_ep_plan
-    plan = DistributionPlan(size, ep_size=ep_degree)
+    plan = DistributionPlan(size, ep_size=ep_degree, dense="fsdp" if fsdp_dense else "replicate")
     model = load_and_prepare_ep(ckpt_dir, plan, hf_config=config).eval()
     # The loader swaps the plan on its own copy: the caller's config keeps the checkpoint's.
     assert config.base_model_ep_plan == AutoConfig.from_pretrained(ckpt_dir).base_model_ep_plan
@@ -99,12 +99,14 @@ def _sharded_model_matches_the_whole_one(rank, size, ckpt_dir, ep_degree):
 
 
 @pytest.mark.parametrize("ep_share", [1, 2], ids=["ep-world", "ep-half"])
+@pytest.mark.parametrize("fsdp_dense", [False, True], ids=["dense-replicated", "dense-sharded"])
 def test_expert_parallel_model_matches_the_whole_model(
-    need_2_gpus, dist_workers, tmp_path, ep_share
+    need_2_gpus, dist_workers, tmp_path, fsdp_dense, ep_share
 ):
-    """With the experts sharded over every rank, or over half of them and replicated across the halves."""
+    """With the dense part replicated, or FSDP2-sharded and loaded shard by shard through DCP; and
+    with the experts sharded over every rank, or over half of them and replicated across the halves."""
     ep_degree = dist_workers.world_size // ep_share
     if ep_degree < 2 or dist_workers.world_size % ep_share or NUM_EXPERTS % ep_degree:
         pytest.skip(f"{NUM_EXPERTS} experts do not shard over EP {ep_degree} on these GPUs")
     _save_tiny_qwen3_moe(tmp_path)
-    dist_workers.run(_sharded_model_matches_the_whole_one, str(tmp_path), ep_degree)
+    dist_workers.run(_sharded_model_matches_the_whole_one, str(tmp_path), fsdp_dense, ep_degree)
