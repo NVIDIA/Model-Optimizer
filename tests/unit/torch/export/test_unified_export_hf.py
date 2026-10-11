@@ -1111,6 +1111,7 @@ def test_source_checkpoint_is_none_for_a_model_built_from_config(tmp_path, monke
 
 def test_process_hf_model_for_export_folds_in_place_and_returns_the_quant_config():
     """The processing half the no-gather writer runs before writing each rank's shard."""
+    pytest.importorskip("transformers")
     from transformers import LlamaConfig, LlamaForCausalLM
 
     from modelopt.torch.export.unified_export_hf import _process_hf_model_for_export
@@ -1139,6 +1140,7 @@ def test_process_hf_model_for_export_folds_in_place_and_returns_the_quant_config
 def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_path, source_plan):
     """The EP load's DistributedConfig and torch_a2a plan stay out of config.json, the source's own
     plan survives, and the live configs keep the run's values afterwards."""
+    pytest.importorskip("transformers")
     from transformers import AutoConfig, Llama4Config
     from transformers.distributed import DistributedConfig
 
