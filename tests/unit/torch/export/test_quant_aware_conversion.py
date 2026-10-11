@@ -1281,3 +1281,85 @@ def test_revert_quant_config_names_mapper():
     q2 = {"exclude_modules": ["x*"]}
     revert_quant_config_names(q2, None)
     assert q2["exclude_modules"] == ["x*"]
+
+
+def _as_loading_rewrote(conversions, siblings):
+    """``conversions`` with every expert converter's ``.weight`` sources expanded the way a
+    load-time rewrite expands them: one anchored source per checkpoint tensor it consumes."""
+    from transformers.core_model_loading import WeightConverter
+
+    rewritten = []
+    for conv in conversions:
+        sources = conv.source_patterns if isinstance(conv.source_patterns, list) else []
+        if not isinstance(conv, WeightConverter) or not any(".experts." in s for s in sources):
+            rewritten.append(conv)
+            continue
+        stems = [s.removesuffix("$").removesuffix(".weight") for s in sources]
+        rewritten.append(
+            WeightConverter(
+                source_patterns=[f"{stem}.{leaf}$" for leaf in siblings for stem in stems],
+                target_patterns=getattr(conv, "_original_target_patterns", conv.target_patterns),
+                operations=list(conv.operations),
+            )
+        )
+    return rewritten
+
+
+@pytest.mark.parametrize(
+    "siblings",
+    [("weight", "weight_scale_inv"), ("weight_packed", "weight_scale", "weight_global_scale")],
+    ids=["fp8-dequantize", "compressed-tensors-decompress"],
+)
+def test_experts_revert_through_converters_loading_rewrote(siblings):
+    """The export replays the conversions ``from_pretrained`` recorded. After a dequantizing or
+    decompressing load, each expert converter lists every checkpoint tensor it consumed, so the
+    same leaf repeats; the expert reverse used to bail on that and leave every name in-memory."""
+    pytest.importorskip("transformers")
+    from _test_utils.torch.transformers_models import get_tiny_mixtral
+
+    try:
+        from transformers.conversion_mapping import get_model_conversion_mapping
+    except ImportError:
+        pytest.skip("transformers build has no conversion_mapping API")
+    model = get_tiny_mixtral(**_MIXTRAL_KWARGS)
+    stock = get_model_conversion_mapping(model, add_legacy=False)
+    if not any(".experts." in str(c.source_patterns) for c in stock):
+        pytest.skip("transformers build has no mixtral expert conversion")
+    model._weight_conversions = _as_loading_rewrote(stock, siblings)
+
+    p = "model.layers.0"
+    sd = {f"{p}.mlp.gate.weight": torch.randn(2, 32)}
+    for e in range(2):
+        sd.update(_nvfp4_linear(f"{p}.mlp.experts.{e}.gate_proj", 64, 32))
+        sd.update(_nvfp4_linear(f"{p}.mlp.experts.{e}.up_proj", 64, 32))
+        sd.update(_nvfp4_linear(f"{p}.mlp.experts.{e}.down_proj", 32, 64))
+
+    out = revert_weight_conversion_quant_aware(model, sd)
+
+    for e in range(2):
+        base = f"{p}.block_sparse_moe.experts.{e}"
+        assert f"{base}.w1.weight" in out
+        assert f"{base}.w3.weight" in out
+        assert f"{base}.w2.weight" in out
+        assert f"{base}.w1.weight_scale_2" in out
+    assert not any(".mlp.experts." in k for k in out)
+
+
+def test_dense_split_names_each_part_once_through_load_siblings():
+    """A dense fused converter that a dequantizing load rewrote still un-fuses into one part per
+    module, not one per checkpoint tensor the load consumed."""
+    pytest.importorskip("transformers")
+    from transformers.core_model_loading import Concatenate, WeightConverter
+
+    from modelopt.torch.export.quant_aware_conversion import _dense_split_rule
+
+    modules = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")
+    leaves = ("weight", "weight_scale_inv")
+    conv = WeightConverter(
+        source_patterns=[f"{m}.{leaf}$" for leaf in leaves for m in modules],
+        target_patterns="self_attn.qkv_proj",
+        operations=[Concatenate(dim=0)],
+    )
+    rev = conv.reverse_transform()
+    rule = _dense_split_rule(rev, list(rev.operations))
+    assert rule.part_suffixes == (".q_proj", ".k_proj", ".v_proj")
