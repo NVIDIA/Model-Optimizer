@@ -712,6 +712,34 @@ def test_build_reverse_rules_orders_prefix_reorder_after_container():
     assert not any(".mlp.experts." in k for k in out)
 
 
+def test_a_dequantizing_fp8_load_still_reverses_the_other_conversions():
+    """A FineGrainedFP8 ``dequantize=True`` load adds a converter that only decodes each weight in
+    place. It renames nothing, so it must neither abort the reverse of the model's real
+    conversions (MiniMax-M2.7 kept its in-memory expert names) nor re-encode a weight."""
+    pytest.importorskip("transformers.core_model_loading")
+    fp8 = pytest.importorskip("transformers.integrations.finegrained_fp8")
+    from transformers.core_model_loading import WeightConverter, WeightRenaming
+
+    conversions = [
+        WeightRenaming(".block_sparse_moe.experts.", ".mlp.experts."),
+        WeightConverter(
+            source_patterns=["weight$", "weight_scale_inv", "activation_scale"],
+            target_patterns="weight",
+            operations=[fp8.Fp8Dequantize(None)],
+        ),
+    ]
+    model = types.SimpleNamespace(_weight_conversions=conversions)
+    sd = _nvfp4_linear("model.layers.0.mlp.experts.0.w1", 8, 16)
+    sd["model.layers.0.self_attn.q_proj.weight"] = torch.randn(8, 16, dtype=torch.bfloat16)
+
+    out = revert_weight_conversion_quant_aware(model, sd)
+
+    expert = "model.layers.0.block_sparse_moe.experts.0.w1"
+    assert {f"{expert}.weight", f"{expert}.weight_scale", f"{expert}.weight_scale_2"} <= set(out)
+    assert out["model.layers.0.self_attn.q_proj.weight"].dtype == torch.bfloat16
+    assert not any(".mlp.experts." in k or k.endswith("weight_scale_inv") for k in out)
+
+
 def test_nested_text_prefix_reverse_does_not_capture_vlm_siblings():
     """A nested text-model conversion must not rewrite the full VLM namespace."""
     pytest.importorskip("transformers.core_model_loading")
