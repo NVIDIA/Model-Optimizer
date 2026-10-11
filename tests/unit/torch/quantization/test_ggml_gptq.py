@@ -15,6 +15,7 @@
 """GPTQ for GGML block formats: the group update, the helper, and the payload pin."""
 
 import copy
+import dataclasses
 import io
 from types import SimpleNamespace
 
@@ -44,11 +45,11 @@ def _problem(rows=6, cols=16, seed=0):
     return weight, hessian, compute_hessian_inverse(hessian, weight, 0.01)
 
 
-def _round_to_tenths(weight):
+def _round_to_tenths(weight, columns=None):
     return torch.round(weight * 10) / 10
 
 
-def _round_in_groups_of_4(group):
+def _round_in_groups_of_4(group, columns=None):
     scale = group.abs().amax(dim=-1, keepdim=True) / 2
     return torch.round(group / scale) * scale
 
@@ -96,7 +97,11 @@ def _iq_config(algorithm, num_bits="iq1_s"):
             {"quantizer_name": "*", "enable": False},
             {
                 "quantizer_name": "*weight_quantizer",
-                "cfg": {"num_bits": num_bits, "block_sizes": {-1: 256}, "backend": "ggml"},
+                "cfg": {
+                    "num_bits": num_bits,
+                    "block_sizes": {-1: GGML_FORMAT_REGISTRY[num_bits].block_size},
+                    "backend": "ggml",
+                },
                 "enable": True,
             },
         ],
@@ -143,6 +148,61 @@ def test_gptq_on_a_ggml_format_pins_the_payload_it_chose():
         return ((weight - original.weight) @ inputs.T).square().sum()
 
     assert weighted_error(model.weight) < weighted_error(plain.weight_quantizer(plain.weight))
+
+
+@pytest.mark.parametrize(
+    ("num_bits", "importance_weighted", "weighted"),
+    [
+        ("iq2_xxs", True, True),
+        ("iq1_s", True, True),
+        ("iq2_xxs", False, False),
+        ("q8_0", True, False),
+    ],
+)
+def test_gptq_weights_the_search_by_the_root_of_the_hessian_diagonal(
+    monkeypatch, num_bits, importance_weighted, weighted
+):
+    ggml_format = GGML_FORMAT_REGISTRY[num_bits]
+    calls = []
+
+    def recording_quantize(weight, **kwargs):
+        calls.append(kwargs.get("importance"))
+        return ggml_format.quantize(weight, **kwargs)
+
+    monkeypatch.setitem(
+        GGML_FORMAT_REGISTRY,
+        num_bits,
+        dataclasses.replace(ggml_format, quantize=recording_quantize),
+    )
+    model = torch.nn.Linear(512, 8, bias=False)
+    inputs = _inputs()
+    algorithm = {**GPTQ, "importance_weighted": importance_weighted}
+    mtq.quantize(model, _iq_config(algorithm, num_bits), forward_loop=lambda m: m(inputs))
+
+    gptq_calls = calls[-(512 // ggml_format.block_size) :]  # one call per GGML column group
+    if not weighted:
+        assert gptq_calls == [None] * len(gptq_calls)
+        return
+    root = inputs.square().sum(dim=0).sqrt()
+    importance = torch.cat(gptq_calls)
+    torch.testing.assert_close(importance / importance.mean(), root / root.mean())
+
+
+def test_a_module_calibration_never_reached_gets_the_plain_search():
+    # An MoE expert that no calibration token reaches keeps a zero Hessian. Weighting by its
+    # diagonal would make every code score zero error, so GPTQ must fall back to the plain search.
+    torch.manual_seed(0)
+    model = torch.nn.ModuleDict(
+        {"used": torch.nn.Linear(512, 8, bias=False), "unused": torch.nn.Linear(512, 8, bias=False)}
+    )
+    original = model["unused"].weight.detach().clone()
+    inputs = _inputs()
+    algorithm = {**GPTQ, "importance_weighted": True}
+    mtq.quantize(model, _iq_config(algorithm, "iq2_xxs"), forward_loop=lambda m: m["used"](inputs))
+
+    packed, shape = IQ2_XXS.quantize(original)
+    plain = IQ2_XXS.dequantize(packed, shape, dtype=original.dtype)
+    torch.testing.assert_close(model["unused"].weight.detach(), plain, rtol=0, atol=0)
 
 
 def test_pin_outlives_the_weight_tensor():

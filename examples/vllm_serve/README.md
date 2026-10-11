@@ -315,6 +315,64 @@ Notes:
 - vLLM quantizes the DeepSeek-V4 indexer key and query without a Hadamard rotation and the
   GLM-5.3-Flash ones after one, so the fake quantization applies in that basis.
 
+## Fake-quantize MoE expert-parallel communication
+
+To study compressed expert-parallel (EP) communication, fake-quantize what the MoE layers send
+between ranks. vLLM's routed-experts module (vLLM 0.24 or newer) gets two quantizers:
+`dispatch_quantizer` sees the routed tokens entering the MoE kernel's prepare step, which sends them
+to the expert ranks, and `combine_quantizer` sees the expert output entering its finalize step,
+which sends it back. Both work for any MoE layer built on vLLM's fused-MoE layer and with any
+all-to-all backend. Enable them by importing the `configs/ptq/units/moe_dispatch_nvfp4` and
+`configs/ptq/units/moe_combine_nvfp4` units into a recipe, for example `moe_comm_nvfp4_only.yaml`:
+
+```yaml
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  moe_dispatch_nvfp4: configs/ptq/units/moe_dispatch_nvfp4
+  moe_combine_nvfp4: configs/ptq/units/moe_combine_nvfp4
+
+metadata:
+  description: NVFP4 fake quantization of the MoE expert-parallel dispatch and combine only.
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: moe_dispatch_nvfp4
+    - $import: moe_combine_nvfp4
+```
+
+```bash
+RECIPE_PATH=moe_comm_nvfp4_only.yaml python vllm_serve_fakequant.py <model_path> \
+  --data-parallel-size 8 --enable-expert-parallel --moe-backend auto --host 0.0.0.0 --port 8000
+```
+
+Drop one of the two units to quantize only the dispatch or only the combine. `algorithm: max`
+calibrates one NVFP4 global scale per layer and direction, the max over all DP and EP ranks, so
+serving clips larger values; with `algorithm: null` it is computed from each call's tensor. Pass
+`--moe-backend auto` or your production backend: the launcher's `triton` default is only needed to
+fake-quantize the experts themselves.
+
+Notes:
+
+- The combine quantizer sees what the all-to-all backend sends: router-weighted partial sums per
+  token and rank for the default `allgather_reducescatter`, DeepEP high-throughput and the FlashInfer
+  backends, and unweighted per-expert rows for DeepEP low-latency and NIXL. These two, FlashInfer
+  one-sided and DeepEP v2 under CUDA graphs with the Humming indexed experts also send unused
+  padding rows, which would enter a calibrated or per-call global scale, so they require a constant
+  one (`constant_amax`).
+- The router and the shared experts see the unquantized tokens, and the combine reduction (for
+  example the reduce-scatter sum) and the residual add stay unquantized.
+- Tokens handled by experts on their own rank are quantized too, although they are not sent.
+- When the expert kernels quantize their inputs (for example FP8 or NVFP4 experts), vLLM quantizes
+  the dispatched tokens again, so the expert inputs carry both roundings.
+- Without data parallelism (`--enable-expert-parallel` with tensor parallelism only), vLLM runs no
+  all-to-all; the quantizers then emulate one over the same expert partition.
+- The Mega-MoE backend of DeepSeek-V4 and Kimi-K3 (`--moe-backend deep_gemm_mega_moe`) fuses
+  dispatch, expert GEMMs and combine into one kernel, and the FlashInfer MoE-EP backends
+  (`flashinfer_moe_ep_*`) combine inside their kernel. A recipe that enables a quantizer such a
+  backend cannot reach raises an error; use the default MoE backend instead.
+
 ## Serve a model with sparse attention in vLLM
 
 Apply ModelOpt sparse attention at serve time. Right after model load, the launcher replaces each native attention implementation with its matching ModelOpt adapter: `ModelOptSparseAttentionImpl` for FlashAttention or `ModelOptSparseFlashInferImpl` for FlashInfer. Both adapters use the same Triton kernel with paged KV cache support.

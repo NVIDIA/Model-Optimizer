@@ -97,6 +97,9 @@ jobs:
           # all find the config and write .coverage.* files to the same location.
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
+          # sys.monitoring records the same lines as the default C tracer at a fraction of the
+          # overhead; the tracer slowed each hf_ptq example run by ~60%. Needs Python 3.12+.
+          COVERAGE_CORE: sysmon
         run: |
           echo "Running tests for: ${{ inputs.example }}"
           pytest_args=()

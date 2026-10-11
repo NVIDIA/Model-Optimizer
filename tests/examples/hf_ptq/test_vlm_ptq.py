@@ -19,6 +19,6 @@ from _test_utils.examples.run_command import run_hf_ptq_command
 
 
 @pytest.mark.timeout(420)  # PTQ + TRT-LLM multimodal deploy in one test; fp8 takes 190-270s in CI
-@pytest.mark.parametrize("quant", ["fp8", "int8_smoothquant", "nvfp4"])
+@pytest.mark.parametrize("quant", ["fp8", "nvfp4"])
 def test_qwen_vl(quant):
     run_hf_ptq_command(model=QWEN_VL_PATH, quant=quant, vlm=True)

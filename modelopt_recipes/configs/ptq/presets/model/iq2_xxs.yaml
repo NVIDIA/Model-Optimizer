@@ -27,6 +27,8 @@ algorithm:
   block_size: 256
   # Heavier than GPTQ's usual 0.01: low damping overfits the calibration Hessian at these bit widths.
   perc_damp: 0.3
+  # Weight each block's codebook search by the square root of the Hessian diagonal.
+  importance_weighted: true
   layerwise:
     enable: true
 quant_cfg:

@@ -651,8 +651,12 @@ def quantize(
             (19 for int8/fp8, 21 for int4, 23 for nvfp4). If the specified opset is lower than the required minimum,
             a warning will be issued and the opset will be upgraded to the required minimum.
         target_dla:
-            If True, enable Q/DQ nodes to be placed in all tensors for optimal DLA deployment. This only has
-            effect in INT8 quantization. Note that this may cause accuracy degradation, proceed with caution.
+            Expand INT8 Q/DQ coverage for DLA and preserve scalar operator constants.
+            TensorRT 10.7 and earlier require the separate Q/DQ Translator workflow.
+            DLA deployment is unsupported after 10.7 through 11.3. TensorRT 11.4+ supports
+            direct Q/DQ deployment with strongly typed DLA support enabled.
+            Requires a compatible DLA platform and package. False disables DLA targeting.
+            This option only affects INT8 quantization and may reduce accuracy.
         autotune:
             If True, detect optimal Q/DQ node placements according to the TensorRT version and platform available.
             If False, use the default pattern-based quantization approach.
@@ -693,6 +697,9 @@ def quantize(
         None, writes the quantized onnx model in the supplied output_path
         or writes to the same directory with filename like "<model_name>.quant.onnx".
     """
+    if not isinstance(target_dla, bool):
+        raise ValueError("target_dla must be a boolean; use True to enable DLA targeting")
+
     if trt_rtx_backend not in ("legacy", "abi"):
         raise ValueError(f"trt_rtx_backend must be 'legacy' or 'abi', got {trt_rtx_backend!r}")
     if trt_plugins and "NvTensorRtRtx" in calibration_eps:

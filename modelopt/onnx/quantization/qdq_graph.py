@@ -50,6 +50,7 @@ __all__ = [
     "get_layer_precision_mapping",
     "get_resize_scales",
     "print_stat",
+    "remove_dla_scalar_input_qdq",
     "remove_partial_input_qdq",
     "should_quantize_to_8bit",
     "validate_8bit_layers",
@@ -384,6 +385,33 @@ def build_non_residual_input_map(
                 non_residual_inputs[node.name] = None
 
     return non_residual_inputs, no_quantize_inputs
+
+
+def remove_dla_scalar_input_qdq(graph: Graph) -> None:
+    """Keep scalar Mul/Div coefficients and Pad fill values constant for DLA.
+
+    Q/DQ turns these constants into tensor inputs, preventing DLA from evaluating
+    Pad's fill value or broadcasting a scalar coefficient. Bypass only the
+    relevant consumer edge so shared Conv weights and activation Q/DQ stay intact.
+    """
+    scalar_input_indices = {"Mul": (0, 1), "Div": (1,), "Pad": (2,)}
+    for node in graph.nodes:
+        for index in scalar_input_indices.get(node.op, ()):
+            if index >= len(node.inputs) or not node.inputs[index].inputs:
+                continue
+            dequantize = node.inputs[index].inputs[0]
+            if dequantize.op != "DequantizeLinear" or not dequantize.inputs[0].inputs:
+                continue
+            quantize = dequantize.inputs[0].inputs[0]
+            if quantize.op != "QuantizeLinear":
+                continue
+            source = quantize.inputs[0]
+            value = source
+            if source.inputs and source.inputs[0].op == "Constant":
+                value = source.inputs[0].attrs.get("value")
+            if isinstance(value, gs.Constant) and value.values.size == 1:
+                node.inputs[index] = source
+    graph.cleanup().toposort()
 
 
 def remove_partial_input_qdq(

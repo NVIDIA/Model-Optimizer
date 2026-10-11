@@ -13,16 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Alias recipe for nvidia/GLM-5.1-NVFP4 (source zai-org/GLM-5.1). Same recipe as `general/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast`: NVFP4 on the
-# routed experts with the expert `input_scale` pinned to 1.0, and an FP8 KV cache in cast
-# mode.
+# QuantizerCfgList snippet that enables NVFP4 (E2M1, block 16, E4M3 scales) fake quantization of the
+# MoE expert-parallel combine: the expert output entering the MoE kernel's finalize step, which sends
+# it back to the token ranks. The quantizer lives on vLLM's RoutedExperts module (vLLM >= 0.24);
+# see examples/vllm_serve/README.md for the supported paths. Pairs with the moe_dispatch_nvfp4 unit.
+# Requires Blackwell+ GPUs for the NVFP4 fake-quant kernels.
 
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
 imports:
-  base: general/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast
-
-$import: base
-metadata:
-  description: >-
-    zai-org/GLM-5.1 quantized with the general expert-only NVFP4 scheme, expert
-    `input_scale` pinned to 1.0, and an FP8 KV cache in cast mode, as published in
-    nvidia/GLM-5.1-NVFP4.
+  nvfp4: configs/numerics/nvfp4
+---
+  - quantizer_name: '*combine_quantizer'
+    cfg:
+      $import: nvfp4
