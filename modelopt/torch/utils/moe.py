@@ -551,51 +551,6 @@ def _ckpt_quant_method(cfg):
     return None
 
 
-def _source_experts_fused_on_disk(ckpt_path: "str | None") -> bool:
-    r"""Whether the checkpoint stores routed experts fused or per-expert.
-
-    Peek the source checkpoint's safetensors key names to tell whether the routed experts are stored
-    FUSED (one tensor per layer spanning all experts -- e.g. gpt-oss ``mlp.experts.gate_up_proj[_blocks]``)
-    or SEPARATED (per-expert ``mlp.experts.<i>.{gate,up,down}_proj`` -- the Qwen/DeepSeek/Mixtral/Kimi
-    majority). This drives the EXPORT layout so the quantized checkpoint matches the source (round-trip):
-    fused-native models (gpt-oss) MUST stay fused on disk to reload in transformers/vLLM; separated-native
-    models split as before. Returns ``False`` (=> split, the historical behavior) when unknown / no
-    checkpoint / not MoE. The ``\\.experts\\.`` anchors on the routed container so ``shared_expert(s)``
-    fused MLPs don't false-positive.
-    """
-    import glob
-    import json
-    import os
-    import re
-    import struct
-
-    if not ckpt_path or not os.path.isdir(ckpt_path):
-        return False
-    keys: list = []
-    idx = os.path.join(ckpt_path, "model.safetensors.index.json")
-    try:
-        if os.path.isfile(idx):
-            with open(idx) as fh:
-                keys = list(json.load(fh)["weight_map"])
-        else:
-            for f in sorted(glob.glob(os.path.join(ckpt_path, "*.safetensors")))[:4]:
-                with open(f, "rb") as fh:
-                    n = struct.unpack("<Q", fh.read(8))[0]
-                    keys += [k for k in json.loads(fh.read(n)) if k != "__metadata__"]
-    except Exception:
-        return False
-    # Separated wins if present: a per-expert index between the routed `.experts.` and the projection.
-    if any(re.search(r"\.experts\.\d+\.(gate_proj|up_proj|down_proj|w1|w2|w3)", k) for k in keys):
-        return False
-    # Fused: a per-layer routed-expert tensor with NO per-expert digit (gate_up_proj[_blocks], down_proj...).
-    return any(
-        re.search(
-            r"\.experts\.(gate_up_proj|down_proj|gate_proj|up_proj)(_blocks|_scales)?(\.|$)", k
-        )
-        for k in keys
-    )
-
-
 def load_and_prepare_ep(
     ckpt_path: str,
     mo_session: "ModelOptSession",
@@ -879,14 +834,4 @@ def load_and_prepare_ep(
             torch.distributed.all_reduce(torch.ones(1, device=warm_device), group=_sub.get_group())
             torch.cuda.synchronize()
         torch.distributed.barrier()
-    # Record whether the SOURCE checkpoint stored experts fused vs separated, so the distributed export can
-    # MIRROR the source layout (fused-native like gpt-oss stays fused; separated-native splits as before).
-    # Read by ``modelopt.torch.export.distribute.distributed_save_hf_checkpoint`` off the model object.
-    model._modelopt_experts_fused_on_disk = _source_experts_fused_on_disk(ckpt_path)
-    if mo_session.rank == 0:
-        print(
-            f"[ep] source experts on disk: {'FUSED' if model._modelopt_experts_fused_on_disk else 'separated'}"
-            " -> export will match",
-            flush=True,
-        )
     return model
