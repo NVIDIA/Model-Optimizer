@@ -351,10 +351,12 @@ def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
             f"No safetensors checkpoint at {ckpt_path} "
             "(expected model.safetensors or model.safetensors.index.json)."
         )
-    plans = [_conversion_plan(model)]
-    if getattr(model, "_weight_conversions", None):
-        plans.append(_conversion_plan(model, model._weight_conversions))
-    plans = [plan for plan in plans if plan is not None]
+    loaded = getattr(model, "_weight_conversions", None)
+    stock_and_loaded = (
+        _conversion_plan(model),
+        _conversion_plan(model, loaded) if loaded else None,
+    )
+    plans = [plan for plan in stock_and_loaded if plan is not None]
     model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
 
     def placed(ckpt_key: str) -> bool:
