@@ -671,7 +671,7 @@ with torch.inference_mode():
 python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --qformat fp8 --export_path <quantized_ckpt_path> --trust_remote_code
 ```
 
-> *For exporting fake-quantized models for vLLM serving (e.g., for research or kernels not yet supported in real-quant), use the `--vllm_fakequant_export` flag. See [vllm_serve/README.md](../vllm_serve/README.md) for details. For weight-only formats such as the GGML formats (IQ, Q8_0), the export is a plain BF16 checkpoint that a stock vLLM image serves directly.*
+> *For exporting fake-quantized models for vLLM serving (e.g., for research or kernels not yet supported in real-quant), use the `--vllm_fakequant_export` flag. See [vllm_serve/README.md](../vllm_serve/README.md) for details. When every quantizer is a weight quantizer, as in the GGML recipes (IQ, Q8_0), the export is a plain BF16 checkpoint that a stock vLLM image serves directly.*
 
 ### Hugging Face framework [Script](./scripts/huggingface_example.sh)
 

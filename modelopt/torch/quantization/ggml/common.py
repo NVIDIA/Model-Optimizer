@@ -319,19 +319,25 @@ class GGMLFormat:
         ):
             return None
         pinned = pinned.to(weight.device).reshape(-1, width, self.block_bytes)
-        decoded = self.dequantize(
-            pinned, torch.tensor((pinned.shape[0], weight.shape[-1])), dtype=torch.float32
-        )
+        shape = torch.tensor((pinned.shape[0], weight.shape[-1]))
         rows = weight.reshape(-1, weight.shape[-1])
         storage_dtypes = [weight.dtype]
         if weight.dtype == torch.float32:
             storage_dtypes += [torch.bfloat16, torch.float16]
+
+        def decoding(storage_dtype):
+            # Decoding straight into the storage dtype rounds once, as GPTQ did writing the weight,
+            # and holds one table at a time rather than a float32 copy beside each rounding.
+            return self.dequantize(pinned, shape, dtype=storage_dtype).to(weight.dtype)
+
+        # Every whole-weight comparison first: matching rows builds int64 keys several times the
+        # weight's size, and only row slices need it.
+        if rows.shape[0] == pinned.shape[0]:
+            for storage_dtype in storage_dtypes:
+                if torch.equal(rows, decoding(storage_dtype)):
+                    return pinned.reshape(*weight.shape[:-1], width, self.block_bytes)
         for storage_dtype in storage_dtypes:
-            table = decoded.to(storage_dtype).to(weight.dtype)
-            if rows.shape == table.shape and torch.equal(rows, table):
-                index = slice(None)
-            else:
-                index = _matching_rows(table, rows)
+            index = _matching_rows(decoding(storage_dtype), rows)
             if index is not None:
                 return pinned[index].reshape(*weight.shape[:-1], width, self.block_bytes)
         return None
