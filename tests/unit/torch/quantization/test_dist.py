@@ -68,3 +68,52 @@ def _test_uneven_amax_sync_helper(rank, size):
 def test_amax_sync_with_a_rank_that_never_calibrated(skip_on_windows):
     """The rank without an amax still joins the sync, contributing a zero on the group's device."""
     spawn_multiprocess_job(2, _test_uneven_amax_sync_helper, backend="gloo")
+
+
+def _sync(quantizer):
+    quantizer.sync_amax_across_distributed_group(DistributedProcessGroup(dist.group.WORLD))
+
+
+def _calibrated_zero_amax_helper(rank, size):
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
+    quantizer._set_buffer("_amax", torch.tensor(0.0))
+    _sync(quantizer)
+    assert quantizer.amax is not None
+    assert quantizer.amax.item() == 0.0
+    dist.destroy_process_group()
+
+
+def test_a_calibrated_zero_amax_survives_the_sync(skip_on_windows):
+    """An all-zero weight calibrates to amax 0, which is not "never calibrated"."""
+    spawn_multiprocess_job(2, _calibrated_zero_amax_helper, backend="gloo")
+
+
+def _calibrators_dtype_helper(rank, size):
+    per_tensor = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
+    if rank == 0:
+        per_tensor._set_buffer("_amax", torch.tensor(3.0, dtype=torch.bfloat16))
+    per_channel = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=0))
+    per_channel._set_buffer("_amax", torch.tensor([1.0, 2.0 + rank], dtype=torch.bfloat16))
+    _sync(per_tensor)
+    _sync(per_channel)
+    assert per_tensor.amax.dtype == torch.bfloat16
+    assert per_tensor.amax.item() == 3.0
+    assert per_channel.amax.dtype == torch.bfloat16
+    assert per_channel.amax.tolist() == [1.0, 3.0]
+    dist.destroy_process_group()
+
+
+def test_the_sync_leaves_every_rank_the_calibrators_dtype(skip_on_windows):
+    """Including a rank that never calibrated the quantizer and so had no amax of its own."""
+    spawn_multiprocess_job(2, _calibrators_dtype_helper, backend="gloo")
+
+
+def _never_calibrated_helper(rank, size):
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
+    _sync(quantizer)
+    assert getattr(quantizer, "_amax", None) is None
+    dist.destroy_process_group()
+
+
+def test_a_quantizer_no_rank_calibrated_stays_uncalibrated(skip_on_windows):
+    spawn_multiprocess_job(2, _never_calibrated_helper, backend="gloo")
