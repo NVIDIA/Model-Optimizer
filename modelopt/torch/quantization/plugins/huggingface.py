@@ -1572,11 +1572,13 @@ def normalize_experts_impl_on_the_fly(model):
 
     To avoid that while keeping the fast grouped path, this redirects any
     unsupported backend to ``grouped_mm`` (which has a CPU / old-HW fallback, so
-    it is universally runnable). ``eager``, ``grouped_mm`` and the unset/``None``
-    default (which dispatches to the model's eager ``F.linear`` forward) are left
-    untouched. Applied to the model config and recursively to
-    ``text_config`` / ``vision_config`` / ``audio_config`` / ``speech_config``
-    whenever a fused-experts module is present.
+    it is universally runnable). ``eager``, ``grouped_mm`` and ``torch_a2a`` are
+    left untouched, and so is ``None``, which dispatches to the eager ``F.linear``
+    forward -- but transformers resolves an unrequested backend to ``grouped_mm``
+    wherever that can dispatch, when it builds the model, so a model calibrates on
+    the grouped path unless ``eager`` was asked for. Applied to the model config
+    and recursively to ``text_config`` / ``vision_config`` / ``audio_config`` /
+    ``speech_config`` whenever a fused-experts module is present.
     """
     fused_experts = [module for module in model.modules() if _is_fused_experts_module(module)]
     if not fused_experts:
