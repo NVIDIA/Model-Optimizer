@@ -447,18 +447,17 @@ def test_distributed_calibration_gives_each_rank_its_own_shard(hf_ptq, monkeypat
     assert calib_loader(None) is loader
 
 
-def test_distributed_calibration_runs_through_the_distributed_forward_loop(hf_ptq, monkeypatch):
-    """Only distributed_forward_loop re-plants the all-to-all forwards that quantizer insertion
-    clobbers, so a distributed run must calibrate through it rather than the plain loop."""
-    session = _session(world_size=2)
+def _calibration_loop_choice(hf_ptq, monkeypatch, session):
+    """Run mono_quantize under ``session`` and return which calibration loop it built."""
     model = torch.nn.Linear(2, 2)
-    calib_dataloader, loop = object(), object()
-    built, quantized = [], []
+    chosen, quantized = [], []
     monkeypatch.setattr(hf_ptq, "is_quantized", lambda m: False)
     monkeypatch.setattr(hf_ptq, "need_calibration", lambda cfg: True)
-    monkeypatch.setattr(hf_ptq, "distributed_forward_loop", lambda *a: built.append(a) or loop)
     monkeypatch.setattr(
-        hf_ptq, "create_forward_loop", lambda **k: pytest.fail("plain calibration loop selected")
+        hf_ptq, "distributed_forward_loop", lambda *a: chosen.append("distributed") or object()
+    )
+    monkeypatch.setattr(
+        hf_ptq, "create_forward_loop", lambda **k: chosen.append("plain") or object()
     )
     monkeypatch.setattr(
         hf_ptq.mtq, "quantize", lambda m, cfg, forward_loop: quantized.append(forward_loop) or m
@@ -478,9 +477,24 @@ def test_distributed_calibration_runs_through_the_distributed_forward_loop(hf_pt
         model,
         model_type="qwen3_moe",
         calibration_only=False,
-        calib_dataloader=calib_dataloader,
+        calib_dataloader=object(),
         is_nemotron_vl_model=False,
     )
 
-    assert built == [(model, calib_dataloader, session)]
-    assert quantized == [loop]
+    assert len(quantized) == 1
+    return chosen
+
+
+def test_expert_parallel_calibration_runs_through_the_distributed_forward_loop(hf_ptq, monkeypatch):
+    """Only distributed_forward_loop re-plants the all-to-all forwards that quantizer insertion
+    clobbers, so an expert-parallel run must calibrate through it rather than the plain loop."""
+    session = _session(world_size=2)
+    session.ep_mesh = object()  # what load_and_prepare_ep records
+
+    assert _calibration_loop_choice(hf_ptq, monkeypatch, session) == ["distributed"]
+
+
+def test_fsdp2_calibration_keeps_the_plain_forward_loop(hf_ptq, monkeypatch):
+    """Without expert parallelism there is nothing to re-plant: FSDP2 keeps the plain loop and its
+    split-on-OOM retry, as on main."""
+    assert _calibration_loop_choice(hf_ptq, monkeypatch, _session(world_size=2)) == ["plain"]
