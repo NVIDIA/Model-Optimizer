@@ -1030,7 +1030,7 @@ def test_source_checkpoint_is_none_for_a_model_built_from_config(tmp_path, monke
 
 
 def test_process_hf_model_for_export_folds_in_place_and_returns_the_quant_config():
-    """The processing half the speculative-decoding exporters call before keeping only the draft."""
+    """The processing half the no-gather writer runs before writing each rank's shard."""
     from transformers import LlamaConfig, LlamaForCausalLM
 
     from modelopt.torch.export.unified_export_hf import _process_hf_model_for_export

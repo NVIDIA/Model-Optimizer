@@ -1072,11 +1072,10 @@ def _process_hf_model_for_export(
     """Fold a quantized HF model's quantizers into its weights in place; return its quant config.
 
     The processing half of an export, for a caller that serializes the model itself: the no-gather
-    writer, which writes each rank's shard, and the speculative-decoding exporters, which keep only
-    the draft. Afterwards the model's own state dict holds the deployment weights. Nothing is
-    gathered, so it runs on a live FSDP2 or expert-parallel model; there the fused MoE experts stay
-    fused, since each rank folds only its local shard and the writer splits them after
-    consolidation.
+    writer, which writes each rank's shard. Afterwards the model's own state dict holds the
+    deployment weights. Nothing is gathered, so it runs on a live FSDP2 or expert-parallel model;
+    there the fused MoE experts stay fused, since each rank folds only its local shard and the
+    writer splits them after consolidation.
     """
     dtype, _, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
     keep_fused_experts = any(_hf_shard_flags(model))
