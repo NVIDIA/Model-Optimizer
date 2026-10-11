@@ -173,6 +173,33 @@ def test_ambiguous_or_unknown_suffixes_stay_unmapped():
     assert _map_ckpt_keys_to_model(nn.Module(), ckpt_keys, model_keys) == {}
 
 
+def test_a_key_the_model_has_no_place_for_never_displaces_a_match():
+    """DeepSeek-V3's MTP layer and the layers a truncated model lacks have no slot in the model, yet
+    their suffixes name a key uniquely -- one another checkpoint key already names exactly. Mapped,
+    they would overwrite that key's tensor; they must stay unmapped.
+    """
+    model_keys = {"model.norm.weight", "model.layers.0.input_layernorm.weight"}
+    ckpt_keys = model_keys | {
+        "model.layers.61.shared_head.norm.weight",
+        "model.layers.1.input_layernorm.weight",
+    }
+
+    assert _map_ckpt_keys_to_model(nn.Module(), ckpt_keys, model_keys) == {
+        key: key for key in model_keys
+    }
+
+
+def test_two_keys_claiming_one_model_key_map_neither():
+    """Two checkpoint names reaching the same model key by suffix are equally plausible; loading
+    either would let set order pick the tensor, so neither is mapped."""
+    model_keys = {"model.language_model.norm.weight"}
+
+    assert (
+        _map_ckpt_keys_to_model(nn.Module(), {"model.norm.weight", "mtp.norm.weight"}, model_keys)
+        == {}
+    )
+
+
 # -------------------------------------------------------------------------- FSDP2 wrap boundaries
 
 
@@ -276,6 +303,42 @@ def test_load_names_leave_already_real_params_untouched(tmp_path):
     ref = src.state_dict()
     for name in dense:
         assert torch.equal(params[name], ref[name]), name
+
+
+class _DenseAndExpert(nn.Module):
+    """A dense param the EP-dense load fills and an expert one ``from_pretrained`` already placed."""
+
+    def __init__(self):
+        super().__init__()
+        self.dense = nn.Linear(4, 4, bias=False)
+        self.expert = nn.Linear(4, 4, bias=False)
+
+
+def test_load_names_judge_suffixes_against_the_whole_model(tmp_path):
+    """Among the dense names alone ``weight`` names only ``dense.weight``, so a checkpoint key with no
+    slot in the model (a per-expert ``experts.0.weight``) would land on it. Across the whole model
+    ``weight`` also names the expert, so that key stays unmapped and the dense param gets its own.
+    """
+    ckpt = {"dense.weight": torch.randn(4, 4), "experts.0.weight": torch.randn(4, 4)}
+    model = _meta_twin(_DenseAndExpert)
+    model.expert.to_empty(device="cpu")
+
+    _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu", load_names={"dense.weight"})
+
+    assert torch.equal(model.dense.weight, ckpt["dense.weight"])
+
+
+def test_a_truncated_model_keeps_its_own_layers(tmp_path):
+    """A 1-layer model loading a 2-layer checkpoint gets the checkpoint's layer 0. Layer 1's names
+    reach layer 0's keys by suffix alone and must not overwrite them."""
+    src = get_tiny_llama()
+    model = _meta_twin(get_tiny_llama, num_hidden_layers=1)
+
+    _meta_dcp_load(model, _save(tmp_path, src.state_dict()), "cpu")
+
+    ref = src.state_dict()
+    for name, value in model.state_dict().items():
+        assert torch.equal(value, ref[name]), name
 
 
 class _WithBuffers(nn.Module):
