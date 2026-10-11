@@ -228,6 +228,25 @@ def test_an_ep_capable_moe_left_unsharded_is_an_error(hf_ptq, monkeypatch, ep_de
         hf_ptq._decide_expert_parallel(_args(_session(world_size=2)))
 
 
+@pytest.mark.parametrize(
+    ("config", "ep_capable"),
+    [(_deepseek_v3(n_routed_experts=3), True), (LlamaConfig(**_TINY), False)],
+    ids=["moe_no_ep_degree", "dense"],
+)
+def test_dense_sharding_without_expert_parallelism_is_an_error(
+    hf_ptq, monkeypatch, config, ep_capable
+):
+    """Only the EP loader shards a dense part by itself. Without EP the run would load the whole
+    model on every rank and drop the sharding the plan asked for, so it must fail and point at the
+    loader that can shard it."""
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+    _serve(monkeypatch, hf_ptq, config)
+
+    with pytest.raises(RuntimeError, match="--use_fsdp2") as raised:
+        hf_ptq._decide_expert_parallel(_args(_session(world_size=2)))
+    assert ("MODELOPT_EP_DEGREE" in str(raised.value)) == ep_capable
+
+
 def test_a_dense_model_under_torchrun_runs_data_parallel(hf_ptq, monkeypatch):
     """A dense model has no experts to shard, so replicating it per rank is not an error."""
     _serve(monkeypatch, hf_ptq, LlamaConfig(**_TINY))
