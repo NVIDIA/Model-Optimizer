@@ -25,6 +25,7 @@ from modelopt.torch.models import EPSpec, ModelSpec, get_spec, get_specs
 from modelopt.torch.utils.moe import apply_distributed_support
 
 EP_MODEL_TYPES = [s.model_type for s in get_specs() if s.ep_spec is not None]
+EP_REFUSED_MODEL_TYPES = [mt for mt in EP_MODEL_TYPES if get_spec(mt).ep_spec.unsupported]
 
 
 def cfg(**kw):
@@ -52,12 +53,17 @@ def test_every_ep_plan_is_well_formed(model_type):
 
 
 @pytest.mark.parametrize("model_type", EP_MODEL_TYPES)
-def test_a_spec_declares_either_a_plan_a_floor_or_a_prepare(model_type):
+def test_a_spec_declares_a_plan_a_floor_a_prepare_or_a_refusal(model_type):
     """An EP section that says nothing would claim support the model does not have."""
     ep = get_spec(model_type).ep_spec
-    assert ep.base_model_ep_plan or ep.requires_transformers or ep.prepare, (
+    assert ep.base_model_ep_plan or ep.requires_transformers or ep.prepare or ep.unsupported, (
         f"{model_type} has an EP section that declares nothing"
     )
+
+
+def test_models_whose_own_plan_would_misroute_them_are_refused():
+    """GPT-OSS ships a plan of its own, so only its refusal keeps it off the expert-parallel path."""
+    assert "gpt_oss" in EP_REFUSED_MODEL_TYPES
 
 
 def test_the_omni_vlm_reuses_the_text_models_plan():
@@ -118,6 +124,37 @@ def test_a_vlm_plan_lands_on_the_nested_config_only():
 def test_a_missing_nested_config_is_an_error_not_a_silent_skip():
     with pytest.raises(ValueError, match="llm_config"):
         apply_distributed_support("nemotron_h_omni", cfg())
+
+
+@pytest.mark.parametrize("model_type", EP_REFUSED_MODEL_TYPES)
+def test_an_unsupported_model_is_refused_with_its_config_untouched(model_type):
+    config = cfg()
+
+    with pytest.raises(NotImplementedError, match="cannot be quantized expert-parallel yet"):
+        apply_distributed_support(model_type, config)
+    assert vars(config) == {}
+
+
+def test_a_refusal_comes_before_the_rest_of_the_section(monkeypatch):
+    """Nothing is attached or patched for a run that is about to be refused."""
+    prepared = []
+    spec = ModelSpec(
+        model_type="_probe",
+        ep_spec=EPSpec(
+            base_model_ep_plan={"layers.*.experts": "grouped_gemm"},
+            prepare=lambda hf_config, **_: prepared.append(hf_config),
+            unsupported="It is not ready",
+        ),
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.models.get_spec", lambda mt: spec if mt == "_probe" else None
+    )
+    config = cfg()
+
+    with pytest.raises(NotImplementedError, match="It is not ready"):
+        apply_distributed_support("_probe", config)
+    assert not prepared
+    assert vars(config) == {}
 
 
 def test_prepare_runs_and_its_config_is_returned(monkeypatch):

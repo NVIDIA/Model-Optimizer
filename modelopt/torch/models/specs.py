@@ -209,6 +209,13 @@ class EPSpec(SpecSection):
     patching classes or installing on-the-fly weight decompression. Runs after the declarative
     fields above have been applied."""
 
+    unsupported: str | None = None
+    """Why this model cannot be quantized expert-parallel yet, when its config would route it there.
+
+    Stock transformers ships a ``base_model_ep_plan`` for some MoEs the expert-parallel path
+    cannot handle, and the plan alone makes a model expert-parallel capable. Naming the reason
+    here refuses the run before any weight is loaded instead of failing deep in quantization."""
+
 
 @dataclass(kw_only=True)
 class ExportSpec(SpecSection):
