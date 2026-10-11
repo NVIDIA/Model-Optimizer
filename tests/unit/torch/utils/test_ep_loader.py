@@ -29,8 +29,10 @@ from torch import nn
 
 from modelopt.torch.utils.moe import (
     _ckpt_quant_method,
+    _experts_sharded_over,
     _routed_expert_modules,
     _seed_parallel_states,
+    _transformers_mesh_builder,
 )
 
 # ----------------------------------------------------------------------------------- tiny MoE
@@ -231,3 +233,28 @@ def test_a_transformers_quantization_config_object_reports_the_plain_method_name
     config = SimpleNamespace(quantization_config=transformers.FineGrainedFP8Config())
 
     assert _ckpt_quant_method(config) == "fp8"
+
+
+def test_from_pretrained_builds_its_mesh_from_the_ep_mesh_it_is_given():
+    """Newer transformers ignores ``from_pretrained``'s ``device_mesh`` and builds a world-sized one,
+    which shards the experts over every rank when EP is below the world size. During the load it gets
+    the EP mesh instead, and its own builder is back afterwards, even when the load raises."""
+    pytest.importorskip("transformers")
+    mixin = _transformers_mesh_builder()
+    if mixin is None:
+        pytest.skip("this transformers honors from_pretrained's device_mesh")
+    from transformers import PreTrainedModel
+    from transformers.distributed import DistributedConfig
+
+    builder = mixin.initialize_distributed_mesh
+    ep_mesh = SimpleNamespace(device_type="cpu")
+    config = DistributedConfig(enable_expert_parallel=True, tp_plan="auto", tp_size=2)
+    with _experts_sharded_over(ep_mesh):
+        _, device_map, device_mesh = PreTrainedModel.prepare_distribute_model(config)
+
+    assert device_mesh is ep_mesh
+    assert device_map == torch.device("cpu")
+    assert mixin.initialize_distributed_mesh is builder
+    with pytest.raises(RuntimeError), _experts_sharded_over(ep_mesh):
+        raise RuntimeError("the load failed")
+    assert mixin.initialize_distributed_mesh is builder

@@ -24,6 +24,7 @@ it into transformers' ``ExpertsInterface`` (lazily, from ``load_and_prepare_ep``
 import time, so importing this module has no transformers-``ExpertsInterface`` side effect).
 """
 
+import contextlib
 import warnings
 from typing import TYPE_CHECKING, Any
 
@@ -587,6 +588,41 @@ def _ckpt_quant_method(cfg):
     return None
 
 
+def _transformers_mesh_builder():
+    """The module whose ``initialize_distributed_mesh`` ``from_pretrained`` calls, or ``None``.
+
+    Newer transformers drops ``from_pretrained``'s ``device_mesh`` once ``distributed_config`` is
+    given: it builds its own world-sized ``tp`` mesh from the config's sizes. That shards the experts
+    over every rank instead of this rank's EP group whenever the EP degree is below the world size.
+    Older releases honor ``device_mesh`` and have no such builder.
+    """
+    try:
+        import transformers.distributed.mixin as mixin
+    except ImportError:
+        return None
+    return mixin if hasattr(mixin, "initialize_distributed_mesh") else None
+
+
+@contextlib.contextmanager
+def _experts_sharded_over(ep_mesh):
+    """Make ``from_pretrained`` shard the experts over ``ep_mesh`` on releases that build their own mesh."""
+    mixin = _transformers_mesh_builder()
+    if mixin is None:
+        yield
+        return
+
+    def _ep_mesh(distributed_config):
+        index = torch.cuda.current_device() if ep_mesh.device_type == "cuda" else None
+        return torch.device(ep_mesh.device_type, index), ep_mesh
+
+    original = mixin.initialize_distributed_mesh
+    mixin.initialize_distributed_mesh = _ep_mesh
+    try:
+        yield
+    finally:
+        mixin.initialize_distributed_mesh = original
+
+
 def load_and_prepare_ep(
     ckpt_path: str,
     mo_session: "ModelOptSession",
@@ -687,14 +723,19 @@ def load_and_prepare_ep(
     import dataclasses as _dc
 
     _dc_has_tp_plan = any(f.name == "tp_plan" for f in _dc.fields(DistributedConfig))
+    if _transformers_mesh_builder() is not None:
+        # This release sizes its own mesh from tp_size; _experts_sharded_over swaps in the EP mesh.
+        distributed_config = DistributedConfig(
+            enable_expert_parallel=True, tp_plan="auto", tp_size=ep_degree
+        )
+    elif _dc_has_tp_plan:
+        distributed_config = DistributedConfig(enable_expert_parallel=True, tp_plan="auto")
+    else:
+        distributed_config = DistributedConfig(enable_expert_parallel=True)
     from_pretrained_kwargs: dict[str, Any] = {
         "dtype": dtype,
         "device_mesh": ep_submesh,
-        "distributed_config": (
-            DistributedConfig(enable_expert_parallel=True, tp_plan="auto")
-            if _dc_has_tp_plan
-            else DistributedConfig(enable_expert_parallel=True)
-        ),
+        "distributed_config": distributed_config,
         "trust_remote_code": trust_remote_code,
     }
     if not _dc_has_tp_plan:
@@ -806,7 +847,8 @@ def load_and_prepare_ep(
             f"require_lm_head={require_lm_head}, archs={_archs})",
             flush=True,
         )
-    model = loader.from_pretrained(ckpt_path, **from_pretrained_kwargs)
+    with _experts_sharded_over(ep_submesh):
+        model = loader.from_pretrained(ckpt_path, **from_pretrained_kwargs)
     model.eval()
     # Force the experts forward to dispatch to `torch_a2a`: from_pretrained's `experts_implementation`
     # kwarg resolves non-fp8 impls back to "grouped_mm", but @use_experts_implementation reads
