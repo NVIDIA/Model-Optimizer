@@ -380,14 +380,24 @@ def _decide_expert_parallel(args: argparse.Namespace):
 
     if plan.is_expert_parallel:
         return plan, hf_config
-    if is_expert_parallel_capable(hf_config) and not plan.is_fsdp_dense and not args.use_fsdp2:
-        # Neither sharding applies, so every rank would hold the whole MoE. That runs, and wastes the
-        # cluster, so say so rather than let it look like it worked.
+    # Past this point load_model replicates the model on every rank, so any sharding the plan asked
+    # for would be dropped. That runs, and wastes the cluster, so say so rather than let it look like
+    # it worked.
+    ep_capable = is_expert_parallel_capable(hf_config)
+    if plan.is_fsdp_dense:
+        # Only the expert-parallel loader shards a dense part by itself.
         raise RuntimeError(
-            f"{hf_config.model_type} can be expert-parallel, but the plan resolved to ep_size=1 with "
-            f"no dense sharding at world_size={mo_session.world_size} -- every rank would hold the "
-            "whole MoE. Set MODELOPT_EP_DEGREE>1, or MODELOPT_FSDP_SIZE=world / --use_fsdp2 to shard "
-            "it with FSDP2 instead."
+            f"The plan shards the dense part over {plan.fsdp_size} ranks but leaves ep_size=1, and "
+            "without expert parallelism nothing shards it -- every rank would hold the whole model. "
+            "Pass --use_fsdp2 to shard it with FSDP2"
+            + (", or set MODELOPT_EP_DEGREE>1" if ep_capable else "")
+            + ", or set MODELOPT_FSDP_SIZE=1 if the model does fit one GPU."
+        )
+    if ep_capable:
+        raise RuntimeError(
+            f"{hf_config.model_type} can be expert-parallel, but the plan resolved to ep_size=1 at "
+            f"world_size={mo_session.world_size} -- every rank would hold the whole MoE. Set "
+            "MODELOPT_EP_DEGREE>1, or pass --use_fsdp2 to shard it with FSDP2 instead."
         )
     return None, None
 
