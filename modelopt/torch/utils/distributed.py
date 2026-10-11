@@ -326,43 +326,61 @@ def _map_ckpt_keys_to_model(model: "torch.nn.Module", ckpt_keys, model_keys) -> 
     WITHOUT hard-coding it: the leaf path is preserved, so the ckpt key's component suffix uniquely locates
     the model key. Ambiguous (>1 candidate) or absent suffixes are left unmapped -> caught by the caller's
     coverage guard rather than mis-assigned.
+
+    ``model_keys`` must be the WHOLE model's keys, even when only some of them will be loaded: a suffix is
+    unique only if no other model key shares it, and the caller drops the mappings it does not load. Each
+    model key takes at most one checkpoint key -- a later pass never maps onto a key an earlier pass
+    claimed, and two checkpoint keys claiming one key in the same pass are both left unmapped. Otherwise a
+    key the model has no place for (an MTP layer's ``model.layers.61.shared_head.norm.weight``, a layer a
+    truncated model lacks) lands on ``model.norm.weight`` by suffix alone and overwrites it, with set order
+    picking the winner.
     """
+    from collections import defaultdict
+
     key_map: dict = {}
     remaining = set(ckpt_keys)
+
+    def claim(hits: dict) -> None:
+        claimed = set(key_map.values())
+        for mk, cks in hits.items():
+            if len(cks) == 1 and mk not in claimed:
+                key_map[cks[0]] = mk
+            remaining.difference_update(cks)
+
     # Pass 1: exact
-    for ck in list(remaining):
-        if ck in model_keys:
-            key_map[ck] = ck
-            remaining.discard(ck)
+    claim({ck: [ck] for ck in remaining if ck in model_keys})
     # Pass 2: model-declared regex conversion mapping (rare; e.g. leaf renames)
     conv = getattr(model, "_checkpoint_conversion_mapping", None) or {}
     if conv and remaining:
         compiled = [(re.compile(p), r) for p, r in conv.items()]
-        for ck in list(remaining):
+        hits: dict = defaultdict(list)
+        for ck in remaining:
             mk = ck
             for rx, repl in compiled:
                 mk, n = rx.subn(repl, mk)
                 if n:
                     break
             if mk in model_keys:
-                key_map[ck] = mk
-                remaining.discard(ck)
-    # Pass 3: longest unique component-suffix match
+                hits[mk].append(ck)
+        claim(hits)
+    # Pass 3: longest unique component-suffix match. Candidates only grow as the suffix shortens, so the
+    # longest suffix with any candidate decides.
     if remaining:
-        from collections import defaultdict
-
         suffix_idx: dict = defaultdict(list)
         for mk in model_keys:
             comps = mk.split(".")
             for k in range(1, len(comps) + 1):
                 suffix_idx[tuple(comps[-k:])].append(mk)
+        hits = defaultdict(list)
         for ck in remaining:
             comps = ck.split(".")
             for k in range(len(comps), 0, -1):
                 cands = suffix_idx.get(tuple(comps[-k:]))
-                if cands and len(cands) == 1:
-                    key_map[ck] = cands[0]
+                if cands:
+                    if len(cands) == 1:
+                        hits[cands[0]].append(ck)
                     break
+        claim(hits)
     return key_map
 
 
@@ -436,7 +454,14 @@ def _meta_dcp_load(
         model.state_dict()
     )  # (sharded ``DTensor`` or plain) params + replicated persistent buffers
     target_names = set(full_sd) if load_names is None else (set(load_names) & set(full_sd))
-    key_map = _map_ckpt_keys_to_model(model, ckpt_keys, target_names)  # {ckpt_key: model_key}
+    # {ckpt_key: model_key}, mapped against the WHOLE model and then cut to what this load fills: a suffix
+    # unique among the targets alone can still belong to a key outside them (an expert's, when only the
+    # dense part loads here).
+    key_map = {
+        ck: mk
+        for ck, mk in _map_ckpt_keys_to_model(model, ckpt_keys, set(full_sd)).items()
+        if mk in target_names
+    }
     # Build load_sd in the model's state_dict ORDER (identical on every rank) -- NOT key_map/set iteration
     # order, which is hash-randomized per process. dcp.load's collective load planner deadlocks if ranks
     # present the same keys in different orders, so a deterministic, rank-consistent order is required.
