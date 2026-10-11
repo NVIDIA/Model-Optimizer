@@ -172,15 +172,11 @@ def _build_fused_experts_class(kmod):
     _get_situ = kmod._get_situ_activation_params
 
     class KimiK3Experts(nn.Module):
-        def __init__(self, config):
+        def __init__(self, config, hidden_dim):
             super().__init__()
             self.num_experts = config.num_experts
-            # experts run in the LATENT space when use_latent_moe (routed_expert_hidden_size), else hidden.
-            self.hidden_dim = (
-                config.routed_expert_hidden_size
-                if getattr(config, "use_latent_moe", False)
-                else config.hidden_size
-            )
+            # The width the MoE block runs its experts at: the latent one under latent MoE, else hidden.
+            self.hidden_dim = hidden_dim
             self.intermediate_dim = config.moe_intermediate_size
             self.gate_up_proj = nn.Parameter(
                 torch.empty(self.num_experts, 2 * self.intermediate_dim, self.hidden_dim)
@@ -251,9 +247,12 @@ def _patch_kimi_moe_block(kmod) -> None:
 
     def _init(self, config):
         _orig_init(self, config)
-        # Replace the ModuleList of per-expert MLPs with the fused grouped-param module (EP-capable).
+        # Replace the ModuleList of per-expert MLPs with the fused grouped-param module (EP-capable), as
+        # wide as the space the block runs its experts in. The block decides latent MoE itself (Kimi-K3's
+        # config has no use_latent_moe field) and the forward below follows it, so read it off the block.
         del self.experts
-        self.experts = FusedExperts(config)
+        width = config.routed_expert_hidden_size if self.use_latent_moe else config.hidden_size
+        self.experts = FusedExperts(config, width)
 
     def _forward(self, hidden_states):
         identity = hidden_states

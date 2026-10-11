@@ -99,7 +99,6 @@ def _config(**overrides):
         "hidden_act": "silu",
         "situ_beta": 1.5,
         "situ_linear_beta": 0.25,
-        "use_latent_moe": True,
         "latent_moe_use_norm": True,
         "num_shared_experts": 1,
         "_experts_implementation": "eager",
@@ -165,15 +164,16 @@ def _remote_module(name="kimi_k3_remote_stub"):
         def __init__(self, config):
             super().__init__()
             self.config = config
-            self.use_latent_moe = config.use_latent_moe
+            # Kimi-K3's config has no use_latent_moe field: the block derives it, as vLLM does.
+            self.use_latent_moe = config.routed_expert_hidden_size is not None
             self.latent_moe_use_norm = config.latent_moe_use_norm
             hidden = config.hidden_size
-            width = config.routed_expert_hidden_size if config.use_latent_moe else hidden
+            width = config.routed_expert_hidden_size if self.use_latent_moe else hidden
             self.experts = nn.ModuleList(
                 KimiBlockSparseMLP(config, width) for _ in range(config.num_experts)
             )
             self.gate = KimiMoEGate(config)
-            if config.use_latent_moe:
+            if self.use_latent_moe:
                 self.routed_expert_down_proj = nn.Linear(hidden, width, bias=False)
                 self.routed_expert_up_proj = nn.Linear(width, hidden, bias=False)
                 if config.latent_moe_use_norm:
@@ -285,7 +285,9 @@ def test_fused_experts_match_a_per_expert_reference(hidden_act):
     gate read from rows [0:I] and up from rows [I:2I] of ``gate_up_proj``. A ``situ`` model hands
     the full [gate; up] row to the remote ``SituAndMul``. Experts live in the latent width."""
     config = _config(hidden_act=hidden_act)
-    experts = kimi_k3._build_fused_experts_class(_remote_module())(config)
+    experts = kimi_k3._build_fused_experts_class(_remote_module())(
+        config, config.routed_expert_hidden_size
+    )
     n, inter, latent = 4, config.moe_intermediate_size, config.routed_expert_hidden_size
     assert experts.gate_up_proj.shape == (n, 2 * inter, latent)
     assert experts.down_proj.shape == (n, latent, inter)
@@ -325,7 +327,9 @@ def test_fused_experts_dispatch_through_the_experts_interface(monkeypatch):
 
     monkeypatch.setitem(ALL_EXPERTS_FUNCTIONS, "modelopt_test_probe", probe)
     config = _config(hidden_act="situ")
-    experts = kimi_k3._build_fused_experts_class(_remote_module())(config)
+    experts = kimi_k3._build_fused_experts_class(_remote_module())(
+        config, config.routed_expert_hidden_size
+    )
     _randomize(experts)
     gen = torch.Generator().manual_seed(1)
     tokens = torch.randn(len(ROUTES), config.routed_expert_hidden_size, generator=gen)
@@ -345,7 +349,6 @@ def test_fused_experts_dispatch_through_the_experts_interface(monkeypatch):
     [
         {},
         {
-            "use_latent_moe": False,
             "latent_moe_use_norm": False,
             "routed_expert_hidden_size": None,
             "num_shared_experts": None,
