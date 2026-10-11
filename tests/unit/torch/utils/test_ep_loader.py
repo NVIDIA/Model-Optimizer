@@ -13,27 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""What the expert-parallel loader reads off the loaded model and the source checkpoint.
+"""What the expert-parallel loader reads off the loaded model and its config.
 
 ``_routed_expert_modules`` finds the routed-expert containers the EP plan shards,
 ``_seed_parallel_states`` gives every module the parallel state its amax syncs over, and
-``_ckpt_quant_method`` / ``_source_experts_fused_on_disk`` read the checkpoint's native
-quantization and the layout its experts are stored in. Everything runs in one CPU process.
+``_ckpt_quant_method`` reads the checkpoint's native quantization. Everything runs in one CPU
+process.
 """
 
-import json
 from types import SimpleNamespace
 
 import pytest
 import torch
-from safetensors.torch import save_file
 from torch import nn
 
 from modelopt.torch.utils.moe import (
     _ckpt_quant_method,
     _routed_expert_modules,
     _seed_parallel_states,
-    _source_experts_fused_on_disk,
 )
 
 # ----------------------------------------------------------------------------------- tiny MoE
@@ -234,105 +231,3 @@ def test_a_transformers_quantization_config_object_reports_the_plain_method_name
     config = SimpleNamespace(quantization_config=transformers.FineGrainedFP8Config())
 
     assert _ckpt_quant_method(config) == "fp8"
-
-
-# ---------------------------------------------------------------- _source_experts_fused_on_disk
-
-# gpt-oss: per-layer MXFP4 blocks/scales spanning every expert, plus fused biases.
-_FUSED_MXFP4 = [
-    "model.layers.0.mlp.router.weight",
-    "model.layers.0.mlp.experts.gate_up_proj_blocks",
-    "model.layers.0.mlp.experts.gate_up_proj_scales",
-    "model.layers.0.mlp.experts.gate_up_proj_bias",
-    "model.layers.0.mlp.experts.down_proj_blocks",
-]
-# Llama-4: one bf16 gate_up_proj / down_proj per layer, beside a per-layer shared expert.
-_FUSED_BF16 = [
-    "language_model.model.layers.0.feed_forward.experts.gate_up_proj",
-    "language_model.model.layers.0.feed_forward.experts.down_proj",
-    "language_model.model.layers.0.feed_forward.shared_expert.gate_proj.weight",
-]
-# Qwen3-MoE / DeepSeek / Kimi: one tensor per expert projection.
-_PER_EXPERT = [
-    "model.layers.0.mlp.gate.weight",
-    "model.layers.0.mlp.experts.0.gate_proj.weight",
-    "model.layers.0.mlp.experts.0.up_proj.weight",
-    "model.layers.0.mlp.experts.0.down_proj.weight",
-    "model.layers.0.mlp.experts.1.gate_proj.weight",
-]
-# Mixtral: per-expert w1 / w2 / w3.
-_PER_EXPERT_W123 = [
-    "model.layers.0.block_sparse_moe.experts.0.w1.weight",
-    "model.layers.0.block_sparse_moe.experts.0.w2.weight",
-    "model.layers.0.block_sparse_moe.experts.0.w3.weight",
-]
-# Fused projections that belong to a shared expert, not to the routed experts.
-_FUSED_SHARED_EXPERTS = [
-    "model.layers.0.mlp.shared_experts.gate_up_proj.weight",
-    "model.layers.0.mlp.shared_experts.down_proj.weight",
-    "model.layers.0.mlp.shared_expert.gate_up_proj",
-]
-
-
-def _index(ckpt_dir, keys):
-    """Write a sharded checkpoint's ``model.safetensors.index.json`` naming ``keys``."""
-    weight_map = dict.fromkeys(keys, "model-00001-of-00002.safetensors")
-    (ckpt_dir / "model.safetensors.index.json").write_text(
-        json.dumps({"metadata": {}, "weight_map": weight_map})
-    )
-    return str(ckpt_dir)
-
-
-@pytest.mark.parametrize(
-    ("keys", "fused"),
-    [
-        (_FUSED_MXFP4, True),
-        (_FUSED_BF16, True),
-        (_PER_EXPERT, False),
-        (_PER_EXPERT_W123, False),
-        ([*_PER_EXPERT, "model.layers.1.mlp.experts.gate_up_proj"], False),
-        (_FUSED_SHARED_EXPERTS, False),
-        (["model.layers.0.mlp.down_proj.weight", "lm_head.weight"], False),
-    ],
-    ids=[
-        "gpt-oss-mxfp4",
-        "llama4-bf16",
-        "qwen3-per-expert",
-        "mixtral-w123",
-        "per-expert-wins",
-        "fused-shared-experts",
-        "dense",
-    ],
-)
-def test_the_expert_layout_is_read_from_the_index(tmp_path, keys, fused):
-    assert _source_experts_fused_on_disk(_index(tmp_path, keys)) is fused
-
-
-@pytest.mark.parametrize(
-    ("keys", "fused"), [(_FUSED_MXFP4, True), (_PER_EXPERT, False)], ids=["fused", "per-expert"]
-)
-def test_without_an_index_the_safetensors_headers_are_read(tmp_path, keys, fused):
-    save_file({key: torch.zeros(1) for key in keys}, str(tmp_path / "model.safetensors"))
-
-    assert _source_experts_fused_on_disk(str(tmp_path)) is fused
-
-
-def test_an_unknown_or_unreadable_checkpoint_counts_as_separated(tmp_path):
-    """``False`` keeps the historical per-expert export, and probing must never fail the load."""
-    (tmp_path / "config.json").write_text("{}")
-    bad_index = tmp_path / "bad_index"
-    bad_index.mkdir()
-    (bad_index / "model.safetensors.index.json").write_text("{not json")
-    truncated = tmp_path / "truncated"
-    truncated.mkdir()
-    (truncated / "model.safetensors").write_bytes(b"\x08\x00")
-
-    for path in (
-        None,
-        tmp_path / "missing",
-        tmp_path / "config.json",
-        tmp_path,
-        bad_index,
-        truncated,
-    ):
-        assert _source_experts_fused_on_disk(path and str(path)) is False, path
