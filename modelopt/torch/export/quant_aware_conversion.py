@@ -728,6 +728,31 @@ def _drop_shadowed_prefix_renames(model, rules: list[RenameRule]) -> list[Rename
     return kept
 
 
+def _quantization_codec_ops() -> tuple[type, ...]:
+    """Transformers' ops that decode or encode a weight's on-disk quantization in place."""
+    try:
+        from transformers.integrations import finegrained_fp8
+    except Exception:  # transformers without the FP8 integration
+        return ()
+    names = ("Fp8Dequantize", "Fp8Quantize", "Fp8DecodeScale", "Fp8EncodeScale")
+    return tuple(op for op in (getattr(finegrained_fp8, n, None) for n in names) if op is not None)
+
+
+def _decodes_in_place(rev, ops) -> bool:
+    """Whether a reversed converter only re-encodes a weight's quantization, under the same name.
+
+    A dequantizing load (FineGrainedFP8 ``dequantize=True``) decodes each weight in place, and
+    its reverse would re-encode the weight in the source's format. The export never wants that:
+    it writes ModelOpt's own quantized weights and scales. Such a converter renames nothing.
+    """
+    codec_ops = _quantization_codec_ops()
+    if not ops or not codec_ops or not all(isinstance(op, codec_ops) for op in ops):
+        return False
+    sources = [p.strip("^$") for p in _as_list(rev.source_patterns)]
+    targets = [p.strip("^$") for p in _as_list(rev.target_patterns)]
+    return bool(sources) and sources[:1] == targets[:1]
+
+
 def _build_reverse_rules(
     model,
 ) -> tuple[list[SplitRule], list[_MergeRule], list[RenameRule], list[str], set[str] | None]:
@@ -750,6 +775,8 @@ def _build_reverse_rules(
       survives in the state dict, so it is un-fused via a :class:`SplitRule`.
     * Dense splitting ``WeightConverter`` (reverse is ``Concatenate`` only): the split
       tensors are re-fused under the transform's original sub-model scope.
+    * A dequantizing load's ``WeightConverter`` (quantization codec ops only, same name): no
+      rule -- the export writes ModelOpt's own quantization, not the source's.
 
     Raises :class:`QuantConversionUnsupportedError` for any op shape not covered, so
     the caller falls back to the legacy (in-memory-name) behavior.
@@ -825,6 +852,8 @@ def _build_reverse_rules(
                         dim=ops[0].dim,
                     )
                 )
+            elif _decodes_in_place(rev, ops):
+                continue
             else:
                 raise QuantConversionUnsupportedError(
                     f"unsupported reverse ops: {[type(o).__name__ for o in ops]}"
