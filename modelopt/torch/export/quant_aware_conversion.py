@@ -729,13 +729,20 @@ def _drop_shadowed_prefix_renames(model, rules: list[RenameRule]) -> list[Rename
 
 
 def _quantization_codec_ops() -> tuple[type, ...]:
-    """Transformers' ops that decode or encode a weight's on-disk quantization in place."""
+    """Transformers' ops that decode or encode a weight's on-disk quantization in place.
+
+    Includes the identity op, which is what older releases (5.5, 5.6) reverse ``Fp8Dequantize``
+    into; later ones reverse it into ``Fp8Quantize``.
+    """
     try:
+        from transformers import core_model_loading
         from transformers.integrations import finegrained_fp8
     except Exception:  # transformers without the FP8 integration
         return ()
     names = ("Fp8Dequantize", "Fp8Quantize", "Fp8DecodeScale", "Fp8EncodeScale")
-    return tuple(op for op in (getattr(finegrained_fp8, n, None) for n in names) if op is not None)
+    ops = [getattr(finegrained_fp8, n, None) for n in names]
+    ops.append(getattr(core_model_loading, "_IdentityOp", None))
+    return tuple(op for op in ops if op is not None)
 
 
 def _decodes_in_place(rev, ops) -> bool:
