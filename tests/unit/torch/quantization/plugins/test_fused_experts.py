@@ -322,6 +322,8 @@ class _SyntheticGroupedExperts(nn.Module):
         self.has_bias = False
         self.is_transposed = False
         self.is_concatenated = True
+        # What transformers' @use_experts_implementation sets (5.18+ reads it in grouped_mm).
+        self._is_expert_parallel = False
         self.gate_up_proj = nn.Parameter(
             torch.randn(NUM_EXPERTS, 2 * INTERMEDIATE_DIM, HIDDEN_DIM) * 0.02
         )
@@ -407,6 +409,8 @@ class _SyntheticUngatedExperts(nn.Module):
         self.has_bias = False
         self.is_transposed = False
         self.is_concatenated = True
+        # What transformers' @use_experts_implementation sets (5.18+ reads it in grouped_mm).
+        self._is_expert_parallel = False
         self.up_proj = nn.Parameter(torch.randn(NUM_EXPERTS, INTERMEDIATE_DIM, HIDDEN_DIM) * 0.02)
         self.down_proj = nn.Parameter(torch.randn(NUM_EXPERTS, HIDDEN_DIM, INTERMEDIATE_DIM) * 0.02)
         self.act_fn = nn.SiLU()
