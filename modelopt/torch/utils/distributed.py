@@ -34,7 +34,7 @@ import torch
 import torch.distributed
 from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, fully_shard
 from torch.distributed.tensor import DTensor
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
@@ -681,8 +681,8 @@ class _StridedIterableShard(IterableDataset):
     own identical stream (deterministic seed) and takes slot ``rank`` from every complete group of
     ``world_size`` consecutive samples. Any trailing incomplete group is dropped so every rank yields
     exactly the same count -- preserving the equal-per-rank-batch invariant that keeps per-step EP
-    collectives from hanging when one rank runs short. Assumes single-worker iteration (these loaders use
-    ``num_workers=0``); with multiple workers the base stream would be duplicated per worker.
+    collectives from hanging when one rank runs short. Each DataLoader worker process iterates its own
+    copy of the stream, so the workers split the groups between them rather than each yielding them all.
     """
 
     def __init__(self, base: IterableDataset, rank: int, world_size: int):
@@ -691,12 +691,15 @@ class _StridedIterableShard(IterableDataset):
         self.world_size = world_size
 
     def __iter__(self):
+        info = get_worker_info()
+        num_workers, worker = (info.num_workers, info.id) if info is not None else (1, 0)
         it = iter(self.base)
-        while True:
+        for index in itertools.count():
             group = list(itertools.islice(it, self.world_size))
             if len(group) < self.world_size:
                 return  # drop incomplete trailing group -> equal counts across ranks
-            yield group[self.rank]
+            if index % num_workers == worker:
+                yield group[self.rank]
 
 
 def shard_dataloader(loader, rank: int, world_size: int):
