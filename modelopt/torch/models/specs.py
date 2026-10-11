@@ -204,10 +204,10 @@ class EPSpec(SpecSection):
     prepare: "Callable[..., Any] | None" = None
     """Escape hatch for a model that cannot be made expert-parallel by data alone.
 
-    Called as ``prepare(hf_config, ckpt_path=..., trust_remote_code=..., keep_compressed=...)``
-    and returns the config to load. Reserved for checkpoints carrying their own modeling code,
-    where the work is patching classes or installing on-the-fly weight decompression. Runs
-    after the declarative fields above have been applied."""
+    Called as ``prepare(hf_config, ckpt_path=..., trust_remote_code=...)`` and returns the
+    config to load. Reserved for checkpoints carrying their own modeling code, where the work is
+    patching classes or installing on-the-fly weight decompression. Runs after the declarative
+    fields above have been applied."""
 
 
 @dataclass(kw_only=True)

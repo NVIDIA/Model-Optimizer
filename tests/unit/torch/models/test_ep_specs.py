@@ -133,12 +133,10 @@ def test_prepare_runs_and_its_config_is_returned(monkeypatch):
 
     config = cfg()
     assert (
-        apply_distributed_support("_probe", config, ckpt_path="/c", keep_compressed=True)
+        apply_distributed_support("_probe", config, ckpt_path="/c", trust_remote_code=True)
         == "replaced"
     )
-    assert seen["config"] is config
-    assert seen["ckpt_path"] == "/c"
-    assert seen["keep_compressed"] is True
+    assert seen == {"config": config, "ckpt_path": "/c", "trust_remote_code": True}
 
 
 def test_prepare_runs_after_the_plan_is_attached(monkeypatch):

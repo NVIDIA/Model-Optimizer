@@ -147,7 +147,6 @@ def apply_distributed_support(
     *,
     ckpt_path: "str | None" = None,
     trust_remote_code: bool = False,
-    keep_compressed: bool = False,
 ):
     """Prepare ``hf_config`` so ``model_type`` can be loaded expert-parallel, from its model spec.
 
@@ -188,12 +187,7 @@ def apply_distributed_support(
             target.base_model_ep_plan = dict(ep.base_model_ep_plan)
 
     if ep.prepare is not None:
-        hf_config = ep.prepare(
-            hf_config,
-            ckpt_path=ckpt_path,
-            trust_remote_code=trust_remote_code,
-            keep_compressed=keep_compressed,
-        )
+        hf_config = ep.prepare(hf_config, ckpt_path=ckpt_path, trust_remote_code=trust_remote_code)
     return hf_config
 
 
