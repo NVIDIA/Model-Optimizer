@@ -873,6 +873,9 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         # `_grouped_linear`, so no quantizer ever saw data -- `assert_fused_experts_intercepted`
         # turns that into an error instead of an export full of fallback scales.
         self._register_temp_attribute("_intercept_count", 0)
+        # How many times this module's forward ran: an experts module that no calibration token
+        # reached (e.g. vision experts under text-only calibration) has nothing to intercept.
+        self._register_temp_attribute("_forward_count", 0)
 
     @property
     def _running_grouped_mm(self) -> bool:
@@ -986,6 +989,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
 
     def forward(self, *args, **kwargs):
         self._down_proj_linear = False
+        self._forward_count += 1
         return super().forward(*args, **kwargs)
 
     def get_expert_weight(self, name, idx, dtype=None):
@@ -1541,14 +1545,15 @@ def register_fused_experts_on_the_fly(model):
             # `_fused_experts_wrapper` matches on parameter SHAPE only, so it also claims a
             # transposed `(num_experts, in_dim, out_dim)` container. The fused-experts export
             # (export/moe_utils.py) then splits gate/up by slicing dim 1 at `intermediate_dim`, the
-            # wrong axis for that layout, and writes silently wrong weights.
-            raise NotImplementedError(
+            # wrong axis for that layout, and writes silently wrong weights. Leave it unquantized.
+            warnings.warn(
                 f"Fused MoE experts '{name}' ({mod_type.__name__}) store their weights transposed "
                 "(num_experts, in_dim, out_dim), which the generic _QuantFusedExperts export path "
                 "does not support: it splits gate/up along dim 1, which is the input dim for this "
-                "layout. Such a class needs its own quantized wrapper, as GptOssExperts and "
-                "Llama4TextExperts have."
+                "layout. Leaving them unquantized; such a class needs its own quantized wrapper, as "
+                "GptOssExperts and Llama4TextExperts have."
             )
+            continue
         if wrapper is not None:
             print(
                 f"\033[1mDetected fused MoE experts '{name}' of type {mod_type.__name__}, "
@@ -1588,12 +1593,22 @@ def normalize_experts_impl_on_the_fly(model):
     # (all-to-all DP=EP) runs its local experts through the same `_grouped_linear`, so _QuantFusedExperts
     # intercepts it too -- don't clobber it back to grouped_mm.
     supported_impls = (None, "eager", "grouped_mm", "torch_a2a")
+    # A class with its own quantized wrapper -- GPT-OSS's quantizes down_proj's input by intercepting
+    # the eager forward's bmm/matmul -- only works on the eager forward, so keep main's forced eager
+    # for such a model.
+    force_eager = any(
+        (wrapper := QuantModuleRegistry.get(type(module))) is not None
+        and not issubclass(wrapper, _QuantFusedExperts)
+        for module in fused_experts
+    )
 
     def _normalize(cfg):
         if cfg is None:
             return
         if hasattr(cfg, "_experts_implementation"):
-            if cfg._experts_implementation not in supported_impls:
+            if force_eager and cfg._experts_implementation != "torch_a2a":
+                cfg._experts_implementation = "eager"
+            elif cfg._experts_implementation not in supported_impls:
                 cfg._experts_implementation = "grouped_mm"
         for sub in nested_cfg_attrs:
             if hasattr(cfg, sub):
@@ -1627,15 +1642,19 @@ def assert_fused_experts_intercepted(model):
     ``config._experts_implementation`` entirely, so no config change can rescue it. Checking
     the hit count is a direct test of the thing actually depended on.
 
-    Only modules with at least one enabled quantizer are reported: an experts module the
-    recipe leaves unquantized loses nothing by not being intercepted.
+    Only modules whose forward ran and that have at least one enabled quantizer are reported:
+    an experts module no calibration token reached (vision experts under text-only calibration)
+    falls back to weight-derived scales as before, and one the recipe leaves unquantized loses
+    nothing by not being intercepted.
     """
     missed = []
     for name, module in model.named_modules():
         if not isinstance(module, _QuantFusedExperts):
             continue
         # A missing attribute (rather than 0) means it was already cleaned up -- say nothing.
-        if getattr(module, "_intercept_count", None) != 0:
+        if getattr(module, "_intercept_count", None) != 0 or not getattr(
+            module, "_forward_count", 0
+        ):
             continue
 
         first = module._first_proj_attr
@@ -1660,11 +1679,10 @@ def assert_fused_experts_intercepted(model):
         "neither `F.linear` nor `_grouped_linear`, so not one of their quantizers was invoked and "
         "every expert would be exported with a weight-derived fallback scale.\n"
         + "\n".join(missed)
-        + "\n\nEither the active experts backend bypasses both hooks -- `batched_mm`, `sonicmoe`, "
-        "or a hand-written `bmm`/`matmul` forward on a class without "
-        "`@use_experts_implementation`, which `normalize_experts_impl_on_the_fly` cannot redirect "
-        "-- or the calibration data never routed a token through these modules. Check the "
-        "module's `forward` and `config._experts_implementation`."
+        + "\n\nTheir forward ran, but the active experts backend bypasses both hooks -- "
+        "`batched_mm`, `sonicmoe`, or a hand-written `bmm`/`matmul` forward on a class without "
+        "`@use_experts_implementation`, which `normalize_experts_impl_on_the_fly` cannot "
+        "redirect. Check the module's `forward` and `config._experts_implementation`."
     )
 
 

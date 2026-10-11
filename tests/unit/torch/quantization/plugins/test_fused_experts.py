@@ -536,9 +536,10 @@ class TestQuantFusedExperts:
         assert QuantModuleRegistry.get(block_type) is None
         self._cleanup_registry(expert_type)
 
-    def test_transposed_fused_experts_are_refused(self):
+    def test_transposed_fused_experts_are_left_unquantized(self):
         """Matched by shape, a transposed container would export with gate/up split along its input
-        dim; registration refuses it rather than let export write wrong weights."""
+        dim; registration leaves it unquantized, with a warning, rather than let export write wrong
+        weights or abort the rest of the model's quantization."""
 
         class _TransposedExperts(_SyntheticFusedExperts):
             is_transposed = True
@@ -546,7 +547,7 @@ class TestQuantFusedExperts:
         model = nn.Module()
         model.experts = _TransposedExperts()
 
-        with pytest.raises(NotImplementedError, match="store their weights transposed"):
+        with pytest.warns(UserWarning, match="store their weights transposed"):
             register_fused_experts_on_the_fly(model)
         assert QuantModuleRegistry.get(_TransposedExperts) is None
 
@@ -2585,3 +2586,83 @@ def test_native_fp8_experts_unpacked_temporary_fold(has_gate, exception, snapsho
     assert all(q.is_enabled for q in quantizers)
     torch.testing.assert_close(experts.state_dict(), state, rtol=0, atol=0)
     torch.testing.assert_close(experts(inputs, indices, routing), expected)
+
+
+# ---------------------------------------------------------------------------
+# A class with its own wrapper keeps eager; the interception check spares unreached experts
+# ---------------------------------------------------------------------------
+def test_gpt_oss_calibrates_down_proj_input_on_the_eager_forward():
+    """GPT-OSS's own wrapper quantizes down_proj's input by intercepting the eager forward's
+    bmm/matmul, which the grouped path never calls: the model keeps main's forced eager."""
+    transformers = pytest.importorskip("transformers")
+    config = transformers.GptOssConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=64,
+        layer_types=["full_attention"],
+    )
+    torch.manual_seed(0)
+    model = transformers.GptOssForCausalLM(config).eval()
+
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randint(0, 64, (2, 8))))
+
+    assert model.config._experts_implementation == "eager"
+    assert model.model.layers[0].mlp.experts.down_proj_input_quantizer.amax is not None
+
+
+_INT8_EXPERTS_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*proj_input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        {"quantizer_name": "*proj_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+    ],
+    "algorithm": "max",
+}
+
+
+class _TextAndVisionMoEModel(nn.Module):
+    """Two MoE blocks, as Ernie-4.5-VL has: text-only calibration never reaches the vision one."""
+
+    def __init__(self):
+        super().__init__()
+        self.text_moe = _SyntheticSparseMoeBlock()
+        self.vision_moe = _SyntheticSparseMoeBlock()
+
+    def forward(self, x):
+        return self.text_moe(x)
+
+
+class _BypassingExperts(_SyntheticFusedExperts):
+    """A hand-written forward that reaches neither ``F.linear`` nor ``_grouped_linear``."""
+
+    def forward(self, hidden_states, top_k_index, top_k_weights):
+        return torch.zeros_like(hidden_states)
+
+
+class TestFusedExpertsInterceptionCheck:
+    def test_experts_no_calibration_token_reached_are_not_an_error(self):
+        model = _TextAndVisionMoEModel()
+        TestFusedExpertsCalibration._cleanup_registry(_SyntheticFusedExperts)
+        try:
+            mtq.quantize(model, _INT8_EXPERTS_CFG, lambda m: m(torch.randn(2, 4, HIDDEN_DIM)))
+        finally:
+            TestFusedExpertsCalibration._cleanup_registry(_SyntheticFusedExperts)
+
+        assert model.text_moe.experts.gate_up_proj_input_quantizer.amax is not None
+        assert model.vision_moe.experts.gate_up_proj_input_quantizer.amax is None
+
+    def test_experts_whose_forward_ran_past_both_hooks_still_fail_loudly(self):
+        model = _TinyMoEModel()
+        model.moe.experts = _BypassingExperts()
+        try:
+            with pytest.raises(RuntimeError, match="collected nothing"):
+                mtq.quantize(model, _INT8_EXPERTS_CFG, lambda m: m(torch.randn(2, 4, HIDDEN_DIM)))
+        finally:
+            TestFusedExpertsCalibration._cleanup_registry(_BypassingExperts)

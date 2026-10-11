@@ -144,9 +144,9 @@ def calibrate(
                 module.validate_attr(attr_name=attr_name, warn_error=True, name=name)
 
     if forward_loop_ran:
-        # A fused-experts module the calibration forward never reached collected nothing.
-        # Surface it here rather than let the export emit weight-derived fallback scales under
-        # a warning that blames the size of the calibration set.
+        # A fused-experts module whose forward ran past both interception hooks collected
+        # nothing. Surface it here rather than let the export emit weight-derived fallback scales
+        # under a warning that blames the size of the calibration set.
         try:
             from .plugins.huggingface import assert_fused_experts_intercepted
         except ImportError:
