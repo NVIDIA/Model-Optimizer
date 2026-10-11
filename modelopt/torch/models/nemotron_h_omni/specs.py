@@ -23,7 +23,7 @@ prefix, so a plan on ``llm_config`` surfaces as ``language_model.<base>.layers.*
 real parameter paths -- while a plan on the top config reaches no expert at all.
 """
 
-from ..nemotron_h.ep import BASE_MODEL_EP_PLAN, prepare
+from ..nemotron_h.specs import BASE_MODEL_EP_PLAN
 from ..specs import EPSpec, ModelSpec, register
 
 __all__: list[str] = []
@@ -37,7 +37,6 @@ register(
         ep_spec=EPSpec(
             base_model_ep_plan=BASE_MODEL_EP_PLAN,
             plan_config_attr="llm_config",
-            prepare=prepare,
         ),
     )
 )
