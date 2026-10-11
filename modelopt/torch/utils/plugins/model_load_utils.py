@@ -1418,6 +1418,167 @@ def _seed_parallel_states(model: nn.Module, expert_names, dense_state, expert_st
         )
 
 
+_FINEGRAINED_FP8_PATCHED = False
+_FP8_DEQUANT_DTYPE = None  # model compute dtype the dequant must emit (set by the call site)
+
+
+def _patch_finegrained_fp8_dequant(target_dtype=None):
+    """Correct transformers' block-FP8 dequant (``Fp8Dequantize._dequantize_one``) for DeepSeek-V3.
+
+    transformers 5.9's ``_dequantize_one`` infers the block geometry by *dividing* the weight shape
+    by the scale-grid shape and requires exact divisibility::
+
+        block_m = rows // scale_rows  # assumes rows == scale_rows * block_m exactly
+
+    But DeepSeek-V3 block-FP8 uses a fixed 128x128 block with a *ceil* scale grid, so a weight whose
+    dimension isn't a multiple of 128 has a partial last block: e.g. ``kv_a_proj_with_mqa`` is
+    (576, 7168) with a (5, 56) grid -> ``576 % 5 != 0`` raises ``ValueError``, and degenerate/empty
+    scale grids from the merged/sharded expert path hit ``rows % 0`` -> ``ZeroDivisionError``.
+
+    Replace it with a divisibility-free tile-and-crop: broadcast each per-block scale over its
+    ``block`` rows/cols (block size from the real ``weight_block_size`` when the grid is inexact,
+    else derived), then crop to the weight shape -- correct for both full and partial last blocks,
+    2-D dense linears and (leading-dim-broadcast) per-expert tensors. Idempotent.
+
+    transformers >= 5.10.1 ONLY: this is skipped. Upstream fixed the two show-stoppers there -- the
+    loader's expert ``tensor_idx`` check became ``any(op is MergeModulelist ...)`` (bug 1) and
+    ``_dequantize_one`` gained an ``output_dtype`` the loader passes as the destination dtype (bug 3) --
+    and it added native FP4-unpack + ue8m0 (E8M0) scale decoding that our simpler override does NOT do
+    (installing it on >= 5.10.1 would BREAK ue8m0 checkpoints like DeepSeek-V4). The only thing still
+    unpatched upstream is the partial-block divisibility (bug 2), which no shipping model on >= 5.10.1
+    hits here (DeepSeek-V4's dims are all 128-multiples); revisit if one does.
+    """
+    global _FINEGRAINED_FP8_PATCHED, _FP8_DEQUANT_DTYPE
+    if target_dtype is not None:
+        _FP8_DEQUANT_DTYPE = target_dtype  # keep current even if already patched
+    if _FINEGRAINED_FP8_PATCHED:
+        return
+    import transformers
+    from packaging.version import parse
+
+    if parse(transformers.__version__) >= parse("5.10.1"):
+        _FINEGRAINED_FP8_PATCHED = True  # upstream handles it (and natively supports ue8m0/fp4)
+        return
+    import torch
+    from transformers.integrations import finegrained_fp8 as _fp8
+
+    def _dequantize_one(self, quantized, scales):
+        # FP4 path (int8 / float4_e2m1fn_x2 nibble-packed) unchanged: unpack to fp32 first.
+        fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
+        if quantized.dtype == torch.int8 or (
+            fp4_dtype is not None and quantized.dtype == fp4_dtype
+        ):
+            q = self._unpack_fp4(quantized)
+        else:
+            q = quantized.to(torch.float32)
+        rows, cols = q.shape[-2:]
+        scale_rows, scale_cols = scales.shape[-2:]
+        # Emit the MODEL compute dtype (bf16), NOT the scale dtype. DeepSeek's weight_scale_inv is F32;
+        # transformers' original out_dtype logic would return F32 weights, which then run against bf16
+        # activations -> "mat1 and mat2 have the same dtype" RuntimeError in the calibration matmuls.
+        out_dtype = _FP8_DEQUANT_DTYPE or torch.bfloat16
+        # Degenerate/empty scale grid (sharded/merged expert artifact): emit unscaled rather than crash.
+        if scale_rows == 0 or scale_cols == 0 or scales.numel() == 0:
+            return q.to(out_dtype)
+        wbs = getattr(
+            getattr(self.hf_quantizer, "quantization_config", None), "weight_block_size", None
+        ) or (128, 128)
+
+        def _blk(dim, sgrid, cfg_blk):
+            # A ceil scale grid at the config block size (DeepSeek's uniform 128x128, incl. partial last
+            # block e.g. 576 -> 5 blocks) is the common case -- trust the config block. Only a grid that
+            # is NOT the ceil-at-config-block (a coarser/per-tensor scale) derives the block by division;
+            # never infer from exact divisibility alone (576 % 5 and 9 % 3 both mislead).
+            if sgrid == -(-dim // cfg_blk):
+                return cfg_blk
+            return dim // sgrid if sgrid and dim % sgrid == 0 else cfg_blk
+
+        block_m = _blk(rows, scale_rows, wbs[0])
+        block_n = _blk(cols, scale_cols, wbs[1])
+        s = (
+            scales.to(torch.float32)
+            .repeat_interleave(block_m, dim=-2)
+            .repeat_interleave(block_n, dim=-1)
+        )
+        s = s[..., :rows, :cols]
+        return (q * s).to(out_dtype)
+
+    _fp8.Fp8Dequantize._dequantize_one = _dequantize_one
+
+    # --- Fix the routed-expert block-FP8 load corruption (transformers 5.9) ---------------------
+    # The FP8 quantizer's update_weight_conversions PREPENDS Fp8Dequantize to each converter's
+    # operations, so for the fused-MoE experts converter operations[0] becomes Fp8Dequantize instead
+    # of the original MergeModulelist. The state-dict loader only assigns a per-expert tensor_idx when
+    # ``isinstance(mapping.operations[0], MergeModulelist)`` (core_model_loading.py) -- with the prepend
+    # that check fails, tensor_idx becomes None, and GroupedGemmParallel.shard_tensor then row-slices
+    # each per-expert (2048,7168) weight to param[rank*local:(rank+1)*local] = (16,7168) and slices the
+    # scales full/empty per rank. Result: gate_up_proj loads as (256,32,7168), a grouped-GEMM contraction
+    # mismatch at calibration. Fix: FUSE the prepended Fp8Dequantize into the expert MergeModulelist (a
+    # MergeModulelist subclass that dequantizes each per-expert (weight,scale) pair, dropping scales, then
+    # stacks) so operations[0] IS a MergeModulelist again -- the loader assigns tensor_idx (whole-expert
+    # selection + EP shard) and Concatenate still runs after scales are dropped. Idempotent (flag-guarded).
+    try:
+        from transformers.core_model_loading import MergeModulelist as _MergeModulelist
+        from transformers.core_model_loading import WeightConverter as _WeightConverter
+        from transformers.quantizers.quantizer_finegrained_fp8 import (
+            FineGrainedFP8HfQuantizer as _FineGrainedFP8HfQuantizer,
+        )
+
+        # Fuse the prepended Fp8Dequantize INTO the expert MergeModulelist: dequantize each per-expert
+        # (weight, scale) pair -- dropping scales -- then stack, exactly as the intended
+        # [Fp8Dequantize, MergeModulelist, Concatenate] chain does, but packaged as a single op that
+        # *is a* MergeModulelist. That keeps operations[0] a MergeModulelist so the loader assigns each
+        # per-expert its tensor_idx (whole-expert selection + EP shard) AND Concatenate still runs after
+        # dequant has dropped the scales (Concatenate cats every remaining source pattern, so it must not
+        # see scale keys). Net execution is identical to upstream's intent; only the op layout changes.
+        class _DequantThenMerge(_MergeModulelist):
+            def __init__(self, deq, dim=0):
+                super().__init__(dim)
+                self._deq = deq
+
+            def convert(self, input_dict, source_patterns=None, target_patterns=None, **kwargs):
+                deq_out = self._deq.convert(
+                    input_dict,
+                    source_patterns=source_patterns,
+                    target_patterns=target_patterns,
+                    **kwargs,
+                )
+                return super().convert(
+                    deq_out,
+                    source_patterns=source_patterns,
+                    target_patterns=target_patterns,
+                    **kwargs,
+                )
+
+        if not getattr(_FineGrainedFP8HfQuantizer, "_modelopt_uwc_patched", False):
+            _orig_uwc = _FineGrainedFP8HfQuantizer.update_weight_conversions
+
+            def _uwc_fixed(self, weight_conversions):
+                convs = _orig_uwc(self, weight_conversions)
+                for conv in convs:
+                    ops = getattr(conv, "operations", None)
+                    # Match the expert converter update_weight_conversions produced:
+                    # [Fp8Dequantize, MergeModulelist, <Concatenate...>]. Fuse ops[0]+ops[1].
+                    if (
+                        isinstance(conv, _WeightConverter)
+                        and ops
+                        and len(ops) >= 2
+                        and isinstance(ops[0], _fp8.Fp8Dequantize)
+                        and isinstance(ops[1], _MergeModulelist)
+                        and not isinstance(ops[1], _DequantThenMerge)
+                    ):
+                        deq, mml = ops[0], ops[1]
+                        ops[:2] = [_DequantThenMerge(deq, dim=mml.dim)]
+                return convs
+
+            _FineGrainedFP8HfQuantizer.update_weight_conversions = _uwc_fixed
+            _FineGrainedFP8HfQuantizer._modelopt_uwc_patched = True
+    except Exception as _e:
+        print(f"[ep] WARNING: could not patch update_weight_conversions: {_e}", flush=True)
+
+    _FINEGRAINED_FP8_PATCHED = True
+
+
 def _fsdp2_shard_dense(model: nn.Module, fsdp_mesh, expert_modules) -> int:
     """FSDP2-shard the model's dense modules, leaving the routed experts to EP.
 
@@ -1791,13 +1952,32 @@ def load_and_prepare_ep(
         from_pretrained_kwargs["tp_plan"] = "auto"
     if attn_implementation is not None:
         from_pretrained_kwargs["attn_implementation"] = attn_implementation
-    if _ckpt_quant_method(hf_config) == "mxfp4":
+    # Native block-FP8 checkpoints (e.g. DeepSeek-V3: quantization_config.quant_method="fp8", e4m3 with
+    # weight_block_size) must be DEQUANTIZED to bf16 on load: ModelOpt PTQ inserts/exports quantizers on
+    # plain bf16 Linears, and the EP grouped_gemm experts expect bf16 fused params -- not fp8 blocks with
+    # weight_scale_inv. Mirror get_model's mxfp4 dequant-on-load, using FineGrainedFP8Config(dequantize=True).
+    # (compressed-tensors pack-quantized experts, e.g. Kimi, are handled separately by the on-the-fly
+    # decompressor plugin; here we only cover the native fp8 case.)
+    _ckpt_qm = _ckpt_quant_method(hf_config)
+    if _ckpt_qm == "fp8":
+        from transformers import FineGrainedFP8Config
+
+        from_pretrained_kwargs["quantization_config"] = FineGrainedFP8Config(dequantize=True)
+        _patch_finegrained_fp8_dequant(
+            dtype
+        )  # correct transformers' block-fp8 dequant; emit model dtype
+        if mo_session.rank == 0:
+            print(
+                "[ep] native block-fp8 checkpoint -> FineGrainedFP8Config(dequantize=True) -> bf16",
+                flush=True,
+            )
+    elif _ckpt_qm == "mxfp4":
         # Native mxfp4 checkpoints (e.g. gpt-oss: fused `gate_up_proj_blocks`/`_scales` + biases) must be
         # DEQUANTIZED to bf16 on load so ModelOpt can insert nvfp4/fp8 quantizers on the fused bf16 experts
         # (the a2a grouped_gemm expects bf16). transformers dequantizes blocks->bf16 during from_pretrained.
         # NB: the single-process loader needed device_map="sequential" to dodge a CUDA illegal-access in the
         # mxfp4 dequant under multi-GPU device_map="auto"; the EP path uses device_mesh (no device_map), so
-        # watch for an EP-shard-awareness issue in the dequant convert-op.
+        # watch for an EP-shard-awareness issue in the dequant convert-op (analogous to the fp8 patch above).
         from transformers import Mxfp4Config
 
         from_pretrained_kwargs["quantization_config"] = Mxfp4Config(dequantize=True)
