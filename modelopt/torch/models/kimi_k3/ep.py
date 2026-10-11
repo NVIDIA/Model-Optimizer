@@ -342,29 +342,29 @@ def _patch_kda_beta_sigmoid(kmod) -> None:
         if orig is None or getattr(orig, "_kimi_k3_beta_wrapped", False):
             continue
 
-        def _squash(arguments):
-            if arguments.get("use_beta_sigmoid_in_kernel"):
-                beta = arguments.get("beta")
-                if isinstance(beta, torch.Tensor):
-                    arguments["beta"] = torch.sigmoid(beta.float()).to(beta.dtype)
-                    arguments["use_beta_sigmoid_in_kernel"] = False
-
         def _make(orig_fn):
-            # Bind to the kernel's signature so beta and the flag are found however they are passed.
+            # Where beta sits when passed by position. The flag only ever arrives by name: fla-core
+            # takes it through **kwargs -- which is exactly why it ignores it -- so it is read off the
+            # call's keywords, never off the kernel's signature.
             try:
-                signature = inspect.signature(orig_fn)
+                params = list(inspect.signature(orig_fn).parameters)
             except (TypeError, ValueError):
-                signature = None
+                params = []
+            beta_pos = params.index("beta") if "beta" in params else None
 
             def _wrapped(*args, **kwargs):
-                try:
-                    bound = signature.bind(*args, **kwargs)  # type: ignore[union-attr]
-                except (AttributeError, TypeError):  # no signature, or a call it rejects
-                    _squash(kwargs)
-                    return orig_fn(*args, **kwargs)
-                bound.apply_defaults()
-                _squash(bound.arguments)
-                return orig_fn(*bound.args, **bound.kwargs)
+                if kwargs.get("use_beta_sigmoid_in_kernel"):
+                    beta = kwargs.get("beta")
+                    if isinstance(beta, torch.Tensor):
+                        kwargs["beta"] = torch.sigmoid(beta.float()).to(beta.dtype)
+                        kwargs["use_beta_sigmoid_in_kernel"] = False
+                    elif beta_pos is not None and beta_pos < len(args):
+                        beta = args[beta_pos]
+                        if isinstance(beta, torch.Tensor):
+                            squashed = torch.sigmoid(beta.float()).to(beta.dtype)
+                            args = (*args[:beta_pos], squashed, *args[beta_pos + 1 :])
+                            kwargs["use_beta_sigmoid_in_kernel"] = False
+                return orig_fn(*args, **kwargs)
 
             setattr(_wrapped, "_kimi_k3_beta_wrapped", True)
             return _wrapped

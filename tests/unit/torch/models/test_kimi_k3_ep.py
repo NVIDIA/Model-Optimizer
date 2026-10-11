@@ -207,12 +207,15 @@ def _remote_module(name="kimi_k3_remote_stub"):
             self.head_dim = head_dim
             self.A_log = nn.Parameter(torch.zeros(num_heads, dtype=torch.bfloat16))  # stale shape
 
-    def chunk_kda(q, k, v, g, beta=None, use_beta_sigmoid_in_kernel=False):
-        remote.calls.append(("chunk_kda", beta, use_beta_sigmoid_in_kernel))
+    # fla-core 0.5's signatures: use_beta_sigmoid_in_kernel is no parameter of either kernel; it lands
+    # in **kwargs, which is why the kernels ignore it.
+    def chunk_kda(q, k, v, g, beta, scale=None, initial_state=None, **kwargs):
+        remote.calls.append(("chunk_kda", beta, kwargs.get("use_beta_sigmoid_in_kernel", False)))
         return "chunk_kda"
 
-    def fused_recurrent_kda(q, k, v, g, beta=None, use_beta_sigmoid_in_kernel=False):
-        remote.calls.append(("fused_recurrent_kda", beta, use_beta_sigmoid_in_kernel))
+    def fused_recurrent_kda(q, k, v, g, beta, A_log=None, dt_bias=None, scale=None, **kwargs):  # noqa: N803
+        flag = kwargs.get("use_beta_sigmoid_in_kernel", False)
+        remote.calls.append(("fused_recurrent_kda", beta, flag))
         return "fused_recurrent_kda"
 
     def create_causal_mask(
@@ -425,12 +428,12 @@ def test_kda_beta_is_squashed_in_torch_only_when_the_kernel_flag_asks_for_it():
 
 
 def test_kda_beta_passed_positionally_is_squashed_too():
-    """The fix must not depend on how the remote code spells the call."""
+    """The fix must not depend on whether the remote code passes beta by position or by name."""
     remote = _remote_module()
     kimi_k3._patch_kda_beta_sigmoid(remote)
     beta = torch.tensor([-8.0, 8.4], dtype=torch.bfloat16)
 
-    remote.chunk_kda(1, 2, 3, 4, beta, True)
+    remote.chunk_kda(1, 2, 3, 4, beta, use_beta_sigmoid_in_kernel=True)
 
     ((_, seen, flag),) = remote.calls
     assert flag is False
