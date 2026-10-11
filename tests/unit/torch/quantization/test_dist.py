@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from functools import partial
+
+import pytest
 import torch
 import torch.distributed as dist
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
@@ -117,3 +120,35 @@ def _never_calibrated_helper(rank, size):
 
 def test_a_quantizer_no_rank_calibrated_stays_uncalibrated(skip_on_windows):
     spawn_multiprocess_job(2, _never_calibrated_helper, backend="gloo")
+
+
+def _expert_input_amax_helper(rank, size, share):
+    from modelopt.torch.quantization.model_calib import max_calibrate
+    from modelopt.torch.utils.distributed import ParallelState
+
+    model = torch.nn.Sequential(torch.nn.Linear(16, 16))
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop=None)
+    expert = model[0]
+    expert._parallel_state = ParallelState(
+        data_parallel_group=-1, expert_model_parallel_group=dist.group.WORLD
+    )
+    if share:
+        expert._share_input_amax_across_ep = True
+
+    def forward_loop(m):  # only rank 0's experts receive tokens
+        if rank == 0:
+            m(torch.ones(2, 16))
+
+    if share:
+        max_calibrate(model, forward_loop)
+        assert expert.input_quantizer.amax.item() == 1.0
+    else:
+        with pytest.raises(RuntimeError, match="MoE calibration incomplete"):
+            max_calibrate(model, forward_loop)
+    dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("share", [False, True], ids=["megatron", "opted-in"])
+def test_only_modules_that_opt_in_share_expert_input_amax_before_the_check(skip_on_windows, share):
+    """Megatron's experts keep main's check-then-sync; HF fused experts share the input amax first."""
+    spawn_multiprocess_job(2, partial(_expert_input_amax_helper, share=share), backend="gloo")
