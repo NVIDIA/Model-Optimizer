@@ -1476,6 +1476,7 @@ class TensorQuantizer(nn.Module):
             # MAX over non-negative amax).
             self._set_buffer("_amax", torch.zeros((), dtype=torch.float32, device=device))
             amax = self._amax
+        assert amax is not None  # calibrated here, or the zero just above
         # NCCL requires every rank to contribute the same DTYPE as well as the same shape, and the two
         # sides of this collective get their amax from different places: a rank that calibrated the
         # quantizer keeps the calibrator's dtype (``_amax_setter_helper`` stores
