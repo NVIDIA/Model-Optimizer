@@ -33,8 +33,8 @@ transformers = pytest.importorskip("transformers")
 
 from packaging.version import Version
 
-if Version(transformers.__version__) < Version("5.6"):
-    pytest.skip("needs the transformers >= 5.6 weight-loading API", allow_module_level=True)
+if Version(transformers.__version__) < Version("5.8"):
+    pytest.skip("the on-the-fly decompression needs transformers >= 5.8", allow_module_level=True)
 
 import transformers.core_model_loading as cml
 import transformers.modeling_utils as mu
