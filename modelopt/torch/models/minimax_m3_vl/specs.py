@@ -15,13 +15,12 @@
 
 """MiniMax-M3 specs (HF model type ``minimax_m3_vl``).
 
-M3's MoE block already follows the sparse-dispatch convention; the only gap is that its experts
-hardcode a per-expert loop instead of dispatching through the ExpertsInterface, so ``ep.py``
-decorates the class and the generic transport takes over unchanged.
+transformers ships everything M3 needs to run expert-parallel: its MoE block calls the experts with
+the router's top-k, its experts dispatch through the experts interface, and its text config carries a
+``base_model_ep_plan``. The generic all-to-all transport takes over unchanged.
 """
 
 from ..specs import EPSpec, ModelSpec, register
-from .ep import BASE_MODEL_EP_PLAN, prepare
 
 __all__: list[str] = []
 
@@ -29,11 +28,6 @@ register(
     ModelSpec(
         model_type="minimax_m3_vl",
         min_transformers_version="5.13",
-        ep_spec=EPSpec(
-            base_model_ep_plan=BASE_MODEL_EP_PLAN,
-            plan_config_attr="text_config",
-            requires_transformers="5.13",
-            prepare=prepare,
-        ),
+        ep_spec=EPSpec(requires_transformers="5.13"),
     )
 )
