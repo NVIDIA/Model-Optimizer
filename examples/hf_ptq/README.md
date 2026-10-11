@@ -638,6 +638,32 @@ See [Recipe-based Quantization](#recipe-based-quantization) for the recipe forma
 
 > *Set `MODELOPT_FSDP2_EXPORT=nogather` to have every rank write its own shards of the checkpoint in parallel instead of gathering the full state dict on one host.*
 
+## Expert-Parallel Post-Training Quantization for MoE Models
+
+Under `torchrun`, `hf_ptq.py` shards an MoE model's routed experts across the ranks (expert parallelism) instead of loading the whole model on every GPU. Each rank holds `num_experts / ep_degree` experts and calibrates on its own shard of the calibration data. An all-to-all sends every token to the rank that owns its expert, so each expert's quantizers see the tokens routed to it from all ranks. The dense (non-expert) part is replicated on every rank, or FSDP2-sharded when it does not fit one GPU. Each rank then writes its share of the unified HF checkpoint, without gathering the model onto one GPU.
+
+A model can be expert-parallel when its config declares a `base_model_ep_plan`. transformers ships one for several MoEs, and ModelOpt supplies the plan or an adapter for others (see the `ep_spec` entries in `modelopt/torch/models/*/specs.py`). Expert parallelism needs transformers 5.6 or newer; a model that needs a newer release says so before loading.
+
+```bash
+torchrun --nproc_per_node=<num_gpus_per_node> \
+    hf_ptq.py \
+    --pyt_ckpt_path <path_to_moe_model> \
+    --recipe general/ptq/nvfp4_default-kv_fp8 \
+    --calib_size <num_calib_samples> \
+    --export_path <export_path>
+```
+
+To run across nodes, add the `--nnodes`, `--node_rank`, `--master_addr` and `--master_port` flags shown in [Manual (run on each node)](#manual-run-on-each-node). `--calib_size` is the total over all ranks.
+
+Two environment variables override the automatic distribution plan:
+
+| Variable | Default | Effect |
+| :--- | :--- | :--- |
+| `MODELOPT_EP_DEGREE` | `auto` | Expert-parallel degree. `auto` picks the largest degree that divides both the routed-expert count and the world size. Below the world size, each group of `MODELOPT_EP_DEGREE` ranks holds a full set of experts, and the groups calibrate on different data. |
+| `MODELOPT_FSDP_SIZE` | `auto` | Whether to FSDP2-shard the dense part. `auto` shards it when it would take more than 60% of one GPU's memory; `world` always shards it; `1` replicates it. |
+
+A run that cannot shard the model the way the plan asks fails before loading, rather than loading the whole model on every rank. `--use_fsdp2` skips expert parallelism and uses the [FSDP2 path](#multi-node-post-training-quantization-with-fsdp2) instead. That is also the way to quantize GPT-OSS and Llama-4 across GPUs: their experts are stored transposed, which the expert-parallel export cannot write yet, so expert parallelism refuses them.
+
 ## Evaluate Accuracy
 
 ### TensorRT-LLM Validation
