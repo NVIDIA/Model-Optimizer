@@ -33,10 +33,8 @@ algorithm:
     layerwise:
       enable: true
   # GPTQ only reaches 2-D linears; imatrix encodes the fused MoE experts it leaves, and skips the
-  # weights GPTQ already encoded.
+  # weights GPTQ already encoded. It collects its statistics in a single forward pass.
   - method: imatrix
-    layerwise:
-      enable: true
 quant_cfg:
   - $import: base_disable_all
   - quantizer_name: '*mlp*weight_quantizer'

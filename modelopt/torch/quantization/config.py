@@ -1261,6 +1261,8 @@ class ImatrixCalibConfig(QuantizeAlgorithmConfig):
     on dense linears and on each expert of HF fused-MoE experts, which GPTQ does not reach. A
     weight that already holds final codes, such as GPTQ's, is left alone, so
     ``[{method: gptq}, {method: imatrix}]`` runs GPTQ where it applies and imatrix on the rest.
+    By default the statistics come from a single forward pass, as llama.cpp collects them; with
+    ``layerwise`` enabled, each layer's are collected after the earlier layers are quantized.
     """
 
     method: Literal["imatrix"] = ModeloptField("imatrix")
