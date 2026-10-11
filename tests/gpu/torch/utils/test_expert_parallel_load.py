@@ -32,7 +32,7 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM, Qwen3MoeConfig
 
 from modelopt.torch.utils.distributed import ModelOptSession
-from modelopt.torch.utils.moe import apply_distributed_support, load_and_prepare_ep
+from modelopt.torch.utils.moe import load_and_prepare_ep
 
 NUM_EXPERTS = 8
 
@@ -69,7 +69,7 @@ def _sharded_model_matches_the_whole_one(rank, size, ckpt_dir):
         device=device,
         is_main=rank == 0,
     )
-    config = apply_distributed_support("qwen3_moe", AutoConfig.from_pretrained(ckpt_dir))
+    config = AutoConfig.from_pretrained(ckpt_dir)  # carries qwen3_moe's own base_model_ep_plan
     model = load_and_prepare_ep(ckpt_dir, session, size, hf_config=config).eval()
     whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16).to(device).eval()
 
