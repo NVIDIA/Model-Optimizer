@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Pieces of a no-gather distributed HF checkpoint writer.
+"""No-gather distributed HF checkpoint writer for FSDP2.
 
 Every tensor is sent to exactly one owner rank over batched point-to-point sends and
 written from there, so no rank ever materializes the whole model and no unit is
-replicated across ranks.
+replicated across ranks. Selected by ``MODELOPT_FSDP2_EXPORT=nogather``.
 """
 
 import json
@@ -46,6 +46,39 @@ from .unified_export_hf_streaming import _parse_shard_size
 
 # A checkpoint's files: its weights, sharded as save_pretrained names them or in one file, and index.
 _CHECKPOINT_FILES = re.compile(r"model(-\d{5}-of-\d{5})?\.safetensors(\.index\.json)?")
+
+from .moe_utils import _FUSED_PROJ, _fused_experts_prefixes, _split_local_fused_module
+
+
+def distributed_save_hf_checkpoint(
+    model: nn.Module,
+    export_dir: "str | Path",
+    maxbound: float,
+    kv_cache_format: "str | None",
+    max_shard_size: "str | int" = "10GB",
+    is_modelopt_qlora: bool = False,
+    extra_state_dict: "dict[str, torch.Tensor] | None" = None,
+) -> None:
+    """No-gather distributed HF export.
+
+    Thin wrapper: hf_ptq exports under ``torch.inference_mode()``, so run the entire write with inference mode DISABLED
+    via a nested ``inference_mode(False)`` context -- the ``.detach()`` in ``get_model_state_dict`` and the version-
+    counted ops in the write path both reject inference tensors. The context form reliably restores normal mode for this
+    scope (a decorator did not, under the caller's already-active inference_mode). ``no_grad`` too:
+    ``inference_mode(False)`` re-ENABLES autograd, so a bare ``clone()``/``detach()`` on an inference tensor would try
+    to set up grad and read its (missing) version counter -- ``no_grad`` avoids that while the clones still land as
+    normal tensors because inference mode is off.
+    """
+    with torch.inference_mode(False), torch.no_grad():
+        _distributed_save_hf_checkpoint_impl(
+            model,
+            export_dir,
+            maxbound,
+            kv_cache_format,
+            max_shard_size,
+            is_modelopt_qlora,
+            extra_state_dict,
+        )
 
 
 def _even_bins(keys: list, sizes: dict, n: int, max_bytes: int) -> list:
@@ -633,3 +666,211 @@ def _write_even_shards(
                 f"wrote to {export_dir}: {left[:5]}"
             )
         raise
+
+
+def _distributed_save_hf_checkpoint_impl(
+    model: nn.Module,
+    export_dir: "str | Path",
+    maxbound: float,
+    kv_cache_format: "str | None",
+    max_shard_size: "str | int" = "10GB",
+    is_modelopt_qlora: bool = False,
+    extra_state_dict: "dict[str, torch.Tensor] | None" = None,
+) -> None:
+    """Distributed HF safetensors export -- no rank-0 full-model host-RAM gather.
+
+    Writes an already-processed, FSDP2-sharded model to ``export_dir`` as HF safetensors, entirely
+    distributed. No rank ever holds the whole model:
+
+      1. Fused expert weights (when present): each rank splits its LOCAL shard into per-expert keys
+         with global indices and keeps them in place -- no communication. Experts are therefore
+         already disjoint across ranks. dp-replica ranks under DP x EP skip this.
+      2. Dense / non-expert weights: each fqn is assigned to exactly ONE owner rank and moved there
+         (:func:`_materialize_owned`), so every tensor becomes whole on its owner while the set stays
+         spread across ranks. Replicated and plain values need no transport; dim-0 shards travel
+         point-to-point, bucketed per peer.
+      3. The reverse weight conversion runs per-rank on those whole tensors -- it cannot run while
+         they are sharded, because transformers' conversion ops are written against whole tensors
+         and have no way to express a placement.
+      4. Every rank bin-packs its own owned set into even shards, numbered into a global range, and
+         writes them directly with ``safetensors.save_file``. Rank 0 unions the weight index.
+
+    Peak memory per rank is its owned set, not the model. Placements the point-to-point transport
+    does not cover are rejected rather than routed through an untested slower path.
+    """
+    import torch.distributed as dist
+    from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
+    from torch.distributed.tensor import DTensor
+
+    from .model_utils import TiedWeightMap
+    from .quant_utils import postprocess_state_dict
+
+    # Name-based tied-weight dedup, matching the gather path. ``fully_shard`` splits a shared
+    # nn.Parameter into distinct per-module shards, so a declared tie surfaces here as two
+    # independent DTensors and both sides would be written. The map is derived from names and is
+    # identical on every rank, so the alias is dropped consistently; postprocess_state_dict skips a
+    # group whose canonical is missing from this rank's slice rather than orphaning the alias.
+    tied_map = TiedWeightMap(model)
+
+    export_dir = Path(export_dir)
+    rank, world = dist.get_rank(), dist.get_world_size()
+    device = torch.device(f"cuda:{torch.cuda.current_device()}")
+
+    # This writer targets a FULLY FSDP2-sharded model -- no expert parallelism. FSDP2
+    # shards the fused 3-D expert weight on dim 0 (the expert axis), so fused experts are just
+    # DTensors sharded across the fsdp mesh: each per-expert key's TRUE global index comes from the
+    # DTensor's own dim-0 offset (``_split_local_fused_module`` reads it), so there is no EP block base
+    # (ep_rank=0) and no dp-replica dedup (dp_idx=0 -> every rank writes its own experts). The EP-hybrid
+    # (a2a experts) path -- which resolves ep_rank/dp_idx from the parallel-group provider -- is out of
+    # scope here.
+    ep_rank, dp_idx = 0, 0
+    # Total config expert count, to tell a per-EP-group expert tensor (size < total) from one that
+    # spans all experts (classic DP x EP) when computing the per-expert global index offset.
+    _cfg = getattr(model, "config", None)
+
+    def _experts_of(c):
+        if c is None:
+            return 0
+        return int(
+            getattr(c, "num_experts", 0)
+            or getattr(c, "num_local_experts", 0)
+            or getattr(c, "n_routed_experts", 0)  # nemotron_h
+            or 0
+        )
+
+    # VLMs nest the text-model fields under ``config.text_config`` (the quantized backbone is
+    # ``model.language_model``), so fall back to it when the top-level config has no expert count.
+    total_experts = _experts_of(_cfg) or _experts_of(getattr(_cfg, "text_config", None))
+    # DP x EP: experts are dp-REPLICATED across the EDP group (each holds a full EP-sharded copy). Only
+    # the first replica (dp_idx == 0) writes them; replica ranks (dp_idx > 0) skip the per-expert split.
+    # dp_idx is the EDP-group rank resolved above -- 0 when experts are not EDP-replicated (dense /
+    # FSDP2 / EP-without-DP), so every such rank writes.
+    write_experts = dp_idx == 0
+    sharded_sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
+
+    # Re-materialize every value as a NORMAL tensor UP FRONT. hf_ptq exports under torch.inference_mode(),
+    # so these are inference tensors; the inference flag is STICKY -- clone/reshape/detach/slice all
+    # propagate it -- and the expert split, scale reduce and write below all do version-counted ops
+    # that reject inference tensors. The only way to drop the flag is to copy the data into a freshly
+    # ALLOCATED tensor (here, under the wrapper's inference_mode(False)). For a DTensor, copy the LOCAL
+    # shard and rewrap so mesh/placements survive. Bounded to this rank's shard.
+    def _to_normal(v):
+        if isinstance(v, DTensor):
+            _loc = v.to_local()
+            _new = torch.empty_like(_loc)
+            _new.copy_(_loc)
+            # Pass the ORIGINAL global shape/stride: from_local() otherwise re-infers them as
+            # local x world, which is only right for an EVEN shard. This helper runs over every
+            # DTensor in the state dict just before classification, so with an uneven shard
+            # (b_proj: 96 rows over 64 ranks) or a zero-size one (mlp_res_proj) each rank derives a
+            # DIFFERENT global shape for the same tensor -- and then classifies it differently,
+            # which breaks the export with no hint of where the shape went wrong.
+            return DTensor.from_local(
+                _new,
+                v.device_mesh,
+                v.placements,
+                run_check=False,
+                shape=v.shape,
+                stride=v.stride(),
+            )
+        if v.is_inference():
+            _new = torch.empty_like(v)
+            _new.copy_(v)
+            return _new
+        return v
+
+    # Re-materialize IN PLACE, not as `{k: _to_normal(v) for ...}`. The comprehension keeps the ENTIRE
+    # original dict alive while building a full second copy -> a transient 2x of the whole state dict.
+    # That is fine at 30B (24GB -> 48GB) but OOMs at large MoE: at 235B the write-point state dict is
+    # ~157GB/rank (fused expert weights are sharded, but the per-expert NVFP4 scale tensors are
+    # replicated on every rank), and doubling it hits ~314GB > GPU. Overwriting each key frees the old
+    # value immediately, so peak stays ~1x. (Import of ep-dp's in-place/streaming write handling.)
+    for _k in list(sharded_sd.keys()):
+        sharded_sd[_k] = _to_normal(sharded_sd[_k])
+    prefixes = _fused_experts_prefixes(sharded_sd)
+    prefix_set = set(prefixes)
+
+    def _is_expert_key(key: str) -> bool:
+        for proj in _FUSED_PROJ:
+            for suffix in ("", "_weight_scale", "_weight_scale_2", "_input_scale"):
+                if key.endswith(f".experts.{proj}{suffix}"):
+                    if key[: key.rfind(".experts.") + len(".experts")] in prefix_set:
+                        return True
+        return False
+
+    # Probe the DTensor placement of a sample expert + dense weight: directly shows what state the
+    # generation forwards left the sharded params in -- FSDP2 (Shard(0)/Replicate/gathered) or EP
+    # (expert dim-0 Shard, or a plain local shard for the a2a transport).
+
+    # Sync the shared per-module activation (input) scales across ranks (global max), so every
+    # expert of a module gets the same input_scale regardless of which rank owns it.
+    in_keys = sorted(k for k in sharded_sd if k.endswith("_input_scale") and _is_expert_key(k))
+    if in_keys:
+        stacked = torch.stack(
+            [
+                sharded_sd[k].detach().to(device=device, dtype=torch.float32).reshape(())
+                for k in in_keys
+            ]
+        )
+        dist.all_reduce(stacked, op=dist.ReduceOp.MAX)
+        for j, k in enumerate(in_keys):
+            sharded_sd[k] = stacked[j].clone()
+    # (1) Experts: split this rank's local shard into per-expert keys (global idx); stays local.
+    # Skipped on dp-replica ranks under DP x EP (their experts are written by dp group 0).
+    local_sd: dict = {}
+    if write_experts:
+        for pi, prefix in enumerate(prefixes):
+            local_sd.update(
+                _split_local_fused_module(
+                    prefix, sharded_sd, ep_rank=ep_rank, total_experts=total_experts
+                )
+            )
+        local_sd = postprocess_state_dict(
+            local_sd, maxbound, kv_cache_format, is_modelopt_qlora, tied_map=tied_map
+        )
+        # In place (see above): avoid a transient 2x copy of the per-expert split.
+        for _k in list(local_sd.keys()):
+            local_sd[_k] = local_sd[_k].detach().contiguous()
+    # At this point local_sd holds ONLY this rank's (already split, per-expert) experts -- capture the
+    # set so _materialize_owned can tell disjoint experts from replicated dense.
+    expert_key_set = set(local_sd)
+
+    # (2) Dense / non-expert: leave sharded for now -- FSDP2 leaves DTensors (dim-0 shard); EP leaves
+    # plain replicated tensors. Do NOT gather to rank 0; _materialize_owned below moves each tensor to
+    # a single OWNER rank instead, so the set stays spread across ranks. postprocess runs on every rank
+    # (dict-level key renaming + small scalar scale math -- safe on DTensors).
+    nonexpert_keys = [k for k in sharded_sd if not _is_expert_key(k)]
+    dense_sd = {k: sharded_sd[k] for k in nonexpert_keys}
+    dense_sd = postprocess_state_dict(
+        dense_sd, maxbound, kv_cache_format, is_modelopt_qlora, tied_map=tied_map
+    )
+    local_sd.update(dense_sd)
+    # No explicit gc.collect() here: the del drops the last references and CPython frees acyclic
+    # objects immediately. Collecting a ~900-entry DTensor state dict measured 0.89s of the 0.89s
+    # this phase used to cost -- and because it ran at different speeds per rank, the next
+    # collective absorbed the skew and looked like gather cost.
+    del sharded_sd, dense_sd
+    # (3) Whole-tensor redistribution -> reverse conversion -> write. Each tensor ends up WHOLE on
+    # exactly one rank (never gathered to a single rank), which is what lets the reverse run: the
+    # transformers conversion ops are written against whole tensors and cannot express a placement.
+    # The reverse must precede the shard layout, since it renames keys and splits tensors.
+    _materialize_owned(local_sd, expert_key_set, rank, world)
+    _revert_whole_sd(model, local_sd)
+    # Tensors the model does not own -- whatever the caller hands in via extra_state_dict, e.g.
+    # weights read straight off the source checkpoint that the FSDP2 loader drops. They are plain
+    # CPU tensors, already whole and identical on every rank, so ONE rank adds them to its
+    # write set; the index union and
+    # the cross-rank duplicate check below then treat them like any other owned key. Rank 0 takes
+    # them wholesale: they are small next to the model, and spreading them would cost a collective
+    # to agree on the split. They go in AFTER the reverse conversion because they carry their
+    # original hub names and were never converted -- reverting them would rename them wrongly. This
+    # mirrors the gather path, which merges extra_state_dict into the already-reverted dict.
+    if extra_state_dict and rank == 0:
+        collisions = sorted(set(extra_state_dict) & set(local_sd))
+        if collisions:
+            raise RuntimeError(
+                f"extra_state_dict overlaps the exported model weights on {len(collisions)} key(s), "
+                f"so the checkpoint would be ambiguous; first few: {collisions[:5]}"
+            )
+        local_sd.update(extra_state_dict)
+    _write_even_shards(local_sd, export_dir, max_shard_size, rank, world)
