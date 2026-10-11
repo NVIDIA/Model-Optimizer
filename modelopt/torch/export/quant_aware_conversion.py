@@ -98,6 +98,18 @@ _QUANT_STATE_SUFFIXES = (
 )
 _LEAF_SUFFIXES = (".weight", *_QUANT_STATE_SUFFIXES, ".bias")
 
+# Checkpoint tensors a load-time rewrite folds into a weight -- compressed-tensors' stored
+# parameters, FP8's activation scale -- and so lists as sources next to it. They name the same
+# module as that weight; here they only matter for reading the module's leaf off a pattern.
+_LOAD_SIBLING_SUFFIXES = (
+    ".weight_packed",
+    ".weight_global_scale",
+    ".weight_shape",
+    ".weight_zero_point",
+    ".weight_g_idx",
+    ".activation_scale",
+)
+
 # Leaves that are per-tensor scalars (0-d) and must be *duplicated*, not split, when
 # a fused module is un-fused.
 _SCALAR_LEAF_SUFFIXES = (".weight_scale_2", ".input_scale")
@@ -855,7 +867,7 @@ def _expert_leaf_renames(rev) -> list[RenameRule]:
     fused leaf as per-expert parts, mapped back to the hub leaves positionally.
     """
     src_leaf = _leaf(_as_list(rev.source_patterns)[0])
-    hub_leaves = [_leaf(t) for t in _as_list(rev.target_patterns)]
+    hub_leaves = _distinct_leaves(_as_list(rev.target_patterns))
     part_leaves = _FUSED_EXPERT_PART_NAMES.get(src_leaf, [src_leaf])
     if len(part_leaves) != len(hub_leaves):
         raise QuantConversionUnsupportedError(
@@ -874,7 +886,7 @@ def _expert_leaf_renames(rev) -> list[RenameRule]:
 def _dense_split_rule(rev, ops) -> SplitRule:
     """Un-fuse a dense (non-expert) fused linear that survives in the state dict."""
     fused = _leaf_suffix(_as_list(rev.source_patterns)[0])
-    parts = tuple(_leaf_suffix(t) for t in _as_list(rev.target_patterns))
+    parts = tuple("." + leaf for leaf in _distinct_leaves(_as_list(rev.target_patterns)))
     dim = next((op.dim for op in ops if hasattr(op, "dim")), 0)
     return SplitRule(fused_suffix=fused, part_suffixes=parts, dim=dim)
 
@@ -883,10 +895,21 @@ def _as_list(x) -> list:
     return list(x) if isinstance(x, (list, tuple)) else [x]
 
 
+def _distinct_leaves(patterns: list[str]) -> list[str]:
+    """The module leaves ``patterns`` name, each once, in order.
+
+    A converter that loading rewrote lists every checkpoint tensor it consumes per module: a
+    dequantizing quantizer adds each weight's ``weight_scale_inv``, an on-the-fly decompressor the
+    stored ``weight_packed`` / ``weight_scale`` / ``weight_global_scale``. Those all name the same
+    module, so repeated leaves collapse to it.
+    """
+    return list(dict.fromkeys(_leaf(p) for p in patterns))
+
+
 def _leaf(pattern: str) -> str:
     """Bare leaf name from a conversion pattern, e.g. ``.experts.*.w1.weight`` -> ``w1``."""
-    p = pattern
-    for suffix in _LEAF_SUFFIXES:
+    p = pattern.removesuffix("$")
+    for suffix in (*_LEAF_SUFFIXES, *_LOAD_SIBLING_SUFFIXES):
         if p.endswith(suffix):
             p = p[: -len(suffix)]
             break
