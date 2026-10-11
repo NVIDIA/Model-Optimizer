@@ -1,0 +1,197 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The expert-parallel sizing of transformers' load-time caching-allocator warmup.
+
+``from_pretrained`` reserves the bytes ``get_total_byte_count`` reports for each device in one
+allocation. Under the EP load it would count every expert at full size (the experts are most of a
+large MoE), so ``_ep_aware_caching_allocator_warmup`` swaps in a sizing that counts one EP shard of
+each expert. The sizing is called directly here, and once through ``caching_allocator_warmup`` with
+the CUDA queries and the allocation faked.
+"""
+
+import pytest
+import torch
+from torch import nn
+
+pytest.importorskip("transformers")
+
+from transformers import modeling_utils
+
+from modelopt.torch.utils.moe import _ep_aware_caching_allocator_warmup
+
+if not hasattr(modeling_utils, "get_total_byte_count"):
+    pytest.skip("transformers has no get_total_byte_count to size", allow_module_level=True)
+
+_GPU = torch.device("cuda", 0)
+
+# The plan load_and_prepare_ep shards with after the a2a swap: base-relative keys (no ``model.``).
+_A2A_PLAN = {
+    "layers.*.mlp.gate": "torch_a2a_router",
+    "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+    "layers.*.mlp.experts.down_proj": "grouped_gemm",
+    "layers.*.mlp.experts": "torch_a2a_experts",
+}
+
+# _TinyMoe's fp32 bytes: the fused experts; the dense params (embedding, attention weight + bias,
+# router); the router's persistent ``e_score_correction_bias`` buffer. The tied head adds none.
+_EXPERT_BYTES = 4 * (4 * 16 * 8 + 4 * 8 * 8)
+_DENSE_BYTES = 4 * (16 * 8 + 8 * 8 + 8 + 4 * 8)
+_BUFFER_BYTES = 4 * 4
+
+
+class _TinyMoe(nn.Module):
+    """One MoE decoder layer, a head tied to the embedding, and a persistent router buffer."""
+
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.embed_tokens = nn.Embedding(16, 8)
+        layer = nn.Module()
+        layer.self_attn = nn.Linear(8, 8)
+        layer.mlp = nn.Module()
+        layer.mlp.gate = nn.Linear(8, 4, bias=False)
+        layer.mlp.gate.register_buffer("e_score_correction_bias", torch.zeros(4))
+        layer.mlp.experts = nn.Module()
+        layer.mlp.experts.gate_up_proj = nn.Parameter(torch.zeros(4, 16, 8))
+        layer.mlp.experts.down_proj = nn.Parameter(torch.zeros(4, 8, 8))
+        self.model.layers = nn.ModuleList([layer])
+        self.lm_head = nn.Linear(8, 16, bias=False)
+        self.lm_head.weight = self.model.embed_tokens.weight
+        self.all_tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
+
+    def get_parameter_or_buffer(self, name):
+        """``PreTrainedModel``'s lookup, which the sizing goes through."""
+        try:
+            return self.get_parameter(name)
+        except AttributeError:
+            return self.get_buffer(name)
+
+    def device_map(self):
+        """Every param and persistent buffer on one GPU, as ``from_pretrained`` expands it."""
+        names = [name for name, _ in self.named_parameters(remove_duplicate=False)]
+        names += [name for name, _ in self.named_buffers()]
+        return dict.fromkeys(names, _GPU)
+
+
+def test_experts_count_one_ep_shard_and_the_rest_counts_in_full():
+    """The router is replicated on every rank, so it counts in full like the other dense params."""
+    model = _TinyMoe()
+
+    with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN):
+        total = modeling_utils.get_total_byte_count(model, model.device_map(), None)
+
+    assert dict(total) == {_GPU: _EXPERT_BYTES // 4 + _DENSE_BYTES + _BUFFER_BYTES}
+
+
+def test_dense_weights_left_on_meta_are_not_counted_but_buffers_are():
+    """With the sharded dense strategy every dense ``.weight`` / ``.bias`` stays on meta during
+    ``from_pretrained``; persistent buffers still load onto the device."""
+    model = _TinyMoe()
+
+    with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN, dense_on_meta=True):
+        total = modeling_utils.get_total_byte_count(model, model.device_map(), None)
+
+    assert dict(total) == {_GPU: _EXPERT_BYTES // 4 + _BUFFER_BYTES}
+
+
+def test_the_quantizer_sizes_the_elements():
+    class _OneBytePerElement:
+        def param_element_size(self, model, name, param):
+            return 1
+
+    model = _TinyMoe()
+
+    with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN):
+        total = modeling_utils.get_total_byte_count(model, model.device_map(), _OneBytePerElement())
+
+    # One byte per element where fp32 takes four.
+    assert dict(total) == {_GPU: (_EXPERT_BYTES // 4 + _DENSE_BYTES + _BUFFER_BYTES) // 4}
+
+
+def test_transformers_reserves_only_the_per_rank_footprint(monkeypatch):
+    """End to end: the one up-front allocation ``caching_allocator_warmup`` makes shrinks from the
+    whole model (stock sizing, which also checks the byte counts above) to what this EP rank
+    holds."""
+    reserved = []
+
+    def fake_empty(numel, *, dtype, device, **kwargs):
+        reserved.append((numel * torch.tensor([], dtype=dtype).element_size(), device))
+
+    model = _TinyMoe()
+    with monkeypatch.context() as m:
+        m.setattr(torch.cuda, "mem_get_info", lambda index: (80 * 1024**3, 80 * 1024**3))
+        m.setattr(torch.cuda, "memory_reserved", lambda index: 0)
+        m.setattr(torch.cuda, "memory_allocated", lambda index: 0)
+        m.setattr(torch, "empty", fake_empty)
+        modeling_utils.caching_allocator_warmup(model, model.device_map(), None)
+        with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN):
+            modeling_utils.caching_allocator_warmup(model, model.device_map(), None)
+
+    assert reserved == [
+        (_EXPERT_BYTES + _DENSE_BYTES + _BUFFER_BYTES, _GPU),
+        (_EXPERT_BYTES // 4 + _DENSE_BYTES + _BUFFER_BYTES, _GPU),
+    ]
+
+
+def test_an_error_while_sizing_falls_back_to_the_stock_sizing(monkeypatch):
+    """The warmup only sizes an allocator reservation, so whatever the EP-aware sizing cannot
+    handle gets transformers' own number instead of failing the load."""
+    stock_calls = []
+
+    def stock_sizing(model, accelerator_device_map, hf_quantizer=None):
+        stock_calls.append((model, accelerator_device_map, hf_quantizer))
+        return {_GPU: 123}
+
+    class _UnsupportedQuantizer:
+        def param_element_size(self, model, name, param):
+            raise TypeError("unsupported param")
+
+    monkeypatch.setattr(modeling_utils, "get_total_byte_count", stock_sizing)
+    model, quantizer = _TinyMoe(), _UnsupportedQuantizer()
+    device_map = model.device_map()
+
+    with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN):
+        assert modeling_utils.get_total_byte_count(model, device_map, quantizer) == {_GPU: 123}
+
+    assert stock_calls == [(model, device_map, quantizer)]
+
+
+def test_the_stock_sizing_is_restored_on_exit_even_after_an_error():
+    stock = modeling_utils.get_total_byte_count
+
+    with (
+        pytest.raises(RuntimeError, match="load failed"),
+        _ep_aware_caching_allocator_warmup(4, _A2A_PLAN),
+    ):
+        assert modeling_utils.get_total_byte_count is not stock
+        raise RuntimeError("load failed")
+
+    assert modeling_utils.get_total_byte_count is stock
+
+
+@pytest.mark.parametrize("ep_degree", [1, 0])
+def test_without_expert_parallelism_the_stock_sizing_stays(ep_degree):
+    stock = modeling_utils.get_total_byte_count
+
+    with _ep_aware_caching_allocator_warmup(ep_degree, _A2A_PLAN):
+        assert modeling_utils.get_total_byte_count is stock
+
+
+def test_a_transformers_without_the_sizing_hook_is_left_alone(monkeypatch):
+    monkeypatch.delattr(modeling_utils, "get_total_byte_count")
+
+    with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN):
+        assert not hasattr(modeling_utils, "get_total_byte_count")
