@@ -36,8 +36,8 @@ transformers = pytest.importorskip("transformers")
 
 from packaging.version import Version
 
-if Version(transformers.__version__) < Version("5.6"):
-    pytest.skip("Kimi-K3 expert parallelism needs transformers >= 5.6", allow_module_level=True)
+if Version(transformers.__version__) < Version("5.8"):
+    pytest.skip("Kimi-K3 expert parallelism needs transformers >= 5.8", allow_module_level=True)
 
 import transformers.conversion_mapping as cm
 import transformers.core_model_loading as cml
