@@ -39,6 +39,11 @@ import torch.distributed as dist
 # ---------------------------------------------------------------------------------------------------
 
 
+# all_to_all_single addresses its flattened buffers with int32 element offsets, so a hop larger than
+# this overflows them; _a2a_moe_torch chunks such transfers along the hidden dim.
+_A2A_MAX_HOP_ELEMENTS = 2**31 - 1
+
+
 def _a2a_moe_torch(
     group,
     hidden_states,
@@ -100,7 +105,7 @@ def _a2a_moe_torch(
         the LAST (hidden) dim into column slices so every hop stays < 2**31 elements; the per-rank ROW split
         sizes are identical for every slice, and cat-ing the slices is autograd-safe.
         """
-        int32_max = 2**31 - 1
+        int32_max = _A2A_MAX_HOP_ELEMENTS
         if input_.dim() >= 2:
             # n_chunks (the number of collective HOPS we issue) MUST be identical on every rank, but the
             # recv size Q*H is per-rank data-dependent (routing imbalance -> different Q). Deciding n_chunks
