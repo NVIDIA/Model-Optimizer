@@ -21,6 +21,7 @@ import dataclasses
 import pytest
 import torch
 import torch.nn.functional as F
+from _test_utils.torch.transformers_models import get_tiny_llama
 from torch import nn
 
 import modelopt.torch.quantization as mtq
@@ -224,3 +225,28 @@ def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):
             (experts.down_proj, experts.down_proj_weight_quantizers),
         ):
             assert torch.equal(weight[idx].detach(), _decoded(quantizers[idx], weight[idx].shape))
+
+
+@pytest.mark.parametrize("layerwise", [False, True])
+def test_layerwise_imatrix_sees_the_earlier_layers_quantization(monkeypatch, layerwise):
+    calls = _record_importance(monkeypatch)
+
+    def run(layerwise):
+        model = get_tiny_llama(
+            dtype=torch.float32, hidden_size=256, intermediate_size=256, num_attention_heads=4
+        )
+        input_ids = torch.randint(0, 32, (4, 16), generator=torch.Generator().manual_seed(0))
+        algorithm = {"method": "imatrix", "layerwise": {"enable": layerwise}}
+        start = len(calls)
+        mtq.quantize(model, _config(algorithm, "*mlp*weight_quantizer"), lambda m: m(input_ids))
+        weighted = [c for c in calls[start:] if c is not None]
+        assert len(weighted) == 6  # gate, up and down of both layers
+        return weighted
+
+    single_pass, other = run(False), run(layerwise)
+    # Layer 0's MLP inputs come only from unquantized weights either way.
+    for a, b in zip(single_pass[:3], other[:3]):
+        torch.testing.assert_close(a, b)
+    # Layer 1's do not when layerwise: they pass through layer 0's quantized MLP first.
+    changed = any(not torch.allclose(a, b) for a, b in zip(single_pass[3:], other[3:]))
+    assert changed == layerwise
