@@ -107,7 +107,7 @@ def _per_channel_unevenly_calibrated(rank, size):
         q.sync_amax_across_distributed_group(_whole_world())
 
 
-def test_uneven_per_channel_calibration_fails_on_every_rank(dist_workers):
+def test_uneven_per_channel_calibration_fails_on_every_rank(need_2_gpus, dist_workers):
     """A one-sided raise would leave the other rank blocked in the collective forever.
 
     The rank that HAS the amax cannot know the have-nots exist without asking, so the agreement is a
