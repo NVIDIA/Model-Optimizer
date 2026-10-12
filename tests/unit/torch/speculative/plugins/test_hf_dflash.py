@@ -43,9 +43,14 @@ from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashBaseModelOutput,
     DFlashModule,
     HFDFlashModel,
+    _block_targets,
     _dpace_position_weights,
     build_target_layer_ids,
 )
+from modelopt.torch.speculative.plugins.hf_dflash2 import HFDFlash2Model
+from modelopt.torch.speculative.plugins.hf_domino import HFDominoModel
+from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel
+from modelopt.torch.speculative.plugins.hf_lilicorr import HFLiLiCorrModel
 from modelopt.torch.speculative.plugins.master_weight_adamw import (
     MasterWeightAdamW,
     VerifyMasterWeightsCallback,
@@ -1474,6 +1479,42 @@ class TestAnchorSamplingStaticShape:
         )
         torch.testing.assert_close(padded_loss, base_loss)
         assert padded_acc == pytest.approx(base_acc)
+
+
+# Anchors 1 and 4 of an 8-token sequence whose loss_mask is 0 only at position 3:
+# (label positions, supervision mask) per block position.
+_LABELS_AT_ANCHOR = ([[1, 2, 3, 4], [4, 5, 6, 7]], [[0, 1, 0, 1], [0, 1, 1, 1]])
+_LABELS_AFTER_ANCHOR = ([[2, 3, 4, 5], [5, 6, 7, 7]], [[1, 0, 1, 1], [1, 1, 1, 0]])
+
+
+@pytest.mark.parametrize(
+    ("model_cls", "expected"),
+    [
+        (HFDFlashModel, _LABELS_AT_ANCHOR),
+        (HFDFlash2Model, _LABELS_AT_ANCHOR),
+        (HFLiLiCorrModel, _LABELS_AT_ANCHOR),
+        (HFDSparkModel, _LABELS_AFTER_ANCHOR),
+        (HFDominoModel, _LABELS_AFTER_ANCHOR),
+    ],
+    ids=["dflash", "dflash2", "lilicorr", "dspark", "domino"],
+)
+def test_block_targets_follow_the_label_shift(model_cls, expected):
+    """Each block position's label and supervision; a wrong shift trains silently worse."""
+    positions, mask = expected
+    input_ids = 100 + torch.arange(8).unsqueeze(0)  # token id = 100 + its position
+    loss_mask = torch.ones(1, 8)
+    loss_mask[0, 3] = 0.0
+    targets = _block_targets(
+        input_ids,
+        torch.tensor([[1, 4]]),
+        torch.tensor([[True, True]]),
+        loss_mask,
+        4,
+        model_cls._label_shift,
+    )
+    assert torch.equal(targets.positions, torch.tensor([positions]))
+    assert torch.equal(targets.token_ids, 100 + torch.tensor([positions]))
+    assert torch.equal(targets.mask, torch.tensor([mask], dtype=torch.float32))
 
 
 class TestTeacherLogits:

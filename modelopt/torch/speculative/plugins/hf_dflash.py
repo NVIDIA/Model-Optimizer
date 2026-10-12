@@ -133,6 +133,78 @@ def _gather_rows(x, positions):
     return torch.gather(x, 1, idx).reshape(*positions.shape, x.size(-1))
 
 
+def _block_positions(anchor_positions, block_size, offset, seq_len):
+    """Index ``anchor + offset + k`` of each block position ``k``, clamped onto the sequence.
+
+    Returns ``(positions [B, N, bs], inside)``; ``inside`` is False past the sequence end.
+    """
+    k = torch.arange(block_size, device=anchor_positions.device).view(1, 1, -1)
+    unclamped = anchor_positions.unsqueeze(-1) + k + offset
+    return unclamped.clamp(min=0, max=seq_len - 1), unclamped < seq_len
+
+
+def _block_gather(x, positions):
+    """``x[b, positions[b, n, k]]`` for ``x`` [B, seq] and ``positions`` [B, N, bs]."""
+    return torch.gather(x.unsqueeze(1).expand(-1, positions.shape[1], -1), 2, positions)
+
+
+def _block_tokens(input_ids, anchor_positions, block_size, offset):
+    """The token at ``anchor + offset + k`` for each block position ``k``: [B, N, bs]."""
+    positions, _ = _block_positions(anchor_positions, block_size, offset, input_ids.shape[1])
+    return _block_gather(input_ids, positions)
+
+
+class _BlockTargets(NamedTuple):
+    """What each block position is trained on: the token at ``anchor + k + label_shift``."""
+
+    token_ids: torch.Tensor  # [B, N, bs]
+    positions: torch.Tensor  # [B, N, bs] their sequence indices, clamped onto the sequence
+    mask: torch.Tensor  # [B, N, bs] 1.0 where the position is supervised
+
+
+def _block_targets(input_ids, anchor_positions, block_keep_mask, loss_mask, block_size, shift):
+    """Labels of every block position and where they are supervised.
+
+    A position is supervised when its block is kept and its label lies inside the sequence
+    and the loss mask, and is not the anchor itself, which the draft is given as input.
+    """
+    positions, inside = _block_positions(anchor_positions, block_size, shift, input_ids.shape[1])
+    k = torch.arange(block_size, device=input_ids.device).view(1, 1, -1)
+    mask = block_keep_mask.unsqueeze(-1).expand(-1, -1, block_size).float()
+    mask = mask * inside.float()
+    mask = mask * (k + shift > 0).float()
+    mask = mask * _block_gather(loss_mask, positions)
+    return _BlockTargets(_block_gather(input_ids, positions), positions, mask)
+
+
+def _block_position_weights(mask, scheme, first, decay_factor, dpace_alpha, target_ce=None):
+    """``mask`` weighted per block position, by D-PACE or by exponential decay.
+
+    ``first`` is the first predicted block position. ``target_ce`` returns the draft's
+    cross-entropy on its labels ([B, N, bs]); only D-PACE calls it.
+    """
+    block_size = mask.shape[-1]
+    if scheme == "dpace" and block_size > 1:
+        with torch.no_grad():
+            # Draft confidence q_i = exp(-CE) on the label; detached, as in the paper (Eq. 9).
+            confidences = torch.exp(-target_ce()[..., first:].float())
+            dpace = torch.ones_like(mask)
+            dpace[..., first:] = _dpace_position_weights(
+                confidences, dpace_alpha, valid_mask=mask[..., first:]
+            )
+        return mask * dpace
+    if decay_factor > 0:
+        k = torch.arange(block_size, device=mask.device).view(1, 1, -1)
+        return mask * torch.exp(-(k - first).clamp(min=0).float() / decay_factor)
+    return mask
+
+
+def _masked_top1(logits, target_ids, mask):
+    """Top-1 accuracy of ``logits`` against ``target_ids`` where ``mask`` is set (0-dim)."""
+    correct = (logits.argmax(dim=-1) == target_ids) & (mask > 0.5)
+    return correct.sum().float() / (mask.sum() + 1e-6)
+
+
 def _draft_mask_mod(seq_len, anchor_positions, block_keep_mask, block_size, window, causal):
     """The draft's attention visibility rule, as a FlexAttention ``mask_mod``.
 
@@ -240,6 +312,10 @@ class _DFlashLossTerms(NamedTuple):
 @DFlashDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
 class HFDFlashModel(DFlashModel):
     """DFlash Model for HuggingFace transformers."""
+
+    # Block position k is trained on the token at anchor + k + _label_shift: DFlash predicts
+    # the anchor's own position onward, so slot 0 (the given anchor) is never supervised.
+    _label_shift = 0
 
     @property
     def _base_model(self):
@@ -824,35 +900,14 @@ class HFDFlashModel(DFlashModel):
         Returns:
             (loss, accuracy) tuple.
         """
-        bsz, seq_len = input_ids.shape
         block_size = self.dflash_block_size
-        n_blocks = anchor_positions.shape[1]
-        device = input_ids.device
-
-        label_offsets = torch.arange(0, block_size, device=device).view(1, 1, -1)
-        label_indices = anchor_positions.unsqueeze(-1) + label_offsets
-        valid_label = label_indices < seq_len
-        safe_label_indices = label_indices.clamp(max=seq_len - 1)
-
-        target_ids = torch.gather(
-            input_ids.unsqueeze(1).expand(-1, n_blocks, -1), 2, safe_label_indices
+        targets = _block_targets(
+            input_ids, anchor_positions, block_keep_mask, loss_mask, block_size, self._label_shift
         )
-
-        # Weight mask: valid block * in bounds * exclude anchor (pos 0) * loss_mask
-        weight_mask = block_keep_mask.unsqueeze(-1).expand(-1, -1, block_size).float()
-        weight_mask = weight_mask * valid_label.float()
-        pos_in_block = torch.arange(block_size, device=device).view(1, 1, -1)
-        weight_mask = weight_mask * (pos_in_block > 0).float()
-
-        orig_loss_mask = torch.gather(
-            loss_mask.unsqueeze(1).expand(-1, n_blocks, -1), 2, safe_label_indices
-        )
-        weight_mask = weight_mask * orig_loss_mask
-
-        binary_eval_mask = weight_mask.view(-1)
+        binary_eval_mask = targets.mask.view(-1)
 
         flat_logits = logits.view(-1, logits.size(-1))
-        flat_targets = target_ids.view(-1)
+        flat_targets = targets.token_ids.view(-1)
 
         kd = self.dflash_self_logit_distillation
         if kd and base_outputs is None:
@@ -867,35 +922,25 @@ class HFDFlashModel(DFlashModel):
         if not kd:
             loss_per_token = F.cross_entropy(flat_logits, flat_targets, reduction="none")
 
-        # Block-position loss weighting: dynamic D-PACE weights or static exponential decay.
-        if self.dflash_loss_objective == "dpace" and block_size > 1:
-            # Draft confidence q_i = exp(-CE) on the target-selected token, over the
-            # predicted positions (slot 0 is the given anchor, already masked above).
-            # Weights are detached (paper Eq.9), so this adds the documented ~2.3%
-            # training overhead without altering the cross-entropy gradient.
-            with torch.no_grad():
-                conf_ce = (
-                    loss_per_token.detach()
-                    if loss_per_token is not None
-                    else F.cross_entropy(flat_logits, flat_targets, reduction="none")
-                ).view(bsz, n_blocks, block_size)
-                confidences = torch.exp(-conf_ce[..., 1:].float())
-                dpace = torch.ones_like(weight_mask)
-                dpace[..., 1:] = _dpace_position_weights(
-                    confidences, self.dflash_dpace_alpha, valid_mask=weight_mask[..., 1:]
-                )
-            weight_mask = weight_mask * dpace
-        elif self.dflash_loss_decay_factor > 0:
-            k = torch.arange(block_size, device=device).view(1, 1, -1)
-            decay = torch.exp(-(k - 1).clamp(min=0).float() / self.dflash_loss_decay_factor)
-            weight_mask = weight_mask * decay
+        weight_mask = _block_position_weights(
+            targets.mask,
+            self.dflash_loss_objective,
+            1 - self._label_shift,
+            self.dflash_loss_decay_factor,
+            self.dflash_dpace_alpha,
+            target_ce=lambda: (
+                loss_per_token.detach()
+                if loss_per_token is not None
+                else F.cross_entropy(flat_logits, flat_targets, reduction="none")
+            ).view(targets.mask.shape),
+        )
 
         flat_weights = weight_mask.view(-1)
         valid_count = flat_weights.sum() + 1e-6
 
         if valid_count > 1.0:
             if kd:
-                flat_teacher = self._teacher_logits(base_outputs, safe_label_indices)
+                flat_teacher = self._teacher_logits(base_outputs, targets.positions)
                 flat_teacher = flat_teacher.reshape(flat_logits.shape)
                 target_soft = torch.softmax(flat_teacher, dim=-1)
                 draft_logsoft = torch.log_softmax(flat_logits, dim=-1)
@@ -905,11 +950,9 @@ class HFDFlashModel(DFlashModel):
                 loss = (loss_per_token * flat_weights).sum() / valid_count
 
             with torch.no_grad():
-                preds = flat_logits.argmax(dim=-1)
-                correct = (preds == flat_targets) & (binary_eval_mask > 0.5)
-                accuracy = correct.sum().float() / (binary_eval_mask.sum() + 1e-6)
-                accuracy = accuracy.item()
+                accuracy = _masked_top1(flat_logits, flat_targets, binary_eval_mask).item()
         else:
+            # Through the draft's output, so an FSDP unit around the draft still runs its backward.
             loss = flat_logits.sum() * 0.0
             accuracy = 0.0
 

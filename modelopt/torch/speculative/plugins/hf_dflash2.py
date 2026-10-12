@@ -39,7 +39,7 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ..dflash.conversion import DFlash2DMRegistry
-from .hf_dflash import HFDFlashModel
+from .hf_dflash import HFDFlashModel, _block_targets, _block_tokens
 from .modeling_dflash2 import DFlash2Module
 
 __all__ = ["HFDFlash2Model"]
@@ -231,45 +231,35 @@ class HFDFlash2Model(HFDFlashModel):
         if self.dflash_selector_loss_alpha <= 0 or draft_hidden is None:
             return loss, accuracy
 
-        bsz, seq_len = input_ids.shape
+        bsz = input_ids.shape[0]
         block_size = self.dflash_block_size
         n_blocks = anchor_positions.shape[1]
-        device = input_ids.device
 
-        offsets = torch.arange(block_size, device=device).view(1, 1, -1)
-        label_indices = anchor_positions.unsqueeze(-1) + offsets
-        valid_label = label_indices < seq_len
-        safe_label_indices = label_indices.clamp(max=seq_len - 1)
-        expanded_ids = input_ids.unsqueeze(1).expand(-1, n_blocks, -1)
-        target_ids = torch.gather(expanded_ids, 2, safe_label_indices)
-
-        # Same supervision mask as the backbone loss: valid block, in bounds, not the
-        # anchor slot, and inside the answer span. Position weighting (decay/D-PACE) is
-        # deliberately not applied — it shapes *where* the backbone spends capacity,
-        # while the selector should learn every position's transition equally.
-        weight_mask = block_keep_mask.unsqueeze(-1).expand(-1, -1, block_size).float()
-        weight_mask = weight_mask * valid_label.float()
-        weight_mask = weight_mask * (offsets > 0).float()
-        weight_mask = weight_mask * torch.gather(
-            loss_mask.unsqueeze(1).expand(-1, n_blocks, -1), 2, safe_label_indices
+        # The backbone's supervision mask, without its position weighting (decay/D-PACE):
+        # that shapes *where* the backbone spends capacity, while the selector should learn
+        # every position's transition equally.
+        targets = _block_targets(
+            input_ids, anchor_positions, block_keep_mask, loss_mask, block_size, self._label_shift
         )
 
         # Teacher-forced predecessor of block position k is the real token at anchor+k-1.
-        # Only offsets 1..block_size-1 are supervised (weight_mask zeroes slot 0), so the
+        # Only offsets 1..block_size-1 are supervised (the mask zeroes slot 0), so the
         # first supervised position, k=1, has the anchor's own token as its predecessor.
         # Slot 0's entry here resolves to anchor-1 and never contributes.
         #
         # This is the train/serve contract: CandidateSelector.greedy_path seeds its walk
         # from the anchor token, so ITS position 0 corresponds to block offset 1. A caller
         # that hands greedy_path the full 0..block_size-1 candidate set is off by one.
-        predecessor_ids = torch.gather(expanded_ids, 2, (safe_label_indices - 1).clamp(min=0))
+        predecessor_ids = _block_tokens(
+            input_ids, anchor_positions, block_size, self._label_shift - 1
+        )
 
         selector_loss, selector_accuracy, selector_coverage = self._selector_loss(
             logits.reshape(bsz, n_blocks, block_size, -1),
-            target_ids,
+            targets.token_ids,
             draft_hidden.reshape(bsz, n_blocks, block_size, -1),
             predecessor_ids,
-            weight_mask,
+            targets.mask,
         )
         self._selector_metrics = {
             "selector_accuracy": selector_accuracy,
