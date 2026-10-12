@@ -98,7 +98,7 @@ failures (`seq_len` divisibility, offline eval, mask token, chat template) are i
 | Error pattern | Root cause | Fix |
 | --- | --- | --- |
 | `Domino (projector_type='domino') requires ['emb_dim', 'gru_hidden_dim'] in dflash_architecture_config` | GRU head dims missing | Set both in `dflash_architecture_config` |
-| `Domino currently supports shift_label=True (next-token alignment) only` | `shift_label=false` | Leave it at `true` |
+| `shift_label=False is not supported: projector_type 'domino' trains only next-token alignment` | `shift_label: false` | Leave it at `true` |
 | `pure_draft_prefix_len must be in [0, N] (block_size=B), got X` | Prefix length >= block size | Lower it below `block_size` |
 | `DominoLambdaCallback: state.max_steps unset (<=0); lambda_base curriculum disabled` (warning) | `training.max_steps` not set | Set `training.max_steps`, else the curriculum never runs |
 | DDP error about unused parameters | `ddp_find_unused_parameters` turned off | Keep it `true` |

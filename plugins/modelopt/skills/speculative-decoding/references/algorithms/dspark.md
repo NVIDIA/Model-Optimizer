@@ -146,6 +146,7 @@ failures (`seq_len` divisibility, offline eval, mask token, chat template) are i
 | `DSpark (projector_type='dspark') requires 'markov_rank' (> 0) in dflash_architecture_config` | Markov head dimension missing | Set `dflash_architecture_config.markov_rank` |
 | `DSpark requires markov_rank > 0, got N` | Non-positive value | Set a positive rank |
 | `Unsupported markov_head_type: '...'. Expected 'vanilla', 'gated' or 'rnn'` | Typo or unsupported head | Use one of the three |
+| `shift_label=False is not supported: projector_type 'dspark' trains only next-token alignment` | `dflash_architecture_config.shift_label: false` | Remove it; DSpark only trains next-token alignment |
 | `dflash_confidence_head_alpha > 0 but the confidence head was not built` | Loss term enabled without the head | Set `dflash_architecture_config.use_confidence_head=true`, or set the alpha to 0 |
 | `An offline DFlash-family model cannot run AR validation / pseudo_speculative_generate` | Offline/streaming conversion deleted base layers | Keep `estimate_ar=false` and `ar_validate_steps=0`; evaluate after export |
 | Draft trains but acceptance length is poor | Draft dims left at defaults instead of matching the base | Set the GQA/FFN dims explicitly (see *Per-model adjustments*) |

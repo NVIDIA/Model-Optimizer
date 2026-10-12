@@ -519,7 +519,7 @@ class DominoExporter(DFlashExporter):
         config["dflash_config"].update(
             {
                 "projector_type": getattr(draft_config, "projector_type", "domino"),
-                "shift_label": getattr(draft_config, "shift_label", True),
+                "shift_label": bool(self.model._label_shift),
                 "pure_draft_prefix_len": getattr(draft_config, "pure_draft_prefix_len", 1),
                 "gru_hidden_dim": gru_hidden_dim,
                 "emb_dim": emb_dim,
@@ -598,7 +598,7 @@ class DSparkExporter(DFlashExporter):
         config["dflash_config"].update(
             {
                 "projector_type": getattr(draft_config, "projector_type", "dspark"),
-                "shift_label": getattr(draft_config, "shift_label", True),
+                "shift_label": bool(self.model._label_shift),
                 "markov_rank": draft_config.markov_rank,
                 "markov_head_type": getattr(draft_config, "markov_head_type", "vanilla"),
                 "use_confidence_head": bool(getattr(draft_config, "use_confidence_head", False)),

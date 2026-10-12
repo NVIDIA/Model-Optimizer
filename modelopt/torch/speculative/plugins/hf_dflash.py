@@ -387,6 +387,16 @@ class HFDFlashModel(DFlashModel):
         """Initialize DFlash draft module."""
         super().modify(config)
 
+        # shift_label names a next-token variant's alignment in its export; the alignment is
+        # fixed by _label_shift, so a config turning it off is refused rather than ignored.
+        arch_config = config.dflash_architecture_config
+        if self._label_shift and not arch_config.get("shift_label", True):
+            raise ValueError(
+                f"dflash_architecture_config.shift_label={arch_config['shift_label']!r} is not "
+                f"supported: projector_type {arch_config.get('projector_type')!r} trains only "
+                "next-token alignment (block position k predicts the token at anchor + k + 1)."
+            )
+
         self.dflash_fp32_master_weights = config.dflash_fp32_master_weights
 
         base_config = self._base_llm_config
