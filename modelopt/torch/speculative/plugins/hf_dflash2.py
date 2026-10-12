@@ -72,10 +72,10 @@ class HFDFlash2Model(HFDFlashModel):
                 "candidate selector's rank/top-k)."
             )
         super().modify(config)
-        self.dflash_selector_loss_alpha = getattr(config, "dflash_selector_loss_alpha", 1.0)
-        self.dflash_lk_loss_type = getattr(config, "dflash_lk_loss_type", "ce")
-        self.dflash_lk_ce_scale = getattr(config, "dflash_lk_ce_scale", 1.0)
-        self.dflash_lk_ce_decay = getattr(config, "dflash_lk_ce_decay", 1.0)
+        self.dflash_selector_loss_alpha = config.dflash_selector_loss_alpha
+        self.dflash_lk_loss_type = config.dflash_lk_loss_type
+        self.dflash_lk_ce_scale = config.dflash_lk_ce_scale
+        self.dflash_lk_ce_decay = config.dflash_lk_ce_decay
         if self.dflash_lk_loss_type != "ce" and self.dflash_self_logit_distillation:
             raise ValueError(
                 f"dflash_lk_loss_type={self.dflash_lk_loss_type!r} needs the draft's "

@@ -126,7 +126,7 @@ class HFLiLiCorrModel(HFDFlashModel):
             )
         super().modify(config)
 
-        weights = {name: float(getattr(config, name, -1.0)) for name in _TERM_WEIGHT_FIELDS}
+        weights = {name: float(getattr(config, name)) for name in _TERM_WEIGHT_FIELDS}
         unset = [name for name, value in weights.items() if value < 0.0]
         if unset:
             raise ValueError(
@@ -137,7 +137,7 @@ class HFLiLiCorrModel(HFDFlashModel):
         self.dflash_lilicorr_w_ce = weights["dflash_lilicorr_w_ce"]
         self.dflash_lilicorr_w_margin = weights["dflash_lilicorr_w_margin"]
         self.dflash_lilicorr_w_pen = weights["dflash_lilicorr_w_pen"]
-        self.dflash_lilicorr_w_cal = float(getattr(config, "dflash_lilicorr_w_cal", 0.0))
+        self.dflash_lilicorr_w_cal = float(config.dflash_lilicorr_w_cal)
         if not any(weights.values()) and self.dflash_lilicorr_w_cal == 0.0:
             raise ValueError(
                 "All LiLiCorr objective weights are 0, so the reranker would never "
@@ -145,7 +145,7 @@ class HFLiLiCorrModel(HFDFlashModel):
                 "least one of dflash_lilicorr_w_ce / _w_margin / _w_pen / _w_cal above 0."
             )
 
-        self.dflash_lilicorr_margin = float(getattr(config, "dflash_lilicorr_margin", -1.0))
+        self.dflash_lilicorr_margin = float(config.dflash_lilicorr_margin)
         if self.dflash_lilicorr_w_margin > 0.0 and self.dflash_lilicorr_margin <= 0.0:
             raise ValueError(
                 "dflash_lilicorr_w_margin > 0 requires a positive dflash_lilicorr_margin "
