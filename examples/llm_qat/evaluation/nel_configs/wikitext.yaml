@@ -7,13 +7,13 @@ evaluation:
         parallelism: 2
         request_timeout: 300
         max_retries: 2
-        temperature: null
-        top_p: null
-        max_new_tokens: null
+        temperature:
+        top_p:
+        max_new_tokens:
         task: wikitext
     target:
       api_endpoint:
-        api_key_name: null
+        api_key_name:
         adapter_config:
           use_reasoning: false
           use_request_logging: true
@@ -21,16 +21,16 @@ evaluation:
           max_logged_requests: 2
           max_logged_responses: 2
   tasks:
-  - name: lm-evaluation-harness.wikitext
-    endpoint_type: completions
-    container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
-    nemo_evaluator_config:
-      config:
-        params:
-          task: ${evaluation.nemo_evaluator_config.config.params.task}
-          extra:
-            num_fewshot: 0
-            tokenizer: ${deployment.tokenizer_path}
-            tokenizer_backend: huggingface
-            tokenized_requests: true
-            args: --seed 42
+    - name: lm-evaluation-harness.wikitext
+      endpoint_type: completions
+      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+      nemo_evaluator_config:
+        config:
+          params:
+            task: ${evaluation.nemo_evaluator_config.config.params.task}
+            extra:
+              num_fewshot: 0
+              tokenizer: ${deployment.tokenizer_path}
+              tokenizer_backend: huggingface
+              tokenized_requests: true
+              args: --seed 42
