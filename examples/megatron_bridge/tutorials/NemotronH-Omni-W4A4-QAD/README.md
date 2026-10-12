@@ -66,7 +66,7 @@ The recipe is [`model_type/nemotron_h/ptq/nvfp4-aggressive-mse`](../../../../mod
 | MTP block-0 KV cache | **FP8**, calibrated |
 | Vision tower, projector, the rest of the MTP head, latent MoE, routers, embeddings | BF16 |
 
-PTQ takes **16 minutes on one 4-GPU GB300 node** with 512 calibration samples.
+PTQ runs on **one 4-GPU GB300 node** with 512 calibration samples.
 
 <details>
 <summary>PTQ command (click to expand)</summary>
