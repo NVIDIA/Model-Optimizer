@@ -550,6 +550,49 @@ class TestDraftMaskRule:
         assert torch.equal(dense, vmapped)
 
 
+def _legacy_generate_swa_mask(model, ctx_len, bsz, dtype, device):
+    """Verbatim copy of the hand-written generation mask, kept as the semantic reference."""
+    window = model.dflash_swa_window_size
+    causal = model.dflash_draft_attention == "causal"
+    if window is None and not causal:
+        return None
+    block_size = model.dflash_block_size
+    kv_len = ctx_len + block_size
+    kv_idx = torch.arange(kv_len, device=device).view(1, 1, 1, -1)
+    q_pos_in_block = torch.arange(block_size, device=device).view(1, 1, -1, 1)
+    q_real_pos = ctx_len + q_pos_in_block
+    is_ctx = kv_idx < ctx_len
+    keep_ctx = is_ctx if window is None else (is_ctx & (kv_idx > q_real_pos - window))
+    keep_block = ~is_ctx
+    if causal:
+        keep_block = keep_block & ((kv_idx - ctx_len) <= q_pos_in_block)
+    keep = keep_ctx | keep_block
+    attn_mask = torch.zeros(bsz, 1, block_size, kv_len, device=device, dtype=dtype)
+    attn_mask.masked_fill_(~keep, torch.finfo(dtype).min)
+    return attn_mask
+
+
+class TestGenerateMaskRule:
+    """Generation evaluates the training rule for its one block, anchored at ``ctx_len``."""
+
+    @pytest.mark.parametrize("ctx_len", [1, 5, 16])
+    @pytest.mark.parametrize("window", [None, BLOCK_SIZE, 2 * BLOCK_SIZE])
+    @pytest.mark.parametrize("attention", ["bidirectional", "causal"])
+    def test_matches_the_hand_written_mask(self, ctx_len, window, attention):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config(block_size=BLOCK_SIZE)
+        config["dflash_swa_window_size"] = window
+        config["dflash_draft_attention"] = attention
+        mtsp.convert(model, [("dflash", config)])
+        args = (ctx_len, 2, torch.float32, torch.device("cpu"))
+        got = model._build_generate_swa_mask(*args)
+        want = _legacy_generate_swa_mask(model, *args)
+        if want is None:
+            assert got is None
+        else:
+            assert torch.equal(got, want)
+
+
 class TestDFlashSwaMask:
     """Test all-layer non-causal sliding-window attention mask (MiMo-style)."""
 

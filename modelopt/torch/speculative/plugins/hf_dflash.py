@@ -160,6 +160,19 @@ def _draft_mask_mod(seq_len, anchor_positions, block_keep_mask, block_size, wind
     return mask_mod
 
 
+def _dense_additive_mask(mask_mod, bsz, q_len, kv_len, dtype, device):
+    """``mask_mod`` evaluated on broadcast index grids, as SDPA's additive [B, 1, Q, KV] mask."""
+    visible = mask_mod(
+        torch.arange(bsz, device=device).view(-1, 1, 1, 1),
+        None,
+        torch.arange(q_len, device=device).view(1, 1, -1, 1),
+        torch.arange(kv_len, device=device).view(1, 1, 1, -1),
+    )
+    attn_mask = torch.zeros(bsz, 1, q_len, kv_len, device=device, dtype=dtype)
+    attn_mask.masked_fill_(~visible, torch.finfo(dtype).min)
+    return attn_mask
+
+
 def _dpace_position_weights(
     confidences: torch.Tensor, alpha: float, valid_mask: torch.Tensor | None = None
 ) -> torch.Tensor:
@@ -707,47 +720,26 @@ class HFDFlashModel(DFlashModel):
                 head_dims={layer.self_attn.head_dim for layer in self.dflash_module.layers},
             )
 
-        visible = mask_mod(
-            torch.arange(bsz, device=device).view(-1, 1, 1, 1),
-            None,
-            torch.arange(q_len, device=device).view(1, 1, -1, 1),
-            torch.arange(kv_len, device=device).view(1, 1, 1, -1),
-        )  # [B, 1, Q, KV]
-        attn_mask = torch.zeros(bsz, 1, q_len, kv_len, device=device, dtype=dtype)
-        attn_mask.masked_fill_(~visible, torch.finfo(dtype).min)
-        return attn_mask
+        return _dense_additive_mask(mask_mod, bsz, q_len, kv_len, dtype, device)
 
     def _build_generate_swa_mask(self, ctx_len, bsz, dtype, device):
         """Generation-time mask [B, 1, block_size, ctx_len + block_size], or None.
 
         Returns None only when there is nothing to mask: full attention over the context
-        *and* bidirectional blocks (KV cache with no mask). With sliding-window attention,
-        each block query only sees context within ``dflash_swa_window_size`` tokens before
-        its real position (ctx_len + position-in-block), matching training and vLLM
-        inference; block kv is left un-windowed. With ``dflash_draft_attention="causal"``
-        the block is additionally lower-triangular, mirroring
-        :meth:`_build_draft_attention_mask` so generation matches training.
+        *and* bidirectional blocks (KV cache with no mask). Otherwise it is the training rule,
+        :func:`_draft_mask_mod`, for the one block being drafted, anchored at ``ctx_len``:
+        the window counts from each query's real position, and under
+        ``dflash_draft_attention="causal"`` the block is lower-triangular.
         """
         window = self.dflash_swa_window_size
         causal = self.dflash_draft_attention == "causal"
         if window is None and not causal:
             return None
         block_size = self.dflash_block_size
-        kv_len = ctx_len + block_size
-        kv_idx = torch.arange(kv_len, device=device).view(1, 1, 1, -1)
-        q_pos_in_block = torch.arange(block_size, device=device).view(1, 1, -1, 1)
-        q_real_pos = ctx_len + q_pos_in_block
-        is_ctx = kv_idx < ctx_len
-        # Context kv kept iff within the window (when windowing); block kv always visible
-        # unless the block is causal, in which case only positions <= the query's.
-        keep_ctx = is_ctx if window is None else (is_ctx & (kv_idx > q_real_pos - window))
-        keep_block = ~is_ctx
-        if causal:
-            keep_block = keep_block & ((kv_idx - ctx_len) <= q_pos_in_block)
-        keep = keep_ctx | keep_block
-        attn_mask = torch.zeros(bsz, 1, block_size, kv_len, device=device, dtype=dtype)
-        attn_mask.masked_fill_(~keep, torch.finfo(dtype).min)
-        return attn_mask
+        anchors = torch.full((bsz, 1), ctx_len, dtype=torch.long, device=device)
+        keep = torch.ones(bsz, 1, dtype=torch.bool, device=device)
+        mask_mod = _draft_mask_mod(ctx_len, anchors, keep, block_size, window, causal)
+        return _dense_additive_mask(mask_mod, bsz, block_size, ctx_len + block_size, dtype, device)
 
     def _target_hidden(self, hidden_states):
         """The base hidden states the draft's ``fc`` reads, concatenated: [B, seq, n * H].
