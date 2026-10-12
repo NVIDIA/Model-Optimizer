@@ -25,6 +25,8 @@ import modelopt.torch.nas as mtn
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
+from modelopt.torch.opt.conversion import ModelLikeModule
+from modelopt.torch.opt.mode import _ModeRegistryCls
 from modelopt.torch.utils.distributed import _serialize
 
 
@@ -194,6 +196,38 @@ def test_model_like_initialization(mode, modellike, expect_exception):
 
     model2 = mto.restore_from_modelopt_state(model2, modelopt_state)
     assert isinstance(model2, torch.nn.Module)
+
+
+def test_apply_mode_with_mode_descriptor_instance():
+    """Test that a ModeDescriptor instance behaves identically to its string name."""
+    model_str = SimpleLinearModel()
+    model_desc = SimpleLinearModel()
+    model_desc.load_state_dict(model_str.state_dict())
+
+    descriptor = _ModeRegistryCls.get_from_any("quantize")
+    model_str = mto.apply_mode(model_str, mode=["quantize"], init_state=True)
+    model_desc = mto.apply_mode(model_desc, mode=[descriptor], init_state=True)
+
+    # modelopt state must be identical
+    manager_str = mto.ModeloptStateManager(model_str)
+    manager_desc = mto.ModeloptStateManager(model_desc)
+    assert torch.equal(_serialize(manager_str.state_dict()), _serialize(manager_desc.state_dict()))
+
+    # model state dict must be identical
+    state_str = model_str.state_dict()
+    state_desc = model_desc.state_dict()
+    assert state_str.keys() == state_desc.keys()
+    for key in state_str:
+        assert torch.equal(state_str[key], state_desc[key])
+
+
+def test_apply_mode_empty_mode_with_model_like():
+    """Test that an empty mode list initializes and returns a plain model from a ModelLike."""
+    model = mto.apply_mode((get_model, (), {}), mode=[])
+    assert isinstance(model, torch.nn.Module)
+    assert not isinstance(model, ModelLikeModule)
+    assert not mto.ModeloptStateManager.is_converted(model)
+    model(get_input())
 
 
 def test_sparse_quantized_module():
