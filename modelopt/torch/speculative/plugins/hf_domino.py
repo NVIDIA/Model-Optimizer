@@ -129,8 +129,8 @@ class HFDominoModel(HFDFlashModel):
         # (DFlashConfig carries the two fields); updated each step by
         # DominoLambdaCallback. Defaults keep a single forward (e.g. unit tests)
         # well-defined without a scheduler.
-        self.dflash_lambda_base_start = getattr(config, "dflash_lambda_base_start", 1.0)
-        self.dflash_lambda_base_decay_ratio = getattr(config, "dflash_lambda_base_decay_ratio", 1.0)
+        self.dflash_lambda_base_start = config.dflash_lambda_base_start
+        self.dflash_lambda_base_decay_ratio = config.dflash_lambda_base_decay_ratio
         self._lambda_base = self.dflash_lambda_base_start
         if not getattr(self.dflash_module, "shift_label", True):
             raise NotImplementedError(

@@ -140,9 +140,9 @@ class HFDSparkModel(HFDFlashModel):
         super().modify(config)
         # Three-term loss weights (DSpark only). Defaults follow the DeepSpec recipe
         # (L1/TVD-dominant) so a config that only sets the head still trains sensibly.
-        self.dflash_ce_loss_alpha = getattr(config, "dflash_ce_loss_alpha", 0.1)
-        self.dflash_l1_loss_alpha = getattr(config, "dflash_l1_loss_alpha", 0.9)
-        self.dflash_confidence_head_alpha = getattr(config, "dflash_confidence_head_alpha", 0.0)
+        self.dflash_ce_loss_alpha = config.dflash_ce_loss_alpha
+        self.dflash_l1_loss_alpha = config.dflash_l1_loss_alpha
+        self.dflash_confidence_head_alpha = config.dflash_confidence_head_alpha
         if self.dflash_confidence_head_alpha > 0 and not self.dflash_module.use_confidence_head:
             raise ValueError(
                 "dflash_confidence_head_alpha > 0 but the confidence head was not built; "

@@ -387,7 +387,7 @@ class HFDFlashModel(DFlashModel):
         """Initialize DFlash draft module."""
         super().modify(config)
 
-        self.dflash_fp32_master_weights = getattr(config, "dflash_fp32_master_weights", False)
+        self.dflash_fp32_master_weights = config.dflash_fp32_master_weights
 
         base_config = self._base_llm_config
         # Use Qwen3Config (not generic PretrainedConfig) so rope_parameters is

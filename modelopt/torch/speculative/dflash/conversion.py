@@ -48,6 +48,16 @@ DFlash2DMRegistry = _DMRegistryCls(prefix="DFlash2")
 # registry so its wrapper (HFLiLiCorrModel) does not overwrite HFDFlashModel.
 LiLiCorrDMRegistry = _DMRegistryCls(prefix="LiLiCorr")
 
+# dflash_architecture_config.projector_type -> the registry holding that variant's wrapper.
+_REGISTRY_BY_PROJECTOR_TYPE = {
+    None: DFlashDMRegistry,
+    "dflash": DFlashDMRegistry,
+    "domino": DominoDMRegistry,
+    "dspark": DSparkDMRegistry,
+    "dflash2": DFlash2DMRegistry,
+    "lilicorr": LiLiCorrDMRegistry,
+}
+
 
 def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertReturnType:
     """Convert the model to a DFlash (or Domino) model as per `config`."""
@@ -59,22 +69,13 @@ def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertRe
     custom_config = config.dflash_architecture_config
     config.dflash_architecture_config = {**default_dflash_config, **custom_config}
 
-    # Route to the Domino registry when the architecture asks for the Domino head.
     projector_type = config.dflash_architecture_config.get("projector_type")
-    if projector_type == "domino":
-        registry = DominoDMRegistry
-    elif projector_type == "dspark":
-        registry = DSparkDMRegistry
-    elif projector_type == "dflash2":
-        registry = DFlash2DMRegistry
-    elif projector_type == "lilicorr":
-        registry = LiLiCorrDMRegistry
-    elif projector_type in (None, "dflash"):
-        registry = DFlashDMRegistry
-    else:
+    registry = _REGISTRY_BY_PROJECTOR_TYPE.get(projector_type)
+    if registry is None:
+        supported = [name for name in _REGISTRY_BY_PROJECTOR_TYPE if name is not None]
         raise ValueError(
             f"Unsupported dflash_architecture_config.projector_type: {projector_type!r}. "
-            "Expected 'dflash' (default), 'domino', 'dspark', 'dflash2' or 'lilicorr'."
+            f"Expected one of {supported} ('dflash' is the default)."
         )
 
     original_cls = type(model)
