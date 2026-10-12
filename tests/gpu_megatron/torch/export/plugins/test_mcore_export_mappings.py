@@ -17,7 +17,10 @@
 
 import pytest
 
-from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
+from modelopt.torch.export.plugins.mcore_common import (
+    all_mcore_hf_export_mapping,
+    all_mcore_hf_vision_passthrough_mapping,
+)
 
 # ``_GPTModelExporter`` only emits ``k_scale`` / ``v_scale`` and sets ``kv_cache_quant_algo``
 # for layers whose architecture mapping defines ``core_attention``. A missing entry is silent:
@@ -34,6 +37,7 @@ KV_SCALE_EXPORT_PREFIXES = {
     "Qwen3VLForConditionalGeneration": "model.language_model.layers.{}.self_attn.",
     "Qwen3_5ForConditionalGeneration": "model.language_model.layers.{}.self_attn.",
     "Qwen3_5MoeForConditionalGeneration": "model.language_model.layers.{}.self_attn.",
+    "NemotronH_Omni_Reasoning_V3": "language_model.backbone.layers.{}.mixer.",
     "GlmMoeDsaForCausalLM": "model.layers.{}.self_attn.",
 }
 
@@ -55,6 +59,7 @@ PER_EXPERT_MOE_ARCHS = {
     "Qwen3_5MoeForConditionalGeneration": "model.language_model.layers.{}.mlp.experts.{}",
     "Qwen3MoeForCausalLM": "model.layers.{}.mlp.experts.{}",
     "NemotronHForCausalLM": "backbone.layers.{}.mixer.experts.{}",
+    "NemotronH_Omni_Reasoning_V3": "language_model.backbone.layers.{}.mixer.experts.{}",
     "GlmMoeDsaForCausalLM": "model.layers.{}.mlp.experts.{}",
 }
 
@@ -84,3 +89,19 @@ def test_qwen3_5_moe_expert_names_match_released_checkpoint():
 
     fc2 = mapping["experts.linear_fc2"].target_name_or_prefix.format(7).format(3) + "."
     assert fc2 == "model.language_model.layers.7.mlp.experts.3.down_proj."
+
+
+def test_new_model_nests_every_target_under_language_model():
+    """The new model keeps the whole Nemotron-H language model, ``lm_head`` included, under one prefix."""
+    text = all_mcore_hf_export_mapping["NemotronHForCausalLM"]
+    vl = all_mcore_hf_export_mapping["NemotronH_Omni_Reasoning_V3"]
+    assert vl.keys() == text.keys()
+    for key, rule in vl.items():
+        assert type(rule) is type(text[key])
+        assert rule.target_name_or_prefix == "language_model." + text[key].target_name_or_prefix
+        assert rule.func_kwargs == text[key].func_kwargs
+    assert vl["output_layer"].target_name_or_prefix == "language_model.lm_head."
+    # MTP is exported from the live model; a passthrough would write it a second time.
+    assert vl["mtp.eh_proj"].target_name_or_prefix.startswith("language_model.mtp.")
+    passthrough = all_mcore_hf_vision_passthrough_mapping["NemotronH_Omni_Reasoning_V3"]
+    assert not any(p.startswith("language_model.") for p in passthrough)

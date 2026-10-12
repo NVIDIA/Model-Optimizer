@@ -15,6 +15,7 @@ Changelog
 
 - Add Q8_0 weight-only quantization with 32-value GGML blocks, packed unified HF and Megatron export, and a built-in ``q8_0`` PTQ recipe.
 - Add Hugging Face PTQ calibration and export support for Nemotron-H MTP modules, preserving calibrated expert input scales.
+- Add the ``model_type/nemotron_h`` aggressive-MSE NVFP4 PTQ recipe: weight-MSE calibrated NVFP4 routed and shared MoE experts, FP8 attention projections, Mamba ``in_proj``/``out_proj`` and ``lm_head``, and an FP8 KV cache. The latent MoE, router, embeddings and the vision and audio encoders stay in BF16, and the MTP rules apply only to checkpoints that carry an MTP tail.
 - Backfill checkpoint aliases for three more published NVFP4 releases: ``moonshotai/Kimi-K2.7-Code``, ``google/gemma-4-26B-A4B-it`` and ``google/diffusiongemma-26B-A4B-it``. Each imports an existing general recipe wholesale rather than copying its body.
 - Backfill checkpoint aliases for nine more published NVFP4 releases, so each is reachable from its source model's hub path: ``zai-org/GLM-5.1`` and ``GLM-5.2``, ``MiniMaxAI/MiniMax-M2.5`` and ``MiniMax-M3``, ``deepseek-ai/DeepSeek-V3.1`` and ``DeepSeek-V3.2``, ``Qwen/Qwen3-235B-A22B-Instruct-2507`` and ``-Thinking-2507``, and ``Qwen/Qwen3.6-27B``. Each imports an existing general or architecture recipe wholesale rather than copying its body.
 - Add composed Hugging Face AutoQuantize recipes that run fixed PTQ or weight AutoQuantize before
@@ -50,6 +51,7 @@ Changelog
 
 *Megatron Framework (M-LM / M-Bridge)*
 
+- Add chat-data distillation to ``examples/megatron_bridge/distill.py``: ``--sft --sft_hf_dataset`` takes a local chat ``.jsonl`` or a Hugging Face Hub dataset, renders each conversation with the model's chat template, and ``--sft_loss_mode`` selects which turns are trained. Requires a Megatron-Bridge with ``DirectHFSFTDatasetConfig``.
 - Add mergeable LoRA QAD for fake-quantized dense Megatron/Transformer Engine linear layers. Enable it with ``--lora_rank`` in Megatron-Bridge PTQ, train through the normal QAD flow, and export a standalone quantized checkpoint without deployment adapters.
 - Add optional Top-P (nucleus) truncation to the Megatron top-k logits KD loss (now ``TopLogitsKLLoss``) via ``logit_kl_top_p`` and ``logit_kl_top_p_min_k`` in ``DistillationConfig``: after the global Top-K selection, only the smallest prefix whose cumulative teacher probability reaches ``top_p`` (with a floor of ``min_k`` entries) contributes to the KL, mirroring ``--logits-save-top-p`` / ``--logits-save-top-p-min-k`` in Megatron-LM's logits saver.
 - Add an end-to-end W4A4 NVFP4 PTQ and QAD tutorial for Qwen3.6-35B-A3B also covering evaluation and vLLM throughput benchmarking. See `examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/>`_ for details.
