@@ -12,9 +12,6 @@ Only the language model (including its MTP head) is quantized; the vision tower 
 
 ## Results
 
-> [!IMPORTANT]
-> These results come from an earlier variant of the recipe: an NVFP4 KV-cache cast instead of FP8, and the whole MTP head in BF16. They will be refreshed with [`nvfp4-aggressive-mse`](../../../../modelopt_recipes/model_type/nemotron_h/ptq/nvfp4-aggressive-mse.yaml), the recipe the steps below use; until then they show the expected order of magnitude, not exact targets.
-
 All checkpoints were served with the same vLLM settings; quantized ones with an NVFP4 KV cache.
 
 | Model | AA-LCR | SciCode (subtask) | GPQA Diamond pass@1 (maj@8) |
