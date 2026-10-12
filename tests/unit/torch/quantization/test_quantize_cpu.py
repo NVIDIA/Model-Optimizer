@@ -729,15 +729,22 @@ def test_indexer_k_check_covers_all_ranks(skip_on_windows):
     spawn_multiprocess_job(2, _test_indexer_check_covers_all_ranks, backend="gloo")
 
 
-def test_indexer_q_patterns_need_the_query_quantizer():
+@pytest.mark.parametrize(
+    "quantizer_name",
+    [
+        "indexer_q_quantizer",
+        "indexer_scorer_kwargs_quantizer",
+    ],
+)
+def test_indexer_patterns_need_their_own_quantizer(quantizer_name):
     """Each indexer quantizer is checked on its own: a converted key quantizer does not count."""
     config = copy.deepcopy(INDEXER_K_ONLY_CFG)
     config["quant_cfg"].append(
-        {"quantizer_name": "*indexer_q_quantizer", "cfg": {"num_bits": 8, "axis": None}}
+        {"quantizer_name": f"*{quantizer_name}", "cfg": {"num_bits": 8, "axis": None}}
     )
     mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
     try:
-        with pytest.raises(RuntimeError, match=r"enables indexer_q_quantizer, but no"):
+        with pytest.raises(RuntimeError, match=rf"enables {quantizer_name}, but no"):
             mtq.quantize(_ToyIndexerModel(), config, lambda m: m(torch.randn(2, 16)))
     finally:
         mtq.unregister(_ToyIndexer)

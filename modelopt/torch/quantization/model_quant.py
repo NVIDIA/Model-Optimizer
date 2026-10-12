@@ -237,6 +237,11 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
 _PLUGIN_QUANTIZERS = {
     "indexer_q_quantizer": (("*Indexer",), "sparse-attention indexer", "indexer_*_nvfp4"),
     "indexer_k_quantizer": (("*Indexer",), "sparse-attention indexer", "indexer_*_nvfp4"),
+    "indexer_scorer_kwargs_quantizer": (
+        ("*Indexer",),
+        "sparse-attention indexer",
+        "indexer_*_nvfp4",
+    ),
     "dispatch_quantizer": (("*Experts*", "*FusedMoE"), "MoE experts module", "moe_*_nvfp4"),
     "combine_quantizer": (("*Experts*", "*FusedMoE"), "MoE experts module", "moe_*_nvfp4"),
 }
