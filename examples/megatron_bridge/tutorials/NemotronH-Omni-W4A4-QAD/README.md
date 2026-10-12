@@ -87,7 +87,7 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
 
 - `--tp_size 1` is **required**: with tensor parallelism, static NVFP4 weight scales are per-shard but the Megatron checkpoint saves them as replicated, so calibration raises `NotImplementedError` for TP > 1. Expert parallelism spreads the experts instead.
 - Calibration is text-only (`cnn_nemotron_v2_mix`): the language model is calibrated on its own, and the vision tower is not run.
-- The MTP head is built. In Megatron-Core its MoE block is `language_model.mtp.layers.0.mtp_model_layer.layers.1`, which the recipe quantizes like the backbone experts; the rest of the head stays BF16.
+- The MTP head is quantized too, so the exported checkpoint has it in the serving format: its MoE block (`language_model.mtp.layers.0.mtp_model_layer.layers.1` in Megatron-Core) gets the same NVFP4 treatment as the backbone experts, and the rest of the head stays BF16.
 
 </details>
 
@@ -128,7 +128,7 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
 - `--sft --sft_hf_dataset ... --sft_loss_mode assistant` renders each conversation with the model's chat template and computes the loss on assistant tokens only.
 - `--seq_length 32768 --gbs 64`: 600 iterations cover 38,400 records, about 1.07 epochs of the 35,800-record training split.
 - `--recompute_*` and `--no_async_save` are needed to fit: the async-save worker needs its own CUDA context and runs out of memory next to the resident teacher.
-- The MTP head is built but receives no loss under KD-only training (`mtp_1 loss` and `mtp_2 loss` log as 0), so its weights stay as PTQ left them.
+- QAD does not train the MTP head, so the exported MTP head keeps its PTQ weights.
 - Each saved iteration is about 1.6 TB; size `--save_interval` and `--checkpoint_keep_last` to your storage.
 
 </details>
@@ -150,6 +150,7 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/export_quantize
 ```
 
 - The exporter writes the quantized language model, including the MTP head, under `language_model.`, and copies `vision_model.`, `vision_projector.` and `mlp1.` from the source checkpoint.
+- The MTP head can be replaced after export by a separately trained MTP head in the same format.
 - It exports the latest `iter_*` under `--megatron_path`. To export another iteration, point `--megatron_path` at a directory holding a link to that `iter_*` and a matching `latest_checkpointed_iteration.txt`.
 - The backbone KV cache is cast at the fixed FP8 range, so the export has no backbone `k_scale` / `v_scale`; vLLM then uses a scale of 1.0, which is that range. Only the MTP attention carries a calibrated pair.
 
