@@ -138,6 +138,7 @@ Changelog
 - Fix Megatron unified HF export of MoE models with grouped-GEMM experts when only the experts are quantized (e.g. ``nvfp4_experts_only-*`` recipes): ``hf_quant_config.json`` and the ``quantization_config`` in ``config.json`` were not written, so the quantized experts were served as unquantized weights. Re-export such checkpoints.
 - Fix DFlash conversion on NoPE targets whose config leaves ``rope_theta`` unset.
 - Fix offline DFlash training failing to reconstruct the target logits when the captured hidden states are stored in a different dtype than the target's weights.
+- Fix Domino AR validation (``pseudo_speculative_generate``), which scored the backbone alone at the wrong block positions, and a DSpark AR-validation crash when ``device_map="auto"`` places a tied ``lm_head`` on another GPU than the draft. DSpark and Domino now reject ``dflash_architecture_config.shift_label: false`` at conversion (DSpark trained with the shift regardless) and export the ``shift_label`` and ``markov_head_type`` they were trained with; checkpoints saved with ``shift_label: false`` still load.
 - Fix ``hf_ptq`` overwriting a model's existing ``pad_token`` with ``eos_token`` when the model already has a valid padding token. The exported tokenizer now preserves the source model's padding configuration.
 - Fix Hugging Face exports dropping off-index safetensors such as GLM-4.7's ``mtp.safetensors``.
 - Fix Megatron-Core checkpoint saving for quantized grouped MoE experts when tensor and expert parallelism are both enabled.
