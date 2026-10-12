@@ -26,6 +26,8 @@ import torch
 
 GGML_BLOCK_SIZE = 256
 _SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
+# Columns hashed at a time, bounding _row_keys' int64 temporaries to this slice of the weight.
+_ROW_KEY_CHUNK = 256
 
 
 class _CacheKey(NamedTuple):
@@ -168,13 +170,18 @@ def _row_keys(x: torch.Tensor) -> torch.Tensor:
     """A 64-bit hash of each row's bits; equal rows always get equal keys.
 
     Integer sums wrap and are associative, so unlike a floating-point projection the key does not
-    depend on how the reduction is ordered, which differs between differently shaped products.
+    depend on how the reduction is ordered, which differs between differently shaped products. That
+    is also what lets the columns be summed a chunk at a time.
     """
     multipliers = torch.randint(
         -(2**62), 2**62, (x.shape[-1],), generator=torch.Generator().manual_seed(0)
-    )
-    bits = x.contiguous().view(_SIGNED_INT_OF_SIZE[x.element_size()]).to(torch.int64)
-    return (bits * multipliers.to(x.device)).sum(-1)
+    ).to(x.device)
+    bits = x.contiguous().view(_SIGNED_INT_OF_SIZE[x.element_size()])
+    keys = torch.zeros(x.shape[:-1], dtype=torch.int64, device=x.device)
+    for start in range(0, x.shape[-1], _ROW_KEY_CHUNK):
+        columns = slice(start, start + _ROW_KEY_CHUNK)
+        keys += (bits[..., columns].to(torch.int64) * multipliers[columns]).sum(-1)
+    return keys
 
 
 def fake_quantize_with_cache(
