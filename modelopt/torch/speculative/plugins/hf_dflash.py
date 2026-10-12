@@ -84,6 +84,7 @@ from transformers.utils import ModelOutput
 
 from ..dflash.conversion import DFlashDMRegistry
 from ..dflash.dflash_model import DFlashModel
+from .dflash_flex_attention import build_draft_block_mask
 from .modeling_dflash import (  # noqa: F401
     DFlashAttention,
     DFlashBaseModelOutput,
@@ -383,6 +384,18 @@ class HFDFlashModel(DFlashModel):
         self.dflash_config.block_size = self.dflash_block_size
         # On the draft config so _build_draft_module stays a pure function of it.
         self.dflash_config.attention_sink_bias = self.dflash_attention_sink
+        if self.dflash_use_flex_attention and self.dflash_attention_sink:
+            raise ValueError(
+                "dflash_use_flex_attention does not support dflash_attention_sink: the flex "
+                "kernel has no sink column, so the draft would train without the sink it is "
+                "exported with. Unset one of them."
+            )
+        if self.dflash_use_flex_attention and self.dflash_config.attention_dropout:
+            raise ValueError(
+                "dflash_use_flex_attention does not support attention_dropout > 0 (got "
+                f"{self.dflash_config.attention_dropout}): the flex path applies no dropout, "
+                "so it would be silently skipped. Unset one of them."
+            )
 
         # Which base layers feed the draft's `fc`: explicit ids win, else the uniform default.
         num_target_layers = (
@@ -685,15 +698,13 @@ class HFDFlashModel(DFlashModel):
         )
 
         if self.dflash_use_flex_attention:
-            from .dflash_flex_attention import build_draft_block_mask
-
             return build_draft_block_mask(
                 mask_mod,
                 bsz,
                 q_len,
                 kv_len,
                 device,
-                head_dim=self.dflash_module.layers[0].self_attn.head_dim,
+                head_dims={layer.self_attn.head_dim for layer in self.dflash_module.layers},
             )
 
         visible = mask_mod(

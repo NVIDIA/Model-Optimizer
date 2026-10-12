@@ -36,6 +36,7 @@ from transformers.modeling_layers import GradientCheckpointingLayer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
+import modelopt.torch.speculative.plugins.dflash_flex_attention as dflash_flex_attention
 import modelopt.torch.speculative.plugins.hf_dflash as hf_dflash
 from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashAttention,
@@ -313,6 +314,70 @@ class TestDFlashSaveRestore:
         model_test = AutoModelForCausalLM.from_pretrained(tmp_path / "modelopt_model")
         assert isinstance(model_test, HFDFlashModel)
         tf_modelopt_state_and_output_tester(model_ref, model_test)
+
+
+class TestFlexAttentionConflicts:
+    """FlexAttention's conflicts are rejected when the model is built, resume included."""
+
+    @staticmethod
+    def _config(**overrides):
+        config = get_dflash_config()
+        config.update(overrides)
+        return config
+
+    def test_attention_sink_is_rejected_at_convert(self):
+        config = self._config(dflash_use_flex_attention=True, dflash_attention_sink=True)
+        with pytest.raises(ValueError, match="dflash_attention_sink"):
+            mtsp.convert(get_tiny_llama(num_hidden_layers=4), [("dflash", config)])
+
+    def test_attention_dropout_is_rejected_at_convert(self):
+        config = self._config(dflash_use_flex_attention=True)
+        config["dflash_architecture_config"] = {
+            **config["dflash_architecture_config"],
+            "attention_dropout": 0.1,
+        }
+        with pytest.raises(ValueError, match="attention_dropout"):
+            mtsp.convert(get_tiny_llama(num_hidden_layers=4), [("dflash", config)])
+
+    def test_flex_and_compile_survive_a_from_pretrained_resume(self, tmp_path):
+        """Resume re-runs modify() with the base on meta; the checks and the compile hold."""
+        mto.enable_huggingface_checkpointing()
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = self._config(dflash_use_flex_attention=True, dflash_use_torch_compile=True)
+        mtsp.convert(model, [("dflash", config)])
+        model.save_pretrained(tmp_path / "ckpt")
+
+        restored = AutoModelForCausalLM.from_pretrained(tmp_path / "ckpt")
+        restored.restore_draft_precision()
+        assert restored.dflash_use_flex_attention
+        restored.train()
+        assert restored.dflash_module._body() != restored.dflash_module._forward_body
+
+
+class TestFlexTiles:
+    """One BlockMask serves every layer, whatever each layer's head_dim."""
+
+    @staticmethod
+    def _block_size(monkeypatch, head_dims):
+        seen = {}
+
+        def create_block_mask(*_args, BLOCK_SIZE, **_kwargs):  # noqa: N803
+            seen["block"] = BLOCK_SIZE
+
+        monkeypatch.setattr(dflash_flex_attention, "_flex_ops", lambda: (None, create_block_mask))
+        dflash_flex_attention.build_draft_block_mask(None, 1, 64, 128, "cpu", head_dims)
+        return seen["block"]
+
+    @pytest.mark.parametrize("head_dims", [{256}, {512}, {256, 512}])
+    def test_every_layer_tile_divides_the_mask_block(self, monkeypatch, head_dims):
+        block = self._block_size(monkeypatch, head_dims)
+        for head_dim in head_dims:
+            _, options = dflash_flex_attention._tiles(head_dim)
+            largest_tile = 128 if options is None else max(options["BLOCK_M"], options["BLOCK_N"])
+            assert block % largest_tile == 0, (head_dims, block)
+
+    def test_large_head_dims_alone_keep_the_finer_block(self, monkeypatch):
+        assert self._block_size(monkeypatch, {512}) == 64
 
 
 class TestDFlashLazyRotaryEmb:

@@ -25,6 +25,8 @@ backward is ~10x slower.
 """
 
 import torch
+from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
+from transformers.models.qwen3.modeling_qwen3 import repeat_kv
 
 __all__ = ["build_draft_block_mask", "flex_attention_forward", "is_block_mask"]
 
@@ -46,14 +48,15 @@ _PINNED_TILE_MASK_BLOCK_SIZE = 64
 _DEFAULT_TILE_MASK_BLOCK_SIZE = 128
 
 
-def _mask_block_size(head_dim):
-    """BlockMask block size, which must be divisible by the kernel's BLOCK_M/BLOCK_N.
+def _tiles(head_dim):
+    """``(BlockMask block size, kernel_options)`` for attention at ``head_dim``.
 
-    The pinned 32x32 tiles allow the finer 64; the autotuner may pick tiles up to 128.
+    The block size must be divisible by the kernel's BLOCK_M/BLOCK_N: the pinned 32x32 tiles
+    allow the finer 64, while the autotuner may pick default tiles up to 128.
     """
     if head_dim > _MAX_DEFAULT_TILE_HEAD_DIM:
-        return _PINNED_TILE_MASK_BLOCK_SIZE
-    return _DEFAULT_TILE_MASK_BLOCK_SIZE
+        return _PINNED_TILE_MASK_BLOCK_SIZE, _LARGE_HEAD_DIM_KERNEL_OPTIONS
+    return _DEFAULT_TILE_MASK_BLOCK_SIZE, None
 
 
 _flex_attention_compiled = None
@@ -61,11 +64,9 @@ _create_block_mask_compiled = None
 
 
 def _flex_ops():
-    """Resolve and compile the FlexAttention entry points once per process."""
+    """Compile the FlexAttention entry points once per process."""
     global _flex_attention_compiled, _create_block_mask_compiled
     if _flex_attention_compiled is None:
-        from torch.nn.attention.flex_attention import create_block_mask, flex_attention
-
         # dynamic=False: shapes are fixed within a run, and dynamic shapes slow the kernel.
         _flex_attention_compiled = torch.compile(flex_attention, dynamic=False)
         _create_block_mask_compiled = torch.compile(create_block_mask, dynamic=False)
@@ -74,35 +75,25 @@ def _flex_ops():
 
 def is_block_mask(mask) -> bool:
     """True if ``mask`` is a FlexAttention ``BlockMask`` rather than a dense tensor."""
-    if mask is None or torch.is_tensor(mask):
-        return False
-    try:
-        from torch.nn.attention.flex_attention import BlockMask
-    except ImportError:
-        return False
     return isinstance(mask, BlockMask)
 
 
-def build_draft_block_mask(mask_mod, bsz, q_len, kv_len, device, head_dim):
-    """Block-sparse ``BlockMask`` of the draft attention's ``mask_mod``."""
-    _, create_block_mask = _flex_ops()
-    return create_block_mask(
+def build_draft_block_mask(mask_mod, bsz, q_len, kv_len, device, head_dims):
+    """Block-sparse ``BlockMask`` of the draft attention's ``mask_mod``.
+
+    One mask serves every layer, so it takes the largest block size among the layers'
+    ``head_dims``: every tile size in use divides it.
+    """
+    _, compiled_create_block_mask = _flex_ops()
+    return compiled_create_block_mask(
         mask_mod,
         bsz,
         None,
         q_len,
         kv_len,
         device=device,
-        BLOCK_SIZE=_mask_block_size(head_dim),
+        BLOCK_SIZE=max(_tiles(head_dim)[0] for head_dim in head_dims),
     )
-
-
-def _repeat_kv(x, n_rep):
-    """HF's ``repeat_kv``: [B, n_kv, S, D] -> [B, n_kv * n_rep, S, D]."""
-    if n_rep == 1:
-        return x
-    b, h, s, d = x.shape
-    return x[:, :, None].expand(b, h, n_rep, s, d).reshape(b, h * n_rep, s, d)
 
 
 def flex_attention_forward(query, key, value, block_mask, scaling):
@@ -111,16 +102,13 @@ def flex_attention_forward(query, key, value, block_mask, scaling):
     The layout matches what HF's ``sdpa_attention_forward`` returns so the caller's
     ``reshape(bsz, q_len, -1)`` is unchanged.
     """
-    flex_attention, _ = _flex_ops()
-    head_dim = query.shape[-1]
+    compiled_flex_attention, _ = _flex_ops()
     n_rep = query.shape[1] // key.shape[1]
-    kernel_options = (
-        _LARGE_HEAD_DIM_KERNEL_OPTIONS if head_dim > _MAX_DEFAULT_TILE_HEAD_DIM else None
-    )
-    attn_output = flex_attention(
+    _, kernel_options = _tiles(query.shape[-1])
+    attn_output = compiled_flex_attention(
         query,
-        _repeat_kv(key, n_rep),
-        _repeat_kv(value, n_rep),
+        repeat_kv(key, n_rep),
+        repeat_kv(value, n_rep),
         block_mask=block_mask,
         scale=scaling,
         kernel_options=kernel_options,

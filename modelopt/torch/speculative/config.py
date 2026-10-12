@@ -156,8 +156,7 @@ class DFlashConfig(ModeloptBaseConfig):
         default=False,
         description=(
             "Compute the draft's attention with FlexAttention over a block-sparse BlockMask "
-            "instead of SDPA with a dense [B, 1, Q, KV] mask, skipping fully-masked tiles. "
-            "Requires torch >= 2.5."
+            "instead of SDPA with a dense [B, 1, Q, KV] mask, skipping fully-masked tiles."
         ),
     )
 
