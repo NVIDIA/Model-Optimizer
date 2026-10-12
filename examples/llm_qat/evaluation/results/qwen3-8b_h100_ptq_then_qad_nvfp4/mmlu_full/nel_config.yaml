@@ -1,0 +1,58 @@
+defaults:
+- execution: slurm/default
+- deployment: vllm
+- ../../../nel_configs/mmlu@_global_
+- _self_
+execution:
+  hostname: ${oc.env:NEL_SLURM_HOST}
+  username: ${oc.env:SLURM_USER}
+  account: ${oc.env:NEL_SLURM_ACCOUNT}
+  partition: ${oc.env:NEL_SLURM_PARTITION}
+  output_dir: ${oc.env:NEL_OUTPUT_DIR}
+  num_nodes: 1
+  ntasks_per_node: 1
+  gres: gpu:1
+  walltime: 04:00:00
+  sbatch_extra_flags:
+    exclusive: false
+    mem: 64G
+  mounts:
+    mount_home: false
+    deployment:
+      /path/to/hf-cache: /hf-cache
+      /path/to/checkpoint: /checkpoint
+    evaluation:
+      /path/to/hf-cache: /hf-cache
+      /path/to/checkpoint: /checkpoint
+deployment:
+  image: vllm/vllm-openai:v0.28.0-cu129
+  checkpoint_path: ${oc.env:QWEN3_MODEL_CHECKPOINT}
+  served_model_name: qwen3-8b-ptq-then-qad
+  tensor_parallel_size: 1
+  data_parallel_size: 1
+  env_vars:
+    HF_HOME: lit:/hf-cache
+  command: vllm serve /checkpoint --served-model-name ${deployment.served_model_name}
+    --host 0.0.0.0 --port ${deployment.port} --dtype bfloat16 --tensor-parallel-size
+    1 --data-parallel-size 1 --max-model-len 32768 --max-num-seqs 2 --gpu-memory-utilization
+    0.85 --seed 42 --kv-cache-dtype auto
+  tokenizer_path: /hf-cache/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+  port: 18108
+evaluation:
+  tasks:
+  - name: lm-evaluation-harness.mmlu
+    endpoint_type: completions
+    container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    nemo_evaluator_config:
+      config:
+        params:
+          extra:
+            num_fewshot: 5
+            tokenizer: ${deployment.tokenizer_path}
+            tokenizer_backend: huggingface
+            tokenized_requests: true
+            args: --seed 42 --model_args "base_url=http://127.0.0.1:${deployment.port}/v1/completions,model=${deployment.served_model_name},tokenized_requests=True,tokenizer=${deployment.tokenizer_path},tokenizer_backend=huggingface,num_concurrent=1,timeout=300,max_retries=2,stream=False,max_length=32768"
+  nemo_evaluator_config:
+    config:
+      params:
+        parallelism: 1

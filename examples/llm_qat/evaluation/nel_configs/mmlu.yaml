@@ -1,0 +1,36 @@
+# Shared benchmark recipe for nemo-evaluator-launcher==0.2.6.
+# All 57 MMLU subjects, test split, 5-shot log-likelihood accuracy. No sample limit by default.
+evaluation:
+  nemo_evaluator_config:
+    config:
+      params:
+        parallelism: 2
+        request_timeout: 300
+        max_retries: 2
+        temperature: null
+        top_p: null
+        max_new_tokens: null
+        task: mmlu
+    target:
+      api_endpoint:
+        api_key_name: null
+        adapter_config:
+          use_reasoning: false
+          use_request_logging: true
+          use_response_logging: true
+          max_logged_requests: 2
+          max_logged_responses: 2
+  tasks:
+  - name: lm-evaluation-harness.mmlu
+    endpoint_type: completions
+    container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
+    nemo_evaluator_config:
+      config:
+        params:
+          task: ${evaluation.nemo_evaluator_config.config.params.task}
+          extra:
+            num_fewshot: 5
+            tokenizer: ${deployment.tokenizer_path}
+            tokenizer_backend: huggingface
+            tokenized_requests: true
+            args: --seed 42

@@ -1,0 +1,40 @@
+# Full benchmark coverage; NEL 0.2.6. Replace mount placeholders; see ../../../README.md.
+defaults:
+- execution: slurm/default
+- deployment: vllm
+- ../../../nel_configs/wikitext@_global_
+- _self_
+execution:
+  hostname: ${oc.env:NEL_SLURM_HOST}
+  username: ${oc.env:SLURM_USER}
+  account: ${oc.env:NEL_SLURM_ACCOUNT}
+  partition: ${oc.env:NEL_SLURM_PARTITION}
+  output_dir: ${oc.env:NEL_OUTPUT_DIR}
+  num_nodes: 1
+  ntasks_per_node: 1
+  gres: gpu:1
+  walltime: 04:00:00
+  sbatch_extra_flags:
+    exclusive: false
+    mem: 64G
+  mounts:
+    mount_home: false
+    deployment:
+      /path/to/hf-cache: /hf-cache
+    evaluation:
+      /path/to/hf-cache: /hf-cache
+deployment:
+  image: vllm/vllm-openai:v0.28.0-cu129
+  checkpoint_path: ${oc.env:QWEN3_HF_CACHE}/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+  served_model_name: qwen3-8b-teacher
+  tensor_parallel_size: 1
+  data_parallel_size: 1
+  env_vars:
+    HF_HOME: lit:/hf-cache
+  command: vllm serve /hf-cache/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+    --served-model-name ${deployment.served_model_name} --host 0.0.0.0 --port ${deployment.port}
+    --dtype bfloat16 --tensor-parallel-size 1 --data-parallel-size 1 --max-model-len
+    32768 --max-num-seqs 2 --gpu-memory-utilization 0.85 --seed 42 --kv-cache-dtype
+    auto
+  tokenizer_path: /hf-cache/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+  port: 18102
