@@ -37,6 +37,36 @@ These instructions apply to AI-assisted work in this repository.
   "ship", or equivalent before running `git push`, `gh pr create`, or any
   push-option flags like `-o merge_request.create`.
 
+## Pre-push review pass
+
+Before asking to push, review the whole diff against its base as a skeptical
+reviewer would, and report what you found. If the pass turns up an opportunity
+below, tell the user and offer to address it before pushing; do not push as-is.
+
+- **Performance and memory, especially on GPU.** Measure peak memory and time
+  of changed heavy paths at realistic sizes (e.g. with
+  `torch.cuda.max_memory_allocated`) instead of reasoning about them. Look for
+  full-size temporaries (float32 copies of narrower tensors, int64
+  intermediates, whole-tensor work a chunked loop could bound), expensive work a
+  cache or earlier result already holds, and host syncs or device-to-host copies
+  on hot paths.
+- **Distributed and offloaded paths.** Every rank must issue the same
+  collectives in the same order; rank-dependent work, and any hook it triggers,
+  must not start one. Do not keep gathered or onloaded weights past their layer.
+- **Simplicity.** Prefer the smallest diff, and extending an existing mechanism
+  over adding a parallel one: ask whether something already does this. Remove
+  dead code, debug leftovers, unused options and unrelated refactors. Keep
+  public API changes minimal and backward compatible. Comments say why, not
+  what.
+- **Correctness.** Validate before mutating, so a refusal leaves state
+  unchanged, and fail loudly rather than silently ignore an option or route.
+  Cover the layouts the change can meet: dtypes, tied or shared weights,
+  offloaded, FSDP2 and meta tensors, fused or grouped modules.
+- **Evidence.** Each fix has a test that fails without it; check by reverting.
+  A test for a hang fails fast instead of hanging CI. Run the paths CI skips
+  (multi-GPU, GPU-only) when the change touches them, and state in the PR what
+  you ran and what you did not.
+
 ## Updating skills
 
 - **Keep skill edits concise.** Skills are loaded into agent context, so every
