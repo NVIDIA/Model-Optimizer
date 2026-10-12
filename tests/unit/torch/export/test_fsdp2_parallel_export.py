@@ -158,6 +158,9 @@ def test_streaming_export_extra_state_dict_mtp(tmp_path):
 def _two_rank_streaming_export(rank, size, export_dir):
     # A deadlocked rank exits with its stack instead of hanging the run on the join.
     faulthandler.dump_traceback_later(45, exit=True)
+    # The unsharded reference is built and exported on every rank, so any collective its
+    # calibration or export issues has a partner.
+    expected, _ = _export_transformers_checkpoint(_tiny_quantized_llama(tie=False), torch.bfloat16)
     # Calibrating after sharding leaves the root's parameters unsharded: FSDP2 skips the root's
     # post-forward reshard. That is the state in which the owner's state_dict() used to reshard
     # them on its rank alone, so the next gather window ran a collective the other rank skipped.
@@ -167,7 +170,6 @@ def _two_rank_streaming_export(rank, size, export_dir):
     faulthandler.cancel_dump_traceback_later()
     if rank != 0:
         return
-    expected, _ = _export_transformers_checkpoint(_tiny_quantized_llama(tie=False), torch.bfloat16)
     exported = _load_all(Path(export_dir))
     assert set(exported) == set(expected)
     for key, tensor in expected.items():
