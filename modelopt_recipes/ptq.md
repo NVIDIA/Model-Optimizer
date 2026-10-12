@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 33 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 37 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -59,11 +59,15 @@ supported combinations.
 | `nvfp4_mlp_weight_only` | NVFP4 W4A16 (block 32), MLP + MoE weights only | none | max |
 | `mxfp4_mlp_weight_only` | MXFP4 W4A16, MLP + MoE weights only | none | none (no calibration) |
 | `iq1_s` | IQ1_S W1A16, MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for fused MoE experts |
+| `iq1_s_experts_only` | IQ1_S W1A16, MoE routed experts only | none | imatrix |
 | `iq1_m` | IQ1_M W1A16 (1.75 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for fused MoE experts |
+| `iq1_m_experts_only` | IQ1_M W1A16 (1.75 bpw), MoE routed experts only | none | imatrix |
 | `iq2_xxs` | IQ2_XXS W2A16 (2.06 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for fused MoE experts |
 | `iq2_xxs_experts_only` | IQ2_XXS W2A16 (2.06 bpw), MoE routed experts only | none | imatrix |
 | `iq2_xs` | IQ2_XS W2A16 (2.31 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for fused MoE experts |
+| `iq2_xs_experts_only` | IQ2_XS W2A16 (2.31 bpw), MoE routed experts only | none | imatrix |
 | `iq2_s` | IQ2_S W2A16 (2.56 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for fused MoE experts |
+| `iq2_s_experts_only` | IQ2_S W2A16 (2.56 bpw), MoE routed experts only | none | imatrix |
 | `q8_0` | Q8_0 W8A16 (8.5 bpw), eligible linears | none | none (no calibration) |
 
 </details>
@@ -155,9 +159,10 @@ activations and tensor-core math are what deliver the throughput.
   Unified HF export writes the packed GGML blocks; Megatron export additionally
   requires tensor and pipeline parallel sizes of 1, and does not support
   fused-MoE experts.
-- **`iq2_xxs_experts_only`** — IQ2_XXS on the MoE routed experts only (`*.experts.*`,
-  `*block_sparse_moe*`), calibrated with imatrix alone; shared experts, dense layers and
-  attention stay in BF16.
+- **`iq1_s_experts_only` / `iq1_m_experts_only` / `iq2_xxs_experts_only` /
+  `iq2_xs_experts_only` / `iq2_s_experts_only`** — the same IQ formats on the MoE routed
+  experts only (`*.experts.*`, `*block_sparse_moe*`), calibrated with imatrix alone; shared
+  experts, dense layers and attention stay in BF16.
 - **`q8_0`** — GGML-compatible weight-only quantization on eligible linear layers,
   with BF16 activations; `lm_head`, MoE routers, `conv1d` and the vision branch stay
   in BF16. Q8_0 uses 8.5 bits per weight and requires no calibration data. Quantized
