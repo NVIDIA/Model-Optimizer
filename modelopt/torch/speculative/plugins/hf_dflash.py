@@ -423,7 +423,7 @@ class HFDFlashModel(DFlashModel):
                     "contains duplicates; each draft layer needs a distinct capture layer "
                     "(the streaming producer captures each base layer at most once)."
                 )
-            # forward() indexes hidden_states[lid + 1], where a negative id silently wraps.
+            # _target_hidden indexes hidden_states[lid + 1], where a negative id silently wraps.
             if min(user_target_layer_ids) < 0:
                 raise ValueError(
                     f"dflash_architecture_config.target_layer_ids {user_target_layer_ids} "
@@ -749,6 +749,24 @@ class HFDFlashModel(DFlashModel):
         attn_mask.masked_fill_(~keep, torch.finfo(dtype).min)
         return attn_mask
 
+    def _target_hidden(self, hidden_states):
+        """The base hidden states the draft's ``fc`` reads, concatenated: [B, seq, n * H].
+
+        ``hidden_states[0]`` is the embedding output, so layer ``lid``'s output is at ``lid + 1``.
+        """
+        return torch.cat([hidden_states[lid + 1] for lid in self.target_layer_ids], dim=-1)
+
+    def _draft_zero_loss(self, device):
+        """A zero loss that every trainable draft parameter feeds, for a step with nothing to train.
+
+        DDP expects a gradient for each parameter on every rank; a rank returning a constant
+        loss would leave the others waiting on its reduction.
+        """
+        return sum(
+            (p.reshape(-1)[0] * 0.0 for p in self.dflash_module.parameters() if p.requires_grad),
+            torch.zeros((), device=device),
+        )
+
     @torch.no_grad()
     def _teacher_logits(self, base_outputs, label_positions, token_ids=None):
         """The base model's logits for the tokens at ``label_positions`` ([B, ...]) -> [B, ..., vocab].
@@ -1012,9 +1030,7 @@ class HFDFlashModel(DFlashModel):
                     "The base model did not return hidden states required for DFlash training. "
                     "Ensure its top-level multimodal forward supports output_hidden_states=True."
                 )
-            offset = 1
-            selected = [raw_outputs.hidden_states[lid + offset] for lid in self.target_layer_ids]
-            target_hidden = torch.cat(selected, dim=-1)  # [B, seq, num_layers * H]
+            target_hidden = self._target_hidden(raw_outputs.hidden_states)
             base_outputs = DFlashBaseModelOutput(
                 target_hidden=target_hidden, logits=raw_outputs.logits
             )
@@ -1040,17 +1056,10 @@ class HFDFlashModel(DFlashModel):
         n_blocks = anchor_positions.shape[1]
 
         if n_blocks == 0 or not block_keep_mask.any():
-            # Keep all trainable draft parameters in the graph so DDP can reduce a rank
-            # that receives an all-masked answer-only batch.
-            dummy = sum(
-                (
-                    parameter.reshape(-1)[0] * 0.0
-                    for parameter in self.dflash_module.parameters()
-                    if parameter.requires_grad
-                ),
-                torch.zeros((), device=device),
+            # An all-masked answer-only batch: nothing to train, but DDP still reduces.
+            return ModelOutput(
+                loss=self._draft_zero_loss(device), logits=base_outputs.logits, train_acc=[[0.0]]
             )
-            return ModelOutput(loss=dummy, logits=base_outputs.logits, train_acc=[[0.0]])
 
         # 4. Build draft inputs
         noise_embedding = self._build_noise_embedding(

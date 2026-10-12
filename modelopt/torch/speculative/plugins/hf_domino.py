@@ -323,9 +323,7 @@ class HFDominoModel(HFDFlashModel):
                     attention_mask=attention_mask,
                     output_hidden_states=True,
                 )
-            offset = 1
-            selected = [base_out.hidden_states[lid + offset] for lid in self.target_layer_ids]
-            target_hidden = torch.cat(selected, dim=-1)  # [B, seq, num_layers * H]
+            target_hidden = self._target_hidden(base_out.hidden_states)
 
         # 2. Build loss mask (same convention as DFlash).
         if labels is not None:
@@ -344,9 +342,7 @@ class HFDominoModel(HFDFlashModel):
         n_blocks = anchor_positions.shape[1]
 
         if n_blocks == 0 or not block_keep_mask.any():
-            # Zero loss that still flows through all draft params for DDP sync.
-            dummy = sum(p.sum() for p in self.dflash_module.parameters()) * 0.0
-            return ModelOutput(loss=dummy, logits=None, train_acc=[[0.0]])
+            return ModelOutput(loss=self._draft_zero_loss(device), logits=None, train_acc=[[0.0]])
 
         # 4. Build draft inputs (inherited helpers).
         noise_embedding = self._build_noise_embedding(
