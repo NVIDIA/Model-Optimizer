@@ -530,7 +530,7 @@ class DominoExporter(DFlashExporter):
         config["dflash_config"].update(
             {
                 "projector_type": getattr(draft_config, "projector_type", "domino"),
-                "shift_label": getattr(draft_config, "shift_label", True),
+                "shift_label": bool(self.model._label_shift),
                 "pure_draft_prefix_len": getattr(draft_config, "pure_draft_prefix_len", 1),
                 "gru_hidden_dim": gru_hidden_dim,
                 "emb_dim": emb_dim,
@@ -619,7 +619,7 @@ class DSparkExporter(DFlashExporter):
         config["dflash_config"].update(
             {
                 "projector_type": getattr(draft_config, "projector_type", "dspark"),
-                "shift_label": getattr(draft_config, "shift_label", True),
+                "shift_label": bool(self.model._label_shift),
                 "markov_rank": draft_config.markov_rank,
                 "markov_head_type": self.model.dflash_module.markov_head_type,
                 "use_confidence_head": bool(getattr(draft_config, "use_confidence_head", False)),
@@ -634,7 +634,7 @@ class DSparkExporter(DFlashExporter):
                     "mask_token_id": config["dflash_config"]["mask_token_id"],
                     "target_layer_ids": config["dflash_config"]["target_layer_ids"],
                     "markov_rank": config["dflash_config"]["markov_rank"],
-                    "sample_from_anchor": True,
+                    "sample_from_anchor": config["dflash_config"]["shift_label"],
                     "enable_confidence_head": config["dflash_config"]["use_confidence_head"],
                     "confidence_head_with_markov": config["dflash_config"]["use_confidence_head"],
                 }

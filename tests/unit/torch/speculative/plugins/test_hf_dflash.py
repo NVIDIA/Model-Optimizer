@@ -1574,6 +1574,36 @@ def test_a_step_with_nothing_to_train_reaches_every_draft_parameter(head, draft_
     assert all(output.grad is not None for output in outputs)
 
 
+@pytest.mark.parametrize(
+    "head_fields",
+    [
+        {"projector_type": "dspark", "markov_rank": 4},
+        {"projector_type": "domino", "emb_dim": 8, "gru_hidden_dim": 8},
+    ],
+    ids=["dspark", "domino"],
+)
+def test_next_token_variants_refuse_shift_label_false_at_convert(head_fields):
+    """Left unset, as the recipes do, shift_label converts; set to false, it is refused.
+
+    Restore does not refuse it: DSpark used to accept the field, ignore it in training and
+    save it into the checkpoint's modelopt_state.
+    """
+    config = get_dflash_config()
+    config["dflash_architecture_config"].update(head_fields)
+    model = get_tiny_llama(num_hidden_layers=4)
+    mtsp.convert(model, [("dflash", config)])
+
+    state = mto.modelopt_state(model)
+    saved_config = state["modelopt_state_dict"][0][1]["config"]
+    saved_config["dflash_architecture_config"]["shift_label"] = False
+    restored = mto.restore_from_modelopt_state(get_tiny_llama(num_hidden_layers=4), state)
+    assert restored._label_shift == 1
+
+    config["dflash_architecture_config"]["shift_label"] = False
+    with pytest.raises(ValueError, match="only next-token alignment"):
+        mtsp.convert(get_tiny_llama(num_hidden_layers=4), [("dflash", config)])
+
+
 class TestTeacherLogits:
     """The base distribution is projected only at the rows, and vocab entries, asked for.
 
