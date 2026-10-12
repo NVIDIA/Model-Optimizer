@@ -68,7 +68,13 @@ from transformers.trainer_pt_utils import LabelSmoother
 from transformers.utils import ModelOutput
 
 from ..dflash.conversion import DominoDMRegistry
-from .hf_dflash import HFDFlashModel
+from .hf_dflash import (
+    HFDFlashModel,
+    _block_position_weights,
+    _block_targets,
+    _block_tokens,
+    _masked_top1,
+)
 from .modeling_dflash import DFlashBaseModelOutput
 from .modeling_domino import DominoModule
 
@@ -100,6 +106,8 @@ class HFDominoModel(HFDFlashModel):
     Registered in ``DominoDMRegistry`` so that ``convert_to_dflash_model`` can
     route to it when ``dflash_architecture_config.projector_type == "domino"``.
     """
+
+    _label_shift = 1
 
     def _build_draft_module(self, dflash_config):
         """Build the Domino draft module (DFlash backbone + GRU correction head)."""
@@ -151,18 +159,15 @@ class HFDominoModel(HFDFlashModel):
         Returns:
             Corrected logits [B, N*block_size, vocab].
         """
-        bsz, seq_len = input_ids.shape
+        bsz = input_ids.shape[0]
         bs = self.dflash_block_size
-        device = input_ids.device
         suffix_start = self.dflash_module.pure_draft_prefix_len
 
         hidden4d = hidden.reshape(bsz, n_blocks, bs, hidden.size(-1))
         base4d = base_logits.reshape(bsz, n_blocks, bs, -1)
 
         # Teacher-forced previous tokens: the real token at anchor+j for j in [0, bs).
-        prev_offsets = torch.arange(bs, device=device).view(1, 1, -1)
-        prev_idx = (anchor_positions.unsqueeze(-1) + prev_offsets).clamp(max=seq_len - 1)
-        prev_ids = torch.gather(input_ids.unsqueeze(1).expand(-1, n_blocks, -1), 2, prev_idx)
+        prev_ids = _block_tokens(input_ids, anchor_positions, bs, self._label_shift - 1)
 
         block_emb = self._base_model_embeddings(prev_ids)  # [B, N, bs, H]
         gru_in = block_emb.reshape(bsz * n_blocks, bs, block_emb.size(-1))
@@ -187,40 +192,27 @@ class HFDominoModel(HFDFlashModel):
         Uses next-token (shift_label) alignment: position k predicts the token at
         anchor+k+1, and position 0 is *not* excluded (unlike base DFlash).
         """
-        bsz, seq_len = input_ids.shape
-        bs = self.dflash_block_size
-        n_blocks = anchor_positions.shape[1]
-        device = input_ids.device
-
-        # shift_label=True: label for block position k is the token at anchor+k+1.
-        label_offsets = torch.arange(1, 1 + bs, device=device).view(1, 1, -1)
-        label_indices = anchor_positions.unsqueeze(-1) + label_offsets
-        valid_label = label_indices < seq_len
-        safe_label_indices = label_indices.clamp(max=seq_len - 1)
-
-        target_ids = torch.gather(
-            input_ids.unsqueeze(1).expand(-1, n_blocks, -1), 2, safe_label_indices
+        targets = _block_targets(
+            input_ids,
+            anchor_positions,
+            block_keep_mask,
+            loss_mask,
+            self.dflash_block_size,
+            self._label_shift,
         )
-
-        # Weight mask: valid block * in bounds * loss_mask. No pos-0 exclusion.
-        weight_mask = block_keep_mask.unsqueeze(-1).expand(-1, -1, bs).float()
-        weight_mask = weight_mask * valid_label.float()
-        orig_loss_mask = torch.gather(
-            loss_mask.unsqueeze(1).expand(-1, n_blocks, -1), 2, safe_label_indices
+        binary_eval_mask = targets.mask.view(-1)
+        # dflash_loss_objective is not wired for Domino yet: it always decays.
+        weight_mask = _block_position_weights(
+            targets.mask,
+            "decay",
+            1 - self._label_shift,
+            self.dflash_loss_decay_factor,
+            self.dflash_dpace_alpha,
         )
-        weight_mask = weight_mask * orig_loss_mask
-
-        binary_eval_mask = weight_mask.view(-1)
-
-        # Loss decay: exp(-k/gamma) so the first prediction (k=0) gets weight 1.0.
-        if self.dflash_loss_decay_factor > 0:
-            k = torch.arange(bs, device=device).view(1, 1, -1)
-            decay = torch.exp(-k.clamp(min=0).float() / self.dflash_loss_decay_factor)
-            weight_mask = weight_mask * decay
 
         flat_final = final_logits.reshape(-1, final_logits.size(-1))
         flat_base = base_logits.reshape(-1, base_logits.size(-1))
-        flat_targets = target_ids.reshape(-1)
+        flat_targets = targets.token_ids.reshape(-1)
         flat_weights = weight_mask.reshape(-1)
         valid_count = flat_weights.sum() + 1e-6
 
@@ -236,13 +228,8 @@ class HFDominoModel(HFDFlashModel):
             loss = (1.0 - lambda_base) * final_loss + lambda_base * base_loss
 
             with torch.no_grad():
-                eval_count = binary_eval_mask.sum() + 1e-6
-                final_correct = (flat_final.argmax(dim=-1) == flat_targets) & (
-                    binary_eval_mask > 0.5
-                )
-                base_correct = (flat_base.argmax(dim=-1) == flat_targets) & (binary_eval_mask > 0.5)
-                accuracy = (final_correct.sum().float() / eval_count).item()
-                base_accuracy = (base_correct.sum().float() / eval_count).item()
+                accuracy = _masked_top1(flat_final, flat_targets, binary_eval_mask).item()
+                base_accuracy = _masked_top1(flat_base, flat_targets, binary_eval_mask).item()
         else:
             loss = flat_final.sum() * 0.0
             final_loss = loss

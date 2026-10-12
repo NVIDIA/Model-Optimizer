@@ -69,7 +69,13 @@ from transformers.trainer_pt_utils import LabelSmoother
 from transformers.utils import ModelOutput
 
 from ..dflash.conversion import DSparkDMRegistry
-from .hf_dflash import HFDFlashModel
+from .hf_dflash import (
+    HFDFlashModel,
+    _block_position_weights,
+    _block_targets,
+    _block_tokens,
+    _masked_top1,
+)
 from .modeling_dflash import DFlashBaseModelOutput
 from .modeling_dspark import DSparkModule
 
@@ -117,6 +123,8 @@ class HFDSparkModel(HFDFlashModel):
     to it when ``dflash_architecture_config.projector_type == "dspark"``.
     """
 
+    _label_shift = 1
+
     def _build_draft_module(self, dflash_config):
         """Build the DSpark draft module (DFlash backbone + Markov/confidence head)."""
         return DSparkModule(dflash_config)
@@ -158,18 +166,15 @@ class HFDSparkModel(HFDFlashModel):
 
         Returns ``(final_logits [B, N, bs, V], confidence_logits [B, N, bs] | None)``.
         """
-        bsz, seq_len = input_ids.shape
+        bsz = input_ids.shape[0]
         bs = self.dflash_block_size
-        device = input_ids.device
 
         hidden4d = hidden.reshape(bsz, n_blocks, bs, hidden.size(-1))
         base4d = backbone_logits.reshape(bsz, n_blocks, bs, -1)
 
         # Teacher-forced previous token for block position k: the real token at
         # anchor+k (so position 0's predecessor is the anchor itself).
-        prev_offsets = torch.arange(bs, device=device).view(1, 1, -1)
-        prev_idx = (anchor_positions.unsqueeze(-1) + prev_offsets).clamp(max=seq_len - 1)
-        prev_ids = torch.gather(input_ids.unsqueeze(1).expand(-1, n_blocks, -1), 2, prev_idx)
+        prev_ids = _block_tokens(input_ids, anchor_positions, bs, self._label_shift - 1)
 
         bias = self.dflash_module.compute_markov_bias(prev_ids, hidden4d)
         final4d = base4d + bias
@@ -197,41 +202,28 @@ class HFDSparkModel(HFDFlashModel):
         next-token distribution at position anchor+k (= label index - 1), read from
         ``base_outputs``.
         """
-        bsz, seq_len = input_ids.shape
-        bs = self.dflash_block_size
-        n_blocks = anchor_positions.shape[1]
-        device = input_ids.device
         vocab = final_logits.size(-1)
-
-        # shift_label=True: label for block position k is the token at anchor+k+1.
-        label_offsets = torch.arange(1, 1 + bs, device=device).view(1, 1, -1)
-        label_indices = anchor_positions.unsqueeze(-1) + label_offsets
-        valid_label = label_indices < seq_len
-        safe_label_indices = label_indices.clamp(max=seq_len - 1)
-
-        target_ids = torch.gather(
-            input_ids.unsqueeze(1).expand(-1, n_blocks, -1), 2, safe_label_indices
+        targets = _block_targets(
+            input_ids,
+            anchor_positions,
+            block_keep_mask,
+            loss_mask,
+            self.dflash_block_size,
+            self._label_shift,
         )
-
-        # Weight mask: valid block * in bounds * loss_mask (no pos-0 exclusion).
-        weight_mask = block_keep_mask.unsqueeze(-1).expand(-1, -1, bs).float()
-        weight_mask = weight_mask * valid_label.float()
-        orig_loss_mask = torch.gather(
-            loss_mask.unsqueeze(1).expand(-1, n_blocks, -1), 2, safe_label_indices
+        binary_eval_mask = targets.mask.view(-1)
+        # dflash_loss_objective is not wired for DSpark yet: it always decays.
+        weight_mask = _block_position_weights(
+            targets.mask,
+            "decay",
+            1 - self._label_shift,
+            self.dflash_loss_decay_factor,
+            self.dflash_dpace_alpha,
         )
-        weight_mask = weight_mask * orig_loss_mask
-
-        binary_eval_mask = weight_mask.view(-1)
-
-        # Exponential position decay (exp(-k/gamma); position 0 gets weight 1).
-        if self.dflash_loss_decay_factor > 0:
-            k = torch.arange(bs, device=device).view(1, 1, -1)
-            decay = torch.exp(-k.float() / self.dflash_loss_decay_factor)
-            weight_mask = weight_mask * decay
 
         flat_final = final_logits.reshape(-1, vocab)
         flat_base = backbone_logits.reshape(-1, vocab)
-        flat_targets = target_ids.reshape(-1)
+        flat_targets = targets.token_ids.reshape(-1)
         flat_weights = weight_mask.reshape(-1)
         valid_count = flat_weights.sum() + 1e-6
 
@@ -242,7 +234,7 @@ class HFDSparkModel(HFDFlashModel):
             return loss, 0.0, metrics
 
         # Aligned target distribution: the base model's own prediction of each label.
-        flat_teacher = self._teacher_logits(base_outputs, safe_label_indices).reshape(-1, vocab)
+        flat_teacher = self._teacher_logits(base_outputs, targets.positions).reshape(-1, vocab)
 
         # Term 1: cross-entropy on the corrected (final) logits.
         ce_per_token = F.cross_entropy(flat_final, flat_targets, reduction="none")
@@ -273,12 +265,8 @@ class HFDSparkModel(HFDFlashModel):
         )
 
         with torch.no_grad():
-            eval_count = binary_eval_mask.sum() + 1e-6
-            keep = binary_eval_mask > 0.5
-            acc = ((flat_final.argmax(dim=-1) == flat_targets) & keep).sum().float() / eval_count
-            base_acc = (
-                (flat_base.argmax(dim=-1) == flat_targets) & keep
-            ).sum().float() / eval_count
+            acc = _masked_top1(flat_final, flat_targets, binary_eval_mask)
+            base_acc = _masked_top1(flat_base, flat_targets, binary_eval_mask)
             # One device sync for all five scalars instead of one per .item().
             acc_v, base_acc_v, ce_v, l1_v, conf_v = torch.stack(
                 [acc, base_acc, ce_loss.detach(), l1_loss.detach(), confidence_loss.detach()]
