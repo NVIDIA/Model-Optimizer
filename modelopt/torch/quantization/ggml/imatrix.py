@@ -18,7 +18,7 @@
 import torch
 
 from ..utils.calib_utils import ImatrixEncoder, register_imatrix_encoder
-from .common import floored_second_moments, pin_packed_weight, pinned_packed_weight
+from .common import floored_second_moments, pin_packed_weight, pinned_packed_weight, validate_weight
 from .registry import GGML_FORMAT_REGISTRY
 
 __all__ = ["GGMLImatrixEncoder"]
@@ -45,6 +45,11 @@ class GGMLImatrixEncoder(ImatrixEncoder):
             and ggml_format.weighted
             and pinned_packed_weight(quantizer, num_bits) is None
         )
+
+    def validate(self, weight, quantizer):
+        """Refuse a weight the format cannot encode, such as one whose width is not a block multiple."""
+        ggml_format = GGML_FORMAT_REGISTRY[quantizer.num_bits]
+        validate_weight(weight, ggml_format.name.upper(), block_size=ggml_format.block_size)
 
     def encode(self, weight, quantizer, second_moments):
         """Encode ``weight`` once, weighted by ``second_moments``, and pin the payload."""

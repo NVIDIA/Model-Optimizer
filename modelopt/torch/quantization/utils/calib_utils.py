@@ -340,6 +340,9 @@ class ImatrixEncoder:
         """Whether this encoder handles ``quantizer``; decided before calibration runs."""
         raise NotImplementedError
 
+    def validate(self, weight: torch.Tensor, quantizer) -> None:
+        """Raise if :meth:`encode` would refuse ``weight``; checked before calibration runs."""
+
     def encode(
         self, weight: torch.Tensor, quantizer, second_moments: torch.Tensor | None
     ) -> torch.Tensor:

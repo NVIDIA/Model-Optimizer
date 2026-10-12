@@ -26,6 +26,7 @@ from torch import nn
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
+from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.nn import QuantModuleRegistry
@@ -81,7 +82,7 @@ def _decoded(quantizer, shape):
 
 def test_imatrix_weights_the_search_by_the_root_of_the_inputs_second_moments(monkeypatch):
     calls = _record_importance(monkeypatch)
-    inputs = _inputs()
+    inputs = _inputs(rows=2500)  # more rows than the hook squares at a time
     mtq.quantize(nn.Linear(512, 8, bias=False), _config(IMATRIX), forward_loop=lambda m: m(inputs))
 
     torch.testing.assert_close(calls[-1], _importance(inputs.square().mean(dim=0)))
@@ -119,6 +120,30 @@ def test_imatrix_leaves_codes_gptq_chose():
         pinned_packed_weight(gptq_only.weight_quantizer, "iq2_xxs"),
     )
     assert torch.equal(both.weight, gptq_only.weight)
+
+
+def test_imatrix_refuses_a_width_it_cannot_encode_before_calibrating():
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(512, 640, bias=False), nn.Linear(640, 8, bias=False))
+    original = copy.deepcopy(model)
+    forwards = []
+
+    with pytest.raises(
+        ValueError, match=r"imatrix cannot encode a weight of 1: .*divisible by 256"
+    ):
+        mtq.quantize(model, _config(IMATRIX), forward_loop=forwards.append)
+
+    assert not forwards
+    for module, before in zip(model, original):
+        assert torch.equal(module.weight, before.weight)
+
+
+def test_imatrix_warns_that_ranks_are_not_synced(monkeypatch):
+    monkeypatch.setattr(model_calib, "dist_is_initialized", lambda: True)
+    monkeypatch.setattr(model_calib, "dist_size", lambda: 2)
+    inputs = _inputs()
+    with pytest.warns(UserWarning, match="not synced across ranks"):
+        mtq.quantize(nn.Linear(512, 8, bias=False), _config(IMATRIX), lambda m: m(inputs))
 
 
 def test_a_module_calibration_never_reached_gets_the_plain_search():

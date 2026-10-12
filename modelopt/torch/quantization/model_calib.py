@@ -2364,6 +2364,11 @@ def gptq(
     print_rank_0(f"GPTQ time: {time.time() - total_start:.2f}s")
 
 
+# Calibration rows squared at a time, bounding imatrix's float32 temporaries to this slice of an
+# input rather than twice the whole of it.
+_IMATRIX_ROW_CHUNK = 1024
+
+
 @torch.no_grad()
 def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None):
     """Encode weights once with their inputs' per-column second moments, llama.cpp's imatrix.
@@ -2392,26 +2397,43 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
 
     targets: dict[int, list] = {}  # id(weight quantizer) -> [sum of x^2 per column, token count]
     target_modules = []
-    for module in names.name_to_module.values():
+    for name, module in names.name_to_module.items():
         if not isinstance(module, QuantModule):
             continue
         accepted = [q for q in module.iter_weight_quantizers_for_calibration() if _accepted(q)]
         if accepted:
-            target_modules.append(module)
+            target_modules.append((name, module))
             targets.update((id(q), [None, 0]) for q in accepted)
     if not targets:
         print_rank_0("imatrix: no weight quantizer has an imatrix encoder, skipping")
         return
+
+    # Refuse a weight the encoder cannot take before the forward and before any weight changes;
+    # otherwise it would fail only after calibration, with the earlier weights already encoded.
+    for name, module in target_modules:
+        for weight, quantizer in module.iter_weights_for_calibration():
+            if id(quantizer) in targets:
+                try:
+                    _IMATRIX_ENCODER_REGISTRY[quantizer.backend].validate(weight, quantizer)
+                except (ValueError, TypeError) as e:
+                    raise type(e)(f"imatrix cannot encode a weight of {name}: {e}") from e
+
+    # TODO: sum the statistics across data-parallel ranks, as max_calibrate syncs amax.
+    if dist_is_initialized() and dist_size() > 1:
+        warn_rank_0(
+            "imatrix: statistics are not synced across ranks, so ranks that calibrate on "
+            "different data may encode different codes. Treat imatrix as single-rank for now."
+        )
 
     def capture(quantizer, _weight, inputs):
         entry = targets.get(id(quantizer))
         if entry is None:
             return
         inputs = inputs.to_local() if hasattr(inputs, "to_local") else inputs
-        x = inputs.detach().reshape(-1, inputs.shape[-1]).float()
+        x = inputs.detach().reshape(-1, inputs.shape[-1])
         if x.shape[0] == 0:
             return
-        sum_sq = x.square().sum(dim=0)
+        sum_sq = sum(rows.float().square().sum(dim=0) for rows in x.split(_IMATRIX_ROW_CHUNK))
         entry[0] = sum_sq if entry[0] is None else entry[0] + sum_sq
         entry[1] += x.shape[0]
 
@@ -2426,7 +2448,7 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
             handle.remove()
 
     encoded = 0
-    for module in target_modules:
+    for _, module in target_modules:
         with enable_weight_access_and_writeback(module, model, names):
             for weight, quantizer in module.iter_weights_for_calibration():
                 entry = targets.get(id(quantizer))
