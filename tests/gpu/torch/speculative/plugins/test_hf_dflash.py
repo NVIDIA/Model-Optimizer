@@ -22,6 +22,7 @@ import pytest
 import torch
 from _test_utils.torch.speculative.dflash import get_dflash_config
 from _test_utils.torch.transformers_models import get_tiny_llama
+from accelerate import dispatch_model
 
 import modelopt.torch.speculative as mtsp
 
@@ -290,6 +291,44 @@ class TestShardedBaseGeneration:
 
         # validate_online cats both onto the running sequence, so both must come back on
         # the caller's device rather than wherever the draft happened to run.
+        assert base_token.device == input_ids.device
+        assert draft_tokens.device == input_ids.device
+        assert draft_tokens.shape == (1, 2)
+
+
+class TestLmHeadOffTheDraftDevice:
+    """``device_map="auto"`` keeps a tied ``lm_head`` with ``embed_tokens`` on the first GPU.
+
+    The draft can land on another GPU, so a decode that adds the draft's own outputs to the
+    backbone logits must bring those logits to the draft first.
+    """
+
+    @pytest.mark.parametrize(
+        "head_fields",
+        [{}, {"projector_type": "dspark", "markov_rank": 4}],
+        ids=["dflash", "dspark"],
+    )
+    def test_generate(self, head_fields):
+        config = get_dflash_config()
+        config["dflash_architecture_config"].update(head_fields)
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", config)])
+        device_map = {
+            "model.embed_tokens": "cpu",
+            "lm_head": "cpu",
+            "model.layers": 0,
+            "model.norm": 0,
+            "model.rotary_emb": 0,
+            "dflash_module": 0,
+        }
+        # main_device="cpu" runs the "cpu" entries there rather than offloading them to the
+        # GPU, so the CPU stands in for the first GPU.
+        dispatch_model(model.eval(), device_map, main_device="cpu")
+
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        with torch.no_grad():
+            base_token, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=2)
+
         assert base_token.device == input_ids.device
         assert draft_tokens.device == input_ids.device
         assert draft_tokens.shape == (1, 2)
