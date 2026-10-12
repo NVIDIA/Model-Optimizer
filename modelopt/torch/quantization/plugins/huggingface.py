@@ -892,6 +892,21 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         """
         return bool(getattr(self, "is_transposed", False))
 
+    def _local_experts(self, weight: torch.Tensor) -> torch.Tensor:
+        """``weight`` indexed the way the per-expert quantizers are: by this module's own experts.
+
+        Under expert parallelism transformers keeps a fused expert weight as a DTensor sharded over
+        the experts and sets ``num_experts`` to the local count, so indexing the DTensor would read
+        the GLOBAL expert: from rank 1 on, another rank's. Its local shard holds this rank's experts in
+        quantizer order. A DTensor holding every expert (FSDP2) is indexed as it is.
+        """
+        if (
+            isinstance(weight, torch.distributed.tensor.DTensor)
+            and weight.shape[0] != self.num_experts
+        ):
+            return weight.to_local()
+        return weight
+
     def _quantize_grouped_weight(self, weight: torch.Tensor, quantizers: nn.ModuleList):
         """Fake-quantize a fused 3-D weight per expert.
 
@@ -907,6 +922,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         """
         if all(not q.is_enabled for q in quantizers):
             return weight
+        weight = self._local_experts(weight)
         if self._is_transposed_experts:
             return torch.stack(
                 [
@@ -1012,6 +1028,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             quantizers = getattr(self, quantizers_name, None)
             if weight is None or quantizers is None:
                 continue
+            weight = self._local_experts(weight)
             for idx, q in enumerate(quantizers):
                 # Calibrate the same (transposed) view the forward quantizes, so block NVFP4 locks
                 # _original_shape / _amax with the contraction dim last (and the export reads it that way).
@@ -1057,7 +1074,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             for idx, q in enumerate(quantizers):
                 if not (isinstance(q, TensorQuantizer) and q.fake_quant):
                     continue
-                slice_ = weight.data[idx]
+                slice_ = self._local_experts(weight.data)[idx]
                 # Fold in the same (transposed) orientation the weight was calibrated/quantized in.
                 folded = (
                     _transposed_quantize(slice_.float(), q) if transposed else q(slice_.float())

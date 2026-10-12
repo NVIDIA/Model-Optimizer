@@ -2720,3 +2720,165 @@ class TestFusedExpertsInterceptionCheck:
                 mtq.quantize(model, _INT8_EXPERTS_CFG, lambda m: m(torch.randn(2, 4, HIDDEN_DIM)))
         finally:
             TestFusedExpertsCalibration._cleanup_registry(_BypassingExperts)
+
+
+# ---------------------------------------------------------------------------
+# Fused experts under expert parallelism
+# ---------------------------------------------------------------------------
+_EP_EXPERTS, _EP_HIDDEN, _EP_TOKENS = 4, 8, 6
+
+
+class _ExpertsHolder(nn.Module):
+    def __init__(self, experts):
+        super().__init__()
+        self.experts = experts
+
+    def forward(self, *args):
+        return self.experts(*args)
+
+
+_WEIGHT_ONLY_INT8_EXPERTS_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*proj_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+    ],
+    "algorithm": "max",
+}
+
+
+def _ep_sharded_experts_use_their_own_weights_job(rank, size):
+    """Experts sharded the way transformers' expert parallelism shards them (``MoEParamShard``: a
+    DTensor ``Shard(0)`` over the experts, ``num_experts`` set to the local count): each rank's
+    per-expert quantizers must calibrate on, and fold into, the rank's own experts, as in the whole
+    module -- not on the global experts their local index names."""
+    import torch.distributed as dist
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.tensor import Shard, distribute_tensor
+    from transformers import Qwen3MoeConfig
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
+
+    config = Qwen3MoeConfig(
+        hidden_size=_EP_HIDDEN,
+        moe_intermediate_size=2 * _EP_HIDDEN,
+        intermediate_size=4 * _EP_HIDDEN,
+        num_experts=_EP_EXPERTS,
+        num_experts_per_tok=TOP_K,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+    )
+    whole = _ExpertsHolder(Qwen3MoeExperts(config))
+    with torch.no_grad():
+        for e in range(_EP_EXPERTS):  # a distinct scale per expert, so a mix-up cannot pass
+            whole.experts.gate_up_proj[e].normal_(std=0.1 * (e + 1))
+            whole.experts.down_proj[e].normal_(std=0.1 * (e + 1))
+    sharded = _ExpertsHolder(Qwen3MoeExperts(config))
+    n_local = _EP_EXPERTS // size
+    owned = slice(rank * n_local, (rank + 1) * n_local)
+    mesh = init_device_mesh("cpu", (size,))
+    sharded.experts.num_experts = n_local
+    for name in ("gate_up_proj", "down_proj"):
+        full = getattr(whole.experts, name).detach().clone()
+        sharded.experts._parameters[name] = nn.Parameter(distribute_tensor(full, mesh, [Shard(0)]))
+
+    mtq.quantize(whole, _WEIGHT_ONLY_INT8_EXPERTS_CFG)
+    mtq.quantize(sharded, _WEIGHT_ONLY_INT8_EXPERTS_CFG)
+    for name in ("gate_up_proj_weight_quantizers", "down_proj_weight_quantizers"):
+        local_quantizers = getattr(sharded.experts, name)
+        assert len(local_quantizers) == n_local
+        for i, quantizer in enumerate(local_quantizers):
+            reference = getattr(whole.experts, name)[owned.start + i]
+            torch.testing.assert_close(
+                quantizer.amax, reference.amax, atol=0, rtol=0, msg=f"{name}[{i}]"
+            )
+
+    whole.experts.fold_weight()
+    sharded.experts.fold_weight()
+    for name in ("gate_up_proj", "down_proj"):
+        torch.testing.assert_close(
+            getattr(sharded.experts, name).to_local(),
+            getattr(whole.experts, name)[owned],
+            atol=0,
+            rtol=0,
+        )
+    dist.destroy_process_group()
+
+
+def test_ep_sharded_experts_calibrate_and_fold_their_own_weights(skip_on_windows):
+    """Weight calibration and folding run outside the forward, where expert-parallel weights are still
+    DTensors sharded over the experts: each rank must use its own experts, not the global ones."""
+    from _test_utils.torch.distributed.utils import spawn_multiprocess_job
+
+    spawn_multiprocess_job(2, _ep_sharded_experts_use_their_own_weights_job, backend="gloo")
+
+
+def _fsdp_wrapped_ep_experts_calibrate_their_own_weights_job(rank, size):
+    """The dense-sharded expert-parallel layout: the decoder layer FSDP2-sharded over ``dp`` with its
+    experts left out (``ignored_params``) and EP-sharded over ``ep``. Weight calibration opens FSDP2's
+    weight-access window on the layer, which must leave the expert DTensors alone -- gathering them
+    would hand every rank every expert, indexed by local position."""
+    import torch.distributed as dist
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.fsdp import fully_shard
+    from torch.distributed.tensor import Shard, distribute_tensor
+    from transformers import Qwen3MoeConfig
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
+
+    config = Qwen3MoeConfig(
+        hidden_size=_EP_HIDDEN,
+        moe_intermediate_size=2 * _EP_HIDDEN,
+        intermediate_size=4 * _EP_HIDDEN,
+        num_experts=_EP_EXPERTS,
+        num_experts_per_tok=TOP_K,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+    )
+    whole = _ExpertsHolder(Qwen3MoeExperts(config))
+    with torch.no_grad():
+        for e in range(_EP_EXPERTS):
+            whole.experts.gate_up_proj[e].normal_(std=0.1 * (e + 1))
+            whole.experts.down_proj[e].normal_(std=0.1 * (e + 1))
+
+    class _Layer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dense = nn.Linear(_EP_HIDDEN, _EP_HIDDEN)
+            self.experts = Qwen3MoeExperts(config)
+
+    layer = _Layer()
+    n_local = _EP_EXPERTS // size
+    owned = slice(rank * n_local, (rank + 1) * n_local)
+    ep_mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("ep",))
+    layer.experts.num_experts = n_local
+    for name in ("gate_up_proj", "down_proj"):
+        full = getattr(whole.experts, name).detach().clone()
+        layer.experts._parameters[name] = nn.Parameter(distribute_tensor(full, ep_mesh, [Shard(0)]))
+    dp_mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("dp",))
+    fully_shard(layer, mesh=dp_mesh, ignored_params=set(layer.experts.parameters()))
+    root = nn.Module()
+    root.layer = layer
+
+    mtq.quantize(whole, _WEIGHT_ONLY_INT8_EXPERTS_CFG)
+    mtq.quantize(root, _WEIGHT_ONLY_INT8_EXPERTS_CFG)
+    for name in ("gate_up_proj_weight_quantizers", "down_proj_weight_quantizers"):
+        for i, quantizer in enumerate(getattr(layer.experts, name)):
+            reference = getattr(whole.experts, name)[owned.start + i]
+            torch.testing.assert_close(
+                quantizer.amax, reference.amax, atol=0, rtol=0, msg=f"{name}[{i}]"
+            )
+    # The expert weights stay sharded: nothing gathered them for good.
+    assert layer.experts.gate_up_proj.to_local().shape[0] == n_local
+    dist.destroy_process_group()
+
+
+def test_fsdp_wrapped_ep_experts_calibrate_their_own_weights(skip_on_windows):
+    """With the dense part FSDP2-sharded, the experts' weight calibration runs inside FSDP2's weight
+    access window, which must not gather the expert-parallel weights FSDP2 does not own."""
+    from _test_utils.torch.distributed.utils import spawn_multiprocess_job
+
+    spawn_multiprocess_job(
+        2, _fsdp_wrapped_ep_experts_calibrate_their_own_weights_job, backend="gloo"
+    )
