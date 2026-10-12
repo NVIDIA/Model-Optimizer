@@ -77,7 +77,6 @@ from pathlib import Path
 from typing import NamedTuple
 
 import torch
-import torch.nn.functional as F
 from transformers import PreTrainedModel
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config as _Qwen3Config
 from transformers.trainer_pt_utils import LabelSmoother
@@ -86,6 +85,14 @@ from transformers.utils import ModelOutput
 from ..dflash.conversion import DFlashDMRegistry
 from ..dflash.dflash_model import DFlashModel
 from .dflash_flex_attention import build_draft_block_mask
+from .dflash_losses import (
+    DraftLogits,
+    LossContext,
+    LossOutput,
+    _block_targets,
+    _first_predicted_position,
+    _masked_top1,
+)
 from .modeling_dflash import (  # noqa: F401
     DFlashAttention,
     DFlashBaseModelOutput,
@@ -134,89 +141,6 @@ def _gather_rows(x, positions):
     return torch.gather(x, 1, idx).reshape(*positions.shape, x.size(-1))
 
 
-def _block_positions(anchor_positions, block_size, offset, seq_len):
-    """Index ``anchor + offset + k`` of each block position ``k``, clamped onto the sequence.
-
-    Returns ``(positions [B, N, bs], inside)``; ``inside`` is False past the sequence end.
-    """
-    k = torch.arange(block_size, device=anchor_positions.device).view(1, 1, -1)
-    unclamped = anchor_positions.unsqueeze(-1) + k + offset
-    return unclamped.clamp(min=0, max=seq_len - 1), unclamped < seq_len
-
-
-def _block_gather(x, positions):
-    """``x[b, positions[b, n, k]]`` for ``x`` [B, seq] and ``positions`` [B, N, bs]."""
-    return torch.gather(x.unsqueeze(1).expand(-1, positions.shape[1], -1), 2, positions)
-
-
-def _block_tokens(input_ids, anchor_positions, block_size, offset):
-    """The token at ``anchor + offset + k`` for each block position ``k``: [B, N, bs]."""
-    positions, _ = _block_positions(anchor_positions, block_size, offset, input_ids.shape[1])
-    return _block_gather(input_ids, positions)
-
-
-class _BlockTargets(NamedTuple):
-    """What each block position is trained on: the token at ``anchor + k + label_shift``."""
-
-    token_ids: torch.Tensor  # [B, N, bs]
-    positions: torch.Tensor  # [B, N, bs] their sequence indices, clamped onto the sequence
-    mask: torch.Tensor  # [B, N, bs] 1.0 where the position is supervised
-
-
-def _first_predicted_position(shift):
-    """The first block position whose label comes after the anchor, for a label shift."""
-    return max(0, 1 - shift)
-
-
-def _block_targets(input_ids, anchor_positions, block_keep_mask, loss_mask, block_size, shift):
-    """Labels of every block position and where they are supervised.
-
-    A position is supervised when its block is kept and its label lies inside the sequence
-    and the loss mask, and is not the anchor itself, which the draft is given as input.
-    """
-    positions, inside = _block_positions(anchor_positions, block_size, shift, input_ids.shape[1])
-    k = torch.arange(block_size, device=input_ids.device).view(1, 1, -1)
-    mask = block_keep_mask.unsqueeze(-1).expand(-1, -1, block_size).float()
-    mask = mask * inside.float()
-    mask = mask * (k >= _first_predicted_position(shift)).float()
-    mask = mask * _block_gather(loss_mask, positions)
-    return _BlockTargets(_block_gather(input_ids, positions), positions, mask)
-
-
-def _block_position_weights(mask, scheme, first, *, decay_factor, dpace_alpha, target_ce=None):
-    """``mask`` weighted per block position, by D-PACE or by exponential decay.
-
-    ``first`` is the first predicted block position. ``target_ce`` returns the draft's
-    cross-entropy on its labels ([B, N, bs]); only D-PACE calls it. The two floats are
-    keyword-only because swapping them would still give a plausible weight curve.
-    """
-    block_size = mask.shape[-1]
-    if scheme == "dpace" and block_size > 1:
-        if target_ce is None:
-            raise ValueError(
-                "D-PACE weighs each block position by the draft's confidence on its label, "
-                "so it needs target_ce."
-            )
-        with torch.no_grad():
-            # Draft confidence q_i = exp(-CE) on the label; detached, as in the paper (Eq. 9).
-            confidences = torch.exp(-target_ce()[..., first:].float())
-            dpace = torch.ones_like(mask)
-            dpace[..., first:] = _dpace_position_weights(
-                confidences, dpace_alpha, valid_mask=mask[..., first:]
-            )
-        return mask * dpace
-    if decay_factor > 0:
-        k = torch.arange(block_size, device=mask.device).view(1, 1, -1)
-        return mask * torch.exp(-(k - first).clamp(min=0).float() / decay_factor)
-    return mask
-
-
-def _masked_top1(logits, target_ids, mask):
-    """Top-1 accuracy of ``logits`` against ``target_ids`` where ``mask`` is set (0-dim)."""
-    correct = (logits.argmax(dim=-1) == target_ids) & (mask > 0.5)
-    return correct.sum().float() / (mask.sum() + 1e-6)
-
-
 def _draft_mask_mod(seq_len, anchor_positions, block_keep_mask, block_size, window, causal):
     """The draft's attention visibility rule, as a FlexAttention ``mask_mod``.
 
@@ -257,129 +181,6 @@ def _dense_additive_mask(mask_mod, bsz, q_len, kv_len, dtype, device):
     attn_mask = torch.zeros(bsz, 1, q_len, kv_len, device=device, dtype=dtype)
     attn_mask.masked_fill_(~visible, torch.finfo(dtype).min)
     return attn_mask
-
-
-def _dpace_position_weights(
-    confidences: torch.Tensor, alpha: float, valid_mask: torch.Tensor | None = None
-) -> torch.Tensor:
-    """Compute detached D-PACE per-position weights from draft confidences.
-
-    Derived from D-PACE (arXiv:2605.18810). The paper factorizes the per-position
-    weight (Fig. 2 / Eq. 8) into a *cumulative confidence* times a *continuation
-    value*, which is equivalently the suffix sum of the cumulative confidences::
-
-        C_j = prod_{i<=j} q~_i                 # cumulative confidence (Eq. 8)
-        w_j = sum_{m>=j} C_m                    # = C_j * continuation value f~_j
-
-    Each confidence is asymmetrically smoothed toward 1 (Eq. 7)::
-
-        q~_i = (1 - alpha) * q_i + alpha,   alpha in (0, 1],
-
-    so the floor ``q~_i >= alpha`` keeps every cumulative product (hence every
-    weight) strictly positive. We evaluate the suffix sum from its definition as
-    ``total - exclusive_prefix_sum`` of ``C`` rather than reversing the tensor.
-    Positions with ``valid_mask == 0`` are multiplicative no-ops in ``C`` and
-    contribute nothing to the sum, matching the per-token loss mask. Weights are
-    detached (Eq. 9): they reweight the cross-entropy without adding gradient.
-
-    Args:
-        confidences: ``[..., L]`` draft confidence ``q_i = exp(-CE_i)`` per position.
-        alpha: smoothing factor in (0, 1]; raises if outside that range.
-        valid_mask: optional ``[..., L]`` 0/1 mask; ``None`` treats all positions valid.
-
-    Returns:
-        Detached weights with the same shape and dtype as ``confidences``.
-    """
-    if not 0.0 < alpha <= 1.0:
-        raise ValueError(f"dflash_dpace_alpha must be in (0, 1], got {alpha}")
-
-    with torch.no_grad():
-        smoothed = alpha + (1.0 - alpha) * confidences.float()  # Eq. 7
-        if valid_mask is not None:
-            keep = valid_mask.to(torch.bool)
-            smoothed = torch.where(keep, smoothed, torch.ones_like(smoothed))
-        cum_conf = torch.cumprod(smoothed, dim=-1)  # Eq. 8 cumulative confidence C_j
-        if valid_mask is not None:
-            cum_conf = cum_conf * keep.to(cum_conf.dtype)
-        # Suffix sum w_j = sum_{m>=j} C_m, written as total minus the exclusive
-        # prefix sum so no axis reversal is needed (Eq. 8).
-        inclusive = torch.cumsum(cum_conf, dim=-1)
-        weights = inclusive[..., -1:] - inclusive + cum_conf
-        return weights.to(dtype=confidences.dtype)
-
-
-class DraftLogits(NamedTuple):
-    """The draft's logits per block position: [B, N, bs, V]."""
-
-    final: torch.Tensor  # the distribution the draft serves
-    backbone: torch.Tensor  # before any head; ``final`` itself for a head-less variant
-
-
-class LossOutput(NamedTuple):
-    """A training step's loss, the accuracy ``train_acc`` reports, and its metrics."""
-
-    loss: torch.Tensor
-    accuracy: float
-    metrics: dict  # name -> detached 0-dim tensor
-
-
-class LossContext:
-    """One training step's supervision; costly per-token quantities are computed lazily, once.
-
-    ``weights`` are the per-position weights after decay or D-PACE, which reads the draft's
-    confidence off ``ce("final")``. ``ce`` keeps its gradient only when ``ce_grad`` says the
-    objective backpropagates through it; otherwise it runs under ``no_grad``.
-    """
-
-    def __init__(self, batch, logits, targets, *, weighting, teacher, ce_grad):
-        """Weigh the step's block positions.
-
-        Args:
-            batch: The forward's ``DraftBatch``.
-            logits: The draft's ``DraftLogits``.
-            targets: The labels and their mask, from ``_block_targets``.
-            weighting: ``_block_position_weights``' scheme, first, decay_factor and dpace_alpha.
-            teacher: Returns the base model's logits for every label position.
-            ce_grad: Whether the objective backpropagates through ``ce``.
-        """
-        self.batch = batch
-        self.logits = logits
-        self.targets = targets
-        self._teacher_fn = teacher
-        self._ce_grad = ce_grad and torch.is_grad_enabled()
-        self._ce = {}
-        self._teacher = None
-        self.weights = _block_position_weights(
-            targets.mask,
-            **weighting,
-            target_ce=lambda: self.ce("final").detach().view(targets.mask.shape),
-        )
-        self.weight_sum = self.weights.sum() + 1e-6
-
-    @functools.cached_property
-    def trainable(self) -> bool:
-        """Whether the weights leave anything to train on (reads the device once)."""
-        return bool(self.weight_sum > 1.0)
-
-    def flat_logits(self, source):
-        """``logits.<source>`` as [B * N * bs, V]."""
-        logits = getattr(self.logits, source)
-        return logits.reshape(-1, logits.shape[-1])
-
-    def ce(self, source):
-        """Per-token cross-entropy of ``logits.<source>`` on the labels: [B * N * bs]."""
-        if source not in self._ce:
-            with torch.set_grad_enabled(self._ce_grad):
-                self._ce[source] = F.cross_entropy(
-                    self.flat_logits(source), self.targets.token_ids.view(-1), reduction="none"
-                )
-        return self._ce[source]
-
-    def teacher(self):
-        """The base model's logits for every label position: [B, N, bs, V]."""
-        if self._teacher is None:
-            self._teacher = self._teacher_fn()
-        return self._teacher
 
 
 class DraftBatch(NamedTuple):

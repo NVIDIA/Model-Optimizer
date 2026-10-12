@@ -41,7 +41,8 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ..dflash.conversion import DFlash2DMRegistry
-from .hf_dflash import HFDFlashModel, LossOutput, _block_tokens
+from .dflash_losses import LossOutput, _block_tokens
+from .hf_dflash import HFDFlashModel
 from .modeling_dflash2 import DFlash2Module
 
 __all__ = ["HFDFlash2Model"]

@@ -77,7 +77,8 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ..dflash.conversion import LiLiCorrDMRegistry
-from .hf_dflash import HFDFlashModel, LossOutput, _block_positions
+from .dflash_losses import LossOutput, _block_positions
+from .hf_dflash import HFDFlashModel
 from .modeling_lilicorr import LiLiCorrModule
 
 logger = logging.getLogger(__name__)

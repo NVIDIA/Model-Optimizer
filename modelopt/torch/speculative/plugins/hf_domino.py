@@ -68,14 +68,14 @@ from transformers.trainer_pt_utils import LabelSmoother
 from transformers.utils import ModelOutput
 
 from ..dflash.conversion import DominoDMRegistry
-from .hf_dflash import (
-    HFDFlashModel,
+from .dflash_losses import (
     _block_position_weights,
     _block_targets,
     _block_tokens,
     _first_predicted_position,
     _masked_top1,
 )
+from .hf_dflash import HFDFlashModel
 from .modeling_dflash import DFlashBaseModelOutput
 from .modeling_domino import DominoModule
 
