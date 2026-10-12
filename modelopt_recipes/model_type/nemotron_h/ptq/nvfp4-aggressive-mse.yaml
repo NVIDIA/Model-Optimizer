@@ -135,8 +135,9 @@ quantize:
     - quantizer_name: '*mtp_model_layer.layers.1.mlp.shared_experts.*input_quantizer'
       cfg:
         $import: nvfp4
-    # Restated so this rule cannot inherit the backbone setting above. Megatron-Core MTP block 0
-    # (mtp.layers.0.mtp_model_layer.layers.0) falls under the same glob.
+    # Restated so this rule cannot inherit the backbone setting above. It also matches the
+    # Megatron-Core MTP attention (mtp.layers.0.mtp_model_layer.layers.0...), so it needs no
+    # separate Megatron-Core rule.
     - quantizer_name: '*mtp.layers.0.*[kv]_bmm_quantizer'
       cfg:
         $import: fp8
