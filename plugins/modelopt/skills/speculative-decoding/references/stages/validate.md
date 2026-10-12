@@ -63,12 +63,10 @@ produces an in-pipeline metric**, so what you check depends on the sheet:
   metric, and no launcher example sets one. A green benchmark task therefore says the
   run finished, not that the metric passed. Reporting PASS without having read the
   number off the log is a false PASS on the run's headline metric.
-- **Sheet defines no inference metric** (currently Domino and DSpark — their eval path
-  runs the DFlash backbone with the new head bypassed, and Domino ships no benchmark
-  task at all) — do **not** go looking for a benchmark log. Report the training
-  regression gate instead, and state plainly that acceptance quality requires a
-  separate evaluation of the exported checkpoint. Never report a backbone-only
-  acceptance rate as the model's result.
+- **Sheet defines no inference metric** (currently Domino and the DSpark training
+  examples, which ship no benchmark task) — do **not** go looking for a benchmark log.
+  Report the training regression gate instead, and state plainly that acceptance
+  quality requires a separate evaluation of the exported checkpoint.
 
 Where the gate is the training regression check (`check_regression.py` against
 `trainer_state.json`), confirm the `=== Regression Check ===` block is actually

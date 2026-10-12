@@ -305,8 +305,12 @@ class TestLmHeadOffTheDraftDevice:
 
     @pytest.mark.parametrize(
         "head_fields",
-        [{}, {"projector_type": "dspark", "markov_rank": 4}],
-        ids=["dflash", "dspark"],
+        [
+            {},
+            {"projector_type": "dspark", "markov_rank": 4},
+            {"projector_type": "domino", "emb_dim": 8, "gru_hidden_dim": 8},
+        ],
+        ids=["dflash", "dspark", "domino"],
     )
     def test_generate(self, head_fields):
         config = get_dflash_config()

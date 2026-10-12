@@ -1224,36 +1224,42 @@ class HFDFlashModel(DFlashModel):
            The draft model's KV injection concatenates projected target_hidden as K/V
            with the block's own K/V, enabling the draft to "see" the target's context.
 
-        6. **Decode**: Apply ``lm_head`` to draft hidden states at positions 1..block_size-1
-           (skip position 0 which is the known anchor). Argmax gives draft tokens.
+        6. **Decode**: Apply ``lm_head`` to draft hidden states from position
+           ``1 - _label_shift`` on, the first one that predicts a token after the anchor
+           (position 1 for DFlash, whose position 0 is the known anchor). Argmax gives draft
+           tokens.
 
         7. **Return**: ``(base_token, draft_tokens[:steps])`` — base token is always
-           returned; draft tokens are truncated to ``steps`` (default: block_size-1).
+           returned; draft tokens are truncated to ``steps``.
 
         Note:
             This method re-runs the full target model from scratch on each call
             (no KV cache). For AR validation, it is called repeatedly with growing
             ``input_ids`` by ``AcceptanceRateValidation.validate()``. The ``steps``
-            parameter should be set to ``block_size - 1`` for full block evaluation.
+            parameter should be set to ``block_size - 1 + _label_shift`` for full block
+            evaluation.
 
         Args:
             input_ids: Input token IDs [B, seq_len].
-            steps: Number of draft tokens to return (capped at block_size-1).
+            steps: Number of draft tokens to return (capped at block_size - 1 + _label_shift).
 
         Returns:
             base_token: Next token from base model [B, 1].
-            draft_tokens: Draft tokens [B, min(steps, block_size-1)] or None if steps < 1.
+            draft_tokens: Draft tokens [B, min(steps, block_size - 1 + _label_shift)] or None
+                if steps < 1.
         """
         base_token, hidden_states = self._generation_base(input_ids)
         if steps < 1:
             return base_token, None
         draft_hidden = self._draft_block(base_token, hidden_states)
 
-        # Logits on positions 1..block_size-1 (skip anchor at position 0)
-        draft_logits = self._base_model_lm_head(draft_hidden[:, 1:, :])
-        draft_tokens = draft_logits.argmax(dim=-1)  # [B, block_size-1]
+        # Position k predicts the token at anchor + k + _label_shift, so this one drafts the
+        # first token after the anchor.
+        first = 1 - self._label_shift
+        draft_logits = self._base_model_lm_head(draft_hidden[:, first:, :])
+        draft_tokens = draft_logits.argmax(dim=-1)  # [B, block_size - first]
 
         # Return up to `steps` tokens. base_token already follows input_ids; draft_tokens is
         # produced on the draft's device, and callers cat both onto the running sequence.
-        num_tokens = min(steps, self.dflash_block_size - 1)
+        num_tokens = min(steps, self.dflash_block_size - first)
         return base_token, draft_tokens[:, :num_tokens].to(input_ids.device)

@@ -117,15 +117,10 @@ the only in-pipeline evidence is training progress plus the export landing in
 
 ## Quality gate
 
-**Do not trust in-training AR for DSpark.** The recipe pins `estimate_ar: false` and
-`ar_validate_steps: 0` deliberately: eval runs the DFlash backbone only, with the
-Markov head not applied, so any reported AR reflects the backbone alone rather than
-the trained model.
-
-`pseudo_speculative_generate` *is* overridden for DSpark (unlike Domino), so a
-non-offline model can generate correctly — but the offline/streaming path deletes base
-layers and refuses. Evaluate by exporting and running the offline acceptance-length
-harness separately.
+`pseudo_speculative_generate` applies the Markov head, so AR validation measures the
+trained drafter on an online model — but the offline/streaming path deletes base
+layers and refuses. Evaluate those by exporting and running the offline
+acceptance-length harness separately.
 
 Otherwise the training-regression gate from `dflash.md` (`MAX_FINAL_LOSS`,
 `MIN_FINAL_ACC` via `check_regression.py`) applies; none of the streaming examples set

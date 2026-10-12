@@ -28,16 +28,12 @@ The committed example is **online**, 2 tasks:
 `--full-conversations` matters: it keeps real assistant completions so
 `answer_only_loss` has assistant spans to mask.
 
-**The inference side is intentionally not wired up yet.** The Domino correction head
-is not applied in `pseudo_speculative_generate` or in the serving stack, so the
-example ships no vLLM smoke test and no MT-Bench AR eval. Do not treat their absence
-as a broken config.
-
-When that path lands, copy the smoke-test and AR-eval steps from
-`hf_online_dflash.yaml` (its `task_1` and `task_2`) and append them to the Domino
-config as **`task_2` and `task_3`** — Domino's `task_0`/`task_1` are already the
-dataset build and training, so keep the source file's numbering and the destination's
-distinct.
+The example ships no vLLM smoke test or MT-Bench AR eval; do not treat their absence
+as a broken config. Serving is not wired up yet, but HF AR validation
+(`pseudo_speculative_generate`) applies the correction head: to measure AR, append
+`hf_online_dflash.yaml`'s `task_2` as Domino's **`task_2`** with `--steps` equal to the
+block size (Domino drafts the whole block: 16, not DFlash's 15). Add the smoke test
+(`task_1` there) as `task_3` once serving lands.
 
 ## Recipe and training knobs
 
@@ -87,11 +83,6 @@ export is the whole in-pipeline signal.
 
 ## Quality gate
 
-**Do not trust in-training AR for Domino.** The recipe pins `estimate_ar: false` and
-`ar_validate_steps: 0` deliberately: eval delegates to the DFlash backbone with the
-correction head not applied, so reported acceptance rates are backbone-only. The code
-logs this once as a warning — treat that warning as expected, not as a defect.
-
 The training-regression gate from `dflash.md` applies and the Qwen3-8B example sets
 it: `MAX_FINAL_LOSS=5.0`, `MIN_FINAL_ACC=0.15`, checked by `check_regression.py`
 against `trainer_state.json`. Since no inference metric is produced, this is currently
@@ -110,6 +101,5 @@ failures (`seq_len` divisibility, offline eval, mask token, chat template) are i
 | `Domino currently supports shift_label=True (next-token alignment) only` | `shift_label=false` | Leave it at `true` |
 | `pure_draft_prefix_len must be in [0, N] (block_size=B), got X` | Prefix length >= block size | Lower it below `block_size` |
 | `DominoLambdaCallback: state.max_steps unset (<=0); lambda_base curriculum disabled` (warning) | `training.max_steps` not set | Set `training.max_steps`, else the curriculum never runs |
-| `Domino eval uses the DFlash backbone only ...` (warning) | Correction head not applied at eval | Expected — do not chase it; evaluate after export once the inference path lands |
 | DDP error about unused parameters | `ddp_find_unused_parameters` turned off | Keep it `true` |
 | Draft trains but quality is poor | Draft dims left at `Qwen3Config` defaults instead of matching the base | Set the GQA/FFN dims explicitly |

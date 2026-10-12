@@ -10,10 +10,9 @@
 #   task_0: Build training conversations (Daring-Anteater multi-turn SFT, 50K)
 #   task_1: Online Domino training + export of the drafter checkpoint
 #
-# NOTE: the inference side (vLLM / AR evaluation) is intentionally not wired up
-# yet — the Domino correction head is not applied in pseudo_speculative_generate
-# or in the serving stack. Add the vLLM smoke-test / MT-Bench AR-eval steps
-# (see hf_online_dflash.yaml task_1/task_2) once the inference path lands.
+# NOTE: serving (vLLM) is not wired up for Domino yet, so there is no smoke test.
+# HF AR validation applies the correction head: to measure AR, append
+# hf_online_dflash.yaml's task_2 with --steps 16 (Domino drafts the whole block).
 #
 # Reference: SpecForge PR #571 (z-lab) | drafter format:
 # huggingface.co/Huang2020/Qwen3-8B-Domino-b16

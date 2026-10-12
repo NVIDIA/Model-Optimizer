@@ -40,9 +40,6 @@ training:
   cp_size: 1
   dp_shard_size: 1
   disable_tqdm: true
-  # Keep off: eval runs the DFlash backbone only (Markov head not applied yet),
-  # so AR would reflect the backbone alone, not the trained model. Compare via
-  # export + the offline acceptance-length harness instead.
   estimate_ar: false
   ar_validate_steps: 0
   answer_only_loss: true
