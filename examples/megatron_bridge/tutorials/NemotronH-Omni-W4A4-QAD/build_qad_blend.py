@@ -13,17 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """Materialize the tutorial's QAD blend as chat jsonl (train.jsonl / validation.jsonl).
 
 ``distill.py --sft_hf_dataset`` reads one source per split and has no blend weights, so the
 weighted mixture is written out here. Each source contributes ``total * weight / sum(weights)``
-rows, taken from the start of its Hugging Face split. Rows come in three shapes:
+rows: the first ones of its Hugging Face split, streamed in order, that Megatron-Bridge accepts
+as text-only chat. A source is skipped if it fails to load or yields too few usable rows. Rows come
+in three shapes:
 
 * ``messages``: used as-is.
-* ``text`` with ``<extra_id_1>User`` / ``Assistant`` markers (SFT-General): parsed into messages.
+* ``text`` with ``<extra_id_1>User`` / ``Assistant`` markers (SFT-General): parsed into messages,
+  dropping empty turns.
 * ``text`` without markers (SFT-Code, SFT-MATH): one assistant turn, so the whole text is trained.
 
-Rows Megatron-Bridge does not accept as text-only chat are skipped. Run inside the NeMo container.
+Each source is cached under ``<output_dir>/parts/`` so an interrupted run resumes. Run inside the
+NeMo container.
 """
 
 import argparse
@@ -82,42 +87,64 @@ def to_chat(row: dict, field: str) -> dict | None:
     text = row.get("text") or ""
     if not text:
         return None
-    turns = [{"role": ROLE[r], "content": c.strip()} for r, c in TURN.findall(text)]
-    return {"messages": turns or [{"role": "assistant", "content": text}]}
+    if "<extra_id_" in text:
+        turns = [
+            {"role": ROLE[r], "content": c.strip()} for r, c in TURN.findall(text) if c.strip()
+        ]
+        if turns:
+            return {"messages": turns}
+    return {"messages": [{"role": "assistant", "content": text}]}
+
+
+def take(repo: str, config: str, split: str, field: str, want: int) -> tuple[list[dict], int]:
+    """Stream the split and keep the first ``want`` usable rows; give up after ``10 * want`` rejects."""
+    got, dropped = [], 0
+    try:
+        for row in load_dataset(repo, config, split=split, streaming=True):
+            chat = to_chat(row, field)
+            if chat is None or not is_text_only_chat_example(chat):
+                dropped += 1
+                if dropped > want * 10:
+                    break
+                continue
+            got.append(chat)
+            if len(got) >= want:
+                break
+    except Exception as e:  # e.g. a gated split, or a schema the streaming reader cannot cast
+        print(f"{repo} {split}: failed ({type(e).__name__}: {str(e)[:80]})", flush=True)
+    return got, dropped
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--total", type=int, default=40000, help="Rows to request across sources.")
-    parser.add_argument("--num_validation", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=1234)
     args = parser.parse_args()
 
+    parts = os.path.join(args.output_dir, "parts")
+    os.makedirs(parts, exist_ok=True)
     total_weight = sum(w for w, *_ in SOURCES)
     rows = []
     for weight, repo, config, split, field in SOURCES:
         want = max(1, round(args.total * weight / total_weight))
-        try:
-            ds = load_dataset(repo, config, split=f"{split}[:{want * 3}]")
-        except Exception as e:  # e.g. a gated or renamed split
-            print(f"{repo} {split}: skipped ({type(e).__name__}: {e})")
-            continue
-        got, dropped = [], 0
-        for row in ds:
-            chat = to_chat(row, field)
-            if chat is None or not is_text_only_chat_example(chat):
-                dropped += 1
+        part = os.path.join(parts, f"{repo.split('/')[-1]}__{config}__{split}.jsonl")
+        if os.path.exists(part):
+            with open(part) as f:
+                got = [json.loads(line) for line in f]
+            if len(got) >= want:
+                rows.extend(got[:want])
+                print(f"{repo} {split}: {want} rows (cached)", flush=True)
                 continue
-            got.append(chat)
-            if len(got) == want:
-                break
+        got, dropped = take(repo, config, split, field, want)
+        with open(part, "w") as f:
+            f.writelines(json.dumps(r) + "\n" for r in got)
         rows.extend(got)
-        print(f"{repo} {split}: {len(got)}/{want} rows ({dropped} dropped)")
+        print(f"{repo} {split}: {len(got)}/{want} rows ({dropped} dropped)", flush=True)
 
     random.Random(args.seed).shuffle(rows)
-    os.makedirs(args.output_dir, exist_ok=True)
-    splits = {"validation": rows[: args.num_validation], "train": rows[args.num_validation :]}
+    num_validation = min(1000, max(1, len(rows) // 20))
+    splits = {"validation": rows[:num_validation], "train": rows[num_validation:]}
     for name, chunk in splits.items():
         path = os.path.join(args.output_dir, f"{name}.jsonl")
         with open(path, "w") as f:

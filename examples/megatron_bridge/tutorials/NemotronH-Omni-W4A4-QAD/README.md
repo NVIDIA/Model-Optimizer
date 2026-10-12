@@ -60,7 +60,7 @@ QAD distills on text chat data, read directly from jsonl by `distill.py --sft_hf
 | Nemotron-Science-v1 / RQA | 2 | 800 |
 | Nemotron-SFT-Instruction-Following-Chat-v2 / reasoning_off | 2 | 800 |
 
-The script also lists `Nemotron-SFT-Instruction-Following-Chat-v2 / reasoning_on` and `Nemotron-Agentic-v1 / tool_calling`; in our run they contributed no records (tool-calling rows are not text-only chat), so the blend has no agentic data. After a seeded shuffle, 1,000 records are held out for validation and 35,800 are used for training.
+The script also lists `Nemotron-SFT-Instruction-Following-Chat-v2 / reasoning_on` and `Nemotron-Agentic-v1 / tool_calling`; in our run they contributed no records, so the blend has no agentic data. After a seeded shuffle, 1,000 records are held out for validation and 35,800 are used for training.
 
 ```bash
 python examples/megatron_bridge/tutorials/NemotronH-Omni-W4A4-QAD/build_qad_blend.py \
