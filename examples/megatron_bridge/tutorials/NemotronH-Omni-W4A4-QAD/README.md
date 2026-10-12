@@ -44,30 +44,12 @@ Every command below runs with `srun`, one task per GPU, and sets `RANK` / `WORLD
 
 ### 1. Data Preparation
 
-QAD distills on text chat data, read directly from jsonl by `distill.py --sft_hf_dataset`. [`build_qad_blend.py`](build_qad_blend.py) materializes a 36,800-record sample of public Nemotron post-training datasets, 400 records per weight point:
-
-| Dataset / split | Weight | Records |
-| --- | --- | --- |
-| Nemotron-Pretraining-SFT-v1 / Nemotron-SFT-General | 20 | 8,000 |
-| Nemotron-SFT-Math-v3 / train | 17 | 6,800 |
-| Nemotron-Competitive-Programming-v1 / python_part00 | 15 | 6,000 |
-| Nemotron-Math-v2 / high_part00 | 10 | 4,000 |
-| Nemotron-Post-Training-Dataset-v1 / stem | 8 | 3,200 |
-| Nemotron-Pretraining-SFT-v1 / Nemotron-SFT-Code | 5 | 2,000 |
-| Nemotron-Pretraining-SFT-v1 / Nemotron-SFT-MATH | 5 | 2,000 |
-| Nemotron-Competitive-Programming-v1 / cpp_part00 | 5 | 2,000 |
-| Nemotron-Science-v1 / MCQ | 3 | 1,200 |
-| Nemotron-Science-v1 / RQA | 2 | 800 |
-| Nemotron-SFT-Instruction-Following-Chat-v2 / reasoning_off | 2 | 800 |
-
-The script also lists `Nemotron-SFT-Instruction-Following-Chat-v2 / reasoning_on` and `Nemotron-Agentic-v1 / tool_calling`; in our run they contributed no records, so the blend has no agentic data. After a seeded shuffle, 1,000 records are held out for validation and 35,800 are used for training.
+Generate the QAD data with [`build_qad_blend.py`](build_qad_blend.py):
 
 ```bash
 python examples/megatron_bridge/tutorials/NemotronH-Omni-W4A4-QAD/build_qad_blend.py \
     --output_dir /path/to/qad_blend
 ```
-
-Records follow the `{"messages": [{"role": ..., "content": ...}, ...]}` schema and are rendered with the model's own chat template during QAD. Records longer than the 32K sequence length used below are truncated.
 
 ---
 
@@ -195,5 +177,5 @@ Benchmarks: AA-LCR (mean reward × 100, 16 repeats), SciCode (subtask accuracy),
 ## Potential further improvements
 
 - **Long reasoning:** on a separate long-reasoning benchmark (APEX shortlist, no tools), PTQ stayed close to BF16 (87.8 vs 88.4) while QAD 600 scored 83.2 and produced about 18% fewer output tokens. One hypothesis is that distilling on 32K-truncated data shortens long reasoning; a longer `--seq_length` or longer-context data would test it.
-- **Data:** the blend is mostly math and code (64% of records) and has no agentic or tool-calling data.
+- **Data:** the blend is mostly math and code (64% of records).
 - **Multimodal data:** QAD here is text-only. Image-text distillation would exercise the language model on vision-conditioned inputs as well.
