@@ -26,6 +26,7 @@ if the routing weights were transported with a plain (non-autograd) collective, 
 receive ~zero gradient and the ``assert ... > 0`` below (and the all-reduced comparison) would fail.
 """
 
+import copy
 import warnings
 
 import pytest
@@ -197,3 +198,97 @@ def _skewed_routing_job(rank, size):
 
 def test_a2a_moe_warns_when_a_rank_receives_far_more_than_it_sent(skip_on_windows):
     spawn_multiprocess_job(2, _skewed_routing_job, backend="gloo")
+
+
+def _split_qwen3_moe_experts(rank, size):
+    """transformers' fused Qwen3-MoE experts, whole and this rank's contiguous share of them."""
+    from transformers import Qwen3MoeConfig
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
+
+    config = Qwen3MoeConfig(
+        hidden_size=H,
+        moe_intermediate_size=2 * H,
+        intermediate_size=4 * H,
+        num_experts=E,
+        num_experts_per_tok=TOP_K,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+    )
+    torch.manual_seed(0)
+    whole = Qwen3MoeExperts(config).to(COMPUTE_DTYPE)
+    with torch.no_grad():
+        whole.gate_up_proj.normal_(std=0.3)
+        whole.down_proj.normal_(std=0.3)
+    local_config = copy.deepcopy(config)
+    local_config.num_experts = E // size
+    local = Qwen3MoeExperts(local_config).to(COMPUTE_DTYPE)
+    owned = slice(rank * (E // size), (rank + 1) * (E // size))
+    with torch.no_grad():
+        local.gate_up_proj.copy_(whole.gate_up_proj[owned])
+        local.down_proj.copy_(whole.down_proj[owned])
+    return whole, local, owned
+
+
+def _routed_tokens(size):
+    """Every rank's tokens and their top-k routing, identical on all ranks."""
+    gen = torch.Generator().manual_seed(1)
+    x = torch.randn(size * T, H, generator=gen).to(COMPUTE_DTYPE)
+    weights, index = torch.randn(size * T, E, generator=gen).softmax(-1).topk(TOP_K, dim=-1)
+    return x, weights.to(COMPUTE_DTYPE), index
+
+
+def _assert_experts_backward_matches(rank, whole, local, owned, size):
+    """``local`` runs this rank's tokens through the torch_a2a forward; ``whole`` runs all tokens on one
+    process. The forward, and the gradients of this rank's hidden states and routing weights and of
+    this rank's experts, must agree."""
+    from transformers.integrations.moe import grouped_mm_experts_forward
+
+    x, weights, index = _routed_tokens(size)
+    tok = slice(rank * T, (rank + 1) * T)
+
+    whole.config._experts_implementation = "grouped_mm"
+    x_ref = x.clone().requires_grad_(True)
+    w_ref = weights.clone().requires_grad_(True)
+    out_ref = whole(x_ref, index, w_ref)
+    out_ref.float().pow(2).sum().backward()
+
+    local.config._experts_implementation = "torch_a2a"
+    x_ep = x[tok].clone().requires_grad_(True)
+    w_ep = weights[tok].clone().requires_grad_(True)
+    # The torch_a2a_experts parallel style passes the EP group as a fourth argument.
+    out_ep = local(x_ep, index[tok], w_ep, dist.group.WORLD)
+    out_ep.float().pow(2).sum().backward()
+
+    assert grouped_mm_experts_forward is not None  # the reference took the grouped_mm path
+    close = {"atol": 3e-2, "rtol": 3e-2}
+    torch.testing.assert_close(out_ep.float(), out_ref[tok].detach().float(), **close)
+    torch.testing.assert_close(x_ep.grad.float(), x_ref.grad[tok].float(), **close)
+    torch.testing.assert_close(w_ep.grad.float(), w_ref.grad[tok].float(), **close)
+    for name in ("gate_up_proj", "down_proj"):
+        # Each rank's experts collect the gradient of every rank's tokens routed to them.
+        local_grad = getattr(local, name).grad
+        assert local_grad is not None and local_grad.abs().max() > 0, name
+        torch.testing.assert_close(
+            local_grad.float(), getattr(whole, name).grad[owned].float(), **close
+        )
+
+
+def _real_experts_backward_job(rank, size):
+    moe.register_torch_a2a()
+    whole, local, owned = _split_qwen3_moe_experts(rank, size)
+    _assert_experts_backward_matches(rank, whole, local, owned, size)
+    dist.destroy_process_group()
+
+
+def test_fused_experts_backward_through_torch_a2a_matches_the_whole_module(skip_on_windows):
+    """transformers' fused experts, split over two ranks, train through the torch_a2a forward exactly
+    as the whole module does on one process: same output, and same gradients for the hidden states,
+    the routing weights and each rank's experts."""
+    transformers = pytest.importorskip("transformers")
+    from packaging.version import Version
+
+    if Version(transformers.__version__) < Version("5.6"):
+        pytest.skip("expert parallelism needs transformers >= 5.6")
+    spawn_multiprocess_job(2, _real_experts_backward_job, backend="gloo")
