@@ -817,12 +817,67 @@ class HFDFlashModel(DFlashModel):
         mask_mod = _draft_mask_mod(ctx_len, anchors, keep, block_size, window, causal)
         return _dense_additive_mask(mask_mod, bsz, block_size, ctx_len + block_size, dtype, device)
 
-    def _target_hidden(self, hidden_states):
+    def _target_hidden(self, hidden_states, device=None):
         """The base hidden states the draft's ``fc`` reads, concatenated: [B, seq, n * H].
 
         ``hidden_states[0]`` is the embedding output, so layer ``lid``'s output is at ``lid + 1``.
+        ``device`` gathers the layers first, for a base model sharded across GPUs.
         """
-        return torch.cat([hidden_states[lid + 1] for lid in self.target_layer_ids], dim=-1)
+        selected = [hidden_states[lid + 1] for lid in self.target_layer_ids]
+        if device is not None:
+            selected = [h.to(device) for h in selected]
+        return torch.cat(selected, dim=-1)
+
+    def _generation_base(self, input_ids):
+        """The base model's greedy next token after ``input_ids`` ([B, 1]), and its hidden states."""
+        if self.dflash_offline:
+            raise RuntimeError(
+                "An offline DFlash-family model cannot run AR validation / "
+                "pseudo_speculative_generate — base model layers were deleted during offline "
+                "conversion to save memory. Reload the full base model before running AR validation."
+            )
+        # Call the base model's inner model directly (avoids DynamicModule dispatch)
+        model_output = self._base_model(input_ids=input_ids, output_hidden_states=True)
+        base_logits = self._base_model_lm_head(model_output.last_hidden_state)
+        base_token = base_logits[:, -1:, :].argmax(dim=-1).to(input_ids.device)
+        return base_token, model_output.hidden_states
+
+    def _draft_block(self, base_token, hidden_states):
+        """Draft hidden states [B, block_size, H] for the block that ``base_token`` anchors.
+
+        Re-runs no base layer: the context is ``hidden_states`` from :meth:`_generation_base`.
+        """
+        # target_layer_ids spans early and late layers, so under device_map="auto" these come
+        # off different GPUs and the cat fails. Everything the draft consumes is gathered
+        # onto the draft's own device -- the last base layer's, per modify() -- which is
+        # also not input_ids.device once the base model is sharded. All no-ops single-device.
+        device = self._base_device()
+        target_hidden = self._target_hidden(hidden_states, device=device)
+
+        block_size = self.dflash_block_size
+        bsz = base_token.shape[0]
+
+        # Block: first token is base_token (anchor), rest are mask
+        block_ids = torch.full(
+            (bsz, block_size), self.mask_token_id, dtype=torch.long, device=device
+        )
+        block_ids[:, 0] = base_token.squeeze(-1).to(device)
+        # The embedding table is on the first shard; its output follows it, not block_ids.
+        noise_embedding = self._base_model_embeddings(block_ids).to(device)
+
+        # The training layout for one block anchored right after the context.
+        ctx_len = target_hidden.shape[1]
+        anchors = torch.full((bsz, 1), ctx_len, dtype=torch.long, device=device)
+        pos_ids = self._build_position_ids(ctx_len, anchors, device)
+
+        attn_mask = self._build_generate_swa_mask(ctx_len, bsz, target_hidden.dtype, device)
+
+        return self.dflash_module(
+            noise_embedding=noise_embedding,
+            target_hidden=target_hidden,
+            position_ids=pos_ids,
+            attention_mask=attn_mask,
+        )
 
     def _draft_zero_loss(self, device):
         """A zero loss that every trainable draft parameter feeds, for a step with nothing to train.
@@ -1165,7 +1220,7 @@ class HFDFlashModel(DFlashModel):
            - ``noise_embedding``: embedded block tokens
            - ``target_hidden``: extracted hidden states from step 2
            - ``position_ids``: context + block positions
-           - ``attention_mask=None``: no mask at inference (all positions attend freely)
+           - ``attention_mask``: the training rule for this one block (None when it masks nothing)
            The draft model's KV injection concatenates projected target_hidden as K/V
            with the block's own K/V, enabling the draft to "see" the target's context.
 
@@ -1189,68 +1244,10 @@ class HFDFlashModel(DFlashModel):
             base_token: Next token from base model [B, 1].
             draft_tokens: Draft tokens [B, min(steps, block_size-1)] or None if steps < 1.
         """
-        if self.dflash_offline:
-            raise RuntimeError(
-                "DFlash offline model cannot run AR validation / pseudo_speculative_generate — "
-                "base model layers were deleted during offline conversion to save memory. "
-                "Reload the full base model before running AR validation."
-            )
-        # Call the base model's inner model directly (avoids DynamicModule dispatch)
-        model_output = self._base_model(
-            input_ids=input_ids,
-            output_hidden_states=True,
-        )
-        # Compute logits via lm_head
-        base_logits = self._base_model_lm_head(model_output.last_hidden_state)
-        # Build output with hidden_states
-        base_outputs = ModelOutput(
-            logits=base_logits,
-            hidden_states=model_output.hidden_states,
-        )
-        base_logits = base_outputs.logits
-        base_token = base_logits[:, -1:, :].argmax(dim=-1).to(input_ids.device)
-
+        base_token, hidden_states = self._generation_base(input_ids)
         if steps < 1:
             return base_token, None
-
-        # Extract target hidden states (raw, before FC projection)
-        hid_offset = 1
-        selected = [base_outputs.hidden_states[lid + hid_offset] for lid in self.target_layer_ids]
-        # target_layer_ids spans early and late layers, so under device_map="auto" these come
-        # off different GPUs and the cat below fails. Everything the draft consumes is gathered
-        # onto the draft's own device -- the last base layer's, per modify() -- which is
-        # also not input_ids.device once the base model is sharded. All no-ops single-device.
-        device = self._base_device()
-        target_hidden = torch.cat([h.to(device) for h in selected], dim=-1)
-
-        block_size = self.dflash_block_size
-        bsz = input_ids.shape[0]
-
-        # Block: first token is base_token (anchor), rest are mask
-        block_ids = torch.full(
-            (bsz, block_size), self.mask_token_id, dtype=torch.long, device=device
-        )
-        block_ids[:, 0] = base_token.squeeze(-1).to(device)
-        # The embedding table is on the first shard; its output follows it, not block_ids.
-        noise_embedding = self._base_model_embeddings(block_ids).to(device)
-
-        # Position IDs: training uses [0..L-1, 0..L-1] where noise positions
-        # mirror context positions. At inference, block predicts tokens at
-        # seq_len..seq_len+B-1, so noise positions continue from ctx_len.
-        ctx_len = target_hidden.shape[1]
-        ctx_positions = torch.arange(ctx_len, device=device)
-        block_positions = torch.arange(ctx_len, ctx_len + block_size, device=device)
-        pos_ids = torch.cat([ctx_positions, block_positions]).unsqueeze(0).expand(bsz, -1)
-
-        attn_mask = self._build_generate_swa_mask(ctx_len, bsz, target_hidden.dtype, device)
-
-        # Draft forward
-        draft_hidden = self.dflash_module(
-            noise_embedding=noise_embedding,
-            target_hidden=target_hidden,
-            position_ids=pos_ids,
-            attention_mask=attn_mask,
-        )
+        draft_hidden = self._draft_block(base_token, hidden_states)
 
         # Logits on positions 1..block_size-1 (skip anchor at position 0)
         draft_logits = self._base_model_lm_head(draft_hidden[:, 1:, :])
@@ -1258,5 +1255,5 @@ class HFDFlashModel(DFlashModel):
 
         # Return up to `steps` tokens. base_token already follows input_ids; draft_tokens is
         # produced on the draft's device, and callers cat both onto the running sequence.
-        num_tokens = min(steps, block_size - 1)
+        num_tokens = min(steps, self.dflash_block_size - 1)
         return base_token, draft_tokens[:, :num_tokens].to(input_ids.device)

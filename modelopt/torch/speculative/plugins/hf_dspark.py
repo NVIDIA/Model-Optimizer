@@ -415,53 +415,17 @@ class HFDSparkModel(HFDFlashModel):
         (the anchor for k=0). Without this override DSpark would fall back to the
         DFlash backbone-only generate, under-reporting acceptance length.
         """
-        if self.dflash_offline:
-            raise RuntimeError(
-                "DSpark offline model cannot run AR validation / pseudo_speculative_generate — "
-                "base model layers were deleted during offline conversion. Reload the full "
-                "base model before running AR validation."
-            )
-        model_output = self._base_model(input_ids=input_ids, output_hidden_states=True)
-        base_logits = self._base_model_lm_head(model_output.last_hidden_state)
-        base_token = base_logits[:, -1:, :].argmax(dim=-1).to(input_ids.device)
-
+        base_token, hidden_states = self._generation_base(input_ids)
         if steps < 1:
             return base_token, None
-
-        hid_offset = 1
-        selected = [model_output.hidden_states[lid + hid_offset] for lid in self.target_layer_ids]
-        # Same sharding hazard as HFDFlashModel.pseudo_speculative_generate: gather onto the
-        # draft's device before the cat rather than assuming one GPU holds every target layer.
-        device = self._base_device()
-        target_hidden = torch.cat([h.to(device) for h in selected], dim=-1)
-
-        block_size = self.dflash_block_size
-        bsz = input_ids.shape[0]
-
-        # Block input: anchor at position 0, mask tokens elsewhere (parallel backbone).
-        block_ids = torch.full(
-            (bsz, block_size), self.mask_token_id, dtype=torch.long, device=device
-        )
-        block_ids[:, 0] = base_token.squeeze(-1).to(device)
-        noise_embedding = self._base_model_embeddings(block_ids).to(device)
-
-        ctx_len = target_hidden.shape[1]
-        ctx_positions = torch.arange(ctx_len, device=device)
-        block_positions = torch.arange(ctx_len, ctx_len + block_size, device=device)
-        pos_ids = torch.cat([ctx_positions, block_positions]).unsqueeze(0).expand(bsz, -1)
-
-        draft_hidden = self.dflash_module(
-            noise_embedding=noise_embedding,
-            target_hidden=target_hidden,
-            position_ids=pos_ids,
-            attention_mask=self._build_generate_swa_mask(ctx_len, bsz, target_hidden.dtype, device),
-        )
+        draft_hidden = self._draft_block(base_token, hidden_states)
         backbone_logits = self._base_model_lm_head(draft_hidden)  # [B, block_size, V]
 
         # Autoregressive Markov sampling over the block.
         m = self.dflash_module
-        num_tokens = min(steps, block_size)
-        prev_token = base_token.squeeze(-1).to(device)  # anchor precedes block position 0
+        num_tokens = min(steps, self.dflash_block_size)
+        # anchor precedes block position 0
+        prev_token = base_token.squeeze(-1).to(draft_hidden.device)
         state = None
         draft_tokens = []
         for k in range(num_tokens):
