@@ -24,6 +24,7 @@ layout (``prefix_gru.*`` / ``embed_proj.*``).
 import json
 from copy import deepcopy
 
+import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_llama
 from safetensors.torch import load_file
@@ -186,6 +187,41 @@ class TestDominoSwa:
         )
         assert out.loss.dim() == 0
         assert windows == [6]
+
+
+class TestDominoGenerate:
+    """AR validation drafts with the model that is trained and exported."""
+
+    @pytest.mark.parametrize("pure_draft_prefix_len", [0, 1])
+    def test_drafts_are_the_training_head_argmax(self, pure_draft_prefix_len):
+        """Greedy drafts equal the training head's argmax when it is teacher-forced on them."""
+        config = _get_domino_config()
+        config["dflash_architecture_config"]["pure_draft_prefix_len"] = pure_draft_prefix_len
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", config)])
+        model.float().eval()
+        head = model.dflash_module
+        torch.manual_seed(0)
+        with torch.no_grad():
+            # Large enough to overturn the backbone's argmax, so a draft that skips the head
+            # or feeds it the wrong prefix disagrees.
+            for p in [*head.prefix_gru.parameters(), *head.embed_proj.parameters()]:
+                p.normal_()
+        input_ids = torch.randint(1, model.dflash_config.vocab_size, (2, SEQ_LEN))
+
+        base_token, drafts = model.pseudo_speculative_generate(input_ids, steps=BLOCK_SIZE)
+
+        with torch.no_grad():
+            _, hidden_states = model._generation_base(input_ids)
+            hidden = model._draft_block(base_token, hidden_states)
+            final_logits = model._apply_domino_head(
+                hidden,
+                model._base_model_lm_head(hidden),
+                torch.cat([base_token, drafts], dim=1),  # the anchor, then the drafts
+                torch.zeros(2, 1, dtype=torch.long),
+                1,
+            )
+        assert torch.equal(final_logits.argmax(dim=-1), drafts)
 
 
 class TestLambdaSchedule:

@@ -54,7 +54,6 @@ training:
   cp_size: 1
   dp_shard_size: 1
   disable_tqdm: true
-  # Eval runs the DFlash backbone only (no Markov head), so AR would understate the model.
   estimate_ar: false
   ar_validate_steps: 0
   answer_only_loss: true

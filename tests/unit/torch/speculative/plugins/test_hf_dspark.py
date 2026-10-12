@@ -305,8 +305,8 @@ class TestDSparkExporter:
         assert "confidence_proj.weight" in sd
 
     def test_export_config_has_dspark_fields(self, tmp_path):
-        """config.json carries the dflash_config DSpark head fields."""
-        export_dir = self._export(tmp_path, head_type="gated")
+        """config.json carries the DSpark head fields as the built head resolved them."""
+        export_dir = self._export(tmp_path, head_type="Gated")  # trains as "gated"
         with open(export_dir / "config.json") as f:
             cfg = json.load(f)
 

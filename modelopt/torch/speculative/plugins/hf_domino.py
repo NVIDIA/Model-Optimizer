@@ -132,10 +132,6 @@ class HFDominoModel(HFDFlashModel):
         self.dflash_lambda_base_start = config.dflash_lambda_base_start
         self.dflash_lambda_base_decay_ratio = config.dflash_lambda_base_decay_ratio
         self._lambda_base = self.dflash_lambda_base_start
-        if not getattr(self.dflash_module, "shift_label", True):
-            raise NotImplementedError(
-                "Domino currently supports shift_label=True (next-token alignment) only."
-            )
 
     def get_exporter(self):
         """Get the exporter for the Domino draft model."""
@@ -266,14 +262,6 @@ class HFDominoModel(HFDFlashModel):
         two-term loss. Eval/offline-eval is delegated to the DFlash parent.
         """
         if not self.training:
-            # Eval delegates to the DFlash backbone; the correction head is not
-            # applied yet, so warn once that acceptance rates are backbone-only.
-            if not getattr(self, "_warned_eval_head_bypass", False):
-                logger.warning(
-                    "Domino eval uses the DFlash backbone only (correction head not "
-                    "applied yet); reported acceptance rates are backbone-only."
-                )
-                self._warned_eval_head_bypass = True
             return super().forward(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -364,6 +352,38 @@ class HFDominoModel(HFDFlashModel):
         )
 
         return ModelOutput(loss=loss, logits=None, train_acc=[[accuracy]], domino_metrics=metrics)
+
+    @torch.no_grad()
+    def pseudo_speculative_generate(self, input_ids, steps=1):
+        """Draft the block left to right, adding the correction head as training does.
+
+        Block position ``k`` predicts the token after the anchor and the ``k`` tokens drafted
+        before it. From ``pure_draft_prefix_len`` on, its backbone logits get the correction
+        from the GRU state over exactly those tokens.
+        """
+        base_token, hidden_states = self._generation_base(input_ids)
+        if steps < 1:
+            return base_token, None
+        draft_hidden = self._draft_block(base_token, hidden_states)
+        device = draft_hidden.device
+        # Under device_map="auto" the embedding table and a tied lm_head sit on the first GPU,
+        # not the draft's, and their outputs stay there.
+        backbone_logits = self._base_model_lm_head(draft_hidden).to(device)  # [B, block_size, V]
+
+        m = self.dflash_module
+        prev_token = base_token.squeeze(-1).to(device)
+        gru_state = None
+        draft_tokens = []
+        for k in range(min(steps, self.dflash_block_size)):
+            prev_emb = self._base_model_embeddings(prev_token).to(device)
+            gru_out, gru_state = m.prefix_gru(prev_emb.unsqueeze(1), gru_state)
+            logits = backbone_logits[:, k, :]
+            if k >= m.pure_draft_prefix_len:
+                correction = m.embed_proj(torch.cat([draft_hidden[:, k, :], gru_out[:, 0, :]], -1))
+                logits = logits + correction
+            prev_token = logits.argmax(dim=-1)
+            draft_tokens.append(prev_token)
+        return base_token, torch.stack(draft_tokens, dim=1).to(input_ids.device)
 
 
 class DominoLambdaCallback(TrainerCallback):

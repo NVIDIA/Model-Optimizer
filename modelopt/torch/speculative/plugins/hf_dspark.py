@@ -419,7 +419,8 @@ class HFDSparkModel(HFDFlashModel):
         if steps < 1:
             return base_token, None
         draft_hidden = self._draft_block(base_token, hidden_states)
-        backbone_logits = self._base_model_lm_head(draft_hidden)  # [B, block_size, V]
+        # Under device_map="auto" a tied lm_head sits with the embedding table, not the draft.
+        backbone_logits = self._base_model_lm_head(draft_hidden).to(draft_hidden.device)
 
         # Autoregressive Markov sampling over the block.
         m = self.dflash_module
