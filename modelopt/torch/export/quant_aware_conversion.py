@@ -62,10 +62,12 @@ Reverse rules are derived from the model's conversion mapping via transformers'
 (in-memory-name) behavior rather than emit a silently-wrong checkpoint.
 """
 
+import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -504,6 +506,81 @@ def _scope_prefixes(rev) -> tuple[str, ...]:
     return tuple(seen)
 
 
+_SAFETENSORS_INDEX = "model.safetensors.index.json"
+_SAFETENSORS_SINGLE = "model.safetensors"
+
+
+def _source_checkpoint_keys(model) -> set[str] | None:
+    """Tensor names of the checkpoint ``model`` was loaded from, or ``None``.
+
+    ``None`` means "unknown" and leaves the reverse conversion exactly as it was: it is
+    returned for a model built from a config, a hub id that was never materialized
+    locally, or a checkpoint layout this does not recognize.
+    """
+    path = getattr(model, "name_or_path", None) or getattr(
+        getattr(model, "config", None), "_name_or_path", None
+    )
+    if not path:
+        return None
+    try:
+        directory = Path(path)
+        if not directory.is_dir():
+            return None
+        index = directory / _SAFETENSORS_INDEX
+        if index.is_file():
+            with index.open() as handle:
+                return set(json.load(handle)["weight_map"])
+        single = directory / _SAFETENSORS_SINGLE
+        if single.is_file():
+            from safetensors import safe_open
+
+            with safe_open(single, framework="pt") as handle:
+                return set(handle.keys())
+    except Exception:  # unreadable or malformed checkpoint -> treat as unknown
+        return None
+    return None
+
+
+def _drop_non_idempotent_renames(
+    rules: list[RenameRule], source_keys: set[str] | None
+) -> list[RenameRule]:
+    """Drop reverse renames that rewrite names the source checkpoint already carries.
+
+    A reverse rename maps an in-memory name back to its source-checkpoint name, so it
+    must be a *no-op* on names that are already in source form -- the same invariant
+    :func:`_idempotent_pattern` enforces for prefix rules. A rule that breaks it is not
+    restoring a name, it is inventing one.
+
+    That happens when a model declares a backwards-compatibility *load* rename as a
+    reversible ``WeightRenaming``. Reversing it rewrites the canonical name to a legacy
+    spelling the published checkpoint never used, and a deployment loader keyed on the
+    canonical name then cannot find the tensor.
+
+    A rule is dropped only on positive evidence: it must rewrite at least one source key,
+    and every source key it rewrites must land on a name absent from the checkpoint. A
+    rule that matches nothing, or whose results are themselves real source names, is kept
+    -- so renames that legitimately restore source names are never touched.
+    """
+    if not source_keys:
+        return rules
+    kept: list[RenameRule] = []
+    for rule in rules:
+        pattern = re.compile(_idempotent_pattern(rule.pattern, rule.repl))
+        rewrites_a_source_key = False
+        every_result_absent = True
+        for key in source_keys:
+            mapped = _sub_scoped(pattern, rule.repl, key, rule.scope_prefixes)
+            if mapped == key:
+                continue
+            rewrites_a_source_key = True
+            if mapped in source_keys:
+                every_result_absent = False
+                break
+        if not (rewrites_a_source_key and every_result_absent):
+            kept.append(rule)
+    return kept
+
+
 def _drop_shadowed_prefix_renames(model, rules: list[RenameRule]) -> list[RenameRule]:
     """Drop child-model reverse renames when the child namespace already exists.
 
@@ -660,6 +737,7 @@ def _build_reverse_rules(
     # substrings and are applied first.
     weight_renamings = _drop_shadowed_prefix_renames(model, weight_renamings)
     rename_rules = leaf_renamings + list(reversed(weight_renamings))
+    rename_rules = _drop_non_idempotent_renames(rename_rules, _source_checkpoint_keys(model))
     return split_rules, merge_rules, rename_rules, expert_fused_leaves
 
 

@@ -38,6 +38,8 @@ from modelopt.torch.export.quant_aware_conversion import (
     RenameRule,
     SplitRule,
     _assert_experts_pre_expanded,
+    _drop_non_idempotent_renames,
+    _source_checkpoint_keys,
     apply_reverse_rules,
     build_reverse_name_mapper,
     revert_quant_config_names,
@@ -185,6 +187,57 @@ def test_idempotency_guard_leaves_disjoint_rules_alone():
     key = "vision_model.encoder.layer.0.attn.weight"
     out = apply_reverse_rules({key: torch.zeros(2)}, [], rules)
     assert list(out) == ["vision_model.radio_model.model.blocks.0.attn.weight"]
+
+
+# A NemotronH-shaped source checkpoint: the canonical embedding name is plural, and the
+# projector weights sit at the top level under their fused ``mlp1.<i>`` names.
+_SOURCE_KEYS = {
+    "backbone.embeddings.weight",
+    "backbone.layers.0.mixer.in_proj.weight",
+    "mlp1.0.weight",
+    "mlp1.1.weight",
+    "vision_projector.vision_final_layernorm.weight",
+}
+
+
+def test_rename_inventing_a_name_absent_from_source_is_dropped():
+    """A BC *load* rename declared reversible would rewrite the canonical name.
+
+    Reversing ``embedding.weight -> embeddings.weight`` turns the published
+    ``backbone.embeddings.weight`` into a legacy spelling the checkpoint never used,
+    which a deployment loader keyed on the canonical name cannot find.
+    """
+    rule = RenameRule(r"embeddings\.weight", "embedding.weight")
+    assert _drop_non_idempotent_renames([rule], _SOURCE_KEYS) == []
+
+
+def test_rename_restoring_a_source_name_is_kept():
+    """A rename whose output is a real source name is left alone."""
+    rule = RenameRule(r"^vision_projector\.mlp1\.norm\.", "mlp1.0.")
+    assert _drop_non_idempotent_renames([rule], _SOURCE_KEYS) == [rule]
+
+
+def test_rename_matching_no_source_key_is_kept():
+    """No evidence means no drop: a rule that never fires on source names survives."""
+    rule = RenameRule(r"^sound_projector\.sound_encoder\.", "sound_encoder.")
+    assert _drop_non_idempotent_renames([rule], _SOURCE_KEYS) == [rule]
+
+
+@pytest.mark.parametrize("source_keys", [None, set()])
+def test_guard_is_inert_when_source_is_unknown(source_keys):
+    """An unreadable or absent source checkpoint keeps the previous behaviour."""
+    rules = [RenameRule(r"embeddings\.weight", "embedding.weight")]
+    assert _drop_non_idempotent_renames(rules, source_keys) == rules
+
+
+def test_source_checkpoint_keys_reads_sharded_index(tmp_path):
+    """The guard's input comes from the checkpoint the model was loaded from."""
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": dict.fromkeys(_SOURCE_KEYS, "model-00001-of-00001.safetensors")})
+    )
+    model = types.SimpleNamespace(name_or_path=str(tmp_path), config=None)
+    assert _source_checkpoint_keys(model) == _SOURCE_KEYS
+    assert _source_checkpoint_keys(types.SimpleNamespace(name_or_path="", config=None)) is None
 
 
 def test_rename_carries_scale_siblings():
