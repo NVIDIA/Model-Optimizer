@@ -36,7 +36,7 @@ BF16 is the mean of two runs. The exported W4A4 checkpoint is **74 GB**.
 
 ## Steps to Reproduce
 
-**Environment:** a NeMo 26.08 container (`nvcr.io/nvidia/nemo:26.08`) on GB300 (4 GPUs per node, aarch64), with this repository mounted at `/opt/Model-Optimizer` and Megatron-Bridge `main` at [`d23c1f98`](https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/d23c1f981596c227b13d98c95b09afb865d80258) (and its pinned Megatron-LM) mounted at `/opt/Megatron-Bridge`. See the [Megatron-Bridge README](../../README.md) for the container setup. Serving NVFP4 checkpoints requires a Blackwell GPU.
+**Environment:** a NeMo 26.08 container (`nvcr.io/nvidia/nemo:26.08`) on GB300 (4 GPUs per node, aarch64), with this repository mounted at `/opt/Model-Optimizer` and Megatron-Bridge `main` (and its pinned Megatron-LM) mounted at `/opt/Megatron-Bridge`. See the [Megatron-Bridge README](../../README.md) for the container setup. Serving NVFP4 checkpoints requires a Blackwell GPU.
 
 Commands run under `srun`, one task per GPU, with `RANK` / `WORLD_SIZE` / `LOCAL_RANK` set from `SLURM_PROCID` / `SLURM_NTASKS` / `SLURM_LOCALID`.
 
