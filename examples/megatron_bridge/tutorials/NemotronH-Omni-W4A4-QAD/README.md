@@ -137,7 +137,7 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
 
 ### 4. Export
 
-Export the QAD checkpoint to a Hugging Face checkpoint on one 4-GPU node (pipeline parallel 4, about 26 minutes):
+Export the QAD checkpoint to a Hugging Face checkpoint on one 4-GPU node (pipeline parallel 4):
 
 ```bash
 # SBATCH --nodes=1 --ntasks-per-node=4 --gpus-per-node=4
