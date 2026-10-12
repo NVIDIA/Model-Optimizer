@@ -65,7 +65,6 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from transformers import PreTrainedModel
-from transformers.trainer_pt_utils import LabelSmoother
 from transformers.utils import ModelOutput
 
 from ..dflash.conversion import DSparkDMRegistry
@@ -354,15 +353,10 @@ class HFDSparkModel(HFDFlashModel):
             selected = [base_out.hidden_states[lid + offset] for lid in self.target_layer_ids]
             target_hidden = torch.cat(selected, dim=-1)  # [B, seq, num_layers * H]
 
-        # 2. Build loss mask (same convention as DFlash/Domino).
-        if labels is not None:
-            loss_mask = (labels != LabelSmoother.ignore_index).float()
-        elif attention_mask is not None:
-            loss_mask = attention_mask.float()
-        else:
-            loss_mask = torch.ones(bsz, seq_len, device=device)
-        if kwargs.get("loss_mask") is not None:
-            loss_mask = loss_mask * kwargs["loss_mask"]
+        # 2. Build loss mask (inherited).
+        loss_mask = self._build_loss_mask(
+            input_ids, attention_mask, labels, kwargs.get("loss_mask")
+        )
 
         # 3. Random anchor sampling (inherited).
         anchor_positions, block_keep_mask = self._sample_anchor_positions(
