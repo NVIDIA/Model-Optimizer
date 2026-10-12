@@ -82,7 +82,6 @@ class DominoModule(DFlashModule):
                 f"pure_draft_prefix_len must be in [0, {self.block_size - 1}] "
                 f"(block_size={self.block_size}), got {self.pure_draft_prefix_len}."
             )
-        self.shift_label = getattr(config, "shift_label", True)
 
         # Causal state over the block's token embeddings. bias=False matches the
         # reference checkpoint (only weight_ih_l0 / weight_hh_l0 are stored).
