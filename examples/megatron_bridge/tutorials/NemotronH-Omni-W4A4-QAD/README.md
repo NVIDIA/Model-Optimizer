@@ -14,19 +14,20 @@ Only the language model (including its MTP head) is quantized; the vision tower 
 
 All checkpoints were served with the same vLLM settings; quantized ones with an NVFP4 KV cache.
 
-| Model | AA-LCR | SciCode (subtask) | GPQA Diamond pass@1 (maj@8) |
-| --- | --- | --- | --- |
-| **BF16** (teacher) | 63.31 | 46.48 | 89.52 (90.66) |
-| **W4A4 PTQ** (QAD student) | 62.00 | 46.92 | 89.27 (90.66) |
-| ↳ QAD 200 iters | 61.69 | 43.62 | 88.70 (89.65) |
-| ↳ QAD 300 iters | 62.56 | 45.53 | 88.70 (88.13) |
-| ↳ QAD 400 iters | 64.06 | 45.36 | 88.89 (90.40) |
-| ↳ QAD 500 iters | 62.94 | 46.22 | 89.84 (90.66) |
-| **↳ QAD 600 iters** | **63.75** | **46.35** | **89.77 (91.67)** |
+| Benchmark | BF16 (teacher) | W4A4 QAD 600 iters |
+| --- | --- | --- |
+| AA-LCR | 68.63 | 69.31 |
+| AA-Omniscience | 26.21 | 25.60 |
+| AA-Omniscience (non-hallucination) | 70.03 | 69.13 |
+| APEX shortlist (no tools) | 88.36 | 83.24 |
+| GPQA Diamond | 89.52 | 89.58 |
+| HLE (no tools) | 31.79 | 30.26 |
+| MMLU-ProX | 76.91 | 80.30 |
+| SciCode (subtask) | 47.13 | 46.43 |
+| SciCode (problem) | 15.10 | 14.62 |
+| τ³-bench banking | 18.88 | 18.04 |
 
-Sample counts: AA-LCR 1,600 (100 questions × 16), SciCode 520, GPQA Diamond 1,584 (198 questions × 8).
-
-The recipe is already close to lossless after PTQ: every PTQ score is within 1.4 points of BF16. The first few hundred QAD iterations dip before recovering, and QAD 600 lands within 0.5 points of BF16 on all three benchmarks. The exported W4A4 checkpoint is **74 GB**.
+BF16 is the mean of two runs. The exported W4A4 checkpoint is **74 GB**.
 
 > [!NOTE]
 > The numbers above come from runs whose code was functionally equivalent to the commands below but predates them: the Omni export mapping and chat-data distillation were local patches then, and the student was built without its MTP head (`--mtp_num_layers 0`). This code path was checked end to end with a short run (a 32-sample PTQ, 20 QAD iterations and the export); QAD keeps the MTP head unchanged either way (see [Section 3](#3-quantization-aware-distillation-qad)).
@@ -168,8 +169,6 @@ Serve with vLLM on one 4-GPU GB300 node, TP=4 with expert parallelism. Quantized
 | Mamba cache rounding | stochastic rounding, 5 Philox rounds |
 | Reasoning parser | `nemotron_v3` |
 | Chat template | the checkpoint's `chat_template.jinja` |
-
-Benchmarks: AA-LCR (mean reward × 100, 16 repeats), SciCode (subtask accuracy), and GPQA Diamond without tools (pass@1 averaged over 8 samples, plus majority@8).
 
 ## Potential further improvements
 
