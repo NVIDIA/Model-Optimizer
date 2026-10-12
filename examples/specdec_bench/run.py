@@ -178,6 +178,10 @@ def run_simple(args):
                 f"or extend _MAX_SEQ_LEN_KEY in run.py."
             )
         engine_args[key] = args.max_seq_len
+    if args.max_num_tokens is not None:
+        if args.engine != "TRTLLM":
+            raise ValueError("--max_num_tokens is currently only wired for --engine TRTLLM.")
+        engine_args["max_num_tokens"] = args.max_num_tokens
     sampling_kwargs = args.runtime_params.get("sampling_kwargs", {"temperature": 0})
     if args.temperature is not None:
         sampling_kwargs["temperature"] = args.temperature
@@ -347,6 +351,16 @@ if __name__ == "__main__":
             "model config + memory budget, which can cap below the input "
             "length on tight GPUs. Set to 40960 for the SPEED-Bench "
             "throughput_32k split (32K input + 4K output + 4K headroom)."
+        ),
+    )
+    parser.add_argument(
+        "--max_num_tokens",
+        type=int,
+        required=False,
+        default=None,
+        help=(
+            "TRT-LLM max batched tokens. Overrides engine_args.max_num_tokens "
+            "from --runtime_params for --engine TRTLLM."
         ),
     )
     parser.add_argument(
