@@ -236,11 +236,8 @@ class HFDSparkModel(HFDFlashModel):
         valid_count = flat_weights.sum() + 1e-6
 
         if valid_count <= 1.0:
-            # Touch every draft parameter, as forward()'s early return does, so DDP with
-            # find_unused_parameters=False still sees the confidence head's gradient.
-            loss = (
-                flat_final.sum() * 0.0 + sum(p.sum() for p in self.dflash_module.parameters()) * 0.0
-            )
+            # As forward()'s early return: DDP still reduces the confidence head's gradient.
+            loss = self._draft_zero_loss(flat_final.device)
             metrics = {"ce_loss": 0.0, "l1_loss": 0.0, "confidence_loss": 0.0, "base_accuracy": 0.0}
             return loss, 0.0, metrics
 
@@ -352,10 +349,8 @@ class HFDSparkModel(HFDFlashModel):
                     attention_mask=attention_mask,
                     output_hidden_states=True,
                 )
-            offset = 1
-            selected = [base_out.hidden_states[lid + offset] for lid in self.target_layer_ids]
             base_outputs = DFlashBaseModelOutput(
-                target_hidden=torch.cat(selected, dim=-1),  # [B, seq, num_layers * H]
+                target_hidden=self._target_hidden(base_out.hidden_states),
                 base_hidden=base_out.last_hidden_state,
             )
         target_hidden = base_outputs.target_hidden
@@ -377,9 +372,7 @@ class HFDSparkModel(HFDFlashModel):
         n_blocks = anchor_positions.shape[1]
 
         if n_blocks == 0 or not block_keep_mask.any():
-            # Zero loss that still flows through all draft params for DDP sync.
-            dummy = sum(p.sum() for p in self.dflash_module.parameters()) * 0.0
-            return ModelOutput(loss=dummy, logits=None, train_acc=[[0.0]])
+            return ModelOutput(loss=self._draft_zero_loss(device), logits=None, train_acc=[[0.0]])
 
         # 4. Build draft inputs (inherited helpers).
         noise_embedding = self._build_noise_embedding(
