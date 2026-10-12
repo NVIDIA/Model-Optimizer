@@ -1434,7 +1434,10 @@ class TestAnchorSamplingStaticShape:
 
 
 class TestTeacherLogits:
-    """The base distribution is projected only at the rows, and vocab entries, asked for."""
+    """The base distribution is projected only at the rows, and vocab entries, asked for.
+
+    It is the next-token distribution, so label ``i`` reads row ``i - 1``.
+    """
 
     @staticmethod
     def _model():
@@ -1443,9 +1446,9 @@ class TestTeacherLogits:
         return model
 
     @staticmethod
-    def _positions(bsz=2):
+    def _labels(bsz=2):
         torch.manual_seed(0)
-        return torch.randint(0, SEQ_LEN, (bsz, 3, BLOCK_SIZE))
+        return torch.randint(1, SEQ_LEN, (bsz, 3, BLOCK_SIZE))
 
     @staticmethod
     def _rows(full, positions):
@@ -1459,45 +1462,52 @@ class TestTeacherLogits:
     def test_matches_the_full_sequence_projection(self):
         model = self._model()
         hidden = self._hidden(model)
-        positions = self._positions()
-        got = model._teacher_logits(DFlashBaseModelOutput(None, base_hidden=hidden), positions)
-        want = self._rows(model._base_model_lm_head(hidden), positions)
+        labels = self._labels()
+        got = model._teacher_logits(DFlashBaseModelOutput(None, base_hidden=hidden), labels)
+        want = self._rows(model._base_model_lm_head(hidden), labels - 1)
         torch.testing.assert_close(got, want)
 
     def test_prenorm_hidden_gets_the_base_final_norm(self):
         model = self._model()
         hidden = self._hidden(model)
-        positions = self._positions()
+        labels = self._labels()
         outputs = DFlashBaseModelOutput(None, base_hidden=hidden, base_hidden_prenorm=True)
-        want = self._rows(model._base_model_lm_head(model._base_model_norm(hidden)), positions)
-        torch.testing.assert_close(model._teacher_logits(outputs, positions), want)
+        want = self._rows(model._base_model_lm_head(model._base_model_norm(hidden)), labels - 1)
+        torch.testing.assert_close(model._teacher_logits(outputs, labels), want)
 
     def test_token_ids_pick_entries_of_the_full_rows(self):
         model = self._model()
         outputs = DFlashBaseModelOutput(None, base_hidden=self._hidden(model))
-        positions = self._positions()
-        token_ids = torch.randint(0, model.config.vocab_size, (*positions.shape, 5))
-        rows = model._teacher_logits(outputs, positions)
+        labels = self._labels()
+        token_ids = torch.randint(0, model.config.vocab_size, (*labels.shape, 5))
+        rows = model._teacher_logits(outputs, labels)
         torch.testing.assert_close(
-            model._teacher_logits(outputs, positions, token_ids), rows.gather(-1, token_ids)
+            model._teacher_logits(outputs, labels, token_ids), rows.gather(-1, token_ids)
         )
 
     def test_handed_over_logits_are_gathered_not_recomputed(self):
         model = self._model()
         logits = torch.randn(2, SEQ_LEN, model.config.vocab_size)
         outputs = DFlashBaseModelOutput(None, logits=logits)
-        positions = self._positions()
-        token_ids = torch.randint(0, model.config.vocab_size, (*positions.shape, 5))
-        want = self._rows(logits, positions)
-        assert torch.equal(model._teacher_logits(outputs, positions), want)
+        labels = self._labels()
+        token_ids = torch.randint(0, model.config.vocab_size, (*labels.shape, 5))
+        want = self._rows(logits, labels - 1)
+        assert torch.equal(model._teacher_logits(outputs, labels), want)
         assert torch.equal(
-            model._teacher_logits(outputs, positions, token_ids), want.gather(-1, token_ids)
+            model._teacher_logits(outputs, labels, token_ids), want.gather(-1, token_ids)
         )
+
+    def test_label_zero_does_not_wrap_to_the_last_row(self):
+        model = self._model()
+        logits = torch.randn(1, SEQ_LEN, model.config.vocab_size)
+        outputs = DFlashBaseModelOutput(None, logits=logits)
+        got = model._teacher_logits(outputs, torch.tensor([[0]]))
+        assert torch.equal(got[0, 0], logits[0, 0])
 
     def test_missing_base_distribution_raises(self):
         model = self._model()
         with pytest.raises(ValueError, match="base_model_hidden_states"):
-            model._teacher_logits(DFlashBaseModelOutput(None), self._positions())
+            model._teacher_logits(DFlashBaseModelOutput(None), self._labels())
 
     def test_offline_dict_keeps_the_hidden_unprojected(self):
         d = {

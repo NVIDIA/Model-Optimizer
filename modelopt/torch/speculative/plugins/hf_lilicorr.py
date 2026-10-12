@@ -545,14 +545,13 @@ class HFLiLiCorrModel(HFDFlashModel):
         batch_blocks, num_slots, topk = candidate_ids.shape
         bsz, n_blocks = anchor_positions.shape
         seq_len = base_outputs.target_hidden.shape[1]
-        # The target's next-token logits that predict the token at anchor+1+s sit at
-        # position anchor+s. Only the [blocks, slots, k] candidate logits are computed,
-        # never whole vocabulary rows.
-        slot_offsets = torch.arange(num_slots, device=candidate_ids.device)
-        positions = (anchor_positions.unsqueeze(-1) + slot_offsets).clamp(min=0, max=seq_len - 1)
+        # Slot s scores the token at anchor+1+s. Only the [blocks, slots, k] candidate logits
+        # are computed, never whole vocabulary rows.
+        slot_offsets = torch.arange(1, num_slots + 1, device=candidate_ids.device)
+        labels = (anchor_positions.unsqueeze(-1) + slot_offsets).clamp(max=seq_len - 1)
         candidate_target_logits = self._teacher_logits(
             base_outputs,
-            positions,
+            labels,
             token_ids=candidate_ids.reshape(bsz, n_blocks, num_slots, topk),
         )
         return candidate_target_logits.reshape(batch_blocks, num_slots, topk).float()

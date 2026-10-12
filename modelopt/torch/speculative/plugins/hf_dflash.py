@@ -97,7 +97,7 @@ from .modeling_fakebase import (
     _FINAL_NORM_PATHS,
     _LM_HEAD_PATHS,
 )
-from .modeling_final_norm import _maybe_apply_base_final_norm
+from .modeling_final_norm import _apply_base_final_norm
 
 logger = logging.getLogger(__name__)
 
@@ -750,13 +750,15 @@ class HFDFlashModel(DFlashModel):
         return attn_mask
 
     @torch.no_grad()
-    def _teacher_logits(self, base_outputs, positions, token_ids=None):
-        """Base-model logits at ``positions`` ([B, ...] sequence indices) -> [B, ..., vocab].
+    def _teacher_logits(self, base_outputs, label_positions, token_ids=None):
+        """The base model's logits for the tokens at ``label_positions`` ([B, ...]) -> [B, ..., vocab].
 
-        Only the requested rows of the base hidden go through the final norm and lm_head, so
-        no full-sequence logits are built from it; ``token_ids`` ([B, ..., k]) narrows the
+        Next-token logits: the ones that predict the token at position ``i`` sit at ``i - 1``.
+        Only those rows of the base hidden go through the final norm and lm_head, so no
+        full-sequence logits are built from it; ``token_ids`` ([B, ..., k]) narrows the
         projection to just those vocab entries.
         """
+        positions = (label_positions - 1).clamp(min=0)
         if base_outputs.logits is not None:
             if token_ids is None:
                 return _gather_rows(base_outputs.logits, positions)
@@ -772,11 +774,7 @@ class HFDFlashModel(DFlashModel):
         # A producer can store the hidden states in a wider dtype than the target's weights.
         # Cast before the final norm too, which online training runs in the target's dtype.
         rows = _gather_rows(base_outputs.base_hidden, positions).to(lm_head.weight.dtype)
-        rows = _maybe_apply_base_final_norm(
-            rows,
-            {"base_hidden_prenorm": base_outputs.base_hidden_prenorm},
-            self._base_model_norm,
-        )
+        rows = _apply_base_final_norm(rows, base_outputs.base_hidden_prenorm, self._base_model_norm)
         if token_ids is None:
             return lm_head(rows)
         logits = torch.einsum("...h,...kh->...k", rows, lm_head.weight[token_ids])
@@ -887,9 +885,7 @@ class HFDFlashModel(DFlashModel):
 
         if valid_count > 1.0:
             if kd:
-                # KD loss: teacher logits for token anchor+k are at position anchor+k-1
-                teacher_indices = (safe_label_indices - 1).clamp(min=0)
-                flat_teacher = self._teacher_logits(base_outputs, teacher_indices)
+                flat_teacher = self._teacher_logits(base_outputs, safe_label_indices)
                 flat_teacher = flat_teacher.reshape(flat_logits.shape)
                 target_soft = torch.softmax(flat_teacher, dim=-1)
                 draft_logsoft = torch.log_softmax(flat_logits, dim=-1)
