@@ -62,6 +62,13 @@ def prepare(hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool 
     Swap text_config to native deepseek_v3 + monkey-patch Kimi's modeling to use the native
     DeepseekV3ForCausalLM + apply the EP plan + install the on-the-fly expert decompressor.
     """
+    if type(hf_config).__module__.startswith("transformers."):
+        # From 5.13, a load without trust_remote_code builds transformers' own port, which the
+        # patch below never reaches.
+        raise ValueError(
+            "kimi_k25: expert parallelism runs on the checkpoint's own modeling code; "
+            "load it with trust_remote_code=True."
+        )
     if not hasattr(hf_config, "text_config"):
         raise ValueError("kimi_k25.apply: hf_config has no .text_config (expected a VLM config)")
 

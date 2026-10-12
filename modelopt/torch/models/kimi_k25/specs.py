@@ -27,7 +27,9 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="kimi_k25",
-        modeling_source="remote_code",
+        # transformers ships Kimi-K2.5 itself from 5.13. Expert parallelism still runs on the
+        # checkpoint's own code (``trust_remote_code=True``), which ``prepare`` patches.
+        min_transformers_version="5.13",
         ep_spec=EPSpec(prepare=prepare),
     )
 )
