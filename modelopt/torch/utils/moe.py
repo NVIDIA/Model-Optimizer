@@ -311,12 +311,14 @@ def register_torch_a2a():
 
     Done lazily from ``load_and_prepare_ep`` -- NOT at import time, so importing this module has no
     transformers side effect:
-      - the ``torch_a2a`` experts FORWARD into ``ExpertsInterface`` (``ALL_EXPERTS_FUNCTIONS``);
-      - two EP parallel STYLES into ``ALL_PARALLEL_STYLES``:
-          * ``torch_a2a_router``  -- emit GLOBAL unmasked expert ids (skip ``RouterParallel``'s
-            per-EP-rank masking) so the a2a dispatch can route each (token, expert) to its owning rank;
-          * ``torch_a2a_experts`` -- inject the EP ``process_group`` into the experts forward (4th arg)
-            and skip the all-reduce (the a2a combine does the reduction).
+
+    - the ``torch_a2a`` experts FORWARD into ``ExpertsInterface`` (``ALL_EXPERTS_FUNCTIONS``);
+    - two EP parallel STYLES into ``ALL_PARALLEL_STYLES``:
+
+      * ``torch_a2a_router`` -- emit GLOBAL unmasked expert ids (skip ``RouterParallel``'s
+        per-EP-rank masking) so the a2a dispatch can route each (token, expert) to its owning rank;
+      * ``torch_a2a_experts`` -- inject the EP ``process_group`` into the experts forward (4th arg)
+        and skip the all-reduce (the a2a combine does the reduction).
 
     These two styles are functionally the stock ``megamoe_router`` / ``megamoe_experts`` (which were
     added for DeepGEMM Mega-MoE in transformers 5.10.4), reimplemented here -- ~5 lines each -- so the
