@@ -60,6 +60,7 @@ def _get_dspark_config(
     confidence_alpha=0.0,
     block_size=BLOCK_SIZE,
     num_layers=NUM_DRAFT_LAYERS,
+    markov_rank=MARKOV_RANK,
 ):
     """Create a DSpark config for testing (dflash mode + projector_type=dspark)."""
     config = deepcopy(DFLASH_DEFAULT_CFG["config"])
@@ -71,7 +72,7 @@ def _get_dspark_config(
     config["dflash_architecture_config"] = {
         "num_hidden_layers": num_layers,
         "projector_type": "dspark",
-        "markov_rank": MARKOV_RANK,
+        "markov_rank": markov_rank,
         "markov_head_type": head_type,
         "use_confidence_head": use_confidence_head,
         "pure_draft_prefix_len": 1,
@@ -270,7 +271,9 @@ class TestDSparkSwa:
 class TestDSparkExporter:
     """Test vanilla serving exports and the native gated/recurrent formats."""
 
-    def _export(self, tmp_path, head_type="vanilla", use_confidence_head=False):
+    def _export(
+        self, tmp_path, head_type="vanilla", use_confidence_head=False, markov_rank=MARKOV_RANK
+    ):
         model = get_tiny_llama(num_hidden_layers=4)
         mtsp.convert(
             model,
@@ -278,7 +281,9 @@ class TestDSparkExporter:
                 (
                     "dflash",
                     _get_dspark_config(
-                        head_type=head_type, use_confidence_head=use_confidence_head
+                        head_type=head_type,
+                        use_confidence_head=use_confidence_head,
+                        markov_rank=markov_rank,
                     ),
                 )
             ],
@@ -312,8 +317,12 @@ class TestDSparkExporter:
     @pytest.mark.parametrize("use_confidence_head", [False, True])
     def test_export_config_has_dspark_fields(self, tmp_path, head_type, use_confidence_head):
         """Vanilla exports select the runtime and preserve the trained head settings."""
+        # DSparkModule casts markov_rank to int; vLLM sizes its Markov table from the export.
         export_dir = self._export(
-            tmp_path, head_type=head_type, use_confidence_head=use_confidence_head
+            tmp_path,
+            head_type=head_type,
+            use_confidence_head=use_confidence_head,
+            markov_rank=float(MARKOV_RANK),
         )
         with open(export_dir / "config.json") as f:
             cfg = json.load(f)
@@ -323,6 +332,7 @@ class TestDSparkExporter:
         dc = cfg["dflash_config"]
         assert dc["projector_type"] == "dspark"
         assert dc["markov_rank"] == MARKOV_RANK
+        assert type(dc["markov_rank"]) is int
         assert dc["markov_head_type"] == head_type.lower()
         assert dc["use_confidence_head"] is use_confidence_head
         assert dc["shift_label"] is True
@@ -331,6 +341,7 @@ class TestDSparkExporter:
         if vanilla:
             assert cfg["model_type"] == "qwen3"
             assert cfg["markov_rank"] == MARKOV_RANK
+            assert type(cfg["markov_rank"]) is int
             assert cfg["sample_from_anchor"] is True
             assert cfg["enable_confidence_head"] is use_confidence_head
             assert cfg["confidence_head_with_markov"] is use_confidence_head
