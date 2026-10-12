@@ -110,3 +110,121 @@ def test_expert_parallel_model_matches_the_whole_model(
         pytest.skip(f"{NUM_EXPERTS} experts do not shard over EP {ep_degree} on these GPUs")
     _save_tiny_qwen3_moe(tmp_path)
     dist_workers.run(_sharded_model_matches_the_whole_one, str(tmp_path), fsdp_dense, ep_degree)
+
+
+def _init_session(rank, size):
+    device = torch.device(f"cuda:{rank}")
+    session = ModelOptSession()
+    session.initialize(
+        distributed=True,
+        rank=rank,
+        world_size=size,
+        local_rank=rank,
+        device=device,
+        is_main=rank == 0,
+    )
+    return session, device
+
+
+def _batches(size):
+    """Every rank's batch, the same on all ranks: each trains on its own, the reference on all."""
+    return [
+        torch.randint(0, 128, (2, 16), generator=torch.Generator().manual_seed(r))
+        for r in range(size)
+    ]
+
+
+def _whole_model_grads_per_batch(whole, batches, device):
+    """The whole model's gradient on each batch alone, as ``{parameter name: gradient}``."""
+    grads = []
+    for batch in batches:
+        whole.zero_grad(set_to_none=True)
+        batch = batch.to(device)
+        whole(batch, labels=batch).loss.backward()
+        grads.append({n: p.grad.detach().clone() for n, p in whole.named_parameters()})
+    return grads
+
+
+def _fail_together(problems):
+    """Raise on every rank if any rank found a problem, so that no rank walks on alone into a collective
+    the failed ones never reach (which would hang until the test timeout instead of failing)."""
+    gathered = [None] * torch.distributed.get_world_size()
+    torch.distributed.all_gather_object(gathered, problems)
+    found = [
+        f"rank {r}: {problem}"
+        for r, rank_problems in enumerate(gathered)
+        for problem in rank_problems
+    ]
+    assert not found, "\n".join(found[:20])
+
+
+def _relative_error(actual, expected):
+    # bf16 gradients summed in a different order on each side: compare by relative norm.
+    return (
+        (actual.float() - expected.float()).norm() / expected.float().norm().clamp_min(1e-12)
+    ).item()
+
+
+def _assert_grads_match_the_whole_model(model, per_batch, rank, size, ep_degree):
+    """Routed experts collect the gradient of every token routed to them, their EP group's batches;
+    FSDP2-sharded dense parameters hold the gradient averaged over every rank; replicated dense
+    parameters see only this rank's batch."""
+    ep_rank = rank % ep_degree
+    group = range(rank - ep_rank, rank - ep_rank + ep_degree)
+    per_rank = NUM_EXPERTS // ep_degree
+    owned = slice(ep_rank * per_rank, (ep_rank + 1) * per_rank)
+    problems, names = [], set()
+    for name, param in model.named_parameters():
+        names.add(name)
+        if param.grad is None:
+            problems.append(f"{name} received no gradient")
+            continue
+        if ".mlp.experts." in name:
+            actual = _local(param.grad)
+            expected = sum(per_batch[r][name] for r in group)[owned]
+        elif isinstance(param.grad, DTensor):
+            actual = param.grad.full_tensor()
+            expected = sum(per_batch[r][name] for r in range(size)) / size
+        else:
+            actual = param.grad
+            expected = per_batch[rank][name]
+        error = _relative_error(actual, expected)
+        if not error < 3e-2:
+            problems.append(f"{name}: gradient off by {error:.3g} (relative norm)")
+    if names != set(per_batch[0]):
+        problems.append(
+            f"parameters differ from the whole model's: {sorted(names ^ set(per_batch[0]))[:5]}"
+        )
+    _fail_together(problems)
+
+
+def _sharded_model_backward_matches_the_whole_one(rank, size, ckpt_dir, fsdp_dense, ep_degree):
+    session, device = _init_session(rank, size)
+    config = AutoConfig.from_pretrained(ckpt_dir)
+    model = load_and_prepare_ep(
+        ckpt_dir, session, ep_degree, hf_config=config, fsdp_dense=fsdp_dense, freeze=False
+    )
+    whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16).to(device)
+
+    batches = _batches(size)
+    mine = batches[rank].to(device)
+    model(mine, labels=mine).loss.backward()
+    _assert_grads_match_the_whole_model(
+        model, _whole_model_grads_per_batch(whole, batches, device), rank, size, ep_degree
+    )
+
+
+@pytest.mark.parametrize("ep_share", [1, 2], ids=["ep-world", "ep-half"])
+@pytest.mark.parametrize("fsdp_dense", [False, True], ids=["dense-replicated", "dense-sharded"])
+def test_expert_parallel_backward_matches_the_whole_model(
+    need_2_gpus, dist_workers, tmp_path, fsdp_dense, ep_share
+):
+    """Loaded trainable, the sharded model's gradients are the whole model's: tokens' gradients travel
+    back through the all-to-all to the experts that saw them, and to the router that chose them."""
+    ep_degree = dist_workers.world_size // ep_share
+    if ep_degree < 2 or dist_workers.world_size % ep_share or NUM_EXPERTS % ep_degree:
+        pytest.skip(f"{NUM_EXPERTS} experts do not shard over EP {ep_degree} on these GPUs")
+    _save_tiny_qwen3_moe(tmp_path)
+    dist_workers.run(
+        _sharded_model_backward_matches_the_whole_one, str(tmp_path), fsdp_dense, ep_degree
+    )
