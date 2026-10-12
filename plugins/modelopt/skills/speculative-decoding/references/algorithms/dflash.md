@@ -157,7 +157,7 @@ DFlash-specific:
 | --- | --- | --- |
 | `seq_len (N) must be divisible by block_size (B)` | `training.training_seq_len` not a multiple of `dflash_block_size` | Adjust either value, or pad |
 | `DFlash offline model cannot run eval/inference forward` | Offline conversion deletes base-model layers to save memory | Don't run eval on the offline model; reload the full base first |
-| `DFlash offline model cannot run AR validation / pseudo_speculative_generate` | Same cause, hit via AR validation | Keep `training.estimate_ar=false` and `training.ar_validate_steps=0` in offline runs |
+| `An offline DFlash-family model cannot run AR validation / pseudo_speculative_generate` | Same cause, hit via AR validation | Keep `training.estimate_ar=false` and `training.ar_validate_steps=0` in offline runs |
 | `dflash_swa_window_size (N) must be >= dflash_block_size (B)` | Config validation | Raise the window or lower the block size |
 | `The base model did not return hidden states required for DFlash training` | Base model's top-level forward ignores `output_hidden_states=True` | Usually a multimodal wrapper — needs a model-side fix |
 | `ERROR: DRAFT_CKPT_DIR=... contains no exported-checkpoint-* directory` | Upstream training produced no draft | Fix training; do not chase the smoke test |
