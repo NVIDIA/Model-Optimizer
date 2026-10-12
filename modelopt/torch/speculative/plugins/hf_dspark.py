@@ -244,10 +244,8 @@ class HFDSparkModel(HFDFlashModel):
             metrics = {"ce_loss": 0.0, "l1_loss": 0.0, "confidence_loss": 0.0, "base_accuracy": 0.0}
             return loss, 0.0, metrics
 
-        # Aligned target distribution: base-model logits that predict token anchor+k+1
-        # sit at position anchor+k (= label index - 1).
-        teacher_indices = (safe_label_indices - 1).clamp(min=0)
-        flat_teacher = self._teacher_logits(base_outputs, teacher_indices).reshape(-1, vocab)
+        # Aligned target distribution: the base model's own prediction of each label.
+        flat_teacher = self._teacher_logits(base_outputs, safe_label_indices).reshape(-1, vocab)
 
         # Term 1: cross-entropy on the corrected (final) logits.
         ce_per_token = F.cross_entropy(flat_final, flat_targets, reduction="none")
