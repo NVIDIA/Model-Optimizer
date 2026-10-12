@@ -131,6 +131,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix unified HF export writing a weight name the source checkpoint does not use when a model declares a backwards-compatibility *load* rename as a reversible ``WeightRenaming``. Reversing such a rule rewrote the canonical name to a legacy spelling, and a deployment runtime keyed on the canonical name then failed to load the quantized checkpoint. Reverse renames that rewrite a name the source checkpoint already carries are now skipped, for both the exported tensors and the quantization config's module references.
 - Fix ONNX quantization reusing existing tensor names for scale and zero-point parameters while preserving INT8 calibration-cache lookup. The boolean ``--target_dla`` / ``target_dla=True`` now preserves scalar multiplication/division operands and padding fill values as constants; use Q/DQ Translator for compatible TensorRT 10.7-and-earlier DLA deployments, or direct Q/DQ with strongly typed DLA enabled in a compatible TensorRT 11.4+ build.
 - Fix calibration silently dropping samples when an out-of-memory error forces the batch to be
   split and a smaller working batch size is already known: the slices stopped tiling the batch,
