@@ -87,7 +87,6 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
 
 - `--tp_size 1` is **required**: with tensor parallelism, static NVFP4 weight scales are per-shard but the Megatron checkpoint saves them as replicated, so calibration raises `NotImplementedError` for TP > 1. Expert parallelism spreads the experts instead.
 - Calibration is text-only (`cnn_nemotron_v2_mix`): the language model is calibrated on its own, and the vision tower is not run.
-- The MoE experts are built as grouped GEMMs (`TEGroupedMLP`). The log reports `moe_grouped_gemm: true`; do not pass `--no_moe_grouped_gemm`.
 - The MTP head is built. In Megatron-Core its MoE block is `language_model.mtp.layers.0.mtp_model_layer.layers.1`, which the recipe quantizes like the backbone experts; the rest of the head stays BF16.
 
 </details>
