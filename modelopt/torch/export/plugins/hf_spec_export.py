@@ -510,19 +510,19 @@ class DominoExporter(DFlashExporter):
         """Extend the DFlash config with the Domino head fields."""
         config = super()._export_config()
         draft_config = self.model.dflash_config
+        # Read off the built head rather than the config dict, so the export describes the
+        # head these weights belong to.
+        head = self.model.dflash_module
 
-        # Present because HFDominoModel.modify validates them at convert time.
-        emb_dim = draft_config.emb_dim
-        gru_hidden_dim = draft_config.gru_hidden_dim
         # Mirror the reference checkpoint: emb_dim also appears at the top level.
-        config["emb_dim"] = emb_dim
+        config["emb_dim"] = head.emb_dim
         config["dflash_config"].update(
             {
                 "projector_type": getattr(draft_config, "projector_type", "domino"),
                 "shift_label": bool(self.model._label_shift),
-                "pure_draft_prefix_len": getattr(draft_config, "pure_draft_prefix_len", 1),
-                "gru_hidden_dim": gru_hidden_dim,
-                "emb_dim": emb_dim,
+                "pure_draft_prefix_len": head.pure_draft_prefix_len,
+                "gru_hidden_dim": head.gru_hidden_dim,
+                "emb_dim": head.emb_dim,
             }
         )
         return config
@@ -594,14 +594,17 @@ class DSparkExporter(DFlashExporter):
         """Extend the DFlash config with the DSpark head fields."""
         config = super()._export_config()
         draft_config = self.model.dflash_config
+        # Read off the built head rather than the config dict: DSparkModule normalizes these
+        # (e.g. lower-cases markov_head_type), and the export must describe what was trained.
+        head = self.model.dflash_module
 
         config["dflash_config"].update(
             {
                 "projector_type": getattr(draft_config, "projector_type", "dspark"),
                 "shift_label": bool(self.model._label_shift),
-                "markov_rank": draft_config.markov_rank,
-                "markov_head_type": getattr(draft_config, "markov_head_type", "vanilla"),
-                "use_confidence_head": bool(getattr(draft_config, "use_confidence_head", False)),
+                "markov_rank": head.markov_rank,
+                "markov_head_type": head.markov_head_type,
+                "use_confidence_head": head.use_confidence_head,
             }
         )
         return config
