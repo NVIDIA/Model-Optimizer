@@ -44,9 +44,10 @@ def _get_generator(seed: int | None = None) -> _random.Random:
         delattr(_get_generator, "generator")
     if not hasattr(_get_generator, "generator"):
         # synchronizing random seed and initialize generator
-        seed = dist.broadcast(seed or _random.getrandbits(64))
+        is_manual = seed is not None
+        seed = dist.broadcast(seed if seed is not None else _random.getrandbits(64))
         _get_generator.generator = _random.Random(seed)  # type: ignore[attr-defined]
-        _get_generator.is_manual = seed is not None  # type: ignore[attr-defined]
+        _get_generator.is_manual = is_manual  # type: ignore[attr-defined]
         _get_generator.is_synced = dist.size() > 1  # type: ignore[attr-defined]
     return _get_generator.generator  # type: ignore[attr-defined]
 
@@ -157,7 +158,12 @@ def _deterministic_seed():
     Resets the random state to prior upon exit.
     """
     old_random_generator = _get_generator()
+    old_is_manual = getattr(_get_generator, "is_manual", False)
+    old_is_synced = getattr(_get_generator, "is_synced", False)
     _set_deterministic_seed(1024)
-    yield
-    delattr(_get_generator, "generator")
-    setattr(_get_generator, "generator", old_random_generator)
+    try:
+        yield
+    finally:
+        _get_generator.generator = old_random_generator  # type: ignore[attr-defined]
+        _get_generator.is_manual = old_is_manual  # type: ignore[attr-defined]
+        _get_generator.is_synced = old_is_synced  # type: ignore[attr-defined]
