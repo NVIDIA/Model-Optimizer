@@ -26,7 +26,7 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="llama4",
-        min_transformers_version="4.57",
+        min_transformers_version="5.5",
         moe_spec=MoESpec(
             block_names=("Llama4TextMoe",),
             expert_linear_names=("gate_up_proj", "down_proj"),

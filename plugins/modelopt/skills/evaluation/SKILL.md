@@ -12,7 +12,9 @@ Guide the user through creating NEL YAML configs, running evaluations, and monit
 
 ### Completed-run analysis
 
-For completed runs, skip launch/config; use launching-evals for artifacts/analysis and apply [run-validation.md](references/run-validation.md) before scores. Its policy overrides blanket uncapping and fixed token/context limits.
+For completed runs, skip launch/config; use launching-evals for artifacts/analysis
+and apply [run-validation.md](references/run-validation.md) before scores. Its policy
+overrides blanket uncapping and fixed token/context limits.
 
 ### Workspace integration
 
@@ -48,6 +50,7 @@ for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
 2. Isolated nel-next venv: `"$SKILL_DIR/scripts/nel-next.sh" --setup-only` (keeps 0.2.6 `nel` untouched).
 3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`, `${HARBOR_ECS_REGION}`) into `.env`; always include the `output.export_config.mlflow` block.
 4. Dry-run → canary → full (`nel-next.sh eval run`), then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
+5. Before reporting a full-run score, apply `references/run-validation.md`, including its benchmark-specific checks.
 
 Steps 1–9 below are currently validated with 0.2.6 — use them for everything else.
 

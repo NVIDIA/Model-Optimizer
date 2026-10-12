@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import gc
 import importlib.util
+import inspect
+from functools import partial, wraps
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -52,7 +54,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins import vllm as vllm_plugin
 from modelopt.torch.quantization.plugins.vllm import (
     _ATTENTION_TYPES,
@@ -411,6 +413,212 @@ def test_prequantized_fused_moe_passes_through(monkeypatch):
     moe.w13_input_quantizer.enable()
     with pytest.raises(RuntimeError, match="w13_input_quantizer"), moe._fakequant_moe_kernels():
         pass
+
+
+class _StandInPrepareFinalize:
+    """Records the fused expert output that a modular prepare/finalize object would send."""
+
+    def __init__(self, asynchronous=False, batched=False):
+        self.asynchronous = asynchronous
+        # Batched payloads (DeepEP low-latency, NIXL) carry unused padding rows.
+        self.activation_format = SimpleNamespace(name="BatchedExperts" if batched else "Standard")
+        self.sent = []
+
+    def supports_async(self):
+        return self.asynchronous
+
+    def finalize(self, output, fused_expert_output, *args):
+        self.sent.append(fused_expert_output.clone())
+        output.copy_(fused_expert_output)
+
+    def finalize_async(self, output, fused_expert_output, *args):
+        self.sent.append(fused_expert_output.clone())
+        return lambda: output.copy_(fused_expert_output)
+
+
+class _StandInMonolithicPrepareFinalize:
+    activation_format = SimpleNamespace(name="Standard")
+
+    def __init__(self, defer=False):
+        self.defer = defer  # like vLLM's deferred finalize, which skips finalize
+        self.sent = []
+
+    def finalize(self, fused_expert_output):
+        self.sent.append(fused_expert_output.clone())
+        return fused_expert_output
+
+
+class _NativeRoutedExperts(torch.nn.Module):
+    """Runs ``forward_*`` like vLLM's ``RoutedExperts`` and modular kernel; the experts double x."""
+
+    def forward_modular(
+        self, x, topk_weights, topk_ids, shared_experts=None, shared_experts_input=None
+    ):
+        self.dispatched = x
+        output = torch.empty_like(x)
+        prepare_finalize = self.quant_method.moe_kernel.prepare_finalize
+        args = (output, 2 * x, topk_weights, topk_ids, False, None)
+        if prepare_finalize.supports_async():
+            prepare_finalize.finalize_async(*args)()
+        else:
+            prepare_finalize.finalize(*args)
+        return output
+
+    def forward_monolithic(self, x, router_logits=None, input_ids=None):
+        self.dispatched = x
+        prepare_finalize = self.quant_method.moe_kernel.prepare_finalize
+        if prepare_finalize.defer:
+            return SimpleNamespace(gemm2_permuted=2 * x)  # stands in for UnfinalizedMoEOutput
+        return prepare_finalize.finalize(2 * x)
+
+
+_requires_routed_experts = pytest.mark.skipif(
+    not vllm_plugin._has_routed_experts_cls, reason="this vLLM has no RoutedExperts"
+)
+if vllm_plugin._has_routed_experts_cls:
+
+    class _TestQuantRoutedExperts(vllm_plugin._QuantVLLMRoutedExperts, _NativeRoutedExperts):
+        pass
+
+
+def _routed_experts_stand_in(monkeypatch, prepare_finalize=None, constant_amax=1.0):
+    """Pre-quantized routed experts: the communication quantizers must still apply."""
+    moe = _prequantized_module(monkeypatch, _TestQuantRoutedExperts, "model.layers.0.mlp.experts")
+    moe.layer_name = moe.prefix
+    moe.moe_config = SimpleNamespace(use_passthrough_all2all=False)
+    for name in _QuantFusedMoEBase._QUANTIZER_NAMES:
+        getattr(moe, name).disable()
+    if prepare_finalize is not None:
+        moe.quant_method.moe_kernel = SimpleNamespace(prepare_finalize=prepare_finalize)
+    for quantizer in (moe.dispatch_quantizer, moe.combine_quantizer):
+        quantizer.set_from_attribute_config({"enable": True, "constant_amax": constant_amax})
+    return moe
+
+
+@_requires_routed_experts
+@pytest.mark.parametrize("kind", ["finalize", "finalize_async", "batched_finalize", "monolithic"])
+def test_routed_experts_quantize_dispatch_and_combine(monkeypatch, kind):
+    prepare_finalize = (
+        _StandInMonolithicPrepareFinalize()
+        if kind == "monolithic"
+        else _StandInPrepareFinalize(
+            asynchronous=kind == "finalize_async", batched=kind == "batched_finalize"
+        )
+    )
+    moe = _routed_experts_stand_in(monkeypatch, prepare_finalize)
+    x = torch.randn(4, 8)
+    original_x = x.clone()
+    for _ in range(2):  # the second forward must not wrap finalize again
+        if kind == "monolithic":
+            output = moe.forward_monolithic(x=x, router_logits=None)
+        else:
+            output = moe.forward_modular(x=x, topk_weights=None, topk_ids=None)
+
+    dispatched = moe.dispatch_quantizer(original_x)
+    combined = moe.combine_quantizer(2 * dispatched)
+    # Out of place: the router and the shared experts keep the unquantized input.
+    assert torch.equal(x, original_x)
+    assert torch.equal(moe.dispatched, dispatched)
+    assert len(prepare_finalize.sent) == 2
+    assert all(torch.equal(sent, combined) for sent in prepare_finalize.sent)
+    assert torch.equal(output, combined)
+    finalize = getattr(
+        prepare_finalize, "finalize_async" if kind == "finalize_async" else "finalize"
+    )
+    assert not isinstance(finalize.args[0], partial)
+
+
+class _StandInRenamedPayload(_StandInMonolithicPrepareFinalize):
+    def finalize(self, payload):  # an API change: no fused_expert_output argument
+        return payload
+
+
+@_requires_routed_experts
+@pytest.mark.parametrize(
+    ("prepare_finalize", "constant_amax", "match"),
+    [
+        (None, 1.0, "needs a vLLM modular MoE kernel"),
+        (_StandInMonolithicPrepareFinalize(defer=True), 1.0, "did not call the finalize step"),
+        (_StandInRenamedPayload(), 1.0, "takes no fused_expert_output"),
+        (_StandInPrepareFinalize(batched=True), None, "sends unused padding rows"),
+    ],
+    ids=("no_modular_kernel", "deferred_finalize", "renamed_payload", "padded_payload"),
+)
+def test_routed_experts_combine_rejects_unhooked_paths(
+    monkeypatch, prepare_finalize, constant_amax, match
+):
+    moe = _routed_experts_stand_in(monkeypatch, prepare_finalize, constant_amax)
+    with pytest.raises(RuntimeError, match=match):
+        moe.forward_monolithic(x=torch.zeros(2, 8), router_logits=None)
+
+
+_MXFP8_CFG = {"num_bits": (4, 3), "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)}}
+
+
+@_requires_routed_experts
+@pytest.mark.parametrize(
+    ("combine_cfgs", "accepted"),
+    [
+        ([_MXFP8_CFG], True),
+        ([{"num_bits": 8, "block_sizes": {-1: None, "type": "dynamic"}}], False),  # calibrated
+        ([{"constant_amax": 1.0}, {"num_bits": (4, 3), "use_constant_amax": True}], True),
+        ([{"constant_amax": 1.0}, {"num_bits": 8}], False),  # the second one calibrates its scale
+    ],
+    ids=("mx", "per_row", "sequential", "sequential_calibrated"),
+)
+def test_routed_experts_combine_scale_on_padded_payload(monkeypatch, combine_cfgs, accepted):
+    moe = _routed_experts_stand_in(monkeypatch, _StandInPrepareFinalize(batched=True))
+    quantizers = [TensorQuantizer(QuantizerAttributeConfig(**cfg)) for cfg in combine_cfgs]
+    moe.combine_quantizer = (
+        quantizers[0] if len(quantizers) == 1 else SequentialQuantizer(*quantizers)
+    )
+    if accepted:
+        moe._hook_combine()
+    else:
+        with pytest.raises(RuntimeError, match="sends unused padding rows"):
+            moe._hook_combine()
+
+
+@_requires_routed_experts
+def test_routed_experts_combine_scale_rechecked_after_reconfiguration(monkeypatch):
+    moe = _routed_experts_stand_in(monkeypatch, _StandInPrepareFinalize(batched=True))
+    moe._hook_combine()  # constant_amax: accepted, and finalize is hooked
+    # e.g. a later mtq.quantize switches to a calibrated or per-call global scale
+    moe.combine_quantizer.set_from_attribute_config({"constant_amax": None})
+    with pytest.raises(RuntimeError, match="sends unused padding rows"):
+        moe._hook_combine()
+
+
+class DeepEPV2PrepareAndFinalize(_StandInPrepareFinalize):
+    """Named like vLLM's DeepEP v2 prepare/finalize, here in CUDA-graph mode."""
+
+    use_cudagraph = True
+
+
+class HummingIndexedExperts:
+    """Named like the vLLM experts that leave DeepEP v2's unused rows stale."""
+
+
+@_requires_routed_experts
+@pytest.mark.parametrize("experts", [HummingIndexedExperts(), None], ids=("stale", "zeroed"))
+def test_routed_experts_combine_scale_on_deepep_v2_rows(monkeypatch, experts):
+    moe = _routed_experts_stand_in(monkeypatch, DeepEPV2PrepareAndFinalize(), constant_amax=None)
+    moe.quant_method.moe_kernel.fused_experts = experts
+    if experts is None:
+        moe._hook_combine()
+    else:
+        with pytest.raises(RuntimeError, match="sends unused padding rows"):
+            moe._hook_combine()
+
+
+@_requires_routed_experts
+def test_routed_experts_combine_rejects_backends_that_combine_inside_the_kernel(monkeypatch):
+    moe = _routed_experts_stand_in(monkeypatch, _StandInPrepareFinalize())
+    moe.moe_config.use_passthrough_all2all = True  # e.g. the flashinfer_moe_ep_* backends
+    with pytest.raises(RuntimeError, match="combines inside its kernel"):
+        moe.forward_modular(x=torch.zeros(2, 8), topk_weights=None, topk_ids=None)
+    moe.combine_quantizer.disable()  # the dispatched tokens still reach dispatch_quantizer
+    moe.forward_modular(x=torch.zeros(2, 8), topk_weights=None, topk_ids=None)
 
 
 class _NativeMLAAttention(torch.nn.Module):
@@ -853,6 +1061,92 @@ def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm):
         module_path = vllm_key.rsplit("._amax", 1)[0]
         assert module_path.endswith(expected_quantizer), vllm_key
         assert module_path in summary["quantizer_names"], (vllm_key, summary["quantizer_names"])
+
+
+_MOE_COMMUNICATION_FP8_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*dispatch_quantizer", "cfg": {"num_bits": (4, 3)}},
+        {"quantizer_name": "*combine_quantizer", "cfg": {"num_bits": (4, 3)}},
+    ],
+    "algorithm": "max",
+}
+
+
+def _quantize_moe_communication(self):
+    """Run on the worker: calibrate FP8 dispatch/combine quantizers, spying on prepare/finalize.
+
+    Returns, per routed-experts module, whether each quantizer calibrated to the amax of the
+    tensors that the MoE kernel's prepare (dispatch) and finalize (combine) received, and whether
+    those tensors are fake-quantized once calibration is done.
+    """
+    model = self.get_model()
+    experts = {
+        name: module
+        for name, module in model.named_modules()
+        if isinstance(module, vllm_plugin.RoutedExperts)
+    }
+    received = {name: {"dispatch": [], "combine": []} for name in experts}
+
+    def spy(method, tensors, argument):
+        signature = inspect.signature(method)
+
+        @wraps(method)  # keeps the signature that the combine hook looks up
+        def record(*args, **kwargs):
+            tensors.append(signature.bind(*args, **kwargs).arguments[argument].clone())
+            return method(*args, **kwargs)
+
+        return record
+
+    for name, module in experts.items():
+        prepare_finalize = module.quant_method.moe_kernel.prepare_finalize
+        dispatch, combine = received[name]["dispatch"], received[name]["combine"]
+        prepare_finalize.prepare = spy(prepare_finalize.prepare, dispatch, "a1")
+        prepare_finalize.finalize = spy(prepare_finalize.finalize, combine, "fused_expert_output")
+    try:
+        with disable_compilation(model):
+            mtq.quantize(
+                model,
+                _MOE_COMMUNICATION_FP8_CFG,
+                forward_loop=lambda _: self.model_runner._dummy_run(4),
+            )
+        quantizers = {
+            name: {"dispatch": module.dispatch_quantizer, "combine": module.combine_quantizer}
+            for name, module in experts.items()
+        }
+        calibrated = {
+            name: [
+                quantizer.amax.item() == max(t.abs().amax().item() for t in received[name][phase])
+                for phase, quantizer in quantizers[name].items()
+            ]
+            for name in experts
+        }
+        for phases in received.values():
+            for tensors in phases.values():
+                tensors.clear()
+        self.model_runner._dummy_run(4)
+        # A fake-quantized tensor is its own fake quantization.
+        return {
+            name: calibrated[name]
+            + [
+                all(torch.equal(quantizer(t), t) for t in received[name][phase])
+                for phase, quantizer in quantizers[name].items()
+            ]
+            for name in experts
+        }
+    finally:  # the fixture's engine is shared: restore the kernels' own prepare/finalize
+        for module in experts.values():
+            prepare_finalize = module.quant_method.moe_kernel.prepare_finalize
+            for attribute in ("prepare", "finalize", "finalize_async", "_combine_quantizer_owner"):
+                vars(prepare_finalize).pop(attribute, None)
+
+
+@_requires_routed_experts
+def test_tiny_qwen3_moe_communication_quantize(tiny_qwen3_moe_llm):
+    """dispatch/combine quantizers act on exactly what the MoE kernel's prepare/finalize get."""
+    (results,) = tiny_qwen3_moe_llm.collective_rpc(_quantize_moe_communication)
+    assert len(results) >= 2, results
+    assert all(all(checks) for checks in results.values()), results
 
 
 def test_tiny_deepseek_mla_quantize(tiny_deepseek_llm):

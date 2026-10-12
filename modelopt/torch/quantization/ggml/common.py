@@ -236,6 +236,8 @@ class GGMLFormat:
     # its search temporaries, decoding runs every forward and is bounded by kernel launches.
     block_chunk_size: int
     decode_chunk_size: int
+    # Whether ``quantize`` takes a per-input-column ``importance`` that weights its search.
+    weighted: bool = False
 
     @property
     def effective_bits(self) -> float:
@@ -359,6 +361,62 @@ def validate_weight(
         )
     if not weight.is_floating_point():
         raise TypeError(f"{format_name} requires a floating-point weight, got {weight.dtype}")
+
+
+def importance_blocks(
+    importance: torch.Tensor | None, weight: torch.Tensor, format_name: str
+) -> torch.Tensor | None:
+    """A per-input-column ``importance`` as ``[weight.shape[-1] // 256, 256]`` float32 block rows.
+
+    Flattened block ``i`` of ``weight`` is weighted by row ``i % (weight.shape[-1] // 256)``.
+    """
+    if importance is None:
+        return None
+    if tuple(importance.shape) != (weight.shape[-1],) or not importance.is_floating_point():
+        raise ValueError(
+            f"{format_name} importance must be a floating-point [{weight.shape[-1]}] vector, got "
+            f"{importance.dtype} {tuple(importance.shape)}"
+        )
+    importance = importance.to(device=weight.device, dtype=torch.float32)
+    if not (torch.isfinite(importance) & (importance >= 0)).all():
+        raise ValueError(f"{format_name} importance must be finite and non-negative")
+    return importance.reshape(-1, GGML_BLOCK_SIZE)
+
+
+def chunk_importance(
+    blocks_importance: torch.Tensor | None, start: int, stop: int
+) -> torch.Tensor | None:
+    """The importance of flattened blocks ``start:stop``, as ``[stop - start, 32, 8]``."""
+    if blocks_importance is None:
+        return None
+    index = torch.arange(start, stop, device=blocks_importance.device) % len(blocks_importance)
+    return blocks_importance[index].reshape(-1, GGML_BLOCK_SIZE // 8, 8)
+
+
+def iq2_tile_terms(
+    magnitudes: torch.Tensor,
+    grid_tile: torch.Tensor,
+    tile_qnorm: torch.Tensor,
+    weights: torch.Tensor | None = None,
+    odd_parity: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The (weighted) ``|x| . q`` and ``|q|^2`` of every 8-value vector against a grid tile.
+
+    ``magnitudes`` and ``weights`` are ``[blocks, vectors, 8]``, ``grid_tile`` is ``[entries, 8]``
+    and ``tile_qnorm`` its unweighted norms; both results broadcast to ``[blocks, vectors,
+    entries]``. With ``odd_parity`` the dot takes the even-parity sign rule: the coordinate
+    contributing least is flipped.
+    """
+    products = magnitudes.unsqueeze(2) * grid_tile.reshape(1, 1, -1, 8)
+    if weights is None:
+        qnorm = tile_qnorm.reshape(1, 1, -1)
+    else:
+        products = products * weights.unsqueeze(2)
+        qnorm = (weights.unsqueeze(2) * grid_tile.square().reshape(1, 1, -1, 8)).sum(dim=-1)
+    dot = products.sum(dim=-1)
+    if odd_parity is not None:
+        dot = torch.where(odd_parity.unsqueeze(-1), dot - 2.0 * products.amin(dim=-1), dot)
+    return dot, qnorm
 
 
 def validate_block_chunk_size(block_chunk_size: int) -> None:
