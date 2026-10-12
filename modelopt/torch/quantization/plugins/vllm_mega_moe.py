@@ -118,19 +118,29 @@ class _QuantVLLMMegaMoEExperts(QuantModule):
             symm_buffer = self.get_symm_buffer()
             slots = _combine_slots(symm_buffer, output.shape[0])
             valid = (symm_buffer.topk_idx[: output.shape[0]] >= 0).T.unsqueeze(-1)
-            num_topk = symm_buffer.num_topk
-            checked = id(symm_buffer) in _checked_buffers
-            if not checked and not torch.cuda.is_current_stream_capturing() and valid.any():
-                # Once per buffer, on a batch with routed rows (warmup batches are all padding):
-                # the rows must reproduce the kernel's output bit for bit.
-                if not torch.equal(_ordered_sum(slots, valid, num_topk), output):
-                    raise RuntimeError(
-                        f"{self.prefix}: the DeepGEMM Mega-MoE combine rows do not reproduce the"
-                        " kernel output: its buffer layout changed, or DG_COMM_KERNEL_DEBUG=1 zeroed it."
-                    )
-                _checked_buffers.add(id(symm_buffer))
-            output.copy_(_ordered_sum(slots, valid, num_topk, self.combine_quantizer))
+            if id(symm_buffer) not in _checked_buffers:
+                self._check_combine_rows(symm_buffer, slots, valid, output)
+            output.copy_(_ordered_sum(slots, valid, symm_buffer.num_topk, self.combine_quantizer))
         return output
+
+    def _check_combine_rows(self, symm_buffer, slots, valid, output) -> None:
+        """Check that the combine rows reproduce the kernel output bit for bit.
+
+        Eager forwards check each buffer once, on a batch with routed rows (warmup batches are all
+        padding). A CUDA graph captured before that check checks every replay on the device instead,
+        failing with a device-side assert.
+        """
+        message = (
+            f"{self.prefix}: the DeepGEMM Mega-MoE combine rows do not reproduce the kernel output:"
+            " its buffer layout changed, or DG_COMM_KERNEL_DEBUG=1 zeroed it."
+        )
+        reproduced = (_ordered_sum(slots, valid, symm_buffer.num_topk) == output).all()
+        if torch.cuda.is_current_stream_capturing():
+            torch._assert_async(reproduced, message)
+        elif valid.any():
+            if not reproduced:
+                raise RuntimeError(message)
+            _checked_buffers.add(id(symm_buffer))
 
     def _check_combine_scale(self) -> None:
         """Require a global scale fixed across ranks while serving.

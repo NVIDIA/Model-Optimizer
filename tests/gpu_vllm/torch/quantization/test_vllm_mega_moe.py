@@ -98,7 +98,7 @@ def _mega_moe(num_shared_experts=0, constant_amax=1.0, corruption=0.0):
     moe._setup()
     for quantizer in (moe.dispatch_quantizer, moe.combine_quantizer):
         quantizer.set_from_attribute_config({"enable": True, "constant_amax": constant_amax})
-    return moe
+    return moe.to(DEVICE)  # like vLLM, which loads the model on the GPU
 
 
 def _forward(moe, num_tokens=5):
@@ -169,3 +169,36 @@ def test_mega_moe_layout_check_waits_for_routed_rows():
     assert not vllm_mega_moe._checked_buffers
     with pytest.raises(RuntimeError, match="do not reproduce the kernel output"):
         _forward(moe)
+
+
+@pytest.mark.parametrize("corruption", [0.0, 1.0], ids=("same_layout", "changed_buffer_layout"))
+def test_mega_moe_graph_checks_layout_on_replay(monkeypatch, corruption):
+    """A CUDA graph captured after padding-only warmup checks the rows on every replay."""
+    reproduced = torch.full((), bool(corruption), device=DEVICE)  # wrong until the replay checks
+    # Record the device-side check instead of letting it kill the CUDA context.
+    monkeypatch.setattr(
+        torch, "_assert_async", lambda condition, message: reproduced.copy_(condition)
+    )
+    moe = _mega_moe(corruption=corruption)
+    moe.dispatch_quantizer.disable()
+    hidden_states = torch.randn(5, HIDDEN, dtype=torch.bfloat16, device=DEVICE)
+    topk_ids = torch.full((5, NUM_TOPK), -1, device=DEVICE)  # like vLLM's warmup batches
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        moe(hidden_states, None, topk_ids, activation_clamp=None)  # eager warmup checks nothing
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = moe(hidden_states, None, topk_ids, activation_clamp=None)
+    assert not vllm_mega_moe._checked_buffers
+
+    topk_ids.copy_(torch.randint(0, 8, topk_ids.shape, device=DEVICE))
+    graph.replay()
+    assert reproduced.item() == (not corruption)
+    if not corruption:
+        slots, valid, num_topk = _slots_and_valid(moe, topk_ids)
+        assert valid.all()
+        assert torch.equal(
+            output, vllm_mega_moe._ordered_sum(slots, valid, num_topk, moe.combine_quantizer)
+        )
