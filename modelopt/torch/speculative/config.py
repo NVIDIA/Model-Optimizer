@@ -145,10 +145,11 @@ class DFlashConfig(ModeloptBaseConfig):
     )
 
     dflash_use_torch_compile: bool = ModeloptField(
-        default=True,
+        default=False,
         description=(
             "Whether to torch.compile the draft decoder stack and the DSpark TVD chunk in "
-            "training. Compiles once, on the first step."
+            "training. Compiles once, on the first step, and needs a working Inductor "
+            "toolchain."
         ),
     )
 
