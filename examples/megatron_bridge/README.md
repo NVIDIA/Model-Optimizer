@@ -20,7 +20,7 @@ This directory contains examples of using Model Optimizer with the [NeMo Megatro
 >
 > Or the [Qwen3.6-35B-A3B W4A4 NVFP4 + QAD tutorial](tutorials/Qwen3.6-35B-A3B/README.md) for an end-to-end quantization-aware distillation workflow.
 >
-> Or the [NemotronH omni VL W4A4 + QAD tutorial](tutorials/NemotronH-Omni-W4A4-QAD/README.md) for a Mamba-Transformer MoE vision-language model with an NVFP4 KV cache.
+> Or the [NemotronH omni VL W4A4 + QAD tutorial](tutorials/NemotronH-Omni-W4A4-QAD/README.md) for a Mamba-Transformer MoE vision-language model.
 
 ## Pre-Requisites
 

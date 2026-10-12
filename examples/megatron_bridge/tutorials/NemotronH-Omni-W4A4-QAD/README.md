@@ -8,11 +8,14 @@ End-to-end W4A4 quantization of a NemotronH omni vision-language checkpoint (arc
 4. **[Export](#4-export)**: the deployable Hugging Face checkpoint
 5. **[Evaluation and Serving](#5-evaluation-and-serving)**: the vLLM settings behind the results
 
-Only the language model is quantized; the vision tower, projector and MTP head stay BF16 and are copied from the source checkpoint.
+Only the language model (including its MTP head) is quantized; the vision tower and projector stay BF16 and are copied from the source checkpoint.
 
 ## Results
 
-All checkpoints were served with the same vLLM settings ([Section 5](#5-evaluation-and-serving)); quantized ones with an NVFP4 KV cache.
+> [!IMPORTANT]
+> These results come from an earlier variant of the recipe: an NVFP4 KV-cache cast instead of FP8, and the whole MTP head in BF16. They will be refreshed with [`nvfp4-aggressive-mse`](../../../../modelopt_recipes/model_type/nemotron_h/ptq/nvfp4-aggressive-mse.yaml), the recipe the steps below use; until then they show the expected order of magnitude, not exact targets.
+
+All checkpoints were served with the same vLLM settings; quantized ones with an NVFP4 KV cache.
 
 | Model | AA-LCR | SciCode (subtask) | GPQA Diamond pass@1 (maj@8) |
 | --- | --- | --- | --- |
@@ -70,17 +73,18 @@ Records follow the `{"messages": [{"role": ..., "content": ...}, ...]}` schema a
 
 ### 2. Quantization
 
-The recipe is a fixed mixed-precision scheme; it will be published under `modelopt_recipes`, and its path goes to `--recipe` below. Counts are read from the exported checkpoint's `hf_quant_config.json`:
+The recipe is [`model_type/nemotron_h/ptq/nvfp4-aggressive-mse`](../../../../modelopt_recipes/model_type/nemotron_h/ptq/nvfp4-aggressive-mse.yaml), the same file `hf_ptq.py` uses: its rules list both the Hugging Face and the Megatron-Core module names where they differ.
 
-| Component | Precision | Tensors |
-| --- | --- | --- |
-| MoE routed experts (`up`/`down_proj`) | **NVFP4 W4A4**, block 16, MSE-selected static weight scales | 40,960 |
-| MoE shared experts | **NVFP4 W4A4** | 80 |
-| Mamba `in_proj` / `out_proj` | **FP8 W8A8** per-tensor | 80 |
-| Attention `q`/`k`/`v`/`o_proj` (8 layers) | **FP8 W8A8** per-tensor | 32 |
-| `lm_head` | **FP8 W8A8** | 1 |
-| KV cache | **NVFP4** cast, constant amax 448 | — |
-| Vision tower, projector, MTP head, routers, embeddings | BF16 | — |
+| Component | Precision |
+| --- | --- |
+| MoE routed and shared experts | **NVFP4 W4A4**, block 16, MSE-selected static weight scales |
+| Mamba `in_proj` / `out_proj` | **FP8 W8A8** per-tensor |
+| Attention `q`/`k`/`v`/`o_proj` (Megatron-Core `linear_qkv` / `linear_proj`) | **FP8 W8A8** per-tensor |
+| `lm_head` (Megatron-Core `output_layer`) | **FP8 W8A8** |
+| KV cache | **FP8** cast at a fixed range (no `k_scale` / `v_scale` exported) |
+| MTP block-1 routed and shared experts | **NVFP4 W4A4**, as above |
+| MTP block-0 KV cache | **FP8**, calibrated |
+| Vision tower, projector, the rest of the MTP head, latent MoE, routers, embeddings | BF16 |
 
 PTQ takes **16 minutes on one 4-GPU GB300 node** with 512 calibration samples.
 
@@ -92,7 +96,7 @@ PTQ takes **16 minutes on one 4-GPU GB300 node** with 512 calibration samples.
 srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
     --hf_model_name_or_path <nemotron_h_omni-checkpoint> \
     --trust_remote_code \
-    --recipe /path/to/recipe.yaml \
+    --recipe model_type/nemotron_h/ptq/nvfp4-aggressive-mse \
     --tp_size 1 --ep_size 4 --pp_size 1 \
     --calib_dataset_name cnn_nemotron_v2_mix \
     --calib_num_samples 512 \
@@ -103,8 +107,8 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
 
 - `--tp_size 1` is **required**: static NVFP4 weight scales are calibrated per full weight, so the recipe needs TP=1. Expert parallelism spreads the experts instead.
 - Calibration is text-only (`cnn_nemotron_v2_mix`): the language model is calibrated on its own, and the vision tower is not run.
-- The MoE experts are built as grouped GEMMs (`TEGroupedMLP`), which is what the recipe's `mlp.experts.linear_fc*` rules match. The log reports `moe_grouped_gemm: true`; do not pass `--no_moe_grouped_gemm`.
-- The MTP head is built and stays BF16 (the recipe disables `language_model.mtp.*`).
+- The MoE experts are built as grouped GEMMs (`TEGroupedMLP`). The log reports `moe_grouped_gemm: true`; do not pass `--no_moe_grouped_gemm`.
+- The MTP head is built. In Megatron-Core its MoE block is `language_model.mtp.layers.0.mtp_model_layer.layers.1`, which the recipe quantizes like the backbone experts; the rest of the head stays BF16.
 
 </details>
 
@@ -145,7 +149,7 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
 - `--sft --sft_hf_dataset ... --sft_loss_mode assistant` renders each conversation with the model's chat template and computes the loss on assistant tokens only.
 - `--seq_length 32768 --gbs 64`: 600 iterations cover 38,400 records, about 1.07 epochs of the 35,800-record training split.
 - `--recompute_*` and `--no_async_save` are needed to fit: the async-save worker needs its own CUDA context and runs out of memory next to the resident teacher.
-- The MTP head is built but receives no loss under KD-only training (`mtp_1 loss` and `mtp_2 loss` log as 0), so it stays bit-identical to the BF16 source.
+- The MTP head is built but receives no loss under KD-only training (`mtp_1 loss` and `mtp_2 loss` log as 0), so its weights stay as PTQ left them.
 - Each saved iteration is about 1.6 TB; size `--save_interval` and `--checkpoint_keep_last` to your storage.
 
 </details>
@@ -154,7 +158,7 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
 
 ### 4. Export
 
-Export the QAD checkpoint to a Hugging Face checkpoint on one 4-GPU node (pipeline parallel 4, about 26 minutes), then add the NVFP4 KV-cache scales:
+Export the QAD checkpoint to a Hugging Face checkpoint on one 4-GPU node (pipeline parallel 4, about 26 minutes):
 
 ```bash
 # SBATCH --nodes=1 --ntasks-per-node=4 --gpus-per-node=4
@@ -164,24 +168,21 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/export_quantize
     --megatron_path /path/to/qad_output/checkpoints \
     --export_unified_hf_path /path/to/nemotron_h_omni_w4a4_hf \
     --pp_size 4
-
-python examples/megatron_bridge/tutorials/NemotronH-Omni-W4A4-QAD/add_nvfp4_kv_scales.py \
-    /path/to/nemotron_h_omni_w4a4_hf
 ```
 
-- The exporter writes the quantized language model under `language_model.`, the MTP head from the model in BF16, and copies `vision_model.`, `vision_projector.` and `mlp1.` from the source checkpoint.
+- The exporter writes the quantized language model, including the MTP head, under `language_model.`, and copies `vision_model.`, `vision_projector.` and `mlp1.` from the source checkpoint.
 - It exports the latest `iter_*` under `--megatron_path`. To export another iteration, point `--megatron_path` at a directory holding a link to that `iter_*` and a matching `latest_checkpointed_iteration.txt`.
-- [`add_nvfp4_kv_scales.py`](add_nvfp4_kv_scales.py) is needed because the recipe's KV quantizers use a constant amax, so the export carries NVFP4 KV metadata but no `k_scale` / `v_scale` tensors. The script writes the scale that amax implies, 448 / (6 × 448) = 1/6, for each of the 8 attention layers.
+- The backbone KV cache is cast at the fixed FP8 range, so the export has no backbone `k_scale` / `v_scale`; vLLM then uses a scale of 1.0, which is that range. Only the MTP attention carries a calibrated pair.
 
 ---
 
 ### 5. Evaluation and Serving
 
-All checkpoints were served with vLLM on one 4-GPU GB300 node, TP=4 with expert parallelism. Quantized checkpoints used these engine arguments; the BF16 baseline used `--kv-cache-dtype auto`.
+Serve with vLLM on one 4-GPU GB300 node, TP=4 with expert parallelism. Quantized checkpoints use these engine arguments; the BF16 baseline uses `--kv-cache-dtype auto`.
 
 | Setting | Value |
 | --- | --- |
-| `--kv-cache-dtype` | `nvfp4` |
+| `--kv-cache-dtype` | `fp8` |
 | `--max-model-len` | 262144 |
 | `--mamba-ssm-cache-dtype` | `float16` |
 | `--mamba-conv-cache-dtype` | `float32` |
