@@ -40,7 +40,7 @@ The recipe is already close to lossless after PTQ: every PTQ score is within 1.4
 
 **Environment:** a NeMo 26.08 container (`nvcr.io/nvidia/nemo:26.08`) on GB300 (4 GPUs per node, aarch64), with this repository mounted at `/opt/Model-Optimizer` and Megatron-Bridge `main` at [`d23c1f98`](https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/d23c1f981596c227b13d98c95b09afb865d80258) (and its pinned Megatron-LM) mounted at `/opt/Megatron-Bridge`. See the [Megatron-Bridge README](../../README.md) for the container setup. Serving NVFP4 checkpoints requires a Blackwell GPU.
 
-Every command below runs with `srun`, one task per GPU, and sets `RANK` / `WORLD_SIZE` / `LOCAL_RANK` from `SLURM_PROCID` / `SLURM_NTASKS` / `SLURM_LOCALID` in the `srun` body. Pass `--trust_remote_code`, since the model ships its own modeling code.
+Commands run under `srun`, one task per GPU, with `RANK` / `WORLD_SIZE` / `LOCAL_RANK` set from `SLURM_PROCID` / `SLURM_NTASKS` / `SLURM_LOCALID`.
 
 ### 1. Data Preparation
 
