@@ -31,9 +31,10 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="nemotron_h_omni",
-        # The Omni VLM ships its own modeling code with the checkpoint; only its language
-        # sub-model is the transformers-native NemotronH.
-        modeling_source="remote_code",
+        # transformers ships the Omni VLM itself from 5.18. Expert parallelism still runs on the
+        # checkpoint's own code (``trust_remote_code=True``), whose sub-model config is the
+        # ``llm_config`` the plan below targets; transformers' port names it ``text_config``.
+        min_transformers_version="5.18",
         ep_spec=EPSpec(
             base_model_ep_plan=BASE_MODEL_EP_PLAN,
             plan_config_attr="llm_config",
