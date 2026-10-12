@@ -169,9 +169,3 @@ Serve with vLLM on one 4-GPU GB300 node, TP=4 with expert parallelism. Quantized
 | Mamba cache rounding | stochastic rounding, 5 Philox rounds |
 | Reasoning parser | `nemotron_v3` |
 | Chat template | the checkpoint's `chat_template.jinja` |
-
-## Potential further improvements
-
-- **Long reasoning:** on a separate long-reasoning benchmark (APEX shortlist, no tools), PTQ stayed close to BF16 (87.8 vs 88.4) while QAD 600 scored 83.2 and produced about 18% fewer output tokens. One hypothesis is that distilling on 32K-truncated data shortens long reasoning; a longer `--seq_length` or longer-context data would test it.
-- **Data:** the blend is mostly math and code (64% of records).
-- **Multimodal data:** QAD here is text-only. Image-text distillation would exercise the language model on vision-conditioned inputs as well.
