@@ -34,7 +34,7 @@ The exported W4A4 checkpoint is **70 GB**.
 
 **Environment:** a NeMo 26.08 container (`nvcr.io/nvidia/nemo:26.08`) on GB300 (4 GPUs per node, aarch64), with this repository mounted at `/opt/Model-Optimizer` and Megatron-Bridge `main` (and its pinned Megatron-LM) mounted at `/opt/Megatron-Bridge`. See the [Megatron-Bridge README](../../README.md) for the container setup. Serving NVFP4 checkpoints requires a Blackwell GPU.
 
-Single-node steps launch with `torchrun`; QAD runs on 8 nodes under Slurm with `python` (see [Slurm Usage](../../README.md#slurm-usage)).
+PTQ and export launch with `torchrun`; QAD runs on 8 nodes with the `sbatch` script in [Section 3](#3-quantization-aware-distillation-qad).
 
 ### 1. Data Preparation
 
@@ -97,9 +97,13 @@ We used **8 nodes × 4 GB300 (32 GPUs)** with context parallelism 4 and expert p
 <details>
 <summary>QAD command (click to expand)</summary>
 
-> NOTE: We use `python -u` for slurm multi-node run here: `#SBATCH --nodes=8 --ntasks-per-node=4 --gpus-per-node=4`. See [Slurm Usage](../../README.md#slurm-usage).
+`srun` starts one task per GPU (32 in all), and each task maps its Slurm rank variables to the `RANK` / `WORLD_SIZE` / `LOCAL_RANK` that `torch.distributed` reads, with a shared `MASTER_ADDR` / `MASTER_PORT`. Add the container options your cluster needs (image, mounts as in the Environment note) to `srun`.
 
 ```bash
+#!/bin/bash
+#SBATCH --nodes=8 --ntasks-per-node=4 --gpus-per-node=4
+export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1) MASTER_PORT=29500
+srun bash -c 'export RANK=$SLURM_PROCID WORLD_SIZE=$SLURM_NTASKS LOCAL_RANK=$SLURM_LOCALID
 python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
     --teacher_hf_path <nemotron_h_omni-checkpoint> \
     --student_hf_path <nemotron_h_omni-checkpoint> \
@@ -118,7 +122,7 @@ python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
     --save_interval 100 --checkpoint_keep_last -1 \
     --eval_iters 4 --eval_interval 100 \
     --log_interval 10 \
-    --output_dir /path/to/qad_output
+    --output_dir /path/to/qad_output'
 ```
 
 - `--student_megatron_path` is the PTQ checkpoint from Section 2; `--student_hf_path` still points at the BF16 model, which supplies the architecture. The PTQ checkpoint was written at EP=4 and loads at EP=32.
