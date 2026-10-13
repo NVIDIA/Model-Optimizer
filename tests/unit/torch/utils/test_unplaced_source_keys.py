@@ -13,64 +13,167 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``unplaced_source_keys`` must count the tensors a dequantizing load folded into the weights.
+"""``load_pretrained`` must record exactly the checkpoint tensors the model has no parameter for.
 
 These drive a real ``from_pretrained`` on CPU, because what is under test is which checkpoint
-tensors the Transformers loader consumed: a dequantizing quantizer consumes scale and block tensors
-the model's stock conversion mapping never mentions, and the export carries whatever this calls
-unplaced. Each checkpoint also holds one genuinely stray tensor, a layer past
-``num_hidden_layers``, which must still be reported.
+tensors the Transformers loader consumed. The record is what the export carries: a tensor wrongly
+called unplaced lands in the export beside the weight it became, and one wrongly called placed is
+dropped from it.
 """
 
 import json
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 pytest.importorskip("accelerate")
 pytest.importorskip("transformers")
 
-from transformers import AutoModelForCausalLM
+from transformers import LlamaConfig, LlamaForCausalLM
 
-from modelopt.torch.utils.plugins.model_load_utils import unplaced_source_keys
+from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
+# A layer past ``num_hidden_layers``: genuinely stray, so it must always be recorded.
 STRAY = "model.layers.1.input_layernorm.weight"
 
 
-def _save(path, config, state, quantization_config):
-    state[STRAY] = torch.ones(config.hidden_size, dtype=torch.bfloat16)
+def _tiny_llama_config(**overrides):
+    kwargs = {
+        "vocab_size": 64,
+        "hidden_size": 32,
+        "intermediate_size": 64,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "tie_word_embeddings": False,
+        "architectures": ["LlamaForCausalLM"],
+    }
+    kwargs.update(overrides)
+    return LlamaConfig(**kwargs)
+
+
+def _save(path, config, state, quantization_config=None):
     save_file(state, str(path / "model.safetensors"), metadata={"format": "pt"})
     config_json = config.to_dict()
-    config_json["quantization_config"] = quantization_config
+    if quantization_config is not None:
+        config_json["quantization_config"] = quantization_config
     (path / "config.json").write_text(json.dumps(config_json))
 
 
-def _load(path, quantization_config):
-    model = AutoModelForCausalLM.from_pretrained(
-        path, quantization_config=quantization_config, dtype=torch.bfloat16
-    )
+def _load(path, auto_class=None, **kwargs):
+    model = load_pretrained(str(path), auto_class, **kwargs)
     if getattr(model, "_weight_conversions", None) is None:
         pytest.skip("this transformers does not record the conversions from_pretrained ran")
     return model
 
 
+def test_records_the_stray_tensors_and_the_checkpoint(tmp_path):
+    """Nothing keys off a name such as 'mtp': an auxiliary tower is recorded by the same rule."""
+    config = _tiny_llama_config()
+    state = LlamaForCausalLM(config).to(torch.bfloat16).state_dict()
+    extra = {"mtp.fc.weight": torch.ones(2), "aux_tower.blocks.0.weight": torch.ones(2)}
+    _save(tmp_path, config, {**state, **extra})
+
+    model = _load(tmp_path, dtype=torch.bfloat16)
+
+    assert model._modelopt_unplaced_source_keys == sorted(extra), "sorted, for a stable export"
+    assert model._modelopt_source_checkpoint == str(tmp_path)
+    assert model.dtype == torch.bfloat16, "from_pretrained kwargs must pass through"
+
+
+def test_records_an_empty_list_when_every_tensor_was_placed(tmp_path):
+    """An empty record is an answer, so the export does not derive the list again."""
+    config = _tiny_llama_config()
+    _save(tmp_path, config, LlamaForCausalLM(config).state_dict())
+
+    model = _load(tmp_path)
+
+    assert model._modelopt_unplaced_source_keys == []
+
+
+def test_an_ignore_rule_does_not_hide_an_unplaced_tensor(tmp_path):
+    """Qwen3-Next ignores ``^mtp.*``, DeepSeek-V3 and GLM their MTP layers.
+
+    Transformers drops what those rules match from its own ``unexpected_keys``, so a list taken
+    from the loader came back empty for exactly the MTP heads the export exists to carry.
+    """
+
+    class IgnoresMtp(LlamaForCausalLM):
+        _keys_to_ignore_on_load_unexpected = [r"^mtp\."]
+
+    config = _tiny_llama_config()
+    _save(
+        tmp_path, config, {**LlamaForCausalLM(config).state_dict(), "mtp.fc.weight": torch.ones(2)}
+    )
+
+    model = _load(tmp_path, IgnoresMtp)
+
+    assert model._modelopt_unplaced_source_keys == ["mtp.fc.weight"]
+
+
+def test_a_tensor_the_index_omits_is_recorded(tmp_path):
+    """The index is not an inventory: a shard can hold a tensor it does not list, such as an MTP
+    head stored in a main shard. The loader still sees it, and so must the record."""
+    config = _tiny_llama_config()
+    state = LlamaForCausalLM(config).state_dict()
+    shard = "model-00001-of-00001.safetensors"
+    save_file({**state, "mtp.fc.weight": torch.ones(2)}, str(tmp_path / shard))
+    index = {"metadata": {}, "weight_map": dict.fromkeys(state, shard)}
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+    (tmp_path / "config.json").write_text(json.dumps(config.to_dict()))
+
+    model = _load(tmp_path)
+
+    assert model._modelopt_unplaced_source_keys == ["mtp.fc.weight"]
+
+
+def test_experts_of_a_missing_layer_are_recorded_by_their_source_names(tmp_path):
+    """The record names the tensors on disk, not what converting them would have produced.
+
+    Per-expert tensors of a layer the model does not build (an MTP layer, say) convert to one fused
+    ``...experts.gate_up_proj``, which no shard holds; the export can only carry the sources.
+    """
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    config = AutoConfig.for_model(
+        "qwen3_moe",
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        moe_intermediate_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        num_experts=2,
+        num_experts_per_tok=1,
+        tie_word_embeddings=False,
+        architectures=["Qwen3MoeForCausalLM"],
+    )
+    AutoModelForCausalLM.from_config(config).save_pretrained(tmp_path)
+    shapes = {"gate_proj": (16, 32), "up_proj": (16, 32), "down_proj": (32, 16)}
+    stray = {
+        f"model.layers.1.mlp.experts.{e}.{proj}.weight": torch.ones(shape)
+        for e in range(2)
+        for proj, shape in shapes.items()
+    }
+    weights = tmp_path / "model.safetensors"
+    save_file({**load_file(str(weights)), **stray}, str(weights), metadata={"format": "pt"})
+
+    model = _load(tmp_path)
+
+    assert model._modelopt_unplaced_source_keys == sorted(stray)
+
+
 def test_fp8_block_scales_folded_in_at_load_are_placed(tmp_path):
     """DeepSeek-V3 style FP8: dequantizing folds every ``weight_scale_inv`` into its weight."""
-    from transformers import FineGrainedFP8Config, LlamaConfig, LlamaForCausalLM
+    from transformers import FineGrainedFP8Config
 
     # Every projection a whole number of 128x128 blocks: transformers before 5.10.1 cannot
     # dequantize a partial block (a 2-head k_proj would be 64x128).
-    config = LlamaConfig(
-        vocab_size=64,
-        hidden_size=128,
-        intermediate_size=256,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        tie_word_embeddings=False,
-    )
-    state = {}
+    config = _tiny_llama_config(hidden_size=128, intermediate_size=256, num_key_value_heads=4)
+    state = {STRAY: torch.ones(config.hidden_size, dtype=torch.bfloat16)}
     for name, tensor in LlamaForCausalLM(config).to(torch.bfloat16).state_dict().items():
         if name.endswith("proj.weight"):
             # One 128x128 block per 128-wide tile; the values only need to be valid FP8.
@@ -82,9 +185,11 @@ def test_fp8_block_scales_folded_in_at_load_are_placed(tmp_path):
     fp8 = {"quant_method": "fp8", "fmt": "e4m3", "activation_scheme": "dynamic"}
     _save(tmp_path, config, state, {**fp8, "weight_block_size": [128, 128]})
 
-    model = _load(tmp_path, FineGrainedFP8Config(dequantize=True))
+    model = _load(
+        tmp_path, quantization_config=FineGrainedFP8Config(dequantize=True), dtype=torch.bfloat16
+    )
 
-    assert unplaced_source_keys(model, str(tmp_path)) == [STRAY]
+    assert model._modelopt_unplaced_source_keys == [STRAY]
 
 
 def test_mxfp4_expert_blocks_folded_in_at_load_are_placed(tmp_path):
@@ -107,7 +212,7 @@ def test_mxfp4_expert_blocks_folded_in_at_load_are_placed(tmp_path):
         tie_word_embeddings=False,
     )
     packed = {"gate_up_proj": (2 * inter, hidden), "down_proj": (hidden, inter)}
-    state = {}
+    state = {STRAY: torch.ones(hidden, dtype=torch.bfloat16)}
     for name, tensor in GptOssForCausalLM(config).to(torch.bfloat16).state_dict().items():
         proj = name.rsplit(".", 1)[-1]
         if ".experts." in name and proj in packed:
@@ -126,6 +231,6 @@ def test_mxfp4_expert_blocks_folded_in_at_load_are_placed(tmp_path):
     ]
     _save(tmp_path, config, state, {"quant_method": "mxfp4", "modules_to_not_convert": bf16})
 
-    model = _load(tmp_path, Mxfp4Config(dequantize=True))
+    model = _load(tmp_path, quantization_config=Mxfp4Config(dequantize=True), dtype=torch.bfloat16)
 
-    assert unplaced_source_keys(model, str(tmp_path)) == [STRAY]
+    assert model._modelopt_unplaced_source_keys == [STRAY]

@@ -116,7 +116,7 @@ def test_unplaced_keys_preserve_registered_qwen_vlm_parameters(tmp_path, factory
     assert unplaced_source_keys(model, str(tmp_path)) == ["mtp.eh_proj.weight"]
 
 
-# --- the loader's own accounting of what it could not place --------------------------------------
+# --- recording what the load could not place -----------------------------------------------------
 
 
 def test_record_unplaced_source_keys_stores_sorted_keys_and_provenance():
@@ -128,14 +128,14 @@ def test_record_unplaced_source_keys_stores_sorted_keys_and_provenance():
     assert model._modelopt_source_checkpoint == "/ckpt/path"
 
 
-def test_record_unplaced_source_keys_distinguishes_none_from_empty():
+def test_record_unplaced_source_keys_records_an_empty_list_as_an_answer():
     """An empty list is an ANSWER -- the loader placed everything -- not "nobody asked".
 
-    The export re-derives the set only when the attribute is absent, so recording [] has to stick;
-    treating it as falsy-and-therefore-unknown would make every clean load pay a re-derivation.
+    The export derives the set only when the attribute is absent, so recording [] has to stick;
+    treating it as falsy-and-therefore-unknown would make every clean load pay a derivation.
     """
     model = torch.nn.Linear(2, 2)
-    assert record_unplaced_source_keys(model, "/ckpt/path", None) == []
+    assert record_unplaced_source_keys(model, "/ckpt/path", []) == []
     assert model._modelopt_unplaced_source_keys == []
     assert model._modelopt_source_checkpoint == "/ckpt/path"
 

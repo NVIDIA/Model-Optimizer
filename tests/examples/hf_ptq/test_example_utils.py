@@ -32,6 +32,8 @@ from _test_utils.torch.transformers_models import get_tiny_nemotron_h
 from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM, LlamaConfig
 
+from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
+
 
 def _write_safetensors(path, tensors):
     save_file(tensors, str(path), metadata={"format": "pt"})
@@ -73,9 +75,9 @@ def test_mtp_preparation_matches_loader(tmp_path, loader, trust_remote_code):
                 str(tmp_path), device="cpu", trust_remote_code=trust_remote_code
             )
         else:
-            model = example_utils._from_pretrained_recording(
-                AutoModelForCausalLM,
+            model = load_pretrained(
                 str(tmp_path),
+                AutoModelForCausalLM,
                 model_type=source.config.model_type,
                 trust_remote_code=trust_remote_code,
             )
@@ -105,6 +107,8 @@ def test_get_model_preserves_preparation_error(monkeypatch, tmp_path, failure_at
         return nullcontext()
 
     monkeypatch.setattr(example_utils, "prepare_model_for_loading", prepare)
+    # The second call, around the real load, is load_pretrained's, which imports it from here.
+    monkeypatch.setattr("modelopt.torch.models.hf.prepare_model_for_loading", prepare)
     with pytest.raises(ValueError, match="MTP preparation failed"):
         example_utils.get_model(str(tmp_path), device="cpu")
     assert calls == failure_at
@@ -212,6 +216,7 @@ def test_resolve_init_config_falls_back_when_rederive_raises():
 )
 def test_get_model_uses_expected_dtype_kwarg(
     monkeypatch,
+    tmp_path,
     architecture,
     model_class_name,
     expected_config_dtype_kwarg,
@@ -274,7 +279,7 @@ def test_get_model_uses_expected_dtype_kwarg(
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
 
-    model = example_utils.get_model("checkpoint", device="cpu", trust_remote_code=True)
+    model = example_utils.get_model(str(tmp_path), device="cpu", trust_remote_code=True)
 
     assert isinstance(model, FakeModel)
     assert calls["eval"]
@@ -300,7 +305,7 @@ def test_get_model_uses_expected_dtype_kwarg(
     ],
 )
 def test_get_model_device_map_for_diffusion_gemma(
-    monkeypatch, model_type, architecture, device_count, expected_device_map
+    monkeypatch, tmp_path, model_type, architecture, device_count, expected_device_map
 ):
     calls = {}
     hf_config = SimpleNamespace(
@@ -342,7 +347,7 @@ def test_get_model_device_map_for_diffusion_gemma(
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
     monkeypatch.setattr(torch.cuda, "device_count", lambda: device_count)
 
-    example_utils.get_model("checkpoint", device="cuda", trust_remote_code=True)
+    example_utils.get_model(str(tmp_path), device="cuda", trust_remote_code=True)
 
     assert calls["from_pretrained"]["device_map"] == expected_device_map
     # Sequential caps per-GPU memory; "auto" must stay unrestricted.
@@ -394,7 +399,7 @@ def test_is_diffusion_gemma(hf_config, expected):
     [(True, True), (False, False)],
 )
 def test_get_model_deepseek_honors_trust_remote_code(
-    monkeypatch, trust_remote_code, expect_bundled_code
+    monkeypatch, tmp_path, trust_remote_code, expect_bundled_code
 ):
     """DeepSeek ships bundled modeling code; --trust_remote_code selects it, else built-in."""
     used = {}
@@ -437,7 +442,7 @@ def test_get_model_deepseek_honors_trust_remote_code(
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
 
-    example_utils.get_model("checkpoint", device="cpu", trust_remote_code=trust_remote_code)
+    example_utils.get_model(str(tmp_path), device="cpu", trust_remote_code=trust_remote_code)
 
     assert used["path"] == ("bundled" if expect_bundled_code else "builtin")
 
@@ -600,60 +605,3 @@ class _Recipe:
 def test_recipe_layerwise_blocks(recipe, expected):
     """Both recipe shapes normalize to dicts, so callers need no shape-aware access."""
     assert example_utils.recipe_layerwise_blocks(recipe) == expected
-
-
-# --- carry-over of weights the loader could not place -------------------------------------------
-
-
-class _StubAuto:
-    """Minimal stand-in for an ``AutoModelFor*`` class."""
-
-    def __init__(self, unexpected, model=None):
-        self._unexpected = unexpected
-        self._model = model if model is not None else SimpleNamespace()
-        self.saw_output_loading_info = None
-        self.saw_kwargs = None
-
-    def from_pretrained(self, ckpt_path, output_loading_info=False, **kwargs):
-        self.saw_output_loading_info = output_loading_info
-        self.saw_kwargs = kwargs
-        return self._model, {
-            "missing_keys": [],
-            "unexpected_keys": list(self._unexpected),
-            "mismatched_keys": [],
-            "error_msgs": [],
-        }
-
-
-def test_from_pretrained_recording_asks_the_loader_for_its_accounting(tmp_path):
-    """The point of this path: take unexpected_keys from the loader rather than re-deriving it."""
-    auto = _StubAuto(["mtp.layers.0.eh_proj.weight", "mtp.fc.weight"])
-    model = example_utils._from_pretrained_recording(auto, str(tmp_path), device_map="cpu")
-
-    assert auto.saw_output_loading_info is True, "must request the loading info"
-    assert auto.saw_kwargs == {"device_map": "cpu"}, "caller kwargs must pass through untouched"
-    assert model._modelopt_unplaced_source_keys == [
-        "mtp.fc.weight",
-        "mtp.layers.0.eh_proj.weight",
-    ], "recorded sorted, so export order is stable"
-    assert model._modelopt_source_checkpoint == str(tmp_path)
-
-
-def test_from_pretrained_recording_is_quiet_when_everything_was_placed(tmp_path):
-    """Record an empty answer too, so the exporter can tell 'nothing to carry' from 'never asked'."""
-    auto = _StubAuto([])
-    model = example_utils._from_pretrained_recording(auto, str(tmp_path))
-
-    assert model._modelopt_unplaced_source_keys == []
-    assert model._modelopt_source_checkpoint == str(tmp_path)
-
-
-def test_recording_is_architecture_agnostic(tmp_path):
-    """Nothing keys off the string 'mtp': an auxiliary tower is carried by the same rule."""
-    auto = _StubAuto(["aux_tower.blocks.0.weight", "something_else.weight"])
-    model = example_utils._from_pretrained_recording(auto, str(tmp_path))
-
-    assert model._modelopt_unplaced_source_keys == [
-        "aux_tower.blocks.0.weight",
-        "something_else.weight",
-    ]
