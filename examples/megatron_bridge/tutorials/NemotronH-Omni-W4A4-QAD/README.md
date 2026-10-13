@@ -6,31 +6,9 @@ End-to-end W4A4 quantization of a NemotronH omni vision-language checkpoint (arc
 2. **[Quantization](#2-quantization)**: W4A4 PTQ with `examples/megatron_bridge/quantize.py`
 3. **[QAD](#3-quantization-aware-distillation-qad)**: distillation from the BF16 teacher with `examples/megatron_bridge/distill.py`
 4. **[Export](#4-export)**: the deployable Hugging Face checkpoint
-5. **[Evaluation and Serving](#5-evaluation-and-serving)**: the vLLM settings behind the results
+5. **[Evaluation and Serving](#5-evaluation-and-serving)**: the vLLM settings
 
 Only the language model (including its MTP head) is quantized; the vision tower and projector stay BF16 and are copied from the source checkpoint.
-
-## Results
-
-All checkpoints were served with the same vLLM settings; quantized ones with an NVFP4 KV cache.
-
-| Benchmark | BF16 (teacher) | W4A4 QAD 600 iters |
-| --- | --- | --- |
-| AA-LCR | 68.63 | 69.31 |
-| AA-Omniscience | 26.21 | 25.60 |
-| AA-Omniscience (non-hallucination) | 70.03 | 69.13 |
-| APEX shortlist (no tools) | 88.36 | 83.24 |
-| GPQA Diamond | 89.52 | 89.58 |
-| HLE (no tools) | 31.79 | 30.26 |
-| MMLU-ProX | 76.91 | 80.30 |
-| SciCode (subtask) | 47.13 | 46.43 |
-| SciCode (problem) | 15.10 | 14.62 |
-| τ³-bench banking | 18.88 | 18.04 |
-
-BF16 is the mean of two runs. The exported W4A4 checkpoint is **74 GB**.
-
-> [!NOTE]
-> The numbers above come from runs whose code was functionally equivalent to the commands below but predates them: the Omni export mapping and chat-data distillation were local patches then, and the student was built without its MTP head (`--mtp_num_layers 0`). This code path was checked end to end with a short run (a 32-sample PTQ, 20 QAD iterations and the export); QAD keeps the MTP head unchanged either way (see [Section 3](#3-quantization-aware-distillation-qad)).
 
 ---
 
