@@ -90,7 +90,9 @@ class OfflineSupervisedDataset(Dataset):
 
     - ``input_ids``: token IDs of shape ``(seq_len,)``
     - ``hidden_states``: base model last hidden states of shape ``(seq_len, hidden_size)``
-    - ``aux_hidden_states``: auxiliary hidden states of shape ``(seq_len, hidden_size)``
+    - ``aux_hidden_states``: auxiliary hidden states of shape ``(seq_len, hidden_size)``.
+      Absent from dumps written with ``--no-aux-hidden-states``; reading one of those
+      requires ``aux_hidden_states_optional=True``.
     - ``loss_mask`` (optional): per-token assistant mask of shape ``(seq_len,)``,
       present when the dump was produced with ``--answer-only-loss``.
 
@@ -106,6 +108,10 @@ class OfflineSupervisedDataset(Dataset):
             is stored in the file (backward compatible).
         tokenizer: Optional tokenizer used to recover the assistant mask for dumps
             that lack a stored ``loss_mask``.
+        aux_hidden_states_optional (bool): Tolerate dumps written with
+            ``--no-aux-hidden-states``, yielding an empty ``(seq_len, 0)`` plane in
+            their place. Only modes that never read the aux planes may set this; for
+            the others a missing key must still raise.
     """
 
     def __init__(
@@ -115,13 +121,7 @@ class OfflineSupervisedDataset(Dataset):
         tokenizer=None,
         aux_hidden_states_optional: bool = False,
     ):
-        """Initialize with a list of .pt file paths.
-
-        Args:
-            aux_hidden_states_optional: tolerate dumps written with
-                ``--no-aux-hidden-states``. Only modes that never read the aux planes
-                may set this; for the others a missing key must still raise.
-        """
+        """Initialize with a list of .pt file paths."""
         super().__init__()
         self.dumped_files = dumped_files
         self.answer_only_loss = answer_only_loss

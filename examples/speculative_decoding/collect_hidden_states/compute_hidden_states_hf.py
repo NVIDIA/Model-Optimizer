@@ -193,8 +193,16 @@ def main(args: argparse.Namespace) -> None:
             outputs = model(input_ids=input_ids.to(model.device), output_hidden_states=True)
             # outputs.hidden_states[0] is the embedding output; layer k output is at index k+1.
             hidden_states = outputs.hidden_states
-            aux_hidden_states = torch.cat(
-                [hidden_states[lid + 1].squeeze(0).cpu() for lid in selected_layer_ids], dim=-1
+            # Only build the aux planes when they will be stored: assembling them costs a
+            # concatenation and a device-to-host copy per conversation, which is pure waste
+            # on a dump that is about to drop them.
+            aux_hidden_states = (
+                None
+                if args.no_aux_hidden_states
+                else torch.cat(
+                    [hidden_states[lid + 1].squeeze(0).cpu() for lid in selected_layer_ids],
+                    dim=-1,
+                )
             )
             output_hidden_states = hidden_states[-1].squeeze(0).cpu()
         # Write-then-rename: keep_conversation() skips any existing <id>.pt as finished work,
