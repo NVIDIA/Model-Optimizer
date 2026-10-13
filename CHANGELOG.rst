@@ -147,6 +147,7 @@ Changelog
 **Bug Fixes**
 
 - Fix exports using the built-in Transformers NemotronH implementation retaining incompatible legacy remote-code config and model mappings. Re-export affected checkpoints before deployment.
+- Fix INT8 real quantization (``mtq.compress``) of FP16 weights zeroing or clipping channels with a small amax: their scales underflowed in FP16. Scales of newly compressed INT8 weights are now stored in FP32.
 - Fix Hugging Face exports classifying registered Qwen VLM parameters as unplaced source weights, which overwrote quantized tensors with original weights and incorrectly excluded their modules from quantization. Re-export affected checkpoints.
 - Right-pad labeled calibration samples to avoid fully masked causal rows that can produce non-finite cuDNN attention gradients during AutoQuantize. Generation previews remove padding before decoding.
 - Fix ONNX quantization reusing existing tensor names for scale and zero-point parameters while preserving INT8 calibration-cache lookup. The boolean ``--target_dla`` / ``target_dla=True`` now preserves scalar multiplication/division operands and padding fill values as constants; use Q/DQ Translator for compatible TensorRT 10.7-and-earlier DLA deployments, or direct Q/DQ with strongly typed DLA enabled in a compatible TensorRT 11.4+ build.
