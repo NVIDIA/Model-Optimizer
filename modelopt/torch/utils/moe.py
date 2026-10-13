@@ -824,6 +824,12 @@ def load_and_prepare_ep(
         if _cfg is not None and hasattr(_cfg, "_experts_implementation"):
             _cfg._experts_implementation = "torch_a2a"
 
+    # The checkpoint tensors the model has no parameter for (an MTP head), worked out once, at load,
+    # for the export to carry.
+    from .plugins.model_load_utils import record_unplaced_source_keys
+
+    record_unplaced_source_keys(model, ckpt_path)
+
     # DP=EP all-to-all: no FSDP. Non-experts stay replicated per rank (from_pretrained already placed
     # them on this rank's GPU); experts stay EP-sharded on the ep submesh. The model carries
     # model._device_mesh = ep_submesh (sparse_moe_mesh["ep"]), which the export uses to detect EP and the
