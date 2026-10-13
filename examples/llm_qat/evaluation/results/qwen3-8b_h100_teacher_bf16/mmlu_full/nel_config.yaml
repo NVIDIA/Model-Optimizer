@@ -1,6 +1,7 @@
 defaults:
   - execution: slurm/default
   - deployment: vllm
+  - ../../../nel_configs/qwen3_8b_vllm_deployment@_global_
   - ../../../nel_configs/mmlu@_global_
   - _self_
 execution:
@@ -19,18 +20,12 @@ execution:
   mounts:
     mount_home: false
     deployment:
-      # NEL mounts checkpoint_path at /checkpoint; cached files link to /blobs.
+      /path/to/checkpoint: /checkpoint
+      # Cached checkpoint files link to /blobs.
       /path/to/hf-cache/hub/models--Qwen--Qwen3-8B/blobs: /blobs
     evaluation:
       /path/to/checkpoint: /checkpoint
       /path/to/hf-cache/hub/models--Qwen--Qwen3-8B/blobs: /blobs
 deployment:
-  image: vllm/vllm-openai:v0.28.0-cu129
-  checkpoint_path: ${oc.env:MODEL_CHECKPOINT}
   served_model_name: qwen3-8b-teacher
-  tensor_parallel_size: 1
-  data_parallel_size: 1
-  command: vllm serve /checkpoint --served-model-name ${deployment.served_model_name} --host 0.0.0.0 --port ${deployment.port} --dtype bfloat16 --tensor-parallel-size
-    1 --data-parallel-size 1 --max-model-len 32768 --max-num-seqs 2 --gpu-memory-utilization 0.85 --seed 42 --kv-cache-dtype auto
-  tokenizer_path: /checkpoint
   port: 18100

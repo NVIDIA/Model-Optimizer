@@ -16,5 +16,5 @@ QAD improves both metrics over PTQ but remains below the BF16 teacher. The quant
 
 NeMo Evaluator Launcher (NEL) configurations and evaluation results for the [Hugging Face QAT/QAD tutorial](../README.md).
 
-- `nel_configs/`: shared benchmark recipes.
+- `nel_configs/`: shared benchmark recipes and vLLM deployment settings.
 - `results/<model-and-hardware>/<benchmark-and-scope>/`: each evaluation's config `nel_config.yaml`.
