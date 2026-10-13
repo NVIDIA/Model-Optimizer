@@ -6,9 +6,26 @@ End-to-end W4A4 quantization of a NemotronH omni vision-language checkpoint (arc
 2. **[Quantization](#2-quantization)**: W4A4 PTQ with `examples/megatron_bridge/quantize.py`
 3. **[QAD](#3-quantization-aware-distillation-qad)**: distillation from the BF16 teacher with `examples/megatron_bridge/distill.py`
 4. **[Export](#4-export)**: the deployable Hugging Face checkpoint
-5. **[Evaluation and Serving](#5-evaluation-and-serving)**: the vLLM settings
+5. **[Evaluation and Serving](#5-evaluation-and-serving)**: the vLLM settings behind the results
 
 Only the language model (including its MTP head) is quantized; the vision tower and projector stay BF16 and are copied from the source checkpoint.
+
+## Results
+
+All checkpoints were served with the same vLLM settings (see [Section 5](#5-evaluation-and-serving)); the quantized ones with an FP8 KV cache. BF16 is the mean of two runs.
+
+| Benchmark | BF16 (teacher) | W4A4 PTQ | W4A4 QAD (600 iters) |
+| --- | --- | --- | --- |
+| AA-LCR | 68.63 | 68.62 | 67.94 |
+| AA-Omniscience | 26.21 | 25.63 | 25.87 |
+| AA-Omniscience (non-hallucination) | 70.03 | 71.34 | 69.65 |
+| GPQA Diamond | 89.52 | 89.84 | 89.90 |
+| HLE (no tools) | 31.79 | 30.49 | 30.72 |
+| SciCode (subtask) | 47.13 | 46.48 | 46.58 |
+| SciCode (problem) | 15.10 | 13.65 | 15.38 |
+| τ³-bench banking | 18.88 | 17.40 | 20.10 |
+
+The exported W4A4 checkpoint is **70 GB**.
 
 ---
 
@@ -91,6 +108,7 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
     --sft --sft_hf_dataset /path/to/qad_blend/train.jsonl \
     --sft_hf_validation /path/to/qad_blend/validation.jsonl \
     --sft_loss_mode assistant \
+    --freeze_mtp \
     --seq_length 32768 --mbs 1 --gbs 64 \
     --train_iters 600 \
     --lr 2e-5 --min_lr 5e-6 --lr_warmup_iters 30 \
@@ -106,7 +124,7 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
 - `--sft --sft_hf_dataset ... --sft_loss_mode assistant` renders each conversation with the model's chat template and computes the loss on assistant tokens only.
 - `--seq_length 32768 --gbs 64`: 600 iterations cover 38,400 records, about 1.07 epochs of the 35,800-record training split.
 - `--recompute_*` and `--no_async_save` are needed to fit: the async-save worker needs its own CUDA context and runs out of memory next to the resident teacher.
-- QAD does not train the MTP head, so the exported MTP head keeps its PTQ weights.
+- `--freeze_mtp` keeps the MTP head out of training: its loss is skipped and its parameters are frozen, so the exported MTP head keeps its PTQ weights. Without it, the quantized MTP head's cross-entropy loss trains the head and, through the hidden states, embeddings and output layer it shares, the rest of the student too.
 - Each saved iteration is about 1.6 TB; size `--save_interval` and `--checkpoint_keep_last` to your storage.
 
 </details>
