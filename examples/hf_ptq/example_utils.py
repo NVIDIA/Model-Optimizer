@@ -690,6 +690,7 @@ def get_model(
             ckpt_path,
             AutoModelForCausalLM,
             model_type=hf_config.model_type,
+            distribution="sequential",
             device_map=device_map,
             **model_kwargs,
         )
@@ -701,6 +702,7 @@ def get_model(
                 ckpt_path,
                 AutoModelForCausalLM,
                 model_type=hf_config.model_type,
+                distribution="sequential",
                 device_map="auto",
                 trust_remote_code=trust_remote_code,
                 dtype="auto",
@@ -727,6 +729,7 @@ def get_model(
             ckpt_path,
             AutoModelForCausalLM,
             model_type=hf_config.model_type,
+            distribution="sequential",
             device_map="cpu" if device == "cpu" else "sequential",
             **model_kwargs,
         )
@@ -827,6 +830,7 @@ def get_model(
             ckpt_path,
             auto_model_module,
             model_type=hf_config.model_type,
+            distribution="sequential",
             device_map=device_map,
             **model_kwargs2,
         )

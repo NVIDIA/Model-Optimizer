@@ -15,10 +15,10 @@
 
 """Expert-parallel PTQ wiring in ``examples/hf_ptq``.
 
-Under torchrun, hf_ptq.py applies the model's spec to its config, decides a distribution plan from
-the ``MODELOPT_EP_DEGREE`` / ``MODELOPT_FSDP_SIZE`` knobs, and loads the model through
-``load_and_prepare_ep`` when that plan shards the experts. Every rank then calibrates on its own
-shard of the data, and a dense model is pinned to the rank's own GPU instead of ``"auto"``.
+Under torchrun, hf_ptq.py decides a distribution plan with ``resolve_distribution_plan`` and loads
+the model through ``load_pretrained``: with the plan when it shards the experts, as FSDP2 under
+``--use_fsdp2``, and otherwise whole through ``get_model``. Every rank then calibrates on its own
+shard of the data, and a whole model is pinned to the rank's own GPU instead of ``"auto"``.
 
 Nothing here needs a process group or a checkpoint: an initialized ``ModelOptSession`` stands in
 for the torchrun session, the configs are tiny real transformers configs served from memory, and
@@ -34,17 +34,15 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import transformers
 from _test_utils.examples.hf_ptq_example_utils import example_utils
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
-from packaging.version import Version
 from torch.utils.data import DataLoader
-from transformers import DeepseekV3Config, LlamaConfig, Qwen3MoeConfig
+from transformers import DeepseekV3Config, LlamaConfig
 
 from modelopt.torch.models import get_spec
-from modelopt.torch.utils import env
-from modelopt.torch.utils.distributed import ModelOptSession
-from modelopt.torch.utils.moe import is_expert_parallel_capable, load_and_prepare_ep
+from modelopt.torch.utils.distributed import ModelOptSession, get_active_mo_session
+from modelopt.torch.utils.plugins import model_load_utils
+from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
 
@@ -83,6 +81,34 @@ def _no_distribution_knobs(monkeypatch):
     monkeypatch.delenv("MODELOPT_FSDP_SIZE", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _checkpoint_is_local(monkeypatch):
+    """The checkpoint path names no files; resolving it must not reach the Hub."""
+    monkeypatch.setattr(
+        model_load_utils, "ensure_local_checkpoint", lambda path, group=None: (None, path)
+    )
+
+
+@pytest.fixture
+def torchrun():
+    """Enter the active session as rank ``rank`` of a ``world_size``-rank torchrun launch."""
+    active = get_active_mo_session(required=False)
+
+    def enter(world_size, rank=0):
+        active.initialize(
+            distributed=world_size > 1,
+            rank=rank,
+            world_size=world_size,
+            local_rank=rank,
+            device=torch.device(f"cuda:{rank}"),
+            is_main=rank == 0,
+        )
+        return active
+
+    yield enter
+    active._reset()
+
+
 def _session(world_size, rank=0, distributed=True):
     """The session modelopt_session() yields on ``rank`` of a ``world_size``-rank launch."""
     session = ModelOptSession()
@@ -117,11 +143,6 @@ def _serve(monkeypatch, hf_ptq, config):
     return config
 
 
-def _qwen3_moe(num_experts):
-    """Qwen3-MoE, whose base_model_ep_plan ships with transformers itself."""
-    return Qwen3MoeConfig(num_experts=num_experts, moe_intermediate_size=8, **_TINY)
-
-
 def _deepseek_v3(n_routed_experts):
     """DeepSeek-V3 without a plan of its own, so only its model spec can make it EP-capable."""
     config = DeepseekV3Config(n_routed_experts=n_routed_experts, **_TINY)
@@ -129,103 +150,26 @@ def _deepseek_v3(n_routed_experts):
     return config
 
 
-# ----------------------------------------------------------------------------------- env knobs
-
-
-@pytest.mark.parametrize(
-    ("knob", "name"),
-    [(env.ep_degree, "MODELOPT_EP_DEGREE"), (env.fsdp_size, "MODELOPT_FSDP_SIZE")],
-)
-def test_distribution_knobs_default_to_auto(monkeypatch, knob, name):
-    """Unset and exported-but-empty both mean "let the plan decide"."""
-    assert knob() == "auto"
-    monkeypatch.setenv(name, "")
-    assert knob() == "auto"
-
-
-@pytest.mark.parametrize(
-    ("knob", "name", "other"),
-    [
-        (env.ep_degree, "MODELOPT_EP_DEGREE", env.fsdp_size),
-        (env.fsdp_size, "MODELOPT_FSDP_SIZE", env.ep_degree),
-    ],
-)
-def test_distribution_knobs_are_read_when_called(monkeypatch, knob, name, other):
-    """A value snapshotted at import would miss what the launcher sets later; and each knob reads
-    only its own variable."""
-    monkeypatch.setenv(name, "2")
-    assert knob() == "2"
-    monkeypatch.setenv(name, "8")
-    assert knob() == "8"
-    assert other() == "auto"
-
-
 # -------------------------------------------------------------------------------- the decision
 
 
 @pytest.mark.parametrize("single_process_session", [False, True])
 def test_a_single_process_run_is_never_expert_parallel(hf_ptq, monkeypatch, single_process_session):
-    """With no distributed session there is nothing to shard over, even for an EP-capable MoE
-    (which, decided at world_size=1, would otherwise be rejected as an unsharded MoE)."""
+    """With no distributed session there is nothing to shard over, even for an EP-capable MoE."""
     session = _session(world_size=1, distributed=False) if single_process_session else None
     _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
 
     assert hf_ptq._decide_expert_parallel(_args(session)) == (None, None)
 
 
-def test_use_fsdp2_keeps_the_standalone_fsdp2_loader(hf_ptq, monkeypatch):
+def test_use_fsdp2_keeps_the_standalone_fsdp2_loader(hf_ptq, monkeypatch, torchrun):
     """--use_fsdp2 names its loader, so even an explicit EP degree for an EP-capable MoE must not
     divert the run to the expert-parallel one."""
     monkeypatch.setenv("MODELOPT_EP_DEGREE", "2")
     _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
-    args = _args(_session(world_size=2), use_fsdp2=True)
+    args = _args(torchrun(world_size=2), use_fsdp2=True)
 
     assert hf_ptq._decide_expert_parallel(args) == (None, None)
-
-
-@pytest.mark.skipif(
-    Version(transformers.__version__) < Version("5.7"),
-    reason="qwen3_moe's base_model_ep_plan ships in transformers 5.7",
-)
-@pytest.mark.parametrize("rank", [0, 1])
-def test_an_ep_capable_moe_is_planned_expert_parallel(hf_ptq, monkeypatch, capsys, rank):
-    """Auto picks the largest EP degree dividing both the world and the expert count, hands back a
-    config the EP loader can shard, and only rank 0 reports the decision."""
-    _serve(monkeypatch, hf_ptq, _qwen3_moe(num_experts=8))
-
-    plan, hf_config = hf_ptq._decide_expert_parallel(_args(_session(world_size=4, rank=rank)))
-
-    assert (plan.world_size, plan.ep_size, plan.edp) == (4, 4, 1)
-    assert not plan.is_fsdp_dense
-    assert is_expert_parallel_capable(hf_config)
-    assert ("[ep] decided" in capsys.readouterr().out) == (rank == 0)
-
-
-def test_the_spec_is_applied_before_the_decision(hf_ptq, monkeypatch):
-    """DeepSeek-V3's plan comes only from its spec. Deciding before applying it would read the MoE
-    as dense; applied first, it shards, and the config handed on carries the spec's plan."""
-    _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
-
-    plan, hf_config = hf_ptq._decide_expert_parallel(_args(_session(world_size=4)))
-
-    assert plan.ep_size == 4
-    assert hf_config.base_model_ep_plan == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
-
-
-@pytest.mark.parametrize(
-    ("ep_degree", "experts"),
-    [(None, 3), ("1", 8)],
-    ids=["auto_finds_no_degree", "explicit_degree_one"],
-)
-def test_an_ep_capable_moe_left_unsharded_is_an_error(hf_ptq, monkeypatch, ep_degree, experts):
-    """No EP degree above 1 divides 3 experts over 2 ranks, and an explicit 1 asks for none. With
-    the dense part replicated, every rank would hold the whole MoE: that must fail, not run."""
-    if ep_degree is not None:
-        monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
-    _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=experts))
-
-    with pytest.raises(RuntimeError, match="can be expert-parallel, but the plan resolved"):
-        hf_ptq._decide_expert_parallel(_args(_session(world_size=2)))
 
 
 @pytest.mark.parametrize(
@@ -233,72 +177,92 @@ def test_an_ep_capable_moe_left_unsharded_is_an_error(hf_ptq, monkeypatch, ep_de
     [(_deepseek_v3(n_routed_experts=3), True), (LlamaConfig(**_TINY), False)],
     ids=["moe_no_ep_degree", "dense"],
 )
-def test_dense_sharding_without_expert_parallelism_is_an_error(
-    hf_ptq, monkeypatch, config, ep_capable
+def test_dense_sharding_without_expert_parallelism_needs_use_fsdp2(
+    hf_ptq, monkeypatch, torchrun, config, ep_capable
 ):
-    """Only the EP loader shards a dense part by itself. Without EP the run would load the whole
-    model on every rank and drop the sharding the plan asked for, so it must fail and point at the
-    loader that can shard it."""
+    """Without expert parallelism a plan that shards the dense part is an FSDP2 run, which this
+    script runs only under --use_fsdp2, the flag its FSDP2 checks hang off; so it must fail and point
+    there rather than load the model whole on every rank."""
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
     _serve(monkeypatch, hf_ptq, config)
 
     with pytest.raises(RuntimeError, match="--use_fsdp2") as raised:
-        hf_ptq._decide_expert_parallel(_args(_session(world_size=2)))
+        hf_ptq._decide_expert_parallel(_args(torchrun(world_size=2)))
     assert ("MODELOPT_EP_DEGREE" in str(raised.value)) == ep_capable
 
 
-def test_a_dense_model_under_torchrun_runs_data_parallel(hf_ptq, monkeypatch):
-    """A dense model has no experts to shard, so replicating it per rank is not an error."""
+def test_a_dense_model_under_torchrun_runs_data_parallel(hf_ptq, monkeypatch, torchrun):
+    """A dense model has no experts to shard, so it loads whole on every rank, through get_model."""
     _serve(monkeypatch, hf_ptq, LlamaConfig(**_TINY))
 
-    assert hf_ptq._decide_expert_parallel(_args(_session(world_size=4))) == (None, None)
-
-
-def test_the_env_knobs_override_the_automatic_plan(hf_ptq, monkeypatch):
-    """The decision honours both knobs; left on auto it would pick ep_size=4, dense replicated."""
-    monkeypatch.setenv("MODELOPT_EP_DEGREE", "2")
-    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
-    _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
-
-    plan, _ = hf_ptq._decide_expert_parallel(_args(_session(world_size=4)))
-
-    assert (plan.ep_size, plan.edp, plan.fsdp_size) == (2, 2, 4)
+    assert hf_ptq._decide_expert_parallel(_args(torchrun(world_size=4))) == (None, None)
 
 
 # ---------------------------------------------------------------------------------- load_model
 
 
-def test_load_model_hands_an_expert_parallel_plan_to_the_ep_loader(hf_ptq, monkeypatch):
-    """With an EP plan, load_model loads through load_and_prepare_ep -- with the session, the
-    decided degree and dense sharding, and the spec-prepared config -- and through no other
-    loader."""
-    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
-    served = _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
-    session = _session(world_size=4)
+def _record_load_pretrained(hf_ptq, monkeypatch):
+    """Replace hf_ptq's load_pretrained and every other loader; return the recorded call."""
     calls = []
 
-    def load_and_prepare_ep_stub(*args, **kwargs):
-        calls.append(inspect.signature(load_and_prepare_ep).bind(*args, **kwargs).arguments)
+    def load_pretrained_stub(*args, **kwargs):
+        calls.append(inspect.signature(load_pretrained).bind(*args, **kwargs).arguments)
         raise _LoaderReachedError
 
-    monkeypatch.setattr(hf_ptq, "load_and_prepare_ep", load_and_prepare_ep_stub)
-    monkeypatch.setattr(hf_ptq, "get_model", lambda *a, **k: pytest.fail("dense loader ran"))
-    monkeypatch.setattr(
-        hf_ptq, "parallel_load_and_prepare_fsdp2", lambda *a, **k: pytest.fail("FSDP2 loader ran")
+    monkeypatch.setattr(hf_ptq, "load_pretrained", load_pretrained_stub)
+    monkeypatch.setattr(hf_ptq, "get_model", lambda *a, **k: pytest.fail("whole-model loader ran"))
+    return calls
+
+
+def test_load_model_loads_an_expert_parallel_plan_through_load_pretrained(
+    hf_ptq, monkeypatch, torchrun
+):
+    """With an EP plan, load_model hands load_pretrained the plan -- the decided degree and dense
+    sharding -- and the spec-prepared config it was decided on."""
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+    served = _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
+    calls = _record_load_pretrained(hf_ptq, monkeypatch)
+    args = _args(torchrun(world_size=4), trust_remote_code=True, attn_implementation="eager")
+
+    with pytest.raises(_LoaderReachedError):
+        hf_ptq.load_model(args)
+
+    (call,) = calls
+    plan = call["distribution"]
+    assert call["ckpt_path"] == _CKPT
+    assert (plan.ep_size, plan.is_fsdp_dense) == (4, True)
+    assert call["kwargs"] == {
+        "hf_config": served,
+        "trust_remote_code": True,
+        "attn_implementation": "eager",
+    }
+    assert served.base_model_ep_plan == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
+
+
+def test_use_fsdp2_loads_through_load_pretrained(hf_ptq, monkeypatch, torchrun):
+    """--use_fsdp2 asks load_pretrained for its FSDP2 load, with the CPU-offload choice and the
+    config its checks already read."""
+    served = _serve(monkeypatch, hf_ptq, LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY))
+    calls = _record_load_pretrained(hf_ptq, monkeypatch)
+    args = _args(
+        torchrun(world_size=2),
+        use_fsdp2=True,
+        cpu_offload=True,
+        specdec_offline_dataset=None,
+        low_memory_mode=False,
     )
 
     with pytest.raises(_LoaderReachedError):
-        hf_ptq.load_model(_args(session, trust_remote_code=True, attn_implementation="eager"))
+        hf_ptq.load_model(args)
 
     (call,) = calls
-    assert call["ckpt_path"] == _CKPT
-    assert call["mo_session"] is session
-    assert call["ep_degree"] == 4
-    assert call["fsdp_dense"] is True
-    assert call["trust_remote_code"] is True
-    assert call["attn_implementation"] == "eager"
-    assert call["hf_config"] is served
-    assert served.base_model_ep_plan == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
+    assert call["distribution"] == "fsdp2"
+    assert call["kwargs"] == {
+        "hf_config": served,
+        "trust_remote_code": False,
+        "cpu_offload": True,
+        "attn_implementation": None,
+    }
 
 
 # ------------------------------------------------------------------------- per-rank placement
