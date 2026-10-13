@@ -66,34 +66,28 @@ def _state_worker(worker, *, action="audit"):
             layer._linear_attn_state.disable()
             layer.linear_attention_config = LinearAttentionConfig()
         elif action == "setup":
-            layer.linear_attention_config.state_block_v = 16
             layer._state_calls = {"prefill": 0, "decode": 0, "changed": 0}
-            original = layer._quantized_state_call
+            original = layer._quantize_cache
 
-            def checked_call(native, *args, _layer=layer, _original=original, **kwargs):
-                state = kwargs["initial_state"]
-                indices = kwargs.get("ssm_state_indices")
-                if indices is not None:
-                    indices = indices[: kwargs["cu_seqlens"].numel() - 1].long()
-                selected = state if indices is None else state.index_select(0, indices)
-                quantizer = copy.deepcopy(_layer._linear_attn_state)
-                rounded = torch.cat([quantizer(x) for x in selected.split(16, -1)], -1)
+            def checked_call(metadata, _layer=layer, _original=original):
+                state = _layer.kv_cache[1]
+                count = metadata.num_decodes + metadata.num_prefills
+                indices = metadata.non_spec_state_indices_tensor[:count].long()
+                if metadata.has_initial_state is not None:
+                    indices = indices[metadata.has_initial_state[:count]]
                 expected = state.clone()
-                if indices is None:
-                    expected = rounded
-                else:
-                    expected.index_copy_(0, indices, rounded)
+                if indices.numel():
+                    selected = state[indices].transpose(-1, -2).contiguous()
+                    quantizer = copy.deepcopy(_layer._linear_attn_state)
+                    rounded = quantizer(selected)
+                    expected[indices] = rounded.transpose(-1, -2)
+                    _layer._state_calls["prefill" if metadata.num_prefills else "decode"] += 1
+                    _layer._state_calls["changed"] += int(not torch.equal(selected, rounded))
+                _original(metadata)
+                # Assert at native layer entry, including fresh and inactive cache slots.
+                torch.testing.assert_close(state, expected, atol=0, rtol=0, equal_nan=True)
 
-                def checked_native(*a, **kw):
-                    # Check the full cache, including inactive slots, before delegating.
-                    torch.testing.assert_close(kw["initial_state"], expected, atol=0, rtol=0)
-                    return native(*a, **kw)
-
-                _layer._state_calls["prefill" if indices is None else "decode"] += 1
-                _layer._state_calls["changed"] += int(not torch.equal(selected, rounded))
-                return _original(checked_native, *args, **kwargs)
-
-            layer._quantized_state_call = checked_call
+            layer._quantize_cache = checked_call
     if action == "setup":
         worker._state_checkpoint = copy.deepcopy(mto.modelopt_state(model))
     return [dict(layer._state_calls) for layer in layers]
@@ -117,7 +111,7 @@ def _tiny_model(path, kind):
             linear_num_value_heads=4,
             linear_num_key_heads=2,
             linear_key_head_dim=32,
-            linear_value_head_dim=64,
+            linear_value_head_dim=32,
             num_experts=4,
             num_experts_per_tok=2,
             moe_intermediate_size=64,
@@ -157,11 +151,13 @@ def _generate(llm):
 @pytest.fixture(params=["gdn", "kda"])
 def compiled_worker(request, tmp_path, monkeypatch):
     """Compile one tiny native model outside the functional test's timeout."""
-    if Version(vllm_version).release[:2] != (0, 15):
-        pytest.skip("The state adapter requires vLLM 0.15.x")
+    if Version(vllm_version).release[:2] != (0, 30):
+        pytest.skip("The state adapter requires vLLM 0.30.x")
     if not torch.cuda.is_available():
         pytest.skip("Requires a CUDA GPU")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", "triton")
+    monkeypatch.setenv("VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE", "1")
     paths = [str(ROOT), str(ROOT / "examples/vllm_serve"), str(Path(__file__).parent)]
     for path in reversed(paths):
         monkeypatch.syspath_prepend(path)
@@ -183,7 +179,13 @@ def compiled_worker(request, tmp_path, monkeypatch):
         enable_prefix_caching=False,
         enable_chunked_prefill=True,
         async_scheduling=False,
+        additional_config={
+            "gdn_prefill_backend": "triton",
+            "kda_prefill_backend": "triton",
+            "kda_decode_backend": "triton",
+        },
         mamba_cache_dtype="float32",
+        mamba_cache_mode="none",
         kv_cache_memory_bytes=128 * 1024**2,
         gpu_memory_utilization=0.1,
         worker_cls="fakequant_worker.FakeQuantWorker",
