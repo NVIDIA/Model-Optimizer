@@ -337,6 +337,30 @@ def test_an_expert_parallel_plan_is_refused(session, serve, loaders, auto_class,
     assert auto_class.calls == []
 
 
+def test_every_rank_loads_the_plan_rank0_was_handed(
+    session, serve, loaders, process_group, auto_class, monkeypatch, tmp_path
+):
+    """Ranks loading different plans would build mismatched meshes and hang: rank 1, handed a plan
+    of its own, loads the one rank 0 was handed."""
+    active = session(2, rank=1)
+    serve(LlamaConfig(**_TINY))
+    rank0_plan = DistributionPlan(2, fsdp_size=2)
+
+    def broadcast_object_list(message, group=None, group_src=None):
+        label = message[0][0]
+        message[0] = (label, rank0_plan if label == "plan" else [], None)
+
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 1)
+    monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast_object_list)
+    monkeypatch.setattr(model_load_utils, "AutoModelForCausalLM", auto_class)
+
+    load_pretrained(str(tmp_path), distribution=DistributionPlan(2))
+
+    assert auto_class.calls == [], "rank 1 loaded the whole model, as its own plan says"
+    assert "fsdp2" in loaders
+    assert active.plan is rank0_plan
+
+
 def test_the_plan_a_load_runs_is_kept_on_the_session(
     session, serve, loaders, process_group, tmp_path
 ):
