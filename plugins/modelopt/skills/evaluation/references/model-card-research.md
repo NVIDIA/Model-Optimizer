@@ -46,11 +46,7 @@ Present findings, explain each setting, ask user to confirm or adjust. If no mod
 
 ## `max_new_tokens` — mandatory model-card lookup
 
-1. **Apply task-specific generation policy first.** Read the selected [task recipe](../recipes/tasks/)
-   before using published budgets or fallbacks below. If the policy forbids per-response
-   caps, check merged settings and backend/native generation defaults for inherited
-   caps; follow the task guidance for the selected backend/version. Keep sampling,
-   thinking, context and timeout settings distinct from per-response budgets.
+1. **Apply task-specific generation policy first** (see the selected [task recipe](../recipes/tasks/)); it overrides the budgets and fallbacks below. Keep sampling, thinking, context and timeout settings separate from per-response budgets.
 2. **Fetch the HF model card before writing the value.** Not optional. Consult its linked evaluation recipes for applicable settings.
 3. Look for `max_tokens` / `max_new_tokens` / "output length" explicitly used for the exact task, model and harness. A published evaluation recipe linked from the card may set a shared default: use it only for evaluations it covers and when task policy permits. A budget for another harness does not apply even when the benchmark name matches. Annotate with a citing comment. Do not select the highest number mentioned, quickstart/OpenCode examples, generic output-length recommendations, or `generation_config.json` defaults.
 4. **Consult `nvfp4-modelcard-sampling.md` as a reference.** Apply the same task/model/harness applicability rule. Re-read the card and surface discrepancies; do not infer output budgets from same-family rows or recommended sampling.

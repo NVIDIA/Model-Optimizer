@@ -52,7 +52,7 @@ services:
       model_traffic: {capture_request_body: true}  # per service, never in a shared block
       interceptors:                              # lists REPLACE on merge — restate the whole chain
         # SWE-bench prepends system_message + turn_counter — see swebench_verified.md
-        - name: drop_params                        # stripped fields and generation settings must follow task policy
+        - name: drop_params                        # agents send max_tokens; many servers reject it. Output caps follow task policy
           # last two are sent by the 0.5.x harbor eval image; vLLM 400s on them unless stripped
           config: {params: [max_tokens, max_completion_tokens, max_input_tokens_per_task, no_rebuild]}
         - name: consolidate_system
