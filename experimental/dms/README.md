@@ -112,6 +112,10 @@ bash scripts/evaluate.sh outputs/qwen3_8b/student_model
 
 For code details, advanced options, and guides on extending DMS, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## Related projects
+
+ - [Steve Westerhouse's Triton kernels for DMS](https://github.com/westers/kvcompress): Triton kernels for faster prefilling along with benchmarking scripts. Although the speed up is lower than with `dms_prefill_flex()` ([results](https://github.com/westers/kvcompress?tab=readme-ov-file#dms-prefill-optimization-results)), it's a great example of a clean implementation of FlashAttention with DMS.
+
 ## Limitations
 
 This repository currently supports training eviction adapters only and keeps base model weights frozen. This training approach can achieve comparable accuracy while being roughly two orders of magnitude cheaper than full fine-tuning. In contrast, the original recipe used in the paper updates all model weights during training; we plan to support it in the near future.
