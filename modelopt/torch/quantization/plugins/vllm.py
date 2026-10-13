@@ -39,7 +39,7 @@ from ..nn import (
     SequentialQuantizer,
     TensorQuantizer,
 )
-from .custom import CUSTOM_MODEL_PLUGINS
+from .custom import CUSTOM_MODEL_PLUGINS, CUSTOM_POST_CONVERSION_PLUGINS
 
 _NVFP4_ATTENTION_QUANTIZER_CFG = {
     "num_bits": (2, 1),
@@ -611,6 +611,44 @@ class _VLLMParallelLinear(QuantModule):
         output = super().forward(input_)
         self.quant_method = self._quant_method
         return output
+
+
+class _KimiGemmRsArFakeQuantGuard:
+    """Keep Kimi's fused collective GEMM for projections without enabled fake quantizers."""
+
+    def __init__(self, gemm_rs_ar, down_proj: _VLLMParallelLinear) -> None:
+        self.gemm_rs_ar = gemm_rs_ar
+        self.down_proj = down_proj
+
+    def should_run(self, x: torch.Tensor) -> bool:
+        return not any(
+            getattr(self.down_proj, name).is_enabled for name in self.down_proj._QUANTIZER_NAMES
+        ) and self.gemm_rs_ar.should_run(x)
+
+    def __call__(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        return self.gemm_rs_ar(x, weight)
+
+
+def _guard_kimi_gemm_rs_ar(model: torch.nn.Module) -> None:
+    """Route Kimi MLP down projections through ModelOpt when quantizers are enabled."""
+    try:
+        from vllm.models.kimi_k3.nvidia.model import KimiMLP
+    except ModuleNotFoundError as exc:
+        if exc.name != "vllm.models.kimi_k3" and not (
+            exc.name and exc.name.startswith("vllm.models.kimi_k3.")
+        ):
+            raise
+        return
+
+    for module in model.modules():
+        if not isinstance(module, KimiMLP) or not isinstance(module.down_proj, _VLLMParallelLinear):
+            continue
+        gemm_rs_ar = module.gemm_rs_ar
+        if gemm_rs_ar is not None and not isinstance(gemm_rs_ar, _KimiGemmRsArFakeQuantGuard):
+            module.gemm_rs_ar = _KimiGemmRsArFakeQuantGuard(gemm_rs_ar, module.down_proj)
+
+
+CUSTOM_POST_CONVERSION_PLUGINS.add(_guard_kimi_gemm_rs_ar)
 
 
 def post_restore_vllm_parallel_linears(model: torch.nn.Module) -> None:

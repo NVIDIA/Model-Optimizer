@@ -56,6 +56,7 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins import vllm as vllm_plugin
+from modelopt.torch.quantization.plugins.custom import register_custom_post_conversion_plugins
 from modelopt.torch.quantization.plugins.vllm import (
     _ATTENTION_TYPES,
     VllmMLAAttention,
@@ -416,6 +417,48 @@ def test_kimi_low_latency_linear_fake_quant_support(path, dtype, shape, expected
         weight=torch.empty(shape, dtype=dtype),
     )
     assert vllm_plugin._supports_fake_quant_linear(linear) is expected
+
+
+@pytest.mark.parametrize("quantizer_name", _VLLMParallelLinear._QUANTIZER_NAMES)
+def test_kimi_gemm_rs_ar_bypasses_enabled_fake_quantizers(quantizer_name):
+    # Kimi's fused GEMM is available only in the Kimi vLLM fork.
+    kimi_model = pytest.importorskip("vllm.models.kimi_k3.nvidia.model")
+    x = torch.ones(128, 2)
+    mlp = object.__new__(kimi_model.KimiMLP)
+    torch.nn.Module.__init__(mlp)
+    mlp.shard_sequence_parallel = False
+    mlp.gate_up_proj = Mock(return_value=(x, None))
+    mlp.act_fn = Mock(side_effect=lambda value: value)
+
+    down_proj = object.__new__(vllm_plugin._QuantVLLMRowParallelLinear)
+    torch.nn.Module.__init__(down_proj)
+    down_proj.register_parameter("weight", torch.nn.Parameter(torch.ones(2, 2)))
+    down_proj.forward = Mock(return_value=(x + 1, None))
+    for name in _VLLMParallelLinear._QUANTIZER_NAMES:
+        quantizer = TensorQuantizer(QuantizerAttributeConfig())
+        quantizer.disable()
+        setattr(down_proj, name, quantizer)
+    mlp.down_proj = down_proj
+
+    gemm_rs_ar = Mock(side_effect=lambda inputs, weight: inputs + 2)
+    gemm_rs_ar.should_run.side_effect = lambda inputs: inputs.shape[0] >= 128
+    mlp.gemm_rs_ar = gemm_rs_ar
+
+    register_custom_post_conversion_plugins(mlp)
+    register_custom_post_conversion_plugins(mlp)
+    assert isinstance(mlp.gemm_rs_ar, vllm_plugin._KimiGemmRsArFakeQuantGuard)
+    assert torch.equal(mlp(x), x + 2)
+    assert gemm_rs_ar.call_count == 1
+    assert down_proj.forward.call_count == 0
+
+    getattr(down_proj, quantizer_name).enable()
+    assert torch.equal(mlp(x), x + 1)
+    assert gemm_rs_ar.call_count == 1
+    assert down_proj.forward.call_count == 1
+
+    getattr(down_proj, quantizer_name).disable()
+    assert torch.equal(mlp(x), x + 2)
+    assert gemm_rs_ar.call_count == 2
 
 
 def test_unregistered_unquantized_subclass_is_unsupported():
