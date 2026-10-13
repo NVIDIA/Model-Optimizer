@@ -10,6 +10,32 @@ TB 2.1 is the successor to TB 2.0 — **identical harbor flow; only the playbook
 name changes** (`terminal_bench_2_1` vs `terminal_bench_2`). The 2.1 task set is
 pinned via a vendored registry override shipped in the `nemo-evaluator` package.
 
+## Output-token policy
+
+ModelOpt's Terminal-Bench / Terminus-2 protocol uses **no configured per-response
+output-token cap**. This rule takes precedence over model-card output budgets
+and the generic 65536/16384 fallbacks. A budget for another harness, such as
+Claude Code, does not apply even when the benchmark name matches.
+
+Keep `drop_params` stripping `max_tokens` and `max_completion_tokens`. Do not
+reintroduce a numeric output cap through `services.<svc>.generation`,
+`proxy.extra_body`, solver/agent/LLM kwargs, interceptors, or server flags such as
+`--override-generation-config '{"max_new_tokens":65536}'` / `--max-new-tokens`
+or backend equivalents. Check the merged config, including imported model
+fragments and CLI overrides.
+
+Removing request fields does **not** guarantee unlimited generation: checkpoint
+`generation_config.json` and backend defaults can still impose limits. Inspect
+the effective serving defaults for the selected backend/version. If an inherited
+numeric `max_new_tokens` imposes a cap, neutralize that cap explicitly (e.g. vLLM
+`--override-generation-config '{"max_new_tokens":null}'` where supported), preserving
+sampling and stop/EOS settings. Verify the effective defaults rather than
+substituting a numeric fallback.
+
+Continue model-card lookup for sampling and thinking settings. Context-window
+limits (e.g. `--max-model-len`), agent/task timeouts, and sandbox/SLURM lifetimes
+are separate limits; keep them and record them for baseline/candidate comparison.
+
 ## Task-specific values
 
 | Field | Value |

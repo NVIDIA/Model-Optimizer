@@ -46,6 +46,12 @@ Present findings, explain each setting, ask user to confirm or adjust. If no mod
 
 ## `max_new_tokens` — mandatory model-card lookup
 
+**Benchmark protocol takes precedence.** For Terminal-Bench with ModelOpt's
+Terminus-2 protocol, follow the recipe's [output-token policy](../recipes/tasks/aa_next/terminal_bench_2_1.md#output-token-policy)
+instead of the budget selection and fallbacks below. Do not transfer a model-card
+cap from another harness (e.g. Claude Code), even for the same benchmark. Still
+research sampling, thinking, and context settings.
+
 1. **Fetch the HF model card before writing the value.** Not optional. Consult its linked evaluation recipes for applicable settings.
 2. Look for `max_tokens` / `max_new_tokens` / "output length" explicitly used for the applicable evaluation. A published evaluation recipe linked from the card may set a shared default: use it for tasks covered by that recipe unless a task-specific override applies. Annotate with a citing comment. Do not select the highest number mentioned, quickstart/OpenCode examples, generic output-length recommendations, or `generation_config.json` defaults.
 3. **Consult `nvfp4-modelcard-sampling.md` as a reference.** Use an output budget only when its source explicitly covers the evaluated model and applicable evaluation. Re-read the card and surface discrepancies; do not infer output budgets from same-family rows or recommended sampling.
