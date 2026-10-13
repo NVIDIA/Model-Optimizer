@@ -386,7 +386,7 @@ def test_fsdp2_rejects_mtp_before_distributed_loading(monkeypatch, tmp_path, has
     def distributed_load(*args, **kwargs):
         raise RuntimeError("distributed loader reached")
 
-    monkeypatch.setattr(hf_ptq, "parallel_load_and_prepare_fsdp2", distributed_load)
+    monkeypatch.setattr(hf_ptq, "load_pretrained", distributed_load)
     error, message = (
         (NotImplementedError, "Nemotron-H MTP")
         if has_mtp
