@@ -33,14 +33,14 @@ The exported W4A4 checkpoint is **70 GB**.
 
 **Environment:** a NeMo 26.08 container (`nvcr.io/nvidia/nemo:26.08`) on GB300 (4 GPUs per node, aarch64), with this repository mounted at `/opt/Model-Optimizer` and Megatron-Bridge `main` (and its pinned Megatron-LM) mounted at `/opt/Megatron-Bridge`. See the [Megatron-Bridge README](../../README.md) for the container setup. Serving NVFP4 checkpoints requires a Blackwell GPU.
 
-Commands run under `srun`, one task per GPU, with `RANK` / `WORLD_SIZE` / `LOCAL_RANK` set from `SLURM_PROCID` / `SLURM_NTASKS` / `SLURM_LOCALID`.
+Single-node steps launch with `torchrun`; QAD runs on 8 nodes under Slurm with `python` (see [Slurm Usage](../../README.md#slurm-usage)).
 
 ### 1. Data Preparation
 
 Generate the QAD data with [`build_qad_blend.py`](build_qad_blend.py):
 
 ```bash
-python examples/megatron_bridge/tutorials/NemotronH-Omni-W4A4-QAD/build_qad_blend.py \
+python /opt/Model-Optimizer/examples/megatron_bridge/tutorials/NemotronH-Omni-W4A4-QAD/build_qad_blend.py \
     --output_dir /path/to/qad_blend
 ```
 
@@ -67,8 +67,7 @@ PTQ runs on **one 4-GPU GB300 node** with 512 calibration samples.
 <summary>PTQ command (click to expand)</summary>
 
 ```bash
-# SBATCH --nodes=1 --ntasks-per-node=4 --gpus-per-node=4
-srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
+torchrun --nproc_per_node 4 /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
     --hf_model_name_or_path <nemotron_h_omni-checkpoint> \
     --trust_remote_code \
     --recipe model_type/nemotron_h/ptq/nvfp4-aggressive-mse \
@@ -97,9 +96,10 @@ We used **8 nodes × 4 GB300 (32 GPUs)** with context parallelism 4 and expert p
 <details>
 <summary>QAD command (click to expand)</summary>
 
+> NOTE: We use `python -u` for slurm multi-node run here: `#SBATCH --nodes=8 --ntasks-per-node=4 --gpus-per-node=4`. See [Slurm Usage](../../README.md#slurm-usage).
+
 ```bash
-# SBATCH --nodes=8 --ntasks-per-node=4 --gpus-per-node=4
-srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
+python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
     --teacher_hf_path <nemotron_h_omni-checkpoint> \
     --student_hf_path <nemotron_h_omni-checkpoint> \
     --student_megatron_path /path/to/nemotron_h_omni_w4a4_megatron \
@@ -136,8 +136,7 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
 Export the QAD checkpoint to a Hugging Face checkpoint on one 4-GPU node (pipeline parallel 4):
 
 ```bash
-# SBATCH --nodes=1 --ntasks-per-node=4 --gpus-per-node=4
-srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/export_quantized_megatron_to_hf.py \
+torchrun --nproc_per_node 4 /opt/Model-Optimizer/examples/megatron_bridge/export_quantized_megatron_to_hf.py \
     --hf_model_name_or_path <nemotron_h_omni-checkpoint> \
     --trust_remote_code \
     --megatron_path /path/to/qad_output/checkpoints \

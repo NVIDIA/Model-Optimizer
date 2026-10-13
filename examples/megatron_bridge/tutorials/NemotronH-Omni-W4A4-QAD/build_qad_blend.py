@@ -27,8 +27,7 @@ as text-only chat. Rows come in three shapes:
 * ``text`` without markers (SFT-Code, SFT-MATH): one assistant turn, so the whole text is trained.
 
 A source that fails to load or yields fewer rows than its share stops the run, so the mixture
-cannot change silently; ``--allow_partial`` keeps what was collected instead. Either way the
-realized row count of every source is written to ``blend_summary.json``.
+cannot change silently.
 
 Each source is cached under ``<output_dir>/parts/``, written atomically, so an interrupted run
 resumes and an unreadable part is rebuilt. Run inside the NeMo container.
@@ -77,6 +76,10 @@ TURN = re.compile(
     re.DOTALL,
 )
 ROLE = {"User": "user", "Assistant": "assistant", "System": "system"}
+
+
+# ``datasets`` and Megatron-Bridge are imported inside the two functions below, not at module
+# level, so the unit tests can load this script without either installed.
 
 
 def stream(repo: str, config: str, split: str):
@@ -141,12 +144,12 @@ def read_part(path: str) -> list[dict] | None:
         return None
 
 
-def build(output_dir: str, total: int, seed: int, allow_partial: bool = False) -> dict[str, int]:
+def build(output_dir: str, total: int, seed: int) -> dict[str, int]:
     """Build ``train.jsonl`` and ``validation.jsonl`` under ``output_dir``; return the split sizes."""
     parts = os.path.join(output_dir, "parts")
     os.makedirs(parts, exist_ok=True)
     total_weight = sum(w for w, *_ in SOURCES)
-    rows, summary = [], []
+    rows = []
     for weight, repo, config, split, field in SOURCES:
         want = max(1, round(total * weight / total_weight))
         part = os.path.join(parts, f"{repo.split('/')[-1]}__{config}__{split}.jsonl")
@@ -159,20 +162,12 @@ def build(output_dir: str, total: int, seed: int, allow_partial: bool = False) -
             except (
                 Exception
             ) as e:  # e.g. a gated split, or a schema the streaming reader cannot cast
-                if not allow_partial:
-                    raise RuntimeError(f"{repo} {split}: failed to load") from e
-                print(f"{repo} {split}: failed ({type(e).__name__}: {str(e)[:80]})", flush=True)
-                got, dropped = [], 0
+                raise RuntimeError(f"{repo} {split}: failed to load") from e
+            if len(got) < want:
+                raise RuntimeError(f"{repo} {split}: only {len(got)}/{want} usable rows")
             write_jsonl(part, got)
-            print(f"{repo} {split}: {len(got)}/{want} rows ({dropped} dropped)", flush=True)
-            if len(got) < want and not allow_partial:
-                raise RuntimeError(
-                    f"{repo} {split}: {len(got)}/{want} usable rows; pass --allow_partial to keep them"
-                )
+            print(f"{repo} {split}: {want} rows ({dropped} dropped)", flush=True)
         rows.extend(got[:want])
-        summary.append(
-            {"repo": repo, "config": config, "split": split, "want": want, "rows": len(got[:want])}
-        )
 
     random.Random(seed).shuffle(rows)
     num_validation = min(1000, len(rows) // 20)
@@ -182,8 +177,6 @@ def build(output_dir: str, total: int, seed: int, allow_partial: bool = False) -
     for name, chunk in splits.items():
         write_jsonl(os.path.join(output_dir, f"{name}.jsonl"), chunk)
         print(f"wrote {name}.jsonl: {len(chunk)} rows", flush=True)
-    with open(os.path.join(output_dir, "blend_summary.json"), "w") as f:
-        json.dump({"total": total, "seed": seed, "sources": summary}, f, indent=2)
     return {name: len(chunk) for name, chunk in splits.items()}
 
 
@@ -192,13 +185,8 @@ def main():
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--total", type=int, default=36800, help="Rows to request across sources.")
     parser.add_argument("--seed", type=int, default=1234)
-    parser.add_argument(
-        "--allow_partial",
-        action="store_true",
-        help="Keep going when a source fails or is short, instead of stopping.",
-    )
     args = parser.parse_args()
-    build(args.output_dir, args.total, args.seed, args.allow_partial)
+    build(args.output_dir, args.total, args.seed)
 
 
 if __name__ == "__main__":

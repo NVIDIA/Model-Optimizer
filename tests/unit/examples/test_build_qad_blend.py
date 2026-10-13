@@ -21,6 +21,7 @@ CPU with neither ``datasets`` nor Megatron-Bridge installed.
 
 import importlib.util
 import json
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -104,16 +105,14 @@ def test_take_skips_rejected_rows_and_gives_up_after_too_many(monkeypatch):
     assert got == [] and dropped == 21  # stops after 10 * want rejects
 
 
-def test_build_splits_weighted_rows_and_records_the_mixture(tmp_path, two_sources):
+def test_build_splits_weighted_rows(tmp_path, two_sources):
     sizes = blend.build(str(tmp_path), total=100, seed=0)
     assert sizes == {"validation": 5, "train": 95}
     rows = _read(tmp_path / "train.jsonl") + _read(tmp_path / "validation.jsonl")
     assert len(rows) == 100 and all(set(r) == {"messages"} for r in rows)
-    summary = json.loads((tmp_path / "blend_summary.json").read_text())
-    assert [(s["repo"], s["want"], s["rows"]) for s in summary["sources"]] == [
-        ("org/a", 50, 50),
-        ("org/b", 50, 50),
-    ]
+    # Equal weights: each source contributes its first 50 rows, q0..q49.
+    counts = Counter(r["messages"][0]["content"] for r in rows)
+    assert counts == {f"q{i}": 2 for i in range(50)}
 
 
 def test_build_reuses_cached_parts(tmp_path, two_sources):
@@ -157,26 +156,24 @@ def test_build_fails_on_a_source_that_cannot_load(tmp_path, two_sources, monkeyp
 
     def stream(repo, config, split):
         if repo == "org/b":
-            raise TypeError("cannot cast")
-        yield from real_stream(repo, config, split)
+            yield from real_stream(repo, config, split)
+            return
+        yield from (_chat(i) for i in range(10))  # yields some rows, then the reader fails
+        raise TypeError("cannot cast")
 
     monkeypatch.setattr(blend, "stream", stream)
-    with pytest.raises(RuntimeError, match="org/b train: failed to load"):
+    with pytest.raises(RuntimeError, match="org/a train: failed to load"):
         blend.build(str(tmp_path), total=100, seed=0)
+    assert not (tmp_path / "parts" / "a__default__train.jsonl").exists()
     assert not (tmp_path / "train.jsonl").exists()
-
-    sizes = blend.build(str(tmp_path), total=100, seed=0, allow_partial=True)
-    assert sizes == {"validation": 2, "train": 48}
-    summary = json.loads((tmp_path / "blend_summary.json").read_text())
-    assert [s["rows"] for s in summary["sources"]] == [50, 0]
 
 
 def test_build_fails_on_a_short_source(tmp_path, two_sources):
-    with pytest.raises(RuntimeError, match="org/a train: 100/250 usable rows"):
+    with pytest.raises(RuntimeError, match="org/a train: only 100/250 usable rows"):
         blend.build(str(tmp_path), total=500, seed=0)
+    assert not (tmp_path / "parts" / "a__default__train.jsonl").exists()
 
 
-def test_build_rejects_an_empty_blend(tmp_path, two_sources, monkeypatch):
-    monkeypatch.setattr(blend, "is_usable", lambda chat: False)
+def test_build_rejects_a_blend_too_small_to_split(tmp_path, two_sources):
     with pytest.raises(RuntimeError, match="too few rows"):
-        blend.build(str(tmp_path), total=100, seed=0, allow_partial=True)
+        blend.build(str(tmp_path), total=10, seed=0)
