@@ -178,7 +178,10 @@ class GPTQHelper:
         group = parallel_state.data_parallel_group if parallel_state is not None else None
         if group is None or not group.is_initialized() or group.world_size() == 1:
             return
-        device = torch.device("cuda", torch.cuda.current_device())
+        on_cuda = "nccl" in dist.get_backend(group.group)
+        device = (
+            torch.device("cuda", torch.cuda.current_device()) if on_cuda else torch.device("cpu")
+        )
         n_samples = torch.tensor(self.n_samples, dtype=torch.float64, device=device)
         hessian = self.hessian.to(device).mul_(self.n_samples)
         dist.all_reduce(n_samples, group=group.group)
