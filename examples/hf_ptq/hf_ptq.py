@@ -84,7 +84,7 @@ from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
 from modelopt.torch.models import hf_model_type
-from modelopt.torch.models.hf import prepare_model_for_calibration, prepare_model_for_loading
+from modelopt.torch.models.hf import prepare_model_for_calibration
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
@@ -105,7 +105,10 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     ensure_local_checkpoint,
 )
-from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
+from modelopt.torch.utils.plugins.model_load_utils import (
+    load_pretrained,
+    parallel_load_and_prepare_fsdp2,
+)
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
@@ -358,13 +361,12 @@ def load_model(args: argparse.Namespace):
             model_kwargs = {"trust_remote_code": args.trust_remote_code}
             if args.attn_implementation is not None:
                 model_kwargs["attn_implementation"] = args.attn_implementation
-            with prepare_model_for_loading(
-                hf_config.model_type, args.local_checkpoint_path, args.trust_remote_code
-            ):
-                full_model = AutoModelForCausalLM.from_pretrained(
-                    args.local_checkpoint_path,
-                    **model_kwargs,
-                )
+            full_model = load_pretrained(
+                args.local_checkpoint_path,
+                AutoModelForCausalLM,
+                model_type=hf_config.model_type,
+                **model_kwargs,
+            )
         calibration_only = True
 
     # Include auxiliary modules whose activation quantizers require calibration data.
