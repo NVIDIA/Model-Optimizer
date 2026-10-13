@@ -233,8 +233,11 @@ def _test_topk_logits_kl_loss(kd_kwargs, rank, size):
     loss["kd_loss"].backward()
 
 
-def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, rank, size):
-    """Test that skip_lm_loss only zeroes the main LM head, unless MTP is left out of quantization."""
+def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size):
+    """Test that skip_lm_loss only zeroes the main LM head, unless MTP is left out of quantization.
+
+    ``freeze_mtp`` zeroes the MTP loss and freezes the MTP head regardless.
+    """
     set_seed(SEED)
 
     num_layers = 2
@@ -282,7 +285,9 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, rank, size):
 
     distill_cfg = setup_distillation_config(
         # kd_loss_alpha == 1.0 skips the LM loss; any alpha < 1 keeps it.
-        config_or_path=DistillationConfig(kd_loss_alpha=1.0 if skip_lm_loss else 0.5),
+        config_or_path=DistillationConfig(
+            kd_loss_alpha=1.0 if skip_lm_loss else 0.5, freeze_mtp=freeze_mtp
+        ),
         student_cfg=student_model.config,
         teacher_cfg=teacher_model.config,
     )
@@ -295,7 +300,7 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, rank, size):
     adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
 
     # An untrained MTP head is frozen so DDP doesn't wait for its grads.
-    mtp_skipped = quantized and skip_lm_loss
+    mtp_skipped = freeze_mtp or (quantized and skip_lm_loss)
     with distillation_model.hide_teacher_model():
         mtp_params = [p for n, p in distillation_model.named_parameters() if "mtp" in n.split(".")]
     assert mtp_params
@@ -460,11 +465,18 @@ def test_distillation_config_top_p_validation():
 
 
 @pytest.mark.parametrize(
-    ("quantized", "skip_lm_loss"), [(False, True), (True, True), (True, False)]
+    ("quantized", "skip_lm_loss", "freeze_mtp"),
+    [
+        (False, True, False),
+        (True, True, False),
+        (True, False, False),
+        (False, True, True),
+        (False, False, True),
+    ],
 )
-def test_skip_lm_loss_with_mtp(dist_workers, quantized, skip_lm_loss):
+def test_skip_lm_loss_with_mtp(dist_workers, quantized, skip_lm_loss, freeze_mtp):
     """Test that skip_lm_loss only zeroes the main LM head, unless MTP is left out of quantization."""
-    dist_workers.run(partial(_test_skip_lm_loss_with_mtp, quantized, skip_lm_loss))
+    dist_workers.run(partial(_test_skip_lm_loss_with_mtp, quantized, skip_lm_loss, freeze_mtp))
 
 
 def test_mtp_excluded_from_quantization():

@@ -71,6 +71,9 @@ class DistillationConfig:
             Only the smallest prefix of the (sorted) Top-K whose cumulative teacher probability
             reaches this value contributes to the loss. Requires ``logit_kl_topk``. Must be in (0, 1].
         logit_kl_top_p_min_k: Minimum number of Top-K entries kept per token when top-P is active.
+        freeze_mtp: Keep the student's MTP head fixed: skip its loss, which otherwise also trains the
+            shared layers it reads from, and freeze its parameters. Use it when the MTP head is
+            replaced after training. Default: ``False``.
     """
 
     intermediate_layer_pairs: list[tuple[str, ...]] = field(default_factory=list)
@@ -80,6 +83,7 @@ class DistillationConfig:
     logit_kl_topk: int | None = None
     logit_kl_top_p: float | None = None
     logit_kl_top_p_min_k: int = 1
+    freeze_mtp: bool = False
     criterion: Criterion | None = None
     loss_balancer: mtd.DistillationLossBalancer | None = None
 
@@ -701,11 +705,17 @@ def adjust_distillation_model_for_mcore(
     # skip_lm_loss=True — only the final main-head call is zeroed.
     # An MTP head left out of quantization is exempt from that: there is no quantization
     # error to recover there, and its CE materialises an fp32 [seq, vocab] tensor.
-    skip_mtp_loss = _mtp_excluded_from_quantization(model)
+    # ``freeze_mtp`` skips the MTP loss unconditionally.
     skip_lm_loss = distill_cfg.skip_lm_loss
-    if skip_lm_loss and skip_mtp_loss:
+    skip_mtp_loss = distill_cfg.freeze_mtp or (
+        skip_lm_loss and _mtp_excluded_from_quantization(model)
+    )
+    if skip_mtp_loss:
         # Freeze the untrained MTP head: DDP's overlapped grad reduce asserts on params with no grad.
-        warn_rank_0("MTP head is outside quantization and its loss is skipped: freezing it.")
+        warn_rank_0(
+            "MTP head is frozen and its loss is skipped"
+            + (" (freeze_mtp)." if distill_cfg.freeze_mtp else ": it is outside quantization.")
+        )
         with model.hide_teacher_model():
             for name, param in model.named_parameters():
                 if "mtp" in name.split("."):
@@ -715,7 +725,7 @@ def adjust_distillation_model_for_mcore(
         self._lm_loss_call_count += 1
         mtp_num_layers = self.config.mtp_num_layers or 0
         is_mtp_call = self._lm_loss_call_count <= mtp_num_layers
-        if skip_lm_loss and self.training and (not is_mtp_call or skip_mtp_loss):
+        if self.training and (skip_mtp_loss if is_mtp_call else skip_lm_loss):
             return torch.zeros_like(labels, dtype=logits.dtype)
         return type(self).compute_language_model_loss(self, labels, logits)
 
