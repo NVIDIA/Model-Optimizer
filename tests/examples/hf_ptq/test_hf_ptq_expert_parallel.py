@@ -90,8 +90,14 @@ def _checkpoint_is_local(monkeypatch):
 
 
 @pytest.fixture
-def torchrun():
-    """Enter the active session as rank ``rank`` of a ``world_size``-rank torchrun launch."""
+def torchrun(monkeypatch):
+    """Enter the active session as rank ``rank`` of a ``world_size``-rank torchrun launch.
+
+    Every rank acts as its group's first, deciding for itself; how the ranks agree on what they
+    decide is tested with the session.
+    """
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
+    monkeypatch.setattr(torch.distributed, "broadcast_object_list", lambda *a, **k: None)
     active = get_active_mo_session(required=False)
 
     def enter(world_size, rank=0):
