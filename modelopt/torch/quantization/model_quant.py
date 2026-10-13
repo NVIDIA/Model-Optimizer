@@ -235,12 +235,17 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
 # what those modules are, recipe units listing the supported models).
 _PLUGIN_QUANTIZERS = {
     "gdn_state_quantizer": (
-        ("*GatedDeltaNet", "*GatedDeltaNetAttention"),
+        ("*GatedDeltaNet", "*Qwen*GatedDeltaNetAttention"),
         "GDN layer",
         "linear_attention_state_int8*",
     ),
     "kda_state_quantizer": (
-        ("*KimiDeltaAttention", "*KimiK3DeltaAttention", "*KimiLinearDeltaAttention"),
+        (
+            "*KimiDeltaAttention",
+            "*KimiK3DeltaAttention",
+            "*KimiLinearDeltaAttention",
+            "*KimiGatedDeltaNetAttention",
+        ),
         "KDA layer",
         "linear_attention_state_int8*",
     ),

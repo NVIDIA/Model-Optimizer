@@ -16,8 +16,7 @@ Changelog
 - Added experimental NVFP4 recurrent-state fake quantization using TensorQuantizer block16 E4M3 scales for linear-attention QAT.
 
 - Add optional ReplaySSM state QAT for GDN/KDA using the compatible INT8/Hadamard serving fork. The replay recipe controls checkpoint refresh frequency independently of chunked prefill.
-
-- Add experimental FP8/INT8 recurrent-state fake quantization before native vLLM GDN/KDA prefill and decode; use the state-only recipe with the documented vLLM 0.15.x eager runtime.
+- Add experimental FP8/INT8 recurrent-state fake quantization before native vLLM GDN/KDA prefill and decode; use the state-only recipe with the documented vLLM 0.30.x eager runtime.
 
 - Add Q8_0 weight-only quantization with 32-value GGML blocks, packed unified HF and Megatron export, and a built-in ``q8_0`` PTQ recipe.
 - Add Hugging Face PTQ calibration and export support for Nemotron-H MTP modules, preserving calibrated expert input scales.

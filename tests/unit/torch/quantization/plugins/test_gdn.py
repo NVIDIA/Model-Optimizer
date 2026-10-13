@@ -306,6 +306,7 @@ def test_quant_cfg_refinement_and_policy_precedence():
         ("KimiDeltaAttention", "kda_state_quantizer"),
         ("KimiK3DeltaAttention", "kda_state_quantizer"),
         ("KimiLinearDeltaAttention", "kda_state_quantizer"),
+        ("KimiGatedDeltaNetAttention", "kda_state_quantizer"),
     ],
 )
 def test_state_recipe_rejects_unconverted_layers(class_name, quantizer_name):
