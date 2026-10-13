@@ -345,15 +345,21 @@ class SyncedAttribute:
 
     Declare one with :func:`synced`. Reading it is local. Assigning it is collective: every rank of
     the group assigns it at the same point, and each then holds the value the group's first rank
-    assigned -- whatever the others passed -- so no rank drifts from the rest.
-    :meth:`ModelOptSession.decide` sets one from a function run on the first rank only. Assign a new
-    value rather than mutating the one held, which would change this rank's copy only. Outside a
-    distributed session it is a plain attribute.
+    assigned -- whatever the others passed -- so no rank drifts from the rest. A reduced attribute
+    holds the group's values combined instead, the same on every rank.
+    :meth:`ModelOptSession.decide` sets one from a function run on the first rank only, or on every
+    rank for a reduced attribute. Assign a new value rather than mutating the one held, which would
+    change this rank's copy only. Outside a distributed session it is a plain attribute.
     """
 
-    def __init__(self, group: "Callable[[ModelOptSession], Any] | None" = None) -> None:
-        """Hold the attribute on ``group`` (see :func:`synced`)."""
+    def __init__(
+        self,
+        group: "Callable[[ModelOptSession], Any] | None" = None,
+        reduce: "Callable[[list[Any]], Any] | None" = None,
+    ) -> None:
+        """Hold the attribute on ``group``, combining the ranks' values with ``reduce`` if given."""
         self.group = group
+        self.reduce = reduce
         self.name = ""
 
     def __set_name__(self, owner: type, name: str) -> None:
@@ -368,14 +374,19 @@ class SyncedAttribute:
         session._sync(self, lambda: value, decide=False)
 
 
-def synced(group: "Callable[[ModelOptSession], Any] | None" = None) -> SyncedAttribute:
+def synced(
+    group: "Callable[[ModelOptSession], Any] | None" = None,
+    reduce: "Callable[[list[Any]], Any] | None" = None,
+) -> SyncedAttribute:
     """Declare a :class:`ModelOptSession` attribute that stays the same on every rank of a group.
 
     ``group`` picks the ranks: ``None`` for all of them, or a callable taking the session and returning
-    the ``ProcessGroup`` that holds the attribute, resolved at each assignment. See
-    :class:`SyncedAttribute`.
+    the ``ProcessGroup`` that holds the attribute, resolved at each assignment. ``reduce`` makes every
+    rank's value count: it takes the group's values in rank order and returns the one every rank then
+    holds, e.g. ``min`` for a batch size each rank's memory bounds. Without it, the group's first rank
+    decides. See :class:`SyncedAttribute`.
     """
-    return SyncedAttribute(group)
+    return SyncedAttribute(group, reduce)
 
 
 class ModelOptSession:
@@ -432,9 +443,10 @@ class ModelOptSession:
         """Set the synced attribute ``name`` to ``decide_fn()``, run on its group's first rank only.
 
         The other ranks take that value instead of computing their own, which could differ when it
-        depends on what each rank reads for itself: the environment, its GPU, files on its node. If
+        depends on what each rank reads for itself: the environment, its GPU, files on its node. For a
+        reduced attribute ``decide_fn`` runs on every rank instead, and the results are combined. If
         ``decide_fn`` raises, every rank of the group raises, instead of waiting in a collective the
-        first rank never joins. Collective, like assigning the attribute. Returns the value.
+        failing rank never joins. Collective, like assigning the attribute. Returns the value.
         """
         attribute = getattr(type(self), name, None)
         if not isinstance(attribute, SyncedAttribute):
@@ -451,6 +463,9 @@ class ModelOptSession:
             self._synced[name] = value_fn()
             return
         group = None if attribute.group is None else attribute.group(self)
+        if attribute.reduce is not None:
+            self._synced[name] = self._reduce(name, attribute.reduce, value_fn, group)
+            return
         first = torch.distributed.get_rank(group) == 0
         value, error = None, None
         if first or not decide:
@@ -477,6 +492,35 @@ class ModelOptSession:
             )
         # The first rank's own object stays the caller's; a copy keeps a later mutation of it local.
         self._synced[name] = copy.deepcopy(value) if first else value
+
+    def _reduce(
+        self, name: str, reduce: Callable[[list[Any]], Any], value_fn: Callable[[], Any], group
+    ) -> Any:
+        """Combine ``value_fn()`` from every rank of ``group`` with ``reduce``."""
+        value, error = None, None
+        try:
+            value = value_fn()
+        except Exception as e:
+            # Still join the gather: the other ranks would otherwise wait in it for this one.
+            error = e
+        mine = (name, value, None if error is None else f"{type(error).__name__}: {error}")
+        gathered: list[Any] = [None] * torch.distributed.get_world_size(group)
+        torch.distributed.all_gather_object(gathered, mine, group=group)
+        if error is not None:
+            raise error
+        for rank, (_, _, rank_error) in enumerate(gathered):
+            if rank_error is not None:
+                raise RuntimeError(
+                    f"rank {rank} failed to set ModelOptSession.{name}: {rank_error}"
+                )
+        names = sorted({rank_name for rank_name, _, _ in gathered})
+        if names != [name]:
+            raise RuntimeError(
+                f"Ranks set synced session attributes out of step: {names} at the same point. "
+                "Every rank must set them in the same order."
+            )
+        # The gathered values are unpickled copies, so the result shares nothing with the callers'.
+        return reduce([rank_value for _, rank_value, _ in gathered])
 
     @property
     def initialized(self) -> bool:

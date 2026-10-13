@@ -100,10 +100,12 @@ def test_reset_clears_the_identity_and_the_ep_mesh():
 
 
 class _Session(ModelOptSession):
-    """A session with a second synced attribute, and one held on a group of its own."""
+    """A session with a second synced attribute, one held on a group of its own, and reduced ones."""
 
     other = synced()
     grouped = synced(group=lambda session: "ep-group")
+    smallest = synced(reduce=min)
+    grouped_smallest = synced(group=lambda session: "ep-group", reduce=min)
 
 
 def _session(rank=None):
@@ -138,16 +140,38 @@ def _as_rank(monkeypatch, rank, rank0_message=None):
     return sent
 
 
+def _gather_as_rank(monkeypatch, rank, others):
+    """Answer the session's gathers as ``rank``; returns what each gather was handed.
+
+    ``others`` are the other ranks' messages in rank order, as they would have sent them.
+    """
+    sent = []
+
+    def all_gather_object(gathered, mine, group=None):
+        sent.append((mine, group))
+        gathered[:] = [*others[:rank], mine, *others[rank:]]
+
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: len(others) + 1)
+    monkeypatch.setattr(torch.distributed, "all_gather_object", all_gather_object)
+    monkeypatch.setattr(
+        torch.distributed, "broadcast_object_list", lambda *a, **k: pytest.fail("rank 0 decided")
+    )
+    return sent
+
+
 def test_a_synced_attribute_is_plain_in_a_single_process(monkeypatch):
     """Nothing to sync with: no collective, and an uninitialized session behaves the same."""
-    monkeypatch.setattr(
-        torch.distributed, "broadcast_object_list", lambda *a, **k: pytest.fail("a collective ran")
-    )
+    for collective in ("broadcast_object_list", "all_gather_object"):
+        monkeypatch.setattr(
+            torch.distributed, collective, lambda *a, **k: pytest.fail("a collective ran")
+        )
     for session in (_session(), _Session()):
         plan = DistributionPlan(world_size=1)
         session.plan = plan
         assert session.plan is plan
         assert session.decide("other", lambda: 3) == 3
+        session.smallest = 4
+        assert session.smallest == 4
 
 
 def test_rank0_sends_what_it_assigns_and_keeps_its_own_copy(monkeypatch):
@@ -209,6 +233,56 @@ def test_a_synced_attribute_is_held_on_its_group(monkeypatch):
     sent = _as_rank(monkeypatch, 0)
     _session(rank=0).grouped = 5
     assert sent == [(("grouped", 5, None), "ep-group")]
+
+
+def test_a_reduced_attribute_holds_the_groups_combined_value(monkeypatch):
+    """Every rank's value counts, and every rank ends up holding the same result."""
+    sent = _gather_as_rank(monkeypatch, 1, others=[("smallest", 8, None), ("smallest", 2, None)])
+    session = _session(rank=1)
+
+    session.smallest = 4
+
+    assert sent == [(("smallest", 4, None), None)]
+    assert session.smallest == 2
+
+
+def test_decide_runs_on_every_rank_for_a_reduced_attribute(monkeypatch):
+    _gather_as_rank(monkeypatch, 1, others=[("smallest", 8, None)])
+    assert _session(rank=1).decide("smallest", lambda: 3) == 3
+
+
+def test_a_rank_failing_a_reduced_attribute_still_joins_the_gather(monkeypatch):
+    """A failing rank must still reach the gather, or every other rank waits in it."""
+    sent = _gather_as_rank(monkeypatch, 1, others=[("smallest", 8, None)])
+
+    def fail():
+        raise ValueError("no memory reading")
+
+    with pytest.raises(ValueError, match="no memory reading"):
+        _session(rank=1).decide("smallest", fail)
+    assert sent == [(("smallest", None, "ValueError: no memory reading"), None)]
+
+
+def test_the_other_ranks_raise_when_one_failed_a_reduced_attribute(monkeypatch):
+    _gather_as_rank(monkeypatch, 0, others=[("smallest", None, "ValueError: no memory reading")])
+    with pytest.raises(
+        RuntimeError, match=r"rank 1 failed to set ModelOptSession.smallest.*memory"
+    ):
+        _session(rank=0).smallest = 4
+
+
+def test_reduced_attributes_set_out_of_step_fail(monkeypatch):
+    _gather_as_rank(monkeypatch, 0, others=[("other", 8, None)])
+    with pytest.raises(RuntimeError, match="out of step"):
+        _session(rank=0).smallest = 4
+
+
+def test_a_reduced_attribute_is_held_on_its_group(monkeypatch):
+    sent = _gather_as_rank(monkeypatch, 0, others=[("grouped_smallest", 1, None)])
+    session = _session(rank=0)
+    session.grouped_smallest = 5
+    assert sent == [(("grouped_smallest", 5, None), "ep-group")]
+    assert session.grouped_smallest == 1
 
 
 def test_only_synced_attributes_can_be_decided():
