@@ -75,7 +75,7 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
 
 QAD trains the quantized student against the frozen BF16 teacher with a logit KL loss only (no cross-entropy). See the [QAD section of the Megatron-Bridge README](../../README.md#quantization-aware-distillation-qad).
 
-We used **8 nodes × 4 GB300 (32 GPUs)** with context parallelism 4 and expert parallelism 32. The validation KD loss fell from 1.36e-2 at iteration 100 to 1.01e-2 at iteration 600.
+We used **8 nodes × 4 GB300 (32 GPUs)** with context parallelism 4 and expert parallelism 32.
 
 <details>
 <summary>QAD command (click to expand)</summary>
