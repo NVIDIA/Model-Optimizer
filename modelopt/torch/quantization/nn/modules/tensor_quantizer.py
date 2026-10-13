@@ -1729,7 +1729,8 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         """Compute the per-block scale from a per-block amax, optionally FP8-quantizing it."""
         if quantize:
             per_tensor_scale = _amax_to_scale(self.global_amax, self._quant_max_bound)
-            # Map the minimum encoded FP8 scale back to physical scale units.
+            # scaled_e4m3 maps per_tensor_scale to E4M3_MAX (448); apply the inverse
+            # mapping to express the minimum encoded FP8 scale in physical scale units.
             min_value = (_FP8_E4M3_MIN_POSITIVE / E4M3_MAX) * per_tensor_scale.view(-1)
             scale = _amax_to_scale(amax, self._quant_max_bound, min_value=min_value)
             return scaled_e4m3(scale, per_tensor_scale, None, 4, 3)
