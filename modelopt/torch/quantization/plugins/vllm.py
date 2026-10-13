@@ -533,7 +533,7 @@ def _linear_fake_quant_checks() -> dict[type, Callable[[torch.nn.Module], bool]]
     try:
         from vllm.models.kimi_k3.nvidia.low_latency_gemm import KimiK3LowLatencyLinearMethod
     except ModuleNotFoundError as exc:
-        if exc.name != "vllm.models.kimi_k3" and not (
+        if exc.name not in ("vllm.models", "vllm.models.kimi_k3") and not (
             exc.name and exc.name.startswith("vllm.models.kimi_k3.")
         ):
             raise
@@ -634,7 +634,7 @@ def _guard_kimi_gemm_rs_ar(model: torch.nn.Module) -> None:
     try:
         from vllm.models.kimi_k3.nvidia.model import KimiMLP
     except ModuleNotFoundError as exc:
-        if exc.name != "vllm.models.kimi_k3" and not (
+        if exc.name not in ("vllm.models", "vllm.models.kimi_k3") and not (
             exc.name and exc.name.startswith("vllm.models.kimi_k3.")
         ):
             raise

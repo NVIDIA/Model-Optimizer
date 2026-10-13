@@ -34,7 +34,7 @@ import inspect
 from functools import partial, wraps
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -417,6 +417,24 @@ def test_kimi_low_latency_linear_fake_quant_support(path, dtype, shape, expected
         weight=torch.empty(shape, dtype=dtype),
     )
     assert vllm_plugin._supports_fake_quant_linear(linear) is expected
+
+
+def test_missing_kimi_package_keeps_standard_vllm_supported():
+    original_import = __import__
+
+    def missing_kimi_import(name, *args, **kwargs):
+        if name.startswith("vllm.models.kimi_k3"):
+            raise ModuleNotFoundError("No module named 'vllm.models'", name="vllm.models")
+        return original_import(name, *args, **kwargs)
+
+    vllm_plugin._linear_fake_quant_checks.cache_clear()
+    try:
+        with patch("builtins.__import__", side_effect=missing_kimi_import):
+            checks = vllm_plugin._linear_fake_quant_checks()
+            assert vllm_plugin.vllm_linear.UnquantizedLinearMethod in checks
+            vllm_plugin._guard_kimi_gemm_rs_ar(torch.nn.Module())
+    finally:
+        vllm_plugin._linear_fake_quant_checks.cache_clear()
 
 
 @pytest.mark.parametrize("quantizer_name", _VLLMParallelLinear._QUANTIZER_NAMES)
@@ -1290,7 +1308,10 @@ def _quantize_kv_preset_and_summarize(self):
     methods: dict[str, list[str]] = {"passthrough": [], "fake_quant": []}
     enabled = []
     for name, module in model.named_modules():
-        if isinstance(module, (_VLLMParallelLinear, _QuantFusedMoEBase)):
+        if isinstance(module, _VLLMParallelLinear):
+            kind = "fake_quant" if module._fake_quant_supported else "passthrough"
+            methods[kind].append(type(module.quant_method).__name__)
+        elif isinstance(module, _QuantFusedMoEBase):
             kind = "passthrough" if module._prequantized else "fake_quant"
             methods[kind].append(type(module.quant_method).__name__)
         if isinstance(module, TensorQuantizer) and module.is_enabled:
