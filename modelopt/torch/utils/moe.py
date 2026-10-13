@@ -19,8 +19,6 @@ Capability detection and EP degree selection: deciding how a model distributes, 
 this GPU's memory and the knobs.
 """
 
-import torch.distributed as dist
-
 
 def require_transformers(min_version: str, feature: str) -> None:
     """Fail loudly if the installed transformers is older than ``min_version`` (the floor for ``feature``).
@@ -189,38 +187,29 @@ def decide_distribution_plan(
     * ``fsdp_size`` -- ``auto`` -> ``1`` (replicate the dense part) when it fits one GPU, else
       ``world_size`` (FSDP2-shard it); ``"world"`` -> ``world_size``.
 
-    On a distributed run the plan is decided ONCE, on rank 0, and broadcast; every other rank adopts rank 0's
-    decision instead of making its own. The inputs are all read locally -- the env knobs, this GPU's memory,
-    the config on this rank's filesystem -- so ranks deciding independently could disagree, and a
-    disagreement surfaces as a hang at mesh creation rather than as an error. Collective: every rank must
-    call it. If rank 0 fails to decide, every rank raises.
+    Inside a :class:`~modelopt.torch.utils.distributed.ModelOptSession` the session decides it and
+    keeps it as ``session.plan``: on a distributed run once, on rank 0, and every other rank adopts
+    rank 0's decision instead of making its own (:meth:`~modelopt.torch.utils.distributed.ModelOptSession.decide`).
+    The inputs are all read locally -- the env knobs, this GPU's memory, the config on this rank's
+    filesystem -- so ranks deciding independently could disagree, and a disagreement surfaces as a
+    hang at mesh creation rather than as an error. Collective: every rank must call it. If rank 0
+    fails to decide, every rank raises. Without a session, this process decides alone.
     """
-    from .distributed import is_distributed_run
+    from .distributed import get_active_mo_session
 
-    decide_kwargs = {
-        "ep_size": ep_size,
-        "fsdp_size": fsdp_size,
-        "device_mem_bytes": device_mem_bytes,
-    }
-    if not is_distributed_run():
-        return _decide_distribution_plan_on_rank0(hf_config, world_size, **decide_kwargs)
+    def decide():
+        return _decide_distribution_plan_on_rank0(
+            hf_config,
+            world_size,
+            ep_size=ep_size,
+            fsdp_size=fsdp_size,
+            device_mem_bytes=device_mem_bytes,
+        )
 
-    plan, error = None, None
-    if dist.get_rank() == 0:
-        try:
-            plan = _decide_distribution_plan_on_rank0(hf_config, world_size, **decide_kwargs)
-        except Exception as e:
-            error = e
-    # Ship the failure as text, not the exception object: the other ranks only need to stop, and an
-    # exception is not guaranteed to pickle.
-    decision = [(plan, None if error is None else f"{type(error).__name__}: {error}")]
-    dist.broadcast_object_list(decision, src=0)
-    if error is not None:
-        raise error
-    plan, rank0_error = decision[0]
-    if rank0_error is not None:
-        raise RuntimeError(f"rank 0 failed to decide the distribution plan: {rank0_error}")
-    return plan
+    session = get_active_mo_session(required=False)
+    if not session.initialized:
+        return decide()
+    return session.decide("plan", decide)
 
 
 def _decide_distribution_plan_on_rank0(
