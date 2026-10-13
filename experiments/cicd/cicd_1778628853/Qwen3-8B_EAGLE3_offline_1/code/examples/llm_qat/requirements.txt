@@ -1,0 +1,3 @@
+flash-attn
+py7zr
+tensorboardX

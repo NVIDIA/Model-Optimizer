@@ -1,0 +1,18 @@
+[project]
+name = "modelopt-launcher"
+version = "0.1.0"
+description = "ModelOpt Launcher — submit quantization, training, and evaluation jobs to Slurm clusters"
+requires-python = ">=3.10"
+dependencies = [
+    "nemo-run>=0.8.0",
+    "pyyaml",
+]
+
+[tool.setuptools]
+py-modules = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = []

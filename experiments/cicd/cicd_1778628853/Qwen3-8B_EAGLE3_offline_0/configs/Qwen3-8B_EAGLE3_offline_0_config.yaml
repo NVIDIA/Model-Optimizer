@@ -1,0 +1,24 @@
+_target_: nemo_run.config.Script
+args:
+- --model /hf-local/Qwen/Qwen3-8B
+- --tp_size 8
+- --ep_size 8
+- --max_num_tokens 32000
+- --port 8000
+- --host 0.0.0.0
+- --trust_remote_code
+- --
+- --data /hf-local/modelopt/Speculative-Decoding-Prompt-Samples
+- --save /scratchspace/data
+entrypoint: bash
+env:
+  HF_HOME: /cicd/hf-cache
+  HF_LOCAL: /hf-local
+  HF_TOKEN: ''
+  LAUNCH_SCRIPT: python
+  MLM_SKIP_INSTALL: '1'
+  TRITON_CACHE_DIR: /cicd/triton-cache
+inline: ''
+m: false
+metadata: {}
+path: common/tensorrt_llm/query.sh

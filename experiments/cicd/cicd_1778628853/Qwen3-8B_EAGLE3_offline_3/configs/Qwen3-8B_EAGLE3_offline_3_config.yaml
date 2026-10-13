@@ -1,0 +1,23 @@
+_target_: nemo_run.config.Script
+args:
+- --draft_model_dir /scratchspace/export
+- --draft_length 3
+- --output_length 4096
+- --engine VLLM
+- --tp_size 8
+- --ep_size 1
+- --speculative_algorithm EAGLE3
+- --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
+- --concurrency 1
+entrypoint: bash
+env:
+  HF_HOME: /cicd/hf-cache
+  HF_MODEL_CKPT: /hf-local/Qwen/Qwen3-8B
+  HF_TOKEN: ''
+  LAUNCH_SCRIPT: python
+  MLM_SKIP_INSTALL: '1'
+  TRITON_CACHE_DIR: /cicd/triton-cache
+inline: ''
+m: false
+metadata: {}
+path: common/specdec_bench/quick_check.sh

@@ -1,0 +1,6 @@
+--extra-index-url https://download.pytorch.org/whl/cu129
+numpy
+opencv-python-headless
+scipy
+torch>=2.0.0
+tqdm

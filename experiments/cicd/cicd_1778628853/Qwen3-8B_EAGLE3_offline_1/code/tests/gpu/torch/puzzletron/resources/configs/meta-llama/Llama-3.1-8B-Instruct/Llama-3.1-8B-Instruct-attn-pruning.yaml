@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - /meta-llama/Llama-3.1-8B-Instruct/pruning@pruning: attn_pruning
+  - _self_
+
+descriptor: llama
+
+puzzle_dir: ???
+teacher_dir: ${puzzle_dir}/ckpts/teacher/
+dataset_path: ???

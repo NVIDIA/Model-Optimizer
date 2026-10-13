@@ -1,0 +1,50 @@
+# Local single-GPU variant of megatron_lm_ptq.yaml.
+#
+# Uses MegatronLMQuantizeTask with typed config (tp=1, 1 GPU).
+# See common/megatron_lm/quantize/task.py for all available fields.
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/megatron_lm_ptq_local.yaml hf_local=/mnt/hf-local --yes
+#
+# -----------------------------------------------------------------------------------
+# Equivalent raw SandboxTask (for reference — shows what MegatronLMQuantizeTask generates):
+#
+#   task_0:
+#     script: common/megatron_lm/quantize/quantize.sh
+#     args:
+#       - --calib-dataset-path-or-name /hf-local/abisee/cnn_dailymail
+#       - --calib-size 32
+#     environment:
+#       - MLM_MODEL_CFG: Qwen/Qwen3-8B
+#       - QUANT_CFG: NVFP4_DEFAULT_CFG
+#       - HF_MODEL_CKPT: /hf-local/Qwen/Qwen3-8B
+#       - MMLU_DATASET: /hf-local/cais/mmlu
+#       - TP: 1
+#     slurm_config:
+#       _factory_: "slurm_factory"
+#       nodes: 1
+#       ntasks_per_node: 1
+#       gpus_per_node: 1
+# -----------------------------------------------------------------------------------
+
+job_name: Qwen3-8B_NVFP4_local
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note:
+
+  task_0:
+    _target_: common.megatron_lm.quantize.task.MegatronLMQuantizeTask
+    config:
+      model: Qwen/Qwen3-8B
+      quant_cfg: NVFP4_DEFAULT_CFG
+      tp: 1
+      calib_dataset: abisee/cnn_dailymail
+      calib_size: 32
+      mmlu_dataset: cais/mmlu
+      hf_local: /hf-local/
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1

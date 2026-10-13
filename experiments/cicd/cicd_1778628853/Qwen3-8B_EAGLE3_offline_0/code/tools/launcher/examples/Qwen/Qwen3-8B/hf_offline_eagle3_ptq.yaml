@@ -1,0 +1,128 @@
+# EAGLE3 offline speculative decoding pipeline with PTQ for Qwen3-8B.
+#
+# 5-step pipeline:
+#   task_0: Data synthesis — query TRT-LLM server to generate prompt samples
+#   task_1: Dump hidden states — run target model to capture hidden states
+#   task_2: Offline training — train the EAGLE3 draft head and export checkpoint
+#   task_3: PTQ — quantize the EAGLE3 model using offline hidden states
+#   task_4: Benchmark — evaluate speculative decoding speedup via VLLM
+#
+# All tasks share /scratchspace to pass artifacts between steps.
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_offline_eagle3_ptq.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/hf_offline_eagle3_ptq.yaml --yes
+
+job_name: Qwen3-8B_EAGLE3_offline_PTQ
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+
+  # Step 1: Data synthesis via TRT-LLM server
+  # Args before "--" go to trtllm-serve; args after "--" go to tools/query.py.
+  task_0:
+    script: common/tensorrt_llm/query.sh
+    args:
+      - --model <<global_vars.hf_model>>
+      - --tp_size 4
+      - --ep_size 4
+      - --max_num_tokens 32000
+      - --port 8000
+      - --host 0.0.0.0
+      - --trust_remote_code
+      - --
+      - --data /hf-local/modelopt/Speculative-Decoding-Prompt-Samples
+      - --save /scratchspace/data
+    environment:
+      - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
+
+  # Step 2: Dump hidden states from target model
+  task_1:
+    script: common/eagle3/dump_offline_data.sh
+    args:
+      - --input-data /scratchspace/data
+      - --output-dir /scratchspace/offline_hidden_states
+      - --max-seq-len 8192
+      - --tp 4
+      - --moe-ep 4
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
+
+  # Step 3: Train EAGLE3 draft head (offline, single task) and export checkpoint
+  task_2:
+    script: common/eagle3/offline_training.sh
+    args:
+      - --offline-data /scratchspace/offline_hidden_states
+      - --data_path None
+      - --mode eagle3
+      - --num_epochs 1
+      - --lr 3e-4
+      - --save_steps 500000
+      - --output_dir /scratchspace/eagle3
+      - --train_bs 8
+      - --training_seq_len 4096
+      - --eagle_config modules/Model-Optimizer/examples/speculative_decoding/eagle_config.json
+      - --disable_tqdm True
+      - --ar_validate_steps 500000
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
+
+  # Step 4: PTQ — quantize the EAGLE3 model using offline hidden states
+  task_3:
+    script: common/eagle3/hf_ptq.sh
+    args:
+      - --specdec_offline_dataset /scratchspace/offline_hidden_states
+      - --qformat fp8
+      - --calib_size 512
+      - --export_path /scratchspace/export_quantized
+    environment:
+      - HF_MODEL_CKPT: /scratchspace/export
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+
+  # Step 5: Benchmark speculative decoding (VLLM backend)
+  task_4:
+    script: common/specdec_bench/quick_check.sh
+    args:
+      - --draft_model_dir /scratchspace/export_quantized
+      - --draft_length 3
+      - --output_length 4096
+      - --engine VLLM
+      - --tp_size 4
+      - --ep_size 1
+      - --speculative_algorithm EAGLE3
+      - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
+      - --concurrency 1
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      container: vllm/vllm-openai:latest
