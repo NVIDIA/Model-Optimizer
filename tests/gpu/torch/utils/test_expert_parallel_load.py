@@ -83,6 +83,9 @@ def _sharded_model_matches_the_whole_one(rank, size, ckpt_dir, ep_degree):
             local = _local(getattr(layer.mlp.experts, name))
             assert local.shape[0] == per_rank
             torch.testing.assert_close(local, getattr(whole_layer.mlp.experts, name)[owned])
+    # The load recorded what it could not place, for the export to carry: here, nothing.
+    assert model._modelopt_unplaced_source_keys == []
+    assert model._modelopt_source_checkpoint == ckpt_dir
 
     # Every rank calibrates on different tokens, so each sends its own batch through the experts.
     generator = torch.Generator().manual_seed(rank)
