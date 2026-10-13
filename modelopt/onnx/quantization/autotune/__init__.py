@@ -46,6 +46,7 @@ try:
     )
     from .region_pattern import RegionPattern
     from .region_search import CombinedRegionSearch
+    from .torch_region_builder import TorchRegionBuilder
 except ImportError as e:
     from modelopt.onnx.logging_config import logger
 
@@ -73,6 +74,7 @@ _OPTIONAL_EXPORTS = [
     "RegionType",
     "ResolvedInsertionPoint",
     "TensorRTPyBenchmark",
+    "TorchRegionBuilder",
     "TrtExecBenchmark",
 ]
 __all__.extend(name for name in _OPTIONAL_EXPORTS if name in globals())
