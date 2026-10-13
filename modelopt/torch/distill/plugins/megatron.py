@@ -72,8 +72,7 @@ class DistillationConfig:
             reaches this value contributes to the loss. Requires ``logit_kl_topk``. Must be in (0, 1].
         logit_kl_top_p_min_k: Minimum number of Top-K entries kept per token when top-P is active.
         freeze_mtp: Keep the student's MTP head fixed: skip its loss, which otherwise also trains the
-            shared layers it reads from, and freeze its parameters. Use it when the MTP head is
-            replaced after training. Default: ``False``.
+            shared layers it reads from, and freeze its parameters. Default: ``False``.
     """
 
     intermediate_layer_pairs: list[tuple[str, ...]] = field(default_factory=list)

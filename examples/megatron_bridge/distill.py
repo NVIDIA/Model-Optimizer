@@ -262,8 +262,7 @@ def get_args():
     parser.add_argument(
         "--freeze_mtp",
         action="store_true",
-        help="Keep the student's MTP head at its input weights: skip its loss and freeze it. "
-        "Use it when the MTP head is replaced after training.",
+        help="Keep the student's MTP head at its input weights: skip its loss and freeze it.",
     )
     parser.add_argument(
         "--no_async_save",
