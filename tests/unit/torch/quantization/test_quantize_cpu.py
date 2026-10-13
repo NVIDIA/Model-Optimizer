@@ -730,13 +730,13 @@ def test_indexer_k_check_covers_all_ranks(skip_on_windows):
 
 
 @pytest.mark.parametrize(
-    "quantizer_name",
+    ("quantizer_name", "supported"),
     [
-        "indexer_q_quantizer",
-        "indexer_scorer_kwargs_quantizer",
+        ("indexer_q_quantizer", r"configs/ptq/units/indexer_\*_nvfp4"),
+        ("indexer_scorer_kwargs_quantizer", r"scorer kernel arguments.*examples/vllm_serve"),
     ],
 )
-def test_indexer_patterns_need_their_own_quantizer(quantizer_name):
+def test_indexer_patterns_need_their_own_quantizer(quantizer_name, supported):
     """Each indexer quantizer is checked on its own: a converted key quantizer does not count."""
     config = copy.deepcopy(INDEXER_K_ONLY_CFG)
     config["quant_cfg"].append(
@@ -744,7 +744,7 @@ def test_indexer_patterns_need_their_own_quantizer(quantizer_name):
     )
     mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
     try:
-        with pytest.raises(RuntimeError, match=rf"enables {quantizer_name}, but no"):
+        with pytest.raises(RuntimeError, match=rf"enables {quantizer_name}, but no.*{supported}"):
             mtq.quantize(_ToyIndexerModel(), config, lambda m: m(torch.randn(2, 16)))
     finally:
         mtq.unregister(_ToyIndexer)

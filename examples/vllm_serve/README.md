@@ -351,7 +351,7 @@ such a build into the serving environment and serve:
 ```bash
 pip install --no-deps --no-build-isolation <DeepGEMM source directory or git URL>
 RECIPE_PATH=<recipe>.yaml \
-  python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
+  python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
 ```
 
 Notes:
