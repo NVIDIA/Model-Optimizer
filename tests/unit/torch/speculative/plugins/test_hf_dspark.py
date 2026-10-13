@@ -36,8 +36,9 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
+from modelopt.torch.speculative.plugins.dflash_losses import _tvd_chunk, _tvd_per_token
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
-from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel, _tvd_chunk, _tvd_per_token
+from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel
 from modelopt.torch.speculative.plugins.modeling_dflash import (
     DFlashBaseModelOutput,
     DFlashModule,
