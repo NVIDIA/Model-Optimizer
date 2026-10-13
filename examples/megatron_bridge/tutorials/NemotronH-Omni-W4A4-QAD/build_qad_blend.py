@@ -19,16 +19,19 @@
 ``distill.py --sft_hf_dataset`` reads one source per split and has no blend weights, so the
 weighted mixture is written out here. Each source contributes ``total * weight / sum(weights)``
 rows: the first ones of its Hugging Face split, streamed in order, that Megatron-Bridge accepts
-as text-only chat. A source is skipped if it fails to load or yields too few usable rows. Rows come
-in three shapes:
+as text-only chat. Rows come in three shapes:
 
 * ``messages``: used as-is.
 * ``text`` with ``<extra_id_1>User`` / ``Assistant`` markers (SFT-General): parsed into messages,
   dropping empty turns.
 * ``text`` without markers (SFT-Code, SFT-MATH): one assistant turn, so the whole text is trained.
 
-Each source is cached under ``<output_dir>/parts/`` so an interrupted run resumes. Run inside the
-NeMo container.
+A source that fails to load or yields fewer rows than its share stops the run, so the mixture
+cannot change silently; ``--allow_partial`` keeps what was collected instead. Either way the
+realized row count of every source is written to ``blend_summary.json``.
+
+Each source is cached under ``<output_dir>/parts/``, written atomically, so an interrupted run
+resumes and an unreadable part is rebuilt. Run inside the NeMo container.
 """
 
 import argparse
@@ -36,9 +39,6 @@ import json
 import os
 import random
 import re
-
-from datasets import load_dataset
-from megatron.bridge.data.conversation_processing import is_text_only_chat_example
 
 # (weight, repo, config, split, field)
 SOURCES = [
@@ -64,7 +64,6 @@ SOURCES = [
     (8, "nvidia/Nemotron-Post-Training-Dataset-v1", "default", "stem", "messages"),
     (3, "nvidia/Nemotron-Science-v1", "default", "MCQ", "messages"),
     (2, "nvidia/Nemotron-Science-v1", "default", "RQA", "messages"),
-    (3, "nvidia/Nemotron-SFT-Instruction-Following-Chat-v2", "default", "reasoning_on", "messages"),
     (
         2,
         "nvidia/Nemotron-SFT-Instruction-Following-Chat-v2",
@@ -72,13 +71,26 @@ SOURCES = [
         "reasoning_off",
         "messages",
     ),
-    (5, "nvidia/Nemotron-Agentic-v1", "default", "tool_calling", "messages"),
 ]
 TURN = re.compile(
     r"<extra_id_\d+>(User|Assistant|System)\n?(.*?)(?=<extra_id_\d+>(?:User|Assistant|System)|\Z)",
     re.DOTALL,
 )
 ROLE = {"User": "user", "Assistant": "assistant", "System": "system"}
+
+
+def stream(repo: str, config: str, split: str):
+    """Yield the rows of one Hugging Face split, in order, without downloading it."""
+    from datasets import load_dataset
+
+    yield from load_dataset(repo, config, split=split, streaming=True)
+
+
+def is_usable(chat: dict) -> bool:
+    """Whether Megatron-Bridge's chat path accepts the conversation as text-only chat."""
+    from megatron.bridge.data.conversation_processing import is_text_only_chat_example
+
+    return is_text_only_chat_example(chat)
 
 
 def to_chat(row: dict, field: str) -> dict | None:
@@ -99,57 +111,94 @@ def to_chat(row: dict, field: str) -> dict | None:
 def take(repo: str, config: str, split: str, field: str, want: int) -> tuple[list[dict], int]:
     """Stream the split and keep the first ``want`` usable rows; give up after ``10 * want`` rejects."""
     got, dropped = [], 0
-    try:
-        for row in load_dataset(repo, config, split=split, streaming=True):
-            chat = to_chat(row, field)
-            if chat is None or not is_text_only_chat_example(chat):
-                dropped += 1
-                if dropped > want * 10:
-                    break
-                continue
-            got.append(chat)
-            if len(got) >= want:
+    for row in stream(repo, config, split):
+        chat = to_chat(row, field)
+        if chat is None or not is_usable(chat):
+            dropped += 1
+            if dropped > want * 10:
                 break
-    except Exception as e:  # e.g. a gated split, or a schema the streaming reader cannot cast
-        print(f"{repo} {split}: failed ({type(e).__name__}: {str(e)[:80]})", flush=True)
+            continue
+        got.append(chat)
+        if len(got) >= want:
+            break
     return got, dropped
+
+
+def write_jsonl(path: str, rows: list[dict]) -> None:
+    """Write ``rows`` to ``path`` atomically: an interrupted write never leaves a partial file."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+    os.replace(tmp, path)
+
+
+def read_part(path: str) -> list[dict] | None:
+    """Read a cached part, or ``None`` if it is missing or unreadable (it is then rebuilt)."""
+    try:
+        with open(path) as f:
+            return [json.loads(line) for line in f]
+    except (OSError, ValueError):
+        return None
+
+
+def build(output_dir: str, total: int, seed: int, allow_partial: bool = False) -> dict[str, int]:
+    """Build ``train.jsonl`` and ``validation.jsonl`` under ``output_dir``; return the split sizes."""
+    parts = os.path.join(output_dir, "parts")
+    os.makedirs(parts, exist_ok=True)
+    total_weight = sum(w for w, *_ in SOURCES)
+    rows, summary = [], []
+    for weight, repo, config, split, field in SOURCES:
+        want = max(1, round(total * weight / total_weight))
+        part = os.path.join(parts, f"{repo.split('/')[-1]}__{config}__{split}.jsonl")
+        got = read_part(part)
+        if got is not None and len(got) >= want:
+            print(f"{repo} {split}: {want} rows (cached)", flush=True)
+        else:
+            try:
+                got, dropped = take(repo, config, split, field, want)
+            except (
+                Exception
+            ) as e:  # e.g. a gated split, or a schema the streaming reader cannot cast
+                if not allow_partial:
+                    raise RuntimeError(f"{repo} {split}: failed to load") from e
+                print(f"{repo} {split}: failed ({type(e).__name__}: {str(e)[:80]})", flush=True)
+                got, dropped = [], 0
+            write_jsonl(part, got)
+            print(f"{repo} {split}: {len(got)}/{want} rows ({dropped} dropped)", flush=True)
+            if len(got) < want and not allow_partial:
+                raise RuntimeError(
+                    f"{repo} {split}: {len(got)}/{want} usable rows; pass --allow_partial to keep them"
+                )
+        rows.extend(got[:want])
+        summary.append(
+            {"repo": repo, "config": config, "split": split, "want": want, "rows": len(got[:want])}
+        )
+
+    random.Random(seed).shuffle(rows)
+    num_validation = min(1000, len(rows) // 20)
+    splits = {"validation": rows[:num_validation], "train": rows[num_validation:]}
+    if not splits["train"] or not splits["validation"]:
+        raise RuntimeError(f"too few rows ({len(rows)}) for a train/validation split")
+    for name, chunk in splits.items():
+        write_jsonl(os.path.join(output_dir, f"{name}.jsonl"), chunk)
+        print(f"wrote {name}.jsonl: {len(chunk)} rows", flush=True)
+    with open(os.path.join(output_dir, "blend_summary.json"), "w") as f:
+        json.dump({"total": total, "seed": seed, "sources": summary}, f, indent=2)
+    return {name: len(chunk) for name, chunk in splits.items()}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--total", type=int, default=40000, help="Rows to request across sources.")
+    parser.add_argument("--total", type=int, default=36800, help="Rows to request across sources.")
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument(
+        "--allow_partial",
+        action="store_true",
+        help="Keep going when a source fails or is short, instead of stopping.",
+    )
     args = parser.parse_args()
-
-    parts = os.path.join(args.output_dir, "parts")
-    os.makedirs(parts, exist_ok=True)
-    total_weight = sum(w for w, *_ in SOURCES)
-    rows = []
-    for weight, repo, config, split, field in SOURCES:
-        want = max(1, round(args.total * weight / total_weight))
-        part = os.path.join(parts, f"{repo.split('/')[-1]}__{config}__{split}.jsonl")
-        if os.path.exists(part):
-            with open(part) as f:
-                got = [json.loads(line) for line in f]
-            if len(got) >= want:
-                rows.extend(got[:want])
-                print(f"{repo} {split}: {want} rows (cached)", flush=True)
-                continue
-        got, dropped = take(repo, config, split, field, want)
-        with open(part, "w") as f:
-            f.writelines(json.dumps(r) + "\n" for r in got)
-        rows.extend(got)
-        print(f"{repo} {split}: {len(got)}/{want} rows ({dropped} dropped)", flush=True)
-
-    random.Random(args.seed).shuffle(rows)
-    num_validation = min(1000, max(1, len(rows) // 20))
-    splits = {"validation": rows[:num_validation], "train": rows[num_validation:]}
-    for name, chunk in splits.items():
-        path = os.path.join(args.output_dir, f"{name}.jsonl")
-        with open(path, "w") as f:
-            f.writelines(json.dumps(r) + "\n" for r in chunk)
-        print(f"wrote {path}: {len(chunk)} rows")
+    build(args.output_dir, args.total, args.seed, args.allow_partial)
 
 
 if __name__ == "__main__":
