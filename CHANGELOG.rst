@@ -65,6 +65,7 @@ Changelog
 - Add a ``kd_loss_alpha`` option to HuggingFace ``KDTrainer`` to blend cross-entropy and knowledge distillation losses during training.
 - A tracked ``examples/hf_ptq/hf_ptq.py`` run now writes ``.experiment.json`` into ``--export_path`` and uploads the same file with the run, so a checkpoint on disk names the experiment and MLflow run id that produced it. The pointer is written only once the export completes, and an export that is not tracked removes one it would otherwise inherit from a reused ``--export_path`` or from a quantized source checkpoint.
 - ``export_hf_checkpoint`` and the vLLM fake-quant export now copy the source checkpoint's non-model files (tokenizer, processor, remote code, chat templates, ...) into the export unchanged. They read the source from local disk only: get a local copy of a Hugging Face Hub model with ``modelopt.torch.export.ensure_local_checkpoint`` and load it from there.
+- ``modelopt.torch.utils.plugins.model_load_utils.load_pretrained`` now also loads a model distributed. Inside a distributed ``modelopt.torch.utils.distributed.modelopt_session()`` it FSDP2-shards the model or gives every rank a whole copy, as the model and the ``MODELOPT_FSDP_SIZE`` variable decide; its new ``distribution`` argument picks the load explicitly.
 
 - Add Parallel Decoding Distillation (PDD) to ``modelopt.torch.fastgen`` with Qwen-Image training, distributed-checkpoint export, and PDD-2/4/8 inference. AutoModel remains an unmodified pinned runtime dependency.
 
