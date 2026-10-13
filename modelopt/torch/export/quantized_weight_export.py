@@ -106,6 +106,7 @@ class _QuantizedWeightExportState:
     weight_shape: tuple[int, ...]
     tensors: tuple[_ExportStateTensor, ...]
     packing_permutation: tuple[int, ...]
+    input_quantizer_enabled: bool
     static_nvfp4: bool = False
     four_over_six: bool = False
 
@@ -133,6 +134,7 @@ class _QuantizedWeightExportMetadata:
     weight_shape: tuple[int, ...]
     tensors: tuple[_ExportStateTensorMetadata, ...]
     packing_permutation: tuple[int, ...]
+    input_quantizer_enabled: bool
     static_nvfp4: bool
     four_over_six: bool
 
@@ -453,6 +455,7 @@ def capture_quantized_weight_export_state(
         weight_shape=tuple(weight.shape),
         tensors=tuple(tensors),
         packing_permutation=permutation,
+        input_quantizer_enabled=input_quantizer is not None and input_quantizer.is_enabled,
         static_nvfp4=static_nvfp4,
         four_over_six=bool(block_config.get("four_over_six", False)),
     )
@@ -489,6 +492,7 @@ def split_quantized_weight_export_state(
             for record in state.tensors
         ),
         state.packing_permutation,
+        state.input_quantizer_enabled,
         state.static_nvfp4,
         state.four_over_six,
     )
@@ -513,6 +517,7 @@ def restore_quantized_weight_export_state(
             for spec, tensor in zip(metadata.tensors, tensors, strict=True)
         ),
         metadata.packing_permutation,
+        metadata.input_quantizer_enabled,
         metadata.static_nvfp4,
         metadata.four_over_six,
     )
@@ -578,6 +583,7 @@ def merge_quantized_weight_export_states(
     if any(
         state.quantization_format != reference.quantization_format
         or state.block_size != reference.block_size
+        or state.input_quantizer_enabled != reference.input_quantizer_enabled
         or state.packing_permutation != reference.packing_permutation
         or state.static_nvfp4 != reference.static_nvfp4
         or state.four_over_six != reference.four_over_six
@@ -606,6 +612,7 @@ def merge_quantized_weight_export_states(
         tuple(shape),
         tensors,
         reference.packing_permutation,
+        reference.input_quantizer_enabled,
         reference.static_nvfp4,
         reference.four_over_six,
     )
@@ -668,6 +675,7 @@ def select_quantized_weight_export_state(
         tuple(shape),
         tuple(_select_state_tensor(record, packed_dim, indices) for record in state.tensors),
         state.packing_permutation,
+        state.input_quantizer_enabled,
         state.static_nvfp4,
         state.four_over_six,
     )
@@ -819,9 +827,20 @@ def build_hf_quantization_config(
     named_states: Mapping[str, _QuantizedWeightExportState | _QuantizedWeightExportSpec | None]
     | Iterable[tuple[str, _QuantizedWeightExportState | _QuantizedWeightExportSpec | None]],
 ) -> dict[str, Any]:
-    """Build canonical ModelOpt HF configuration from named states or specs."""
+    """Build canonical HF configuration, rejecting unrepresentable activation settings."""
     layers: dict[str, tuple[str, int] | None] = {}
     for weight_name, state in dict(named_states).items():
+        if state is not None:
+            requires_input = state.quantization_format not in {
+                QUANTIZATION_FP8_PB_WO,
+                QUANTIZATION_W4A16_NVFP4,
+            }
+            if state.input_quantizer_enabled != requires_input:
+                raise NotImplementedError(
+                    f"Cannot build canonical HF configuration for {weight_name!r}: "
+                    f"{state.quantization_format!r} requires an "
+                    f"{'enabled' if requires_input else 'disabled'} input quantizer"
+                )
         layer_name = _quantized_layer_name(weight_name)
         value = None if state is None else (state.quantization_format, state.block_size)
         previous = layers.setdefault(layer_name, value)

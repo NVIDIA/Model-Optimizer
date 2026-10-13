@@ -123,6 +123,7 @@ def _blockwise_export_state(width: int, *, transposed: bool = False):
             ),
         ),
         packing_permutation=(1, 0) if transposed else (0, 1),
+        input_quantizer_enabled=False,
     )
 
 
@@ -155,6 +156,100 @@ def test_functional_fp8_export_is_repeatable():
         torch.testing.assert_close(base[name], repeated[name])
 
 
+_CAPTURE_FORMAT_CONFIGS = {
+    "fp8_pc_pt": {"num_bits": (4, 3), "axis": 0},
+    "fp8_pb_wo": {"num_bits": (4, 3), "block_sizes": {-2: 128, -1: 128}},
+    "nvfp4": {
+        "num_bits": (2, 1),
+        "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+    },
+    "mxfp8": {
+        "num_bits": (4, 3),
+        "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+    },
+    "mxfp4": {
+        "num_bits": (2, 1),
+        "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+    },
+}
+
+
+def _capture_linear(quantization_format):
+    module = nn.Linear(256, 128, bias=False)
+    cfg = _CAPTURE_FORMAT_CONFIGS[quantization_format]
+    module.weight_quantizer = TensorQuantizer(QuantizerAttributeConfig(**cfg))
+    module.input_quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            **({"num_bits": (4, 3), "type": "dynamic"} if "axis" in cfg else cfg)
+        )
+    )
+    if quantization_format == "fp8_pb_wo":
+        module.input_quantizer.disable()
+    return module
+
+
+@pytest.mark.parametrize("quantization_format", _CAPTURE_FORMAT_CONFIGS)
+def test_capture_preserves_format_state_and_detaches_tensors(quantization_format):
+    module = _capture_linear(quantization_format)
+    cfg = _CAPTURE_FORMAT_CONFIGS[quantization_format]
+    expected = {}
+    if quantization_format == "fp8_pc_pt":
+        scale = torch.arange(1, 129, dtype=torch.float32)
+        module.weight_quantizer._amax = (448 * scale).reshape(128, 1)
+        expected["weight_scale"] = (scale, (0,), (1,))
+    elif quantization_format == "fp8_pb_wo":
+        scale = torch.tensor([[1.0, 2.0]])
+        module.weight_quantizer._amax = 448 * scale
+        expected["weight_scale"] = (scale, (0, 1), (128, 128))
+    elif quantization_format == "nvfp4":
+        module.weight_quantizer._amax = torch.tensor(2 * 6 * 448.0)
+        module.input_quantizer._amax = torch.tensor(3 * 6 * 448.0)
+        expected["weight_scale_2"] = (torch.tensor(2.0), (), ())
+        expected["input_scale"] = (torch.tensor(3.0), (), ())
+    elif quantization_format == "mxfp8":
+        scale = torch.full((128, 8), 127, dtype=torch.uint8)
+        module.weight_quantizer._scale = scale.clone()
+        expected["weight_scale"] = (scale, (0, 1), (1, 32))
+    for quantizer in (module.weight_quantizer, module.input_quantizer):
+        if hasattr(quantizer, "_amax"):
+            quantizer._amax.requires_grad_()
+
+    state = capture_quantized_weight_export_state(module)
+
+    assert state.quantization_format == quantization_format
+    assert state.weight_shape == (128, 256)
+    assert state.packing_permutation == (0, 1)
+    assert state.block_size == (cfg.get("block_sizes") or {}).get(-1, 0)
+    assert state.input_quantizer_enabled is module.input_quantizer.is_enabled
+    with torch.no_grad():
+        for quantizer in (module.weight_quantizer, module.input_quantizer):
+            for name in ("_amax", "_scale"):
+                if (value := getattr(quantizer, name, None)) is not None:
+                    value.zero_()
+    assert {record.name for record in state.tensors} == set(expected)
+    for record in state.tensors:
+        value, axes, block_sizes = expected[record.name]
+        torch.testing.assert_close(record.value, value)
+        assert record.axes == axes
+        assert record.block_sizes == block_sizes
+        assert record.value.device.type == "cpu"
+        assert not record.value.requires_grad
+
+
+@pytest.mark.parametrize("quantization_format", _CAPTURE_FORMAT_CONFIGS)
+def test_capture_requires_calibration_only_for_static_scales(quantization_format):
+    module = _capture_linear(quantization_format)
+
+    if quantization_format in {"mxfp8", "mxfp4"}:
+        state = capture_quantized_weight_export_state(module)
+        assert state.quantization_format == quantization_format
+        assert not state.tensors
+    else:
+        error = "amax" if quantization_format == "nvfp4" else "Missing calibrated"
+        with pytest.raises((RuntimeError, AssertionError), match=error):
+            capture_quantized_weight_export_state(module)
+
+
 def test_capture_resolves_numbered_grouped_weights_by_storage():
     module = _GroupedWeights()
 
@@ -163,6 +258,7 @@ def test_capture_resolves_numbered_grouped_weights_by_storage():
 
     assert state0 is not None and state1 is not None
     assert state0.quantization_format == state1.quantization_format == "fp8"
+    assert not state0.input_quantizer_enabled and not state1.input_quantizer_enabled
     assert state0.tensors[0].value.item() != state1.tensors[0].value.item()
 
 
@@ -237,14 +333,21 @@ def test_export_spec_rejects_unsupported_quantization(features, quantizer_cfg, e
         get_quantized_weight_export_spec(module)
 
 
-def test_export_state_split_restore_preserves_output():
+@pytest.mark.parametrize("input_enabled", [True, False])
+def test_export_state_split_restore_preserves_output(input_enabled):
     module = _fp8_linear()
+    if not input_enabled:
+        module.input_quantizer.disable()
     state = capture_quantized_weight_export_state(module)
     assert state is not None
-    metadata, tensors = split_quantized_weight_export_state(state)
+    selected = select_quantized_weight_export_state(
+        merge_quantized_weight_export_states((state, state), 0), 0, range(4)
+    )
+    metadata, tensors = split_quantized_weight_export_state(selected)
 
     restored = restore_quantized_weight_export_state(metadata, tensors)
 
+    assert restored.input_quantizer_enabled is input_enabled
     expected = export_quantized_weight_tensors(module.weight, state, torch.float32)
     actual = export_quantized_weight_tensors(module.weight, restored, torch.float32)
     assert actual.keys() == expected.keys()
@@ -286,9 +389,46 @@ def test_export_spec_builds_config_without_tensor_state(
         spec = updated_spec
     assert spec.input_quantizer_enabled is input_enabled
 
+    if quantization_format == "fp8" and not input_enabled:
+        with pytest.raises(NotImplementedError, match="requires an enabled input quantizer"):
+            build_hf_quantization_config({"model.layers.0.proj.weight": spec})
+        return
+
     config = build_hf_quantization_config({"model.layers.0.proj.weight": spec})
 
     assert config["quant_algo"] == quant_algo
+    group = config["config_groups"]["group_0"]
+    assert ("input_activations" in group) is input_enabled
+
+
+@pytest.mark.parametrize("use_spec", [True, False])
+@pytest.mark.parametrize("order", [(False,), (True, False), (False, True)])
+def test_hf_config_rejects_disabled_fp8_input_quantization(use_spec, order):
+    capture = (
+        get_quantized_weight_export_spec if use_spec else capture_quantized_weight_export_state
+    )
+    module = _fp8_linear()
+    enabled = capture(module)
+    module.input_quantizer.disable()
+    disabled = capture(module)
+    named_states = {
+        f"model.layers.0.mlp.experts.{index}.proj.weight": enabled if is_enabled else disabled
+        for index, is_enabled in enumerate(order)
+    }
+
+    with pytest.raises(NotImplementedError, match="requires an enabled input quantizer"):
+        build_hf_quantization_config(named_states)
+
+
+def test_state_merge_rejects_different_dynamic_activation_settings():
+    module = _capture_linear("mxfp8")
+    enabled = capture_quantized_weight_export_state(module)
+    module.input_quantizer.disable()
+    disabled = capture_quantized_weight_export_state(module)
+    assert not enabled.tensors and not disabled.tensors
+
+    with pytest.raises(ValueError, match="shards are incompatible"):
+        merge_quantized_weight_export_states((enabled, disabled), 0)
 
 
 _FUNCTIONAL_FORMAT_CASES = (
@@ -453,6 +593,11 @@ def test_capture_uses_the_requested_weight_format_and_transposed_layout():
     module = _SquareTransposedExperts()
     gate_state = capture_quantized_weight_export_state(module, "gate_up_proj")
     down_state = capture_quantized_weight_export_state(module, "down_proj")
+
+    assert gate_state.quantization_format == "fp8"
+    assert down_state.quantization_format == "w4a16_nvfp4"
+    assert gate_state.weight_shape == down_state.weight_shape == (2, 16, 16)
+    assert gate_state.packing_permutation == down_state.packing_permutation == (0, 2, 1)
 
     config = build_hf_quantization_config(
         {
