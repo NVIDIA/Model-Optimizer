@@ -36,6 +36,14 @@ Read the stage file for *what to do*, and the algorithm sheet for *the values to
 plug in*. When a stage file says "see the algorithm sheet", it means the section of
 `references/algorithms/<algorithm>.md` with the matching heading.
 
+## Where the code lives
+
+The launcher scripts in `tools/launcher/common/{eagle3,specdec}/` are thin wrappers around
+`examples/speculative_decoding/` — `main.py` (training), `collect_hidden_states/` (dumps),
+`scripts/{export_hf_checkpoint,ar_validate,quantize_drafter}.py`. Read a wrapper for the
+flags it passes, that directory for what they do. Its `README.md` is also the non-launcher
+path: training invoked directly, without Slurm.
+
 ## Stages
 
 | Stage | Reference | Use when |
