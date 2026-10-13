@@ -19,6 +19,7 @@ import contextlib
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.quantization.tensor_quantizer_common import (
     BlockQuantTester,
     TensorQuantizerTester,
@@ -29,6 +30,22 @@ from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
 from modelopt.torch.quantization.nn.modules import tensor_quantizer
+from modelopt.torch.utils.distributed import DistributedProcessGroup
+
+
+def _test_sync_cpu_amax_with_nccl(rank, size):
+    quantizer = tensor_quantizer.TensorQuantizer()
+    quantizer._amax = torch.tensor(float(rank))
+
+    with pytest.warns(UserWarning, match="tensor is on CPU, but NCCL only supports CUDA tensors"):
+        quantizer.sync_amax_across_distributed_group(DistributedProcessGroup())
+
+    assert quantizer.amax.device.type == "cpu"
+    assert quantizer.amax == rank
+
+
+def test_sync_cpu_amax_with_nccl(need_2_gpus):
+    spawn_multiprocess_job(2, _test_sync_cpu_amax_with_nccl, backend="nccl")
 
 
 class TestTensorQuantizerCuda(TensorQuantizerTester):
