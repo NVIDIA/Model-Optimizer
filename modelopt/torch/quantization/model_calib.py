@@ -2385,8 +2385,6 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
     if forward_loop is None:
         warn_rank_0("imatrix: no forward_loop given; skipping imatrix calibration")
         return
-    # The forward below collects what imatrix needs; max only runs one if activations need it.
-    max_calibrate(model, forward_loop, skip_forward_without_activation_calib=True)
     names = module_name_maps(model)
 
     # Pick the targets before the forward disables every weight quantizer.
@@ -2404,11 +2402,8 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
         if accepted:
             target_modules.append((name, module))
             targets.update((id(q), [None, 0]) for q in accepted)
-    if not targets:
-        print_rank_0("imatrix: no weight quantizer has an imatrix encoder, skipping")
-        return
 
-    # Refuse a weight the encoder cannot take before the forward and before any weight changes;
+    # Refuse a weight the encoder cannot take before any forward or calibration state changes;
     # otherwise it would fail only after calibration, with the earlier weights already encoded.
     for name, module in target_modules:
         for weight, quantizer in module.iter_weights_for_calibration():
@@ -2419,11 +2414,17 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
                     raise type(e)(f"imatrix cannot encode a weight of {name}: {e}") from e
 
     # TODO: sum the statistics across data-parallel ranks, as max_calibrate syncs amax.
-    if dist_is_initialized() and dist_size() > 1:
+    if targets and dist_is_initialized() and dist_size() > 1:
         warn_rank_0(
             "imatrix: statistics are not synced across ranks, so ranks that calibrate on "
             "different data may encode different codes. Treat imatrix as single-rank for now."
         )
+
+    # The forward below collects what imatrix needs; max only runs one if activations need it.
+    max_calibrate(model, forward_loop, skip_forward_without_activation_calib=True)
+    if not targets:
+        print_rank_0("imatrix: no weight quantizer has an imatrix encoder, skipping")
+        return
 
     def capture(quantizer, _weight, inputs):
         entry = targets.get(id(quantizer))

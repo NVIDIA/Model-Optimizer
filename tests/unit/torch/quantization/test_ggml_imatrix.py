@@ -122,20 +122,33 @@ def test_imatrix_leaves_codes_gptq_chose():
     assert torch.equal(both.weight, gptq_only.weight)
 
 
-def test_imatrix_refuses_a_width_it_cannot_encode_before_calibrating():
+@pytest.mark.parametrize("calibrate_inputs", [False, True])
+def test_imatrix_refuses_a_width_it_cannot_encode_before_calibrating(calibrate_inputs):
     torch.manual_seed(0)
     model = nn.Sequential(nn.Linear(512, 640, bias=False), nn.Linear(640, 8, bias=False))
     original = copy.deepcopy(model)
+    config = _config(IMATRIX)
+    if calibrate_inputs:
+        # max_calibrate then runs a forward of its own, which must not run either.
+        config["quant_cfg"].append(
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": (4, 3)}, "enable": True}
+        )
+    inputs = _inputs(rows=64)
     forwards = []
+
+    def forward_loop(model):
+        forwards.append(model)
+        model(inputs)
 
     with pytest.raises(
         ValueError, match=r"imatrix cannot encode a weight of 1: .*divisible by 256"
     ):
-        mtq.quantize(model, _config(IMATRIX), forward_loop=forwards.append)
+        mtq.quantize(model, config, forward_loop=forward_loop)
 
     assert not forwards
     for module, before in zip(model, original):
         assert torch.equal(module.weight, before.weight)
+        assert module.input_quantizer.amax is None
 
 
 def test_imatrix_warns_that_ranks_are_not_synced(monkeypatch):
