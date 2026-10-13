@@ -84,6 +84,7 @@ class _QuantizedWeightExportState:
     weight_shape: tuple[int, ...]
     tensors: tuple[_ExportStateTensor, ...]
     packing_permutation: tuple[int, ...]
+    input_quantizer_enabled: bool
     static_nvfp4: bool = False
     four_over_six: bool = False
 
@@ -413,6 +414,7 @@ def capture_quantized_weight_export_state(
         weight_shape=tuple(weight.shape),
         tensors=tuple(tensors),
         packing_permutation=permutation,
+        input_quantizer_enabled=input_quantizer is not None and input_quantizer.is_enabled,
         static_nvfp4=static_nvfp4,
         four_over_six=bool(block_config.get("four_over_six", False)),
     )

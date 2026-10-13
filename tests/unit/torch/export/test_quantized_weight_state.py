@@ -116,6 +116,100 @@ def test_capture_does_not_modify_zero_amax():
     torch.testing.assert_close(module.input_quantizer._amax, input_amax)
 
 
+_CAPTURE_FORMAT_CONFIGS = {
+    "fp8_pc_pt": {"num_bits": (4, 3), "axis": 0},
+    "fp8_pb_wo": {"num_bits": (4, 3), "block_sizes": {-2: 128, -1: 128}},
+    "nvfp4": {
+        "num_bits": (2, 1),
+        "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+    },
+    "mxfp8": {
+        "num_bits": (4, 3),
+        "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+    },
+    "mxfp4": {
+        "num_bits": (2, 1),
+        "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+    },
+}
+
+
+def _capture_linear(quantization_format):
+    module = nn.Linear(256, 128, bias=False)
+    cfg = _CAPTURE_FORMAT_CONFIGS[quantization_format]
+    module.weight_quantizer = TensorQuantizer(QuantizerAttributeConfig(**cfg))
+    module.input_quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            **({"num_bits": (4, 3), "type": "dynamic"} if "axis" in cfg else cfg)
+        )
+    )
+    if quantization_format == "fp8_pb_wo":
+        module.input_quantizer.disable()
+    return module
+
+
+@pytest.mark.parametrize("quantization_format", _CAPTURE_FORMAT_CONFIGS)
+def test_capture_preserves_format_state_and_detaches_tensors(quantization_format):
+    module = _capture_linear(quantization_format)
+    cfg = _CAPTURE_FORMAT_CONFIGS[quantization_format]
+    expected = {}
+    if quantization_format == "fp8_pc_pt":
+        scale = torch.arange(1, 129, dtype=torch.float32)
+        module.weight_quantizer._amax = (448 * scale).reshape(128, 1)
+        expected["weight_scale"] = (scale, (0,), (1,))
+    elif quantization_format == "fp8_pb_wo":
+        scale = torch.tensor([[1.0, 2.0]])
+        module.weight_quantizer._amax = 448 * scale
+        expected["weight_scale"] = (scale, (0, 1), (128, 128))
+    elif quantization_format == "nvfp4":
+        module.weight_quantizer._amax = torch.tensor(2 * 6 * 448.0)
+        module.input_quantizer._amax = torch.tensor(3 * 6 * 448.0)
+        expected["weight_scale_2"] = (torch.tensor(2.0), (), ())
+        expected["input_scale"] = (torch.tensor(3.0), (), ())
+    elif quantization_format == "mxfp8":
+        scale = torch.full((128, 8), 127, dtype=torch.uint8)
+        module.weight_quantizer._scale = scale.clone()
+        expected["weight_scale"] = (scale, (0, 1), (1, 32))
+    for quantizer in (module.weight_quantizer, module.input_quantizer):
+        if hasattr(quantizer, "_amax"):
+            quantizer._amax.requires_grad_()
+
+    state = capture_quantized_weight_export_state(module)
+
+    assert state.quantization_format == quantization_format
+    assert state.weight_shape == (128, 256)
+    assert state.packing_permutation == (0, 1)
+    assert state.block_size == (cfg.get("block_sizes") or {}).get(-1, 0)
+    assert state.input_quantizer_enabled is module.input_quantizer.is_enabled
+    with torch.no_grad():
+        for quantizer in (module.weight_quantizer, module.input_quantizer):
+            for name in ("_amax", "_scale"):
+                if (value := getattr(quantizer, name, None)) is not None:
+                    value.zero_()
+    assert {record.name for record in state.tensors} == set(expected)
+    for record in state.tensors:
+        value, axes, block_sizes = expected[record.name]
+        torch.testing.assert_close(record.value, value)
+        assert record.axes == axes
+        assert record.block_sizes == block_sizes
+        assert record.value.device.type == "cpu"
+        assert not record.value.requires_grad
+
+
+@pytest.mark.parametrize("quantization_format", _CAPTURE_FORMAT_CONFIGS)
+def test_capture_requires_calibration_only_for_static_scales(quantization_format):
+    module = _capture_linear(quantization_format)
+
+    if quantization_format in {"mxfp8", "mxfp4"}:
+        state = capture_quantized_weight_export_state(module)
+        assert state.quantization_format == quantization_format
+        assert not state.tensors
+    else:
+        error = "amax" if quantization_format == "nvfp4" else "Missing calibrated"
+        with pytest.raises((RuntimeError, AssertionError), match=error):
+            capture_quantized_weight_export_state(module)
+
+
 def test_capture_resolves_numbered_grouped_weights_by_storage():
     module = _GroupedWeights()
 
@@ -124,6 +218,7 @@ def test_capture_resolves_numbered_grouped_weights_by_storage():
 
     assert state0 is not None and state1 is not None
     assert state0.quantization_format == state1.quantization_format == "fp8"
+    assert not state0.input_quantizer_enabled and not state1.input_quantizer_enabled
     assert state0.tensors[0].value.item() != state1.tensors[0].value.item()
 
 
