@@ -25,6 +25,7 @@ Changelog
 *Quantization*
 
 - Add metadata-only export specifications and non-mutating per-weight quantizer-state capture.
+- Add functional quantized-weight packing, topology-aligned state merge/select and transport APIs, and canonical Hugging Face quantization-config construction.
 - HF export records canonical activation schemes, group/block sizes and weight-only MXFP4 metadata; mixed-format exports retain unquantized-layer exclusions, and non-square FP8 block layouts are rejected.
 - Add Q8_0 weight-only quantization with 32-value GGML blocks, packed unified HF and Megatron export, and a built-in ``q8_0`` PTQ recipe.
 - Add Hugging Face PTQ calibration and export support for Nemotron-H MTP modules, preserving calibrated expert input scales.
