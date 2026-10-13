@@ -24,7 +24,8 @@ import pytest
 import torch
 from _test_utils.examples import diffusers_example_runner
 
-# Does what the diffusers example scripts do to process-wide state, and records what it saw.
+# Changes process-wide state the way the diffusers example scripts (and libraries they import) do,
+# and records what it saw.
 _SCRIPT = textwrap.dedent(
     """
     import logging
@@ -42,6 +43,12 @@ _SCRIPT = textwrap.dedent(
         logger.setLevel(logging.INFO)
         logger.addHandler(logging.StreamHandler(sys.stdout))
         logging.getLogger("_runner_test_lib").setLevel(logging.ERROR)
+        logging.getLogger("_runner_test_new").setLevel(logging.ERROR)  # created by the run
+        # An entry imported from, as onnxruntime.transformers adds for itself, and one that is not.
+        sys.path.append(os.environ["_RUNNER_TEST_LIB"])
+        import _runner_test_libmod  # noqa: F401
+        sys.path.append(os.path.join(os.getcwd(), "unused"))
+        sys.path.remove(os.path.dirname(__file__))  # the runner's own entry
         logger.info(f"{GREETING} argv={sys.argv[1:]} cwd={os.path.basename(os.getcwd())}")
         if "--fail" in sys.argv:
             sys.exit(3)
@@ -65,7 +72,13 @@ def example(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "utils", other_utils)
     monkeypatch.setattr(torch.nn, "RMSNorm", torch.nn.RMSNorm)
     monkeypatch.setattr(torch.nn.modules.normalization, "RMSNorm", torch.nn.RMSNorm)
-    return other_utils
+    lib_dir = tmp_path / "lib"
+    lib_dir.mkdir()
+    (lib_dir / "_runner_test_libmod.py").write_text("")
+    monkeypatch.setenv("_RUNNER_TEST_LIB", str(lib_dir))
+    monkeypatch.setattr(sys, "path", list(sys.path))  # undo the entry the runner keeps
+    yield other_utils
+    sys.modules.pop("_runner_test_libmod", None)
 
 
 def test_runs_script_as_main_and_restores_process_state(example):
@@ -87,7 +100,10 @@ def test_runs_script_as_main_and_restores_process_state(example):
     assert main_logger.handlers == handlers
     assert main_logger.level == level
     assert logging.getLogger("_runner_test_lib").level == lib_level
-    assert (os.getcwd(), sys.path) == (cwd, path)
+    assert logging.getLogger("_runner_test_new").level == logging.NOTSET
+    assert os.getcwd() == cwd
+    # Only the entry that a still-imported module came from outlives the run.
+    assert sys.path == [*path, os.environ["_RUNNER_TEST_LIB"]]
 
 
 def test_nonzero_exit_raises_with_output(example):

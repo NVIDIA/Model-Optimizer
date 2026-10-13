@@ -53,6 +53,23 @@ def _pop_modules(names: set[str]) -> dict:
     return popped
 
 
+def _restore_sys_path(path_before: list[str]) -> None:
+    """Put back ``sys.path``, keeping only added entries that a still-imported module came from.
+
+    ``onnxruntime.transformers`` appends its own directory on first import and later imports its
+    siblings from it by bare name (``optimizer.py``: ``from fusion_options import ...``), so its
+    entry has to outlive the run that imported it. Call after evicting the example's own modules.
+    """
+    module_dirs = {
+        os.path.dirname(f)
+        for m in list(sys.modules.values())
+        if isinstance(f := getattr(m, "__file__", None), str)
+    }
+    before = set(path_before)
+    kept = dict.fromkeys(p for p in sys.path if p not in before and p in module_dirs)
+    sys.path[:] = [*path_before, *kept]
+
+
 def _all_loggers() -> list[logging.Logger]:
     with logging._lock:  # any getLogger() from a background thread mutates loggerDict
         others = list(logging.Logger.manager.loggerDict.values())
@@ -63,8 +80,9 @@ def _all_loggers() -> list[logging.Logger]:
 def _restored_logging(stream: io.StringIO):
     """Put back logger levels, and drop handlers left writing to ``stream`` once it is discarded.
 
-    ``quantize.py`` adds a ``StreamHandler(sys.stdout)`` on every run, and ``sys.stdout`` is
-    ``stream`` while it runs.
+    Loggers the run created go back to ``NOTSET``: ``quantize.py`` sets the shared ``__main__``
+    logger to INFO. It also adds a ``StreamHandler(sys.stdout)`` on every run, and ``sys.stdout``
+    is ``stream`` while it runs.
     """
     levels = {lg: lg.level for lg in _all_loggers()}
     try:
@@ -74,8 +92,7 @@ def _restored_logging(stream: io.StringIO):
             for handler in list(lg.handlers):
                 if getattr(handler, "stream", None) is stream:
                     lg.removeHandler(handler)
-            if lg in levels:
-                lg.setLevel(levels[lg])
+            lg.setLevel(levels.get(lg, logging.NOTSET))
 
 
 def run_example_in_process(cmd_parts: list[str], example_path: str) -> str:
@@ -95,6 +112,7 @@ def run_example_in_process(cmd_parts: list[str], example_path: str) -> str:
     shadowed = _pop_modules(local_names)
     rmsnorm = (torch.nn.RMSNorm, torch.nn.modules.normalization.RMSNorm)
     env_before = os.environ.copy()
+    path_before = list(sys.path)
     cwd = os.getcwd()
     output = io.StringIO()
     try:
@@ -119,9 +137,9 @@ def run_example_in_process(cmd_parts: list[str], example_path: str) -> str:
         raise
     finally:
         os.chdir(cwd)
-        sys.path.remove(str(example_dir))
         _pop_modules(local_names)
         sys.modules.update(shadowed)
+        _restore_sys_path(path_before)
         torch.nn.RMSNorm, torch.nn.modules.normalization.RMSNorm = rmsnorm
         for key in os.environ.keys() - env_before.keys():
             del os.environ[key]
