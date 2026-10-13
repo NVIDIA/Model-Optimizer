@@ -368,10 +368,15 @@ Notes:
   the dispatched tokens again, so the expert inputs carry both roundings.
 - Without data parallelism (`--enable-expert-parallel` with tensor parallelism only), vLLM runs no
   all-to-all; the quantizers then emulate one over the same expert partition.
-- The Mega-MoE backend of DeepSeek-V4 and Kimi-K3 (`--moe-backend deep_gemm_mega_moe`) fuses
-  dispatch, expert GEMMs and combine into one kernel, and the FlashInfer MoE-EP backends
-  (`flashinfer_moe_ep_*`) combine inside their kernel. A recipe that enables a quantizer such a
-  backend cannot reach raises an error; use the default MoE backend instead.
+- The DeepGEMM Mega-MoE backend of DeepSeek-V4 and Kimi-K3 (`--moe-backend deep_gemm_mega_moe`)
+  fuses dispatch, expert GEMMs and combine into one kernel. The dispatch quantizer sees its input
+  tokens. The combine quantizer sees the per-(token, expert) outputs, already weighted by the
+  router, which the kernel leaves in its buffer; they are summed again after quantization. There,
+  the combine needs a calibrated (`algorithm: max`) or constant global scale, and quantizing the
+  dispatch needs `VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION=1` (the fused shared expert would
+  read the quantized tokens too).
+- The FlashInfer MoE-EP backends (`flashinfer_moe_ep_*`) combine inside their kernel, so a recipe
+  enabling the combine quantizer raises an error there.
 
 ## Serve a model with sparse attention in vLLM
 

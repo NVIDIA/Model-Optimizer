@@ -15,11 +15,29 @@
 
 import gzip
 import json
+import multiprocessing
+from multiprocessing import forkserver
 from pathlib import Path
 
 import pytest
 
-from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_preprocess_data
+from modelopt.torch.utils.plugins.megatron_preprocess_data import (
+    _prestart_forkserver,
+    _worker_context,
+    megatron_preprocess_data,
+)
+
+
+def test_worker_context_uses_forkserver():
+    assert _worker_context().get_start_method() == "forkserver"
+
+
+def test_worker_context_falls_back_to_spawn_without_forkserver(monkeypatch):
+    monkeypatch.setattr(multiprocessing, "get_all_start_methods", lambda: ["spawn"])
+    monkeypatch.setattr(forkserver, "ensure_running", lambda: pytest.fail("started a forkserver"))
+
+    assert _worker_context().get_start_method() == "spawn"
+    _prestart_forkserver()
 
 
 # Depends on the external HF datasets-server, which intermittently returns 5xx

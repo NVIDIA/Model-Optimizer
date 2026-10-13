@@ -24,6 +24,7 @@ import torch
 from common import (
     add_answer_only_loss_args,
     add_aux_layers_args,
+    add_no_aux_hidden_states_args,
     load_chat_template,
     resolve_aux_layers,
     tokenize_with_loss_mask,
@@ -101,6 +102,7 @@ def parse_args() -> argparse.Namespace:
     )
     add_aux_layers_args(parser)
     add_answer_only_loss_args(parser)
+    add_no_aux_hidden_states_args(parser)
 
     return parser.parse_args()
 
@@ -148,9 +150,16 @@ def main(args: argparse.Namespace) -> None:
     model = AutoModel.from_pretrained(
         args.model, dtype="auto", device_map="auto", trust_remote_code=args.trust_remote_code
     )
-    num_hidden_layers = getattr(model.config, "num_hidden_layers", None)
+    # Multimodal checkpoints (e.g. *ForConditionalGeneration) keep the language
+    # model's depth under config.text_config.
+    text_config = (
+        getattr(model.config, "text_config", None)
+        or getattr(model.config, "llm_config", None)
+        or model.config
+    )
+    num_hidden_layers = getattr(text_config, "num_hidden_layers", None)
     if num_hidden_layers is None:
-        raise ValueError(f"model.config has no 'num_hidden_layers' attribute: {model.config}")
+        raise ValueError(f"config has no 'num_hidden_layers' attribute: {text_config}")
     selected_layer_ids = resolve_aux_layers(args, num_hidden_layers)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
@@ -184,8 +193,16 @@ def main(args: argparse.Namespace) -> None:
             outputs = model(input_ids=input_ids.to(model.device), output_hidden_states=True)
             # outputs.hidden_states[0] is the embedding output; layer k output is at index k+1.
             hidden_states = outputs.hidden_states
-            aux_hidden_states = torch.cat(
-                [hidden_states[lid + 1].squeeze(0).cpu() for lid in selected_layer_ids], dim=-1
+            # Only build the aux planes when they will be stored: assembling them costs a
+            # concatenation and a device-to-host copy per conversation, which is pure waste
+            # on a dump that is about to drop them.
+            aux_hidden_states = (
+                None
+                if args.no_aux_hidden_states
+                else torch.cat(
+                    [hidden_states[lid + 1].squeeze(0).cpu() for lid in selected_layer_ids],
+                    dim=-1,
+                )
             )
             output_hidden_states = hidden_states[-1].squeeze(0).cpu()
         # Write-then-rename: keep_conversation() skips any existing <id>.pt as finished work,
@@ -199,7 +216,11 @@ def main(args: argparse.Namespace) -> None:
                     {
                         "input_ids": input_ids.squeeze(0).cpu(),
                         "hidden_states": output_hidden_states,
-                        "aux_hidden_states": aux_hidden_states,
+                        **(
+                            {}
+                            if args.no_aux_hidden_states
+                            else {"aux_hidden_states": aux_hidden_states}
+                        ),
                         "loss_mask": loss_mask,
                         "conversation_id": conversation_id,
                     },

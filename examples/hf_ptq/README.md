@@ -542,6 +542,10 @@ formats in `kv_cache_quantized_layers`. `mtq.auto_quantize` returns the sensitiv
 selected recipe in its search state; `--kv_auto_quantize_checkpoint` stores that resumable state,
 including the candidate quantizer tensors needed for replay.
 
+KV-only recipes leave weights in their original precision, so `hf_quant_config.json` contains
+`quantization.quant_algo: null` and `quantized_layers: {}`. Validate their quantization through
+`kv_cache_quant_algo`, `kv_cache_quantized_layers`, and the exported K/V scaling tensors.
+
 KV sensitivity scoring runs one reference forward plus one forward per eligible-layer candidate
 for every scoring step. Choose the recipe's `auto_quantize.score_size` with the number of eligible
 layers and candidates in mind. Peak scoring memory also grows with the number of selected tokens
@@ -671,7 +675,7 @@ with torch.inference_mode():
 python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --qformat fp8 --export_path <quantized_ckpt_path> --trust_remote_code
 ```
 
-> *For exporting fake-quantized models for vLLM serving (e.g., for research or kernels not yet supported in real-quant), use the `--vllm_fakequant_export` flag. See [vllm_serve/README.md](../vllm_serve/README.md) for details.*
+> *For exporting fake-quantized models for vLLM serving (e.g., for research or kernels not yet supported in real-quant), use the `--vllm_fakequant_export` flag. See [vllm_serve/README.md](../vllm_serve/README.md) for details. When every quantizer is a weight quantizer, as in the GGML recipes (IQ, Q8_0), the export is a plain BF16 checkpoint that a stock vLLM image serves directly.*
 
 ### Hugging Face framework [Script](./scripts/huggingface_example.sh)
 

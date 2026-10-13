@@ -13,6 +13,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
          <button class="announcement-tag is-active" type="button" data-tag="all" aria-pressed="true">All</button>
          <button class="announcement-tag" type="button" data-tag="release" aria-pressed="false">Release</button>
          <button class="announcement-tag" type="button" data-tag="autoquantize" aria-pressed="false">AutoQuantize</button>
+         <button class="announcement-tag" type="button" data-tag="kv-cache" aria-pressed="false">KV cache</button>
          <button class="announcement-tag" type="button" data-tag="quantization" aria-pressed="false">Quantization</button>
          <button class="announcement-tag" type="button" data-tag="nvfp4" aria-pressed="false">NVFP4</button>
          <button class="announcement-tag" type="button" data-tag="qad" aria-pressed="false">QAD</button>
@@ -30,6 +31,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
+     <article class="announcement-card" data-date="2026-10-08" data-title="AutoQuant KV: Automatic Mixed-Precision KV Cache Quantization" data-summary="Learn how AutoQuant selects per-layer KV formats under a storage budget and combines with GEMM quantization, with Qwen3-8B as a case study." data-tags="autoquantize kv-cache quantization mixed-precision modelopt">
+       <div class="announcement-card-meta">October 8, 2026 &middot; Model Optimizer Team</div>
+       <h2><a href="announcements/autoquant-kv.html">AutoQuant KV: Automatic Mixed-Precision KV Cache Quantization</a></h2>
+       <p>Learn how AutoQuant selects per-layer KV formats under a storage budget and combines with GEMM quantization, with Qwen3-8B as a case study.</p>
+       <div class="announcement-card-tags"><span>autoquantize</span><span>kv-cache</span><span>quantization</span><span>mixed-precision</span><span>modelopt</span></div>
+     </article>
      <article class="announcement-card" data-date="2026-09-28" data-title="Quantizing a 4.9 TB Qwen3.8 Model on a Single GPU" data-summary="Layerwise calibration and per-layer shard export drop the memory floor for PTQ from one model to one layer: a 4.9 TB Qwen3.8 checkpoint quantized on a single GB300." data-tags="quantization nvfp4 layerwise moe single-gpu modelopt">
        <div class="announcement-card-meta">September 28, 2026 &middot; Model Optimizer Team</div>
        <h2><a href="announcements/single-gpu-ptq.html">Quantizing a 4.9 TB Qwen3.8 Model on a Single GPU</a></h2>

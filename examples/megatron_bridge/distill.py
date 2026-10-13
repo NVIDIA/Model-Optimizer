@@ -260,6 +260,11 @@ def get_args():
         help="KD loss weight alpha in (1 - alpha) * lm_loss + alpha * kd_loss. 1.0 skips the LM loss entirely.",
     )
     parser.add_argument(
+        "--freeze_mtp",
+        action="store_true",
+        help="Keep the student's MTP head at its input weights: skip its loss and freeze it.",
+    )
+    parser.add_argument(
         "--no_async_save",
         action="store_true",
         help="Save checkpoints synchronously. Async saving spawns a worker that needs its own "
@@ -552,6 +557,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         logit_kl_topk=args.logit_kl_top_k,
         logit_kl_top_p=args.logit_kl_top_p,
         logit_kl_top_p_min_k=args.logit_kl_top_p_min_k,
+        freeze_mtp=args.freeze_mtp,
     )
 
     # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under

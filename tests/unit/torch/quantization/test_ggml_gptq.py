@@ -215,6 +215,26 @@ def test_pin_outlives_the_weight_tensor():
     assert not torch.equal(IQ1_S.quantize(model.weight.detach())[0], _pin(model))
 
 
+def test_folding_a_bf16_weight_decodes_the_pinned_payload():
+    """Folding fake-quantizes a float32 copy of the weight; it must still decode GPTQ's codes.
+
+    A BF16 weight holds the pinned payload's decoding rounded to BF16, so the float32 copy that
+    ``mtq.fold_weight`` and the vLLM fake-quant export hand to the quantizer is not that decoding
+    in float32. Re-encoding it instead would fold in different codes than GPTQ chose.
+    """
+    torch.manual_seed(0)
+    model = torch.nn.Linear(512, 8, bias=False, dtype=torch.bfloat16)
+    inputs = _inputs().to(torch.bfloat16)
+    mtq.quantize(model, _iq_config(GPTQ), forward_loop=lambda m: m(inputs))
+    decoded = _decoded(_pin(model), model.weight).to(torch.bfloat16)
+    assert torch.equal(model.weight, decoded)
+
+    # The vLLM fake-quant export folds this way.
+    assert torch.equal(model.weight_quantizer(model.weight.float()).to(torch.bfloat16), decoded)
+    mtq.fold_weight(model)
+    assert torch.equal(model.weight, decoded)
+
+
 def test_pin_survives_save_and_restore():
     model, inputs = _gptq_model()
     buffer = io.BytesIO()
