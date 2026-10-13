@@ -152,7 +152,11 @@ def main(args: argparse.Namespace) -> None:
     )
     # Multimodal checkpoints (e.g. *ForConditionalGeneration) keep the language
     # model's depth under config.text_config.
-    text_config = getattr(model.config, "text_config", None) or model.config
+    text_config = (
+        getattr(model.config, "text_config", None)
+        or getattr(model.config, "llm_config", None)
+        or model.config
+    )
     num_hidden_layers = getattr(text_config, "num_hidden_layers", None)
     if num_hidden_layers is None:
         raise ValueError(f"model.config has no 'num_hidden_layers' attribute: {model.config}")
