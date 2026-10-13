@@ -436,6 +436,63 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
     assert result == 4
 
 
+def test_get_max_batch_size_agrees_on_the_smallest_ranks_in_a_session(monkeypatch):
+    """Every rank must run the same number of calibration steps, so ranks agree on one batch size.
+
+    Rank 1 of two, on cuda:1, measures its own GPU only, probes with one forward (an OOM retry
+    would run a different number of collective-bearing forwards per rank), and takes rank 0's
+    smaller size.
+    """
+    from modelopt.torch.utils.distributed import get_active_mo_session
+
+    session = get_active_mo_session(required=False)
+    session.initialize(
+        distributed=True,
+        rank=1,
+        world_size=2,
+        local_rank=1,
+        device=torch.device("cuda:1"),
+        is_main=False,
+    )
+    sent = []
+
+    def all_gather_object(gathered, mine, group=None):
+        sent.append(mine)
+        gathered[:] = [("calib_batch_size", 4, None), mine]
+
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 2)
+    monkeypatch.setattr(torch.distributed, "all_gather_object", all_gather_object)
+    seen_batch_sizes: list[int] = []
+    model = Mock(spec=torch.nn.Module, side_effect=lambda x: seen_batch_sizes.append(x.shape[0]))
+    model.__class__.__name__ = "DummyModel"
+    device_props = Mock()
+    device_props.total_memory = 10**12
+    measured = []
+
+    def mem_get_info(device):
+        measured.append(device)
+        return (1000, 0) if len(measured) == 1 else (900, 0)  # 100 bytes a sample -> 10
+
+    try:
+        with (
+            patch("torch.cuda.empty_cache"),
+            patch("torch.cuda.get_device_properties", return_value=device_props),
+            patch("torch.cuda.device_count", return_value=4),
+            patch("torch.cuda.mem_get_info", side_effect=mem_get_info),
+            patch("torch.cuda.max_memory_allocated", return_value=0),
+        ):
+            result = get_max_batch_size(
+                model, max_sample_length=8, sample_input_single_batch=torch.ones((1, 8))
+            )
+    finally:
+        session._reset()
+
+    assert measured == [torch.device("cuda:1")] * 2
+    assert seen_batch_sizes == [1]
+    assert sent == [("calib_batch_size", 8, None)]  # this rank's own 10, regulated to 8
+    assert result == 4
+
+
 def test_get_dataset_samples_with_unsupported_dataset(make_toy_hf_dataset):
     """A dataset not in ``SUPPORTED_DATASET_CONFIG`` loads via the auto-detect path."""
     dataset_name = make_toy_hf_dataset()  # basename never matches a registered key

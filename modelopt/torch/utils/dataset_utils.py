@@ -1006,16 +1006,54 @@ def get_max_batch_size(
 
     ``forward_step(model, inputs)`` optionally probes a custom workload, including during
     OOM retries. By default, probe a model forward (or generation for encoder-decoder models).
+
+    Inside a distributed :class:`~modelopt.torch.utils.distributed.ModelOptSession` it is collective:
+    every rank calls it, and every rank gets the smallest batch size any rank's GPU allows
+    (``session.calib_batch_size``), so that all run the same number of calibration steps. Each rank
+    then measures its own GPU only and probes with a single forward: retrying a smaller batch after an
+    out-of-memory error would run a different number of forwards, and of the collectives inside them,
+    on each rank.
     """
+    from .distributed import get_active_mo_session
+
+    session = get_active_mo_session(required=False)
+    args = (
+        model,
+        max_sample_length,
+        sample_memory_usage_ratio,
+        sample_input_single_batch,
+        enable_grad,
+        forward_step,
+    )
+    if session.initialized and session.distributed:
+        return session.decide(
+            "calib_batch_size", lambda: _max_batch_size(*args, device=session.device)
+        )
+    return _max_batch_size(*args)
+
+
+def _max_batch_size(
+    model: torch.nn.Module,
+    max_sample_length: int,
+    sample_memory_usage_ratio: float,
+    sample_input_single_batch: torch.Tensor | None,
+    enable_grad: bool,
+    forward_step: Callable[[torch.nn.Module, torch.Tensor], Any] | None,
+    device: torch.device | None = None,
+) -> int:
+    """:func:`get_max_batch_size` measured on ``device`` with one probe, or on every visible GPU."""
+    devices = range(torch.cuda.device_count()) if device is None else [device]
 
     def _get_free_gpu_mem():
-        min_gpu_free_mem = torch.cuda.get_device_properties(0).total_memory
+        min_gpu_free_mem = torch.cuda.get_device_properties(
+            0 if device is None else device
+        ).total_memory
         max_allocated_mem = 0
-        for device in range(torch.cuda.device_count()):
-            free_mem = torch.cuda.mem_get_info(device)[0]
+        for gpu in devices:
+            free_mem = torch.cuda.mem_get_info(gpu)[0]
             if free_mem < min_gpu_free_mem:
                 min_gpu_free_mem = free_mem
-                max_allocated_mem = torch.cuda.max_memory_allocated(device)
+                max_allocated_mem = torch.cuda.max_memory_allocated(gpu)
         return min_gpu_free_mem, max_allocated_mem
 
     torch.cuda.empty_cache()
@@ -1070,7 +1108,7 @@ def get_max_batch_size(
 
         # For some models on multi GPU, we observe the memory per batch is not a constant.
         # So we just test the target batch size and make sure we do not go OOM.
-        while target_data_batch > 1:
+        while target_data_batch > 1 and device is None:
             with torch.set_grad_enabled(enable_grad):
                 try:
                     infer_method(target_input)
