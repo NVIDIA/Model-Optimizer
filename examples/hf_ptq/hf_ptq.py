@@ -94,7 +94,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
-from modelopt.torch.utils import env, print_rank_0
+from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
@@ -110,20 +110,12 @@ from modelopt.torch.utils.distributed import (
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.mlflow import add_mlflow_args, resolve_mlflow_args
-from modelopt.torch.utils.moe import (
-    apply_distributed_support,
-    decide_distribution_plan,
-    is_expert_parallel_capable,
-    load_and_prepare_ep,
-)
+from modelopt.torch.utils.moe import is_expert_parallel_capable
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     ensure_local_checkpoint,
 )
-from modelopt.torch.utils.plugins.model_load_utils import (
-    load_pretrained,
-    parallel_load_and_prepare_fsdp2,
-)
+from modelopt.torch.utils.plugins.model_load_utils import load_pretrained, resolve_distribution_plan
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
@@ -334,14 +326,9 @@ def _validate_recipe_calibration(args: argparse.Namespace, recipe) -> None:
 def _decide_expert_parallel(args: argparse.Namespace):
     """Return ``(plan, hf_config)`` when this run should be expert-parallel, else ``(None, None)``.
 
-    The model's own expert-parallel facts are applied to the config BEFORE anything is decided: for
-    several models that is what SUPPLIES ``base_model_ep_plan`` -- stock transformers ships one for
-    some MoEs and not others -- so deciding first would read an EP-capable model as dense and
-    replicate every expert on every rank.
+    ``resolve_distribution_plan`` decides, as ``load_pretrained`` would on its own; deciding first
+    lets a run that loads the model whole go through ``get_model``'s placement.
     """
-    mo_session = getattr(args, "mo_session", None)
-    if mo_session is None or not mo_session.distributed:
-        return None, None
     # --use_fsdp2 asks for the standalone FSDP2 loader explicitly; the EP
     # auto-decision below has no way to know that, so without this it can pick EP anyway
     # (MODELOPT_EP_DEGREE set explicitly, or "auto" resolving non-trivially for the model)
@@ -349,44 +336,18 @@ def _decide_expert_parallel(args: argparse.Namespace):
     if args.use_fsdp2:
         return None, None
 
-    hf_config = AutoConfig.from_pretrained(
+    plan, hf_config = resolve_distribution_plan(
         args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
     )
-    hf_config = apply_distributed_support(
-        hf_config.model_type,
-        hf_config,
-        ckpt_path=args.local_checkpoint_path,
-        trust_remote_code=args.trust_remote_code,
-    )
-    plan = decide_distribution_plan(
-        hf_config,
-        mo_session.world_size,
-        ep_size=env.ep_degree(),
-        fsdp_size=env.fsdp_size(),
-    )
-    if mo_session.is_main:
-        print(f"[ep] decided {plan!r}", flush=True)
-
-    if plan.is_expert_parallel:
+    if plan is None or plan.is_expert_parallel:  # None: not a distributed run
         return plan, hf_config
-    # Past this point load_model replicates the model on every rank, so any sharding the plan asked
-    # for would be dropped. That runs, and wastes the cluster, so say so rather than let it look like
-    # it worked.
-    ep_capable = is_expert_parallel_capable(hf_config)
     if plan.is_fsdp_dense:
-        # Only the expert-parallel loader shards a dense part by itself.
+        # FSDP2 alone runs only under --use_fsdp2, which checks what this script cannot do with it.
         raise RuntimeError(
-            f"The plan shards the dense part over {plan.fsdp_size} ranks but leaves ep_size=1, and "
-            "without expert parallelism nothing shards it -- every rank would hold the whole model. "
+            f"The plan shards the dense part over {plan.fsdp_size} ranks but leaves ep_size=1. "
             "Pass --use_fsdp2 to shard it with FSDP2"
-            + (", or set MODELOPT_EP_DEGREE>1" if ep_capable else "")
+            + (", or set MODELOPT_EP_DEGREE>1" if is_expert_parallel_capable(hf_config) else "")
             + ", or set MODELOPT_FSDP_SIZE=1 if the model does fit one GPU."
-        )
-    if ep_capable:
-        raise RuntimeError(
-            f"{hf_config.model_type} can be expert-parallel, but the plan resolved to ep_size=1 at "
-            f"world_size={mo_session.world_size} -- every rank would hold the whole MoE. Set "
-            "MODELOPT_EP_DEGREE>1, or pass --use_fsdp2 to shard it with FSDP2 instead."
         )
     return None, None
 
@@ -398,29 +359,25 @@ def load_model(args: argparse.Namespace):
         raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
     _ep_plan, _ep_config = _decide_expert_parallel(args)
     if _ep_plan is not None:
-        full_model = load_and_prepare_ep(
+        full_model = load_pretrained(
             args.local_checkpoint_path,
-            args.mo_session,
-            _ep_plan.ep_size,
+            distribution=_ep_plan,
+            hf_config=_ep_config,
             trust_remote_code=args.trust_remote_code,
             attn_implementation=args.attn_implementation,
-            hf_config=_ep_config,
-            fsdp_dense=_ep_plan.is_fsdp_dense,
         )
     elif args.use_fsdp2:
         hf_config = AutoConfig.from_pretrained(
             args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
         )
         validate_fsdp2_supported(args, hf_config)
-        full_model = parallel_load_and_prepare_fsdp2(
+        full_model = load_pretrained(
             args.local_checkpoint_path,
-            args.dist_state.device,
-            args.dist_state.rank,
-            args.dist_state.world_size,
+            distribution="fsdp2",
+            hf_config=hf_config,
             trust_remote_code=args.trust_remote_code,
             cpu_offload=args.cpu_offload,
             attn_implementation=args.attn_implementation,
-            hf_config=hf_config,
         )
     elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
@@ -459,6 +416,7 @@ def load_model(args: argparse.Namespace):
                 args.local_checkpoint_path,
                 AutoModelForCausalLM,
                 model_type=hf_config.model_type,
+                distribution="sequential",
                 **model_kwargs,
             )
         calibration_only = True
