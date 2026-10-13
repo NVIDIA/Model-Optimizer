@@ -56,7 +56,7 @@ def ops(monkeypatch):
 
 
 def _scope():
-    return vllm_layer_scope.current_layer(), vllm_layer_scope.layer_owner()
+    return vllm_layer_scope.current_layer(), vllm_layer_scope.current_layer_owner()
 
 
 def test_patched_callee_sees_the_layer_whose_op_runs_and_its_owner(ops):
@@ -152,7 +152,9 @@ def test_owner_is_held_weakly(ops):
     seen = []
 
     def run(x):
-        seen.append((vllm_layer_scope.current_layer(), vllm_layer_scope.layer_owner() is not None))
+        seen.append(
+            (vllm_layer_scope.current_layer(), vllm_layer_scope.current_layer_owner() is not None)
+        )
 
     ops.module.op(1, "layer.0", run=run)
     del owner

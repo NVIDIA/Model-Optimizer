@@ -806,7 +806,7 @@ def test_indexer_op_routes_scorer_to_calling_layer(glm, scorer_stand_ins):
     call = _scorer_call(glm.fake, paged=False)
 
     def run_scorer():
-        callers.append(vllm_layer_scope.layer_owner())
+        callers.append(vllm_layer_scope.current_layer_owner())
         return call.run()
 
     for layer, quantized in ((0, True), (1, False)):
@@ -818,7 +818,7 @@ def test_indexer_op_routes_scorer_to_calling_layer(glm, scorer_stand_ins):
     op(None, "draft.layers.0.indexer.k_cache", None, run_scorer)
     assert "mma_accum" not in glm.fake.calls[-1].kwargs
     assert callers == [first, second, first, None]
-    assert vllm_layer_scope.layer_owner() is None
+    assert vllm_layer_scope.current_layer_owner() is None
     assert second._enabled_scorer_quantizers() == []
 
 

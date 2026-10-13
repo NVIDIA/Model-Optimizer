@@ -19,9 +19,9 @@ vLLM's layer ops get the name of their layer, not the layer: its ``torch.ops.vll
 cannot take a module argument, and other ops, such as GLM-5.3-Flash's indexer op, follow the same
 convention. The kernels they call get only tensors. :func:`wrap_layer_op` makes the layer that an op
 names the :func:`current_layer` while the op runs, :func:`register_layer_owner` maps a layer name to
-the converted module that acts for the layer, and :func:`layer_owner` gives that module for the
-current layer. A function that the op calls, patched with :func:`patch_function`, can thus act for
-the converted module.
+the converted module that acts for the layer, and :func:`current_layer_owner` gives that module for
+the current layer. A function that the op calls, patched with :func:`patch_function`, can thus act
+for the converted module.
 
 The registry and the patches are process-wide, for one converted model per process: another model
 with the same layer names would get its owners. The patches are permanent. A breakable CUDA graph
@@ -40,7 +40,7 @@ from typing import Any
 
 __all__ = [
     "current_layer",
-    "layer_owner",
+    "current_layer_owner",
     "patch_function",
     "register_layer_owner",
     "wrap_layer_op",
@@ -62,7 +62,7 @@ def current_layer() -> str | None:
     return _current_layer.get()
 
 
-def layer_owner() -> Any:
+def current_layer_owner() -> Any:
     """The owner of the layer whose op runs, or None outside a wrapped op or without an owner."""
     name = _current_layer.get()
     return None if name is None else _owners.get(name)

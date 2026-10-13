@@ -52,7 +52,7 @@ from ..nn import (
 from .vllm import create_parallel_state
 from .vllm_layer_scope import (
     current_layer,
-    layer_owner,
+    current_layer_owner,
     patch_function,
     register_layer_owner,
     wrap_layer_op,
@@ -404,7 +404,7 @@ def _write_k_cache(written_slots: Callable, original: Callable, *args, **kwargs)
                 "indexer_k_quantizer cannot tell whose cache it is."
             )
         return original(*args, **kwargs)
-    indexer = layer_owner()
+    indexer = current_layer_owner()
     if indexer is None or not indexer.indexer_k_quantizer.is_enabled:
         return original(*args, **kwargs)
     bound = _bind(original, args, kwargs)
@@ -424,7 +424,7 @@ def _run_scorer(paged: bool, original: Callable, *args, **kwargs) -> torch.Tenso
 
     ``paged``: the decode scorer, else the prefill one.
     """
-    indexer = layer_owner()
+    indexer = current_layer_owner()
     if indexer is None or not indexer._enabled_scorer_quantizers():
         return original(*args, **kwargs)
     return indexer._score(original, _bind(original, args, kwargs), paged)
