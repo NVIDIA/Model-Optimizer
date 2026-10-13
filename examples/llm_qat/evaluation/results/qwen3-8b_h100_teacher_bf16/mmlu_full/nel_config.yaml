@@ -1,30 +1,15 @@
 defaults:
   - execution: slurm/default
+  - ../../../nel_configs/h100_slurm_execution@_global_
   - deployment: vllm
   - ../../../nel_configs/qwen3_8b_vllm_deployment@_global_
   - ../../../nel_configs/mmlu@_global_
   - _self_
 execution:
-  hostname: ${oc.env:NEL_SLURM_HOST}
-  username: ${oc.env:SLURM_USER}
-  account: ${oc.env:NEL_SLURM_ACCOUNT}
-  partition: ${oc.env:NEL_SLURM_PARTITION}
-  output_dir: ${oc.env:NEL_OUTPUT_DIR}
-  num_nodes: 1
-  ntasks_per_node: 1
-  gres: gpu:1
-  walltime: 04:00:00
-  sbatch_extra_flags:
-    exclusive: false
-    mem: 64G
   mounts:
-    mount_home: false
     deployment:
-      /path/to/checkpoint: /checkpoint
-      # Cached checkpoint files link to /blobs.
       /path/to/hf-cache/hub/models--Qwen--Qwen3-8B/blobs: /blobs
     evaluation:
-      /path/to/checkpoint: /checkpoint
       /path/to/hf-cache/hub/models--Qwen--Qwen3-8B/blobs: /blobs
 deployment:
   served_model_name: qwen3-8b-teacher

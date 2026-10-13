@@ -1,29 +1,11 @@
 # Full benchmark coverage; NEL 0.2.6. Replace mount placeholders; see ../../../README.md.
 defaults:
   - execution: slurm/default
+  - ../../../nel_configs/h100_slurm_execution@_global_
   - deployment: vllm
   - ../../../nel_configs/qwen3_8b_vllm_deployment@_global_
   - ../../../nel_configs/wikitext@_global_
   - _self_
-execution:
-  hostname: ${oc.env:NEL_SLURM_HOST}
-  username: ${oc.env:SLURM_USER}
-  account: ${oc.env:NEL_SLURM_ACCOUNT}
-  partition: ${oc.env:NEL_SLURM_PARTITION}
-  output_dir: ${oc.env:NEL_OUTPUT_DIR}
-  num_nodes: 1
-  ntasks_per_node: 1
-  gres: gpu:1
-  walltime: 04:00:00
-  sbatch_extra_flags:
-    exclusive: false
-    mem: 64G
-  mounts:
-    mount_home: false
-    deployment:
-      /path/to/checkpoint: /checkpoint
-    evaluation:
-      /path/to/checkpoint: /checkpoint
 deployment:
   served_model_name: qwen3-8b-ptq-then-qad
   port: 18110
