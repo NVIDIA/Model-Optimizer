@@ -159,7 +159,7 @@ def main(args: argparse.Namespace) -> None:
     )
     num_hidden_layers = getattr(text_config, "num_hidden_layers", None)
     if num_hidden_layers is None:
-        raise ValueError(f"model.config has no 'num_hidden_layers' attribute: {model.config}")
+        raise ValueError(f"config has no 'num_hidden_layers' attribute: {text_config}")
     selected_layer_ids = resolve_aux_layers(args, num_hidden_layers)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
