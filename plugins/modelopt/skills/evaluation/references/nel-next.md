@@ -137,9 +137,9 @@ Size TP/DP + backend defaults (`--max-num-seqs = ceil(max_parallelism/DP)`, MoE
 `--enable-expert-parallel`, …) per `references/parallelism.md` + Step 3. **Sampling
 is a mandatory model-card lookup** (Step 3 / `references/model-card-research.md`,
 never generic defaults): `generation.temperature`/`top_p` and `proxy.extra_body`
-for card extras (`skip_special_tokens`, thinking toggles). Before adding an output
-budget, apply the benchmark recipe's policy: Terminal-Bench's [output-token policy](../recipes/tasks/aa_next/terminal_bench_2_1.md#output-token-policy)
-overrides model-card caps and generic fallbacks on both requests and the server.
+for card extras (`skip_special_tokens`, thinking toggles). For per-response budgets,
+follow the selected task's generation policy and [generic precedence guidance](model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
+Keep context limits and timeouts separate from output budgets.
 
 Put per-model reasoning config in `extra_body.chat_template_kwargs` (e.g. `enable_thinking`
 for Qwen/Nemotron), not as loose top-level keys. Only add extras the card or

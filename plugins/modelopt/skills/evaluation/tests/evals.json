@@ -5,7 +5,7 @@
     "query": "Review my Terminal-Bench 2.1 Terminus-2 nel-next config without launching jobs. drop_params already removes max_tokens and max_completion_tokens. services.model.generation and proxy.extra_body each set max_tokens: 131072, copied from the model card's Claude Code run. extra_args has --override-generation-config={\"max_new_tokens\":65536}, because no Terminus-2 budget was published and I used the reasoning fallback. The checkpoint also has a native max_new_tokens: 16384. Keep temperature=1.0, top_p=0.95, top_k=20, enable_thinking=true, max-model-len=262144, request timeout=3600 and run_timeout=14400. What should change?",
     "files": [],
     "expected_behavior": [
-      "Reads the Terminal-Bench output-token policy and applies it ahead of generic model-card and fallback budget selection",
+      "Follows generic generation-policy precedence to the Terminal-Bench task policy before selecting a published budget or fallback",
       "Removes both request caps and the numeric server override; drop_params alone is insufficient, and a Claude Code budget does not apply to Terminus-2",
       "Checks merged model fragments, CLI overrides, solver/agent/LLM kwargs and interceptors for reintroduced per-response caps",
       "Checks effective backend/version generation defaults and neutralizes the inherited numeric cap, using a null max_new_tokens override where supported rather than a numeric fallback or a blanket reset of sampling/stop settings",

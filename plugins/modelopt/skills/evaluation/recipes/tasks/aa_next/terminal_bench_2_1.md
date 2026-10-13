@@ -14,13 +14,12 @@ pinned via a vendored registry override shipped in the `nemo-evaluator` package.
 
 ModelOpt's Terminal-Bench / Terminus-2 protocol uses **no configured per-response
 output-token cap**. This rule takes precedence over model-card output budgets
-and the generic 65536/16384 fallbacks. A budget for another harness, such as
-Claude Code, does not apply even when the benchmark name matches.
+and generic fallbacks per [generation-policy precedence](../../../references/model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
 
 Keep `drop_params` stripping `max_tokens` and `max_completion_tokens`. Do not
 reintroduce a numeric output cap through `services.<svc>.generation`,
 `proxy.extra_body`, solver/agent/LLM kwargs, interceptors, or server flags such as
-`--override-generation-config '{"max_new_tokens":65536}'` / `--max-new-tokens`
+`--override-generation-config` / `--max-new-tokens`
 or backend equivalents. Check the merged config, including imported model
 fragments and CLI overrides.
 
