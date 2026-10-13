@@ -65,6 +65,10 @@ class TestSlurmConfig:
         assert cfg.mem == "128G"
         assert cfg.container_mounts == ["/data:/data"]
 
+    def test_nullable_gpus_per_node(self):
+        cfg = SlurmConfig(gpus_per_node=None)
+        assert cfg.gpus_per_node is None
+
 
 class TestSlurmFactory:
     """Tests for the slurm_factory function."""
@@ -99,6 +103,10 @@ class TestSlurmFactory:
     def test_override_nodes(self):
         cfg = slurm_factory(nodes=8)
         assert cfg.nodes == 8
+
+    def test_override_gpus_per_node_none(self):
+        cfg = slurm_factory(gpus_per_node=None)
+        assert cfg.gpus_per_node is None
 
     def test_override_partition(self):
         cfg = slurm_factory(partition="gpu")

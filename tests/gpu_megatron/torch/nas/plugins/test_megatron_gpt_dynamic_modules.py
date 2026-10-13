@@ -36,6 +36,8 @@ from modelopt.torch.nas.plugins.megatron import (
     _DynamicMoELayer,
     _DynamicSelfAttention,
     _DynamicSequentialMLP,
+    _DynamicTEGroupedLinear,
+    _DynamicTEGroupedMLP,
     _DynamicTELayerNormColumnParallelLinear,
     _DynamicTEProjRowParallelLinear,
     _DynamicTEQKVLayerNormColumnParallelLinear,
@@ -231,7 +233,7 @@ def test_gpt_self_attention_head_sorting(distributed_setup_size_1):
     destroy_model_parallel()
 
 
-def _test_gpt_moe_search_space(rank, size):
+def _test_gpt_moe_search_space(moe_grouped_gemm, rank, size):
     channel_divisor = 4
 
     num_layers = min(size * 2, 8)
@@ -258,6 +260,7 @@ def _test_gpt_moe_search_space(rank, size):
         activation_func="squared_relu",
         transformer_impl="transformer_engine",
         num_moe_experts=num_moe_experts,
+        moe_grouped_gemm=moe_grouped_gemm,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
     ).cuda()
@@ -280,11 +283,16 @@ def _test_gpt_moe_search_space(rank, size):
     moe = model.decoder.layers[0].mlp
     assert isinstance(moe, _DynamicMoELayer)
     assert isinstance(moe.router, _DynamicTopKRouter)
-    assert isinstance(moe.experts, _DynamicSequentialMLP)
-    assert isinstance(moe.experts.local_experts, DynamicModuleList)
-    for expert in moe.experts.local_experts:
-        assert isinstance(expert, _DynamicMLP)
     assert isinstance(moe.shared_experts, _DynamicMLP)
+    if moe_grouped_gemm:
+        assert isinstance(moe.experts, _DynamicTEGroupedMLP)
+        assert isinstance(moe.experts.linear_fc1, _DynamicTEGroupedLinear)
+        assert isinstance(moe.experts.linear_fc2, _DynamicTEGroupedLinear)
+    else:
+        assert isinstance(moe.experts, _DynamicSequentialMLP)
+        assert isinstance(moe.experts.local_experts, DynamicModuleList)
+        for expert in moe.experts.local_experts:
+            assert isinstance(expert, _DynamicMLP)
 
     # NOTE: `search_space_size` does not reduce across TP/PP groups
     ss_size_per_pp = search_space_size(model)
@@ -293,15 +301,12 @@ def _test_gpt_moe_search_space(rank, size):
     moe_shared_ffn_choices = moe_shared_expert_intermediate_size // channel_divisor
     hidden_size_choices = hidden_size // channel_divisor
     num_layers_per_pp = num_layers // size
-    # SequentialMLP has per-expert moe_ffn_hidden_size hparams
+    # SequentialMLP has one moe_ffn_hidden_size hparam per expert (moe_ffn_choices**num_moe_experts);
+    # TEGroupedMLP shares a single one (moe_ffn_choices).
+    moe_ffn_ss = moe_ffn_choices if moe_grouped_gemm else moe_ffn_choices**num_moe_experts
     assert (
         ss_size_per_pp
-        == (
-            num_heads_choices
-            * num_moe_experts
-            * moe_ffn_choices**num_moe_experts
-            * moe_shared_ffn_choices
-        )
+        == (num_heads_choices * num_moe_experts * moe_ffn_ss * moe_shared_ffn_choices)
         ** num_layers_per_pp
         * num_layers
         * hidden_size_choices
@@ -319,5 +324,6 @@ def _test_gpt_moe_search_space(rank, size):
     assert not any(named_dynamic_modules(model))
 
 
-def test_gpt_moe_search_space(dist_workers):
-    dist_workers.run(_test_gpt_moe_search_space)
+@pytest.mark.parametrize("moe_grouped_gemm", [False, True])
+def test_gpt_moe_search_space(dist_workers, moe_grouped_gemm):
+    dist_workers.run(partial(_test_gpt_moe_search_space, moe_grouped_gemm))

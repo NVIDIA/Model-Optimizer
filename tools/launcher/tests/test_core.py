@@ -204,7 +204,10 @@ class TestSetSlurmConfigType:
 class TestGetDefaultEnv:
     """Tests for get_default_env utility."""
 
-    def test_default_title(self):
+    def test_default_title(self, monkeypatch):
+        # get_default_env honors HF_HOME / TRITON_CACHE_DIR overrides, so isolate the ambient env.
+        monkeypatch.delenv("HF_HOME", raising=False)
+        monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
         slurm_env, local_env = get_default_env()
         assert slurm_env["TRITON_CACHE_DIR"] == "/cicd/triton-cache"
         assert slurm_env["HF_HOME"] == "/cicd/hf-cache"
@@ -213,7 +216,9 @@ class TestGetDefaultEnv:
         assert local_env["TRITON_CACHE_DIR"] == "/cicd/triton-cache"
         assert "LAUNCH_SCRIPT" not in local_env
 
-    def test_custom_title(self):
+    def test_custom_title(self, monkeypatch):
+        monkeypatch.delenv("HF_HOME", raising=False)
+        monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
         slurm_env, local_env = get_default_env("modelopt")
         assert slurm_env["TRITON_CACHE_DIR"] == "/modelopt/triton-cache"
         assert slurm_env["HF_HOME"] == "/modelopt/hf-cache"

@@ -20,19 +20,10 @@ import onnx_graphsurgeon as gs
 import pytest
 import torch
 from _test_utils.onnx.lib_test_models import SimpleMLP, export_as_onnx
+from _test_utils.onnx.quantization.utils import assert_nodes_are_quantized
 
 from modelopt.onnx.autocast import convert_to_mixed_precision
 from modelopt.onnx.quantization import quantize
-
-
-def assert_nodes_are_quantized(nodes):
-    for node in nodes:
-        for inp_idx, inp in enumerate(node.inputs):
-            if isinstance(inp, gs.Variable):
-                assert node.i(inp_idx).op == "DequantizeLinear", (
-                    f"Input '{inp.name}' of node '{node.name}' is not quantized but should be!"
-                )
-    return True
 
 
 @pytest.mark.parametrize("keep_io_types", [True, False])
@@ -64,7 +55,18 @@ def test_autocast_quantize_int8(tmp_path, keep_io_types, bias_add):
     assert os.path.isfile(output_onnx_path)
 
     # Load the output model and check QDQ node placements
-    graph = gs.import_onnx(onnx.load(output_onnx_path))
+    quantized_model = onnx.load(output_onnx_path)
+    graph = gs.import_onnx(quantized_model)
+
+    activation_scale_names = {
+        node.input[1] for node in quantized_model.graph.node if node.op_type == "QuantizeLinear"
+    }
+    activation_scale_types = {
+        initializer.data_type
+        for initializer in quantized_model.graph.initializer
+        if initializer.name in activation_scale_names
+    }
+    assert activation_scale_types == {onnx.TensorProto.FLOAT16}
 
     # Check that all MatMul nodes are quantized
     mm_nodes = [n for n in graph.nodes if n.op == "MatMul"]

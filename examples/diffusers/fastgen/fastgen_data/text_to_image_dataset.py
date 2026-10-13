@@ -13,10 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from pathlib import Path
 
 import torch
 from nemo_automodel.components.datasets.diffusion.base_dataset import BaseMultiresolutionDataset
+
+from .paths import resolve_cache_root, resolve_under_root
+
+__all__ = ["TextToImageDataset"]
 
 
 class TextToImageDataset(BaseMultiresolutionDataset):
@@ -24,37 +29,78 @@ class TextToImageDataset(BaseMultiresolutionDataset):
 
     def __init__(
         self,
-        cache_dir: str,
+        cache_dir: str | Path,
         train_text_encoder: bool = False,
+        prompt_only: bool = False,
     ):
         """
         Args:
             cache_dir: Directory containing preprocessed cache
             train_text_encoder: If True, returns tokens instead of embeddings
+            prompt_only: Omit cached image latents from returned samples.
         """
         self.train_text_encoder = train_text_encoder
-        super().__init__(cache_dir, quantization=64)
+        self.prompt_only = prompt_only
+        self.cache_root = resolve_cache_root(cache_dir)
+        self._resolved_cache_files: dict[int, Path] = {}
+        super().__init__(str(self.cache_root), quantization=64)
+
+    def _load_metadata(self) -> list[dict]:
+        """Load contained metadata and preserve original expansion ordinals as sample IDs."""
+        metadata_file = resolve_under_root(self.cache_root, "metadata.json", "metadata index")
+        index_bytes = metadata_file.read_bytes()
+        index = json.loads(index_bytes)
+        if not isinstance(index, dict) or not isinstance(index.get("shards"), list):
+            raise ValueError(
+                f"Invalid metadata format in {metadata_file}. Expected dict with 'shards' list."
+            )
+
+        complete_metadata: list[dict] = []
+        for shard_index, shard_name in enumerate(index["shards"]):
+            if not isinstance(shard_name, str) or not shard_name:
+                raise TypeError(f"metadata shard {shard_index} must be a nonempty string")
+            shard_path = resolve_under_root(
+                self.cache_root, shard_name, f"metadata shard {shard_index}"
+            )
+            shard_bytes = shard_path.read_bytes()
+            shard = json.loads(shard_bytes)
+            if not isinstance(shard, list):
+                raise ValueError(f"metadata shard {shard_path} must contain a list")
+            for shard_item_index, item in enumerate(shard):
+                if not isinstance(item, dict):
+                    raise TypeError(
+                        f"metadata shard {shard_path} item {shard_item_index} must be a dict"
+                    )
+                cache_file = item.get("cache_file")
+                if not isinstance(cache_file, str) or not cache_file:
+                    raise TypeError(
+                        f"metadata shard {shard_path} item {shard_item_index} has invalid cache_file"
+                    )
+                complete_metadata.append(dict(item))
+
+        if not complete_metadata:
+            raise ValueError(f"No samples found in {metadata_file}")
+        self.total_num_samples = len(complete_metadata)
+        self.sample_ids = list(range(self.total_num_samples))
+        return complete_metadata
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         """Load a single sample."""
         item = self.metadata[idx]
-        cache_file = Path(item["cache_file"]).resolve()
-        cache_dir = Path(self.cache_dir).resolve()
+        sample_id = self.sample_ids[idx]
+        cache_file = self._resolved_cache_files.get(idx)
+        if cache_file is None:
+            # Resolve lazily so every rank checks only the payloads it actually reads instead of
+            # issuing a full-cache metadata-stat storm at construction time.
+            cache_file = resolve_under_root(
+                self.cache_root, item["cache_file"], f"sample cache file {sample_id}"
+            )
+            self._resolved_cache_files[idx] = cache_file
 
-        try:
-            cache_file.relative_to(cache_dir)
-        except ValueError as e:
-            raise ValueError(
-                f"Cache file {cache_file} is outside cache directory {cache_dir}"
-            ) from e
-
-        # Load cached data
         data = torch.load(cache_file, map_location="cpu", weights_only=True)
-
         # Prepare output - support both bucket_resolution and crop_resolution keys
         resolution_key = "bucket_resolution" if "bucket_resolution" in item else "crop_resolution"
         output = {
-            "latent": data["latent"],
             "crop_resolution": torch.tensor(item[resolution_key]),
             "original_resolution": torch.tensor(item["original_resolution"]),
             "crop_offset": torch.tensor(data["crop_offset"]),
@@ -63,7 +109,8 @@ class TextToImageDataset(BaseMultiresolutionDataset):
             "bucket_id": item["bucket_id"],
             "aspect_ratio": item.get("aspect_ratio", 1.0),
         }
-
+        if not self.prompt_only:
+            output["latent"] = data["latent"]
         if self.train_text_encoder:
             output["clip_tokens"] = data["clip_tokens"].squeeze(0)
             output["t5_tokens"] = data["t5_tokens"].squeeze(0)

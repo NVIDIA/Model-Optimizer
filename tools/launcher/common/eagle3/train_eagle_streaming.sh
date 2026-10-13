@@ -47,6 +47,9 @@
 #   SERVE_CPU_OFFLOAD_GB  GB/GPU offloaded to host RAM (fits big models on too-few GPUs; slower)
 #   SERVE_MAX_MODEL_LEN   cap context length (trims KV/activation)
 #   SERVE_MAX_NUM_SEQS    cap concurrent sequences (trims KV/activation)
+#   SERVE_BLOCK_SIZE      KV-cache block size (e.g. 128 for MiniMax-M3 MSA sparse attention).
+#                         Needs its own knob: multi-token SERVE_EXTRA_ARGS values are mangled
+#                         by nemo_run's unquoted env export, so "--block-size 128" cannot ride it.
 #   SERVE_HOST          single-node: bind/connect host. default 127.0.0.1
 #   SERVE_GPU           single-node: CUDA_VISIBLE_DEVICES for vllm. default "0"
 #   SERVE_TP            tensor-parallel size. default 1 single-node / all serve-node GPUs
@@ -92,6 +95,31 @@ fi
 pip install --no-cache-dir -e modules/Model-Optimizer/
 pip install --no-cache-dir -r modules/Model-Optimizer/examples/speculative_decoding/requirements.txt
 pip install --no-cache-dir 'datasets' 'huggingface-hub>=1.2.1'
+
+# Role is needed here, not just at the dispatch below: provisioning runs on every
+# node, so an ungated override would also downgrade the serve replicas. Derived once
+# and reused by the dispatch.
+NNODES="${SLURM_NNODES:-1}"
+NODEID="${SLURM_NODEID:-0}"
+# Only multi-node has dedicated serve nodes. Single-node is co-located -- one env runs
+# both vllm serve and the trainer -- so there is nothing to gate there.
+if [ "$NNODES" -gt 1 ] && [ "$NODEID" -lt "${SERVE_NODES:-1}" ]; then
+    IS_SERVE_NODE=1
+fi
+
+# Some trust_remote_code models pin an older transformers (e.g. MiniMax-M2.7
+# needs 4.57.x whose modeling code is incompatible with the 5.x that the
+# requirements pull in). Must run AFTER the requirements install to win.
+#
+# Skipped on dedicated serve nodes: they run `vllm serve` from the container's own
+# environment, and recent vLLM rejects transformers v4 at import. Downgrading there
+# would kill every serve replica before the trainer ever receives a hidden state.
+if [ -n "${OVERRIDE_TRANSFORMERS:-}" ] && [ -z "${IS_SERVE_NODE:-}" ]; then
+    pip install --no-cache-dir "transformers==${OVERRIDE_TRANSFORMERS}"
+elif [ -n "${OVERRIDE_TRANSFORMERS:-}" ]; then
+    echo "Serve node ${NODEID}: skipping OVERRIDE_TRANSFORMERS=${OVERRIDE_TRANSFORMERS} (vllm serve needs the container's transformers)."
+fi
+
 export PATH=$PATH:/workspace/.local/bin
 
 ###################################################################################################
@@ -153,6 +181,7 @@ launch_vllm() {
     [ -n "${SERVE_CPU_OFFLOAD_GB:-}" ] && opt_args+=(--cpu-offload-gb "$SERVE_CPU_OFFLOAD_GB")
     [ -n "${SERVE_MAX_MODEL_LEN:-}" ]  && opt_args+=(--max-model-len "$SERVE_MAX_MODEL_LEN")
     [ -n "${SERVE_MAX_NUM_SEQS:-}" ]   && opt_args+=(--max-num-seqs "$SERVE_MAX_NUM_SEQS")
+    [ -n "${SERVE_BLOCK_SIZE:-}" ]     && opt_args+=(--block-size "$SERVE_BLOCK_SIZE")
     # --no-enable-chunked-prefill / --no-enable-prefix-caching: connector captures hidden states during prefill; both skip recomputing cached/partial prefixes, yielding short/empty hidden_states. Required.
     # --no-enable-flashinfer-autotune: on NVFP4 MoE the autotuner re-tunes on the first serving step and stalls a worker past vLLM's execute-model timeout, killing EngineCore.
     # Hidden states move serve -> trainer over NIXL RDMA (no disk round-trip): one
@@ -246,8 +275,8 @@ run_trainer_and_export() {
 }
 
 # Topology dispatch (see header): branch on $SLURM_NNODES / $SLURM_NODEID.
-NNODES="${SLURM_NNODES:-1}"
-NODEID="${SLURM_NODEID:-0}"
+# NNODES/NODEID were derived above, before provisioning, so the transformers
+# override could be role-gated.
 
 # Need >=1 trainer node: with SERVE_NODES >= NNODES every node takes the serve branch,
 # so nobody publishes the rendezvous/DONE_FILE and serve nodes block forever.

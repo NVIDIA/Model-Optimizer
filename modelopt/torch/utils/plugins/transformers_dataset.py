@@ -17,6 +17,7 @@
 
 import copy
 import itertools
+import json
 import os
 
 import torch
@@ -325,11 +326,52 @@ class VisionLanguageDataCollator(LanguageDataCollator):
         chat_template: str | None = None,
         add_generation_prompt: bool = False,
         answer_only_loss: bool = False,
+        shift_labels: bool = True,
         local_image_path: str = "",
         return_labels: bool = False,
     ):
-        """Initialize the VisionLanguageDataset."""
-        self.processor = transformers.AutoProcessor.from_pretrained(processor)
+        """Initialize the collator and its Hugging Face processor."""
+        processor_kwargs = {}
+        for env_name, kwarg_name in (
+            ("VLM_MIN_PIXELS", "min_pixels"),
+            ("VLM_MAX_PIXELS", "max_pixels"),
+        ):
+            value = os.environ.get(env_name)
+            if value is not None:
+                try:
+                    processor_kwargs[kwarg_name] = int(value)
+                except ValueError as exc:
+                    raise ValueError(f"{env_name} must be an integer, got {value!r}") from exc
+
+        self.processor = transformers.AutoProcessor.from_pretrained(processor, **processor_kwargs)
+        if processor_kwargs:
+            print_rank_0(f"Loaded VLM processor with {processor_kwargs}")
+        self._configure_video_processor(self.processor, processor_kwargs)
+        max_prompt_tokens = os.environ.get("VLM_MAX_PROMPT_TOKENS")
+        self.max_prompt_tokens = None
+        if max_prompt_tokens is not None:
+            try:
+                self.max_prompt_tokens = int(max_prompt_tokens)
+            except ValueError as exc:
+                raise ValueError(
+                    f"VLM_MAX_PROMPT_TOKENS must be a positive integer, got {max_prompt_tokens!r}"
+                ) from exc
+            if self.max_prompt_tokens <= 0:
+                raise ValueError("VLM_MAX_PROMPT_TOKENS must be a positive integer.")
+        self._prompt_content_truncation_warned = False
+        max_assistant_tokens = os.environ.get("VLM_MAX_ASSISTANT_TOKENS")
+        self.max_assistant_tokens = None
+        if max_assistant_tokens is not None:
+            try:
+                self.max_assistant_tokens = int(max_assistant_tokens)
+            except ValueError as exc:
+                raise ValueError(
+                    "VLM_MAX_ASSISTANT_TOKENS must be a positive integer, got "
+                    f"{max_assistant_tokens!r}"
+                ) from exc
+            if self.max_assistant_tokens <= 0:
+                raise ValueError("VLM_MAX_ASSISTANT_TOKENS must be a positive integer.")
+        self._assistant_content_truncation_warned = False
         self.chat_template = chat_template
         self.local_image_path = local_image_path
         self._conversations_warned = False
@@ -340,21 +382,263 @@ class VisionLanguageDataCollator(LanguageDataCollator):
             chat_template=chat_template,
             add_generation_prompt=add_generation_prompt,
             answer_only_loss=answer_only_loss,
+            shift_labels=shift_labels,
             return_labels=return_labels,
         )
+        self.processor.chat_template = self.tokenizer.chat_template
 
-    def _process_multimodal_sample(self, examples):
+    @staticmethod
+    def _configure_video_processor(processor, image_pixel_bounds):
+        """Apply visual pixel bounds to a separate Qwen video processor."""
+        video_processor = getattr(processor, "video_processor", None)
+        video_pixel_bounds = {}
+        explicit_video_bounds = False
+        for env_name, size_key, image_key in (
+            ("VLM_VIDEO_MIN_PIXELS", "shortest_edge", "min_pixels"),
+            ("VLM_VIDEO_MAX_PIXELS", "longest_edge", "max_pixels"),
+        ):
+            value = os.environ.get(env_name)
+            if value is None:
+                value = image_pixel_bounds.get(image_key)
+            else:
+                explicit_video_bounds = True
+                try:
+                    value = int(value)
+                except ValueError as exc:
+                    raise ValueError(f"{env_name} must be an integer, got {value!r}") from exc
+            if value is not None:
+                video_pixel_bounds[size_key] = value
+
+        if explicit_video_bounds and video_processor is None:
+            raise ValueError(
+                "VLM_VIDEO_MIN_PIXELS/VLM_VIDEO_MAX_PIXELS were set, but the "
+                "configured VLM processor has no video_processor."
+            )
+        if video_processor is not None and video_pixel_bounds:
+            video_size = dict(video_processor.size)
+            video_size.update(video_pixel_bounds)
+            if video_size["shortest_edge"] > video_size["longest_edge"]:
+                raise ValueError("VLM_VIDEO_MIN_PIXELS must not exceed VLM_VIDEO_MAX_PIXELS.")
+            video_processor.size = video_size
+            print_rank_0(f"Configured VLM video processor with {video_size}")
+
+    def _verify_generation_tags(self):
+        """Accept VLM templates whose assistant spans have stable chat markers.
+
+        Cosmos/Qwen ChatML templates do not necessarily use Hugging Face's
+        ``{% generation %}`` tags.  For those templates we derive the same
+        assistant-only loss mask from the tokenized assistant boundaries.
+        """
+        if self._assistant_marker_specs():
+            return
+        super()._verify_generation_tags()
+
+    def _assistant_marker_specs(self):
+        """Return tokenized assistant start/end boundaries for supported templates."""
+        if hasattr(self, "_cached_assistant_marker_specs"):
+            return self._cached_assistant_marker_specs
+
+        template = self.tokenizer.chat_template or ""
+        specs = []
+        if "<|im_start|>" in template and "<|im_end|>" in template:
+            specs.append(
+                (
+                    self.tokenizer("<|im_start|>assistant\n", add_special_tokens=False)[
+                        "input_ids"
+                    ],
+                    [
+                        self.tokenizer("<|im_end|>\n", add_special_tokens=False)["input_ids"],
+                        self.tokenizer("<|im_end|>", add_special_tokens=False)["input_ids"],
+                    ],
+                )
+            )
+        self._cached_assistant_marker_specs = [
+            (start, [end for end in ends if end]) for start, ends in specs if start and any(ends)
+        ]
+        return self._cached_assistant_marker_specs
+
+    @staticmethod
+    def _find_subsequence(values, pattern, start=0, stop=None):
+        stop = len(values) if stop is None else stop
+        if not pattern or start >= stop:
+            return -1
+        for index in range(start, stop - len(pattern) + 1):
+            if values[index : index + len(pattern)] == pattern:
+                return index
+        return -1
+
+    def _build_assistant_masks(self, tokenized_messages):
+        """Build assistant-content masks from ChatML boundaries."""
+        input_ids = tokenized_messages["input_ids"]
+        attention_mask = tokenized_messages.get("attention_mask")
+        assistant_masks = torch.zeros_like(input_ids)
+
+        for row_index, row in enumerate(input_ids):
+            tokens = row.tolist()
+            if isinstance(attention_mask, torch.Tensor):
+                active = attention_mask[row_index].nonzero(as_tuple=False).flatten()
+                if active.numel() == 0:
+                    continue
+                sequence_start, sequence_end = int(active[0]), int(active[-1]) + 1
+            else:
+                sequence_start, sequence_end = 0, len(tokens)
+
+            for start_marker, end_markers in self._assistant_marker_specs():
+                search_from = sequence_start
+                while search_from < sequence_end:
+                    start = self._find_subsequence(tokens, start_marker, search_from, sequence_end)
+                    if start == -1:
+                        break
+                    content_start = start + len(start_marker)
+                    end_positions = [
+                        position
+                        for marker in end_markers
+                        if (
+                            position := self._find_subsequence(
+                                tokens, marker, content_start, sequence_end
+                            )
+                        )
+                        != -1
+                    ]
+                    content_end = min(end_positions) if end_positions else sequence_end
+                    if content_start < content_end:
+                        assistant_masks[row_index, content_start:content_end] = 1
+                    search_from = max(content_start + 1, content_end + 1)
+
+        return assistant_masks
+
+    def _pad_sequence_tensors(self, tokenized_messages):
+        """Pad processor outputs to the fixed DFlash training sequence length."""
+        if self.train_len is None:
+            return tokenized_messages
+
+        input_ids = tokenized_messages.get("input_ids")
+        if not isinstance(input_ids, torch.Tensor) or input_ids.ndim != 2:
+            raise ValueError("VLM processor did not return rank-2 input_ids.")
+        if input_ids.shape[1] > self.train_len:
+            raise ValueError(
+                f"VLM processor returned seq_len {input_ids.shape[1]} above "
+                f"training_seq_len {self.train_len}; reduce visual or assistant-text caps."
+            )
+
+        pad_width = self.train_len - input_ids.shape[1]
+        if pad_width == 0:
+            return tokenized_messages
+
+        sequence_length = input_ids.shape[1]
+        batch_size = input_ids.shape[0]
+        for key, value in tokenized_messages.items():
+            if (
+                not isinstance(value, torch.Tensor)
+                or value.ndim != 2
+                or value.shape != (batch_size, sequence_length)
+            ):
+                continue
+            pad_value = self.tokenizer.pad_token_id if key == "input_ids" else 0
+            pad = value.new_full((batch_size, pad_width), pad_value)
+            tokenized_messages[key] = torch.cat((value, pad), dim=1)
+
+        return tokenized_messages
+
+    def _truncate_assistant_content(self, messages):
+        """Limit assistant text before image/video placeholders expand into tokens."""
+        if self.max_assistant_tokens is None:
+            return
+
+        for message in messages:
+            if message.get("role") != "assistant":
+                continue
+            for content in message.get("content", []):
+                if content.get("type") != "text" or not isinstance(content.get("text"), str):
+                    continue
+                token_ids = self.tokenizer(content["text"], add_special_tokens=False).input_ids
+                if len(token_ids) <= self.max_assistant_tokens:
+                    continue
+
+                suffix_tokens = min(128, max(1, self.max_assistant_tokens // 4))
+                prefix_tokens = self.max_assistant_tokens - suffix_tokens
+                content["text"] = self.tokenizer.decode(
+                    token_ids[:prefix_tokens] + token_ids[-suffix_tokens:],
+                    skip_special_tokens=True,
+                )
+                if not self._assistant_content_truncation_warned:
+                    print_rank_0(
+                        "Truncating assistant content to "
+                        f"{self.max_assistant_tokens} tokens before VLM tokenization."
+                    )
+                    self._assistant_content_truncation_warned = True
+
+    def _truncate_prompt_content(self, messages):
+        """Limit user/system text before image/video placeholders expand into tokens."""
+        if self.max_prompt_tokens is None:
+            return
+
+        for message in messages:
+            if message.get("role") not in {"system", "user"}:
+                continue
+            for content in message.get("content", []):
+                if content.get("type") != "text" or not isinstance(content.get("text"), str):
+                    continue
+                token_ids = self.tokenizer(content["text"], add_special_tokens=False).input_ids
+                if len(token_ids) <= self.max_prompt_tokens:
+                    continue
+
+                suffix_tokens = min(128, max(1, self.max_prompt_tokens // 4))
+                prefix_tokens = self.max_prompt_tokens - suffix_tokens
+                content["text"] = self.tokenizer.decode(
+                    token_ids[:prefix_tokens] + token_ids[-suffix_tokens:],
+                    skip_special_tokens=True,
+                )
+                if not self._prompt_content_truncation_warned:
+                    print_rank_0(
+                        "Truncating user/system content to "
+                        f"{self.max_prompt_tokens} tokens before VLM tokenization."
+                    )
+                    self._prompt_content_truncation_warned = True
+
+    def _apply_chat_template(self, examples):
+        """Tokenize VLM messages without passing text-only kwargs to the processor."""
+        derive_masks_from_markers = bool(self._assistant_marker_specs())
         tokenized_messages = self.processor.apply_chat_template(
             examples,
             tokenize=True,
             return_tensors="pt",
             return_dict=True,
-            padding="max_length",
-            truncation=True,
-            max_length=self.train_len,
             add_generation_prompt=self.add_generation_prompt,
-            return_assistant_tokens_mask=self.answer_only_loss,
+            return_assistant_tokens_mask=self.answer_only_loss and not derive_masks_from_markers,
         )
+        tokenized_messages = self._pad_sequence_tensors(tokenized_messages)
+        if self.answer_only_loss and derive_masks_from_markers:
+            tokenized_messages["assistant_masks"] = self._build_assistant_masks(tokenized_messages)
+
+        return tokenized_messages
+
+    def _process_multimodal_sample(self, examples):
+        tokenized_messages = self._apply_chat_template(examples)
+
+        if self.return_labels:
+            input_ids = tokenized_messages["input_ids"]
+            labels = input_ids.new_full(input_ids.shape, IGNORE_TOKEN_ID)
+            if self.shift_labels:
+                labels[..., :-1] = input_ids[..., 1:]
+            else:
+                # DFlash predicts the token at the current position rather
+                # than the next autoregressive token.
+                labels[:] = input_ids
+
+            if self.answer_only_loss:
+                if "assistant_masks" not in tokenized_messages:
+                    raise ValueError(
+                        "answer_only_loss requires assistant_masks from the VLM chat template."
+                    )
+                assistant_mask = tokenized_messages["assistant_masks"]
+                if not isinstance(assistant_mask, torch.Tensor) or not assistant_mask.any():
+                    labels[:] = IGNORE_TOKEN_ID
+                elif self.shift_labels:
+                    labels[..., :-1][assistant_mask[..., 1:] == 0] = IGNORE_TOKEN_ID
+                else:
+                    labels[assistant_mask == 0] = IGNORE_TOKEN_ID
+            tokenized_messages["labels"] = labels
 
         return tokenized_messages
 
@@ -383,8 +667,72 @@ class VisionLanguageDataCollator(LanguageDataCollator):
             for msg in copy_messages:
                 if isinstance(msg["content"], str):
                     msg["content"] = [{"type": "text", "text": msg["content"]}]
+                elif isinstance(msg["content"], dict):
+                    # A top-level structured answer can legitimately contain
+                    # keys such as "image" or "video" (for example, a URL in
+                    # a JSON response).  It is media only when it explicitly
+                    # declares a supported multimodal type.
+                    if msg["content"].get("type") in {"text", "image", "video"}:
+                        msg["content"] = [msg["content"]]
+                    else:
+                        msg["content"] = [
+                            {
+                                "type": "text",
+                                "text": json.dumps(msg["content"], ensure_ascii=False),
+                            }
+                        ]
+                elif not isinstance(msg["content"], list):
+                    # Some synthetic rows use a scalar answer or prompt (for
+                    # example, an integer multiple-choice answer). Preserve it
+                    # as text rather than discarding an otherwise valid row.
+                    msg["content"] = [
+                        {
+                            "type": "text",
+                            "text": json.dumps(msg["content"], ensure_ascii=False),
+                        }
+                    ]
 
-                for ctn in msg["content"]:
+                for index, ctn in enumerate(msg["content"]):
+                    if isinstance(ctn, str):
+                        ctn = {"type": "text", "text": ctn}
+                        msg["content"][index] = ctn
+                    if not isinstance(ctn, dict):
+                        ctn = {"type": "text", "text": json.dumps(ctn, ensure_ascii=False)}
+                        msg["content"][index] = ctn
+                    if not {"type", "text", "image", "video", "fps"}.intersection(ctn):
+                        ctn = {"type": "text", "text": json.dumps(ctn, ensure_ascii=False)}
+                        msg["content"][index] = ctn
+                    # Some JSONL producers use a fixed multimodal-part schema
+                    # (text/image/video/fps on every part) so Arrow can load
+                    # heterogeneous image and video datasets together.  Drop
+                    # the inactive placeholders before handing a part to the
+                    # processor, which expects only fields relevant to its type.
+                    content_type = ctn.get("type")
+                    if content_type not in {"text", "image", "video"}:
+                        inferred_types = [
+                            part_type
+                            for key, part_type in (
+                                ("text", "text"),
+                                ("image", "image"),
+                                ("video", "video"),
+                            )
+                            if ctn.get(key) not in (None, "")
+                        ]
+                        if len(inferred_types) != 1:
+                            raise ValueError(
+                                f"Unable to infer a multimodal content type from {ctn!r}."
+                            )
+                        content_type = inferred_types[0]
+                        ctn["type"] = content_type
+                    if content_type != "text" and ctn.get("text") == "":
+                        del ctn["text"]
+                    if content_type != "image" and ctn.get("image") == "":
+                        del ctn["image"]
+                    if content_type != "video":
+                        if ctn.get("video") == "":
+                            del ctn["video"]
+                        if ctn.get("fps") == 0:
+                            del ctn["fps"]
                     if ctn["type"] == "image" and "image" in ctn:
                         ctn["image"] = os.path.abspath(
                             os.path.join(self.local_image_path, ctn["image"])
@@ -395,6 +743,8 @@ class VisionLanguageDataCollator(LanguageDataCollator):
                     for k in keys_to_delete:
                         del ctn[k]
 
+            self._truncate_prompt_content(copy_messages)
+            self._truncate_assistant_content(copy_messages)
             batch.append(copy_messages)
 
         return self._process_multimodal_sample(batch)

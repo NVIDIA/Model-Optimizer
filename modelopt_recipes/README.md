@@ -26,7 +26,7 @@ cfg = load_dmd_config("general/distillation/dmd2_qwen_image")
 ```
 
 or selected from a script/CLI flag, e.g. `hf_ptq.py --recipe
-huggingface/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast`.
+model_type/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast`.
 
 > 📖 **Must-read for PTQ recipe tuning → [`ptq.md`](ptq.md).** It is the
 > guide to every PTQ scheme — body scopes (NVFP4/FP8, experts-only / mlp-only /
@@ -42,12 +42,20 @@ huggingface/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast`.
 | Directory | What lives here |
 |-----------|-----------------|
 | `general/` | **Model-agnostic** recipes — a good starting point for any model. PTQ combos, speculative-decoding training, and distillation. |
-| `huggingface/<model_type>/` | **Model-specific** recipes keyed by a HF `model_type`, optionally nested by released checkpoint. Use these first if your model has an entry. |
-| `models/<model_name>/` | **Instance-specific** recipes that mirror a particular published checkpoint's quantization config. |
+| `model_type/<model_type>/` | **Architecture-specific** recipes keyed by a HF `model_type`; one recipe covers every checkpoint of that architecture. |
+| `timm/<architecture>/` | **Architecture-specific** recipes for timm models. |
+| `models/<org>/<model_id>/` | **Checkpoint-specific** recipes that mirror a particular published checkpoint, keyed by its model-hub path (e.g. `nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16`). |
 | `configs/` | Shared building blocks (`numerics/`, `ptq/units/`, `ptq/presets/`) that recipes compose from via `$import`. Not run directly. |
 
-**Choosing where to look:** check `huggingface/<model_type>/` (then any nested
-`<checkpoint>/`) for your model first; if there's no entry, fall back to
+> ℹ️ **`model_type/` was previously named `huggingface/`.** Old
+> `huggingface/<model_type>/...` recipe paths still resolve for backward
+> compatibility (a source-tree symlink plus a loader alias), but `model_type/` is
+> the canonical location — please use it in new recipes, configs, and `--recipe`
+> flags.
+
+**Choosing where to look:** check `models/<org>/<model_id>/` for your exact
+checkpoint first, then `model_type/<model_type>/` for its architecture or
+`timm/<architecture>/` for a timm model; if none has an entry, fall back to
 `general/`. The presence of a model folder signals a recommended, tuned recipe.
 
 ---
@@ -65,21 +73,24 @@ Other general recipe families are documented inside their own folders:
 
 ---
 
-## `huggingface/` — model-specific recipes
+## `model_type/` — architecture-specific recipes
 
 Each lives under its HF `model_type`. The point of a model folder is to capture
 **what differs from the generic preset** — usually an algorithm tweak or a
 disabled-quantizer pattern for non-text branches. The numerics and standard
 exclusions are still inherited from `configs/`. Browse
-[`huggingface/`](huggingface/) for the available `model_type`s; each `<task>/`
+[`model_type/`](model_type/) for the available `model_type`s; each `<task>/`
 folder has a `README.md` describing the exact delta. See [`ptq.md`](ptq.md) for
 how the model-specific recipes compare to the general ones and why they deviate.
 
 ## `models/` — checkpoint-specific recipes
 
-These mirror a single **published checkpoint's** quantization config exactly —
-a per-component mixed-precision scheme tuned to match a specific release. Browse
-[`models/`](models/) for the available checkpoints.
+These mirror a single **published checkpoint's** quantization config exactly — a
+per-component mixed-precision scheme tuned to match a specific release. Each is
+keyed by the checkpoint's **model-hub path** `<org>/<model_id>` (as on the
+Hugging Face Hub, ModelScope, etc.). Browse [`models/`](models/) for the
+available checkpoints; see [`models/README.md`](models/README.md) for the naming
+convention.
 
 ---
 
@@ -87,9 +98,10 @@ a per-component mixed-precision scheme tuned to match a specific release. Browse
 
 - **New combo for any model** → add to `general/ptq/` by composing existing
   `configs/` units; follow the `<formats-scope>-<kv-mode>[-<algorithm>]` naming.
-- **Tuned for a HF architecture** → `huggingface/<model_type>/<task>/`, with a
+- **Tuned for a HF architecture** → `model_type/<model_type>/<task>/`, with a
   `README.md` documenting the delta from the generic preset. Verify the exact
   `model_type` against the checkpoint's `config.json` before placing it.
-- **Mirrors a specific released checkpoint** → `models/<model_name>/`.
+- **Tuned for a timm architecture** → `timm/<architecture>/<task>/`.
+- **Mirrors a specific released checkpoint** → `models/<org>/<model_id>/` (its model-hub path).
 - Share reused bodies via a `# modelopt-schema:`-tagged snippet and `$import`
   it; keep recipe wrappers thin.

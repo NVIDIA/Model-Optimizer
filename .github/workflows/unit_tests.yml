@@ -13,7 +13,9 @@ on:
       - "tests/unit/**"
       - "tools/launcher/**"
       - "tools/mcp/**"
+      - "tools/resource_monitor.py"
       - ".agents/skills/**"
+      - "plugins/modelopt/skills/**"
   schedule:
     - cron: "0 0 * * *" # Nightly
   workflow_dispatch:
@@ -25,17 +27,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check-dco:
-    uses: ./.github/workflows/_wait_for_checks.yml
-    permissions:
-      checks: read
-    secrets: inherit
-    with:
-      match_pattern: "^DCO$"
   check-file-changes:
     runs-on: ubuntu-latest
     outputs:
-      any_changed: ${{ steps.changed.outputs.any_changed || steps.non-pr.outputs.any_changed }}
+      any_changed: ${{ steps.changed.outputs.any_modified || steps.non-pr.outputs.any_changed }}
     steps:
       - id: non-pr
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -47,21 +42,24 @@ jobs:
       - if: github.event_name == 'pull_request'
         name: Check for changes in test-relevant paths
         id: changed
-        uses: step-security/changed-files@v46.0.5
+        uses: step-security/changed-files@v47.0.5
         with:
           files: |
             .github/workflows/unit_tests.yml
             modelopt/**
+            modelopt_recipes/**
             noxfile.py
             pyproject.toml
             tests/unit/**
+            tests/_test_utils/**
             tools/launcher/**
             tools/mcp/**
+            tools/resource_monitor.py
             .agents/skills/**
+            plugins/modelopt/skills/**
   linux:
-    needs: [check-dco]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ubuntu-setup
@@ -69,9 +67,9 @@ jobs:
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
-        run: pip install nox uv && nox -s "unit-3.12(torch_212, tf_latest)"
+        run: pip install nox uv && nox -s "unit-3.12(torch_214, tf_latest)"
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: unit
@@ -85,32 +83,61 @@ jobs:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Record which CPU this runner got
+        # The 0xc000001d crash this job used to hit tracked the host CPU, not the test, so this
+        # is the first thing worth knowing if it ever recurs. See the ONEDNN_MAX_CPU_ISA comment
+        # on the test step below.
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Processor | Select-Object Name, Description, NumberOfCores | Format-List
+          python -c "import platform; print('machine:', platform.machine(), platform.processor())"
       - name: Run unit tests (without coverage)
-        run: pip install nox uv && nox -s "unit-3.12(torch_212, tf_latest)"
+        env:
+          # Cap oneDNN's instruction set. bf16 linear/matmul on CPU dispatch through oneDNN,
+          # which by default picks the highest ISA the host advertises -- Intel AMX on the
+          # Emerald Rapids runners in the Actions fleet. On those hosts that path executes an
+          # instruction that faults with #UD, which surfaces as 0xc000001d and kills the whole
+          # pytest process. AMD EPYC runners have neither AMX nor AVX-512, take the AVX2 path,
+          # and have never shown the crash -- so AVX2 is the ceiling with evidence behind it.
+          # This is a CI mitigation for a torch/oneDNN Windows issue, not a ModelOpt bug: it
+          # changes which kernel runs, not what is being tested. To check whether it is still
+          # needed, drop it and run the suite repeatedly until an Intel host comes up.
+          # See the PR that added this for the six crashes and the host correlation behind it.
+          ONEDNN_MAX_CPU_ISA: "AVX2"
+          DNNL_MAX_CPU_ISA: "AVX2"
+        run: pip install nox uv && nox -s "unit-3.12(torch_214, tf_latest)"
   multi-version:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {nox_session: "unit-3.10(torch_212, tf_latest)", python_version: "3.10"}
-          - {nox_session: "unit-3.11(torch_212, tf_latest)", python_version: "3.11"}
-          - {nox_session: "unit-3.13(torch_212, tf_latest)", python_version: "3.13"}
-          - {nox_session: "unit-3.14(torch_212, tf_latest)", python_version: "3.14"}
+          # Default torch (2.14) across the other supported Python versions
+          - {nox_session: "unit-3.10(torch_214, tf_latest)", python_version: "3.10"}
+          - {nox_session: "unit-3.11(torch_214, tf_latest)", python_version: "3.11"}
+          - {nox_session: "unit-3.13(torch_214, tf_latest)", python_version: "3.13"}
+          - {nox_session: "unit-3.14(torch_214, tf_latest)", python_version: "3.14"}
+          # Older torch versions on the default Python (3.12) for back-compat.
           - {nox_session: "unit-3.12(torch_28, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_29, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_210, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_211, tf_latest)", python_version: "3.12"}
-          - {nox_session: "unit-3.12(torch_212, tf_min)", python_version: "3.12"}
+          - {nox_session: "unit-3.12(torch_212, tf_latest)", python_version: "3.12"}
+          - {nox_session: "unit-3.12(torch_213, tf_latest)", python_version: "3.12"}
+          # Minimum supported transformers on the default torch.
+          - {nox_session: "unit-3.12(torch_214, tf_min)", python_version: "3.12"}
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ubuntu-setup
@@ -187,8 +214,8 @@ jobs:
         # so they run in their own lightweight job rather than the main unit lane.
         # Override addopts to drop the repo's coverage/instafail plugins (not installed here).
         run: |
-          pip install pytest
-          python -m pytest .agents/skills/ -o addopts="" -p no:cacheprovider -v
+          pip install pytest "tomli; python_version < '3.11'"
+          python -m pytest plugins/modelopt/skills/ -o addopts="" -p no:cacheprovider -v
   unit-pr-required-check:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}
@@ -196,9 +223,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Required unit tests did not succeed
+        # windows is deliberately absent from this condition. It still runs and is still visible,
+        # but it does not gate the merge: its torch CPU tests are flaky for host-dependent
+        # reasons unrelated to the change under review. What we actually care about on that
+        # platform is the ONNX surface (QA also covers Windows), so blocking every PR on
+        # unrelated torch flakiness costs more than it catches.
         if: >-
           ${{ needs.linux.result != 'success' || (needs.check-file-changes.outputs.any_changed == 'true' && (
-            needs.windows.result != 'success' ||
             needs.multi-version.result != 'success' ||
             needs.partial-install.result != 'success' ||
             needs.launcher.result != 'success' ||

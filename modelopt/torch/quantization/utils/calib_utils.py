@@ -63,6 +63,9 @@ def update_hessian(input, hessian, n_samples):
     input_flat = input.reshape(-1, input.shape[-1]).t().float()
     batch_size = input_flat.shape[1]
 
+    if batch_size == 0:  # in MOEs some experts receive no tokens
+        return hessian, n_samples
+
     # Incremental averaging: scale down old hessian
     hessian *= n_samples / (n_samples + batch_size)
     n_samples += batch_size
@@ -126,14 +129,17 @@ class GPTQHelper:
 
     CACHE_NAME = "_forward_no_gptq_hessian"
 
-    def __init__(self, module, name, offload_to_cpu=False, fused=False):
+    def __init__(self, module, name, offload_to_cpu=False, fused=False, importance_weighted=False):
         """Initialize GPTQHelper with module state and Hessian storage."""
         self.module = module
         self.name = name
         self.fused = fused
+        self.importance_weighted = importance_weighted
         in_features = module.weight.shape[-1]
         device = module.weight.device
-        if device.type == "meta" or (offload_to_cpu and get_used_gpu_mem_fraction(device) > 0.65):
+        if device.type == "meta" or (
+            offload_to_cpu and device.type == "cuda" and get_used_gpu_mem_fraction(device) > 0.65
+        ):
             device = "cpu"
         self.hessian = torch.zeros(in_features, in_features, dtype=torch.float32, device=device)
         self.n_samples = 0

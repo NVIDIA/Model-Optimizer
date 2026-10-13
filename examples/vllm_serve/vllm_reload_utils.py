@@ -37,7 +37,13 @@ from modelopt.torch.quantization.conversion import (
     restore_quantizer_state,
 )
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.plugins.vllm import _has_routed_experts_cls
 from modelopt.torch.quantization.utils import is_quantized
+
+# vLLM >= 0.24 moved the fused expert weights (and their quantizers) onto a ``routed_experts``
+# submodule of the MoE layer, so merged expert keys need that extra hop. Follow the plugin's
+# registration flag rather than re-probing, so keys always match the modules it converted.
+_EXPERTS_INFIX = ".routed_experts" if _has_routed_experts_cls else ""
 
 
 def _union_quantizer_keys_across_ranks(local_quantizer_keys: list[str]) -> set[str]:
@@ -106,11 +112,19 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
     )
     if expert_gate_up_match:
         suffix = expert_gate_up_match.group(4) or ""
-        group_key = expert_gate_up_match.group(1) + ".w13_" + expert_gate_up_match.group(3) + suffix
+        group_key = (
+            expert_gate_up_match.group(1)
+            + _EXPERTS_INFIX
+            + ".w13_"
+            + expert_gate_up_match.group(3)
+            + suffix
+        )
         return ("group", group_key, value)
 
-    # Check if this is a non-expert gate/up projection that needs merging
-    if "mixer" not in key and "experts" not in key:
+    # Check if this is a non-expert gate/up projection that needs merging. Only *routed* experts
+    # (``experts.<i>.``) merge into w13/w2 above; shared experts are a plain MLP whose gate/up
+    # still merge into ``gate_up_proj``, so they must not be excluded by the "experts" substring.
+    if "mixer" not in key and not re.search(r"\.experts\.\d+\.", key):
         gate_up_match = re.search(r"(.*\.)(gate|up)_proj\.([^.]+_quantizer)(\..+)?$", key)
         if gate_up_match:
             suffix = gate_up_match.group(4) or ""
@@ -120,7 +134,13 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
     expert_down_match = re.search(r"(.*\.experts)\.\d+\.down_proj\.([^.]+_quantizer)(\..+)?$", key)
     if expert_down_match:
         suffix = expert_down_match.group(3) or ""
-        group_key = expert_down_match.group(1) + ".w2_" + expert_down_match.group(2) + suffix
+        group_key = (
+            expert_down_match.group(1)
+            + _EXPERTS_INFIX
+            + ".w2_"
+            + expert_down_match.group(2)
+            + suffix
+        )
         return ("group", group_key, value)
 
     # Transform bmm_quantizer keys: self_attn.q/k/v_bmm_quantizer -> self_attn.attn.q/k/v_bmm_quantizer

@@ -15,6 +15,8 @@
 
 """Tests of tensor quantization function and module"""
 
+import os
+
 import pytest
 import torch
 from _test_utils.torch.quantization.quant_utils import quant
@@ -25,6 +27,24 @@ import modelopt.torch.quantization.utils as quant_utils
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.extensions import get_cuda_ext, get_cuda_ext_mx
 from modelopt.torch.quantization.tensor_quant import mx_format_map
+
+if triton_kernel.IS_AVAILABLE:
+    import triton
+    import triton.language as tl
+
+    from modelopt.torch.kernels.quantization.common.nvfp4_quant import fp8_quantize_scale
+
+    @triton.jit
+    def _fp8_quantize_scale_test_kernel(block_amax_ptr, output_ptr, global_scale_ptr):
+        block_amax = tl.load(block_amax_ptr).to(tl.float32)
+        global_scale = tl.load(global_scale_ptr).to(tl.float32)
+        output = fp8_quantize_scale(block_amax, global_scale)
+        tl.store(output_ptr, output)
+
+
+NATIVE_E4M3_AVAILABLE = triton_kernel.IS_AVAILABLE and (
+    os.environ.get("TRITON_INTERPRET") == "1" or torch.cuda.get_device_capability() >= (8, 9)
+)
 
 
 class TestFakeTensorQuantCuda(FakeTensorQuantTester):
@@ -160,6 +180,28 @@ class TestScaledE4M3:
 
 
 class Testfp4:
+    @pytest.mark.skipif(not NATIVE_E4M3_AVAILABLE, reason="Native E4M3 requires compute >= 8.9")
+    def test_native_block_scale_underflows_to_zero(self):
+        raw_scale = 2**-11  # Below half the smallest E4M3 subnormal (2**-9).
+        block_amax = torch.tensor(6.0 * raw_scale, device="cuda")
+        output = torch.empty(1, device="cuda")
+        global_scale = torch.tensor(1.0, device="cuda")
+
+        _fp8_quantize_scale_test_kernel[(1,)](block_amax, output, global_scale)
+
+        assert torch.equal(output, torch.zeros_like(output))
+
+    @pytest.mark.skipif(not triton_kernel.IS_AVAILABLE, reason="triton kernel is not available")
+    def test_zero_block_scale_zeroes_block(self):
+        x = torch.ones((1, 16), device="cuda")
+        output = triton_kernel.static_blockwise_fp4_fake_quant(
+            x,
+            amax=torch.zeros(1, device="cuda"),
+            quantize_block_scales=False,
+        )
+
+        assert torch.equal(output, torch.zeros_like(output))
+
     @pytest.mark.skipif(get_cuda_ext_mx() is None, reason="cuda_ext_mx is not available")
     @pytest.mark.parametrize(
         "set_torch_dtype", [torch.float, torch.float16, torch.bfloat16], indirect=True
@@ -312,3 +354,35 @@ class Testfp4:
             f"Mean abs diff: {(output_static - output_dynamic).abs().mean()}\n"
             f"Max relative diff: {((output_static - output_dynamic).abs() / (output_dynamic.abs() + 1e-8)).max()}"
         )
+
+    @pytest.mark.skipif(
+        not hasattr(triton_kernel, "fp4_fake_quant_block"),
+        reason="fp4_fake_quant_block requires compute >= 8.9",
+    )
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    def test_fp4_kernel_scales_with_small_inputs(self, dtype):
+        """Scaling the input and global amax by a power of two scales the output by the same factor.
+
+        Blocks with small magnitudes must not be flushed to zero by an absolute scale floor.
+        """
+        torch.manual_seed(0)
+        x = (torch.randn(8, 64, device="cuda") * 10).to(dtype)
+        reference = triton_kernel.fp4_fake_quant_block(x, x.float().abs().amax())
+        assert reference.abs().amax() > 0
+        for factor in (2.0**-10, 2.0**-20):
+            scaled = triton_kernel.fp4_fake_quant_block(x * factor, x.float().abs().amax() * factor)
+            assert torch.equal(scaled, reference * factor)
+
+    @pytest.mark.skipif(
+        not hasattr(triton_kernel, "fp4_fake_quant_block"),
+        reason="fp4_fake_quant_block requires compute >= 8.9",
+    )
+    @pytest.mark.parametrize("global_amax", [0.0, float("inf"), float("nan")])
+    def test_fp4_kernel_invalid_global_amax_uses_unit_scale(self, global_amax):
+        """A zero, inf or NaN global amax uses a unit block scale, like the CUDA extension."""
+        torch.manual_seed(0)
+        e2m1 = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], device="cuda")
+        x = e2m1[torch.randint(0, 8, (8, 64), device="cuda")]
+        x = x * (torch.randint(0, 2, x.shape, device="cuda") * 2 - 1)
+        output = triton_kernel.fp4_fake_quant_block(x, torch.tensor(global_amax, device="cuda"))
+        assert torch.equal(output, x)

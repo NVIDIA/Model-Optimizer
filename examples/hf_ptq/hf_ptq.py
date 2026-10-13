@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import argparse
-import copy
+import os
 import random
 import time
 import warnings
@@ -24,24 +24,32 @@ from typing import Any
 import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
+from autoquant_utils import (
+    _FSDP2_KV_AUTOQUANT_ERROR,
+    _quantize_config_explicitly_enables_kv,
+    _recipe_is_auto_quantize,
+    _recipe_is_kv_auto_quantize,
+    auto_quantize,
+)
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
-from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from example_utils import (
-    _get_auto_quantize_cost_excluded_patterns,
-    _get_auto_quantize_disabled_layers,
-    _resolve_model_path,
+    HF_PTQ,
+    _prepare_quant_cfg,
     build_quant_cfg,
-    copy_custom_model_files,
+    cleanup_distributed,
     create_vlm_calibration_loop,
+    generate_excludes_prompt,
     get_model,
     get_processor,
     get_tokenizer,
-    is_enc_dec,
     is_nemotron_vl,
-    load_mtp_weights,
-    needs_checkpoint_path_update,
-    resolve_checkpoint_dir,
+    is_trtllm_enc_dec_export,
+    mlflow_run,
+    recipe_layerwise_blocks,
     run_nemotron_vl_preview,
+    save_source_config,
+    setup_distributed_args,
+    validate_fsdp2_supported,
 )
 from torch.utils.data import DataLoader
 from transformers import (
@@ -58,24 +66,25 @@ from transformers import (
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
-from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+from modelopt.recipe import ModelOptAutoQuantizeRecipe, ModelOptPTQRecipe, load_recipe
 from modelopt.recipe.presets import (
     KV_CACHE_NONE,
     KV_QUANT_CFG_CHOICES,
-    QFORMAT_ALIASES,
     QUANT_CFG_CHOICES,
+    RecipeSupersededAction,
 )
 from modelopt.torch.export import (
     export_hf_checkpoint,
     export_hf_vllm_fq_checkpoint,
     export_speculative_decoding,
-    export_tensorrt_llm_checkpoint,
-    get_model_type,
     has_spec_opt,
     save_expert_token_count_table,
 )
+from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
-from modelopt.torch.quantization._auto_quantize_cost import EXCLUDED_MODULE_NAME_PATTERNS_KEY
+from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
+from modelopt.torch.models import hf_model_type
+from modelopt.torch.models.hf import prepare_model_for_calibration, prepare_model_for_loading
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
@@ -83,6 +92,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
+from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
@@ -90,88 +100,32 @@ from modelopt.torch.utils.dataset_utils import (
     get_supported_datasets,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
+from modelopt.torch.utils.mlflow import add_mlflow_args, resolve_mlflow_args
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    copy_non_model_files,
+    ensure_local_checkpoint,
+)
+from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
 
-
-def _kv_cfg_uses_constant_amax(kv_quant_cfg: list[dict[str, Any]]) -> bool:
-    """Return True if this KV cfg pins ``use_constant_amax`` on the bmm quantizer.
-
-    Cast-style KV presets (e.g. ``fp8_cast`` / ``nvfp4_cast``) set
-    ``use_constant_amax: true`` on the ``*[kv]_bmm_quantizer`` entry; that flag
-    means there is no data-driven calibration to run, so callers should skip
-    the KV-only calibration pass. Detect the property from the YAML contents
-    rather than from the preset name so new cast-style presets work
-    automatically.
-    """
-    for entry in kv_quant_cfg:
-        if entry.get("quantizer_name") != "*[kv]_bmm_quantizer":
-            continue
-        cfg = entry.get("cfg") or {}
-        return bool(cfg.get("use_constant_amax"))
-    return False
-
-
-# Formats supported by mtq.auto_quantize unified-checkpoint export.
-#
-# This stays hardcoded — and intentionally not derived from the preset directory —
-# because auto_quantize compatibility is a property of the export path (the unified
-# HF checkpoint writer, TRT-LLM consumer constraints, layer-wise mixing rules), not
-# of the YAML itself. A preset can exist and be valid for plain PTQ while not being
-# safe to mix into an auto_quantize search. Update this set when adding/removing a
-# format from auto_quantize support.
-#
-# NOTE: auto_quantize is being refactored/reimplemented; this table and the
-# _canonical_qformat helper below are expected to be removed in the near future, so
-# deliberately not invested in deriving them from the presets.
-_AUTO_QUANTIZE_QFORMATS: frozenset[str] = frozenset(
-    {
-        "fp8",
-        "int8_smoothquant",
-        "int8_weight_only",
-        "int4_awq",
-        "nvfp4",
-        "nvfp4_awq_lite",
-        "nvfp4_w4a4_weight_mse_fp8_sweep",
-        "w4a8_awq_beta",
-        "w4a16_nvfp4",
-        "fp8_2d_blockwise_weight_only",
-        "w4a8_mxfp4_fp8",
-        "nvfp4_mlp_only",
-        "nvfp4_experts_only",
-        "nvfp4_omlp_only",
-        "nvfp4_w4a4_weight_local_hessian",
-        "mxfp8",
-    }
-)
-
-
-def _canonical_qformat(name: str) -> str:
-    """Resolve a user-provided qformat token to its canonical preset basename.
-
-    Lets membership checks (e.g. against :data:`_AUTO_QUANTIZE_QFORMATS`) accept
-    either the short alias (``int8_sq``) or the canonical YAML basename
-    (``int8_smoothquant``). Unknown tokens pass through unchanged so the existing
-    error paths still fire.
-    """
-    return QFORMAT_ALIASES.get(name, name)
-
-
 mto.enable_huggingface_checkpointing()
 
 
-def extract_and_prepare_language_model_from_vl(full_model):
+def extract_and_prepare_language_model_from_vl(
+    full_model: torch.nn.Module,
+) -> torch.nn.Module | None:
     """Extract language model from VL model and disable quantization for non-language components.
 
     Args:
         full_model: The full VLM model
 
     Returns:
-        tuple: (language_model, model_type) or (None, None) if not a VLM
+        The language model, or None if not a VLM
     """
-    language_model_lineage = get_language_model_from_vl(full_model)
+    language_model_lineage = get_language_model_from_vl(full_model, strict=True)
     if language_model_lineage is not None:
         language_model = language_model_lineage.pop(-1)
         ancestors = language_model_lineage
@@ -189,10 +143,9 @@ def extract_and_prepare_language_model_from_vl(full_model):
                     mtq.quantize(module, disabled_quant_cfg, forward_loop=None)
                     memo.add(module)
 
-        model_type = get_model_type(language_model)
-        return language_model, model_type
+        return language_model
 
-    return None, None
+    return None
 
 
 class _DeviceDataLoader:
@@ -230,6 +183,7 @@ def make_calib_dataloader(
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
     model_type: str | None,
+    autoquant_gradient_recipe: bool = False,
 ) -> tuple[DataLoader | _DeviceDataLoader, str | None]:
     calib_dataloader = None
     first_text_speech_dataset = None
@@ -266,7 +220,6 @@ def make_calib_dataloader(
             batch_size=args.batch_size,
             num_samples=args.calib_size[0],
             device=device,
-            max_length=args.calib_seq,
             require_image=True,
             subsets=["sparsetables", "plotqa_cot", "wiki_en"],
             shuffle_buffer_size=10_000,
@@ -291,12 +244,10 @@ def make_calib_dataloader(
         )
     else:
         assert tokenizer is not None and isinstance(
-            tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)
+            tokenizer, PreTrainedTokenizer | PreTrainedTokenizerFast
         ), "The PreTrainedTokenizer must be set"
         # Labels are only needed for gradient-based auto_quantize
-        include_labels = (
-            args.auto_quantize_bits is not None and args.auto_quantize_method == "gradient"
-        )
+        include_labels = autoquant_gradient_recipe
 
         calib_dataloader = get_dataset_dataloader(
             dataset_name=args.dataset,
@@ -306,152 +257,81 @@ def make_calib_dataloader(
             max_sample_length=args.calib_seq,
             device=device,
             include_labels=include_labels,
+            distributed=args.use_fsdp2,
+            sampler_kwargs=(
+                {"num_replicas": args.dist_state.world_size, "rank": args.dist_state.rank}
+                if args.use_fsdp2
+                else None
+            ),
         )
     return calib_dataloader, first_text_speech_dataset
 
 
-def auto_quantize(
-    args: argparse.Namespace,
-    language_model: torch.nn.Module,
-    calib_dataloader: DataLoader,
-    auto_quantize_method="gradient",
-    auto_quantize_score_size=128,
-    auto_quantize_checkpoint=None,
-    full_model: torch.nn.Module | None = None,
-):
-    """Auto search quantization of multiple formats."""
-
-    if args.calib_with_images:
-        raise NotImplementedError(
-            "AutoQuantize with image-text calibration is not supported yet. "
-            "Please run plain PTQ (e.g., --qformat nvfp4) with --calib_with_images."
+def _resolve_kv_auto_quantize_checkpoint(args: argparse.Namespace) -> str | None:
+    """Resolve a KV-primary checkpoint with a one-release legacy fallback."""
+    if args.kv_auto_quantize_checkpoint is not None:
+        return args.kv_auto_quantize_checkpoint
+    if args.auto_quantize_checkpoint is not None:
+        warnings.warn(
+            "Using --auto_quantize_checkpoint for a KV-cache search is deprecated; use "
+            "--kv_auto_quantize_checkpoint instead.",
+            FutureWarning,
         )
+        return args.auto_quantize_checkpoint
+    return None
 
-    assert not (args.auto_quantize_bits and args.inference_pipeline_parallel > 1), (
-        "Auto Quantization is not supported for pipeline parallel size > 1"
-    )
 
-    qformat_list = args.qformat.split(",")
-    assert qformat_list, "No quantization formats provided"
-    # Check if all provided quantization formats are supported. Canonicalize first so
-    # callers may pass either the short alias (``int8_sq``) or the canonical YAML
-    # basename (``int8_smoothquant``).
-    assert all(
-        _canonical_qformat(qformat) in _AUTO_QUANTIZE_QFORMATS for qformat in qformat_list
-    ), "One or more quantization formats provided are not supported for unified checkpoint export"
+def _validate_recipe_calibration(args: argparse.Namespace, recipe) -> None:
+    """Require image-text calibration when a PTQ recipe enables visual input quantizers."""
+    if not isinstance(recipe, ModelOptPTQRecipe) or args.calib_with_images:
+        return
 
-    # When language_model is a base text model without lm_head (e.g. Gemma4TextModel),
-    # use full_model's lm_head to compute logits/loss from hidden states.
-    is_base_model = (
-        full_model is not None
-        and language_model is not full_model
-        and not hasattr(language_model, "lm_head")
-        and hasattr(full_model, "lm_head")
-    )
-
-    if is_base_model:
-        assert full_model is not None
-        lm_head = full_model.lm_head
-
-        def loss_func(output, data):
-            logits = lm_head(output.last_hidden_state)
-            labels = data["labels"]
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            return torch.nn.functional.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
-            )
-
-    else:
-
-        def loss_func(output, data):
-            return output.loss
-
-    if auto_quantize_method == "gradient":
-
-        def forward_step(model, batch):
-            inputs = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
-            return model(**inputs)
-
-    elif auto_quantize_method == "kl_div":
-
-        def forward_step(model, batch):
-            inputs = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
-            output = model(**inputs)
-            if is_base_model:
-                assert full_model is not None
-                return full_model.lm_head(output.last_hidden_state)
-            return output.logits
-
-    else:
-        raise ValueError(
-            f"Invalid auto_quantize_method: {auto_quantize_method}. Must be 'gradient' or 'kl_div'"
-        )
-
-    auto_quantize_constraints = {
-        "effective_bits": args.auto_quantize_bits,
-        "cost_model": args.auto_quantize_cost_model,
-    }
-    auto_quantize_cost = {}
-    if args.auto_quantize_active_moe_expert_ratio is not None:
-        auto_quantize_cost["active_moe_expert_ratio"] = args.auto_quantize_active_moe_expert_ratio
-    cost_excluded_patterns = _get_auto_quantize_cost_excluded_patterns(language_model)
-    if cost_excluded_patterns:
-        auto_quantize_cost[EXCLUDED_MODULE_NAME_PATTERNS_KEY] = cost_excluded_patterns
-    if auto_quantize_cost:
-        auto_quantize_constraints["cost"] = auto_quantize_cost
-
-    language_model, _ = mtq.auto_quantize(
-        language_model,
-        constraints=auto_quantize_constraints,
-        data_loader=calib_dataloader,
-        forward_step=forward_step,
-        loss_func=loss_func,  # Only used for gradient-based method
-        # TRTLLM only support one quantization format or None (do not quantize, internally supported)
-        quantization_formats=[QUANT_CFG_CHOICES[format] for format in qformat_list],
-        num_calib_steps=len(calib_dataloader),
-        # AutoQuantize scoring is the costly phase; allow smaller sample counts than calibration.
-        num_score_steps=min(
-            len(calib_dataloader), max(auto_quantize_score_size // args.batch_size, 1)
+    visual_input_entry = next(
+        (
+            entry
+            for entry in reversed(recipe.quantize.quant_cfg)
+            if entry.quantizer_name == "*visual.*input_quantizer"
         ),
-        verbose=True,
-        disabled_layers=_get_auto_quantize_disabled_layers(language_model),
-        method=auto_quantize_method,
-        checkpoint=auto_quantize_checkpoint,
+        None,
     )
-
-    calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
-    # We need to explicitly set up KV cache quantization after auto_quantize
-    enable_quant_kv_cache = args.kv_cache_qformat != KV_CACHE_NONE
-    print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
-    if enable_quant_kv_cache:
-        kv_cache_quant_cfg = copy.deepcopy(KV_QUANT_CFG_CHOICES[args.kv_cache_qformat]["quant_cfg"])
-        kv_cache_quant_cfg = [
-            e for e in kv_cache_quant_cfg if e["quantizer_name"] != "*"
-        ]  # keep other quantizers from auto_quantize
-
-        mtq.set_quantizer_by_cfg(language_model, quant_cfg=kv_cache_quant_cfg)
-        if not _kv_cfg_uses_constant_amax(kv_cache_quant_cfg):
-            # Calibrate only the KV cache quantizers; disable all others.
-            with mtq.set_quantizer_by_cfg_context(
-                language_model,
-                [{"quantizer_name": "*", "enable": False}, *kv_cache_quant_cfg],
-            ):
-                mtq.calibrate(language_model, algorithm="max", forward_loop=calibrate_loop)
-    return language_model
+    if visual_input_entry is not None and visual_input_entry.enable:
+        raise ValueError(
+            "Vision Encoder quantization recipes require --calib_with_images so visual input "
+            "quantizers receive activation calibration data."
+        )
 
 
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
-    if args.specdec_offline_dataset is not None or not args.low_memory_mode:
+    if args.use_fsdp2 and _recipe_is_kv_auto_quantize(args.recipe):
+        raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
+    if args.use_fsdp2:
+        hf_config = AutoConfig.from_pretrained(
+            args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
+        )
+        validate_fsdp2_supported(args, hf_config)
+        full_model = parallel_load_and_prepare_fsdp2(
+            args.local_checkpoint_path,
+            args.dist_state.device,
+            args.dist_state.rank,
+            args.dist_state.world_size,
+            trust_remote_code=args.trust_remote_code,
+            cpu_offload=args.cpu_offload,
+            attn_implementation=args.attn_implementation,
+            hf_config=hf_config,
+        )
+    elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
-            args.pyt_ckpt_path,
-            args.device,
+            args.local_checkpoint_path,
+            args.dist_state.device,
             gpu_mem_percentage=args.gpu_max_mem_percentage,
             trust_remote_code=args.trust_remote_code,
             use_seq_device_map=args.use_seq_device_map,
             attn_implementation=args.attn_implementation,
+            offload_folder=args.offload_folder,
+            max_cpu_memory_gb=args.max_cpu_memory_gb,
+            max_gpu_memory_gb=args.max_gpu_memory_gb,
         )
     else:
         assert args.qformat in QUANT_CFG_CHOICES, (
@@ -468,43 +348,61 @@ def load_model(args: argparse.Namespace):
         with init_quantized_weights(
             quant_cfg, gpu_mem_percentage=args.gpu_max_mem_percentage, quant_gemm=False
         ):
+            hf_config = AutoConfig.from_pretrained(
+                args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
+            )
             model_kwargs = {"trust_remote_code": args.trust_remote_code}
             if args.attn_implementation is not None:
                 model_kwargs["attn_implementation"] = args.attn_implementation
-            full_model = AutoModelForCausalLM.from_pretrained(
-                args.pyt_ckpt_path,
-                **model_kwargs,
-            )
+            with prepare_model_for_loading(
+                hf_config.model_type, args.local_checkpoint_path, args.trust_remote_code
+            ):
+                full_model = AutoModelForCausalLM.from_pretrained(
+                    args.local_checkpoint_path,
+                    **model_kwargs,
+                )
         calibration_only = True
 
-    model_type = get_model_type(full_model)
+    # Include auxiliary modules whose activation quantizers require calibration data.
+    prepare_model_for_calibration(full_model)
 
-    device = full_model.device
-    if hasattr(full_model, "model"):
-        device = full_model.model.device
+    # The checkpoint's Hugging Face model_type. Always taken from the root model: a VLM's language
+    # model reports its own sub-config's type, which varies across transformers versions.
+    model_type = hf_model_type(full_model)
+
+    if args.use_fsdp2:
+        device = args.dist_state.device
+    else:
+        device = full_model.device
+        if hasattr(full_model, "model"):
+            device = full_model.model.device
     processor = None
     tokenizer = None
     language_model = full_model
-    default_padding_side = None
-    default_pad_token = None
 
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
-    # Default to image-text calibration for VLM models
-    if is_nemotron_vl_model and not args.calib_with_images and args.auto_quantize_bits is None:
+    # Default to image-text calibration for VLM models. Skip for the AutoQuantize recipe path, whose
+    # text-only path does not support image-text calibration yet (auto_quantize() would raise);
+    # auto-enabling it here would make Nemotron-VL AutoQuantize fail unconditionally.
+    if (
+        is_nemotron_vl_model
+        and not args.calib_with_images
+        and not _recipe_is_auto_quantize(args.recipe)
+    ):
         print("Nemotron VL model detected. Enabling image-text calibration by default.")
         args.calib_with_images = True
 
     if model_type == "whisper":
         processor = get_processor(
-            args.pyt_ckpt_path,
+            args.local_checkpoint_path,
             model_type,
             trust_remote_code=args.trust_remote_code,
         )
     elif args.calib_with_images:
         # For VLM image calibration, we need an AutoProcessor to build multimodal inputs.
         processor = AutoProcessor.from_pretrained(
-            args.pyt_ckpt_path,
+            args.local_checkpoint_path,
             trust_remote_code=args.trust_remote_code,
             padding_side="left",
         )
@@ -512,22 +410,25 @@ def load_model(args: argparse.Namespace):
         if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
             tokenizer = processor.tokenizer
         else:
-            tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
+            tokenizer = get_tokenizer(
+                args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
+            )
 
-        default_pad_token = tokenizer.pad_token
         # Some Nemotron tokenizers may not define pad_token by default; but we use padding=True during calibration.
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
-        assert tokenizer.pad_token is not None, f"Pad token for {args.pyt_ckpt_path} cannot be set!"
+        assert tokenizer.pad_token is not None, (
+            f"Pad token for {args.local_checkpoint_path} cannot be set!"
+        )
 
-        default_padding_side = tokenizer.padding_side
         tokenizer.padding_side = "left"
 
-        # Quantize only the language model, but keep the full_model for calibration forward.
-        extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(full_model)
-        if extracted_lm is not None:
-            language_model = extracted_lm
-            model_type = extracted_model_type
+        # Plain PTQ quantizes only the language model. Recipes keep the complete VLM so their
+        # quantizer rules can target vision and language components in one state.
+        if args.recipe is None:
+            extracted_lm = extract_and_prepare_language_model_from_vl(full_model)
+            if extracted_lm is not None:
+                language_model = extracted_lm
     else:
         if args.specdec_offline_dataset is not None:
             language_model = full_model
@@ -543,26 +444,21 @@ def load_model(args: argparse.Namespace):
                 : len(args.dataset)
             ]
 
-            # Plain PTQ quantizes only the extracted language model. Recipe and
-            # AutoQuantize paths keep the outer CausalLM so recipes/search can see
-            # Qwen3.5/3.6-MoE VLM lm_head.
-            if args.recipe is None and args.auto_quantize_bits is None:
-                extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
-                    full_model
-                )
+            # Plain PTQ quantizes only the extracted language model. The recipe path keeps the outer
+            # CausalLM so recipes / search can see the Qwen3.5/3.6-MoE VLM lm_head; extracting here
+            # would leave modelopt state on the ancestors and make auto_quantize() fail with
+            # "multiple modelopt states".
+            if args.recipe is None:
+                extracted_lm = extract_and_prepare_language_model_from_vl(full_model)
                 if extracted_lm is not None:
                     language_model = extracted_lm
-                    model_type = extracted_model_type
 
-        tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
+        tokenizer = get_tokenizer(
+            args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
+        )
 
-        default_padding_side = tokenizer.padding_side
-        default_pad_token = tokenizer.pad_token
         # Left padding usually provides better calibration result.
         tokenizer.padding_side = "left"
-
-    if model_type == "phi4mm":
-        warnings.warn("Please set the default input_mode to InputMode.LANGUAGE before quantizing.")
 
     return (
         full_model,
@@ -571,8 +467,6 @@ def load_model(args: argparse.Namespace):
         calibration_only,
         processor,
         tokenizer,
-        default_padding_side,
-        default_pad_token,
         device,
     )
 
@@ -593,7 +487,7 @@ def sparsity_main(
     # Different calibration datasets are also available, e.g., "pile" and "wikipedia"
     # Please also check the docstring for the datasets available
     assert tokenizer is not None and isinstance(
-        tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)
+        tokenizer, PreTrainedTokenizer | PreTrainedTokenizerFast
     ), "The PreTrainedTokenizer must be set"
     calib_dataloader = get_dataset_dataloader(
         dataset_name=args.dataset,
@@ -621,7 +515,7 @@ def mono_quantize(
     calib_dataloader: DataLoader,
     is_nemotron_vl_model: bool,
 ):
-    """Plain quantization of the given language model to a single quantization configuration."""
+    """Plain quantization of the selected model target to one quantization configuration."""
 
     model_is_already_quantized = is_quantized(language_model)
 
@@ -640,9 +534,10 @@ def mono_quantize(
             warnings.warn("Dynamic quantization. Calibration skipped.")
         calibrate_loop = None
         if use_calibration:
-            # For Nemotron VL image calibration, the dataloader yields multimodal kwargs (e.g., pixel_values).
-            # Those kwargs must be consumed by the *full* VLM model, not the extracted language_model.
-            if args.calib_with_images and is_nemotron_vl_model:
+            # Image calibration batches contain multimodal kwargs (for example pixel_values).
+            # They must be consumed by the complete VLM even when only a nested component is the
+            # quantization target; the full forward still exercises that component's quantizers.
+            if args.calib_with_images:
                 calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
             else:
                 calibrate_loop = create_forward_loop(
@@ -652,6 +547,9 @@ def mono_quantize(
                     else None,
                 )
 
+        if args.layerwise_export:
+            LayerwiseExporter(full_model, args.export_path)
+
         if calibration_only:
             language_model = mtq.calibrate(
                 language_model, quant_cfg["algorithm"], forward_loop=calibrate_loop
@@ -660,7 +558,7 @@ def mono_quantize(
             language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
 
         # For VL models, update full_model to use the quantized language model
-        if is_nemotron_vl_model:
+        if is_nemotron_vl_model and language_model is not full_model:
             language_model_lineage = get_language_model_from_vl(full_model)
             if language_model_lineage is not None:
                 print("Updating full_model with quantized language_model...")
@@ -670,59 +568,104 @@ def mono_quantize(
         warnings.warn("Skipping quantization: model is already quantized.")
 
 
+def _run_auto_quantize_recipe(
+    args: argparse.Namespace,
+    recipe: ModelOptAutoQuantizeRecipe,
+    full_model: torch.nn.Module,
+    language_model: torch.nn.Module,
+    model_type: str | None,
+    calibration_only: bool,
+    calib_dataloader: DataLoader,
+    is_nemotron_vl_model: bool,
+) -> None:
+    """Run the recipe's fixed PTQ, weight search, and KV search in order."""
+    primary = recipe.auto_quantize
+    followup_kv = recipe.kv_auto_quantize
+    primary_is_kv = primary.constraints.cost_model == "kv_cache"
+    fixed_quantize_config = recipe.quantize
+
+    if fixed_quantize_config is not None and (primary_is_kv or followup_kv is not None):
+        if _quantize_config_explicitly_enables_kv(fixed_quantize_config.model_dump()):
+            raise ValueError(
+                "The fixed quantize stage explicitly enables K/V quantizers before KV-cache "
+                "AutoQuantize. Disable them in the fixed stage."
+            )
+
+    if primary_is_kv and fixed_quantize_config is not None:
+        quant_cfg = _prepare_quant_cfg(args, fixed_quantize_config.model_dump(), full_model)
+        mono_quantize(
+            args,
+            quant_cfg,
+            full_model,
+            language_model,
+            model_type,
+            calibration_only,
+            calib_dataloader,
+            is_nemotron_vl_model,
+        )
+        fixed_quantize_config = None
+
+    auto_quantize(
+        args,
+        full_model,
+        calib_dataloader,
+        aq_config=primary,
+        full_model=full_model,
+        fixed_quantize_config=fixed_quantize_config,
+        allow_uniform_kv=followup_kv is None,
+        checkpoint=(
+            _resolve_kv_auto_quantize_checkpoint(args)
+            if primary_is_kv
+            else args.auto_quantize_checkpoint
+        ),
+    )
+
+    if followup_kv is not None:
+        auto_quantize(
+            args,
+            full_model,
+            calib_dataloader,
+            aq_config=followup_kv,
+            full_model=full_model,
+            allow_uniform_kv=False,
+            # The weight search owns --auto_quantize_checkpoint, so a follow-up KV search must
+            # never use the KV-primary legacy fallback and collide with the weight state.
+            checkpoint=args.kv_auto_quantize_checkpoint,
+        )
+
+
 def export_quantized(
     args: argparse.Namespace,
     full_model: torch.nn.Module,
     language_model: torch.nn.Module,
     model_type: str | None,
-    tokenizer: PreTrainedTokenizerBase | None,
-    default_padding_side,
-    default_pad_token,
 ):
-    with torch.inference_mode():
-        if model_type is None:
-            print(f"Unknown model type {type(language_model).__name__}. Continue exporting...")
-            model_type = f"unknown:{type(language_model).__name__}"
-
+    # Not inference_mode: the FSDP2 path gathers full params in this context and
+    # inference tensors break the subsequent state_dict() -> param.detach().
+    with torch.no_grad():
         export_path = args.export_path
 
         # Early exit for speculative decoding checkpoints
         # No tokenizer saving needed for spec ckpts
         if has_spec_opt(full_model):
             export_speculative_decoding(full_model, export_dir=export_path)
+            args.checkpoint_exported = True
             print(f"Quantized speculative decoding checkpoint exported to: {export_path}")
             return
 
-        # Check if the model is a multimodal/VLM model
-        is_vlm = is_multimodal_model(full_model)
-
-        if is_vlm:
-            # Save original model config and the processor config to the export path for VLMs.
-            print(f"Saving original model config to {export_path}")
-
-            config_kwargs = {"trust_remote_code": args.trust_remote_code}
-            if args.attn_implementation is not None:
-                config_kwargs["attn_implementation"] = args.attn_implementation
-            AutoConfig.from_pretrained(args.pyt_ckpt_path, **config_kwargs).save_pretrained(
-                export_path
-            )
-
-            # Try to save processor config if available
-            try:
-                print(f"Saving processor config to {export_path}")
-                AutoProcessor.from_pretrained(
-                    args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code
-                ).save_pretrained(export_path)
-            except Exception as e:
-                print(f"Warning: Could not save processor config: {e}")
-                print("This is normal for some VLM architectures that don't use AutoProcessor")
+        if is_multimodal_model(full_model):
+            # Per-layer export writes its own config.json with quantization_config, which
+            # the source config would replace; it never writes a processor config.
+            if not args.layerwise_export:
+                save_source_config(args, export_path)
 
         start_time = time.time()
-        if (
-            model_type in ["t5", "bart", "whisper"]
+        is_tensorrt_llm_export = (
+            is_trtllm_enc_dec_export(model_type)
             or args.sparsity_fmt != "dense"
-            or "int8_sq" in args.qformat
-        ):
+            or "int8_smoothquant" in args.qformat
+        )
+        if is_tensorrt_llm_export:
             if (
                 args.inference_tensor_parallel != 1 or args.inference_pipeline_parallel != 1
             ) and args.qformat == "nvfp4_svdquant":
@@ -734,16 +677,17 @@ def export_quantized(
             # Move meta tensor back to device before exporting.
             remove_hook_from_module(language_model, recurse=True)
 
+            # The deprecated exporter detects its TensorRT-LLM decoder_type from the model class.
             export_tensorrt_llm_checkpoint(
                 language_model,
-                model_type,
                 export_dir=export_path,
                 inference_tensor_parallel=args.inference_tensor_parallel,
                 inference_pipeline_parallel=args.inference_pipeline_parallel,
             )
-
-            # Copy custom model files (Python files and JSON configs) for TensorRT-LLM export
-            copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
+            # The unified exporters copy the source's non-model files themselves; this deprecated
+            # one does not.
+            if args.dist_state.is_main:
+                copy_non_model_files(args.local_checkpoint_path, export_path)
         else:
             # Check arguments for unified_hf export format and set to default if unsupported arguments are provided
             assert args.sparsity_fmt == "dense", (
@@ -759,21 +703,19 @@ def export_quantized(
             # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
             # Store the MTP layer prefixes on the model for later exclusion from quantization
             if args.vllm_fakequant_export:
+                # save_pretrained inside the exporter writes model-backed state only; weights
+                # the loader could not place (an MTP head, an auxiliary tower) are carried over
+                # as an extra shard afterward -- see _carry_over_unplaced_weights.
                 export_hf_vllm_fq_checkpoint(
                     full_model, export_dir=export_path, inplace_mem_efficient=True
                 )
             else:
-                mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(
-                    full_model, args.pyt_ckpt_path
-                )
-
-                if mtp_layer_prefixes:
-                    full_model._mtp_layer_prefixes = mtp_layer_prefixes
-
+                # Weights the loader could not place (an MTP head, an auxiliary tower) are
+                # carried over by the exporter from the keys recorded at load time; nothing
+                # architecture-specific is needed here.
                 export_hf_checkpoint(
                     full_model,
                     export_dir=export_path,
-                    extra_state_dict=mtp_state_dict,
                 )
 
                 if args.qformat == "w4a16_nvfp4":
@@ -782,21 +724,9 @@ def export_quantized(
                         "vLLM deployment support is in progress."
                     )
 
-        # Restore default padding and export the tokenizer as well.
-        if tokenizer is not None:
-            tokenizer.padding_side = default_padding_side
-            if default_pad_token is not None:
-                tokenizer.pad_token = default_pad_token
-            tokenizer.save_pretrained(export_path)
-
-        # Copy custom model files (Python files and JSON configs) if trust_remote_code is used.
-        # This must run AFTER tokenizer.save_pretrained() so original tokenizer files
-        # from the source checkpoint take precedence over regenerated ones (which may
-        # differ in format due to newer transformers versions).
-        copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
-
+        args.checkpoint_exported = True
         end_time = time.time()
-        print(
+        print_rank_0(
             f"Quantized model exported to: {export_path}. Total time used {end_time - start_time}s"
         )
 
@@ -827,12 +757,16 @@ def pre_quantize(
     preview_input_ids = batch[input_key][0:1]
     # Pass attention_mask to generate(): HF cannot infer it when pad_token == eos_token.
     preview_attention_mask = batch["attention_mask"][0:1] if "attention_mask" in batch else None
+    if input_key == "input_ids" and preview_attention_mask is not None:
+        preview_input_ids = preview_input_ids[:, preview_attention_mask[0].bool()]
+        preview_attention_mask = torch.ones_like(preview_input_ids)
 
     # Generate preview before quantization
     if args.skip_generate:
         generated_ids_before_ptq = None
-    elif model_type == "deepseek":
-        # DeepSeek generation may go OOM, so we skip it
+    elif model_type is not None and model_type.startswith(("deepseek", "kimi_k2")):
+        # DeepSeek generation may go OOM, so we skip it. Kimi-K2 (kimi_k2) and Kimi-K2.5
+        # (kimi_k25) are DeepSeek-V3 architectures under their own model_type.
         generated_ids_before_ptq = None
     elif model_type == "nemotron_h":
         # NemotronH (SSM/Mamba hybrid) modeling code does not work with accelerate's big model inference
@@ -844,7 +778,7 @@ def pre_quantize(
             full_model,
             tokenizer,
             preview_input_ids,
-            args.pyt_ckpt_path,
+            args.local_checkpoint_path,
             "before quantization",
             allow_fallback=False,
             trust_remote_code=args.trust_remote_code,
@@ -866,13 +800,11 @@ def post_quantize(
     model_type: str | None,
     tokenizer: PreTrainedTokenizerBase | None,
     processor: ProcessorMixin | None,
-    preview_input_ids,
-    preview_attention_mask,
-    generated_ids_before_ptq,
-    is_nemotron_vl_model,
-    first_text_speech_dataset,
-    default_padding_side,
-    default_pad_token,
+    preview_input_ids: torch.Tensor | None,
+    preview_attention_mask: torch.Tensor | None,
+    generated_ids_before_ptq: Any,
+    is_nemotron_vl_model: bool,
+    first_text_speech_dataset: str | None,
     calib_dataloader: DataLoader,
 ):
     """
@@ -886,18 +818,11 @@ def post_quantize(
     # Early exit for offline speculative decoding: skip generation comparison and export directly.
     # The model's get_dummy_inputs() provides the right input format for the export forward pass.
     if args.specdec_offline_dataset is not None:
-        export_quantized(
-            args,
-            full_model,
-            language_model,
-            model_type,
-            tokenizer,
-            default_padding_side,
-            default_pad_token,
-        )
+        export_quantized(args, full_model, language_model, model_type)
         return
+    assert preview_input_ids is not None, "pre_quantize returns preview inputs for this path"
 
-    if args.verbose:
+    if args.verbose and args.dist_state.is_main:
         try:
             mtq.print_quant_summary(full_model, args.export_path)
             save_expert_token_count_table(full_model, args.export_path)
@@ -910,19 +835,26 @@ def post_quantize(
     generated_ids_after_ptq = None
     if generated_ids_before_ptq is None:
         pass
-    elif model_type != "llama4" and not is_nemotron_vl_model:
+    elif model_type not in ("llama4", "llama4_text") and not is_nemotron_vl_model:
         # Our fake quantizer may not be fully compatible with torch.compile.
-        generated_ids_after_ptq = full_model.generate(
-            preview_input_ids,
-            attention_mask=preview_attention_mask,
-            max_new_tokens=100,
-        )
+        # This is a best-effort sanity check: e.g. a `device_map="auto"` load that offloads
+        # part of the model to CPU (seen on unified-memory single-GPU hosts) can make a
+        # quantized layer run on CPU, which some kernels (e.g. NVFP4 dynamic block
+        # quantization) don't support. Don't let that discard the completed calibration.
+        try:
+            generated_ids_after_ptq = full_model.generate(
+                preview_input_ids,
+                attention_mask=preview_attention_mask,
+                max_new_tokens=100,
+            )
+        except Exception as e:
+            warnings.warn(f"Post-quantization generation sanity check failed, skipping it: {e}")
     elif is_nemotron_vl_model and tokenizer is not None:
         generated_ids_after_ptq = run_nemotron_vl_preview(
             full_model,
             tokenizer,
             preview_input_ids,
-            args.pyt_ckpt_path,
+            args.local_checkpoint_path,
             "after quantization",
             allow_fallback=False,
             trust_remote_code=args.trust_remote_code,
@@ -946,7 +878,7 @@ def post_quantize(
         if hasattr(generated_ids, "sequences"):
             generated_ids = generated_ids.sequences
 
-        if is_enc_dec(model_type):
+        if generate_excludes_prompt(full_model):
             if processor is not None and isinstance(processor, WhisperProcessor):
                 return processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
             elif tokenizer is not None:
@@ -978,15 +910,7 @@ def post_quantize(
                 f"example outputs after ptq: {output_decode(generated_ids_after_ptq, preview_input_ids.shape[1])}"
             )
 
-    export_quantized(
-        args,
-        full_model,
-        language_model,
-        model_type,
-        tokenizer,
-        default_padding_side,
-        default_pad_token,
-    )
+    export_quantized(args, full_model, language_model, model_type)
 
 
 def quantize_main(
@@ -997,29 +921,52 @@ def quantize_main(
     calibration_only: bool,
     processor: ProcessorMixin | None,
     tokenizer: PreTrainedTokenizerBase | None,
-    default_padding_side,
-    default_pad_token,
     device: torch.device,
 ):
     # Load the recipe up front so we can detect layerwise calibration before batch-size probing.
     recipe = None
-    if args.recipe is not None and not args.auto_quantize_bits:
+    if args.recipe is not None:
         print(f"Use recipe {args.recipe} for quantization")
         recipe = load_recipe(args.recipe)
-        if not isinstance(recipe, ModelOptPTQRecipe):
+        if not isinstance(recipe, ModelOptPTQRecipe | ModelOptAutoQuantizeRecipe):
             raise TypeError(
-                f"Expected PTQ recipe, but got {type(recipe).__name__} from {args.recipe}"
+                f"Expected PTQ or AutoQuantize recipe, but got {type(recipe).__name__} "
+                f"from {args.recipe}"
             )
+        _validate_recipe_calibration(args, recipe)
 
-    def _is_layerwise(obj):
-        if isinstance(obj, ModelOptPTQRecipe):
-            return _is_layerwise(obj.quantize.algorithm)
-        if isinstance(obj, list):
-            return any(_is_layerwise(a) for a in obj)
-        layerwise = getattr(obj, "layerwise", None)
-        return bool(getattr(layerwise, "enable", False))
+    # AutoQuantize is recipe-driven: everything downstream reads the resolved AutoQuantizeConfig.
+    if isinstance(recipe, ModelOptAutoQuantizeRecipe):
+        aq_config = recipe.auto_quantize
+    else:
+        aq_config = None
 
-    is_layerwise = _is_layerwise(recipe)
+    layerwise_cfgs = recipe_layerwise_blocks(recipe)
+    is_layerwise = any(cfg.get("enable", False) for cfg in layerwise_cfgs)
+
+    # The value is a placeholder, replaced with --export_path below; presence is the switch.
+    args.layerwise_export = any(
+        cfg.get("export_dir") is not None and cfg.get("enable", False) for cfg in layerwise_cfgs
+    )
+    if not args.layerwise_export and any(
+        cfg.get("export_dir") is not None for cfg in layerwise_cfgs
+    ):
+        warnings.warn(
+            "layerwise.export_dir is set but layerwise.enable is not, so there is no "
+            "per-layer pass to write the shards: the whole-model export runs instead, which "
+            "holds the full state dict in host memory."
+        )
+    if args.layerwise_export:
+        if isinstance(recipe, ModelOptAutoQuantizeRecipe):
+            # Only the mono-quantize path retargets export_dir and runs the refusals;
+            # auto_quantize would export to the placeholder and skip the real export.
+            raise NotImplementedError(
+                "layerwise.export_dir is not supported with an AutoQuantize recipe; "
+                "use a PTQ recipe, or drop export_dir and export afterwards."
+            )
+        if not args.skip_generate:
+            print("Layerwise export: forcing --skip_generate, the model is left in export form.")
+        args.skip_generate = True
 
     if args.batch_size == 0:
         # For VL models with image-text calibration, skip automatic batch size detection
@@ -1043,7 +990,9 @@ def quantize_main(
             # Calibration/sparsification will actually take much more memory than regular inference
             # due to intermediate tensors for fake quantization. Setting sample_memory_usage_ratio
             # to 2 to avoid OOM for AWQ/SmoothQuant fake quantization as it will take more memory than inference.
-            sample_memory_usage_ratio = 2 if "awq" in args.qformat or "sq" in args.qformat else 1.1
+            sample_memory_usage_ratio = (
+                2 if "awq" in args.qformat or "smoothquant" in args.qformat else 1.1
+            )
             # Whisper model expects mel-spectrogram input features of length 3000
             # Whisper model needs input of shape (batch_size, num_mel_bins, 3000)
             # As the encoder of Whisper doesn't have embedding layer, input dtype has to be float
@@ -1060,7 +1009,7 @@ def quantize_main(
             else:
                 sample_input_single_batch = None
 
-            run_auto_quant = args.auto_quantize_bits is not None
+            run_auto_quant = aq_config is not None
 
             args.batch_size = get_max_batch_size(
                 language_model,
@@ -1074,7 +1023,15 @@ def quantize_main(
     print(f"Use calib batch_size {args.batch_size}")
 
     calib_dataloader, first_text_speech_dataset = make_calib_dataloader(
-        args, language_model, processor, tokenizer, device, model_type
+        args,
+        language_model,
+        processor,
+        tokenizer,
+        device,
+        model_type,
+        autoquant_gradient_recipe=(
+            aq_config is not None and aq_config.auto_quantize_method == "gradient"
+        ),
     )
 
     # Detect if this is a Nemotron VL model using architecture-based detection
@@ -1084,26 +1041,17 @@ def quantize_main(
         args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
     )
 
-    if args.auto_quantize_bits:
-        assert len(args.qformat.split(",")) > 1, (
-            "Auto quantization needs multiple quantization format."
-        )
-
-        # For VL models, autoquant must walk submodules of the OUTER CausalLM
-        # (which carries lm_head and the LM-head forward path) — otherwise
-        # lm_head and any sibling-of-language_model modules are silently
-        # invisible to the search. ``forward_step`` also needs the outer model
-        # to produce ``CausalLMOutputWithPast`` (for ``.loss`` / ``.logits``).
-        # Visual tower and MTP siblings are auto-excluded inside
-        # ``auto_quantize()`` via *visual* / *mtp* / *vision_tower* patterns.
-        auto_quantize(
+    if aq_config is not None:
+        assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
+        _run_auto_quantize_recipe(
             args,
+            recipe,
             full_model,
+            language_model,
+            model_type,
+            calibration_only,
             calib_dataloader,
-            auto_quantize_method=args.auto_quantize_method,
-            auto_quantize_score_size=args.auto_quantize_score_size,
-            auto_quantize_checkpoint=args.auto_quantize_checkpoint,
-            full_model=full_model,
+            is_nemotron_vl_model,
         )
 
     else:
@@ -1138,25 +1086,7 @@ def quantize_main(
                     KV_QUANT_CFG_CHOICES[args.kv_cache_qformat]["quant_cfg"],
                 )
 
-        # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92).
-        # These layers are typically speculative decoding layers that should be exported as-is.
-        # Complementary to recipe `*mtp*` wildcards (name-match); this catches MTP layers
-        # identified by index.
-        mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
-        if mtp_layer_prefixes:
-            quant_cfg = copy.deepcopy(quant_cfg)
-            for prefix in mtp_layer_prefixes:
-                pattern = f"*{prefix}*"
-                quant_cfg["quant_cfg"].append({"quantizer_name": pattern, "enable": False})
-                print(f"Excluding MTP layer from quantization: {pattern}")
-
-        if needs_checkpoint_path_update(quant_cfg):
-            quant_cfg, resolved_dir = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)
-            print(f"Auto-resolved layerwise checkpoint_dir: {resolved_dir}")
-
-        if args.cast_mxfp4_to_nvfp4:
-            quant_cfg = copy.deepcopy(quant_cfg)
-            force_weight_quantizers_static(quant_cfg["quant_cfg"])
+        quant_cfg = _prepare_quant_cfg(args, quant_cfg, full_model)
 
         if quant_cfg:
             mono_quantize(
@@ -1170,7 +1100,6 @@ def quantize_main(
                 is_nemotron_vl_model,
             )
         else:
-            assert model_type != "dbrx", f"Does not support export {model_type} without quantizaton"
             print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
 
     # If asked, run the closed-form MXFP4 -> NVFP4 cast: read the source MXFP4
@@ -1179,12 +1108,9 @@ def quantize_main(
     # to NVFP4StaticQuantizer with a data-derived ``_global_amax``); we just
     # override that scalar with the closed-form value before export.
     if args.cast_mxfp4_to_nvfp4:
-        # The cast reads the source MXFP4 ``*_scales``/``*_blocks`` tensors from a local
-        # checkpoint directory. ``--pyt_ckpt_path`` may be a HF Hub ID (e.g.
-        # ``openai/gpt-oss-20b``); resolve it to the local snapshot dir that load_model's
-        # ``from_pretrained`` already populated so the cast works with the documented command.
-        source_ckpt_dir = _resolve_model_path(args.pyt_ckpt_path, args.trust_remote_code)
-        apply_cast_mxfp4_to_nvfp4(language_model, source_ckpt_dir)
+        # The cast reads the source MXFP4 ``*_scales``/``*_blocks`` tensors from the local
+        # checkpoint directory main() downloaded.
+        apply_cast_mxfp4_to_nvfp4(language_model, args.local_checkpoint_path)
 
     post_quantize(
         args,
@@ -1198,8 +1124,6 @@ def quantize_main(
         generated_ids_before_ptq,
         is_nemotron_vl_model,
         first_text_speech_dataset,
-        default_padding_side,
-        default_pad_token,
         calib_dataloader,
     )
 
@@ -1211,16 +1135,21 @@ def parse_args() -> argparse.Namespace:
         "--model",
         help=(
             "Model name or path to the PyTorch checkpoint to be quantized. "
-            "Can be a local path or a Huggingface model name."
+            "Can be a local path or a Huggingface model name; a model name is downloaded in "
+            "full. To skip files, download it yourself (e.g. `hf download <name> --exclude "
+            "'original/*'`) and pass the local path."
         ),
         required=True,
     )
     parser.add_argument(
         "--recipe",
         help=(
-            "PTQ recipe YAML file or name without suffix (e.g. general/ptq/fp8_default-kv_fp8_cast, "
-            "general/ptq/nvfp4_default-kv_fp8_cast, general/ptq/nvfp4_default-kv_nvfp4_cast). "
-            "When set, --kv_cache_qformat is ignored; the recipe fully determines KV cache config."
+            "PTQ or AutoQuantize recipe YAML file or name without suffix (e.g. "
+            "general/ptq/nvfp4_default-kv_fp8_cast, general/auto_quantize/nvfp4_fp8_at_4p8bits). "
+            "KV cache behavior depends on the recipe type: PTQ recipes configure it in quant_cfg "
+            "and ignore --kv_cache_qformat; weight AutoQuantize recipes use their kv_cache setting "
+            "or fall back to --kv_cache_qformat; KV-cache AutoQuantize recipes select per-layer K/V "
+            "formats from candidate_formats and ignore --kv_cache_qformat."
         ),
         default=None,
     )
@@ -1228,10 +1157,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--qformat",
-        help=(
-            "Quantization format. If --auto_quantize_bits is set, this argument specifies the quantization "
-            "format for optimal per-layer auto_quantize search."
-        ),
+        action=RecipeSupersededAction,
+        help="Quantization format for single-format PTQ. For mixed-precision search, use an "
+        "AutoQuantize recipe via --recipe. (deprecated: use --recipe)",
         default="fp8",
     )
     parser.add_argument(
@@ -1292,16 +1220,8 @@ def parse_args() -> argparse.Namespace:
         choices=["dense", "sparsegpt"],
     )
     parser.add_argument(
-        "--auto_quantize_bits",
-        default=None,
-        type=float,
-        help=(
-            "Effective bits constraint for auto_quantize. If not set, "
-            "regular quantization without auto_quantize search will be applied."
-        ),
-    )
-    parser.add_argument(
         "--kv_cache_qformat",
+        action=RecipeSupersededAction,
         required=False,
         default="fp8_cast",
         choices=[KV_CACHE_NONE, *KV_QUANT_CFG_CHOICES],
@@ -1310,8 +1230,9 @@ def parse_args() -> argparse.Namespace:
             "Formats whose preset pins use_constant_amax on the KV bmm quantizer "
             "(e.g. fp8_cast, nvfp4_cast) set the amax to FP8 range without data-driven "
             "calibration; all other formats (fp8, nvfp4, ...) use data-driven calibration. "
-            "Ignored when --recipe is given: the recipe YAML is authoritative for KV "
-            "cache config (use the *_cast_kv.yaml recipes for the cast variants)."
+            "With --recipe, the source depends on the recipe type: a PTQ recipe is "
+            "authoritative for KV cache and ignores this flag; an AutoQuantize recipe "
+            "falls back to this flag unless it sets an explicit kv_cache field. (deprecated: use --recipe)"
         ),
     )
     parser.add_argument(
@@ -1348,6 +1269,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
     )
     parser.add_argument(
+        "--use_fsdp2",
+        action="store_true",
+        help=(
+            "Run calibration under PyTorch FSDP2 (requires torchrun); takes precedence over "
+            "--use_seq_device_map. v1: standard causal-LM only (no VILA / pack-quantized / "
+            "speculative / auto-quantize / sparsity / VLM / MTP)."
+        ),
+    )
+    parser.add_argument(
+        "--cpu_offload",
+        action="store_true",
+        help="With --use_fsdp2, keep decoder shards on CPU between forwards (frees GPU memory, adds PCIe traffic).",
+    )
+    parser.add_argument(
         "--verbose",
         help="Print verbose output (e.g. quantization summary). Disable by --no-verbose.",
         default=True,
@@ -1382,56 +1317,23 @@ def parse_args() -> argparse.Namespace:
         type=str,
     )
     parser.add_argument(
-        "--auto_quantize_method",
-        type=str,
-        default="gradient",
-        choices=["gradient", "kl_div"],
-        help=(
-            "Method for auto_quantize sensitivity analysis. 'gradient' uses gradient-based method "
-            "(requires labels in dataset). 'kl_div' uses KL divergence between original and "
-            "quantized model outputs (no labels required). Default: 'gradient'"
-        ),
-    )
-    parser.add_argument(
-        "--auto_quantize_score_size",
-        type=int,
-        default=128,
-        help=(
-            "Number of samples to use for auto_quantize scoring. Most of auto_quantize time is spent on "
-            "sensitivity score estimation, so reducing this speeds it up while only minimally affecting "
-            "final model accuracy compared to lowering --calib_size (the number of samples used for calibration)."
-        ),
-    )
-    parser.add_argument(
         "--auto_quantize_checkpoint",
         type=str,
         default=None,
         help=(
-            "Path to checkpoint file for saving/restoring auto_quantize search state "
-            "(sensitivity scores, costs, etc.). Only used when auto_quantize_bits is specified."
+            "Path to checkpoint file for saving/restoring weight AutoQuantize search state "
+            "(sensitivity scores, costs, etc.). Used with an AutoQuantize --recipe."
         ),
     )
     parser.add_argument(
-        "--auto_quantize_cost_model",
+        "--kv_auto_quantize_checkpoint",
         type=str,
-        default="weight",
-        choices=["weight", "active_moe"],
-        help=(
-            "Cost model for auto_quantize effective-bits accounting. 'weight' counts all "
-            "quantizable weights equally. 'active_moe' scales routed MoE expert weights by "
-            "--auto_quantize_active_moe_expert_ratio, or infers top_k/num_experts from model config."
-        ),
-    )
-    parser.add_argument(
-        "--auto_quantize_active_moe_expert_ratio",
-        type=float,
         default=None,
         help=(
-            "Routed MoE expert active ratio for --auto_quantize_cost_model active_moe. "
-            "For top-k MoE this is top_k / num_experts. If omitted, common model config "
-            "fields such as num_experts_per_tok and num_experts are used when available. "
-            "This only affects AutoQuant cost accounting and does not change calibration "
-            "routing; use --moe_calib_experts_ratio to control calibration expert coverage."
+            "Path for saving/restoring any KV-cache AutoQuantize search checkpoint. Use a new "
+            "path whenever the preceding weight/activation quantization stage changes. "
+            "KV-primary recipes temporarily accept --auto_quantize_checkpoint as a deprecated "
+            "fallback."
         ),
     )
     parser.add_argument(
@@ -1463,24 +1365,49 @@ def parse_args() -> argparse.Namespace:
             "openai/gpt-oss-20b) and the target qformat is NVFP4-family."
         ),
     )
+    parser.add_argument(
+        "--offload_folder",
+        type=str,
+        default=None,
+        help=(
+            "Path to a local folder for disk-offloaded model weights. "
+            "When set, activates disk-offload mode: model weights that exceed the GPU+CPU "
+            "budgets are streamed from disk during calibration and export. "
+            "Pair with --max_cpu_memory_gb to cap CPU RAM usage. "
+            "Incompatible with --low_memory_mode and --use_seq_device_map."
+        ),
+    )
+    parser.add_argument(
+        "--max_cpu_memory_gb",
+        type=float,
+        default=None,
+        help=(
+            "Maximum CPU RAM budget in GiB for disk-offload model loading. "
+            "Only effective when --offload_folder is set. "
+            "Weights beyond this limit are streamed from disk."
+        ),
+    )
+    parser.add_argument(
+        "--max_gpu_memory_gb",
+        type=float,
+        default=None,
+        help=(
+            "Maximum GPU memory budget per device in GiB for disk-offload model loading. "
+            "Only effective when --offload_folder is set. "
+            "Defaults to 80%% of available GPU memory when not specified."
+        ),
+    )
+
+    add_mlflow_args(parser, HF_PTQ)
 
     args = parser.parse_args()
+    # Flipped by export_quantized once a checkpoint is actually on disk. The MLflow pointer
+    # is gated on it rather than on --export_path existing, which proves nothing.
+    args.checkpoint_exported = False
+    resolve_mlflow_args(args, parser, HF_PTQ)
+
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
-    if args.auto_quantize_bits is not None and args.calib_with_images:
-        parser.error("--calib_with_images is not supported with --auto_quantize_bits.")
-    if args.auto_quantize_active_moe_expert_ratio is not None and not (
-        0.0 < args.auto_quantize_active_moe_expert_ratio <= 1.0
-    ):
-        parser.error("--auto_quantize_active_moe_expert_ratio must be in the range (0.0, 1.0].")
-    if (
-        args.auto_quantize_cost_model == "weight"
-        and args.auto_quantize_active_moe_expert_ratio is not None
-    ):
-        parser.error(
-            "--auto_quantize_active_moe_expert_ratio requires "
-            "--auto_quantize_cost_model active_moe."
-        )
 
     if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
         parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")
@@ -1494,13 +1421,53 @@ def parse_args() -> argparse.Namespace:
     # instrumenting a layout that diverges from the recipe.
     if args.low_memory_mode and args.recipe is not None:
         parser.error(
-            "--low_memory_mode does not yet support --recipe; the low-memory loader still "
-            "initializes quantizers from --qformat/--kv_cache_qformat."
+            "--low_memory_mode does not support --recipe; the low-memory loader initializes "
+            "quantizers from --qformat/--kv_cache_qformat."
+        )
+    if args.use_fsdp2 and args.use_seq_device_map:
+        warnings.warn("--use_seq_device_map is ignored when --use_fsdp2 is set.")
+        args.use_seq_device_map = False
+    if args.use_fsdp2 and os.environ.get("RANK") is None:
+        parser.error("--use_fsdp2 requires launching with torchrun")
+    if args.cpu_offload and not args.use_fsdp2:
+        parser.error("--cpu_offload requires --use_fsdp2")
+    if args.use_fsdp2 and args.sparsity_fmt != "dense":
+        parser.error(f"--use_fsdp2 does not support --sparsity_fmt {args.sparsity_fmt}.")
+    if args.use_fsdp2 and args.vllm_fakequant_export:
+        parser.error("--use_fsdp2 does not support --vllm_fakequant_export.")
+    if args.use_fsdp2 and args.cast_mxfp4_to_nvfp4:
+        parser.error("--use_fsdp2 does not support --cast_mxfp4_to_nvfp4.")
+
+    if args.offload_folder is not None and args.low_memory_mode:
+        parser.error("--offload_folder (disk-offload) is not compatible with --low_memory_mode.")
+
+    if args.offload_folder is not None and args.use_seq_device_map:
+        parser.error(
+            "--offload_folder (disk-offload) is not compatible with --use_seq_device_map; "
+            "device_map=auto is used for disk-offload to let accelerate place layers across "
+            "GPU, CPU, and disk."
+        )
+
+    if args.offload_folder is not None and args.device == "cpu":
+        parser.error(
+            "--offload_folder (disk-offload) is not compatible with --device cpu; "
+            "device_map=cpu makes accelerate ignore the memory budgets and offload folder, "
+            "loading the whole model into RAM."
+        )
+
+    if args.offload_folder is None and (
+        args.max_cpu_memory_gb is not None or args.max_gpu_memory_gb is not None
+    ):
+        parser.error(
+            "--max_cpu_memory_gb/--max_gpu_memory_gb only apply to disk-offload loading; "
+            "pass --offload_folder to enable it."
         )
 
     return args
 
 
+# Derived state and the tracking settings themselves; everything else argparse parsed is a
+# parameter of the run. Deriving the list means a new flag is tracked without touching this.
 def main(args: argparse.Namespace):
     if not torch.cuda.is_available():
         raise OSError("GPU is required for inference.")
@@ -1508,41 +1475,53 @@ def main(args: argparse.Namespace):
     random.seed(RAND_SEED)
     np.random.seed(RAND_SEED)
 
-    # launch a memory monitor to read the currently used GPU memory.
-    launch_memory_monitor()
+    setup_distributed_args(args)
 
-    # Force eager execution for all model types.
-    torch.compiler.set_stance("force_eager")
+    try:
+        # Entered inside the try: opening the run is fatal by design, and skipping
+        # cleanup_distributed would leave the other ranks blocked on the first collective
+        # until the NCCL timeout.
+        with mlflow_run(args):
+            # --pyt_ckpt_path stays as given. Every later step reads the local copy of the whole
+            # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local
+            # path.
+            args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
+                args.pyt_ckpt_path
+            )
 
-    (
-        full_model,
-        language_model,
-        model_type,
-        calibration_only,
-        processor,
-        tokenizer,
-        default_padding_side,
-        default_pad_token,
-        device,
-    ) = load_model(args)
+            # launch a memory monitor to read the currently used GPU memory.
+            launch_memory_monitor()
 
-    if args.sparsity_fmt != "dense":
-        # Sparse
-        sparsity_main(args, full_model, tokenizer, device)
-    else:
-        # Quantize
-        quantize_main(
-            args,
-            full_model,
-            language_model,
-            model_type,
-            calibration_only,
-            processor,
-            tokenizer,
-            default_padding_side,
-            default_pad_token,
-            device,
-        )
+            # Force eager execution for all model types.
+            torch.compiler.set_stance("force_eager")
+
+            (
+                full_model,
+                language_model,
+                model_type,
+                calibration_only,
+                processor,
+                tokenizer,
+                device,
+            ) = load_model(args)
+
+            if args.sparsity_fmt != "dense":
+                # Sparse
+                sparsity_main(args, full_model, tokenizer, device)
+            else:
+                # Quantize
+                quantize_main(
+                    args,
+                    full_model,
+                    language_model,
+                    model_type,
+                    calibration_only,
+                    processor,
+                    tokenizer,
+                    device,
+                )
+    finally:
+        cleanup_distributed(args)
 
 
 if __name__ == "__main__":
@@ -1565,11 +1544,6 @@ if __name__ == "__main__":
             raise ValueError(
                 "--cast_mxfp4_to_nvfp4 requires NVFP4-family --qformat values "
                 f"(got {args.qformat!r}). Use e.g. --qformat nvfp4 or nvfp4_mlp_only."
-            )
-        if args.auto_quantize_bits is not None:
-            raise ValueError(
-                "--cast_mxfp4_to_nvfp4 is not supported with --auto_quantize_bits "
-                "(multi-format auto-quantize)."
             )
 
     main(args)

@@ -25,14 +25,17 @@ from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
     get_tiny_gpt_oss,
     get_tiny_llama,
+    get_tiny_nemotron_h,
     get_tiny_qwen3_moe,
     tf_modelopt_state_and_output_tester,
 )
 from packaging.version import Version
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry
+from modelopt.recipe.loader import load_recipe
+from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
+    _QuantHFParallelLinear,
     _TransposedExpertsCalibMixin,
     get_homogeneous_hf_decoder_layers,
     is_homogeneous_hf_model,
@@ -43,8 +46,7 @@ pytest.importorskip("transformers")
 
 import transformers
 from transformers import AutoModelForCausalLM, LlamaForCausalLM
-from transformers.models.dbrx.configuration_dbrx import DbrxConfig, DbrxFFNConfig
-from transformers.models.dbrx.modeling_dbrx import DbrxExpertGLU, DbrxExperts, DbrxFFN
+from transformers.integrations.finegrained_fp8 import FP8Linear
 
 
 class HFModel(nn.Module):
@@ -72,6 +74,32 @@ class PytorchModel(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+def test_hf_parallel_weight_access_restores_dtensor_after_exception(monkeypatch):
+    class FakeDTensor:
+        placements = ("shard",)
+
+        @staticmethod
+        def to_local():
+            return torch.ones(2, 2)
+
+    class ParallelLinear:
+        weight = FakeDTensor()
+        shard = FakeDTensor.placements
+
+    monkeypatch.setattr(torch.distributed.tensor, "DTensor", FakeDTensor)
+    linear = ParallelLinear()
+    original_weight = linear.weight
+
+    with (
+        pytest.raises(RuntimeError, match="test error"),
+        _QuantHFParallelLinear.enable_weight_access_and_writeback(linear),
+    ):
+        assert isinstance(linear.weight, nn.Parameter)
+        raise RuntimeError("test error")
+
+    assert linear.weight is original_weight
 
 
 def test_convert_conv1d():
@@ -107,51 +135,60 @@ def test_convert_conv1d():
     assert torch.allclose(out_1, out_2)
 
 
-@pytest.mark.skipif(
-    Version(transformers.__version__) < Version("5.0"),
-    reason="test_dbrx is not supported for transformers<5.0",
-)
-def test_dbrx():
-    assert DbrxExperts in QuantModuleRegistry
-    assert DbrxExpertGLU in QuantModuleRegistry
-
-    config = DbrxConfig(
-        ffn_config=DbrxFFNConfig(ffn_hidden_size=8, moe_num_experts=2, hidden_size=32),
-        hidden_size=32,
-    )
-
-    model_ref = DbrxFFN(config)
-    model_test = DbrxFFN(config)
+def test_fp8_linear_per_tensor_dequant(monkeypatch):
+    module = FP8Linear(2, 2, block_size=(128, 128))
+    module.weight_scale_inv = nn.Parameter(torch.tensor(2.0))
     with torch.no_grad():
-        model_ref.experts.mlp.w1.copy_(torch.randn(16, 32))
-        model_ref.experts.mlp.v1.copy_(torch.randn(16, 32))
-        model_ref.experts.mlp.w2.copy_(torch.randn(16, 32))
+        module.weight.copy_(torch.tensor([[-2.0, 1.0], [0.5, 4.0]], dtype=torch.float8_e4m3fn))
 
-    model_test.load_state_dict(model_ref.state_dict())
+    mtq.replace_quant_module(module)
+    monkeypatch.setattr("modelopt.torch.quantization.plugins.huggingface.weight_dequant", None)
 
-    mtq.replace_quant_module(model_test)
-
-    expertglu_ref = model_ref.experts.mlp
-    expertglu_test = model_test.experts.mlp
-
-    assert hasattr(expertglu_test, "w1_linear") and not hasattr(expertglu_test, "w1")
-    assert hasattr(expertglu_test, "v1_linear") and not hasattr(expertglu_test, "v1")
-    assert hasattr(expertglu_test, "w2_linear") and not hasattr(expertglu_test, "w2")
-
-    # Weights are stored transposed (W = w1[i].T) to match F.linear semantics with
-    # transformers 5.0's raw matmul: x @ w1[i] = F.linear(x, w1[i].T)
-    assert torch.allclose(
-        torch.concat([m.weight.T for m in expertglu_test.w1_linear], dim=0),
-        expertglu_ref.w1,
+    assert module.block_size is None
+    torch.testing.assert_close(
+        module._dequantize_weight(torch.float32), module.weight.float() * 2.0
     )
 
-    mtq.set_quantizer_attributes_partial(model_test, "*", {"enable": False})
 
-    # In transformers 5.0, the FFN input dimension is ffn_hidden_size (not hidden_size)
-    x = torch.randn(1, 4, 8)
-    out_1 = model_ref(x)
-    out_2 = model_test(x)
-    assert torch.allclose(out_1[0], out_2[0])
+@pytest.mark.skipif(
+    not hasattr(transformers, "NemotronHConfig"),
+    reason="NemotronH is not supported by this Transformers version",
+)
+@pytest.mark.parametrize(
+    "recipe_path",
+    [
+        "general/ptq/nvfp4_experts_only-kv_fp8",
+        "general/ptq/nvfp4_experts_only-kv_fp8_cast",
+        "general/ptq/nvfp4_experts_only-kv_fp8_layerwise",
+        "general/ptq/nvfp4_experts_only_mse-kv_fp8_cast",
+    ],
+)
+def test_nemotron_h_experts_only_recipes_target_routed_experts(recipe_path):
+    model = get_tiny_nemotron_h(
+        num_hidden_layers=1,
+        hybrid_override_pattern="E",
+        n_routed_experts=2,
+    )
+    mtq.replace_quant_module(model)
+
+    recipe = load_recipe(recipe_path)
+    mtq.set_quantizer_by_cfg(model, recipe.quantize.model_dump()["quant_cfg"])
+
+    routed_expert_quantizers = {
+        name: module
+        for name, module in model.named_modules()
+        if ".mixer.experts." in name and isinstance(module, TensorQuantizer)
+    }
+    shared_expert_quantizers = {
+        name: module
+        for name, module in model.named_modules()
+        if ".mixer.shared_experts." in name and isinstance(module, TensorQuantizer)
+    }
+
+    assert routed_expert_quantizers
+    assert all(module.is_enabled for module in routed_expert_quantizers.values())
+    assert shared_expert_quantizers
+    assert not any(module.is_enabled for module in shared_expert_quantizers.values())
 
 
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])
@@ -227,6 +264,16 @@ def test_quantized_transformers_save_restore(tmp_path, model_cls, quant_config):
 def test_is_homogeneous_hf_model_llama():
     model = get_tiny_llama()
     assert is_homogeneous_hf_model(model)
+
+
+def test_is_homogeneous_hf_vlm_language_model():
+    model = get_tiny_llama()
+    language_model = nn.Module()
+    language_model.layers = nn.ModuleList([nn.Linear(4, 4), nn.Linear(4, 4)])
+    model.model.language_model = language_model
+
+    assert is_homogeneous_hf_model(model)
+    assert get_homogeneous_hf_decoder_layers(model) is language_model.layers
 
 
 def test_is_homogeneous_hf_model_gpt_oss():

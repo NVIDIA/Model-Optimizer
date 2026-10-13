@@ -15,11 +15,14 @@
 
 """Module to evaluate a device model for the specified task."""
 
+import os
 import random
+from pathlib import Path
 from typing import Final
 
 import torch
 from datasets import load_dataset
+from PIL import Image
 from tqdm import tqdm
 
 from modelopt.torch._deploy.device_model import DeviceModel
@@ -58,6 +61,61 @@ class ImageNetWrapper(torch.utils.data.Dataset):
         return image, label
 
 
+class LocalImageNetDataset(torch.utils.data.Dataset):
+    """Local ImageNet validation set from a flat directory and a label file.
+
+    Expects:
+      <root>/validation/ILSVRC2012_val_XXXXXXXX.JPEG  (50k images, flat)
+      <root>/val.txt  (one line per image: "<filename> <class_idx>")
+    """
+
+    def __init__(self, root, transform=None):
+        """Initialize the dataset.
+
+        Args:
+            root: Path to the ImageNet root directory.
+            transform: Optional transform to apply to images.
+        """
+        img_dir = Path(root) / "validation"
+        with open(Path(root) / "val.txt") as f:
+            entries = [line.strip().split() for line in f]
+        self.samples = [(img_dir / name, int(label)) for name, label in entries]
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        path, label = self.samples[idx]
+        with Image.open(path) as img:
+            image = img.convert("RGB")
+        if self.transform:
+            image = self.transform(image)
+        return image, label
+
+
+def _load_dataset(dataset_path: str):
+    """Load an ImageNet-style dataset from a local directory or HF Hub.
+
+    Supports three path types:
+    - HF Hub dataset card name (e.g. ILSVRC/imagenet-1k)
+    - Local HF dataset mirror with data/validation* shards
+    - Local ImageNet root with flat validation dir + val.txt
+    """
+    if os.path.isfile(os.path.join(dataset_path, "val.txt")):
+        # Local ImageNet: flat validation/ dir + val.txt label file
+        return None, dataset_path
+    return (
+        load_dataset(
+            dataset_path,
+            split="validation",
+            data_files={"validation": "data/validation*"},
+            verification_mode="no_checks",
+        ),
+        None,
+    )
+
+
 def evaluate(
     model: torch.nn.Module | DeviceModel,
     transform,
@@ -66,6 +124,7 @@ def evaluate(
     num_examples=None,
     device="cuda",
     dataset_path="ILSVRC/imagenet-1k",
+    seed=0,
 ):
     """Evaluate a model for the given dataset.
 
@@ -76,29 +135,36 @@ def evaluate(
         batch_size: Batch size to use for evaluation. Currently only batch_size=1 is supported.
         num_examples: Number of examples to evaluate on. If None, evaluate on the entire dataset.
         device: Device to run evaluation on. Supported devices: "cpu" and "cuda". Defaults to "cuda".
-        dataset_path: HF dataset card or local path to the imagenet dataset. Defaults to "ILSVRC/imagenet-1k".
+        dataset_path: HF dataset card (e.g. "ILSVRC/imagenet-1k"), local HF mirror with
+            data/validation* shards, or local ImageNet root dir containing val.txt and
+            a flat validation/ directory. Defaults to "ILSVRC/imagenet-1k".
+        seed: Random seed for the DataLoader shuffle, ensuring reproducible image sampling across
+            runs. Defaults to 0.
     Returns:
         The evaluation result.
     """
+    hf_dataset, local_root = _load_dataset(dataset_path)
+    if local_root is not None:
+        val_dataset = LocalImageNetDataset(local_root, transform=transform)
+    else:
+        val_dataset = ImageNetWrapper(hf_dataset, transform=transform)
 
-    # Load imagenet-1k from Hugging Face
-    dataset = load_dataset(
-        dataset_path,
-        split="validation",
-        data_files={
-            "validation": "data/validation*",
-        },
-        verification_mode="no_checks",
-    )
-    val_dataset = ImageNetWrapper(dataset, transform=transform)
+    generator = torch.Generator()
+    generator.manual_seed(seed)
     val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=True, num_workers=4
+        val_dataset, batch_size=batch_size, shuffle=True, num_workers=4, generator=generator
     )
 
     # TODO: Add support for segmentation tasks.
     if evaluation_type == ACCURACY:
         return evaluate_accuracy(
-            model, val_loader, num_examples, batch_size, topk=(1, 5), device=device
+            model,
+            val_loader,
+            num_examples,
+            batch_size,
+            topk=(1, 5),
+            random_seed=seed,
+            device=device,
         )
     else:
         raise ValueError(f"Unsupported evaluation type: {evaluation_type}")
@@ -124,7 +190,7 @@ def evaluate_accuracy(
         The accuracy of the model on the validation dataset.
     """
 
-    if random_seed:
+    if random_seed is not None:
         torch.manual_seed(random_seed)
         torch.cuda.manual_seed_all(random_seed)
         random.seed(random_seed)

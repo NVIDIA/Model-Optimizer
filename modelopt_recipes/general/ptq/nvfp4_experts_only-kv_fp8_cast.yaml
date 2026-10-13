@@ -15,6 +15,7 @@
 
 # Composed PTQ recipe for expert-only dynamic NVFP4 quantization with FP8 KV-cache cast mode.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -22,7 +23,6 @@ imports:
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: ptq
   description: >-
     Applies dynamic NVFP4 only to expert-layer weight and input quantizers, plus FP8 KV-cache cast
     mode using constant amax; uses max calibration.
@@ -30,15 +30,15 @@ quantize:
   algorithm:
     method: max
     # Max calibration is fast and does not typically need checkpointing.
-    # layerwise=false required for VLMs where the decoder layers are nested under
+    # layerwise.enable=false required for VLMs where the decoder layers are nested under
     # `model.language_model.layers` (layerwise_calibrate can't find them otherwise).
-    layerwise: false
+    layerwise: {enable: false}
   quant_cfg:
     - $import: base_disable_all
-    - quantizer_name: '*mlp.experts*weight_quantizer'
+    - quantizer_name: '*.experts.*weight_quantizer'
       cfg:
         $import: nvfp4
-    - quantizer_name: '*mlp.experts*input_quantizer'
+    - quantizer_name: '*.experts.*input_quantizer'
       cfg:
         $import: nvfp4
     - quantizer_name: '*block_sparse_moe*weight_quantizer'

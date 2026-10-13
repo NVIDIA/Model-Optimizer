@@ -25,6 +25,7 @@ modelopt/torch/_deploy @NVIDIA/modelopt-torch-deploy-codeowners
 modelopt/torch/distill @NVIDIA/modelopt-torch-distill-codeowners
 modelopt/torch/export @NVIDIA/modelopt-torch-export-codeowners
 modelopt/torch/fastgen @NVIDIA/modelopt-torch-fastgen-codeowners
+modelopt/torch/kernels @NVIDIA/modelopt-torch-kernels-codeowners
 modelopt/torch/nas @NVIDIA/modelopt-torch-nas-prune-codeowners
 modelopt/torch/opt @NVIDIA/modelopt-torch-opt-codeowners
 modelopt/torch/peft @NVIDIA/modelopt-torch-peft-codeowners
@@ -56,11 +57,15 @@ modelopt_recipes @NVIDIA/modelopt-recipes-codeowners
 /examples/onnx_ptq @NVIDIA/modelopt-onnx-codeowners
 /examples/pruning @NVIDIA/modelopt-torch-nas-prune-codeowners
 /examples/puzzletron @NVIDIA/modelopt-torch-puzzletron-codeowners
-/examples/specdec_bench @NVIDIA/modelopt-torch-speculative-codeowners
+/examples/specdec_bench @NVIDIA/modelopt-examples-specdec_bench-codeowners
 /examples/speculative_decoding @NVIDIA/modelopt-torch-speculative-codeowners
 /examples/torch_onnx @NVIDIA/modelopt-onnx-codeowners
+/examples/torch_trt @NVIDIA/modelopt-onnx-codeowners
 /examples/vllm_serve @NVIDIA/modelopt-examples-llm_ptq-codeowners
 /examples/windows @NVIDIA/modelopt-windows-codeowners
+
+# Agent plugin (skills, agent config)
+/plugins @NVIDIA/modelopt-agents-codeowners
 
 # Requirements files are owned by the setup team regardless of location
 requirements*.txt @NVIDIA/modelopt-setup-codeowners

@@ -271,10 +271,12 @@ First, prepare input conversation skeletons using `--mode generate` (default) fr
 
 ```bash
 pip install vllm
-vllm serve meta-llama/Llama-3.2-1B-Instruct --api-key token-abc123 --port 8000  --tensor-parallel-size 1
+vllm serve meta-llama/Llama-3.2-1B-Instruct --api-key token-abc123 --port 8000 --generation-config vllm --tensor-parallel-size 1
 ```
 
 Note: Add `--quantization=modelopt` flag for quantized models.
+
+The `--generation-config vllm` server option avoids a checkpoint-specific output cap.
 
 Then, we generate conversations with the base model using the prepared prompts:
 
@@ -282,7 +284,48 @@ Then, we generate conversations with the base model using the prepared prompts:
 python scripts/server_generate.py --data_path input_conversations/train.jsonl --output_path synthetic/train.jsonl
 ```
 
-To add a system prompt, use the `--system_prompt <system_prompt_text>` argument.
+Inputs can use `conversations` or `messages`, with either full conversations or user-only
+skeletons. Every user turn gets a fresh response using the previously generated responses
+as history. Input system messages are preserved; `--system_prompt <system_prompt_text>`
+overrides them and emits a warning when an input system message is replaced.
+Output remains one full conversation per JSONL record, with no train/eval/test
+split or expansion into separate assistant-turn examples. Existing output IDs are skipped on resume.
+
+Use `--extra_body` to pass model-specific chat parameters, including thinking controls and
+sampling settings. For example, with a compatible Qwen server and reasoning parser:
+
+```bash
+python scripts/server_generate.py --data_path input_conversations/train.jsonl \
+    --output_path synthetic/train.jsonl --model qwen3.8-27b --temperature 1.0 --max_tokens 8192 \
+    --extra_body '{"reasoning_effort":"medium","top_p":0.95,"top_k":20,"chat_template_kwargs":{"enable_thinking":true,"preserve_thinking":true}}'
+```
+
+The client uses the server's default thinking mode and effort unless overridden through
+`--extra_body`. Returned reasoning is saved in the
+assistant's `reasoning_content` field and included in subsequent requests. Token-capped
+conversations retain the existing `truncated: true` flag and need filtering before training.
+Failed conversations and partial answers are excluded from training output. Generation continues
+after per-conversation failures and records each one in `<output_path>.failures`, a JSONL journal
+whose filename deliberately does not end in `.jsonl` so the shard combiner ignores it.
+
+Rerun the same command with the same input ordering and output path to resume. Completed
+conversation IDs are skipped. Connection errors, timeouts, rate limits, and temporary server
+errors remain retryable on resume. Empty final answers also remain retryable when `--temperature`
+is greater than zero. At temperature zero, empty final answers are recorded as rejected to
+avoid repeating greedy-generation failures. Other rejected inputs and responses, including
+unsupported tool roles or calls and HTTP 400/422 responses, are skipped on ordinary resume.
+Inspect the journal and use `--retry_failed` to retry these rejections after correcting the
+input or request settings. This script has no tool-execution loop.
+
+Use `--fail_on_error` to return a nonzero exit status if failures remain after the batch finishes.
+Authentication failures, missing endpoints or models, and unexpected internal or output-write
+errors still exit nonzero by default. When `--log_empty_conversations` is enabled, the `finished` marker means
+every conversation is either saved or recorded as rejected; no marker is appended while
+retryable failures remain. Always inspect the failure journal before using the generated data.
+
+For chat generation, `--max_tokens 0` sends no fixed response cap; the server determines
+the budget from its configured context window and generation defaults. Increase
+`--request_timeout` (seconds, default 600) when long responses need more time.
 
 For large scale data generation, please see [SLURM prepare data](SLURM_prepare_data.md) for SLURM support.
 

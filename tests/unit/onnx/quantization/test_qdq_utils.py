@@ -15,23 +15,34 @@
 
 import warnings
 
+import ml_dtypes
 import numpy as np
+import onnx
 import onnx_graphsurgeon as gs
 import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
-from modelopt.onnx.export import INT4QuantExporter, MXFP8QuantExporter, NVFP4QuantExporter
-from modelopt.onnx.export.nvfp4_exporter import _cast_fp4, _cast_fp8
+from modelopt.onnx.export import (
+    FP8QuantExporter,
+    INT4QuantExporter,
+    MXFP8QuantExporter,
+    NVFP4QuantExporter,
+)
+from modelopt.onnx.export.nvfp4_exporter import _cast_fp4
+from modelopt.onnx.quantization.gs_patching import _export_value_info_proto
 from modelopt.onnx.quantization.qdq_utils import (
+    _cast_fp8,
     apply_column_major_transformation,
     fp4qdq_to_2dq,
     insert_transpose_nodes_for_column_major,
+    qdq_to_dq,
     quantize_weights_to_int4,
     quantize_weights_to_mxfp8,
     replace_zero_scale_with_smallest_nonzero,
 )
 from modelopt.onnx.quantization.quant_utils import pack_float32_to_4bit_cpp_based
+from modelopt.onnx.utils import get_opset_version
 
 
 def create_test_model_with_int4_dq_reshape_transpose_matmul(constant_scale: bool = False):
@@ -333,8 +344,7 @@ def create_test_model_with_nvfp4_qdq(with_transpose: bool = False):
         value_info=value_info,
     )
 
-    model = helper.make_model(graph)
-    return model
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)])
 
 
 class TestQuantizeWeightsToInt4:
@@ -482,6 +492,57 @@ class TestCastFunctions:
         assert np.all(result == expected_array)
 
 
+class TestFP8QuantExporter:
+    """Test suite for FP8QuantExporter."""
+
+    def test_bf16_weights_and_scale_are_compressed(self):
+        weight_data = np.array([0.001312255859375], dtype=ml_dtypes.bfloat16)
+        scale_data = np.array(0.00099945068359375, dtype=ml_dtypes.bfloat16)
+        weight = gs.Constant("weight", weight_data)
+        scale = gs.Constant("linear/weight_quantizer/scale", scale_data)
+        quantized = gs.Variable("quantized", dtype=np.uint8, shape=weight_data.shape)
+        dequantized = gs.Variable(
+            "dequantized", dtype=TensorProto.BFLOAT16, shape=weight_data.shape
+        )
+        value_info = _export_value_info_proto(dequantized, do_type_check=True)
+        assert value_info.type.tensor_type.elem_type == TensorProto.BFLOAT16
+        graph = gs.Graph(
+            nodes=[
+                gs.Node(
+                    op="TRT_FP8QuantizeLinear",
+                    inputs=[weight, scale],
+                    outputs=[quantized],
+                ),
+                gs.Node(
+                    op="TRT_FP8DequantizeLinear",
+                    inputs=[quantized, scale],
+                    outputs=[dequantized],
+                ),
+            ],
+            outputs=[dequantized],
+            opset=23,
+        )
+
+        converted_model = FP8QuantExporter.compress_weights(gs.export_onnx(graph))
+
+        onnx.checker.check_model(converted_model)
+        assert [node.op_type for node in converted_model.graph.node] == ["DequantizeLinear"]
+        assert converted_model.graph.output[0].type.tensor_type.elem_type == TensorProto.BFLOAT16
+        fp8_weight = next(
+            initializer
+            for initializer in converted_model.graph.initializer
+            if initializer.name == "linear/weight_quantizer/fp8_weights"
+        )
+        assert fp8_weight.data_type == TensorProto.FLOAT8E4M3FN
+        assert fp8_weight.raw_data == b"\x3b"
+        output_scale = next(
+            initializer
+            for initializer in converted_model.graph.initializer
+            if initializer.name == scale.name
+        )
+        assert output_scale.data_type == TensorProto.BFLOAT16
+
+
 class TestMXFP8QuantExporter:
     """Test suite for MXFP8QuantExporter."""
 
@@ -604,6 +665,8 @@ class TestFP4QDQTo2DQ:
 
         # Run FP4QDQ to 2DQ conversion
         converted_model = NVFP4QuantExporter.process_model(model)
+
+        assert get_opset_version(converted_model) == 23
 
         # Verify TRT_FP4QDQ node is removed
         fp4qdq_nodes = [node for node in converted_model.graph.node if node.op_type == "TRT_FP4QDQ"]
@@ -1097,6 +1160,267 @@ class TestReplaceZeroScaleWithSmallestNonzero:
         scale_arr = numpy_helper.to_array(value_attr.t)
         assert not (scale_arr == 0).any()
         assert (scale_arr > 0).all()
+
+
+def create_test_model_with_dq_transpose_matmul(
+    out_features: int,
+    in_features: int,
+    *,
+    perm: tuple[int, ...] | None = (1, 0),
+    q_axis: int = 0,
+    transpose: bool = True,
+    declare_axis: bool = True,
+    single_scale: bool = False,
+):
+    """Create weight[out, in] -> Q -> DQ -> Transpose -> MatMul, per-channel on the out axis.
+
+    This is how a torch ``Linear`` exports when the weight reaches MatMul transposed, as in
+    MaxViT's attention blocks. ``perm=None`` omits the attribute, which ONNX defines as
+    reversing the axes.
+    """
+    rng = np.random.RandomState(7)
+    weight = rng.randn(out_features, in_features).astype(np.float32)
+    if single_scale:
+        # One element: covers the whole weight and broadcasts, whatever the axis says.
+        scale = np.array([np.abs(weight).max() / 127.0], dtype=np.float32)
+        zero_point = np.zeros(1, dtype=np.int8)
+    else:
+        reduced = tuple(axis for axis in range(2) if axis != q_axis)
+        scale = (np.abs(weight).max(axis=reduced) / 127.0).astype(np.float32)
+        zero_point = np.zeros(weight.shape[q_axis], dtype=np.int8)
+
+    # ONNX defaults an omitted `axis` to 1, so a caller omitting it must pass q_axis=1.
+    axis_attr = {"axis": q_axis} if declare_axis else {}
+    nodes = [
+        helper.make_node(
+            "QuantizeLinear", ["weight", "w_scale", "w_zp"], ["w_q"], name="w_q", **axis_attr
+        ),
+        helper.make_node(
+            "DequantizeLinear", ["w_q", "w_scale", "w_zp"], ["w_dq"], name="w_dq", **axis_attr
+        ),
+    ]
+    matmul_rhs = "w_dq"
+    if transpose:
+        nodes.append(
+            helper.make_node(
+                "Transpose",
+                ["w_dq"],
+                ["w_t"],
+                name="w_t",
+                **({} if perm is None else {"perm": list(perm)}),
+            )
+        )
+        matmul_rhs = "w_t"
+    nodes.append(helper.make_node("MatMul", ["input", matmul_rhs], ["output"], name="matmul"))
+
+    rows, cols = (in_features, out_features) if transpose else (out_features, in_features)
+    graph = helper.make_graph(
+        nodes=nodes,
+        name="dq_transpose_matmul",
+        inputs=[helper.make_tensor_value_info("input", TensorProto.FLOAT, [3, rows])],
+        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [3, cols])],
+        initializer=[
+            numpy_helper.from_array(weight, "weight"),
+            numpy_helper.from_array(scale, "w_scale"),
+            numpy_helper.from_array(zero_point, "w_zp"),
+        ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+    return model
+
+
+class TestQdqToDqTranspose:
+    """qdq_to_dq must trace a Transpose and follow the Q/DQ pair's own quantization axis."""
+
+    # Square weights are the dangerous shape: the scale length matches either axis, so a
+    # wrong axis passes validation and silently changes the model's output.
+    @pytest.mark.parametrize(
+        ("out_features", "in_features", "q_axis", "transpose", "declare_axis"),
+        [
+            (96, 32, 0, True, True),
+            (32, 32, 0, True, True),
+            (32, 32, 0, False, True),
+            (32, 32, 1, True, True),
+            (32, 32, 1, True, False),
+        ],
+    )
+    def test_conversion_matches_qdq(
+        self, out_features, in_features, q_axis, transpose, declare_axis
+    ):
+        """The DequantizeLinear left in the graph dequantizes along its own axis."""
+        model = create_test_model_with_dq_transpose_matmul(
+            out_features,
+            in_features,
+            q_axis=q_axis,
+            transpose=transpose,
+            declare_axis=declare_axis,
+        )
+        rows = in_features if transpose else out_features
+        inputs = {"input": np.random.RandomState(11).randn(3, rows).astype(np.float32)}
+
+        def run(m):
+            return ort.InferenceSession(
+                m.SerializeToString(), providers=["CPUExecutionProvider"]
+            ).run(None, inputs)[0]
+
+        expected = run(model)
+        converted = qdq_to_dq(onnx.ModelProto.FromString(model.SerializeToString()))
+
+        assert not [n for n in converted.graph.node if n.op_type == "QuantizeLinear"]
+        weight = next(t for t in converted.graph.initializer if t.name == "weight")
+        assert weight.data_type == TensorProto.INT8
+        assert np.array_equal(run(converted), expected)
+
+    def test_dq_transpose_without_perm_is_traced(self):
+        """ONNX lets Transpose omit `perm`; the MatMul behind it must still be found."""
+        model = create_test_model_with_dq_transpose_matmul(96, 32, perm=None)
+        initializer = {t.name: numpy_helper.to_array(t) for t in model.graph.initializer}
+
+        converted = qdq_to_dq(model)
+
+        # onnxruntime cannot execute DQ -> Transpose(no perm) -> MatMul, so check the
+        # converted weight directly. The Q/DQ pair declares axis 0.
+        expected = np.clip(
+            np.round(initializer["weight"] / initializer["w_scale"][:, None]), -128, 127
+        ).astype(np.int8)
+        actual = next(t for t in converted.graph.initializer if t.name == "weight")
+        assert np.array_equal(numpy_helper.to_array(actual), expected)
+
+    def test_one_element_scale_is_not_per_axis(self):
+        """A one-element scale is broadcast over the whole weight, not indexed per axis."""
+        # A single-output-channel Conv: reading the (1,) scale as per-axis would pick the
+        # DQ's default axis 1 and reject a graph that converts fine.
+        weight = np.random.RandomState(3).randn(1, 3, 3, 3).astype(np.float32)
+        graph = helper.make_graph(
+            nodes=[
+                helper.make_node(
+                    "QuantizeLinear", ["weight", "w_scale", "w_zp"], ["w_q"], name="w_q"
+                ),
+                helper.make_node(
+                    "DequantizeLinear", ["w_q", "w_scale", "w_zp"], ["w_dq"], name="w_dq"
+                ),
+                helper.make_node(
+                    "Conv", ["input", "w_dq"], ["output"], name="conv", kernel_shape=[3, 3]
+                ),
+            ],
+            name="one_element_scale",
+            inputs=[helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3, 8, 8])],
+            outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 1, 6, 6])],
+            initializer=[
+                numpy_helper.from_array(weight, "weight"),
+                numpy_helper.from_array(
+                    np.array([np.abs(weight).max() / 127.0], np.float32), "w_scale"
+                ),
+                numpy_helper.from_array(np.array([0], np.int8), "w_zp"),
+            ],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
+        model.ir_version = 10
+        onnx.checker.check_model(model)
+        inputs = {"input": np.random.RandomState(5).randn(1, 3, 8, 8).astype(np.float32)}
+
+        def run(m):
+            return ort.InferenceSession(
+                m.SerializeToString(), providers=["CPUExecutionProvider"]
+            ).run(None, inputs)[0]
+
+        expected = run(model)
+        converted = qdq_to_dq(onnx.ModelProto.FromString(model.SerializeToString()))
+        assert np.array_equal(run(converted), expected)
+
+    @pytest.mark.parametrize(("out_features", "in_features"), [(1, 32), (32, 1)])
+    def test_one_element_scale_broadcasts_through_transpose(self, out_features, in_features):
+        """A single scale covers the whole weight, so no axis of it has to be length 1."""
+        model = create_test_model_with_dq_transpose_matmul(
+            out_features, in_features, single_scale=True
+        )
+        inputs = {"input": np.random.RandomState(11).randn(3, in_features).astype(np.float32)}
+
+        def run(m):
+            return ort.InferenceSession(
+                m.SerializeToString(), providers=["CPUExecutionProvider"]
+            ).run(None, inputs)[0]
+
+        expected = run(model)
+        converted = qdq_to_dq(onnx.ModelProto.FromString(model.SerializeToString()))
+
+        assert not [n for n in converted.graph.node if n.op_type == "QuantizeLinear"]
+        assert np.array_equal(run(converted), expected)
+
+    def test_disagreeing_qdq_axes_raise(self):
+        """Following the DQ while the Q declares another axis would change the output."""
+        model = create_test_model_with_dq_transpose_matmul(32, 32, q_axis=0, transpose=False)
+        q_node = next(node for node in model.graph.node if node.name == "w_q")
+        next(attr for attr in q_node.attribute if attr.name == "axis").i = 1
+
+        with pytest.raises(RuntimeError, match="disagrees with DequantizeLinear axis"):
+            qdq_to_dq(model)
+
+
+class TestQdqToDqValidation:
+    """Regression tests for qdq_to_dq input validation."""
+
+    def test_quantize_linear_without_inputs_raises_value_error(self):
+        q_node = helper.make_node("QuantizeLinear", inputs=[], outputs=["q_output"], name="bad_q")
+        graph = helper.make_graph(
+            nodes=[q_node],
+            name="test_graph",
+            inputs=[],
+            outputs=[helper.make_tensor_value_info("q_output", TensorProto.INT8, [1])],
+        )
+        model = helper.make_model(graph)
+
+        with pytest.raises(ValueError, match="QuantizeLinear node bad_q has no inputs"):
+            qdq_to_dq(model)
+
+    def test_preserves_floating_weight_graph_output(self):
+        """Keep an exposed floating weight unchanged when folding its Q into an initializer."""
+        weight = np.array([[0.3, -0.6], [0.9, 1.1]], dtype=np.float32)
+        data = np.array([[2.0, -1.0]], dtype=np.float32)
+        model = helper.make_model(
+            helper.make_graph(
+                [
+                    helper.make_node(
+                        "QuantizeLinear", ["weight", "scale", "zero"], ["quantized"], name="q"
+                    ),
+                    helper.make_node(
+                        "DequantizeLinear",
+                        ["quantized", "scale", "zero"],
+                        ["dequantized"],
+                        name="dq",
+                    ),
+                    helper.make_node("MatMul", ["input", "dequantized"], ["output"], name="matmul"),
+                ],
+                "exposed_weight",
+                [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 2])],
+                [
+                    helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 2]),
+                    helper.make_tensor_value_info("weight", TensorProto.FLOAT, [2, 2]),
+                ],
+                [
+                    numpy_helper.from_array(weight, "weight"),
+                    numpy_helper.from_array(np.array([0.25, 0.25], dtype=np.float32), "scale"),
+                    numpy_helper.from_array(np.array([0, 0], dtype=np.int8), "zero"),
+                ],
+            ),
+            opset_imports=[helper.make_opsetid("", 19)],
+            ir_version=10,
+        )
+
+        converted = qdq_to_dq(model)
+        onnx.checker.check_model(converted, full_check=True)
+        assert not any(node.op_type == "QuantizeLinear" for node in converted.graph.node)
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 2
+        options.inter_op_num_threads = 1
+        session = ort.InferenceSession(
+            converted.SerializeToString(), sess_options=options, providers=["CPUExecutionProvider"]
+        )
+        output, exposed_weight = session.run(None, {"input": data})
+        np.testing.assert_array_equal(output, np.array([[-0.5, -2.0]], dtype=np.float32))
+        np.testing.assert_array_equal(exposed_weight, weight)
 
 
 class TestLegacyEdgeLLMShims:

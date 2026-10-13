@@ -17,7 +17,7 @@ Key advantages offered by ModelOpt's PyTorch quantization:
 .. tip::
 
     This guide covers the usage of ModelOpt quantization. For details on the quantization formats and recommended use cases,
-    please refer to :any:`quantization-formats`.
+    please refer to :ref:`quantization-formats`.
 
 Apply Post Training Quantization (PTQ)
 ======================================
@@ -26,7 +26,7 @@ PTQ can be achieved with simple calibration on a small set of training or evalua
 The simplest way to quantize a model using ModelOpt is to use :meth:`mtq.quantize() <modelopt.torch.quantization.model_quant.quantize>`.
 
 :meth:`mtq.quantize` takes a model, a quantization config and a forward loop callable as input.  The quantization config specifies the layers to quantize, their quantization formats as well as the algorithm to use for calibration. Please
-refer to :any:`quantization-configs` for the list of quantization configs supported by default. You may also define your own quantization config as
+refer to :ref:`quantization-configs` for the list of quantization configs supported by default. You may also define your own quantization config as
 described in :ref:`customizing quantizer config <customize_quantizer_config>`.
 
 ModelOpt supports algorithms such as AWQ, SmoothQuant, SVDQuant or max for calibration. Please refer to :meth:`mtq.calibrate <modelopt.torch.quantization.model_quant.calibrate>`

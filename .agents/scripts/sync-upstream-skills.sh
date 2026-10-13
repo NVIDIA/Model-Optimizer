@@ -26,13 +26,14 @@
 #
 # Requires: gh, base64, awk. Run from the repo root.
 #
-# The script overwrites .agents/skills/<skill>/ with upstream contents and
+# The script overwrites plugins/modelopt/skills/<skill>/ through the
+# .agents/skills compatibility symlink and
 # re-applies our provenance lines into each SKILL.md frontmatter. If you have
 # local changes to a vendored skill, they will be lost — that is expected,
 # since vendored-verbatim skills should not be modified locally.
 #
 # Note: .claude/skills/ (and other agent-specific skill dirs) are symlinks to
-# .agents/skills/ — see .agents/README.md.
+# plugins/modelopt/skills/ — see .agents/README.md.
 
 set -euo pipefail
 

@@ -15,6 +15,7 @@
 
 """Handles suppressing import errors for third-party modules that may or may not be available."""
 
+import sys
 from contextlib import contextmanager
 
 from .logging import warn_rank_0
@@ -32,7 +33,12 @@ def import_plugin(plugin_name, msg_if_missing=None, verbose=True, success_msg=No
             warn_rank_0(msg_if_missing)
     except Exception as e:
         if verbose:
+            # Capture the ``with import_plugin(...)`` call site so warnings point at the plugin
+            # that actually failed rather than at this helper. When ``__enter__`` runs the
+            # generator body, the stack is [0]=here, [1]=contextlib.__enter__, [2]=the caller.
+            caller = sys._getframe(2)
             warn_rank_0(
-                f"Failed to import modelopt {plugin_name} plugin due to: {e!r}. "
+                f"Failed to import modelopt {plugin_name} plugin "
+                f"(from {caller.f_code.co_filename}:{caller.f_lineno}) due to: {e!r}. "
                 "You may ignore this warning if you do not need this plugin."
             )

@@ -512,7 +512,7 @@ Both curves converge smoothly, with Puzzletron maintaining a consistently lower 
 
 An important insight: **the architecture that looks best before distillation is not necessarily the one that recovers best after distillation.** The 80% memory case in [Section 5.5](#55-extra-insights-accuracy-across-the-full-memory-compression-spectrum) is a concrete example: Puzzletron's pruned model leads Minitron by +8.3pp before distillation, yet Minitron overtakes it by +3.8pp after. More generally, we observed this ranking reversal at multiple compression levels.
 
-A promising improvement to address this is **Blockwise Local Distillation (BLD)**. BLD locally trains block variants *before* the MIP assembly step, so the search prefers blocks that are "distillable" and compatible after reassembly, not just blocks that look good as immediate swaps. The experiments in this guide did not use BLD; adding it on top of the Puzzletron pipeline described here is expected to further improve post-distillation accuracy.
+A promising improvement to address this is **Blockwise Local Distillation (BLD)**. BLD locally trains block variants *before* the MIP assembly step, so the search prefers blocks that are "distillable" and compatible after reassembly, not just blocks that look good as immediate swaps. The experiments in this guide did not use BLD; adding it on top of the Puzzletron pipeline described here is expected to further improve post-distillation accuracy. An improved bypass feature will be merged to `main` in a future release.
 
 ---
 

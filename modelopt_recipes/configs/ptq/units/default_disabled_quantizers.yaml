@@ -16,9 +16,17 @@
 # QuantizerCfgList snippet for standard module patterns that should remain unquantized.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+  # Linear-attention numerical emulation is opt-in, independently of projection quantization.
+  - quantizer_name: '*gdn_state_quantizer'
+    enable: false
+  - quantizer_name: '*gdn_w_quantizer'
+    enable: false
   - quantizer_name: '*block_sparse_moe.gate*'
     enable: false
   - quantizer_name: '*linear_attn.conv1d*'
+    enable: false
+  # Megatron-Core names the GatedDeltaNet block ``self_attention``; HF calls it ``linear_attn``.
+  - quantizer_name: '*self_attention.conv1d*'
     enable: false
   - quantizer_name: '*linear_attn.in_proj_a*'
     enable: false
@@ -37,6 +45,8 @@
   - quantizer_name: '*proj_out.*'
     enable: false
   - quantizer_name: '*router*'
+    enable: false
+  - quantizer_name: 'mtp.*'
     enable: false
   - quantizer_name: 'output.*'
     enable: false

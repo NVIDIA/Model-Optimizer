@@ -35,17 +35,17 @@ import modelopt.onnx.quantization.qdq_utils as qdq
 from modelopt.onnx.logging_config import configure_logging, logger
 from modelopt.onnx.op_types import is_fusible_scaling_op
 from modelopt.onnx.quantization.calib_utils import RandomDataProvider
-from modelopt.onnx.quantization.graph_utils import (
-    _find_int4_quantizable_weights as _find_quantizable_weights,
-)
-from modelopt.onnx.quantization.graph_utils import (
+from modelopt.onnx.quantization.graph_indexing import (
     expand_node_names_from_patterns,
-    get_layer_info,
     get_tensor_consumer_nodes,
     get_tensor_producer_nodes,
 )
 from modelopt.onnx.quantization.gs_patching import patch_gs_modules
 from modelopt.onnx.quantization.ort_utils import create_inference_session
+from modelopt.onnx.quantization.qdq_graph import (
+    _find_int4_quantizable_weights as _find_quantizable_weights,
+)
+from modelopt.onnx.quantization.qdq_graph import get_layer_info
 from modelopt.onnx.quantization.quant_utils import (
     _pad,
     dq_tensor,
@@ -557,7 +557,10 @@ def _quantize_awq_clip(
 
         # Creating inference session and preparing inputs for calibration
         session = create_inference_session(
-            augmented_onnx_path, calibration_eps, input_shapes_profile
+            augmented_onnx_path,
+            calibration_eps,
+            input_shapes_profile,
+            kwargs.get("trt_rtx_backend", "legacy"),
         )
         inputs = []
         for inp_d in data_reader:
@@ -1114,7 +1117,10 @@ def _quantize_awq_lite(
 
         # Creating inference session and preparing inputs for calibration
         session = create_inference_session(
-            augmented_onnx_path, calibration_eps, input_shapes_profile
+            augmented_onnx_path,
+            calibration_eps,
+            input_shapes_profile,
+            kwargs.get("trt_rtx_backend", "legacy"),
         )
         inputs = []
         for inp_d in data_reader:

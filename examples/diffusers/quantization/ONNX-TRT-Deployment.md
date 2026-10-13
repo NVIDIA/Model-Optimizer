@@ -1,7 +1,12 @@
 # ONNX Export and TensorRT Engine Build
 
-This page covers the optional ONNX export + TensorRT engine workflow for diffusion models.
-For quantization-only workflows, refer to `../README.md`.
+> [!WARNING]
+> This Diffusers ONNX export and TensorRT engine deployment workflow is deprecated in ModelOpt 0.48.0 and will be removed no earlier than 0.49.0, after the one-release migration period described in the [Deprecation Policy](../../../README.md#deprecation-policy) section of the main README. The commands below remain available during this period.
+> Use `quantize.py --hf-ckpt-dir` to export a unified Hugging Face checkpoint and select a compatible diffusion deployment backend. See the [HF checkpoint migration and deployment instructions](../README.md#hf-checkpoint-deployment).
+
+The deprecation covers `quantize.py --onnx-dir`, `build_sdxl_8bit_engine.sh`, and the TensorRT execution path in `diffusion_trt.py`, including loading existing engines. Quantization, HF export, and the `--torch` / `--torch-compile` inference modes remain supported.
+
+An HF checkpoint replaces the ONNX export artifact, so migration also requires changing the deployment command; it cannot be passed to `trtexec` or the TensorRT path in `diffusion_trt.py`. Verify support for your model, quantization format, and hardware in the selected backend.
 
 ## Quantize and export ONNX
 
@@ -28,12 +33,12 @@ python quantize.py \
 
 #### FLUX-Dev|SDXL|SDXL-Turbo|LTX-Video FP8/FP4 [Script](./quantize.py)
 
-*In our example code, FP4 is only supported for Flux. However, you can modify our script to enable FP4 format support for your own model.*
+FP4 ONNX export is supported for Flux and SDXL.
 
 ```sh
 python quantize.py \
     --model {flux-dev|sdxl-1.0|sdxl-turbo|ltx-video-dev} --model-dtype {Half|BFloat16} --trt-high-precision-dtype {Half|BFloat16} \
-    --format {fp8|fp4} --batch-size 2 --calib-size {128|256} --quantize-mha \
+    --format {fp8|fp4} --batch-size 2 --calib-size {128|256} \
     --n-steps 20 --quantized-torch-ckpt-save-path ./{MODEL_NAME}.pt --collect-method default \
     --onnx-dir {ONNX_DIR}
 ```

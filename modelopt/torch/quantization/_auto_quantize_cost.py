@@ -16,7 +16,7 @@
 """Cost models for AutoQuantize effective-bits accounting."""
 
 import fnmatch
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Sequence
 from typing import Any, Final
 
 import regex as re
@@ -31,6 +31,7 @@ ACTIVE_MOE_EXPERT_RATIO_KEY: Final = "active_moe_expert_ratio"
 EXCLUDED_MODULE_NAME_PATTERNS_KEY: Final = "excluded_module_name_patterns"
 COST_MODEL_WEIGHT: Final = "weight"
 COST_MODEL_ACTIVE_MOE: Final = "active_moe"
+COST_MODEL_KV_CACHE: Final = "kv_cache"
 
 _ROUTED_MOE_EXPERT_NAME_RE = re.compile(r"(^|\.)experts(\.|$)")
 _ACTIVE_MOE_TOP_K_ATTRS = (
@@ -68,7 +69,7 @@ def _iter_model_configs(model: nn.Module):
 def _get_first_numeric_config_attr(config: Any, attr_names: tuple[str, ...]) -> float | None:
     for attr_name in attr_names:
         value = getattr(config, attr_name, None)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, int | float) and not isinstance(value, bool):
             return float(value)
     return None
 
@@ -156,19 +157,6 @@ class AutoQuantizeCostModel:
             return 0.0
         return 1.0
 
-    def total_weight_size(
-        self,
-        named_modules: Iterable[tuple[str, nn.Module]],
-        is_auto_quantize_module: Callable[[nn.Module], bool],
-        cost_constraints: dict[str, Any],
-    ) -> float:
-        """Return the cost denominator for the effective-bits constraint."""
-        return sum(
-            _get_module_weight_numel(module) * self.module_cost_weight([name], cost_constraints)
-            for name, module in named_modules
-            if is_auto_quantize_module(module)
-        )
-
 
 class WeightCostModel(AutoQuantizeCostModel):
     """Count all quantizable weights equally."""
@@ -198,7 +186,7 @@ class ActiveMoECostModel(AutoQuantizeCostModel):
                 )
 
         if not (
-            isinstance(active_moe_expert_ratio, (int, float))
+            isinstance(active_moe_expert_ratio, int | float)
             and not isinstance(active_moe_expert_ratio, bool)
             and 0.0 < active_moe_expert_ratio <= 1.0
         ):
@@ -219,9 +207,22 @@ class ActiveMoECostModel(AutoQuantizeCostModel):
         return base_weight
 
 
+class KVCacheCostModel(AutoQuantizeCostModel):
+    """Account for the exact storage of paired K/V-cache candidates."""
+
+    name = COST_MODEL_KV_CACHE
+    supported_cost_keys = frozenset()
+
+    @staticmethod
+    def candidate_cost(k_width: int, v_width: int, k_bits: float, v_bits: float) -> float:
+        """Return candidate storage in bits for one attention layer and token."""
+        return k_width * k_bits + v_width * v_bits
+
+
 _COST_MODELS: Final = {
     COST_MODEL_WEIGHT: WeightCostModel(),
     COST_MODEL_ACTIVE_MOE: ActiveMoECostModel(),
+    COST_MODEL_KV_CACHE: KVCacheCostModel(),
 }
 
 

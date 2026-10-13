@@ -31,6 +31,9 @@ NVFP4_DEFAULT_CONFIG = load_config(
 NVFP4_FP8_MHA_CONFIG = load_config(
     "configs/ptq/presets/diffusers/nvfp4_fp8_mha", schema_type=QuantizeConfig
 ).model_dump(exclude_unset=True)
+NVFP4_FP8_CONV_CONFIG = load_config(
+    "configs/ptq/presets/diffusers/nvfp4_fp8_conv", schema_type=QuantizeConfig
+).model_dump(exclude_unset=True)
 
 
 def set_quant_config_attr(quant_config, trt_high_precision_dtype, quant_algo, **kwargs):
@@ -38,8 +41,13 @@ def set_quant_config_attr(quant_config, trt_high_precision_dtype, quant_algo, **
 
     if quant_algo == "smoothquant" and "alpha" in kwargs:
         algo_cfg["alpha"] = kwargs["alpha"]
-    elif quant_algo == "svdquant" and "lowrank" in kwargs:
-        algo_cfg["lowrank"] = kwargs["lowrank"]
+    elif quant_algo == "svdquant":
+        if "lowrank" in kwargs:
+            algo_cfg["lowrank"] = kwargs["lowrank"]
+        # Layers excluded from the SVDQuant algorithm (no AWQ smoothing, no
+        # low-rank branch); they stay quantized with plain max calibration.
+        if kwargs.get("skip_layers"):
+            algo_cfg["skip_layers"] = kwargs["skip_layers"]
     quant_config["algorithm"] = algo_cfg
 
     for entry in quant_config["quant_cfg"]:

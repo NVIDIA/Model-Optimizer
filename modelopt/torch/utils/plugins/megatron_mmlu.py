@@ -155,11 +155,23 @@ def megatron_mmlu(
     cp_group = mpu.get_context_parallel_group()
 
     # Shard whole batches across data-parallel ranks (each rank evaluates every ``dp_size``-th
-    # batch); per-subject counts are all-reduced over the DP group below. ``with_context_parallel``
-    # defaults to False so CP peers in the same DP group evaluate the same batches.
-    dp_size = mpu.get_data_parallel_world_size()
-    dp_rank = mpu.get_data_parallel_rank()
-    dp_group = mpu.get_data_parallel_group()
+    # batch); per-subject counts are all-reduced over the DP group below. CP peers in the same DP
+    # group evaluate the same batches.
+    #
+    # For MoE models with expert parallelism (EP>1), megatron_prefill's forward runs an expert
+    # all-to-all across the EP group, so ranks in one EP group MUST evaluate every batch in
+    # lockstep — sharding them onto disjoint batches desyncs that all-to-all (uneven batch counts /
+    # differing padded seq-lengths) and deadlocks the NCCL communicator. Shard only across
+    # expert-data-parallel replicas, whose ranks each hold a full expert set; EP peers within a
+    # replica then stay in lockstep. For dense models (EP==1) this is the standard DP sharding.
+    if mpu.get_expert_model_parallel_world_size() > 1:
+        dp_size = mpu.get_expert_data_parallel_world_size()
+        dp_rank = mpu.get_expert_data_parallel_rank()
+        dp_group = mpu.get_expert_data_parallel_group()
+    else:
+        dp_size = mpu.get_data_parallel_world_size()
+        dp_rank = mpu.get_data_parallel_rank()
+        dp_group = mpu.get_data_parallel_group()
 
     # Run inference in global batches.
     predictions: list[str] = [""] * len(encoded)

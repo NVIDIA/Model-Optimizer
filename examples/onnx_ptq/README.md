@@ -26,6 +26,35 @@ Please use the TensorRT docker image (e.g., `nvcr.io/nvidia/tensorrt:26.02-py3`)
 
 > **Note:** If you are using `onnxruntime-gpu`, we recommend using `nvcr.io/nvidia/tensorrt:25.06-py3` as it is built with CUDA 12, which is required by the stable `onnxruntime-gpu` package.
 
+#### PETR and FAR3D containers
+
+PETR and FAR3D share two targets from one Dockerfile. The `evaluator` target contains the legacy OpenMMLab stack used for data preparation, ONNX export, calibration, and final accuracy evaluation. The `modelopt` target uses the PyTorch 26.07 container for Model Optimizer, ONNX Runtime CUDA, and TensorRT 11.1 engine builds. Neither target creates a virtual environment.
+
+From the Model Optimizer repository root:
+
+```bash
+docker build --target evaluator -f examples/onnx_ptq/Dockerfile -t modelopt-onnx-evaluator .
+docker build --target modelopt -f examples/onnx_ptq/Dockerfile -t modelopt-onnx-trt11 .
+```
+
+Mount the same workspace into both containers to hand off ONNX models, calibration batches, and TensorRT engines:
+
+```bash
+docker run --rm -it --gpus=all --ipc=host \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  -e USER="$(id -un)" -e LOGNAME="$(id -un)" \
+  -v /path/to/workspace:/workspace \
+  modelopt-onnx-evaluator
+
+docker run --rm -it --gpus=all --ipc=host \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  -e USER="$(id -un)" -e LOGNAME="$(id -un)" \
+  -v /path/to/workspace:/workspace \
+  modelopt-onnx-trt11
+```
+
+TensorRT engines must be built and evaluated with TensorRT 11.1.0.106 on the same GPU architecture. See the [PETR](./petr/) and [FAR3D](./far3d/) guides for their source and dataset mounts.
+
 Set the following environment variables inside the TensorRT docker.
 
 ```bash
@@ -82,7 +111,7 @@ The model can be quantized as an FP8, INT8 or INT4 model using either the CLI or
 
 > *For NVFP4 and MXFP8 ONNX, see the [PyTorch to ONNX example](../torch_onnx/).*
 
-> *Minimum opset requirements: int8 (13+), fp8 (21+), int4 (21+). ModelOpt will automatically upgrade lower opset versions to meet these requirements.*
+> *Minimum opset requirements: int8 (19+), fp8 (19+), int4 (21+). ModelOpt will automatically upgrade lower opset versions to meet these requirements.*
 
 #### Option 1: Command-line interface
 
@@ -90,7 +119,7 @@ The model can be quantized as an FP8, INT8 or INT4 model using either the CLI or
 python -m modelopt.onnx.quantization \
     --onnx_path=vit_base_patch16_224.onnx \
     --quantize_mode=<fp8|int8|int4> \
-    --calibration_data=calib.npy \
+    --calibration_data_path=calib.npy \
     --calibration_method=<max|entropy|awq_clip|rtn_dq> \
     --output_path=vit_base_patch16_224.quant.onnx
 ```
@@ -98,12 +127,14 @@ python -m modelopt.onnx.quantization \
 #### Option 2: Python API
 
 ```python
+import numpy as np
+
 from modelopt.onnx.quantization import quantize
 
 quantize(
     onnx_path="vit_base_patch16_224.onnx",
     quantize_mode="int8",       # fp8, int8, int4 etc.
-    calibration_data="calib.npy",
+    calibration_data=np.load("calib.npy"),
     calibration_method="max",   # max, entropy, awq_clip, rtn_dq etc.
     output_path="vit_base_patch16_224.quant.onnx",
 )
@@ -129,7 +160,37 @@ The top5 accuracy of the model is <accuracy score between 0-100%>
 Inference latency of the model is <X> ms
 ```
 
+### FAR3D 3D object detection
+
+The [FAR3D example](./far3d/) exports and quantizes the FAR3D ONNX image encoder, builds TensorRT engines, and evaluates 3D object detection mAP on the Argoverse 2 validation set.
+
+### BEVFormer 3D object detection
+
+The [BEVFormer example](./bevformer/) exports BEVFormer-tiny to ONNX, generates temporal calibration data, quantizes the model to INT8 or FP8, builds TensorRT engines, and evaluates NDS and mAP on the nuScenes validation set.
+
+### PETR 3D object detection
+
+The [PETR example](./petr/) exports and quantizes the PETRv1 and PETRv2 ONNX backbones, builds TensorRT engines, and evaluates 3D object detection mAP on the nuScenes validation set.
+
 ## Advanced Features
+
+### INT8 quantization for DLA
+
+Use the boolean flag `--target_dla` (Python: `target_dla=True`) to export an INT8 Q/DQ model for DLA. It expands Q/DQ coverage while preserving scalar multiplication/division operands and padding fill values as constants.
+
+Choose the deployment route for your TensorRT version and platform package:
+
+| TensorRT deployment version | DLA workflow |
+| --- | --- |
+| 10.7 and earlier | On a supported DLA platform/build, use the separate Q/DQ Translator and a calibration cache matching the target TensorRT version. |
+| After 10.7 through 11.3 | Not supported for this DLA workflow. |
+| 11.4 and later | Deploy Q/DQ directly with a compatible build that enables strongly typed DLA. |
+
+The legacy route was validated with TensorRT 10.7; direct deployment used a pre-release 11.4.1.22 build. Earlier releases and other platform packages are not covered by those checks. These are deployment requirements, not a TensorRT version requirement for ModelOpt export.
+
+**Migration:** replace `--target_dla iq` or `--target_dla eq` with bare `--target_dla`, and Python string selectors with `target_dla=True`. The flag now uses the constant-preserving DLA placement rules for both deployment routes. Omitting the flag or using `target_dla=False` keeps the default GPU-oriented quantization; Python `None` and string selectors are not accepted.
+
+See the [DLA deployment guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html#deploy-on-dla) for export commands and deployment steps.
 
 ### Per node calibration of ONNX models
 
@@ -161,7 +222,7 @@ To enable per node calibration, add the `--calibrate_per_node` flag to your quan
 python -m modelopt.onnx.quantization \
     --onnx_path=vit_base_patch16_224.onnx \
     --quantize_mode=<int8/fp8> \
-    --calibration_data=calib.npy \
+    --calibration_data_path=calib.npy \
     --calibrate_per_node \
     --output_path=vit_base_patch16_224.quant.onnx
 ```
@@ -210,21 +271,20 @@ trtexec --onnx=/tmp/identity_neural_network.quant.onnx \
 ### Optimize Q/DQ node placement with Autotune
 
 This feature automates Q/DQ (Quantize/Dequantize) node placement optimization for ONNX models using TensorRT performance measurements.
-For more information on the standalone toolkit, please refer to [autotune](./autotune).
 
 To access this feature in the ONNX quantization workflow, simply add `--autotune` in your CLI:
 
 ```bash
 python -m modelopt.onnx.quantization \
     --onnx_path=vit_base_patch16_224.onnx \
-    --quantize_mode=<fp8|int8|int4> \
-    --calibration_data=calib.npy \
-    --calibration_method=<max|entropy|awq_clip|rtn_dq> \
+    --quantize_mode=<fp8|int8> \
+    --calibration_data_path=calib.npy \
+    --calibration_method=<max|entropy> \
     --output_path=vit_base_patch16_224.quant.onnx \
     --autotune=<quick,default,extensive>
 ```
 
-For more fine-tuned Autotune flags, please refer to the [API guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html).
+For more fine-tuned Autotune flags, please refer to the [API guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html) and the [Autotune guide](https://nvidia.github.io/Model-Optimizer/guides/9_autotune.html).
 
 ## Resources
 

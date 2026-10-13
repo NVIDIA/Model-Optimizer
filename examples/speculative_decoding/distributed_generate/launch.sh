@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -euo pipefail
+
 if [ $# -lt 9 ]; then
     echo "Usage: $0 <job_id> <backend> <model_path> <data_path> <output_path> <scripts_path> <start_shard> <jobs_per_node> <comma_separated_node_names> <system_prompt>"
     echo "Example: $0 245387 vllm /model/ /input_data/ /output_data/ /scripts/ 0 20 cluster-01,cluster-02 "\"You are a helpful assistant.\"""
@@ -32,6 +34,9 @@ NODE_NAME=$9
 SYSTEM_PROMPT="${10:-}"
 IFS=',' read -r -a NODE_LIST <<< "$NODE_NAME"
 
+# Pyxis requires bind-mount sources to exist before srun creates the container.
+mkdir -p "$OUTPUT_PATH"
+
 # backend needs to be either vllm or sglang
 if [ "$BACKEND" != "vllm" ] && [ "$BACKEND" != "sglang" ]; then
     echo "Invalid backend: $BACKEND"
@@ -39,22 +44,37 @@ if [ "$BACKEND" != "vllm" ] && [ "$BACKEND" != "sglang" ]; then
 fi
 
 if [ "$BACKEND" == "vllm" ]; then
-    CONTAINER_IMAGE="vllm/vllm-openai:v0.8.5"
+    DEFAULT_CONTAINER_IMAGE="vllm/vllm-openai:v0.24.0"
 else
-    CONTAINER_IMAGE="lmsysorg/sglang:v0.4.6.post2-cu124"
+    DEFAULT_CONTAINER_IMAGE="lmsysorg/sglang:v0.5.3-cu129"
 fi
+CONTAINER_IMAGE=${CONTAINER_IMAGE:-$DEFAULT_CONTAINER_IMAGE}
 counter=$START_SHARD
+worker_pids=()
 for node in "${NODE_LIST[@]}"; do
     echo "Processing node: $node"
-    srun --output=srun_worker_${node}.log --jobid=$JOB_ID -N 1 --ntasks=1 --ntasks-per-node=1 -w $node \
-        --mpi pmix --overlap --container-image=$CONTAINER_IMAGE \
-        --container-mounts=$MODEL_PATH:/model/,$DATA_PATH:/input_data/,$OUTPUT_PATH:/output_data/,$SCRIPTS_PATH:/scripts/ \
-        bash /scripts/distributed_generate/worker.sh $counter $BACKEND $JOBS_PER_NODE "$SYSTEM_PROMPT" &
+    srun --output="srun_worker_${node}.log" --jobid="$JOB_ID" -N 1 --ntasks=1 --ntasks-per-node=1 -w "$node" \
+        --mpi pmix --overlap --container-image="$CONTAINER_IMAGE" \
+        --container-mounts="$MODEL_PATH":/model/,"$DATA_PATH":/input_data/,"$OUTPUT_PATH":/output_data/,"$SCRIPTS_PATH":/scripts/ \
+        bash /scripts/distributed_generate/worker.sh "$counter" "$BACKEND" "$JOBS_PER_NODE" "$SYSTEM_PROMPT" &
 
     echo "srun command for node $node started with PID $!" >> srun_launch.log
+    worker_pids+=("$!")
 
     # increment counter by JOBS_PER_NODE
     counter=$((counter + JOBS_PER_NODE))
 done
 
 echo "Started workers, each processing $JOBS_PER_NODE shards of data. Will process shards $START_SHARD through $((counter - 1))."
+
+worker_status=0
+for worker_pid in "${worker_pids[@]}"; do
+    if ! wait "$worker_pid"; then
+        worker_status=1
+    fi
+done
+
+if [ "$worker_status" -ne 0 ]; then
+    echo "ERROR: one or more workers failed." >&2
+fi
+exit "$worker_status"

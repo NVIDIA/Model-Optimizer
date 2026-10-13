@@ -34,7 +34,7 @@ if [[ -z ${HF_MODEL_CKPT} ]]; then
 fi
 # Persist PTQ ckpt + HF export under /cicd ($SLURM_JOB_DIR/cicd) so later
 # experiments can re-use them. 
-export MLM_MODEL_SAVE="/cicd/megatron-lm/${MLM_MODEL_CFG}"
+export MLM_MODEL_SAVE="${MLM_MODEL_SAVE:-/cicd/megatron-lm/${MLM_MODEL_CFG}}"
 # If QUANT_CFG is a recipe path, collapse to a flat tag (strip dirs + .yaml/.yml).
 _QUANT_CFG_TAG="$(basename "${QUANT_CFG}")"
 _QUANT_CFG_TAG="${_QUANT_CFG_TAG%.yaml}"

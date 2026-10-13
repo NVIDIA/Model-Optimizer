@@ -64,11 +64,8 @@ def check_conv_and_mha(backbone, if_fp4, quantize_mha):
                 ):
                     if hasattr(module, attr):
                         getattr(module, attr).disable()
-                setattr(module, "_disable_fp8_mha", True)
 
                 print(f"Disabled Attention layer quantization for layer {name}")
-            else:
-                setattr(module, "_disable_fp8_mha", False)
 
 
 def filter_func_ltx_video(name: str) -> bool:
@@ -109,6 +106,30 @@ def filter_func_wan_video(name: str) -> bool:
         r".*(patch_embedding|condition_embedder|proj_out|blocks\.(0|1|2|37|38|39)\.).*"
     )
     return pattern.match(name) is not None
+
+
+# Qwen-Image's transformer has 60 ``transformer_blocks``. The recipe quantizes
+# only those blocks while keeping the first two and last two -- and everything
+# outside ``transformer_blocks`` -- in original precision. The model-agnostic,
+# config-driven form of this recipe (deriving the block count from the model)
+# lives in quantize.py; this name-only filter covers the plain FP8/NVFP4 path
+# for the full 60-block Qwen-Image transformer.
+QWEN_IMAGE_NUM_TRANSFORMER_BLOCKS = 60
+_QWEN_IMAGE_BLOCK_RE = re.compile(r"(?:^|\.)transformer_blocks\.(\d+)(?:\.|$)")
+
+
+def filter_func_qwen_image(name: str) -> bool:
+    """Filter function specifically for Qwen-Image models.
+
+    Returns ``True`` for modules to keep in original precision (quantization
+    disabled): everything outside ``transformer_blocks``, plus the first two and
+    last two transformer blocks.
+    """
+    match = _QWEN_IMAGE_BLOCK_RE.search(name)
+    if match is None:
+        return True
+    block_idx = int(match.group(1))
+    return block_idx < 2 or block_idx >= QWEN_IMAGE_NUM_TRANSFORMER_BLOCKS - 2
 
 
 def load_calib_prompts(

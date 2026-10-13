@@ -16,14 +16,54 @@ import contextlib
 
 import pytest
 import torch
+from _test_utils.fs_utils import assert_unmodified_tree
 from _test_utils.torch.distributed.utils import DistributedWorkerPool
+from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from megatron.core.parallel_state import destroy_model_parallel
 
+import modelopt.torch.quantization.extensions as ext
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.utils.plugins.megatron_preprocess_data import _prestart_forkserver
+
+
+@pytest.fixture(scope="session")
+def tiny_tokenizer_path(tmp_path_factory):
+    tokenizer_path = tmp_path_factory.mktemp("tiny_tokenizer")
+    get_tiny_tokenizer().save_pretrained(tokenizer_path)
+    with assert_unmodified_tree(tokenizer_path) as path:
+        yield str(path)
+
 
 apex_destroy = None
 with contextlib.suppress(ImportError):
     from apex.transformer.parallel_state import destroy_model_parallel as apex_destroy
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _prebuild_quant_cuda_extensions():
+    """Prebuild quant CUDA extensions before per-test timeouts start.
+
+    First-use JIT compilation can take minutes in CI, so build the base, FP8, and MX
+    extensions during session setup and let tests fall back to on-demand JIT if needed.
+
+    Doing it here in session setup (``pyproject`` sets ``timeout_func_only``) keeps the
+    build off the per-test clock and, unlike the ``_extensions/test_torch_extensions.py``
+    prebuild tests, runs regardless of test selection/ordering (e.g. ``-k`` filters) and
+    is not itself capped by a per-test timeout. Worker subprocesses then load the cached
+    .so from the shared ``TORCH_EXTENSIONS_DIR``.
+    """
+    ext.precompile()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _prestart_preprocess_forkserver():
+    """Start the forkserver that ``megatron_preprocess_data`` workers fork from, at session start.
+
+    Its first start cold-imports torch/megatron, which would otherwise land inside the first
+    multi-worker preprocess test and its per-test timeout. Starting it here, without waiting,
+    overlaps that import with the earlier tests. The server's environment is fixed at start.
+    """
+    _prestart_forkserver()
 
 
 def megatron_worker_teardown(rank, world_size):
