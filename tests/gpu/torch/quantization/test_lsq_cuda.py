@@ -152,9 +152,19 @@ def test_lsq_quantize_e2e(config):
     assert out.shape == (2, 64)
 
 
-def test_lsq_fp4_fake_quantize_differentiable():
-    """Test that _fake_quantize in FP4 LSQ mode is differentiable."""
+@pytest.mark.parametrize("tied_amax", [True, False], ids=["tied", "default_dual"])
+def test_lsq_fp4_fake_quantize_differentiable(tied_amax):
+    """Representable small scales retain static outputs and analytical LSQ gradients."""
     device = torch.device("cuda")
+    scales = torch.tensor([2.0**-5, 1.0, 448.0], device=device)
+    codes = torch.tensor(
+        [0.625, -0.625, 1, -1, 1.5, -1.5, 2, -2, 3, -3, 4, -4, 6, -6, 0, 0], device=device
+    )
+    x = scales[:, None] * codes
+    rounded = codes.clone()
+    rounded[:2] = torch.tensor([0.5, -0.5], device=device)
+    expected = scales[:, None] * rounded
+
     tq = TensorQuantizer()
     tq._num_bits = (2, 1)
     tq._unsigned = False
@@ -162,24 +172,31 @@ def test_lsq_fp4_fake_quantize_differentiable():
     tq._disabled = False
     tq._block_sizes = {-1: 16, "type": "static", "scale_bits": (4, 3)}
     tq._pass_through_bwd = True
-    tq.register_buffer("_amax", torch.ones(4, device=device))
+    tq.register_buffer("_amax", 6.0 * scales)
     tq.to(device)
     sbsq = StaticBlockScaleQuantizer.from_tensor_quantizer(
-        tq, global_amax=torch.tensor(1.0, device=device)
+        tq, global_amax=torch.tensor(6.0 * 448.0, device=device)
     )
 
-    # global_amax=1.0 with NVFP4 _quant_max_bound=6.0 yields per_tensor_scale = 1/6.
-    sbsq.amax = torch.ones(4, device=device) * 3.0
-    sbsq.enable_lsq(
-        quantize_scales=True,
-        learnable_amax=["post"],
-    )
+    static_output = sbsq(x)
+    torch.testing.assert_close(static_output, expected, rtol=0, atol=0)
+    if tied_amax:
+        sbsq.enable_lsq(learnable_amax=["pre", "post"], tied_amax=True)
+    else:
+        sbsq.enable_lsq()
 
-    x = torch.randn(4, 16, device=device)
-    out = sbsq._fake_quantize(x)
-    assert out.shape == x.shape
-    out.sum().backward()
-    assert sbsq._amax_post.grad is not None
+    out = sbsq(x)
+    torch.testing.assert_close(out, static_output, rtol=0, atol=0)
+    (out[0, 0] + out[1, 0]).backward()
+    # At x/scale=0.625, Q(x/scale)=0.5 and d(scale)/d(amax)=1/6.
+    # Tied: (0.5 - 0.625)/6; default dual: 0.5/6 with fixed pre scale.
+    gradient = -1.0 / 48.0 if tied_amax else 1.0 / 12.0
+    torch.testing.assert_close(
+        sbsq.amax_post.grad,
+        torch.tensor([gradient, gradient, 0.0], device=device),
+        rtol=1e-6,
+        atol=1e-7,
+    )
 
 
 def test_lsq_fp4_cast_ste():

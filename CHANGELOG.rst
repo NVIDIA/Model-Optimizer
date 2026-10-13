@@ -12,6 +12,8 @@ Changelog
 
 **Bug Fixes**
 
+- Fix LSQ clamping small, representable FP8 block scales too aggressively, which could zero quantized values and suppress scale gradients.
+
 0.48.0 (2026-10-xx)
 ^^^^^^^^^^^^^^^^^^^
 

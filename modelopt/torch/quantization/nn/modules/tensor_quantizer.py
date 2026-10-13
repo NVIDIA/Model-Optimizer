@@ -63,7 +63,7 @@ from ...tensor_quant import (
     static_blockwise_fp4_fake_quant,
 )
 from ...utils import is_torch_export_mode
-from ...utils.numeric_utils import fp8_max_for_normalization
+from ...utils.numeric_utils import E4M3_MAX, fp8_max_for_normalization
 from ..functional import normalized_hadamard_transform
 
 # torch.finfo(...).tiny gives the smallest normal E4M3 value; scale clamping needs
@@ -1729,7 +1729,8 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         """Compute the per-block scale from a per-block amax, optionally FP8-quantizing it."""
         if quantize:
             per_tensor_scale = _amax_to_scale(self.global_amax, self._quant_max_bound)
-            min_value = _FP8_E4M3_MIN_POSITIVE * per_tensor_scale.view(-1)
+            # Map the minimum encoded FP8 scale back to physical scale units.
+            min_value = (_FP8_E4M3_MIN_POSITIVE / E4M3_MAX) * per_tensor_scale.view(-1)
             scale = _amax_to_scale(amax, self._quant_max_bound, min_value=min_value)
             return scaled_e4m3(scale, per_tensor_scale, None, 4, 3)
         return _amax_to_scale(amax, self._quant_max_bound, min_value=1e-8)
