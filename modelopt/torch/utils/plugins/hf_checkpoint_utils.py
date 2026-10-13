@@ -403,20 +403,20 @@ def _matches_any_pattern(file_name: str, patterns: tuple[str, ...]) -> bool:
 # both how we find them and how we move them, so it is worth keeping straight:
 #
 #   1. UNPLACED weights. The loader opened the file and read the tensor, but the model had no
-#      parameter for it, so transformers reports it in ``unexpected_keys`` -- an MTP head the
-#      recipe did not quantize is the common case. Moved as TENSORS: located in whichever shard
-#      holds them and merged into the exporter's ``extra_state_dict``.
+#      parameter for it -- an MTP head the recipe did not quantize is the common case. Recorded
+#      once at load time by ``record_unplaced_source_keys``. Moved as TENSORS: located in whichever
+#      shard holds them and merged into the exporter's ``extra_state_dict``.
 #      Found by: ``read_unplaced_weights`` / ``carryable_unplaced_keys`` / ``locate_source_keys``.
 #
-#   2. OFF-INDEX weight files. The index never names the file, so the loader never opened it and
-#      never had the chance to call anything unexpected -- GLM-4.7 keeps its MTP head in a
-#      standalone ``mtp.safetensors`` exactly this way. Moved as FILES: copied byte for byte, so
-#      no host memory is spent re-serialising tensors the export does not otherwise touch.
+#   2. OFF-INDEX weight files. The index never names the file, so the loader never opened it --
+#      GLM-4.7 keeps its MTP head in a standalone ``mtp.safetensors`` exactly this way. Moved as
+#      FILES: copied byte for byte, so no host memory is spent re-serialising tensors the export
+#      does not otherwise touch.
 #      Found by: ``off_index_safetensors_files`` / ``off_index_tensor_names``.
 #
 # The index is what separates them, and it is NOT an inventory of the checkpoint: a tensor missing
 # from ``weight_map`` but sitting in a shard the index names for other tensors is set 1, not set 2.
-# See ``record_unplaced_source_keys`` for the loading behaviour this rests on.
+# See ``checkpoint_tensor_files``, which lists every tensor of set 1's files.
 #
 # Both sets must reach ``quantization_config.ignore``, or a deployment framework reads the
 # top-level ``quant_algo`` and tries to load an original-precision weight as a quantized one
@@ -476,12 +476,12 @@ def off_index_safetensors_files(src: "str | os.PathLike | None") -> list[str]:
     Transformers reads the shards named in ``model.safetensors.index.json`` -- or the single
     ``model.safetensors`` when there is no index -- and nothing else. A checkpoint may ship more:
     GLM-4.7 keeps its MTP head in a standalone ``mtp.safetensors``. Those tensors are never loaded,
-    never quantized, and never reported as ``unexpected_keys`` (the loader did not see them to call
-    them unexpected), so they are not "the unquantized source weights" the export must avoid
-    re-emitting -- they are untouched weight files the export carries over as they are. See
-    :func:`~modelopt.torch.utils.plugins.model_load_utils.record_unplaced_source_keys` for why
-    "never opened" is a property of the FILE rather than of the individual tensor: a tensor the
-    index omits from a file it DOES open is reported, and is carried rather than copied.
+    never quantized, and never among the unplaced source keys (the load never saw them), so they
+    are not "the unquantized source weights" the export must avoid re-emitting -- they are
+    untouched weight files the export carries over as they are. See :func:`checkpoint_tensor_files`
+    for why "never opened" is a property of the FILE rather than of the individual tensor: a tensor
+    the index omits from a file the loader DOES open is listed there, and is carried rather than
+    copied.
 
     Files named like a main weight shard are excluded whatever the index says. An index that is
     empty, partial or malformed would otherwise make the source weights look off-index, and
@@ -593,6 +593,28 @@ def indexed_weight_map(ckpt: "str | Path") -> dict[str, str]:
     return {}
 
 
+def checkpoint_tensor_files(ckpt: "str | Path") -> dict[str, str]:
+    """``tensor name -> file`` for every tensor in the weight files the loader opens.
+
+    The loader opens the files the index names, or the single ``model.safetensors``, and sees every
+    tensor in them -- including any the index omits, such as an MTP head stored inside a main
+    shard. So this is :func:`indexed_weight_map` plus, from the header of each file it names, the
+    tensors it left out. Reads headers only, never tensor data.
+
+    Files the index never names are not included: the loader never opens them, and
+    :func:`copy_off_index_safetensors` copies them into the export whole.
+    """
+    weight_map = indexed_weight_map(ckpt)
+    if not (Path(ckpt) / "model.safetensors.index.json").exists():
+        return weight_map  # The single file's header already listed all of it.
+    tensor_files = dict(weight_map)
+    for file_name in sorted(set(weight_map.values())):
+        with safe_open(str(Path(ckpt) / file_name), framework="pt") as f:
+            for name in f.keys():  # noqa: SIM118 - safe_open is not iterable
+                tensor_files.setdefault(name, file_name)
+    return tensor_files
+
+
 def read_safetensors_subset(
     ckpt_path: "str | Path",
     weight_map: dict,
@@ -626,9 +648,9 @@ def read_safetensors_subset(
 def locate_source_keys(ckpt: "str | Path", keys: list[str]) -> dict[str, str]:
     """Map each key to the safetensors file holding it, for keys the index may not list.
 
-    ``model.safetensors.index.json`` is not a complete inventory of the checkpoint. Transformers
-    enumerates the CONTENTS of each shard it opens, so it reports a tensor the index omits -- an
-    MTP head stored inside a main shard is exactly that case, and it reaches
+    ``model.safetensors.index.json`` is not a complete inventory of the checkpoint. The loader sees
+    the CONTENTS of each shard it opens, including a tensor the index omits -- an MTP head stored
+    inside a main shard is exactly that case, and :func:`checkpoint_tensor_files` lists it among the
     ``_modelopt_unplaced_source_keys`` like any other unplaced key. Resolving purely through
     ``weight_map`` then finds no shard for it and drops it silently, which is the failure the
     carry-over exists to prevent.
@@ -667,7 +689,7 @@ def locate_source_keys(ckpt: "str | Path", keys: list[str]) -> dict[str, str]:
 
     if remaining:
         warnings.warn(
-            f"{len(remaining)} checkpoint key(s) the loader reported are in no safetensors file "
+            f"{len(remaining)} unplaced checkpoint key(s) are in no safetensors file "
             f"of {ckpt} (e.g. {min(remaining)}); they cannot be carried into the export."
         )
     return located
