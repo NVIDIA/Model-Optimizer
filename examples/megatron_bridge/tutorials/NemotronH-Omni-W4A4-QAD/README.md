@@ -21,6 +21,7 @@ All checkpoints were served with the same vLLM settings (see [Section 5](#5-eval
 | AA-Omniscience (non-hallucination) | 70.03 | 71.34 | 69.65 |
 | GPQA Diamond | 89.52 | 89.84 | 89.90 |
 | HLE (no tools) | 31.79 | 30.49 | 30.72 |
+| MMLU-ProX | 76.91 | 74.41 | 81.15 |
 | SciCode (subtask) | 47.13 | 46.48 | 46.58 |
 | SciCode (problem) | 15.10 | 13.65 | 15.38 |
 | τ³-bench banking | 18.88 | 17.40 | 20.10 |
