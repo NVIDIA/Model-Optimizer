@@ -81,7 +81,7 @@ def test_peft_flow(tmp_path):
     input_ids = torch.randint(0, model_original.config.vocab_size, (1, 4))
 
     def forward_loop(model):
-        return model(input_ids)
+        return model(input_ids, use_cache=False)
 
     mtq.quantize(peft_model, mtq.INT8_DEFAULT_CFG, forward_loop)
     mtq.quantize(model_full, mtq.INT8_DEFAULT_CFG, forward_loop)
