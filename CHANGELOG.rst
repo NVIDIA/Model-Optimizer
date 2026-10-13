@@ -126,6 +126,7 @@ Changelog
 **Bug Fixes**
 
 - Fix Hugging Face exports classifying registered Qwen VLM parameters as unplaced source weights, which overwrote quantized tensors with original weights and incorrectly excluded their modules from quantization. Re-export affected checkpoints.
+- Right-pad labeled calibration samples to avoid fully masked causal rows that can produce non-finite cuDNN attention gradients during AutoQuantize. Generation previews remove padding before decoding.
 - Fix calibration silently dropping samples when an out-of-memory error forces the batch to be
   split and a smaller working batch size is already known: the slices stopped tiling the batch,
   so the rows between the old and the new width never reached the model and the collected

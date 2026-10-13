@@ -516,6 +516,10 @@ formats in `kv_cache_quantized_layers`. `mtq.auto_quantize` returns the sensitiv
 selected recipe in its search state; `--kv_auto_quantize_checkpoint` stores that resumable state,
 including the candidate quantizer tensors needed for replay.
 
+KV-only recipes leave weights in their original precision, so `hf_quant_config.json` contains
+`quantization.quant_algo: null` and `quantized_layers: {}`. Validate their quantization through
+`kv_cache_quant_algo`, `kv_cache_quantized_layers`, and the exported K/V scaling tensors.
+
 KV sensitivity scoring runs one reference forward plus one forward per eligible-layer candidate
 for every scoring step. Choose the recipe's `auto_quantize.score_size` with the number of eligible
 layers and candidates in mind. Peak scoring memory also grows with the number of selected tokens
