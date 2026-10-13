@@ -427,6 +427,7 @@ class TestFakeQuantizeLSQ:
         assert quantize_flags == [True, False]
 
     def test_skip_pre_scale_quantization_uses_raw_scale_floor(self, monkeypatch):
+        """Keep the raw pre-scale floor unchanged while normalizing the FP8 post-scale floor."""
         q = self._make_lsq_quantizer()
         q._quantize_scales = True
         q._quantize_pre_scale = False
@@ -485,6 +486,7 @@ class TestLSQSharedGlobalAmax:
         return members
 
     def test_block_scale_tracks_shared_update(self):
+        """Check each member's FP8 scale floor against the updated shared global amax."""
         members = self._make_tied_lsq_group(global_amax=3.0)
         new_value = 5.0
         # Mutate the shared buffer in place, mimicking export unification.
