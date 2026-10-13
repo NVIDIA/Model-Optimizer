@@ -342,6 +342,88 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size)
     assert recorded_losses[-1].any() != skip_lm_loss, "Main LM head loss is zero iff skip_lm_loss"
 
 
+def _test_freeze_mtp_with_quantized_mtp(freeze_mtp, kd_loss_alpha, rank, size):
+    """With the MTP head quantized too, only ``freeze_mtp`` keeps it out of a training step."""
+    set_seed(SEED)
+
+    vocab_size = 32
+    batch_size = 2
+    max_sequence_length = 8
+    model_kwargs = {
+        "tensor_model_parallel_size": size,
+        "pipeline_model_parallel_size": 1,
+        "num_layers": 2,
+        "hidden_size": 8,
+        "num_attention_heads": 4,
+        "num_query_groups": 2,
+        "ffn_hidden_size": 8,
+        "max_sequence_length": max_sequence_length,
+        "vocab_size": vocab_size,
+        "activation_func": "squared_relu",
+        "mtp_num_layers": 1,
+    }
+    teacher_model = get_mcore_gpt_model(initialize_megatron=True, **model_kwargs).cuda()
+    student_model = get_mcore_gpt_model(initialize_megatron=False, **model_kwargs).cuda()
+    # A recipe that quantizes the MTP head as well as the body.
+    student_model.decoder.weight_quantizer = TensorQuantizer()
+    student_model.mtp.weight_quantizer = TensorQuantizer()
+    assert not _mtp_excluded_from_quantization(student_model)
+
+    distill_cfg = setup_distillation_config(
+        config_or_path=DistillationConfig(kd_loss_alpha=kd_loss_alpha, freeze_mtp=freeze_mtp),
+        student_cfg=student_model.config,
+        teacher_cfg=teacher_model.config,
+    )
+    kd_config = {
+        "teacher_model": teacher_model,
+        "criterion": distill_cfg.criterion,
+        "loss_balancer": distill_cfg.loss_balancer,
+    }
+    distillation_model = mtd.convert(student_model, mode=[("kd_loss", kd_config)])
+    adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
+
+    with distillation_model.hide_teacher_model():
+        named_params = dict(distillation_model.named_parameters())
+    mtp_params = {n: p for n, p in named_params.items() if "mtp" in n.split(".")}
+    body_params = {n: p for n, p in named_params.items() if n.startswith("decoder.")}
+    assert mtp_params and body_params
+    mtp_before = {n: p.detach().clone() for n, p in mtp_params.items()}
+    optimizer = torch.optim.AdamW(
+        [p for p in named_params.values() if p.requires_grad], lr=1e-2, weight_decay=0.1
+    )
+
+    distillation_model.train()
+    prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
+    labels = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
+    position_ids = (
+        torch.arange(max_sequence_length, dtype=torch.long)
+        .unsqueeze(0)
+        .repeat(batch_size, 1)
+        .cuda()
+    )
+    attention_mask = torch.tril(
+        torch.ones((batch_size, 1, max_sequence_length, max_sequence_length), dtype=torch.bool)
+    ).cuda()
+    student_loss = distillation_model(prompt_tokens, position_ids, attention_mask, labels=labels)
+    loss = distillation_model.compute_kd_loss(
+        student_loss=student_loss.mean(), loss_reduction_fn=lambda x: x[0].mean()
+    )
+    loss["kd_loss"].backward()
+    optimizer.step()
+
+    # The main LM loss follows kd_loss_alpha either way.
+    assert student_loss.any() == (kd_loss_alpha < 1)
+    expected = (1 - kd_loss_alpha) * student_loss.mean() + kd_loss_alpha * loss["logits_loss"]
+    assert torch.allclose(loss["kd_loss"], expected)
+    # The rest of the student keeps training.
+    assert any(p.grad is not None and p.grad.any() for p in body_params.values())
+    # The MTP head trains unless frozen; frozen, it gets no gradient and the step leaves it as is.
+    mtp_trained = any(p.grad is not None and p.grad.any() for p in mtp_params.values())
+    assert mtp_trained != freeze_mtp
+    if freeze_mtp:
+        assert all(torch.equal(p, mtp_before[n]) for n, p in mtp_params.items())
+
+
 def test_logits_kl_loss(dist_workers):
     """Test LogitsKLLoss with TP parallelism."""
     dist_workers.run(_test_logits_kl_loss)
@@ -477,6 +559,12 @@ def test_distillation_config_top_p_validation():
 def test_skip_lm_loss_with_mtp(dist_workers, quantized, skip_lm_loss, freeze_mtp):
     """Test that skip_lm_loss only zeroes the main LM head, unless MTP is left out of quantization."""
     dist_workers.run(partial(_test_skip_lm_loss_with_mtp, quantized, skip_lm_loss, freeze_mtp))
+
+
+@pytest.mark.parametrize(("freeze_mtp", "kd_loss_alpha"), [(True, 1.0), (True, 0.5), (False, 1.0)])
+def test_freeze_mtp_with_quantized_mtp(dist_workers, freeze_mtp, kd_loss_alpha):
+    """With the MTP head quantized too, only ``freeze_mtp`` keeps it out of a training step."""
+    dist_workers.run(partial(_test_freeze_mtp_with_quantized_mtp, freeze_mtp, kd_loss_alpha))
 
 
 def test_mtp_excluded_from_quantization():
