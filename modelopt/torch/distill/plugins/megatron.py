@@ -711,14 +711,19 @@ def adjust_distillation_model_for_mcore(
     )
     if skip_mtp_loss:
         # Freeze the untrained MTP head: DDP's overlapped grad reduce asserts on params with no grad.
-        warn_rank_0(
-            "MTP head is frozen and its loss is skipped"
-            + (" (freeze_mtp)." if distill_cfg.freeze_mtp else ": it is outside quantization.")
-        )
+        num_frozen = 0
         with model.hide_teacher_model():
             for name, param in model.named_parameters():
                 if "mtp" in name.split("."):
                     param.requires_grad_(False)
+                    num_frozen += 1
+        if num_frozen:
+            warn_rank_0(
+                f"MTP head is frozen ({num_frozen} params) and its loss is skipped"
+                + (" (freeze_mtp)." if distill_cfg.freeze_mtp else ": it is outside quantization.")
+            )
+        elif parallel_state.is_pipeline_last_stage():  # earlier stages never hold the MTP head
+            warn_rank_0("freeze_mtp is set but the model has no MTP head: nothing to freeze.")
 
     def _compute_student_lm_loss(self, labels, logits) -> Tensor:
         self._lm_loss_call_count += 1

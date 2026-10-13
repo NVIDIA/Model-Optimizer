@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import dataclasses
+import warnings
 from functools import partial
 from types import SimpleNamespace
 
@@ -380,7 +381,12 @@ def _test_freeze_mtp_with_quantized_mtp(freeze_mtp, kd_loss_alpha, rank, size):
         "loss_balancer": distill_cfg.loss_balancer,
     }
     distillation_model = mtd.convert(student_model, mode=[("kd_loss", kd_config)])
-    adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
+    if rank == 0:
+        frozen_msg = [w for w in caught if "MTP head is frozen" in str(w.message)]
+        assert bool(frozen_msg) == freeze_mtp
 
     with distillation_model.hide_teacher_model():
         named_params = dict(distillation_model.named_parameters())
