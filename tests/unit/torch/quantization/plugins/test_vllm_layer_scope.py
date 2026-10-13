@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The owner of a vLLM layer, in scope while an op that names the layer runs."""
+"""The layer whose op runs and its owner, seen from the functions that the op calls."""
 
 import functools
 import gc
@@ -55,33 +55,32 @@ def ops(monkeypatch):
     return SimpleNamespace(module=module, kernel=kernel, op=op)
 
 
-def test_callee_runs_for_the_owner_of_the_layer_whose_op_runs(ops):
+def _scope():
+    return vllm_layer_scope.current_layer(), vllm_layer_scope.layer_owner()
+
+
+def test_patched_callee_sees_the_layer_whose_op_runs_and_its_owner(ops):
     owner = _Owner()
     vllm_layer_scope.register_layer_owner("layer.0", owner)
-    calls, outside = [], []
+    calls = []
 
-    def call(called_owner, original, bound):
-        calls.append((called_owner, dict(bound.arguments)))
-        return original(*bound.args, **bound.kwargs) + 1
+    def scaled_up(original, x, scale=2):
+        calls.append((*_scope(), x, scale))
+        return original(x, scale) + 1
 
     vllm_layer_scope.wrap_layer_op(ops.module, "op", "layer_name", decorator=_decorate)
-    vllm_layer_scope.wrap_layer_callee(
-        ops.module, "kernel", call, applies=lambda o: o.active, outside=lambda: outside.append(1)
-    )
-    owner.active = True
-    assert ops.module.op(3, "layer.0") == 7  # bound with the default scale
-    assert calls == [(owner, {"x": 3, "scale": 2})]
-    owner.active = False
-    assert ops.module.op(3, "layer.0") == 6
-    assert ops.module.op(3, SimpleNamespace(value="layer.1")) == 6  # a layer without an owner
-    assert ops.module.kernel(3) == 6  # outside an op
-    assert outside == [1] and len(calls) == 1
+    vllm_layer_scope.patch_function(ops.module, "kernel", scaled_up)
+    assert ops.module.op(3, "layer.0") == 7
+    # A layer without an owner, named by vLLM's LayerName.
+    assert ops.module.op(3, SimpleNamespace(value="layer.1")) == 7
+    assert ops.module.kernel(3, scale=1) == 4  # outside an op
+    assert calls == [("layer.0", owner, 3, 2), ("layer.1", None, 3, 2), (None, None, 3, 1)]
     # A later registration of the name replaces the owner.
     other = _Owner()
-    other.active = True
     vllm_layer_scope.register_layer_owner("layer.0", other)
-    assert ops.module.op(3, "layer.0") == 7 and calls[-1][0] is other
-    assert vllm_layer_scope.layer_owner() is None
+    ops.module.op(3, "layer.0")
+    assert calls[-1][:2] == ("layer.0", other)
+    assert _scope() == (None, None)
 
 
 def test_scope_nests_and_ends_with_the_op(ops):
@@ -91,21 +90,21 @@ def test_scope_nests_and_ends_with_the_op(ops):
     seen = []
 
     def record(x):
-        seen.append(vllm_layer_scope.layer_owner())
+        seen.append(_scope())
 
     def inner(x):
         record(x)
         return ops.module.op(x, "layer.1", run=record)
 
     ops.module.op(1, layer_name="layer.0", run=inner)
-    assert seen == [owner, None]
+    assert seen == [("layer.0", owner), ("layer.1", None)]
 
     def fail(x):
         raise ValueError(x)
 
     with pytest.raises(ValueError):
         ops.module.op(1, "layer.0", run=fail)
-    assert vllm_layer_scope.layer_owner() is None
+    assert _scope() == (None, None)
 
 
 def test_op_wrap_goes_under_its_decorator_once(ops):
@@ -113,23 +112,37 @@ def test_op_wrap_goes_under_its_decorator_once(ops):
     vllm_layer_scope.register_layer_owner("layer.0", owner)
     for _ in range(2):
         vllm_layer_scope.wrap_layer_op(ops.module, "op", "layer_name", decorator=_decorate)
-        vllm_layer_scope.wrap_layer_callee(
-            ops.module, "kernel", lambda *args: None, applies=lambda o: True
-        )
     assert ops.module.op.__wrapped__.__wrapped__ is ops.op
-    assert ops.module.kernel.__wrapped__ is ops.kernel
     # A breakable-cudagraph replay calls the op's __wrapped__, which must still set the scope.
     seen = []
 
     def record(x):
-        seen.append(vllm_layer_scope.layer_owner())
+        seen.append(_scope())
 
     ops.module.op.__wrapped__(1, "layer.0", run=record)
-    assert seen == [owner]
+    assert seen == [("layer.0", owner)]
     # Without the decorator, the wrap goes around the decorated op.
-    module = SimpleNamespace(op=_decorate(ops.op), kernel=ops.kernel)
+    module = SimpleNamespace(op=_decorate(ops.op))
     vllm_layer_scope.wrap_layer_op(module, "op", "layer_name")
     assert module.op.__wrapped__.__wrapped__ is ops.op
+
+
+def test_patch_function_applies_each_wrapper_once(ops):
+    def plus_one(original, *args, **kwargs):
+        return original(*args, **kwargs) + 1
+
+    def doubled(original, *args, **kwargs):
+        return original(*args, **kwargs) * 2
+
+    for _ in range(2):
+        vllm_layer_scope.patch_function(ops.module, "kernel", plus_one)
+    assert ops.module.kernel.__wrapped__ is ops.kernel
+    assert ops.module.kernel(3) == 7
+    # Another wrapper wraps the patched function; patching with either again changes nothing.
+    vllm_layer_scope.patch_function(ops.module, "kernel", doubled)
+    vllm_layer_scope.patch_function(ops.module, "kernel", plus_one)
+    vllm_layer_scope.patch_function(ops.module, "kernel", doubled)
+    assert ops.module.kernel(3) == 14
 
 
 def test_owner_is_held_weakly(ops):
@@ -139,10 +152,10 @@ def test_owner_is_held_weakly(ops):
     seen = []
 
     def run(x):
-        seen.append(vllm_layer_scope.layer_owner() is not None)
+        seen.append((vllm_layer_scope.current_layer(), vllm_layer_scope.layer_owner() is not None))
 
     ops.module.op(1, "layer.0", run=run)
     del owner
     gc.collect()
     ops.module.op(1, "layer.0", run=run)
-    assert seen == [True, False]
+    assert seen == [("layer.0", True), ("layer.0", False)]

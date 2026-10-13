@@ -17,13 +17,14 @@
 
 vLLM's layer ops get the name of their layer, not the layer: its ``torch.ops.vllm`` custom ops
 cannot take a module argument, and other ops, such as GLM-5.3-Flash's indexer op, follow the same
-convention. The kernels they call get only tensors. :func:`register_layer_owner` maps a layer name
-to the converted module that acts for the layer, :func:`wrap_layer_op` makes that module the
-:func:`layer_owner` while an op that names the layer runs, and :func:`wrap_layer_callee` hands it
-the calls of a function that such an op calls.
+convention. The kernels they call get only tensors. :func:`wrap_layer_op` makes the layer that an op
+names the :func:`current_layer` while the op runs, :func:`register_layer_owner` maps a layer name to
+the converted module that acts for the layer, and :func:`layer_owner` gives that module for the
+current layer. A function that the op calls, patched with :func:`patch_function`, can thus act for
+the converted module.
 
-The registry and the wraps are process-wide, for one converted model per process: another model
-with the same layer names would get its owners. The wraps are permanent. A breakable CUDA graph
+The registry and the patches are process-wide, for one converted model per process: another model
+with the same layer names would get its owners. The patches are permanent. A breakable CUDA graph
 replays an op that ``eager_break_during_capture`` decorates by calling the undecorated function, so
 the scope goes under that decorator. An op inside a captured graph has its scope while the graph is
 captured, so the owner must launch only work that the graph can replay.
@@ -37,14 +38,18 @@ from collections.abc import Callable
 from types import ModuleType
 from typing import Any
 
-__all__ = ["layer_owner", "register_layer_owner", "wrap_layer_callee", "wrap_layer_op"]
+__all__ = [
+    "current_layer",
+    "layer_owner",
+    "patch_function",
+    "register_layer_owner",
+    "wrap_layer_op",
+]
 
 # Layer name -> the converted module that acts for the layer. Weak: it keeps no module alive.
 _owners: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
-# Inside an op of a layer that no converted module owns.
-_NO_OWNER = object()
-# The owner of the layer whose op runs: None outside a wrapped op.
-_layer_owner: contextvars.ContextVar = contextvars.ContextVar("_layer_owner", default=None)
+# The name of the layer whose op runs: None outside a wrapped op.
+_current_layer: contextvars.ContextVar = contextvars.ContextVar("_current_layer", default=None)
 
 
 def register_layer_owner(name: str, owner: Any) -> None:
@@ -52,19 +57,24 @@ def register_layer_owner(name: str, owner: Any) -> None:
     _owners[name] = owner
 
 
+def current_layer() -> str | None:
+    """The name of the layer whose op runs, or None outside a wrapped op."""
+    return _current_layer.get()
+
+
 def layer_owner() -> Any:
-    """The owner of the layer whose op runs, or None."""
-    owner = _layer_owner.get()
-    return None if owner is _NO_OWNER else owner
+    """The owner of the layer whose op runs, or None outside a wrapped op or without an owner."""
+    name = _current_layer.get()
+    return None if name is None else _owners.get(name)
 
 
 def wrap_layer_op(
     op_module: ModuleType, name: str, layer_arg: str, decorator: Callable | None = None
 ) -> None:
-    """Wrap the op ``op_module.<name>`` to put the owner of the layer it names in scope.
+    """Wrap the op ``op_module.<name>`` to make the layer it names the current layer.
 
     ``layer_arg`` is the op's argument with the layer name. If ``decorator`` decorates the op, the
-    wrap goes under it and ``decorator`` decorates the wrapper again.
+    wrap goes under it and ``decorator`` decorates the wrapper again. A second wrap does nothing.
     """
     original = getattr(op_module, name)
     if getattr(original, "_modelopt_layer_op", False):
@@ -76,11 +86,11 @@ def wrap_layer_op(
     def wrapper(*args, **kwargs):
         layer = kwargs[layer_arg] if layer_arg in kwargs else args[position]
         # A str or vLLM's LayerName.
-        token = _layer_owner.set(_owners.get(getattr(layer, "value", layer), _NO_OWNER))
+        token = _current_layer.set(getattr(layer, "value", layer))
         try:
             return inner(*args, **kwargs)
         finally:
-            _layer_owner.reset(token)
+            _current_layer.reset(token)
 
     if inner is not original:
         wrapper = decorator(wrapper)  # type: ignore[misc]
@@ -88,35 +98,21 @@ def wrap_layer_op(
     setattr(op_module, name, wrapper)
 
 
-def wrap_layer_callee(
-    module: ModuleType,
-    name: str,
-    call: Callable[[Any, Callable, inspect.BoundArguments], Any],
-    applies: Callable[[Any], bool],
-    outside: Callable[[], None] | None = None,
-) -> None:
-    """Wrap ``module.<name>``, a function that ops call, to hand its calls to the layer's owner.
+def patch_function(module: ModuleType, name: str, wrapper: Callable) -> None:
+    """Replace ``module.<name>`` so that its calls run ``wrapper(original, *args, **kwargs)``.
 
-    Inside an op that :func:`wrap_layer_op` wrapped, a call for whose owner ``applies(owner)``
-    holds runs ``call(owner, original, bound)`` with the bound arguments of the call; other calls
-    run the original function. ``outside()`` runs before a call outside such an op, e.g. to reject
-    it.
+    A second patch with the same ``wrapper`` does nothing; another wrapper wraps the patched one.
     """
     original = getattr(module, name)
-    if getattr(original, "_modelopt_layer_callee", False):
-        return
-    signature = inspect.signature(original)
+    patched_fn = original
+    while patched_fn is not None:
+        if getattr(patched_fn, "_modelopt_patched_by", None) is wrapper:
+            return
+        patched_fn = getattr(patched_fn, "__wrapped__", None)
 
     @functools.wraps(original)
-    def wrapper(*args, **kwargs):
-        owner = _layer_owner.get()
-        if owner is None and outside is not None:
-            outside()
-        if owner is None or owner is _NO_OWNER or not applies(owner):
-            return original(*args, **kwargs)
-        bound = signature.bind(*args, **kwargs)
-        bound.apply_defaults()
-        return call(owner, original, bound)
+    def patched(*args, **kwargs):
+        return wrapper(original, *args, **kwargs)
 
-    wrapper._modelopt_layer_callee = True  # type: ignore[attr-defined]
-    setattr(module, name, wrapper)
+    patched._modelopt_patched_by = wrapper  # type: ignore[attr-defined]
+    setattr(module, name, patched)

@@ -394,13 +394,15 @@ def test_glm5next_kpool_cache_writers_requantize_written_pools(
     quantizer = indexer.indexer_k_quantizer = _fp8_quantizer(amax=2.0)
 
     # A write outside the indexer op names no layer, and one to another layer's cache is misrouted:
-    # both fail before the kernel runs. A layer without the quantizer re-quantizes nothing.
+    # both fail before the kernel runs. A layer without the quantizer re-quantizes nothing, and
+    # neither does the op of a layer that no indexer owns, e.g. a draft model's.
     with pytest.raises(RuntimeError, match="outside the indexer op"):
         kpool_ops.kpool_compress_and_write_cache(*prefill)
     prefill_other = (other_cache, None, None, None, slot_mapping, 4)
     with pytest.raises(RuntimeError, match="writes the K cache of another layer"):
         write(0, kpool_ops.kpool_compress_and_write_cache, *prefill_other)
     write(1, kpool_ops.kpool_compress_and_write_cache, *prefill_other)
+    write("draft", kpool_ops.kpool_compress_and_write_cache, *prefill_other)
     assert not requantized
 
     # Prefill: pools at ``loc`` masked by ``write_mask``.
@@ -418,9 +420,8 @@ def test_glm5next_kpool_cache_writers_requantize_written_pools(
         *(kv_cache, None, None, None, None, None, dec_slots, dec_pos, 4),
     )
     _assert_requantized(before, kv_cache, torch.tensor([17, 30]), quantizer)
-    assert kernel_calls == ["prefill"] * 4 + ["decode"]
+    assert kernel_calls == ["prefill"] * 5 + ["decode"]
     assert len(requantized) == 2 and all(cache is kv_cache for cache in requantized)
-    assert getattr(kpool_ops.kpool_compress_and_write_cache, "_modelopt_layer_callee", False)
 
 
 def test_glm5next_indexer_requantizes_query(parallel_state_stub, monkeypatch):

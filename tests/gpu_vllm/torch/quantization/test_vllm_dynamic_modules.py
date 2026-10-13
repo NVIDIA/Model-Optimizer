@@ -1015,7 +1015,7 @@ def _calibrate_and_clip_indexer_k(self, cfg):
     return amaxes
 
 
-def _record_scorer_call(score, name, calls, deep_gemm_utils, original, bound, paged):
+def _record_scorer_call(score, name, calls, original, bound, paged):
     """Spy on ``_QuantVLLMGlm5NextIndexer._score``: the layer, the path, what top-k reads and the
     in-kernel numerics passed to DeepGEMM."""
     passed = {}
@@ -1027,7 +1027,7 @@ def _record_scorer_call(score, name, calls, deep_gemm_utils, original, bound, pa
 
     vllm_indexer._call_deep_gemm_scorer = spy
     try:
-        logits = score(deep_gemm_utils, original, bound, paged)
+        logits = score(original, bound, paged)
     finally:
         vllm_indexer._call_deep_gemm_scorer = call_scorer
     numerics = {key: passed[key] for key in ("mma_accum", "post_relu") if key in passed}

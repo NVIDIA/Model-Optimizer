@@ -50,7 +50,13 @@ from ..nn import (
     register_quant_backend,
 )
 from .vllm import create_parallel_state
-from .vllm_layer_scope import register_layer_owner, wrap_layer_callee, wrap_layer_op
+from .vllm_layer_scope import (
+    current_layer,
+    layer_owner,
+    patch_function,
+    register_layer_owner,
+    wrap_layer_op,
+)
 
 __all__ = ["register_indexer_scorer_kwargs_quantizer"]
 
@@ -373,53 +379,73 @@ def _kpool_decode_written(arguments: dict) -> tuple[torch.Tensor, torch.Tensor]:
     return slots, valid
 
 
-def _requantize_written_pools(written_slots: Callable) -> Callable:
-    """A K-cache writer call of an indexer: the kernel, then a re-quantization of what it wrote."""
+# Once per function: the patched kernels run on every step.
+_signature = functools.cache(inspect.signature)
 
-    def call(indexer, original: Callable, bound: inspect.BoundArguments):
-        kv_cache = bound.arguments["kv_cache"]
-        if kv_cache.data_ptr() != indexer.k_cache.kv_cache.data_ptr():
+
+def _bind(fn: Callable, args: tuple, kwargs: dict) -> inspect.BoundArguments:
+    """The call ``fn(*args, **kwargs)`` with its arguments by name, defaults included."""
+    bound = _signature(fn).bind(*args, **kwargs)
+    bound.apply_defaults()
+    return bound
+
+
+def _write_k_cache(written_slots: Callable, original: Callable, *args, **kwargs):
+    """A call of a K-cache writer; ``written_slots`` gives the slots that the call writes.
+
+    In the indexer op of a layer with ``indexer_k_quantizer`` on: the kernel, then a re-quantization
+    of the pools it wrote.
+    """
+    if current_layer() is None:
+        # Only the indexer op names the layer of the cache.
+        if any(indexer.indexer_k_quantizer.is_enabled for indexer in _glm5next_indexers):
             raise RuntimeError(
-                f"The indexer op of {indexer.k_cache.prefix} writes the K cache of another layer."
+                "vLLM wrote the GLM-5.3-Flash indexer K cache outside the indexer op, so "
+                "indexer_k_quantizer cannot tell whose cache it is."
             )
-        out = original(*bound.args, **bound.kwargs)
-        slots, valid = written_slots(bound.arguments)
-        _requantize_fp8_indexer_k_cache(kv_cache, slots, valid, indexer.indexer_k_quantizer)
-        return out
-
-    return call
-
-
-def _reject_k_cache_write_outside_op() -> None:
-    """Reject a K-cache write outside the indexer op, which alone names the layer of the cache."""
-    if any(indexer.indexer_k_quantizer.is_enabled for indexer in _glm5next_indexers):
+        return original(*args, **kwargs)
+    indexer = layer_owner()
+    if indexer is None or not indexer.indexer_k_quantizer.is_enabled:
+        return original(*args, **kwargs)
+    bound = _bind(original, args, kwargs)
+    kv_cache = bound.arguments["kv_cache"]
+    if kv_cache.data_ptr() != indexer.k_cache.kv_cache.data_ptr():
         raise RuntimeError(
-            "vLLM wrote the GLM-5.3-Flash indexer K cache outside the indexer op, so "
-            "indexer_k_quantizer cannot tell whose cache it is."
+            f"The indexer op of {indexer.k_cache.prefix} writes the K cache of another layer."
         )
+    out = original(*args, **kwargs)
+    slots, valid = written_slots(bound.arguments)
+    _requantize_fp8_indexer_k_cache(kv_cache, slots, valid, indexer.indexer_k_quantizer)
+    return out
 
 
-# GLM-5.3-Flash's K-cache writers, with the slots that a call writes.
+def _run_scorer(paged: bool, original: Callable, *args, **kwargs) -> torch.Tensor:
+    """A call of vLLM's DeepGEMM scorer: with the scorer quantizers of the layer whose op runs.
+
+    ``paged``: the decode scorer, else the prefill one.
+    """
+    indexer = layer_owner()
+    if indexer is None or not indexer._enabled_scorer_quantizers():
+        return original(*args, **kwargs)
+    return indexer._score(original, _bind(original, args, kwargs), paged)
+
+
+# GLM-5.3-Flash's K-cache writers, patched to re-quantize the slots that a call writes.
 _KPOOL_CACHE_WRITERS = {
-    "kpool_compress_and_write_cache": _kpool_prefill_written,
-    "kpool_decode_update_and_maybe_write_cache_batched": _kpool_decode_written,
+    "kpool_compress_and_write_cache": functools.partial(_write_k_cache, _kpool_prefill_written),
+    "kpool_decode_update_and_maybe_write_cache_batched": functools.partial(
+        _write_k_cache, _kpool_decode_written
+    ),
+}
+# vLLM's DeepGEMM scorers, patched to apply the scorer quantizers. The indexer op imports them from
+# vLLM's module on every call. Prefill scores keys gathered from the K cache into one buffer, per
+# query range; decode scores keys read straight from the paged K cache.
+_DEEP_GEMM_SCORERS = {
+    "fp8_fp4_mqa_logits": functools.partial(_run_scorer, False),
+    "fp8_fp4_paged_mqa_logits": functools.partial(_run_scorer, True),
 }
 # GLM-5.3-Flash's indexer op, which writes the K cache and scores and selects the keys.
 _GLM5NEXT_INDEXER_OP = "sparse_attn_indexer_kpool"
-
-
-def _wrap_deep_gemm_scorer(deep_gemm_utils: ModuleType, paged: bool) -> None:
-    """Wrap vLLM's DeepGEMM scorer in ``deep_gemm_utils`` to apply the scorer quantizers.
-
-    ``paged``: the decode scorer, else the prefill one. The indexer op imports the scorer from the
-    module on every call.
-    """
-    wrap_layer_callee(
-        deep_gemm_utils,
-        "fp8_fp4_paged_mqa_logits" if paged else "fp8_fp4_mqa_logits",
-        lambda indexer, original, bound: indexer._score(deep_gemm_utils, original, bound, paged),
-        applies=lambda indexer: bool(indexer._enabled_scorer_quantizers()),
-    )
 
 
 def _scorer_deep_gemm(deep_gemm_utils: ModuleType, scorer_kwargs: dict) -> ModuleType:
@@ -498,9 +524,9 @@ class _QuantVLLMGlm5NextIndexer(_QuantVLLMIndexerBase):
     The query kernel is swapped for a re-quantizing wrapper while ``forward`` runs; CUDA graph
     capture records the wrapper. The indexer op writes the K cache and scores the keys of the layer
     that it names, so the op and the kernel entry points it calls are wrapped process-wide: the op
-    makes its layer's indexer the layer owner (see :mod:`.vllm_layer_scope`), the K-cache writers
-    re-quantize the pools they wrote, on prefill and on decode pool completion, and vLLM's DeepGEMM
-    scorer entry points apply the scorer quantizers.
+    makes its layer the current layer, whose indexer is the layer owner (see
+    :mod:`.vllm_layer_scope`), the K-cache writers re-quantize the pools they wrote, on prefill and
+    on decode pool completion, and vLLM's DeepGEMM scorer entry points apply the scorer quantizers.
     """
 
     kpool_ops: ModuleType | None = _glm5next_kpool_ops
@@ -528,18 +554,10 @@ class _QuantVLLMGlm5NextIndexer(_QuantVLLMIndexerBase):
             "k_cache_prefix",
             decorator=getattr(self.op_module, "eager_break_during_capture", None),
         )
-        for name, written_slots in _KPOOL_CACHE_WRITERS.items():
-            wrap_layer_callee(
-                self.kpool_ops,
-                name,
-                _requantize_written_pools(written_slots),
-                applies=lambda indexer: indexer.indexer_k_quantizer.is_enabled,
-                outside=_reject_k_cache_write_outside_op,
-            )
-        # Prefill scores keys gathered from the K cache into one buffer, per query range.
-        _wrap_deep_gemm_scorer(self.deep_gemm_utils, paged=False)
-        # Decode scores keys read straight from the paged K cache.
-        _wrap_deep_gemm_scorer(self.deep_gemm_utils, paged=True)
+        for name, wrapper in _KPOOL_CACHE_WRITERS.items():
+            patch_function(self.kpool_ops, name, wrapper)
+        for name, wrapper in _DEEP_GEMM_SCORERS.items():
+            patch_function(self.deep_gemm_utils, name, wrapper)
 
     def forward(self, *args, **kwargs):
         # The scorer only runs for sequences longer than index_topk, which calibration and warmup
@@ -601,16 +619,13 @@ class _QuantVLLMGlm5NextIndexer(_QuantVLLMIndexerBase):
         return kwargs
 
     def _score(
-        self,
-        deep_gemm_utils: ModuleType,
-        original: Callable,
-        bound: inspect.BoundArguments,
-        paged: bool,
+        self, original: Callable, bound: inspect.BoundArguments, paged: bool
     ) -> torch.Tensor:
         """Run the call ``bound`` of vLLM's scorer ``original`` with the scorer quantizers.
 
         ``weights`` is the effective W: the query scale and the model's normalization are folded in.
         """
+        assert self.deep_gemm_utils is not None  # checked in _setup
         arguments = bound.arguments
         scorer_kwargs = self._scorer_kwargs()
         weights = arguments["weights"]
@@ -618,7 +633,7 @@ class _QuantVLLMGlm5NextIndexer(_QuantVLLMIndexerBase):
             weights = weights.to(torch.bfloat16)
         if scorer_kwargs:
             logits = _call_deep_gemm_scorer(
-                deep_gemm_utils, arguments, weights, scorer_kwargs, paged
+                self.deep_gemm_utils, arguments, weights, scorer_kwargs, paged
             )
         else:
             logits = original(*bound.args, **bound.kwargs)
