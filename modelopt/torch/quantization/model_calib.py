@@ -2344,6 +2344,7 @@ def gptq(
 
     for handle in gptq_handles.values():
         handle.cleanup()
+        handle.sync_hessian_across_dp()
 
     print_rank_0("Updating weights using GPTQ algorithm...")
     names = module_name_maps(model)

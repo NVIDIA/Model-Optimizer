@@ -12,6 +12,8 @@ Changelog
 
 **Bug Fixes**
 
+- Fix GPTQ with Megatron data parallelism: each data-parallel replica of a module now builds its Hessian from the whole calibration set instead of only its own shard, so all replicas reach the same quantized weights.
+
 0.48.0 (2026-10-xx)
 ^^^^^^^^^^^^^^^^^^^
 
