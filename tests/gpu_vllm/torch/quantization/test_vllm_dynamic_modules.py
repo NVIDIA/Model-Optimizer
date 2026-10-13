@@ -410,7 +410,7 @@ def test_kimi_low_latency_linear_fake_quant_support(path, dtype, shape, expected
         None,
     )
     if kimi_method is None:
-        pytest.skip("Kimi low-latency vLLM fork is not installed")
+        pytest.skip("Kimi K3 low-latency method is not available in this vLLM build")
     linear = SimpleNamespace(
         quant_method=object.__new__(kimi_method),
         prefix=f"model.layers.1.{path}",
@@ -437,9 +437,21 @@ def test_missing_kimi_package_keeps_standard_vllm_supported():
         vllm_plugin._linear_fake_quant_checks.cache_clear()
 
 
+def test_kimi_guard_does_not_import_k3_for_other_models():
+    model = torch.nn.Linear(2, 2)
+    original_import = __import__
+
+    def reject_k3_import(name, *args, **kwargs):
+        if name == "vllm.models.kimi_k3.nvidia.model":
+            raise RuntimeError("K3 model imported while converting another model")
+        return original_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=reject_k3_import):
+        vllm_plugin._guard_kimi_gemm_rs_ar(model)
+
+
 @pytest.mark.parametrize("quantizer_name", _VLLMParallelLinear._QUANTIZER_NAMES)
 def test_kimi_gemm_rs_ar_bypasses_enabled_fake_quantizers(quantizer_name):
-    # Kimi's fused GEMM is available only in the Kimi vLLM fork.
     kimi_model = pytest.importorskip("vllm.models.kimi_k3.nvidia.model")
     x = torch.ones(128, 2)
     mlp = object.__new__(kimi_model.KimiMLP)

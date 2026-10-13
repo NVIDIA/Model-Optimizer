@@ -18,6 +18,7 @@
 import contextvars
 import importlib
 import inspect
+import sys
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -529,7 +530,7 @@ def _kimi_shared_bf16_linear_supports_fake_quant(module: torch.nn.Module) -> boo
 def _linear_fake_quant_checks() -> dict[type, Callable[[torch.nn.Module], bool]]:
     """Exact method types whose ordinary apply path can receive fake-quantized tensors."""
     checks = {vllm_linear.UnquantizedLinearMethod: lambda module: True}
-    # The Kimi low-latency method is present only in the Kimi vLLM fork.
+    # Older vLLM releases do not expose the Kimi K3 low-latency method.
     try:
         from vllm.models.kimi_k3.nvidia.low_latency_gemm import KimiK3LowLatencyLinearMethod
     except ModuleNotFoundError as exc:
@@ -631,17 +632,18 @@ class _KimiGemmRsArFakeQuantGuard:
 
 def _guard_kimi_gemm_rs_ar(model: torch.nn.Module) -> None:
     """Route Kimi MLP down projections through ModelOpt when quantizers are enabled."""
-    try:
-        from vllm.models.kimi_k3.nvidia.model import KimiMLP
-    except ModuleNotFoundError as exc:
-        if exc.name not in ("vllm.models", "vllm.models.kimi_k3") and not (
-            exc.name and exc.name.startswith("vllm.models.kimi_k3.")
-        ):
-            raise
+    # K3's model module is already loaded when converting a K3 model.
+    kimi_module = sys.modules.get("vllm.models.kimi_k3.nvidia.model")
+    if kimi_module is None:
+        return
+    kimi_mlp_cls = getattr(kimi_module, "KimiMLP", None)
+    if kimi_mlp_cls is None:
         return
 
     for module in model.modules():
-        if not isinstance(module, KimiMLP) or not isinstance(module.down_proj, _VLLMParallelLinear):
+        if not isinstance(module, kimi_mlp_cls) or not isinstance(
+            module.down_proj, _VLLMParallelLinear
+        ):
             continue
         gemm_rs_ar = module.gemm_rs_ar
         if gemm_rs_ar is not None and not isinstance(gemm_rs_ar, _KimiGemmRsArFakeQuantGuard):
