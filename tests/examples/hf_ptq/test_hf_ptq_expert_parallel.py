@@ -323,11 +323,11 @@ def test_a_rank_device_pins_the_whole_model_to_it(
     LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
     placed = []
 
-    def from_pretrained(auto_class, ckpt_path, **kwargs):
+    def load_pretrained(ckpt_path, auto_class, **kwargs):
         placed.append(kwargs["device_map"])
         return torch.nn.Linear(1, 1)
 
-    monkeypatch.setattr(example_utils, "_from_pretrained_recording", from_pretrained)
+    monkeypatch.setattr(example_utils, "load_pretrained", load_pretrained)
     monkeypatch.setattr(example_utils.dist_utils, "size", lambda group=None: world_size)
 
     example_utils.get_model(str(tmp_path), device=device)
