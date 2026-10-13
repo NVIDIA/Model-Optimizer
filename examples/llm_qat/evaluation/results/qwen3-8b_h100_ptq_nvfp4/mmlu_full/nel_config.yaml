@@ -26,7 +26,7 @@ execution:
       /path/to/checkpoint: /checkpoint
 deployment:
   image: vllm/vllm-openai:v0.28.0-cu129
-  checkpoint_path: ${oc.env:QWEN3_MODEL_CHECKPOINT}
+  checkpoint_path: ${oc.env:MODEL_CHECKPOINT}
   served_model_name: qwen3-8b-ptq
   tensor_parallel_size: 1
   data_parallel_size: 1

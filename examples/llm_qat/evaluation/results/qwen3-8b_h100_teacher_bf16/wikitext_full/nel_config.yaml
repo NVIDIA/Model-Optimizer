@@ -25,11 +25,11 @@ execution:
       /path/to/hf-cache/hub/models--Qwen--Qwen3-8B/blobs: /blobs
     evaluation:
       /path/to/hf-cache: /hf-cache
-      /path/to/hf-cache/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218: /checkpoint
+      /path/to/checkpoint: /checkpoint
       /path/to/hf-cache/hub/models--Qwen--Qwen3-8B/blobs: /blobs
 deployment:
   image: vllm/vllm-openai:v0.28.0-cu129
-  checkpoint_path: ${oc.env:QWEN3_HF_CACHE}/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+  checkpoint_path: ${oc.env:MODEL_CHECKPOINT}
   served_model_name: qwen3-8b-teacher
   tensor_parallel_size: 1
   data_parallel_size: 1
