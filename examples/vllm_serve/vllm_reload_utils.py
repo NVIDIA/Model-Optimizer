@@ -23,7 +23,6 @@ import torch
 from vllm.distributed.parallel_state import get_tp_group
 
 from modelopt.torch.export.plugins.vllm_fakequant_hf import (
-    infer_quantizer_prefix_remap,
     is_weight_quantizer_state_key,
     merge_amax_tensors_for_group,
 )
@@ -100,6 +99,18 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
     # Skip p_bmm_quantizer (softmax-P) and lm_head quantizers (not needed in vLLM).
     if "p_bmm_quantizer" in key or (key.startswith("lm_head.") and "quantizer" in key):
         return ("skip", None, None)
+
+    # vLLM fuses the shared-input GatedDeltaNet projections into qkvz and ba.
+    gdn_match = re.search(r"(.*\.linear_attn\.)in_proj_(qkv|z|b|a)\.([^.]+_quantizer)(\..+)?$", key)
+    if gdn_match:
+        projection = "qkvz" if gdn_match.group(2) in ("qkv", "z") else "ba"
+        group_key = (
+            gdn_match.group(1)
+            + f"in_proj_{projection}."
+            + gdn_match.group(3)
+            + (gdn_match.group(4) or "")
+        )
+        return ("group", group_key, value)
 
     # Check if this is a q/k/v projection that needs merging
     qkv_match = re.search(r"(.*\.)([qkv])_proj\.([^.]+_quantizer)(\..+)?$", key)
@@ -271,25 +282,6 @@ def convert_dict_to_vllm(
         max_or_concat: Whether to merge grouped values by taking max/concatenate or require identical
         map_fun: Function to map the state dict to vLLM format
     """
-    # If map_fun is provided, pre-transform quantizer key module-path prefixes so that
-    # HF→vLLM model renames (e.g. backbone.layers → model.layers) are applied before
-    # key grouping (q/k/v → qkv, experts.N.up_proj → experts.w13, etc.).
-    # This is necessary for models where the HF root module differs from vLLM's (e.g.
-    # NemotronH uses backbone.layers in HF but model.layers in vLLM), and for
-    # modelopt_state_weights where ALL keys are quantizer keys so map_fun is never
-    # invoked on non-quantizer keys.
-    if map_fun is not None:
-        q_only = {k: v for k, v in state_dict.items() if "_quantizer" in k}
-        prefix_remap = infer_quantizer_prefix_remap(q_only, map_fun)
-        if prefix_remap:
-            renamed = {}
-            for k, v in state_dict.items():
-                if "_quantizer" in k:
-                    first = k.split(".")[0]
-                    k = prefix_remap.get(first, first) + k[len(first) :]
-                renamed[k] = v
-            state_dict = renamed
-
     vllm_state_dict, merge_groups = _group_keys_for_vllm(state_dict)
 
     merge_fn = _merge_values_by_max_or_concat if max_or_concat else _merge_values_require_identical
@@ -305,12 +297,23 @@ def convert_dict_to_vllm(
             vllm_state_dict[merged_key] = value
     if map_fun is None:
         return vllm_state_dict
-    # Quantizer module-path keys (e.g. "layers.0.mlp.gate_proj.input_quantizer") must NOT
-    # go through map_fun (hf_to_vllm_mapper.apply_dict), which maps weight tensor paths and
-    # drops any key it doesn't recognise — including all quantizer keys. Split them out,
-    # apply map_fun only to non-quantizer keys, then merge back.
-    quantizer_keys = {k: v for k, v in vllm_state_dict.items() if "_quantizer" in k}
-    non_quantizer_keys = {k: v for k, v in vllm_state_dict.items() if "_quantizer" not in k}
+    # Group expert aliases before mapping: weight mappers may turn projections into attributes.
+    # Probe module weight paths because some mappers do not accept quantizer keys.
+    probe_weight = torch.empty((1, 1))
+    quantizer_keys = {}
+    non_quantizer_keys = {}
+    for key, value in vllm_state_dict.items():
+        if "_quantizer" in key:
+            suffix = re.search(r"\.[^.]*_quantizer", key)
+            if suffix is not None:
+                probe_key = key[: suffix.start()] + ".weight"
+                mapped = map_fun({probe_key: probe_weight})
+                if mapped:
+                    mapped_key = next(iter(mapped))
+                    key = mapped_key.removesuffix(".weight") + key[suffix.start() :]
+            quantizer_keys[key] = value
+        else:
+            non_quantizer_keys[key] = value
     mapped = map_fun(non_quantizer_keys) if non_quantizer_keys else {}
     return {**mapped, **quantizer_keys}
 
@@ -665,6 +668,7 @@ def _validate_quantizer_ranges(model, saved_quant_dict, current_state_dict) -> N
         and module._if_quant
         and not module.is_mx_format
         and not module._dynamic
+        and not module._use_constant_amax
         and not is_weight_quantizer_state_key(name)
     } - (saved_quant_dict.keys() & current_state_dict.keys())
     missing = _union_quantizer_keys_across_ranks(sorted(missing))
@@ -678,14 +682,14 @@ def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str,
     """Overlay mapped, TP-sharded quantizer tensors on the model's state dict."""
     # Load on CPU to avoid failures when the checkpoint was saved from a different GPU mapping.
     saved_quant_dict = torch.load(quantizer_file_path, weights_only=True, map_location="cpu")
-    if hasattr(model, "hf_to_vllm_mapper"):
-        saved_quant_dict = model.hf_to_vllm_mapper.apply_dict(saved_quant_dict)
+    map_fun = model.hf_to_vllm_mapper.apply_dict if hasattr(model, "hf_to_vllm_mapper") else None
+    if map_fun is not None:
         saved_quant_dict = {
             key.replace("quantizer_", "quantizer._"): value
             for key, value in saved_quant_dict.items()
             if "quantizer" in key
         }
-    saved_quant_dict = convert_dict_to_vllm(saved_quant_dict)
+    saved_quant_dict = convert_dict_to_vllm(saved_quant_dict, map_fun=map_fun)
 
     current_state_dict = model.state_dict()
     _validate_quantizer_ranges(model, saved_quant_dict, current_state_dict)

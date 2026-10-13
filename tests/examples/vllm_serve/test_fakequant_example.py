@@ -27,8 +27,13 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
+from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
+from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration
+from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.opt.config_loader import load_config
+from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.vllm import VllmMLAAttention
 
@@ -775,3 +780,101 @@ def _check_distributed_recipe_names(rank, size):
 
 def test_exported_recipe_matches_enabled_quantizers_across_ranks():
     spawn_multiprocess_job(2, _check_distributed_recipe_names)
+
+
+@pytest.fixture
+def reload_utils(monkeypatch):
+    reload_utils = _load_example_module("vllm_reload_utils")
+    monkeypatch.setattr(
+        reload_utils, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0, world_size=1)
+    )
+    return reload_utils
+
+
+@pytest.mark.parametrize("architecture", ["vlm", "nemotron", "qwen35"])
+def test_recipe_metadata_and_tensor_reload_share_module_mapping(
+    reload_utils, tmp_path, architecture
+):
+    model_cls = {
+        "vlm": Qwen3VLForConditionalGeneration,
+        "nemotron": NemotronHForCausalLM,
+        "qwen35": Qwen3_5ForConditionalGeneration,
+    }[architecture]
+    gdn = architecture == "qwen35"
+    source = "backbone" if architecture == "nemotron" else "model.language_model"
+    target = "model" if architecture == "nemotron" else "language_model.model"
+    attention = "linear_attn" if gdn else "self_attn"
+    source += f".layers.0.{attention}"
+    target += f".layers.0.{attention}"
+    projections = (
+        ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
+        if gdn
+        else ("q_proj", "k_proj", "v_proj")
+    )
+    fused = ("in_proj_qkvz", "in_proj_ba") if gdn else ("qkv_proj",)
+    source_names = [f"{source}.{projection}.input_quantizer" for projection in projections]
+    expected = {f"{target}.{projection}.input_quantizer" for projection in fused}
+    if not gdn:
+        source_names.append(f"{source}.k_bmm_quantizer")
+        expected.add(f"{target}.attn.k_bmm_quantizer")
+    recipe = {
+        name: {"_disabled": False, "_num_bits": [4, 3], "_axis": None} for name in source_names
+    }
+    model = torch.nn.Module()
+    for name in expected:
+        parent = model
+        *components, quantizer = name.split(".")
+        for component in components:
+            if component not in parent._modules:
+                parent.add_module(component, torch.nn.Module())
+            parent = parent.get_submodule(component)
+        parent.add_module(quantizer, TensorQuantizer())
+    model.hf_to_vllm_mapper = model_cls.hf_to_vllm_mapper
+    cfg = reload_utils.quantizer_recipe_to_quant_cfg(recipe, model)
+    assert {entry["quantizer_name"] for entry in cfg["quant_cfg"] if entry["enable"]} == expected
+    mtq.quantize(model, {**cfg, "algorithm": None})
+    reload_utils.validate_quantizer_recipe_for_model(model, cfg)
+    for name in expected:
+        model.get_submodule(name).amax = torch.tensor(9.0)
+    state = {
+        name + "._amax": torch.tensor(4.001 if gdn and index % 2 else 1.001, dtype=torch.float32)
+        for index, name in enumerate(source_names)
+    }
+    path = tmp_path / "quantizer_state.pth"
+    torch.save(state, path)
+    model.load_state_dict(reload_utils.load_state_dict_from_path(str(path), model))
+    for name in expected:
+        quantizer = model.get_submodule(name)
+        assert quantizer.is_enabled and quantizer.amax.dtype == torch.float32
+        assert torch.equal(quantizer.amax, torch.tensor(4.001 if gdn else 1.001))
+    hf_state = {"modelopt_state_dict": [("quantize", {"metadata": {"quantizer_state": recipe}})]}
+    converted = reload_utils.convert_modelopt_state_to_vllm(
+        hf_state, model.hf_to_vllm_mapper.apply_dict
+    )
+    assert converted["modelopt_state_dict"][0][1]["metadata"]["quantizer_state"].keys() == expected
+
+
+def test_constant_amax_kv_recipe_reloads_without_calibration_buffers(reload_utils, tmp_path):
+    model = torch.nn.Module()
+    model.input_quantizer = TensorQuantizer(amax=9.0)
+    model.k_bmm_quantizer = TensorQuantizer()
+    model.v_bmm_quantizer = TensorQuantizer()
+    set_quantizer_by_cfg(model, load_config("configs/ptq/units/kv_fp8_cast"))
+    for name in ("k_bmm_quantizer", "v_bmm_quantizer"):
+        quantizer = getattr(model, name)
+        assert quantizer.is_enabled and quantizer._use_constant_amax
+        assert not hasattr(quantizer, "_amax")
+    path = tmp_path / "quantizer_state.pth"
+    torch.save({"input_quantizer._amax": torch.tensor(1.001)}, path)
+    model.load_state_dict(reload_utils.load_state_dict_from_path(str(path), model))
+    assert torch.equal(model.input_quantizer.amax, torch.tensor(1.001))
+    inputs = torch.tensor([-1.001, 0.333, 2.001], device="cuda")
+    for name in ("k_bmm_quantizer", "v_bmm_quantizer"):
+        quantizer = getattr(model, name).cuda()
+        assert not hasattr(quantizer, "_amax")
+        torch.testing.assert_close(
+            quantizer(inputs), inputs.to(torch.float8_e4m3fn).float(), rtol=0, atol=0
+        )
+    torch.save({}, path)
+    with pytest.raises(ValueError, match="input_quantizer"):
+        reload_utils.load_state_dict_from_path(str(path), model)
