@@ -21,7 +21,7 @@ import inspect
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
-from functools import partial
+from functools import cache, partial
 from itertools import chain
 from types import ModuleType
 
@@ -505,12 +505,50 @@ def create_parallel_state():
     return ParallelState(dp_group, tp_group, ep_group)
 
 
-def _check_prequantized_quantizers_disabled(module: torch.nn.Module, names) -> None:
-    """Raise if a quantizer is enabled on a layer that is only supported as pass-through.
+def _kimi_shared_bf16_linear_supports_fake_quant(module: torch.nn.Module) -> bool:
+    """Limit the Kimi opt-in to dense BF16 shared-expert projections."""
+    weight = getattr(module, "weight", None)
+    prefix = getattr(module, "prefix", "")
+    return (
+        isinstance(prefix, str)
+        and prefix.endswith(
+            (
+                ".block_sparse_moe.shared_experts.gate_up_proj",
+                ".block_sparse_moe.shared_experts.down_proj",
+            )
+        )
+        and isinstance(weight, torch.Tensor)
+        and weight.ndim == 2
+        and weight.dtype == torch.bfloat16
+        and weight.layout == torch.strided
+        and not weight.is_quantized
+    )
 
-    Such a layer runs a vLLM method other than the plain unquantized one, typically because the
-    checkpoint is pre-quantized (e.g. FP8), so there is no high-precision weight to fake-quantize.
-    """
+
+@cache
+def _linear_fake_quant_checks() -> dict[type, Callable[[torch.nn.Module], bool]]:
+    """Exact method types whose ordinary apply path can receive fake-quantized tensors."""
+    checks = {vllm_linear.UnquantizedLinearMethod: lambda module: True}
+    # The Kimi low-latency method is present only in the Kimi vLLM fork.
+    try:
+        from vllm.models.kimi_k3.nvidia.low_latency_gemm import KimiK3LowLatencyLinearMethod
+    except ModuleNotFoundError as exc:
+        if exc.name != "vllm.models.kimi_k3" and not (
+            exc.name and exc.name.startswith("vllm.models.kimi_k3.")
+        ):
+            raise
+    else:
+        checks[KimiK3LowLatencyLinearMethod] = _kimi_shared_bf16_linear_supports_fake_quant
+    return checks
+
+
+def _supports_fake_quant_linear(module: torch.nn.Module) -> bool:
+    check = _linear_fake_quant_checks().get(type(module.quant_method))
+    return check(module) if check is not None else False
+
+
+def _check_unsupported_quantizers_disabled(module: torch.nn.Module, names) -> None:
+    """Raise if a pass-through layer has any enabled quantizers."""
     enabled = [name for name in names if getattr(module, name).is_enabled]
     if enabled:
         layer = (
@@ -519,10 +557,9 @@ def _check_prequantized_quantizers_disabled(module: torch.nn.Module, names) -> N
             or type(module).__name__
         )
         raise RuntimeError(
-            f"{layer} uses vLLM's {type(module.quant_method).__name__} (e.g. a pre-quantized"
-            f" checkpoint), which cannot be fake-quantized ({', '.join(enabled)} enabled). Use a"
-            " recipe that leaves this layer unquantized (e.g. KV cache only) or an unquantized"
-            " checkpoint."
+            f"{layer} uses vLLM's {type(module.quant_method).__name__}, which does not"
+            f" support ModelOpt fake quantization on this layer ({', '.join(enabled)} enabled)."
+            " Use a recipe that disables these quantizers or add validated method support."
         )
 
 
@@ -534,17 +571,17 @@ class _VLLMParallelLinear(QuantModule):
         self.weight_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_weight)
         self.output_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_output)
         self.output_quantizer.disable()
-        # Layers vLLM runs with another method (e.g. a pre-quantized FP8 checkpoint) pass through.
-        self._prequantized = type(self.quant_method) is not vllm_linear.UnquantizedLinearMethod
+        # Method support is explicit; storage dtype alone does not establish compatibility.
+        self._fake_quant_supported = _supports_fake_quant_linear(self)
         self.fake_quant_method = FakeQuantMethod(self.quant_method)
         self.parallel_state = create_parallel_state()
 
     def iter_weights_for_calibration(self):
-        if not self._prequantized:
+        if self._fake_quant_supported:
             yield from super().iter_weights_for_calibration()
 
     def fold_weight(self, keep_attrs: bool = False):
-        if not self._prequantized:
+        if self._fake_quant_supported:
             super().fold_weight(keep_attrs)
 
     def _sync_input_pre_quant_scale_to_weight(self) -> None:
@@ -563,8 +600,8 @@ class _VLLMParallelLinear(QuantModule):
         self._sync_input_pre_quant_scale_to_weight()
 
     def forward(self, input_):
-        if self._prequantized:
-            _check_prequantized_quantizers_disabled(self, self._QUANTIZER_NAMES)
+        if not self._fake_quant_supported:
+            _check_unsupported_quantizers_disabled(self, self._QUANTIZER_NAMES)
             return super().forward(input_)
         # This context manager will conflict with torch.compile
         # with replace_function(self, "quant_method", self.fake_quant_method):
@@ -722,7 +759,7 @@ class _QuantFusedMoEBase(QuantModule):
         Patching is process-wide: safe for the LIFO nesting vLLM does, but not thread-safe.
         """
         if self._prequantized:
-            _check_prequantized_quantizers_disabled(self, self._QUANTIZER_NAMES)
+            _check_unsupported_quantizers_disabled(self, self._QUANTIZER_NAMES)
         if self._prequantized or not any(
             getattr(self, name).is_enabled for name in self._QUANTIZER_NAMES
         ):

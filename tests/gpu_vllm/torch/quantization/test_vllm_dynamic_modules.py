@@ -360,7 +360,7 @@ def test_prequantized_linear_passes_through(monkeypatch):
         getattr(linear, name).disable()
     weight = linear.weight.detach().clone()
 
-    assert linear._prequantized
+    assert not linear._fake_quant_supported
     assert torch.equal(linear(torch.zeros(2, 4)), torch.ones(2, 4))
     assert isinstance(linear.quant_method, _PrequantizedMethod)
     assert list(linear.iter_weights_for_calibration()) == []
@@ -385,7 +385,47 @@ def test_prequantized_linear_rejects_enabled_quantizers(monkeypatch):
     unquantized = _new_attention(_TestQuantVLLMLinear)
     unquantized.quant_method = vllm_plugin.vllm_linear.UnquantizedLinearMethod()
     unquantized._setup()
-    assert not unquantized._prequantized
+    assert unquantized._fake_quant_supported
+
+
+@pytest.mark.parametrize(
+    ("path", "dtype", "shape", "expected"),
+    [
+        ("block_sparse_moe.shared_experts.gate_up_proj", torch.bfloat16, (4, 4), True),
+        ("block_sparse_moe.shared_experts.down_proj", torch.bfloat16, (4, 4), True),
+        ("block_sparse_moe.shared_experts.other_proj", torch.bfloat16, (4, 4), False),
+        ("mlp.gate_up_proj", torch.bfloat16, (4, 4), False),
+        ("block_sparse_moe.shared_experts.down_proj", torch.float16, (4, 4), False),
+        ("block_sparse_moe.shared_experts.down_proj", torch.bfloat16, (4, 4, 4), False),
+    ],
+)
+def test_kimi_low_latency_linear_fake_quant_support(path, dtype, shape, expected):
+    kimi_method = next(
+        (
+            method
+            for method in vllm_plugin._linear_fake_quant_checks()
+            if method.__name__ == "KimiK3LowLatencyLinearMethod"
+        ),
+        None,
+    )
+    if kimi_method is None:
+        pytest.skip("Kimi low-latency vLLM fork is not installed")
+    linear = SimpleNamespace(
+        quant_method=object.__new__(kimi_method),
+        prefix=f"model.layers.1.{path}",
+        weight=torch.empty(shape, dtype=dtype),
+    )
+    assert vllm_plugin._supports_fake_quant_linear(linear) is expected
+
+
+def test_unregistered_unquantized_subclass_is_unsupported():
+    class OtherUnquantizedMethod(vllm_plugin.vllm_linear.UnquantizedLinearMethod):
+        pass
+
+    method = object.__new__(OtherUnquantizedMethod)
+    assert isinstance(method, vllm_plugin.vllm_linear.UnquantizedLinearMethod)
+    linear = SimpleNamespace(quant_method=method)
+    assert not vllm_plugin._supports_fake_quant_linear(linear)
 
 
 def test_prequantized_fused_moe_passes_through(monkeypatch):
