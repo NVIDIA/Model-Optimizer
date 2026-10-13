@@ -581,15 +581,19 @@ def load_pretrained(
         },
     )
     trust_remote_code = kwargs.get("trust_remote_code", False)
+    session = _distributed_session()
     if distribution is None:
         plan, hf_config = _decide_distribution(ckpt_path, trust_remote_code, None, None)
         distribution = "sequential" if plan is None else plan
         if plan is not None and plan.is_fsdp_dense:
             kwargs.setdefault("hf_config", hf_config)
+    elif session is not None and isinstance(distribution, DistributionPlan):
+        _route(distribution)  # A plan this rank refuses leaves the session as it was.
+        # Every rank loads the plan rank 0 was handed, as it would one the session decided: ranks
+        # loading different plans would build mismatched meshes and hang.
+        session.plan = distribution
+        distribution = session.plan
     route = _route(distribution)
-    session = _distributed_session()
-    if session is not None and isinstance(distribution, DistributionPlan):
-        session.plan = distribution  # What the model is loaded with, the same on every rank.
     if model_type is None:
         model_type = (
             kwargs.get("hf_config")
