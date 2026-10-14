@@ -99,6 +99,7 @@ from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
+    all_reduce,
     broadcast_from,
     distribution_plan,
     is_fsdp2_model,
@@ -2179,6 +2180,7 @@ def export_hf_checkpoint(
     # buffer instead of the whole quantized state dict.
     _offloaded = has_accelerate_offload(model)
 
+    error: Exception | None = None
     try:
         if _offloaded:
             # Imported here rather than at module scope: the streaming exporter imports the
@@ -2331,6 +2333,7 @@ def export_hf_checkpoint(
                 _copy_non_model_files_from_source(model, export_dir)
 
     except Exception as e:
+        error = e
         # Print (not just warnings.warn, which the default filter can dedupe/suppress) BEFORE the
         # barrier below: under FSDP2/EP every other rank is still waiting there, so a failing rank
         # that raises straight into `finally` blocks on that barrier forever without this rank's
@@ -2346,4 +2349,21 @@ def export_hf_checkpoint(
         # Every rank waits for the writer to finish. Without this the ranks that wrote nothing exit
         # first and the job hangs on the ones still writing.
         if is_fsdp2_sharded or is_ep_sharded:
-            torch.distributed.barrier()
+            _finish_export_together(error)
+
+
+def _finish_export_together(error: Exception | None) -> None:
+    """Wait for every rank to finish writing, and raise on all of them if any failed.
+
+    A barrier alone lets the ranks whose writes succeeded return, and the run carries on as if the
+    checkpoint were whole while another rank's export raised. Every rank's outcome is gathered
+    instead (:func:`~modelopt.torch.utils.distributed.all_reduce`), so every rank raises with the
+    failing rank's error.
+    """
+
+    def exported() -> bool:
+        if error is not None:
+            raise error
+        return True
+
+    all_reduce("export_ok", exported, all)
