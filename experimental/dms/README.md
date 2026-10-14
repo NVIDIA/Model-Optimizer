@@ -48,7 +48,7 @@ This single install provides everything needed for training and evaluation (incl
 
 ### Train DMS adapters
 
-**Note:** The number of GPUs determines the effective batch size. The configuration below was tested on a DGX H100 with 8× H100 80GB GPUs. For debugging with a smaller compute budget (e.g., a single RTX 5090), see [`scripts/train_small_debug.sh`](scripts/train_small_debug.sh).
+**Note:** The number of GPUs determines the effective batch size. The configuration below was tested on a DGX H100 with 8× H100 80GB GPUs. For debugging with a smaller compute budget (e.g., a single RTX 5090), see [`scripts/train_small.sh`](scripts/train_small.sh).
 
 ```bash
 bash scripts/train.sh configs/qwen3_8b.yaml
