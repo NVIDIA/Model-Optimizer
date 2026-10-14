@@ -33,6 +33,7 @@ from modelopt.torch.utils.distributed import (
     distribution_plan,
     is_distributed_launch,
     set_distribution_plan,
+    setup_fsdp2_process_group,
 )
 
 # --------------------------------------------------------------------------------- DistributionPlan
@@ -278,6 +279,50 @@ def test_a_distributed_launch_yields_this_ranks_state_on_its_cuda_device(monkeyp
     with distributed_run(device="cpu") as state:
         assert state == DistributedState(rank=2, world_size=4, device=torch.device("cuda:1"))
         assert not state.is_main
+
+
+def test_the_run_destroys_a_group_its_body_set_up(monkeypatch):
+    """FSDP2 on one rank sets a group up mid-run; the run tears it down like a launch's."""
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    live, destroyed = [], []
+    monkeypatch.setattr(dist, "is_initialized", lambda: bool(live))
+    monkeypatch.setattr(dist, "setup", lambda timeout=None: live.append(timeout))
+    monkeypatch.setattr(dist, "cleanup", lambda: destroyed.append(0))
+
+    with distributed_run(device="cpu"):
+        setup_fsdp2_process_group(DistributionPlan(dense="fsdp"), timeout=timedelta(hours=2))
+
+    assert live == [timedelta(hours=2)]
+    assert len(destroyed) == 1
+
+
+def test_the_run_leaves_a_group_it_found_alone(monkeypatch):
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "cleanup", lambda: pytest.fail("destroyed the caller's group"))
+    with distributed_run(device="cpu"):
+        pass
+
+
+@pytest.mark.parametrize(
+    ("plan", "live_group", "setups"),
+    [
+        (DistributionPlan(dense="fsdp"), False, 1),
+        (DistributionPlan(2, dense="fsdp"), True, 0),
+        (DistributionPlan(), False, 0),
+    ],
+    ids=["fsdp2_on_one_rank", "launched_group", "replicated"],
+)
+def test_fsdp2_on_one_rank_sets_up_a_group_of_its_own(monkeypatch, plan, live_group, setups):
+    """FSDP2 shards through a process group even on one rank; a distributed launch has its group,
+    and a plan that does not FSDP2-shard needs none."""
+    calls = []
+    monkeypatch.setattr(dist, "is_initialized", lambda: live_group)
+    monkeypatch.setattr(dist, "setup", lambda timeout=None: calls.append(timeout))
+
+    setup_fsdp2_process_group(plan, timeout=timedelta(hours=2))
+
+    assert calls == [timedelta(hours=2)] * setups
 
 
 def test_a_distributed_launch_owns_the_group_even_when_the_body_raises(monkeypatch, capsys):
