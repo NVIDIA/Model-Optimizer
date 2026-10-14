@@ -27,12 +27,14 @@ import pytest
 import torch
 from torch import nn
 
+from modelopt.torch.utils.distributed import ParallelState
 from modelopt.torch.utils.moe import (
     _ckpt_quant_method,
     _experts_sharded_over,
     _routed_expert_modules,
     _seed_parallel_states,
     _transformers_mesh_builder,
+    expert_parallel_mesh,
 )
 
 # ----------------------------------------------------------------------------------- tiny MoE
@@ -192,6 +194,43 @@ def test_a_sibling_whose_name_extends_an_expert_container_stays_dense():
 
     assert mlp.experts._parallel_state is expert
     assert mlp.experts_gate._parallel_state is dense
+
+
+# ------------------------------------------------------------------------ expert_parallel_mesh
+
+
+def test_the_expert_parallel_mesh_is_the_one_the_model_was_loaded_over(monkeypatch):
+    """Experts seeded with a live expert-parallel group: the mesh transformers kept on the model."""
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    model = _model_with_decoder_at("model.")
+    experts = {f"model.layers.{i}.mlp.experts": model.model.layers[i].mlp.experts for i in (0, 1)}
+    _seed_parallel_states(
+        model,
+        experts,
+        dense_state=ParallelState(data_parallel_group=object()),
+        expert_state=ParallelState(expert_model_parallel_group=object()),
+    )
+    model._device_mesh = mesh = object()
+
+    assert expert_parallel_mesh(model) is mesh
+
+
+@pytest.mark.parametrize("ep_group", [None, -1], ids=["not-seeded", "one-rank-ep"])
+def test_a_model_without_sharded_experts_has_no_expert_parallel_mesh(monkeypatch, ep_group):
+    """An unseeded model, or one whose expert-parallel group is a single rank, is not EP-sharded."""
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    model = _model_with_decoder_at("model.")
+    if ep_group is not None:
+        experts = {"model.layers.0.mlp.experts": model.model.layers[0].mlp.experts}
+        _seed_parallel_states(
+            model,
+            experts,
+            dense_state=ParallelState(),
+            expert_state=ParallelState(expert_model_parallel_group=ep_group),
+        )
+    model._device_mesh = object()
+
+    assert expert_parallel_mesh(model) is None
 
 
 # --------------------------------------------------------------------------- _ckpt_quant_method

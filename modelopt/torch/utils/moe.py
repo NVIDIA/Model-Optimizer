@@ -26,18 +26,12 @@ import time, so importing this module has no transformers-``ExpertsInterface`` s
 
 import contextlib
 import warnings
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.nn.functional import all_to_all_single as autograd_all_to_all_single
-
-if TYPE_CHECKING:
-    from .distributed import ModelOptSession
-
-if TYPE_CHECKING:
-    from torch import nn
 
 
 def require_transformers(min_version: str, feature: str) -> None:
@@ -589,7 +583,6 @@ def _experts_sharded_over(ep_mesh):
 
 def load_and_prepare_ep(
     ckpt_path: str,
-    mo_session: "ModelOptSession",
     ep_degree: int,
     trust_remote_code: bool = False,
     attn_implementation: str | None = None,
@@ -621,7 +614,8 @@ def load_and_prepare_ep(
     floor where their stock support landed later, e.g. qwen3_moe's stock base_model_ep_plan in >= 5.7.)
 
     Assumes the caller has already initialized (and device-bound) the process group -- distributed
-    bring-up is the launcher's job, not this loader's (hf_ptq.main() does it via modelopt_session).
+    bring-up is the launcher's job, not this loader's (hf_ptq.main() does it via ``distributed_run``).
+    The expert-parallel mesh stays recoverable from the model (:func:`expert_parallel_mesh`).
     """
     # Hard floor: the transformers MoE expert-parallel framework. Below 5.6 there is no ExpertsInterface
     # / grouped-GEMM EP styles, and enable_expert_parallel silently shards nothing (no error) -> fail loud.
@@ -632,13 +626,23 @@ def load_and_prepare_ep(
     from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
     from transformers.distributed import DistributedConfig
 
-    from .distributed import ParallelState
+    from .distributed import ParallelState, is_distributed_run, is_initialized, is_master, size
 
-    if mo_session.world_size % ep_degree != 0:
-        raise ValueError(
-            f"world_size {mo_session.world_size} not divisible by ep_degree {ep_degree}"
+    # This loader assumes the caller has ALREADY initialized (and device-bound) the process group --
+    # distributed bring-up belongs to the launcher, not this library function. The example launcher does
+    # it in hf_ptq.main() via distributed_run() -> modelopt.torch.utils.distributed.setup() before
+    # the load. A live, device-bound PG is required here so the mesh subgroups built below create their
+    # NCCL comms eagerly (the synchronized warmup all-reduce per subgroup further down) instead of lazily
+    # on first collective (which deadlocks at DP>1 because ranks reach the lazy init in different phases).
+    if not is_initialized():
+        raise RuntimeError(
+            "load_and_prepare_ep requires a live, device-bound process group; set it up first, e.g. "
+            "with modelopt.torch.utils.distributed.distributed_run() under torchrun."
         )
-    dp = mo_session.world_size // ep_degree
+    world_size = size()
+    if world_size % ep_degree != 0:
+        raise ValueError(f"world_size {world_size} not divisible by ep_degree {ep_degree}")
+    dp = world_size // ep_degree
     if hf_config is None:
         config_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
         if attn_implementation is not None:
@@ -646,18 +650,6 @@ def load_and_prepare_ep(
         hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
     dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
 
-    # This loader assumes the caller has ALREADY initialized (and device-bound) the process group --
-    # distributed bring-up belongs to the launcher, not this library function. The example launcher does
-    # it in hf_ptq.main() via modelopt_session() -> modelopt.torch.utils.distributed.setup() before
-    # the load. A live, device-bound PG is required here so the mesh subgroups built below create their
-    # NCCL comms eagerly (the synchronized warmup all-reduce per subgroup further down) instead of lazily
-    # on first collective (which deadlocks at DP>1 because ranks reach the lazy init in different phases).
-    if not mo_session.initialized:
-        raise RuntimeError(
-            "load_and_prepare_ep requires an initialized ModelOptSession (with a live, device-bound "
-            "process group); enter modelopt.torch.utils.distributed.modelopt_session() (or pass an "
-            "initialized session) before calling it."
-        )
     # Two INDEPENDENT meshes (NeMo-AutoModel style), named by the model part they govern -- two
     # factorizations of the same world:
     #   sparse_moe_mesh = (edp, ep): experts are SHARDED over the ``ep`` axis and REPLICATED over ``edp``;
@@ -666,7 +658,7 @@ def load_and_prepare_ep(
     # This subsumes the old a2a-vs-partial split: a2a is simply dp == 1 (``edp`` size 1), and dense amax
     # always reduces over the whole world (fixing the DP>1 case, where the old dp submesh missed the ep dim).
     sparse_moe_mesh = init_device_mesh("cuda", (dp, ep_degree), mesh_dim_names=("edp", "ep"))
-    dense_mesh = init_device_mesh("cuda", (mo_session.world_size,), mesh_dim_names=("dp",))
+    dense_mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp",))
     ep_submesh = sparse_moe_mesh["ep"]
 
     # NO TENSOR PARALLELISM IS REQUESTED HERE, despite the name. transformers implements expert
@@ -716,7 +708,7 @@ def load_and_prepare_ep(
         from transformers import Mxfp4Config
 
         from_pretrained_kwargs["quantization_config"] = Mxfp4Config(dequantize=True)
-        if mo_session.rank == 0:
+        if is_master():
             print(
                 "[ep] native mxfp4 checkpoint (e.g. gpt-oss) -> Mxfp4Config(dequantize=True) -> bf16",
                 flush=True,
@@ -749,7 +741,7 @@ def load_and_prepare_ep(
     from_pretrained_kwargs["experts_implementation"] = "torch_a2a"
     ep_cfg.base_model_ep_plan = swapped_plan
     from_pretrained_kwargs["config"] = hf_config
-    if mo_session.rank == 0:
+    if is_master():
         print(f"[ep] ep_plan={swapped_plan} experts_implementation=torch_a2a", flush=True)
     # Pick the loader by model type, matching examples' get_model: VLM (nested text_config / a
     # *ForConditionalGeneration arch) -> AutoModel so the WHOLE checkpoint loads (vision tower + projector
@@ -796,7 +788,7 @@ def load_and_prepare_ep(
                 # preview is skipped downstream (pre_quantize guards on hasattr(model, "generate")).
                 if type(hf_config) in AutoModelForImageTextToText._model_mapping:
                     loader = AutoModelForImageTextToText
-                elif mo_session.rank == 0:
+                elif is_master():
                     print(
                         f"[ep] require_lm_head: {type(hf_config).__name__} is not registered under "
                         f"AutoModelForImageTextToText; keeping headless {loader.__name__} "
@@ -805,7 +797,7 @@ def load_and_prepare_ep(
                     )
             except ImportError:
                 pass
-    if mo_session.rank == 0:
+    if is_master():
         print(
             f"[ep] loader={loader.__name__} (is_vlm={_is_vlm}, "
             f"require_lm_head={require_lm_head}, archs={_archs})",
@@ -858,16 +850,13 @@ def load_and_prepare_ep(
             expert_model_parallel_group=_axis(sparse_moe_mesh["ep"]),
         ),
     )
-    if mo_session.rank == 0:
+    if is_master():
         print(
             f"[ep] seeded the expert-parallel state of {len(expert_modules)} routed-expert "
             "module(s) from base_model_ep_plan",
             flush=True,
         )
-    # Re-planting the a2a forwards after quantizer insertion (``_reinstall_a2a_forwards``) needs this mesh.
-    mo_session.ep_mesh = ep_submesh
-
-    if mo_session.distributed:
+    if is_distributed_run():
         # Eagerly create each amax collective's NCCL comm in a globally-consistent order (barrier around
         # each), so the sub-communicators are built in lockstep rather than lazily mid-calibration --
         # which deadlocks when submesh groups are phase-skewed at DP>1. NO forward warmup (variable
@@ -883,3 +872,19 @@ def load_and_prepare_ep(
             torch.cuda.synchronize()
         torch.distributed.barrier()
     return model
+
+
+def expert_parallel_mesh(model: nn.Module):
+    """The mesh ``model``'s routed experts are sharded over, or ``None`` if they are not sharded.
+
+    :func:`load_and_prepare_ep` loads the model over its expert-parallel submesh, which transformers
+    keeps on the model as ``_device_mesh``, and seeds the routed experts with their expert-parallel
+    group. Calibration takes the mesh to re-install the all-to-all forwards
+    (:func:`~modelopt.torch.utils.distributed.distributed_forward_loop`).
+    """
+    expert_parallel = any(
+        getattr(module, "_parallel_state", None) is not None
+        and module._parallel_state.expert_model_parallel_group.is_initialized()
+        for module in model.modules()
+    )
+    return getattr(model, "_device_mesh", None) if expert_parallel else None
