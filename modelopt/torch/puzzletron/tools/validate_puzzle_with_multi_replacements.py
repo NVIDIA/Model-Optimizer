@@ -23,13 +23,14 @@ TODO: Consider moving this a separate module dedicated for scoring
 import gc
 import json
 import warnings
+from datetime import timedelta
 from functools import partial
 from pathlib import Path
+from time import monotonic
 from typing import Optional
 
 import torch
 from omegaconf import DictConfig
-from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 import modelopt.torch.utils.distributed as dist
@@ -44,6 +45,7 @@ from . import validate_model
 from .checkpoint_utils import copy_tokenizer
 from .checkpoint_utils_hf import save_checkpoint_from_shards
 from .common import resolve_torch_dtype
+from .logger import mprint
 from .sharded_checkpoint_utils import load_and_shard_model
 from .validation_utils import (
     validate_model_and_extract_hidden_states,
@@ -145,6 +147,7 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
 
     teacher_hidden_states = None
     if (args.teacher_dir is not None) and (not args.skip_validation):
+        mprint("Puzzletron Progress: preparing and evaluating teacher before solution validation")
         teacher_model = load_and_shard_model(
             checkpoint_path=args.teacher_dir, descriptor=descriptor
         )
@@ -166,8 +169,11 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
         torch.cuda.synchronize()
         dist.barrier()
 
-    for i_solution, puzzle_solution in tqdm(
-        list(zip(args.solutions_to_validate, puzzle_solutions)), desc="Validating solutions"
+    total_solutions = len(puzzle_solutions)
+    mprint(f"Puzzletron Progress: validating {total_solutions} solutions")
+    start_time = monotonic()
+    for completed, (i_solution, puzzle_solution) in enumerate(
+        zip(args.solutions_to_validate, puzzle_solutions), start=1
     ):
         layer_replacements = _extract_layer_replacements_from_puzzle_solution(puzzle_solution)
         realizable_as_symlinks = can_realize_as_symlinks(layer_replacements)
@@ -230,6 +236,14 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
             gc.collect()
 
         dist.barrier()
+
+        elapsed_seconds = monotonic() - start_time
+        remaining_seconds = elapsed_seconds * (total_solutions - completed) / completed
+        mprint(
+            f"Puzzletron Progress: validated {completed}/{total_solutions} solutions; "
+            f"elapsed {timedelta(seconds=int(elapsed_seconds))}; "
+            f"estimated remaining {timedelta(seconds=int(remaining_seconds))}"
+        )
 
 
 def can_realize_as_symlinks(layer_replacements: list[dict]) -> bool:
