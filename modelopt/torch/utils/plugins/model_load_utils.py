@@ -2068,7 +2068,7 @@ def load_and_prepare_ep(
         _patch_finegrained_fp8_dequant(
             dtype
         )  # correct transformers' block-fp8 dequant; emit model dtype
-        if mo_session.rank == 0:
+        if is_master():
             print(
                 "[ep] native block-fp8 checkpoint -> FineGrainedFP8Config(dequantize=True) -> bf16",
                 flush=True,
