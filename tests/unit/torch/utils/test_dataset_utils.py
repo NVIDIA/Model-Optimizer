@@ -436,24 +436,15 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
     assert result == 4
 
 
-def test_get_max_batch_size_agrees_on_the_smallest_ranks_in_a_session(monkeypatch):
+def test_get_max_batch_size_takes_the_smallest_ranks_in_a_distributed_run(monkeypatch):
     """Every rank must run the same number of calibration steps, so ranks agree on one batch size.
 
     Rank 1 of two, on cuda:1, measures its own GPU only, probes with one forward (an OOM retry
     would run a different number of collective-bearing forwards per rank), and takes rank 0's
     smaller size.
     """
-    from modelopt.torch.utils.distributed import get_active_mo_session
-
-    session = get_active_mo_session(required=False)
-    session.initialize(
-        distributed=True,
-        rank=1,
-        world_size=2,
-        local_rank=1,
-        device=torch.device("cuda:1"),
-        is_main=False,
-    )
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setenv("LOCAL_RANK", "1")
     sent = []
 
     def all_gather_object(gathered, mine, group=None):
@@ -473,19 +464,16 @@ def test_get_max_batch_size_agrees_on_the_smallest_ranks_in_a_session(monkeypatc
         measured.append(device)
         return (1000, 0) if len(measured) == 1 else (900, 0)  # 100 bytes a sample -> 10
 
-    try:
-        with (
-            patch("torch.cuda.empty_cache"),
-            patch("torch.cuda.get_device_properties", return_value=device_props),
-            patch("torch.cuda.device_count", return_value=4),
-            patch("torch.cuda.mem_get_info", side_effect=mem_get_info),
-            patch("torch.cuda.max_memory_allocated", return_value=0),
-        ):
-            result = get_max_batch_size(
-                model, max_sample_length=8, sample_input_single_batch=torch.ones((1, 8))
-            )
-    finally:
-        session._reset()
+    with (
+        patch("torch.cuda.empty_cache"),
+        patch("torch.cuda.get_device_properties", return_value=device_props),
+        patch("torch.cuda.device_count", return_value=4),
+        patch("torch.cuda.mem_get_info", side_effect=mem_get_info),
+        patch("torch.cuda.max_memory_allocated", return_value=0),
+    ):
+        result = get_max_batch_size(
+            model, max_sample_length=8, sample_input_single_batch=torch.ones((1, 8))
+        )
 
     assert measured == [torch.device("cuda:1")] * 2
     assert seen_batch_sizes == [1]

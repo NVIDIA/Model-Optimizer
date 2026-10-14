@@ -33,10 +33,8 @@ from torch.utils.data import DataLoader, IterableDataset
 
 import modelopt.torch.utils.distributed as mto_dist
 from modelopt.torch.utils.distributed import (
-    ModelOptSession,
     _reinstall_a2a_forwards,
     distributed_forward_loop,
-    modelopt_session,
     shard_dataloader,
 )
 
@@ -301,16 +299,6 @@ class _MoEModel(nn.Module):
         return hidden_states
 
 
-def _ep_session(rank=0, *, with_mesh=True):
-    """An EP rank's session: its identity plus the EP mesh the model loader recorded."""
-    session = ModelOptSession()
-    session.initialize(
-        distributed=True, rank=rank, world_size=2, local_rank=rank, device=None, is_main=rank == 0
-    )
-    session.ep_mesh = _FakeMesh() if with_mesh else None
-    return session
-
-
 def _drop_tp_wrapper(module):
     """Do what quantizer insertion does to the instance: rebind the class forward over the wrapper.
 
@@ -327,47 +315,43 @@ def test_reinstall_replants_the_ep_wrapper_on_the_a2a_modules_only(monkeypatch, 
     is looked up per module (``is_weight=False``), so children do not inherit their parent's style.
     """
     styles = _install_fake_tp(monkeypatch)
-    model, session = _MoEModel(), _ep_session(rank)
+    monkeypatch.setattr(mto_dist, "is_master", lambda group=None: rank == 0)
+    model, mesh = _MoEModel(), _FakeMesh()
     hidden_states = torch.ones(2, 4)
     with pytest.raises(ValueError, match="process_group"):
         model(hidden_states)  # as quantizer insertion leaves it: no wrapper, no EP group
 
-    assert _reinstall_a2a_forwards(model, session) == 4
+    assert _reinstall_a2a_forwards(model, mesh) == 4
 
     assert styles["torch_a2a_experts"].installed == [layer.experts for layer in model.layers]
     assert styles["torch_a2a_router"].installed == [layer.gate for layer in model.layers]
     assert styles["colwise"].installed == []
     model(hidden_states)
-    assert [layer.experts.groups for layer in model.layers] == [[session.ep_mesh.group]] * 2
+    assert [layer.experts.groups for layer in model.layers] == [[mesh.group]] * 2
     assert ("re-installed 4" in capsys.readouterr().out) == (rank == 0)
 
 
 def test_reinstall_does_not_stack_wrappers_across_calibration_passes(monkeypatch):
     """A repeat call is a no-op; a second wrapper would pass the experts the EP group twice."""
     styles = _install_fake_tp(monkeypatch)
-    model, session = _MoEModel(), _ep_session()
-    assert _reinstall_a2a_forwards(model, session) == 4
+    model, mesh = _MoEModel(), _FakeMesh()
+    assert _reinstall_a2a_forwards(model, mesh) == 4
 
-    assert _reinstall_a2a_forwards(model, session) == 0
+    assert _reinstall_a2a_forwards(model, mesh) == 0
     assert len(styles["torch_a2a_experts"].installed) == 2
     model(torch.ones(2, 4))
-    assert [layer.experts.groups for layer in model.layers] == [[session.ep_mesh.group]] * 2
+    assert [layer.experts.groups for layer in model.layers] == [[mesh.group]] * 2
 
 
 @pytest.mark.parametrize(
-    ("has_session", "has_ep_mesh", "has_tp_plan"),
-    [(False, True, True), (True, False, True), (True, True, False)],
-    ids=["no-session", "no-ep-mesh", "no-tp-plan"],
+    ("has_ep_mesh", "has_tp_plan"), [(False, True), (True, False)], ids=["no-ep-mesh", "no-tp-plan"]
 )
-def test_reinstall_is_a_noop_off_the_expert_parallel_path(
-    monkeypatch, has_session, has_ep_mesh, has_tp_plan
-):
+def test_reinstall_is_a_noop_off_the_expert_parallel_path(monkeypatch, has_ep_mesh, has_tp_plan):
     """A single-process or non-EP model is left untouched, even with the torch_a2a styles around."""
     styles = _install_fake_tp(monkeypatch)
     model = _MoEModel(with_tp_plan=has_tp_plan)
-    session = _ep_session(with_mesh=has_ep_mesh) if has_session else None
 
-    assert _reinstall_a2a_forwards(model, session) == 0
+    assert _reinstall_a2a_forwards(model, _FakeMesh() if has_ep_mesh else None) == 0
     assert not any(style.installed for style in styles.values())
 
 
@@ -381,7 +365,7 @@ def test_reinstall_is_a_noop_where_tp_styles_are_pre_hooks(monkeypatch):
         styles={"torch_a2a_experts": _PreHookStyle(), "torch_a2a_router": _PreHookStyle()},
         where=_LEGACY_TP_MODULE,
     )
-    assert _reinstall_a2a_forwards(_MoEModel(), _ep_session()) == 0
+    assert _reinstall_a2a_forwards(_MoEModel(), _FakeMesh()) == 0
 
 
 # ------------------------------------------------------------------------- distributed_forward_loop
@@ -409,7 +393,7 @@ class _Recorder(nn.Module):
 def test_forward_loop_runs_this_ranks_shard_through_the_captured_model(dataset, rank):
     """Every batch of the rank's shard reaches the top-level model, not the module ``mtq`` passes.
 
-    Only the full model's forward runs the EP collectives; no session means no device move.
+    Only the full model's forward runs the EP collectives; without a device the batches stay put.
     """
     model, inner = _Recorder(), _Recorder()
     shard = shard_dataloader(_loader(dataset), rank, world_size=2)
@@ -422,18 +406,14 @@ def test_forward_loop_runs_this_ranks_shard_through_the_captured_model(dataset, 
 
 
 @pytest.mark.parametrize(("device", "expected"), [(None, "cpu"), ("meta", "meta")])
-def test_forward_loop_moves_tensors_to_the_single_process_session_device(
-    monkeypatch, device, expected
-):
-    """Batch tensors go to ``mo_session.device`` when it names one; other values pass through.
+def test_forward_loop_moves_tensors_to_the_device_it_is_given(device, expected):
+    """Batch tensors go to ``device`` when one is given; other values pass through.
 
     The meta device makes the move observable on a CPU-only host.
     """
-    monkeypatch.delenv("WORLD_SIZE", raising=False)  # single process: no process group
     batches = [{"input_ids": torch.zeros(2, 3), "logits_to_keep": 1}] * 2
     model = _Recorder()
-    with modelopt_session(device=device) as session:
-        distributed_forward_loop(model, batches, session)(model)
+    distributed_forward_loop(model, batches, device=device)(model)
 
     assert [call["input_ids"].device.type for call in model.calls] == [expected] * 2
     assert [call["logits_to_keep"] for call in model.calls] == [1, 1]
@@ -460,14 +440,16 @@ def test_forward_loop_frees_the_allocator_cache_around_the_forwards(monkeypatch)
         mto_dist, "_reinstall_a2a_forwards", lambda *args: events.append(("reinstall", *args))
     )
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: events.append("empty_cache"))
-    model, session = _Recorder(on_forward=lambda: events.append("forward")), _ep_session()
-    forward_loop = distributed_forward_loop(model, [{"input_ids": torch.zeros(1, 1)}] * 2, session)
+    model, mesh = _Recorder(on_forward=lambda: events.append("forward")), _FakeMesh()
+    forward_loop = distributed_forward_loop(
+        model, [{"input_ids": torch.zeros(1, 1)}] * 2, ep_mesh=mesh
+    )
     assert events == []
 
     forward_loop(model)
 
     assert events == [
-        ("reinstall", model, session),
+        ("reinstall", model, mesh),
         "empty_cache",
         "forward",
         "forward",
@@ -481,13 +463,15 @@ def test_forward_loop_replants_a2a_wrappers_dropped_after_it_was_built(monkeypat
     It holds on every pass (multi-pass algorithms call the loop again), with one wrapper per module.
     """
     styles = _install_fake_tp(monkeypatch)
-    model, session = _MoEModel(), _ep_session()
-    forward_loop = distributed_forward_loop(model, [{"input_ids": torch.ones(2, 4)}] * 3, session)
+    model, mesh = _MoEModel(), _FakeMesh()
+    forward_loop = distributed_forward_loop(
+        model, [{"input_ids": torch.ones(2, 4)}] * 3, ep_mesh=mesh
+    )
     for layer in model.layers:
         _drop_tp_wrapper(layer.experts)
 
     forward_loop(model)
     forward_loop(model)
 
-    assert [layer.experts.groups for layer in model.layers] == [[session.ep_mesh.group] * 6] * 2
+    assert [layer.experts.groups for layer in model.layers] == [[mesh.group] * 6] * 2
     assert len(styles["torch_a2a_experts"].installed) == 2
