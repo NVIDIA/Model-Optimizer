@@ -31,7 +31,7 @@ transformers = pytest.importorskip("transformers")
 finegrained_fp8 = pytest.importorskip("transformers.integrations.finegrained_fp8")
 quantizer_fp8 = pytest.importorskip("transformers.quantizers.quantizer_finegrained_fp8")
 
-import modelopt.torch.utils.moe as moe
+import modelopt.torch.utils.plugins.model_load_utils as model_load_utils
 
 if not hasattr(finegrained_fp8, "Fp8Dequantize"):
     pytest.skip("transformers has no Fp8Dequantize", allow_module_level=True)
@@ -56,8 +56,8 @@ def pre_5_10_transformers(monkeypatch):
     """Unpatched transformers, reporting a version the patch targets; restored afterwards."""
     saved = [(cls, name, vars(cls).get(name, _MISSING)) for cls, name in _PATCH_TARGETS]
     monkeypatch.setattr(transformers, "__version__", "5.9.0")
-    monkeypatch.setattr(moe, "_FINEGRAINED_FP8_PATCHED", False)
-    monkeypatch.setattr(moe, "_FP8_DEQUANT_DTYPE", None)
+    monkeypatch.setattr(model_load_utils, "_FINEGRAINED_FP8_PATCHED", False)
+    monkeypatch.setattr(model_load_utils, "_FP8_DEQUANT_DTYPE", None)
     yield
     for cls, name, value in saved:
         if value is not _MISSING:
@@ -118,7 +118,7 @@ def test_dequant_matches_the_blockwise_reference(pre_5_10_transformers, shape, b
     """``grid-divides-the-rows``: 9 rows of 4-row blocks make a 3-row grid, which also divides 9,
     yet the blocks are 4 rows, not 3."""
     weight, scale_inv = _block_fp8(shape, _ceil_grid(shape, block))
-    moe._patch_finegrained_fp8_dequant(torch.float32)
+    model_load_utils._patch_finegrained_fp8_dequant(torch.float32)
 
     out = _dequant_op(block)._dequantize_one(weight, scale_inv)
 
@@ -136,7 +136,7 @@ def test_the_block_size_comes_from_the_grid_or_defaults_to_deepseeks(
     """A grid that is not the configured block's ceil grid sets the block by division; with no
     block size configured, DeepSeek's 128 x 128 applies."""
     weight, scale_inv = _block_fp8(shape, grid)
-    moe._patch_finegrained_fp8_dequant(torch.float32)
+    model_load_utils._patch_finegrained_fp8_dequant(torch.float32)
 
     out = _dequant_op(configured)._dequantize_one(weight, scale_inv)
 
@@ -156,7 +156,7 @@ def test_dequant_emits_the_requested_model_dtype(pre_5_10_transformers, target_d
     """Not the scales' dtype: DeepSeek's fp32 ``weight_scale_inv`` would give fp32 weights that
     then meet bf16 activations in the calibration matmuls. Unrequested, it is bf16."""
     weight, scale_inv = _block_fp8((10, 13), (3, 4))
-    moe._patch_finegrained_fp8_dequant(target_dtype)
+    model_load_utils._patch_finegrained_fp8_dequant(target_dtype)
 
     out = _dequant_op((4, 4))._dequantize_one(weight, scale_inv)
 
@@ -168,7 +168,7 @@ def test_dequant_emits_the_requested_model_dtype(pre_5_10_transformers, target_d
 def test_an_empty_scale_grid_passes_the_weight_through_unscaled(pre_5_10_transformers, grid):
     """Sharded or merged expert loads can hand over an empty grid; it must not crash the load."""
     weight, scale_inv = _block_fp8((10, 13), grid)
-    moe._patch_finegrained_fp8_dequant(torch.float32)
+    model_load_utils._patch_finegrained_fp8_dequant(torch.float32)
 
     out = _dequant_op((4, 4))._dequantize_one(weight, scale_inv)
 
@@ -177,10 +177,10 @@ def test_an_empty_scale_grid_passes_the_weight_through_unscaled(pre_5_10_transfo
 
 def test_patching_again_keeps_the_install_and_takes_the_new_dtype(pre_5_10_transformers):
     """Every block-fp8 load patches again, with its own model dtype."""
-    moe._patch_finegrained_fp8_dequant(torch.bfloat16)
+    model_load_utils._patch_finegrained_fp8_dequant(torch.bfloat16)
     installed = _patched_state()
 
-    moe._patch_finegrained_fp8_dequant(torch.float16)
+    model_load_utils._patch_finegrained_fp8_dequant(torch.float16)
 
     assert _patched_state() == installed
     weight, scale_inv = _block_fp8((10, 13), (3, 4))
@@ -190,14 +190,14 @@ def test_patching_again_keeps_the_install_and_takes_the_new_dtype(pre_5_10_trans
 def test_a_reimported_module_does_not_wrap_the_quantizer_hook_twice(
     pre_5_10_transformers, monkeypatch
 ):
-    """Re-importing ``moe`` loses its module flag; the quantizer class carries its own."""
+    """Re-importing ``model_load_utils`` loses its module flag; the quantizer class carries its own."""
     if not hasattr(FineGrainedFP8HfQuantizer, "update_weight_conversions"):
         pytest.skip("this transformers' FP8 quantizer has no update_weight_conversions")
-    moe._patch_finegrained_fp8_dequant()
+    model_load_utils._patch_finegrained_fp8_dequant()
     hook = vars(FineGrainedFP8HfQuantizer)["update_weight_conversions"]
-    monkeypatch.setattr(moe, "_FINEGRAINED_FP8_PATCHED", False)
+    monkeypatch.setattr(model_load_utils, "_FINEGRAINED_FP8_PATCHED", False)
 
-    moe._patch_finegrained_fp8_dequant()
+    model_load_utils._patch_finegrained_fp8_dequant()
 
     assert vars(FineGrainedFP8HfQuantizer)["update_weight_conversions"] is hook
 
@@ -210,7 +210,7 @@ def test_undoing_the_patch_restores_stock_transformers(pre_5_10_transformers, mo
     classes = (Fp8Dequantize, FineGrainedFP8HfQuantizer)
     stock = {cls: dict(vars(cls)) for cls in classes}
 
-    moe._patch_finegrained_fp8_dequant()
+    model_load_utils._patch_finegrained_fp8_dequant()
 
     changed = {
         (cls, name)
@@ -226,8 +226,8 @@ def test_undoing_the_patch_restores_stock_transformers(pre_5_10_transformers, mo
             delattr(cls, name)
     assert all(dict(vars(cls)) == stock[cls] for cls in classes)
 
-    monkeypatch.setattr(moe, "_FINEGRAINED_FP8_PATCHED", False)
-    moe._patch_finegrained_fp8_dequant()
+    monkeypatch.setattr(model_load_utils, "_FINEGRAINED_FP8_PATCHED", False)
+    model_load_utils._patch_finegrained_fp8_dequant()
     assert vars(Fp8Dequantize).get("_dequantize_one") is not stock[Fp8Dequantize].get(
         "_dequantize_one"
     )
@@ -241,6 +241,6 @@ def test_transformers_from_5_10_1_keeps_its_own_dequant(
     monkeypatch.setattr(transformers, "__version__", version)
     stock = _patched_state()
 
-    moe._patch_finegrained_fp8_dequant(torch.bfloat16)
+    model_load_utils._patch_finegrained_fp8_dequant(torch.bfloat16)
 
     assert _patched_state() == stock
