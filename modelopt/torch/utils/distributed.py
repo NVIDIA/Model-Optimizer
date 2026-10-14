@@ -30,7 +30,7 @@ from warnings import warn
 
 import torch
 import torch.distributed
-from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, fully_shard
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 
 __all__ = [
@@ -633,52 +633,14 @@ def _move_to_fsdp_device(model, params: set[torch.nn.Parameter]) -> None:
 
 
 def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False):
-    """Auto-detect a HF causal-LM's decoder layers and FSDP2 ``fully_shard`` each one.
+    """FSDP2-shard a HF causal LM's decoder layers, and the root unless ``shard_root=False``.
 
-    By default (``shard_root=True``) the root module is wrapped too, so embed/lm_head/norm are
-    sharded instead of replicated per rank; pass ``shard_root=False`` to leave the root replicated
-    (only decoder layers sharded). Returns the detected decoder layers so callers can reuse the
-    detection result.
-
-    Parameters whose dtype differs from the model's dominant one are excluded from the wrap (see
-    :func:`_off_dtype_params`), since FSDP2 rejects a shard group that mixes dtypes. They stay
-    replicated and are moved onto the shards' device, which ``fully_shard`` does not do for the
-    params it ignores.
-
-    The model records that it is FSDP2-sharded over the process group
-    (:func:`set_distribution_plan`).
+    It loads a model, so it lives with the loaders now:
+    :func:`modelopt.torch.utils.plugins.model_load_utils.fsdp2_wrap`. This keeps the old path.
     """
-    # Lazy import: layerwise_calib imports this module at top level (circular).
-    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+    from modelopt.torch.utils.plugins.model_load_utils import fsdp2_wrap as wrap
 
-    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
-    if decoder_layers is None:
-        raise RuntimeError(
-            "Could not auto-detect decoder layers; FSDP2 wrap requires a standard HF causal-LM layout."
-        )
-
-    fsdp_kwargs: dict[str, Any] = {"reshard_after_forward": True}
-    if mp_policy is not None:
-        fsdp_kwargs["mp_policy"] = mp_policy
-    if cpu_offload:
-        fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
-    ignored_params = _off_dtype_params(model)
-    if ignored_params:
-        fsdp_kwargs["ignored_params"] = ignored_params
-
-    # Snapshot/restore config.architectures: some HF builders mutate it during fully_shard.
-    config = getattr(model, "config", None)
-    architectures = list(getattr(config, "architectures", []) or [])
-    for layer in decoder_layers:
-        fully_shard(layer, **fsdp_kwargs)
-    if shard_root:
-        fully_shard(model, **fsdp_kwargs)
-    if ignored_params:
-        _move_to_fsdp_device(model, ignored_params)
-    if config is not None and architectures:
-        config.architectures = architectures
-    set_distribution_plan(model, DistributionPlan(size(), dense="fsdp"))
-    return decoder_layers
+    return wrap(model, shard_root=shard_root, mp_policy=mp_policy, cpu_offload=cpu_offload)
 
 
 def broadcast_state_dict(

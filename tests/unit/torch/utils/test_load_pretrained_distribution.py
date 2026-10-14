@@ -339,3 +339,23 @@ def test_a_whole_model_load_refuses_a_sharded_loads_config(serve, auto_class, tm
 
     with pytest.raises(TypeError, match="hf_config applies to a sharded load only"):
         load_pretrained(str(tmp_path), auto_class, hf_config=config)
+
+
+# --------------------------------------------------------------------------------- fsdp2_wrap
+
+
+def test_fsdp2_wrap_records_that_the_model_is_sharded_over_the_process_group(monkeypatch):
+    """Whatever wraps the model, the export and calibration read the plan rather than the wrap."""
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
+    monkeypatch.setattr(
+        LayerActivationCollector, "get_decoder_layers", staticmethod(lambda model: list(model))
+    )
+    monkeypatch.setattr(model_load_utils, "fully_shard", lambda module, **kwargs: None)
+    monkeypatch.setattr(model_load_utils, "size", lambda group=None: 4)
+
+    model_load_utils.fsdp2_wrap(model)
+
+    plan = DistributionPlan(4, dense="fsdp")
+    assert all(distribution_plan(module) == plan for module in model.modules())
