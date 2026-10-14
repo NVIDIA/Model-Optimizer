@@ -31,6 +31,7 @@ import pytest
 import torch
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization import model_quant
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
@@ -671,6 +672,7 @@ def test_registered_quantizers_turn_their_config_into_scorer_kwargs(glm, monkeyp
 
     registered = dict(vllm_indexer._SCORER_KWARGS_QUANTIZERS)
     monkeypatch.setattr(vllm_indexer, "_SCORER_KWARGS_QUANTIZERS", registered)
+    monkeypatch.setattr(model_quant, "_PLUGIN_QUANTIZERS", dict(model_quant._PLUGIN_QUANTIZERS))
     vllm_indexer.register_indexer_scorer_kwargs_quantizer("indexer_test_quantizer", post_relu)
     indexer = glm.convert()
     assert not indexer.indexer_test_quantizer.is_enabled
@@ -689,6 +691,35 @@ def test_registered_quantizers_turn_their_config_into_scorer_kwargs(glm, monkeyp
     )
     with pytest.raises(ValueError, match="BF16 only"):
         indexer.modelopt_post_restore()
+
+
+class _UnconvertedIndexer(torch.nn.Module):
+    """An indexer that no plugin converts."""
+
+    def forward(self, x):
+        return x
+
+
+def test_quantize_rejects_registered_quantizers_that_quantize_nothing(monkeypatch):
+    """Like the built-in scorer quantizer, a registered one must not silently quantize nothing."""
+    monkeypatch.setattr(
+        vllm_indexer, "_SCORER_KWARGS_QUANTIZERS", dict(vllm_indexer._SCORER_KWARGS_QUANTIZERS)
+    )
+    monkeypatch.setattr(model_quant, "_PLUGIN_QUANTIZERS", dict(model_quant._PLUGIN_QUANTIZERS))
+    vllm_indexer.register_indexer_scorer_kwargs_quantizer("indexer_test_quantizer", lambda q: {})
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*indexer_test_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4), _UnconvertedIndexer())
+    with pytest.raises(
+        RuntimeError,
+        match=r"indexer_test_quantizer.*\(_UnconvertedIndexer\).*scorer kernel arguments",
+    ):
+        mtq.quantize(model, config, lambda m: m(torch.randn(2, 4)))
 
 
 @pytest.mark.parametrize(

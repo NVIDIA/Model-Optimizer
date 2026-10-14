@@ -216,9 +216,13 @@ def register_indexer_scorer_kwargs_quantizer(
     arguments of the GLM-5.3-Flash indexer's DeepGEMM scorer kernel, which every scorer call of
     that layer then gets while the quantizer quantizes; it raises for a config it cannot express.
     Other indexers reject the quantizer. The built-in ``indexer_scorer_kwargs_quantizer`` passes its
-    ``backend_extra_args`` (``backend: scorer_kwargs``) on as they are.
+    ``backend_extra_args`` (``backend: scorer_kwargs``) on as they are. Like for the built-in one,
+    ``mtq.quantize`` raises when a config enables the quantizer but no indexer has it.
     """
+    from ..model_quant import _PLUGIN_QUANTIZERS
+
     _SCORER_KWARGS_QUANTIZERS[name] = scorer_kwargs
+    _PLUGIN_QUANTIZERS[name] = _PLUGIN_QUANTIZERS[_SCORER_KWARGS_QUANTIZER]
 
 
 def _scorer_kwargs_backend(inputs: torch.Tensor, quantizer: TensorQuantizer) -> torch.Tensor:
