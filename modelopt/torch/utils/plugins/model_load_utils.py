@@ -1470,7 +1470,7 @@ def _fsdp2_shard_dense(model: nn.Module, fsdp_mesh, expert_modules) -> int:
     (dense HSDP-sharded over ``fsdp`` and replicated over ``dp``, aligned with the experts' ``(edp, ep)``).
 
     Wraps at the DECODER-LAYER boundary (exactly like the proven pure-FSDP2 path,
-    :func:`~modelopt.torch.utils.distributed._fsdp2_wrap_modules` via HF ``_no_split_modules``) and passes
+    :func:`_fsdp2_wrap_modules` via HF ``_no_split_modules``) and passes
     the routed-expert params as ``ignored_params`` so FSDP shards the layer's dense params (attention,
     layernorms, router) while leaving the experts EP-sharded on the ``ep`` mesh + a2a transport. Wrapping
     the whole layer (not ``self_attn`` or individual leaves) is essential: ``fully_shard`` swaps a wrapped
@@ -1663,7 +1663,7 @@ def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, expert_mo
 
     Requires the dense ``.weight``/``.bias`` params to be on ``meta`` on entry (see
     :func:`_ep_dense_meta_load`). Delegates the materialize + DCP load to the SHARED
-    :func:`~modelopt.torch.utils.distributed._meta_dcp_load` (``load_names`` restricted to the dense params),
+    :func:`_meta_dcp_load` (``load_names`` restricted to the dense params),
     the same loader that backs the DP and FSDP2-full paths -- here just fed a partially-meta model (dense
     meta, experts already real) and a dense-only name set.
     """
