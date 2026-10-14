@@ -31,6 +31,7 @@ if Version(transformers.__version__) < Version("5.7"):
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM, Qwen3MoeConfig
 
+from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.moe import load_and_prepare_ep
 
 NUM_EXPERTS = 8
@@ -60,7 +61,8 @@ def _local(tensor):
 def _sharded_model_matches_the_whole_one(rank, size, ckpt_dir, ep_degree):
     device = torch.device(f"cuda:{rank}")
     config = AutoConfig.from_pretrained(ckpt_dir)  # carries qwen3_moe's own base_model_ep_plan
-    model = load_and_prepare_ep(ckpt_dir, ep_degree, hf_config=config).eval()
+    plan = DistributionPlan(size, ep_size=ep_degree)
+    model = load_and_prepare_ep(ckpt_dir, plan, hf_config=config).eval()
     whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16).to(device).eval()
 
     # Each rank holds its contiguous share of every layer's experts within its EP group, whose
@@ -73,9 +75,11 @@ def _sharded_model_matches_the_whole_one(rank, size, ckpt_dir, ep_degree):
             local = _local(getattr(layer.mlp.experts, name))
             assert local.shape[0] == per_rank
             torch.testing.assert_close(local, getattr(whole_layer.mlp.experts, name)[owned])
-    # The load recorded what it could not place, for the export to carry: here, nothing.
+    # The load recorded what it could not place, for the export to carry: here, nothing. And the
+    # plan it loaded by, on every module.
     assert model._modelopt_unplaced_source_keys == []
     assert model._modelopt_source_checkpoint == ckpt_dir
+    assert all(distribution_plan(module) is plan for module in model.modules())
 
     # Every rank calibrates on different tokens, so each sends its own batch through the experts.
     generator = torch.Generator().manual_seed(rank)
