@@ -18,6 +18,7 @@ import copy
 import logging
 import sys
 import time as time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from config import (
     FP8_DEFAULT_CONFIG,
     INT8_DEFAULT_CONFIG,
     NVFP4_DEFAULT_CONFIG,
+    NVFP4_FP8_CONV_CONFIG,
     NVFP4_FP8_MHA_CONFIG,
     reset_set_int8_config,
     set_quant_config_attr,
@@ -55,6 +57,9 @@ from utils import check_conv_and_mha, check_lora
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_checkpoint
+from modelopt.torch.quantization.nn import TensorQuantizer
+
+_SDXL_MODEL_TYPES = (ModelType.SDXL_BASE, ModelType.SDXL_TURBO)
 
 
 def setup_logging(verbose: bool = False) -> logging.Logger:
@@ -130,7 +135,9 @@ class Quantizer:
         elif self.config.format == QuantFormat.FP8:
             base_cfg = FP8_DEFAULT_CONFIG
         elif self.config.format == QuantFormat.FP4:
-            if self.model_config.model_type.value.startswith("flux"):
+            if self.model_config.model_type in _SDXL_MODEL_TYPES:
+                base_cfg = NVFP4_FP8_CONV_CONFIG
+            elif self.model_config.model_type.value.startswith("flux"):
                 base_cfg = NVFP4_FP8_MHA_CONFIG
             else:
                 base_cfg = NVFP4_DEFAULT_CONFIG
@@ -271,23 +278,6 @@ class ExportManager:
         self.logger = logger
         self.pipeline_manager = pipeline_manager
 
-    def _has_conv_layers(self, model: torch.nn.Module) -> bool:
-        """
-        Check if the model contains any convolutional layers.
-
-        Args:
-            model: Model to check
-
-        Returns:
-            True if model contains Conv layers, False otherwise
-        """
-        for module in model.modules():
-            if isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)) and (
-                module.input_quantizer.is_enabled or module.weight_quantizer.is_enabled
-            ):
-                return True
-        return False
-
     def save_checkpoint(
         self,
         backbone: torch.nn.Module,
@@ -335,15 +325,10 @@ class ExportManager:
 
         # Deferred: the ONNX stack (onnx, onnx_graphsurgeon, ...) is only needed
         # for --onnx-dir exports; HF-checkpoint-only runs must not require it.
-        from onnx_utils.export import generate_fp8_scales, modelopt_export_sd
+        from onnx_utils.export import modelopt_export_sd
 
         self.logger.info(f"Starting ONNX export to {self.config.onnx_dir}")
 
-        if quant_format == QuantFormat.FP8 and self._has_conv_layers(backbone):
-            self.logger.info(
-                "Detected quantizing conv layers in backbone. Generating FP8 scales..."
-            )
-            generate_fp8_scales(backbone)
         self.logger.info("Preparing models for export...")
         pipe.to("cpu")
         torch.cuda.empty_cache()
@@ -444,8 +429,8 @@ def create_argument_parser() -> argparse.ArgumentParser:
             # Basic INT8 quantization with SmoothQuant
             %(prog)s --model flux-dev --format int8 --quant-algo smoothquant --collect-method global_min
 
-            # FP8 quantization with ONNX export
-            %(prog)s --model sd3-medium --format fp8 --onnx-dir ./onnx_models/
+            # FP8 quantization with Hugging Face checkpoint export
+            %(prog)s --model sd3-medium --format fp8 --hf-ckpt-dir ./hf_ckpt/
 
             # FP8 quantization with weight compression (reduces memory footprint)
             %(prog)s --model flux-dev --format fp8 --compress
@@ -457,7 +442,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
             %(prog)s --model ltx-video-dev --format fp8 --batch-size 1 --calib-size 32 --ltx-skip-upsampler
 
             # Restore and export a previously quantized model
-            %(prog)s --model flux-schnell --restore-from checkpoint.pt --onnx-dir ./exports/
+            %(prog)s --model flux-schnell --restore-from ./checkpoints/ --hf-ckpt-dir ./exports/
         """,
     )
     model_group = parser.add_argument_group("Model Configuration")
@@ -579,14 +564,20 @@ def create_argument_parser() -> argparse.ArgumentParser:
         type=str,
         help="Path to save quantized PyTorch checkpoint",
     )
-    export_group.add_argument("--onnx-dir", type=str, help="Directory for ONNX export")
+    export_group.add_argument(
+        "--onnx-dir",
+        type=str,
+        help="Deprecated in 0.48.0; removal no earlier than 0.49.0. Use --hf-ckpt-dir instead.",
+    )
     export_group.add_argument(
         "--hf-ckpt-dir",
         type=str,
         help="Directory for HuggingFace checkpoint export",
     )
     export_group.add_argument(
-        "--restore-from", type=str, help="Path to restore from previous checkpoint"
+        "--restore-from",
+        type=str,
+        help="Checkpoint directory; quantization format and MHA policy are restored automatically",
     )
     export_group.add_argument(
         "--trt-high-precision-dtype",
@@ -600,6 +591,25 @@ def create_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _infer_restored_quantization_format(
+    backbones: list[tuple[str, torch.nn.Module]],
+) -> QuantFormat:
+    has_nvfp4 = False
+    has_fp8 = False
+
+    for _, backbone in backbones:
+        for module in backbone.modules():
+            if isinstance(module, TensorQuantizer) and module.is_enabled:
+                has_nvfp4 |= module.is_nvfp4_dynamic or module.is_nvfp4_static
+                has_fp8 |= module.is_fp8
+
+    if has_nvfp4:
+        return QuantFormat.FP4
+    if has_fp8:
+        return QuantFormat.FP8
+    return QuantFormat.INT8
+
+
 def main() -> None:
     from diffusers.models.normalization import RMSNorm as DiffuserRMSNorm
 
@@ -608,6 +618,16 @@ def main() -> None:
 
     parser = create_argument_parser()
     args, unknown_args = parser.parse_known_args()
+
+    if args.onnx_dir:
+        warnings.warn(
+            "The Diffusers ONNX/TensorRT workflow is deprecated in ModelOpt 0.48.0 "
+            "and will be removed no earlier than 0.49.0. "
+            "Export a unified Hugging Face checkpoint with quantize.py --hf-ckpt-dir "
+            "and use a compatible diffusion deployment backend.",
+            FutureWarning,
+            stacklevel=2,
+        )
 
     model_type = ModelType(args.model)
     if args.backbone is None:
@@ -674,9 +694,9 @@ def main() -> None:
         )
 
         logger.info("Validating configurations...")
-        quant_config.validate()
         export_config.validate()
         if not export_config.restore_from:
+            quant_config.validate()
             calib_config.validate()
 
         pipeline_manager = PipelineManager(model_config, logger)
@@ -685,8 +705,12 @@ def main() -> None:
 
         export_manager = ExportManager(export_config, logger, pipeline_manager)
 
-        if export_config.restore_from and export_config.restore_from.exists():
+        if export_config.restore_from:
             export_manager.restore_checkpoint()
+            quant_config.format = _infer_restored_quantization_format(
+                list(pipeline_manager.iter_backbones())
+            )
+            logger.info(f"Detected restored quantization format: {quant_config.format.value}")
 
         else:
             logger.info("Initializing calibration...")
@@ -716,11 +740,12 @@ def main() -> None:
                     mtq.compress(backbone)
                     logger.info(f"{backbone_name} compression completed")
 
-                # For VAE backbones, skip check_conv_and_mha — the whole point
-                # of VAE quantization is to quantize Conv layers.
                 if backbone_name not in ("video_decoder", "vae"):
                     check_conv_and_mha(
-                        backbone, quant_config.format == QuantFormat.FP4, quant_config.quantize_mha
+                        backbone,
+                        quant_config.format == QuantFormat.FP4
+                        and model_config.model_type not in _SDXL_MODEL_TYPES,
+                        quant_config.quantize_mha,
                     )
 
                 export_manager.save_checkpoint(backbone, backbone_name)

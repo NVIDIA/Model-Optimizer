@@ -36,6 +36,9 @@ from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAt
 
 EXAMPLE_PATH = "diffusers/sparsity"
 
+# Run the example scripts in this process: ~20s of startup saved per step (see conftest).
+pytestmark = pytest.mark.usefixtures("in_process_examples")
+
 # Tiny inference settings — fast but exercises all code paths
 _TINY_ARGS = [
     "--num-frames",

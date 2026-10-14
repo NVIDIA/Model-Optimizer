@@ -21,7 +21,6 @@ imports:
   int8_per_channel: configs/numerics/int8_per_channel
 
 metadata:
-  recipe_type: ptq
   description: INT8 ResNet PTQ with quantized residual connections.
 
 quantize:

@@ -47,9 +47,9 @@ argmax, LiLiCorr keeps the top-``k`` candidates per slot and scores transitions
 between them, then commits a path greedily. This module trains that scorer jointly
 with the backbone.
 
-The objective adds three weighted terms to the DFlash loss::
+The objective adds weighted terms to the DFlash loss::
 
-    loss = dflash_loss + w_ce * L_ce + w_margin * L_margin + w_pen * L_pen
+    loss = dflash_loss + w_ce * L_ce + w_margin * L_margin + w_pen * L_pen + w_cal * L_cal
 
 - ``L_ce``: a softmax over each slot's ``k`` candidate scores, pushing the
   ground-truth candidate up and the competing ones down.
@@ -59,6 +59,9 @@ The objective adds three weighted terms to the DFlash loss::
 - ``L_pen``: the head's own probability mass on the competing candidates, each
   weighted by the target model's logit gap to the ground truth — so a candidate the
   target finds plausible is penalized lightly and a confident wrong one hard.
+- ``L_cal`` (optional, off by default): KL divergence from the target's distribution
+  renormalized over the ``k`` candidates to the head's. An alternative to ``L_pen``
+  whose gradient does not scale with the target's logit gap.
 
 The weights are absolute, with no outer multiplier, so
 ``loss == origin_loss + lilicorr_loss`` holds exactly. Two variants ship and differ
@@ -105,13 +108,6 @@ class HFLiLiCorrModel(HFDFlashModel):
 
     def modify(self, config):
         """Initialize the LiLiCorr draft module and resolve the objective weights."""
-        if config.dflash_offline:
-            raise ValueError(
-                "LiLiCorr (projector_type='lilicorr') requires online training. Its "
-                "distractor penalty weights every competing candidate by the target "
-                "model's own logit gap to the ground truth, and offline mode has no "
-                "target model to read that from. Use data.mode=online."
-            )
         # The grouped convolution is OPTIONAL here (unlike DFlash2, which requires it),
         # but the two geometry keys are all-or-nothing. Setting one alone would build a
         # draft with no convolutions at all and report nothing, and the serving loader
@@ -141,11 +137,12 @@ class HFLiLiCorrModel(HFDFlashModel):
         self.dflash_lilicorr_w_ce = weights["dflash_lilicorr_w_ce"]
         self.dflash_lilicorr_w_margin = weights["dflash_lilicorr_w_margin"]
         self.dflash_lilicorr_w_pen = weights["dflash_lilicorr_w_pen"]
-        if not any(weights.values()):
+        self.dflash_lilicorr_w_cal = float(getattr(config, "dflash_lilicorr_w_cal", 0.0))
+        if not any(weights.values()) and self.dflash_lilicorr_w_cal == 0.0:
             raise ValueError(
-                "All three LiLiCorr objective weights are 0, so the reranker would never "
+                "All LiLiCorr objective weights are 0, so the reranker would never "
                 "receive a gradient and would be exported randomly initialized. Set at "
-                "least one of dflash_lilicorr_w_ce / _w_margin / _w_pen above 0."
+                "least one of dflash_lilicorr_w_ce / _w_margin / _w_pen / _w_cal above 0."
             )
 
         self.dflash_lilicorr_margin = float(getattr(config, "dflash_lilicorr_margin", -1.0))
@@ -161,9 +158,9 @@ class HFLiLiCorrModel(HFDFlashModel):
         logger.info(
             "LiLiCorr enabled: candidate_topk=%d, factor_dim=%d, num_layers=%d, "
             "num_heads=%d, logit_scale=%.3g, vector_eps=%.3g | objective: "
-            "w_ce=%.4g, w_margin=%.4g, w_pen=%.4g, margin=%.4g. Total loss is "
-            "dflash_loss + w_ce*CE + w_margin*hinge + w_pen*penalty, with no outer "
-            "multiplier.",
+            "w_ce=%.4g, w_margin=%.4g, w_pen=%.4g, w_cal=%.4g, margin=%.4g. Total loss is "
+            "dflash_loss + w_ce*CE + w_margin*hinge + w_pen*penalty + w_cal*calibration, "
+            "with no outer multiplier.",
             head.candidate_topk,
             head.factor_dim,
             len(head.layers),
@@ -173,9 +170,19 @@ class HFLiLiCorrModel(HFDFlashModel):
             self.dflash_lilicorr_w_ce,
             self.dflash_lilicorr_w_margin,
             self.dflash_lilicorr_w_pen,
+            self.dflash_lilicorr_w_cal,
             self.dflash_lilicorr_margin,
         )
         self._lilicorr_metrics = None
+
+    @property
+    def _needs_base_logits(self) -> bool:
+        """The distractor penalty and the calibration term both read the target's logits."""
+        return (
+            super()._needs_base_logits
+            or self.dflash_lilicorr_w_pen > 0.0
+            or self.dflash_lilicorr_w_cal > 0.0
+        )
 
     def get_exporter(self):
         """Get the exporter for the LiLiCorr draft model."""
@@ -241,7 +248,7 @@ class HFLiLiCorrModel(HFDFlashModel):
         accuracy, which is reported as ``origin_accuracy`` in the metrics instead.
 
         The two tensors this needs beyond the shared signature -- the target-layer hidden
-        states it anchors on, and the target's logits its distractor penalty weights by --
+        states it anchors on, and the target's logits its penalty and calibration terms read --
         both come from ``base_outputs``, the container ``HFDFlashModel.forward`` already
         builds for them.
         """
@@ -298,7 +305,7 @@ class HFLiLiCorrModel(HFDFlashModel):
         target_hidden,
         target_logits,
     ):
-        """Score the candidate lattice and evaluate the three-term objective.
+        """Score the candidate lattice and evaluate the LiLiCorr objective.
 
         Returns ``(loss, accuracy, metrics)``. ``loss`` already carries the absolute
         term weights, ``accuracy`` is the greedy path-prefix fraction, and ``metrics``
@@ -441,6 +448,18 @@ class HFLiLiCorrModel(HFDFlashModel):
             )
             loss = loss + self.dflash_lilicorr_w_pen * penalty_loss
 
+        cal_loss = ce_loss.new_zeros(())
+        if self.dflash_lilicorr_w_cal > 0.0:
+            cal_loss = self._calibration_loss(
+                node_potentials=node_potentials,
+                candidate_ids=candidate_ids,
+                anchor_positions=anchor_positions,
+                target_logits=target_logits,
+                supervised=supervised,
+                denominator=denominator,
+            )
+            loss = loss + self.dflash_lilicorr_w_cal * cal_loss
+
         raw_metrics = self._lattice_metrics(
             log_start=log_start,
             log_pair=log_pair,
@@ -459,6 +478,7 @@ class HFLiLiCorrModel(HFDFlashModel):
         raw_metrics["lilicorr_ce"] = ce_loss
         raw_metrics["lilicorr_margin"] = margin_loss
         raw_metrics["lilicorr_penalty"] = penalty_loss
+        raw_metrics["lilicorr_calibration"] = cal_loss
 
         # One device sync for every scalar, rather than one per metric.
         names = list(raw_metrics)
@@ -469,6 +489,7 @@ class HFLiLiCorrModel(HFDFlashModel):
         metrics["lilicorr_w_ce"] = self.dflash_lilicorr_w_ce
         metrics["lilicorr_w_margin"] = self.dflash_lilicorr_w_margin
         metrics["lilicorr_w_pen"] = self.dflash_lilicorr_w_pen
+        metrics["lilicorr_w_cal"] = self.dflash_lilicorr_w_cal
         accuracy = metrics["lilicorr_selected_prefix"] / float(num_slots)
         return loss, accuracy, metrics
 
@@ -492,19 +513,39 @@ class HFLiLiCorrModel(HFDFlashModel):
         ``p(j) * (w_j - E[w])`` pushes the ground truth up, the target-rejected
         confuser down, and defers on genuine ties.
         """
-        if target_logits is None:
-            raise ValueError(
-                "dflash_lilicorr_w_pen > 0 requires the target model's logits, which are "
-                "only available in online training (dflash_offline=False)."
-            )
-        batch_blocks, num_slots, topk = candidate_ids.shape
-        bsz, n_blocks = anchor_positions.shape
-        device = candidate_ids.device
-
         # p_head(j | slot): the same per-slot distribution the CE term scores, reused here
         # as the weights of the expectation.
         potentials = torch.stack(node_potentials, dim=1)
         head_probs = F.log_softmax(potentials.float(), dim=-1).exp()
+
+        candidate_target_logits = self._candidate_target_logits(
+            candidate_ids=candidate_ids,
+            anchor_positions=anchor_positions,
+            target_logits=target_logits,
+            requested_by="dflash_lilicorr_w_pen",
+        )
+        # w_j is 0 at the ground truth itself, and 0 for any candidate the target scores
+        # at least as highly — those are not distractors, they are alternatives.
+        gt_target_logit = candidate_target_logits.gather(2, gt_indices.unsqueeze(-1))
+        rejection_weight = (gt_target_logit - candidate_target_logits).clamp_min(0.0)
+
+        # E_{p_head}[w] per slot, averaged over the supervised slots only.
+        per_slot = (head_probs * rejection_weight).sum(dim=-1)
+        return (per_slot * supervised).sum() / denominator
+
+    def _candidate_target_logits(
+        self, *, candidate_ids, anchor_positions, target_logits, requested_by
+    ):
+        """The target's logits for exactly the candidates in play: ``[blocks, slots, k]``."""
+        if target_logits is None:
+            raise ValueError(
+                f"{requested_by} > 0 requires the target model's logits. Online training "
+                "reads them from the target; offline training reconstructs them from the "
+                "captured final hidden state."
+            )
+        batch_blocks, num_slots, topk = candidate_ids.shape
+        bsz, n_blocks = anchor_positions.shape
+        device = candidate_ids.device
 
         target_seq_len = target_logits.shape[1]
         # The target's next-token logits that predict the token at anchor+1+s sit at
@@ -523,16 +564,37 @@ class HFLiLiCorrModel(HFDFlashModel):
         )
         # Advanced indexing reads only the [blocks, slots, k] scalars in play rather
         # than gathering whole vocabulary rows. Teacher weights, hence detached.
-        candidate_target_logits = (
-            target_logits[sample_expanded, positions_expanded, candidate_ids].detach().float()
-        )
-        # w_j is 0 at the ground truth itself, and 0 for any candidate the target scores
-        # at least as highly — those are not distractors, they are alternatives.
-        gt_target_logit = candidate_target_logits.gather(2, gt_indices.unsqueeze(-1))
-        rejection_weight = (gt_target_logit - candidate_target_logits).clamp_min(0.0)
+        return target_logits[sample_expanded, positions_expanded, candidate_ids].detach().float()
 
-        # E_{p_head}[w] per slot, averaged over the supervised slots only.
-        per_slot = (head_probs * rejection_weight).sum(dim=-1)
+    def _calibration_loss(
+        self,
+        *,
+        node_potentials,
+        candidate_ids,
+        anchor_positions,
+        target_logits,
+        supervised,
+        denominator,
+    ):
+        """``KL(p|K || q)`` from the target's candidate distribution to the head's.
+
+        ``p|K`` is the target renormalized over the ``k`` candidates, so the gathered
+        candidate logits suffice and the full-vocabulary normalizer is not needed. The
+        gradient is the cross-entropy's, and the logged value floors at 0 rather than at
+        ``H(p|K)``, which varies with the data and the temperature.
+        """
+        candidate_target_logits = self._candidate_target_logits(
+            candidate_ids=candidate_ids,
+            anchor_positions=anchor_positions,
+            target_logits=target_logits,
+            requested_by="dflash_lilicorr_w_cal",
+        )
+        target_probs = F.softmax(candidate_target_logits, dim=-1)
+        target_log_probs = F.log_softmax(candidate_target_logits, dim=-1)
+        potentials = torch.stack(node_potentials, dim=1)
+        head_log_probs = F.log_softmax(potentials.float(), dim=-1)
+
+        per_slot = (target_probs * (target_log_probs - head_log_probs)).sum(dim=-1)
         return (per_slot * supervised).sum() / denominator
 
     @torch.no_grad()

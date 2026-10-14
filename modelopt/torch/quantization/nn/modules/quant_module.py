@@ -168,6 +168,9 @@ class QuantModule(DynamicModule):
                 if hasattr(quantizer, attr_name):
                     delattr(quantizer, attr_name)
 
+    def _validate_fold_weight(self):
+        """Validate that weight folding is supported before any module is modified."""
+
     def fold_weight(self, keep_attrs: bool = False):
         """Bake each fake-quant weight quantizer into its weight for faster eval.
 

@@ -20,8 +20,8 @@
 # transformers-5 path (`mamba`->`linear_attention`, `attention`->`full_attention`, plus a
 # matching `hybrid_override_pattern`); that conversion is not covered here either.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptDFlashRecipe
 metadata:
-  recipe_type: speculative_dflash
   description: Warm-start fine-tune of the released Nemotron-3.5 DSpark drafter (streaming).
 
 model:

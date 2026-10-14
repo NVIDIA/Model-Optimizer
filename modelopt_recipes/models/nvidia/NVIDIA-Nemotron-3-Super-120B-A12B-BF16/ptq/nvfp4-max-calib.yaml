@@ -29,8 +29,8 @@
 #   - SSM cache:                                    FP32 (can be set to FP16 in VLLM)
 #
 # Calibration: amax/max calibration comparison variant
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 metadata:
-  recipe_type: ptq
   description: Super NVFP4 mixed precision — sparse MoE experts NVFP4 (W4A4, group_size 16); shared experts, mamba in/out_proj FP8 per-tensor; FP8 KV cache;
     everything else(lm_head/MTP/Latent MOE) stay BF16. Amax calibration comparison variant.
 quantize:

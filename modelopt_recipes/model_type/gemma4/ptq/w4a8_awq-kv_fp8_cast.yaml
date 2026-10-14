@@ -28,6 +28,7 @@
 # branch is kept in BF16 by the shared `default_disabled_quantizers` unit imported
 # below, which globally disables `*vision_tower*` / `*visual*` / `*embed_vision*`.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -36,7 +37,6 @@ imports:
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: ptq
   description: >-
     Gemma 4 (multimodal) W4A8 AWQ recipe with FP8 KV-cache cast: INT4 block
     weights + FP8 inputs, awq_lite with alpha_step=1 (coarser search) to avoid

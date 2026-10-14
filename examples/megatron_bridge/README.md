@@ -124,6 +124,28 @@ For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `quantize.py` automati
 > [!NOTE]
 > HuggingFace unified export (`export_quantized_megatron_to_hf.py`) of a quantized VLM covers **Qwen3-VL** and **Qwen3.5-VL**. Other VLMs such as Gemma3-VL are saved in Megatron checkpoint format only.
 
+### Tracking runs with MLflow
+
+Set MLflow's own `MLFLOW_TRACKING_URI`, or pass `--mlflow <tracking-uri>`, to record a run on an MLflow server. Every script here that writes a checkpoint takes the flag — [`prune_minitron.py`](#pruning), `quantize.py`, [`distill.py`](#distillation), `export_quantized_megatron_to_hf.py` and `export_distilled_megatron_to_hf.py` — and they share one experiment-name convention, so a pruning, a quantization, the distillation that refines its checkpoint and the export that deploys it can be found together. (One gap remains: `distill.py --hf_export_path` writes its HuggingFace checkpoint from rank 0, which is not the rank that owns that run, so it carries no pointer.)
+
+```bash
+torchrun --nproc_per_node 2 quantize.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --recipe general/ptq/nvfp4_default-kv_fp8 \
+    --tp_size 2 \
+    --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron \
+    --mlflow https://<your-mlflow-server>/
+```
+
+The run opens *before* the model loads, so a bad URI fails in seconds rather than after a full calibration. Only the master rank uploads: the invocation, every argument as a searchable param, the resolved recipe, that rank's log and the quantizer summary — plus `.experiment.json` written into `--export_megatron_path` once the checkpoint is saved, so a checkpoint on disk names the run that produced it. A failed run is still recorded, with its traceback.
+
+`--mlflow_experiment` defaults to `$USER/<script>/<model basename>-<variant>` — the variant being the pruning target for `prune_minitron.py`, the recipe name for `quantize.py`, the student checkpoint for `distill.py`, and the Megatron checkpoint for the export — and `--mlflow_run_name` to the UTC start time. Authentication uses MLflow's own environment variables. See the [`hf_ptq` README](../hf_ptq/README.md#tracking-runs-with-mlflow) for the full artifact list and the `$MLFLOW_TRACKING_URI` semantics.
+
+`distill.py` — whether it is distilling a pruned BF16 student or running [QAD](#quantization-aware-distillation-qad) from a quantized one — works differently under the hood. It is a training loop, and Megatron-Bridge logs to MLflow from inside it, so the run is opened here and Megatron-Bridge joins it: you get the invocation, every argument and a run log, plus the per-iteration training metrics and the full resolved config that only Megatron-Bridge can see, alongside the existing `--wandb_project` and TensorBoard logging. Two differences worth knowing:
+
+- Uploading checkpoints as MLflow artifacts is **off** by default here, where Megatron-Bridge turns it on: a distilled checkpoint is tens to hundreds of GB and would be pushed over HTTP on every save. Pass `--mlflow_log_checkpoints` to opt in.
+- The run is opened on the last rank, because that is the rank Megatron-Bridge looks at for one to join. The uploaded `logs/distill.log` is therefore that rank's output; `print_rank_0` lines, which is most of what the script itself prints, stay on rank 0 and do not reach it.
+
 ## Distillation
 
 This section shows how to distill a student model from a teacher model in the Megatron-Bridge framework.
@@ -152,6 +174,15 @@ automatically when the tokenizer prepends one at inference, so do not add it you
 token is appended after the response. A record longer than `--seq_length` is truncated from the
 **start** of `"input"`, which drops any system prompt or opening role marker baked in there, so
 pre-filter or pre-truncate the corpus if that matters.
+
+To distill on **chat data** instead, pass `--sft --sft_hf_dataset <spec>`, where `<spec>` is a
+local `<file>.jsonl` of `{"messages": [{"role": ..., "content": ...}, ...]}` records or a Hugging
+Face Hub dataset `<hub_id>[:<split>]` (split defaults to `train`, and may be a slice such as
+`train[:1000]`). Each conversation is rendered with the model's own chat template, and
+`--sft_loss_mode` picks the trained tokens: every assistant turn (`assistant`, the default), only
+the last one (`last_turn`), or the whole conversation (`full`). With `--eval_iters > 0`, also pass
+`--sft_hf_validation` in the same format. This path needs a Megatron-Bridge with
+`DirectHFSFTDatasetConfig`.
 
 Teacher and student must share a tokenizer — distillation scores the teacher on the student's
 token ids, and the KD losses compare the two models' logits elementwise over the vocab dimension.
@@ -304,6 +335,39 @@ torchrun --nproc_per_node 8 distill.py \
 ```
 
 The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) (point `--megatron_path` at `/output/qwen3_8b_nvfp4_qad/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
+
+### LoRA QAD
+
+Add `--lora_rank` to PTQ to train low-rank weight updates with the usual QAD flow:
+
+```bash
+torchrun --nproc_per_node 2 quantize.py \
+    --hf_model_name_or_path Qwen/Qwen3-0.6B \
+    --recipe general/ptq/nvfp4_default-kv_fp8 \
+    --tp_size 2 --lora_rank 8 --lora_alpha 16 \
+    --export_megatron_path /output/qwen3_06b_nvfp4_lora
+```
+
+PTQ calibrates the quantizers before adding the adapters. The backbone is frozen; `A` starts
+random and `B` starts at zero. Each linear layer quantizes `W + (alpha / rank) B @ A` before
+its matrix multiplication. The default targets are `linear_qkv`, `linear_proj`, `linear_fc1`,
+and `linear_fc2`; select other module-name globs with `--lora_target_modules`.
+
+Run `distill.py` with this checkpoint as `--student_megatron_path`, just as for regular QAD.
+ModelOpt reconstructs the quantizers and factors before DDP and optimizer setup, then loads
+the distributed checkpoint tensors. Resuming the output directory also restores the optimizer.
+
+`export_quantized_megatron_to_hf.py` merges the factors into the backbone before exporting a
+standalone quantized checkpoint. Deployment does not require a LoRA adapter. The Python APIs
+are `modelopt.torch.quantization.enable_quant_lora` and `merge_quant_lora`.
+
+Supported targets are fake-quantized dense PyTorch and Megatron/Transformer Engine linear
+layers, including tensor-parallel row/column and fused layer-normalization linear layers.
+Grouped MoE experts, shared target weights, and compressed quantized weights are unsupported.
+Merge adapters with `merge_quant_lora` before using weight-folding APIs. Full activation
+recomputation is supported without unfreezing the backbone. The backbone remains
+in floating point and the implementation forms dense weight updates, so memory savings come
+primarily from the smaller optimizer state rather than compressed backbone storage.
 
 ### Slurm Usage
 

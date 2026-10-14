@@ -43,19 +43,22 @@ from urllib.parse import urlparse
 import yaml
 
 import modelopt.torch.quantization as mtq
-from modelopt.recipe import load_recipe
 from modelopt.torch.utils.mlflow import (
+    TRACKING_URI_ENV,
     MlflowRunLogger,
+    Tool,
     command_text,
     default_experiment_name,
-    validate_tracking_uri,
+    resolve_tracking_uri,
+    resolved_recipe_texts,
 )
+from modelopt.torch.utils.mlflow import add_mlflow_args as _add_mlflow_args
 
 TOOL_NAME = "vllm_serve_fakequant"
 
-# Written by the launcher, read by the workers. The two MLflow-owned names are MLflow's own,
-# so a shell that already exports them opts in without touching the command line.
-TRACKING_URI_ENV = "MLFLOW_TRACKING_URI"
+# Written by the launcher, read by the workers. TRACKING_URI_ENV (imported, so the handover
+# cannot drift from what resolve_tracking_uri reads) and EXPERIMENT_ENV are MLflow's own
+# names, so a shell that already exports them opts in without touching the command line.
 EXPERIMENT_ENV = "MLFLOW_EXPERIMENT_NAME"
 RUN_NAME_ENV = "MODELOPT_MLFLOW_RUN_NAME"
 REQUIRED_ENV = "MODELOPT_MLFLOW_REQUIRED"
@@ -82,64 +85,36 @@ MLFLOW_ENV_VARS = frozenset(
 )
 
 
-def add_mlflow_args(parser: argparse.ArgumentParser) -> None:
-    """Add the MLflow tracking flags to the launcher's parser.
+# This example serves a checkpoint rather than producing one, so the Tool carries only what
+# names the run: there is no output to point at and no chain to join.
+TOOL = Tool(
+    name=TOOL_NAME,
+    tracks=(
+        "Track this server's calibration on an MLflow server "
+        "(e.g. https://<your-mlflow-server>/), uploading the command, the resolved "
+        "recipe, the quantization config actually applied, the worker log and the "
+        "quantizer summary. This is the quantization tracking server, which is "
+        "unrelated to any tracking server an evaluation harness exports its scores to."
+    ),
+    variant_help="recipe name, or the quantization config",
+    # Read from the environment, which is where this example's quantization settings live.
+    variant=lambda args: quant_variant(),
+    model=lambda args: args.model,
+)
 
-    The multi-word flags are registered under both spellings. vLLM's
-    ``FlexibleArgumentParser`` rewrites every ``--foo_bar`` on the command line to
-    ``--foo-bar`` before matching, so the dashed spelling is the one that has to exist for
-    the flag to be reachable at all; the underscored spelling is what ``hf_ptq`` uses and
-    keeps these usable with a plain ``argparse.ArgumentParser``.
-    """
-    parser.add_argument(
-        "--mlflow",
-        default=None,
-        help=(
-            "Track this server's calibration on an MLflow server "
-            "(e.g. https://<your-mlflow-server>/), uploading the command, the resolved "
-            "recipe, the quantization config actually applied, the worker log and the "
-            "quantizer summary. This is the quantization tracking server, which is "
-            "unrelated to any tracking server an evaluation harness exports its scores to. "
-            "MLflow's own $MLFLOW_TRACKING_URI enables tracking without this flag, which "
-            "overrides it. A URI taken from the environment is best-effort: if it is "
-            "unusable the server warns and serves untracked."
-        ),
-    )
-    parser.add_argument(
-        "--mlflow-experiment",
-        "--mlflow_experiment",
-        default=None,
-        help=(
-            "MLflow experiment name. Default: "
-            f"$USER/{TOOL_NAME}/<model basename>-<recipe name, or the quantization config>."
-        ),
-    )
-    parser.add_argument(
-        "--mlflow-run-name",
-        "--mlflow_run_name",
-        default=None,
-        help="MLflow run name. Default: the UTC start time as YYYYmmdd-HHMMSS.",
-    )
+
+def add_mlflow_args(parser: argparse.ArgumentParser) -> None:
+    """Add the MLflow tracking flags to the launcher's parser."""
+    _add_mlflow_args(parser, TOOL)
 
 
 def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     """Settle the tracking configuration and publish it to the worker processes.
 
     Validating here rather than in the worker is what makes a typo in the URI fail at launch
-    instead of after the weights are on the GPUs. As in ``hf_ptq``, only ``--mlflow`` is a
-    deliberate request and therefore fatal when unusable; ``$MLFLOW_TRACKING_URI`` is
-    commonly exported for unrelated tooling and must not take a serve down with it.
+    instead of after the weights are on the GPUs.
     """
-    required = args.mlflow is not None
-    uri = args.mlflow or os.environ.get(TRACKING_URI_ENV) or None
-    if uri:
-        try:
-            uri = validate_tracking_uri(uri)
-        except ValueError as e:
-            if required:
-                parser.error(f"--mlflow: {e}")
-            warnings.warn(f"Ignoring ${TRACKING_URI_ENV}, continuing untracked: {e}")
-            uri = None
+    uri, required = resolve_tracking_uri(args.mlflow, parser)
     if not uri:
         # A rejected URI must not reach the workers, which would try it again and fail there.
         os.environ.pop(TRACKING_URI_ENV, None)
@@ -152,7 +127,7 @@ def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParse
     os.environ[EXPERIMENT_ENV] = (
         args.mlflow_experiment
         or os.environ.get(EXPERIMENT_ENV)
-        or default_experiment_name(TOOL_NAME, args.model, quant_variant())
+        or default_experiment_name(TOOL.name, TOOL.model(args), TOOL.variant(args))
     )
     if args.mlflow_run_name:
         os.environ[RUN_NAME_ENV] = args.mlflow_run_name
@@ -164,8 +139,8 @@ def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParse
 def _without_credentials(uri: str) -> str:
     """Strip any ``user:token@`` from *uri*, for printing.
 
-    ``MlflowRunLogger`` masks the same thing in every URI it prints or uploads, and this
-    line ends up in the worker log that the run itself uploads, so it has to match.
+    Kept rather than folded into :func:`mask_tracking_uri`: this line ends up in the worker
+    log that the run itself uploads, and stripping is what it has always printed.
     """
     parsed = urlparse(uri)
     return parsed._replace(netloc=parsed.netloc.rpartition("@")[2]).geturl()
@@ -316,12 +291,7 @@ class FakeQuantMlflowTracker:
         texts = {}
         if command := os.environ.get(COMMAND_ENV):
             texts["command.txt"] = command
-        if recipe_path := self._quant_config.get("recipe_path"):
-            # The resolved recipe, not the source file: a recipe may be a directory or use
-            # $imports, and only the resolved form stands alone.
-            texts["recipe/resolved_recipe.yaml"] = _dump_yaml(
-                load_recipe(recipe_path).model_dump(mode="json")
-            )
+        texts.update(resolved_recipe_texts(self._quant_config.get("recipe_path")))
         return texts
 
 

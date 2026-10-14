@@ -15,6 +15,7 @@
 
 # Dense Qwen3.5 Vision Encoder and language model FP8 with FP8 KV-cache cast.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -23,7 +24,6 @@ imports:
   w8a8_fp8_fp8: configs/ptq/units/w8a8_fp8_fp8
 
 metadata:
-  recipe_type: ptq
   description: >-
     W8A8 FP8 quantization of dense Qwen3.5 Vision Encoder and language-model Linear layers,
     including any merger Linears, with FP8 KV-cache cast; patch embedding and vision-attention

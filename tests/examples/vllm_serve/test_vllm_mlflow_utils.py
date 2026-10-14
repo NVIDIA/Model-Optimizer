@@ -65,51 +65,9 @@ QUANT_CONFIG = {
 }
 
 
-class FakeMlflow:
-    """Stand-in for the mlflow module, so these tests need no server and no dependency."""
-
-    def __init__(self):
-        self.tracking_uri = None
-        self.experiment = None
-        self.run_name = None
-        self.status = None
-        self.params = {}
-        self.tags = {}
-        self.texts = {}
-        self.metrics = {}
-        self.artifacts = {}
-
-    def set_tracking_uri(self, uri):
-        self.tracking_uri = uri
-
-    def set_experiment(self, name):
-        self.experiment = name
-
-    def start_run(self, run_name=None):
-        self.run_name = run_name
-        return SimpleNamespace(info=SimpleNamespace(experiment_id="7", run_id="deadbeef"))
-
-    def log_params(self, params):
-        self.params.update(params)
-
-    def set_tags(self, tags):
-        self.tags.update(tags)
-
-    def log_text(self, text, artifact_file):
-        self.texts[artifact_file] = text
-
-    def log_artifact(self, local_path, artifact_path=None):
-        self.artifacts[Path(local_path).name] = (artifact_path, Path(local_path).read_text())
-
-    def log_metrics(self, metrics):
-        self.metrics.update(metrics)
-
-    def end_run(self, status=None):
-        self.status = status
-
-
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
+    """Local rather than shared: this suite also clears the launcher-to-worker variables."""
     monkeypatch.setattr(getpass, "getuser", lambda: "tester")
     for name in _TRACKED_ENV:
         monkeypatch.delenv(name, raising=False)
@@ -119,13 +77,6 @@ def clean_env(monkeypatch):
 def mlflow_utils(monkeypatch):
     monkeypatch.syspath_prepend(str(_EXAMPLES_DIR))
     return importlib.import_module("vllm_mlflow_utils")
-
-
-@pytest.fixture
-def fake_mlflow(monkeypatch):
-    fake = FakeMlflow()
-    monkeypatch.setitem(sys.modules, "mlflow", fake)
-    return fake
 
 
 def _resolve(mlflow_utils, monkeypatch, model="/ckpts/Qwen3-0.6B", **flags):

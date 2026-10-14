@@ -627,6 +627,29 @@ def test_auto_quantize_rejects_empty_module_formats(formats):
         )
 
 
+def test_gradient_search_config_none_score_func_does_not_warn():
+    """An explicitly empty score_func must not emit the ignored-value warning."""
+    searcher = AutoQuantizeGradientSearcher()
+
+    def forward_backward_step(model, data):
+        pass
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        config = searcher.sanitize_search_config(
+            {
+                "score_func": None,
+                "data_loader": [object()],
+                "forward_step": lambda model, data: None,
+                "forward_backward_step": forward_backward_step,
+            }
+        )
+
+    assert not any("`score_func` is ignored" in str(warning.message) for warning in caught)
+    assert "score_func" not in config
+    assert config["forward_backward_step"] is forward_backward_step
+
+
 def test_auto_quantize_fixed_module_isolated_from_unrelated_calibration(monkeypatch):
     model = TransformerBlock()
     calibration_states = []
@@ -786,7 +809,7 @@ INT8_CUSTOM_QUANT_TEST_CFG = {
 )
 @pytest.mark.parametrize(
     "method",
-    ["gradient", "kl_div"],
+    ["gradient", "kl_div", "aumann_shapley"],
 )
 def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method):
     model = model_cls()
@@ -1438,7 +1461,7 @@ def test_estimate_quant_compression_per_entry_effective_bits():
         )
 
 
-@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+@pytest.mark.parametrize("method", ["gradient", "kl_div", "aumann_shapley"])
 def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     """Test that checkpoint can be used to resume an interrupted search."""
     model = SimpleLinear()

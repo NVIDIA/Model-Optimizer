@@ -32,6 +32,7 @@ Checks performed:
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -39,12 +40,64 @@ import yaml
 
 _YAML_PARSE_ERROR = object()
 
-# Recipe types this hook validates via load_recipe(). Mirrors RecipeType in
-# modelopt.recipe.config; kept as a literal set so the hook can run without
-# importing modelopt (which is also why _try_load_recipe gates on ImportError).
+# Recipe types reached through the LEGACY metadata.recipe_type path only. A recipe that
+# declares a ``# modelopt-schema:`` comment, or that delegates with ``$import``, is
+# validated whether or not its kind appears here -- _is_recipe_file returns True on those
+# branches before this set is consulted. So a new kind that declares a schema (the
+# recommended form) needs no change here; only a new kind still using the deprecated
+# metadata.recipe_type would. Mirrors RecipeType in modelopt.recipe.config; kept as a
+# literal set so the hook can run without importing modelopt (which is also why
+# _try_load_recipe gates on ImportError).
 _SUPPORTED_RECIPE_TYPES = frozenset(
     {"ptq", "speculative_eagle", "speculative_dflash", "speculative_medusa"}
 )
+
+# A recipe usually declares its kind with a ``# modelopt-schema:`` comment naming its
+# schema class rather than with ``metadata.recipe_type`` (see modelopt/recipe/loader.py).
+# Matched here by name so the hook keeps working without importing modelopt.
+_SCHEMA_COMMENT_RE = re.compile(
+    r"^\s*#\s*modelopt-schema:\s*modelopt\.recipe\.config\.ModelOpt\w+Recipe\s*$",
+    re.MULTILINE,
+)
+
+# Any ``# modelopt-schema:`` declaration, recipe or not. The reusable snippets under
+# ``modelopt_recipes/configs/`` declare non-recipe schemas -- QuantizerAttributeConfig,
+# LayerPatternList and friends -- and a snippet is allowed a top-level ``$import`` of its
+# own, which would otherwise make it indistinguishable here from a delegating alias.
+_ANY_SCHEMA_COMMENT_RE = re.compile(
+    r"^\s*#\s*modelopt-schema:\s*\S+\s*$",
+    re.MULTILINE,
+)
+
+
+def _declares_recipe_schema(path: Path) -> bool:
+    """Whether *path* names one of the recipe schema classes in a ``# modelopt-schema:`` comment.
+
+    Searched over the whole file, deliberately laxer than the loader's
+    ``_parse_modelopt_schema``, which stops at the first non-comment line. A file carrying
+    the comment *below* its YAML body is therefore a recipe to this hook and not to the
+    loader -- which is the outcome we want: the hook hands it to ``load_recipe``, which
+    rejects it with "does not say what kind of recipe it is" rather than the file being
+    skipped silently. ``test_shipped_modelopt_schema_comments_are_in_the_preamble`` keeps
+    the shipped tree free of that shape.
+    """
+    try:
+        return bool(_SCHEMA_COMMENT_RE.search(path.read_text(encoding="utf-8")))
+    except OSError:
+        return False
+
+
+def _declares_non_recipe_schema(path: Path) -> bool:
+    """Whether *path* declares a ``# modelopt-schema:`` that is not a recipe schema.
+
+    That is the signature of a reusable snippet (a quantizer attribute, a layer-pattern
+    list), which ``load_recipe`` cannot load and should never be handed.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return bool(_ANY_SCHEMA_COMMENT_RE.search(text)) and not bool(_SCHEMA_COMMENT_RE.search(text))
 
 
 def _check_quant_cfg(quant_cfg, label: str) -> list[str]:
@@ -105,7 +158,7 @@ def _check_single_file_recipe(path: Path) -> list[str]:
         return []  # not a recipe file
 
     metadata = data.get("metadata")
-    if not isinstance(metadata, dict) or "recipe_type" not in metadata:
+    if not isinstance(metadata, dict) and not _declares_recipe_schema(path):
         return []  # not a recipe file
 
     if "ptq_cfg" in data:
@@ -169,8 +222,12 @@ def _is_dir_recipe(dir_path: Path) -> bool:
 def _is_recipe_file(path: Path) -> bool:
     """Return True if *path* looks like a recipe file that should be validated.
 
-    Covers PTQ + speculative-decoding (EAGLE/DFlash/Medusa) recipes; extend
-    ``_SUPPORTED_RECIPE_TYPES`` for new types (e.g. QAT).
+    Three ways in, checked in this order: a ``# modelopt-schema:`` comment, a top-level
+    ``$import`` (a delegating alias, whose kind comes from what it imports), and finally
+    the deprecated ``metadata.recipe_type`` gated on ``_SUPPORTED_RECIPE_TYPES``. Only
+    that last branch consults the set, so a recipe of any kind that declares a schema is
+    validated here -- including kinds deliberately absent from the set, such as
+    ``auto_quantize``. ``load_recipe`` handles those, so this is intended.
 
     Malformed or unparseable files return True so that ``load_recipe()`` can
     report the actual error.
@@ -180,6 +237,20 @@ def _is_recipe_file(path: Path) -> bool:
         return True  # let load_recipe report the parse error
     if not isinstance(data, dict):
         return False  # not a recipe file at all
+    if _declares_recipe_schema(path):
+        return True
+    if _declares_non_recipe_schema(path):
+        # A snippet, not a recipe -- and snippets may carry a top-level ``$import`` of
+        # their own (see ``test_import_cross_file_same_name_no_conflict``). Without this
+        # the next branch would claim it and ``load_recipe`` would reject it with "does
+        # not say what kind of recipe it is", which is a confusing way to learn that a
+        # fragment was never meant to be loaded as a recipe.
+        return False
+    if "$import" in data:
+        # A delegating alias declares neither a schema comment nor a recipe_type: its
+        # kind comes from the recipe it imports. Validate it so a typo in ``imports:``
+        # or a ``$import`` naming an undeclared import fails here rather than at use.
+        return True
     metadata = data.get("metadata")
     if not isinstance(metadata, dict) or "recipe_type" not in metadata:
         return False  # not a recipe file at all

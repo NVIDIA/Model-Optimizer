@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -21,7 +22,6 @@ imports:
   nvfp4_static: configs/numerics/nvfp4_static
 
 metadata:
-  recipe_type: ptq
   description: >-
     MiniMax-M3 mixed MXFP8 and NVFP4 PTQ. Routed experts use MSE-calibrated
     NVFP4 weights and dynamic NVFP4 activations with input_scale fixed to 1.0;

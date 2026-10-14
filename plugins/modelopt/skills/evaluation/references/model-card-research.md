@@ -8,25 +8,13 @@ Use WebSearch to find the model card (HuggingFace, build.nvidia.com). Read it ca
     "Recommended Sampling" row. The `SamplingParams(temperature=0.8, top_p=0.95)`
     in a card's TensorRT-LLM/vLLM quickstart snippet is boilerplate copied
     verbatim across unrelated models — **never** read eval settings out of it.
-  - **Then cross-check `nvfp4-modelcard-sampling.md`** — published
-    `temperature` / `top_p` / `max_num_tokens` for the 2026 NVFP4 checkpoints
-    under `huggingface.co/nvidia` that disclose them, grouped by family.
-    Required for any NVFP4 checkpoint or same-family sibling; it is also the
-    best source of a default when the card is silent. Pre-2026 releases are out
-    of scope there — read their cards.
+  - **Then cross-check `nvfp4-modelcard-sampling.md`** — required for any NVFP4
+    checkpoint or same-family sibling; see [Sampling reference](#sampling-reference).
 - Context length (`deployment.extra_args: "--max-model-len <value>"`)
-- **Output length (`max_new_tokens`) — mandatory extraction.** Scan the
-  card for any `max_tokens` / `max_new_tokens` / "output length"
-  recommendation. Cards often list two values (e.g., Qwen3.x: `32768`
-  thinking-general + `81920` math/coding). **Pick the highest value** and
-  apply at the top level (no per-task overrides). If the card is genuinely
-  silent on output length, note that explicitly and fall back to the
-  generic default (64K reasoning / 16K non-reasoning) — never write a
-  config with "card not yet checked" + generic default. Check
-  `nvfp4-modelcard-sampling.md` for the model or its family before falling
-  back; a same-family published cap beats the generic default. See SKILL.md
-  Step 3 "`max_new_tokens` — pick a single top-level value" for the full
-  rule.
+- **Output length (`max_new_tokens`) — mandatory extraction.** Record any budget
+  explicitly tied to the applicable evaluation, with its source. Follow the
+  [token-budget rule below](#max_new_tokens--mandatory-model-card-lookup)
+  for selecting the value and fallback.
 - TP/DP settings (to set them appropriately, AskUserQuestion on how many GPUs the model will be deployed)
 - Reasoning config (if applicable):
   - reasoning on/off: use either:
@@ -51,3 +39,15 @@ Use WebSearch to find the model card (HuggingFace, build.nvidia.com). Read it ca
 Remember to check `evaluation.nemo_evaluator_config` and `evaluation.tasks.*.nemo_evaluator_config` overrides too for parameters to adjust (e.g. disabling reasoning)!
 
 Present findings, explain each setting, ask user to confirm or adjust. If no model card found, ask user directly for the above configurations.
+
+## Sampling reference
+
+**Cross-check `temperature` / `top_p` against `nvfp4-modelcard-sampling.md`** — the published settings for the 2026 NVFP4 checkpoints under `huggingface.co/nvidia` that disclose them (older releases and cards that publish nothing are absent — for those, read the card; `-DSpark` / `-DFlash` spec-decode variants share their base checkpoint's row, since spec decoding does not change the target's output distribution). **The card is the source of truth; this file is a reference, not a constraint** — use it to confirm a value you read, to fill a gap when the card is silent or ambiguous, and to catch a misreading. Worth consulting whenever the model is an NVFP4 checkpoint **or shares a family with one** (Qwen3.x, GLM-4.7/5.x, Kimi K2.x/K3, MiniMax M2.x/M3, DeepSeek V3.x/V4/R1, Gemma 4, Nemotron 3/3.5, Llama-Nemotron, Mistral Medium 3.5), and especially when you are unsure. It is a dated snapshot, so for anything newer than it, trust the card. See that file's "Lookup" section. For `max_new_tokens`, follow the token-budget rule below.
+
+## `max_new_tokens` — mandatory model-card lookup
+
+1. **Fetch the HF model card before writing the value.** Not optional. Consult its linked evaluation recipes for applicable settings.
+2. Look for `max_tokens` / `max_new_tokens` / "output length" explicitly used for the applicable evaluation. A published evaluation recipe linked from the card may set a shared default: use it for tasks covered by that recipe unless a task-specific override applies. Annotate with a citing comment. Do not select the highest number mentioned, quickstart/OpenCode examples, generic output-length recommendations, or `generation_config.json` defaults.
+3. **Consult `nvfp4-modelcard-sampling.md` as a reference.** Use an output budget only when its source explicitly covers the evaluated model and applicable evaluation. Re-read the card and surface discrepancies; do not infer output budgets from same-family rows or recommended sampling.
+4. If no applicable evaluation-specific output budget is disclosed after checking the card and reference, fall back to: **65536** (reasoning), **16384** (non-reasoning); surface the missing evaluation guidance to the user.
+5. **Forbidden:** writing `max_new_tokens: <generic_default>` with a "card not yet checked" comment. Either fetch and apply evaluation-specific guidance, or fetch and confirm none is disclosed.

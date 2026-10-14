@@ -15,6 +15,7 @@
 
 # Reproduces the quantization scheme of the published nvidia/MiniMax-M2.7-NVFP4
 # checkpoint from the MiniMaxAI/MiniMax-M2.7 input model.
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
@@ -23,7 +24,6 @@ imports:
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: ptq
   description: >-
     MiniMax M2.7 expert-only NVFP4 weights and activations with max calibration;
     FP8 KV-cache cast mode; attention projections, router, and LM head stay BF16.

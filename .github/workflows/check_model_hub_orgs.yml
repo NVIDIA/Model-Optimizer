@@ -1,0 +1,28 @@
+name: Recipe Hub Org Check
+
+on:
+  pull_request:
+    branches: [main, release/*, feature/*]
+    paths:
+      - "modelopt_recipes/models/**"
+      - "tools/ci/check_model_hub_orgs.py"
+      - ".github/workflows/check_model_hub_orgs.yml"
+  workflow_dispatch:
+    # On-demand
+
+concurrency:
+  # Cancel previous runs if new commit is pushed to the same PR
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  check-model-hub-orgs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/ubuntu-setup
+      - name: Verify models/<org>/<model_id> entries against the Hugging Face Hub
+        run: |
+          pip install huggingface_hub
+          python tools/ci/check_model_hub_orgs.py

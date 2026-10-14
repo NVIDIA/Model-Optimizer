@@ -8,6 +8,8 @@ ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 > **Source of truth:** `configs/benchmarks/swe-bench-verified/bench.yaml` in
 > nvidia-eval-factory-benchmarking (`dl/JoC/competitive_evaluation/…`), with the eval-image
 > pin in `configs/shared/nel_next_containers.yaml` — match its values for a reference run.
+>
+> The sibling `bench_direct.yaml` is a different backend (Gym/opencode) — don't mix its values in.
 
 ## Task-specific values (canonical `bench.yaml`)
 
@@ -16,14 +18,16 @@ ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 | `playbook` | `swebench_verified` (`harbor://swebench-verified@1.0`) |
 | agent | `openhands-sdk` (playbook; `agent_kwargs: {max_iterations: 200, version: "1.17.0"}`) |
 | scope | 500 Python tasks × `repeats: 5` |
-| `max_concurrent` / `sandbox.concurrency` | `15` in `bench.yaml`; per-model configs override it (MiniMax-M2.7 uses `20`) |
+| `max_concurrent` / `sandbox.concurrency` | `15` (canonical `bench.yaml`) |
 | `solver` | `timeout_strategy: max`, `run_timeout: 10800` (3h), `agent_kwargs.llm_kwargs.timeout: 3600` |
-| `sandbox.region` | `us-east-2` |
-| `sandbox.ecr_repository` | `${HARBOR_SWEBENCH_ECR_REPOSITORY}` (dedicated `harbor-swebench` repo, **us-west-2**, regardless of sandbox region) |
+| `sandbox.region` | `${HARBOR_ECS_REGION:-us-east-2}` |
+| `sandbox.ecr_repository` | `${HARBOR_SWEBENCH_ECR_REPOSITORY}` (`harbor-swebench`, **us-west-2** regardless of sandbox region) |
 | `cluster.eval_image` | `${NEL_NEXT_EVAL_IMAGE}` → **`0.5.0.1-harbor`** (same pin as TB2.1: `configs/shared/nel_next_containers.yaml`) *(shared — see `references/nel-next.md`)* |
-| `cluster.container_env.AWS_DEFAULT_REGION` | `us-east-2` (match `sandbox.region`) |
+| `cluster.container_env.AWS_DEFAULT_REGION` | `${HARBOR_ECS_REGION:-us-east-2}` (match `sandbox.region`) |
+| `output.export_config.mlflow.tags` | `task_name: swebench-verified` |
+| `proxy.model_traffic.capture_request_body` | `true`, per service *(shared — see `references/nel-next.md`)* |
 | `instruction_template` | `/configs/prompts/swebench_instruction.md`, **must be MOUNTED**; content is scoring-relevant (gotcha below) |
-| `proxy.request_timeout` | `3600` (FEP-1104 paired HTTP timeout; leaves mirror it on the service proxy) *(shared — see `references/nel-next.md`)* |
+| `proxy.request_timeout` | `3600` (`._swebench_verified.request_timeout`) — set explicitly *(shared — see `references/nel-next.md`)* |
 | `drop_params` | `max_tokens`, `max_completion_tokens`, `max_input_tokens_per_task`, `no_rebuild` *(shared — see `references/nel-next.md`)* |
 | `output.export_config.mlflow.exclude_patterns` | `["shard*", "model_traffic.jsonl"]` *(shared — see `references/nel-next.md`)* |
 | `system_message` | `strategy: replace` + the OpenHands prompt from `bench.yaml` (verbatim) — scoring-relevant |
@@ -32,7 +36,7 @@ ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 benchmarks:
   - playbook: swebench_verified
     repeats: 5
-    max_concurrent: 15            # keep == sandbox.concurrency; per-model configs may raise both
+    max_concurrent: 15            # canonical; keep == sandbox.concurrency
     instruction_template: /configs/prompts/swebench_instruction.md   # mounted (see gotcha)
     solver:
       service: <svc-name>
@@ -40,7 +44,7 @@ benchmarks:
       run_timeout: 10800
       agent_kwargs: {llm_kwargs: {timeout: 3600}}
     sandbox:
-      region: us-east-2
+      region: ${HARBOR_ECS_REGION:-us-east-2}
       ecr_repository: ${HARBOR_SWEBENCH_ECR_REPOSITORY}
       concurrency: 15
       log_stream_prefix: swebench-verified-<model>-<cluster>
@@ -82,16 +86,22 @@ cluster:
   container_mounts: ["<lustre>/<user>/prompts/swebench_instruction.md:/configs/prompts/swebench_instruction.md:ro"]
 ```
 
+### Gotcha — openhands sends `reasoning_effort: high`
+
+If the server doesn't accept `high`, every trial 400s on its first call (`Unexpected reasoning
+effort high. Supported types are …`) and `pass@1` is 0. Overwrite it with a value from the
+400's list — preferably the server default — via `proxy.extra_body.reasoning_effort` (e.g.
+`xhigh`), and hold it fixed across baseline and candidate. TB2.1 and MRCR don't send the key.
+
 ### Deployment proxy (multi-turn agentic)
 
 OpenHands runs ~200 turns/task. The canonical config adds a `system_message`
 interceptor (a large OpenHands system prompt — copy it verbatim from `bench.yaml`)
 plus `turn_counter`.
 
-**Order differs from TB2.1**: `http_pairs_dump` is **first** (not last) and `drop_params`
-comes **before** `consolidate_system`. `http_pairs_dump` is canary/diagnostic-only — it
-retains every error pair in memory for the whole run (`references/nel-next.md`); drop it
-from the scored config.
+Order: `system_message` + `turn_counter` in front of the shared base chain
+(`references/nel-next.md`), `http_pairs_dump` last and canary-only. Interceptor lists replace
+on merge, so restate the whole chain.
 
 ```yaml
 proxy:
@@ -99,13 +109,13 @@ proxy:
   extra_body: {skip_special_tokens: false}   # add model-card sampling extras if the card sets them
   model_traffic: {capture_request_body: true}   # FEA-224; adds the upstream request body to the traffic capture that is ALREADY ON by default
   interceptors:
-    # - {name: http_pairs_dump, config: {dump_path: "$${NEL_OUTPUT_DIR}/http_pairs_metrics.json", first_n: 50}}   # canary only
     - {name: system_message, config: {strategy: replace, system_message: "<the OpenHands prompt from bench.yaml>"}}
     - {name: turn_counter, config: {max_turns: 200, position: system_message}}
     - {name: drop_params, config: {params: [max_tokens, max_completion_tokens, max_input_tokens_per_task, no_rebuild]}}
     - {name: consolidate_system}
     - {name: reasoning}          # reasoning models: normalize reasoning field …
     - {name: reasoning_replay}   # … and replay across turns. Drop both for instruct models.
+    # - {name: http_pairs_dump, config: {dump_path: "$${NEL_OUTPUT_DIR}/http_pairs_metrics.json", first_n: 50}}   # canary only, LAST
 ```
 
 **`reasoning_replay.mode` is per model, not per benchmark.** Valid values are
@@ -134,4 +144,5 @@ metrics). MLflow logs it as `pass_at_1`. Read from `report.md` (Benchmark / Scor
 table) in the run dir or `nel eval report -r <run_id>`, then push to MLflow with
 `nel-next.sh mlflow-push -r <run_id> -c <cfg>` (SLURM doesn't auto-export). Keep
 `timeout_strategy` + the instruction/system prompt fixed across baseline vs quantized
-for a valid delta.
+for a valid delta. The upstream `manifest.yaml` key `mean/reward` is the direct-route
+metric — never compare it against harbor `pass@1`.

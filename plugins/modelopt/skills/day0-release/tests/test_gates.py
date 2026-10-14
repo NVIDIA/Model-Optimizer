@@ -151,6 +151,22 @@ def test_run_judge_error():
     assert not r["pass"] and r["failure_class"] == "EVAL_JUDGE_FAILED"
 
 
+def test_run_validated_warnings_do_not_waive_blockers():
+    """Accept validated warnings without overlooking coverage or integrity blockers."""
+    task = _task(warnings=["protocol-valid scored timeout; trial rate 1/100 = 1%"])
+    assert evaluate_run({"tasks": {"t": task}})["pass"]
+    for blockers in (
+        {"scored_samples": 99},
+        {"score": None},
+        {"errors": ["unscored harness crash"]},
+        {"errors": ["secret leak"]},
+        {"errors": ["wrong model/task/version/config"]},
+        {"errors": ["cross-invocation contamination; no provenance"]},
+        {"errors": ["systemic broken scoring"]},
+    ):
+        assert not evaluate_run({"tasks": {"t": task | blockers}})["pass"]
+
+
 def test_run_missing_score():
     r = evaluate_run({"tasks": {"gpqa": _task(score=None)}})
     assert not r["pass"] and r["failure_class"] == "SAMPLE_ACCOUNTING_FAILED"

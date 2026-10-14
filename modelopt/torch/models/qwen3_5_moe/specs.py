@@ -28,7 +28,7 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="qwen3_5_moe",
-        min_transformers_version="5.2",
+        min_transformers_version="5.5",
         moe_spec=MoESpec(
             block_names=("Qwen3_5MoeSparseMoeBlock",),
             expert_linear_names=("gate_proj", "down_proj", "up_proj"),

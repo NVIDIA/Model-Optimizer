@@ -22,7 +22,7 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="nemotron_h",
-        min_transformers_version="5.3",
+        min_transformers_version="5.5",
         export_spec=ExportSpec(grouped_expert_export=True),
         moe_spec=MoESpec(
             # NemotronHMOE experts (NemotronHMLP) use up_proj and down_proj only (no gate).

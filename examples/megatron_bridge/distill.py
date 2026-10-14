@@ -23,6 +23,7 @@ See `README.md` in this directory for example usage and data preparation instruc
 import argparse
 import contextlib
 import os
+from pathlib import Path
 
 import torch
 from export_distilled_megatron_to_hf import export_llm_to_hf, save_vlm_to_hf
@@ -47,15 +48,35 @@ from megatron.bridge.training.distill import distill
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
+
+try:
+    from megatron.bridge.data.builders import DirectHFSFTDatasetConfig
+    from megatron.bridge.data.sft_processing import ChatSFTPreprocessingConfig
+    from megatron.bridge.data.sources import HFDatasetSourceConfig
+
+    HAS_DIRECT_HF_SFT = True
+except ImportError:
+    HAS_DIRECT_HF_SFT = False
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.utils import unwrap_model
+from mlflow_utils import (
+    NON_PARAMS,
+    add_mlflow_args,
+    checkpoint_marker,
+    checkpoint_name,
+    distill_run,
+    logger_kwargs,
+    record_checkpoint_provenance,
+    resolve_mlflow_args,
+)
 from transformers import AutoTokenizer
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.opt.conversion import ModeloptStateManager
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
+from modelopt.torch.utils.mlflow import Tool, masked_args
 from modelopt.torch.utils.plugins.mbridge import (
     is_vlm_config,
     load_modelopt_megatron_checkpoint,
@@ -65,6 +86,30 @@ from modelopt.torch.utils.plugins.mbridge import (
 
 with contextlib.suppress(ModuleNotFoundError):
     import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
+
+
+DISTILL = Tool(
+    name="megatron_bridge_distill",
+    tracks=(
+        "Track this run on an MLflow server, uploading the command and the run log, and "
+        "writing .experiment.json into <output_dir>/checkpoints. Megatron-Bridge logs the "
+        "training metrics and the resolved config into the same run."
+    ),
+    variant_help="the student Megatron checkpoint's directory name, or bf16 without one",
+    variant=lambda args: (
+        checkpoint_name(args.student_megatron_path) if args.student_megatron_path else "bf16"
+    ),
+    model=lambda args: args.student_hf_path,
+    # None for --validate_only: the run writes no checkpoint to tag or point at.
+    checkpoint=lambda args: (
+        None if args.validate_only else str(Path(args.output_dir) / "checkpoints")
+    ),
+    source=lambda args: args.student_megatron_path or args.student_hf_path,
+    # Megatron-Bridge saves it, so record_checkpoint_provenance settles the pointer: only it
+    # can tell a checkpoint this run saved from the one it resumed from.
+    settles_pointer=False,
+    non_params=NON_PARAMS,
+)
 
 
 def _positive_int(value: str) -> int:
@@ -79,6 +124,16 @@ def _nonnegative_int(value: str) -> int:
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be a non-negative integer")
     return parsed
+
+
+def _hf_source(spec: str) -> "HFDatasetSourceConfig":
+    """``<file>.json[l]`` -> local chat jsonl; otherwise ``<hub_id>[:<split>]`` (split defaults to train)."""
+    if spec.endswith((".json", ".jsonl")):
+        return HFDatasetSourceConfig(
+            path_or_dataset="json", split="train", load_kwargs={"data_files": spec}
+        )
+    dataset, _, split = spec.partition(":")
+    return HFDatasetSourceConfig(path_or_dataset=dataset, split=split or "train")
 
 
 def get_args():
@@ -145,8 +200,9 @@ def get_args():
     parser.add_argument(
         "--sft",
         action="store_true",
-        help="Distill on prompt-completion jsonl from --sft_dataset_root with the loss masked to "
-        "the completion, instead of pre-tokenized --data_paths.",
+        help="Distill on SFT data with the loss masked to the responses, instead of pre-tokenized "
+        "--data_paths: prompt-completion jsonl from --sft_dataset_root, or chat data from "
+        "--sft_hf_dataset.",
     )
     parser.add_argument(
         "--sft_dataset_root",
@@ -155,6 +211,32 @@ def get_args():
         help="Directory holding training.jsonl (and validation.jsonl when --eval_iters > 0) of "
         '{"input": <prompt>, "output": <response>} records (used with --sft). See the README for '
         "how the fields are tokenized and truncated.",
+    )
+    parser.add_argument(
+        "--sft_hf_dataset",
+        type=str,
+        default=None,
+        help="Chat dataset to distill on (used with --sft): a local chat '<file>.jsonl', or "
+        "'<hub_id>[:<split>]' (split defaults to train). Only .json/.jsonl are read as local "
+        "files; anything else is taken as a Hub id. Each conversation is rendered by the "
+        "model's own chat template. Alternative to --sft_dataset_root, which expects "
+        '{"input", "output"} records already preprocessed into a dataset root.',
+    )
+    parser.add_argument(
+        "--sft_hf_validation",
+        type=str,
+        default=None,
+        help="Validation data for --sft_hf_dataset, in the same format (required when "
+        "--eval_iters > 0), e.g. '<hub_id>:test' or '<hub_id>:train[:1000]'.",
+    )
+    parser.add_argument(
+        "--sft_loss_mode",
+        type=str,
+        default="assistant",
+        choices=["assistant", "last_turn", "full"],
+        help="Which tokens --sft_hf_dataset trains on: every assistant turn, only the final one, "
+        "or the whole conversation. Multi-turn records train all of their responses under "
+        "'assistant'.",
     )
     # Training & Eval arguments
     parser.add_argument(
@@ -172,9 +254,16 @@ def get_args():
         "--train_iters", type=int, required=True, help="Number of training iterations"
     )
     parser.add_argument(
-        "--no_skip_lm_loss", action="store_true", help="Disable skipping language model loss"
+        "--kd_loss_alpha",
+        type=float,
+        default=1.0,
+        help="KD loss weight alpha in (1 - alpha) * lm_loss + alpha * kd_loss. 1.0 skips the LM loss entirely.",
     )
-    parser.add_argument("--kd_loss_scale", type=float, default=1.0, help="KD loss weight")
+    parser.add_argument(
+        "--freeze_mtp",
+        action="store_true",
+        help="Keep the student's MTP head at its input weights: skip its loss and freeze it.",
+    )
     parser.add_argument(
         "--no_async_save",
         action="store_true",
@@ -182,11 +271,24 @@ def get_args():
         "CUDA context, which fails when the training process already fills the GPU.",
     )
     parser.add_argument(
-        "--logit_kl_topk",
+        "--logit_kl_top_k",
         type=int,
         default=None,
-        help="Restrict the logit KL loss to the teacher's top-k vocabulary entries, "
-        "replacing the full-vocab temporaries with [seq, k] ones.",
+        help="Restrict the logit KL loss to the teacher's top-k vocabulary entries plus a residual "
+        "bucket for the remaining probability mass (distributions are still normalized over the full vocab).",
+    )
+    parser.add_argument(
+        "--logit_kl_top_p",
+        type=float,
+        default=None,
+        help="Nucleus threshold in (0, 1] applied on top of --logit_kl_top_k: only the smallest prefix "
+        "of the sorted top-k whose cumulative teacher probability reaches this value is distilled.",
+    )
+    parser.add_argument(
+        "--logit_kl_top_p_min_k",
+        type=int,
+        default=1,
+        help="Minimum number of top-k entries kept per token when --logit_kl_top_p is active.",
     )
     parser.add_argument("--lr", type=float, default=1e-4, help="Peak learning rate")
     parser.add_argument("--min_lr", type=float, default=1e-5, help="Minimum learning rate")
@@ -287,7 +389,10 @@ def get_args():
         "heterogeneous (Puzzletron/NAS) student's weights. Defaults to --student_hf_path, which is "
         "correct for homogeneous students; unused for VLMs.",
     )
+    add_mlflow_args(parser, DISTILL, log_checkpoints=True)
+
     args = parser.parse_args()
+    resolve_mlflow_args(args, parser, DISTILL)
 
     # Sanity checks
     if not args.sft and not args.use_mock_data and not args.data_paths:
@@ -300,11 +405,24 @@ def get_args():
     if args.validate_only and args.eval_iters == 0:
         raise ValueError("--validate_only requires --eval_iters > 0.")
 
-    if args.sft and not args.sft_dataset_root:
+    if args.sft and not (args.sft_dataset_root or args.sft_hf_dataset):
         raise ValueError(
             "--sft requires --sft_dataset_root (a directory with training.jsonl, plus "
-            "validation.jsonl when --eval_iters > 0)."
+            "validation.jsonl when --eval_iters > 0) or --sft_hf_dataset."
         )
+    if args.sft_dataset_root and args.sft_hf_dataset:
+        raise ValueError("--sft_dataset_root and --sft_hf_dataset are mutually exclusive.")
+    if args.sft_hf_dataset:
+        if not args.sft:
+            raise ValueError("--sft_hf_dataset requires --sft.")
+        if not HAS_DIRECT_HF_SFT:
+            raise ValueError(
+                "--sft_hf_dataset needs a newer Megatron-Bridge (DirectHFSFTDatasetConfig)."
+            )
+        if args.eval_iters > 0 and not args.sft_hf_validation:
+            raise ValueError("--sft_hf_dataset with --eval_iters > 0 needs --sft_hf_validation.")
+    elif args.sft_hf_validation or args.sft_loss_mode != "assistant":
+        raise ValueError("--sft_hf_validation / --sft_loss_mode require --sft_hf_dataset.")
     if args.sft and (args.data_paths or args.use_mock_data):
         raise ValueError(
             "--sft is mutually exclusive with --data_paths / --use_mock_data: the SFT branch wins "
@@ -312,7 +430,7 @@ def get_args():
         )
     if args.sft_dataset_root and not args.sft:
         raise ValueError("--sft_dataset_root requires --sft; without it the SFT path is not used.")
-    if args.sft:
+    if args.sft and args.sft_dataset_root:
         # Fail on a mistyped root here rather than after both checkpoints have loaded onto GPUs.
         required = ["training.jsonl"] + (["validation.jsonl"] if args.eval_iters > 0 else [])
         absent = [f for f in required if not os.path.isfile(os.path.join(args.sft_dataset_root, f))]
@@ -323,7 +441,7 @@ def get_args():
 
     _check_shared_vocabulary(args)
 
-    print_args(args)
+    print_args(masked_args(args))
 
     return args
 
@@ -353,7 +471,7 @@ def _tokenizer_prepends_bos(args) -> bool:
     return tokenizer("x").input_ids[:1] == [tokenizer.bos_token_id]
 
 
-def main(args: argparse.Namespace):
+def main(args: argparse.Namespace, owns_the_run: bool = True):
     student_has_modelopt_state = args.student_megatron_path is not None and has_modelopt_state(
         args.student_megatron_path
     )
@@ -435,9 +553,11 @@ def main(args: argparse.Namespace):
         )
 
     kd_config = ModelOptDistillConfig(
-        skip_lm_loss=not args.no_skip_lm_loss,
-        kd_loss_scale=args.kd_loss_scale,
-        logit_kl_topk=args.logit_kl_topk,
+        kd_loss_alpha=args.kd_loss_alpha,
+        logit_kl_topk=args.logit_kl_top_k,
+        logit_kl_top_p=args.logit_kl_top_p,
+        logit_kl_top_p_min_k=args.logit_kl_top_p_min_k,
+        freeze_mtp=args.freeze_mtp,
     )
 
     # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under
@@ -502,7 +622,21 @@ def main(args: argparse.Namespace):
         "dataloader_type": "single",
         "skip_getting_attention_mask_from_dataset": True,
     }
-    if args.sft:
+    if args.sft and args.sft_hf_dataset:
+        # Chat rows rendered by the model's own chat template, with the loss covering every
+        # assistant turn, so multi-round records train all of their responses rather than the last.
+        dataset_config = DirectHFSFTDatasetConfig(
+            seq_length=args.seq_length,
+            source=_hf_source(args.sft_hf_dataset),
+            validation_source=(
+                _hf_source(args.sft_hf_validation) if args.sft_hf_validation else None
+            ),
+            preprocessing=ChatSFTPreprocessingConfig(loss_mode=args.sft_loss_mode),
+            dataloader_type="batch",
+            do_validation=args.eval_iters > 0,
+            do_test=False,
+        )
+    elif args.sft:
         # SFT-masked distillation via Bridge's FinetuningDatasetConfig -> NeMo-style GPTSFTDataset,
         # reading {"input", "output"} jsonl. Fields are tokenized as written except that each is
         # ``.strip(" ")``-ed; see --sft_dataset_root help.
@@ -571,6 +705,9 @@ def main(args: argparse.Namespace):
             wandb_project=args.wandb_project,
             wandb_entity=args.wandb_entity,  # optional
             wandb_exp_name=args.wandb_exp_name,
+            # MLflow logging, which Megatron-Bridge drives from inside the training loop so
+            # the metrics and the resolved config are recorded too.
+            **logger_kwargs(args, DISTILL),
         ),
         tokenizer=(
             # SFT reads raw text, so it needs the model's real tokenizer; the pretraining path
@@ -607,7 +744,16 @@ def main(args: argparse.Namespace):
     )
 
     print_rank_0("\nStarting distillation...")
-    distill(config)
+    # Before training: a resumed run starts with the previous run's checkpoint in place, so
+    # only a move in this marker shows that this run saved one of its own.
+    saved_before = checkpoint_marker(args, DISTILL)
+    try:
+        distill(config)
+    finally:
+        # In a finally: when --exit_interval or --exit_duration_in_mins fires -- which is how
+        # a Slurm run usually ends -- Megatron-Bridge calls sys.exit() from inside train(),
+        # so nothing after distill() runs. The checkpoint is already saved by then.
+        record_checkpoint_provenance(args, DISTILL, saved_before=saved_before, is_main=owns_the_run)
     if args.validate_only:
         print_rank_0("\nValidation-only run done! Skipped training and checkpoint export.\n")
         return
@@ -655,7 +801,10 @@ if __name__ == "__main__":
     dist.setup()
     args = get_args()
     try:
-        main(args)
+        # Entered inside the try: opening the run is fatal by design, and the peers of a rank
+        # that exits without dist.abort() stay blocked on the first collective.
+        with distill_run(args, DISTILL) as owns_the_run:
+            main(args, owns_the_run)
     except BaseException:
         dist.abort()  # peers may be stuck in a collective this rank will never reach
     finally:

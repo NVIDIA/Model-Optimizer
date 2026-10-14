@@ -52,7 +52,7 @@ from modelopt.onnx.quantization.autotune.insertion_points import (
     get_autotuner_quantizable_ops,
 )
 from modelopt.onnx.quantization.autotune.region_pattern import RegionPattern
-from modelopt.onnx.quantization.graph_utils import get_tensor_consumer_node_indices
+from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_node_indices
 
 _MUTATION_SPECS = [
     ("node_inputs", "node input points", lambda p: (p.node_index, p.input_index)),
@@ -737,7 +737,7 @@ class QDQAutotunerBase:
             "patterns": [pattern_schemes.to_dict() for pattern_schemes in self.profiled_patterns],
         }
 
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             yaml.dump(state, f, default_flow_style=False, sort_keys=False)
 
         num_patterns = len(self.profiled_patterns)
@@ -775,7 +775,7 @@ class QDQAutotunerBase:
             AutotunerNotInitializedError: If initialize() hasn't been called
             FileNotFoundError: If the input_path doesn't exist
         """
-        with open(input_path) as f:
+        with open(input_path, encoding="utf-8") as f:
             state = yaml.safe_load(f)
 
         if state.get("baseline_latency_ms") is not None:

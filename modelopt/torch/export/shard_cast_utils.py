@@ -36,6 +36,7 @@ from modelopt.torch.quantization.utils.numeric_utils import (
     mxfp4_to_nvfp4_global_amax,
     mxfp4_to_nvfp4_per_block_amax,
 )
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import resolve_checkpoint_file
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
@@ -52,7 +53,6 @@ __all__ = [
 _MXFP4_BLOCK = 32
 _MXFP4_BYTES_PER_BLOCK = 16
 _NVFP4_BLOCK = 16
-_MAX_CHECKPOINT_METADATA_BYTES = 128 * 1024 * 1024
 
 
 def dequantize_mxfp4_to_bf16(
@@ -191,46 +191,6 @@ def link_or_copy(src: Path, dst: Path) -> None:
         if exc.errno not in copy_errnos:
             raise
         shutil.copy2(src, dst)
-
-
-def _is_relative_to(path: Path, root: Path) -> bool:
-    return path == root or root in path.parents
-
-
-def _snapshot_blob_root(source_root: Path) -> Path | None:
-    if source_root.parent.name != "snapshots":
-        return None
-    blob_root = source_root.parent.parent / "blobs"
-    return blob_root.resolve(strict=True) if blob_root.is_dir() else None
-
-
-def _allowed_source_roots(src_dir: Path) -> list[Path]:
-    source_root = src_dir.resolve(strict=True)
-    allowed_roots = [source_root]
-    if blob_root := _snapshot_blob_root(source_root):
-        allowed_roots.append(blob_root)
-    return allowed_roots
-
-
-def resolve_checkpoint_file(
-    src_dir: Path,
-    relative_path: str | Path,
-    *,
-    max_bytes: int | None = _MAX_CHECKPOINT_METADATA_BYTES,
-) -> Path:
-    """Resolve a contained regular checkpoint file and optionally bound its size."""
-    src = src_dir / relative_path
-    try:
-        resolved_src = src.resolve(strict=True)
-    except OSError as exc:
-        raise ValueError(f"checkpoint source is not a readable regular file: {src}") from exc
-    if not resolved_src.is_file():
-        raise ValueError(f"checkpoint source must resolve to a regular file: {src}")
-    if not any(_is_relative_to(resolved_src, root) for root in _allowed_source_roots(src_dir)):
-        raise ValueError(f"checkpoint source is outside the checkpoint directory: {src}")
-    if max_bytes is not None and resolved_src.stat().st_size > max_bytes:
-        raise ValueError(f"checkpoint source exceeds the {max_bytes}-byte size limit: {src}")
-    return resolved_src
 
 
 def _collect_aux_files(

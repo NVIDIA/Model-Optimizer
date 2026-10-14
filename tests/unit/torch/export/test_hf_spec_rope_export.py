@@ -18,9 +18,14 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 
-from modelopt.torch.export.plugins.hf_spec_export import DFlashExporter, EagleExporter
+from modelopt.torch.export.plugins.hf_spec_export import (
+    DFlashExporter,
+    EagleExporter,
+    _get_rope_theta,
+)
 
 DEFAULT_ROPE_SCALING = {
     "rope_type": "yarn",
@@ -152,3 +157,65 @@ def test_dflash_rope_theta_inherits_base_rope_parameters():
     config = exporter._export_config()
 
     assert config["rope_theta"] == 5000000.0
+
+
+class TestGetRopeTheta:
+    """Where a config keeps rope_theta depends on the transformers version.
+
+    Every consumer of a base config -- the exporter, the draft builder, the fake base --
+    has to agree on this, so they share this one reader. Reading it wrong is silent: the
+    draft trains and exports without complaint against a RoPE base the target never used,
+    and only misbehaves at serve time.
+    """
+
+    def test_reads_the_rope_parameters_dict(self):
+        """The transformers 5.12+ layout: the value lives only in the dict."""
+        assert _get_rope_theta(SimpleNamespace(rope_parameters={"rope_theta": 1000000.0})) == (
+            1000000.0
+        )
+
+    def test_reads_the_legacy_rope_scaling_dict(self):
+        """Older transformers spell the same dict rope_scaling."""
+        assert _get_rope_theta(SimpleNamespace(rope_scaling={"rope_theta": 1000000.0})) == (
+            1000000.0
+        )
+
+    def test_prefers_the_dict_over_a_disagreeing_flat_field(self):
+        """Both present and disagreeing: the dict wins.
+
+        This is the regression guard. The precedence was the other way round on main from
+        2026-07-30 to 2026-09-09, and no test noticed -- a config can carry the real base
+        in the dict while the class default (10000.0 for Qwen3) stays visible as a flat
+        rope_theta, so reading flat first exports a drafter whose RoPE base is 100x off.
+        """
+        config = SimpleNamespace(rope_theta=10000.0, rope_parameters={"rope_theta": 1000000.0})
+        assert _get_rope_theta(config) == 1000000.0
+
+    def test_falls_back_to_a_flat_attribute(self):
+        """The transformers 4.x layout: only the flat field exists."""
+        assert _get_rope_theta(SimpleNamespace(rope_theta=12345.0)) == 12345.0
+
+    def test_missing_everywhere_returns_the_default(self):
+        """An absent base must stay absent rather than become a wrong number."""
+        assert _get_rope_theta(SimpleNamespace()) is None
+        assert _get_rope_theta(SimpleNamespace(), 7.0) == 7.0
+
+    def test_reads_a_real_config_whichever_layout_it_uses(self):
+        """A real config resolves on every supported transformers version.
+
+        Asserts the outcome, not the layout: 5.12 keeps the value only in the dict while
+        the minimum supported version (4.57) has only the flat field and no dict at all.
+        The layouts themselves are pinned above, built explicitly, so they stay covered
+        where transformers is absent -- this is the only test here that needs it.
+        """
+        transformers = pytest.importorskip("transformers")
+        config = transformers.Qwen3Config(
+            hidden_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            intermediate_size=64,
+            vocab_size=64,
+            rope_theta=1000000.0,
+        )
+        assert _get_rope_theta(config) == 1000000.0

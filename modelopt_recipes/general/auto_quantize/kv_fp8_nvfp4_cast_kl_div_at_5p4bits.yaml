@@ -24,7 +24,6 @@ imports:
   nvfp4: configs/numerics/nvfp4
 
 metadata:
-  recipe_type: auto_quantize
   description: Layer-wise FP8-cast/NVFP4-cast KV-cache AutoQuantize at 5.4 bits using forward KL.
 
 auto_quantize:

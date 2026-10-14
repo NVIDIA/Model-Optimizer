@@ -61,18 +61,22 @@ def main(args: argparse.Namespace) -> None:
 
     for i, file in enumerate(sampled_files):
         data = torch.load(file)
-        expected_keys = [
-            "input_ids",
-            "hidden_states",
-            "aux_hidden_states",
-            "conversation_id",
-        ]
-        if set(expected_keys) != set(data.keys()):
-            print(f"File {file} does not contain all expected keys: {expected_keys}")
+        # Require only the keys every dump carries, and report what is missing rather
+        # than comparing the whole set: the optional keys are legitimately absent on
+        # some dumps -- ``aux_hidden_states`` under ``--no-aux-hidden-states``, and
+        # ``loss_mask`` unless ``--answer-only-loss`` was used -- and an exact-set
+        # check rejects those as malformed.
+        required_keys = ["input_ids", "hidden_states", "conversation_id"]
+        missing = [k for k in required_keys if k not in data]
+        if missing:
+            print(f"File {file} is missing required keys: {missing}")
             print(f"  Found keys: {list(data.keys())}")
             continue
         print(f"Sample {i + 1}: {file.name}")
         for key in ["input_ids", "hidden_states", "aux_hidden_states"]:
+            if key not in data:
+                print(f"{key}: absent")
+                continue
             print(f"{key}: {data[key].shape} {data[key].dtype} {data[key].device}")
         print(f"conversation_id: {data['conversation_id']}")
         input_ids_list = data["input_ids"].tolist()

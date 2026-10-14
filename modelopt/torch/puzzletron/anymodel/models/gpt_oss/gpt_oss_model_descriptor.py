@@ -34,7 +34,6 @@ from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor, KVHeadsPr
 # Production models use MXFP4 quantized MoE with combined tensors
 # (gate_up_proj_blocks, down_proj_blocks), which is not yet supported.
 from ....pruning.pruning_mixin import PruningMixIn
-from ....utils.dummy_modules import DummyBlock
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
 
@@ -50,14 +49,6 @@ class GptOssModelDescriptor(ModelDescriptor):
     """Model descriptor for GPT-OSS (pure MoE model)."""
 
     _DECODER_LAYER_CLS: Type[nn.Module] = None
-
-    @classmethod
-    def create_dummy_block(cls, original_layer: GptOssDecoderLayer, block_index: int) -> nn.Module:
-        dummy_block = DummyBlock(block_index=block_index)
-        # Required by `GptOssModel.forward` in transformers<5.4
-        if hasattr(original_layer, "attention_type"):
-            dummy_block.attention_type = original_layer.attention_type
-        return dummy_block
 
     @staticmethod
     def decoder_layer_cls():

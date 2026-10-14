@@ -33,6 +33,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
+from modelopt.torch.speculative.plugins.master_weight_adamw import MasterWeightAdamW
 from modelopt.torch.speculative.utils import get_ttt_msk_func
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import is_master
@@ -60,6 +61,7 @@ def make_speculative_data_module(
     answer_only_loss=False,
     shift_labels=True,
     final_aux_is_base_hidden=False,
+    aux_hidden_states_optional=False,
 ) -> dict:
     """Create data module for speculative decoding training.
 
@@ -69,6 +71,8 @@ def make_speculative_data_module(
         final_aux_is_base_hidden: Streaming only. True when the draft's top aux layer is the
             base's final layer, so the last captured plane is both the final aux feature and
             the base (KD-target) hidden instead of an extra dedicated plane.
+        aux_hidden_states_optional: accept dumps written with ``--no-aux-hidden-states``.
+            Only modes that never read the aux planes may set this.
     """
     # Load chat template from file if provided
     chat_template = None
@@ -166,7 +170,10 @@ def make_speculative_data_module(
         if data_args.sample_size > 0:
             dumped_files = dumped_files[: data_args.sample_size]
         train_dataset = OfflineSupervisedDataset(
-            dumped_files, answer_only_loss=answer_only_loss, tokenizer=tokenizer
+            dumped_files,
+            answer_only_loss=answer_only_loss,
+            tokenizer=tokenizer,
+            aux_hidden_states_optional=aux_hidden_states_optional,
         )
         data_collator = EagleOfflineDataCollator(train_len=train_len)
 
@@ -188,12 +195,67 @@ class EagleTrainerWithAccLog(Trainer):
         super().__init__(*args, **kwargs)
         self.lora_lr_multiplier = lora_lr_multiplier
 
-    def create_optimizer(self):
-        """Override to give LoRA parameters a higher learning rate."""
-        super().create_optimizer()
+    def create_optimizer(self, model=None):
+        """Override to give LoRA parameters a higher learning rate.
+
+        ``model`` mirrors the base signature. The delayed-creation branch -- FSDP1, FSDP-XLA
+        and SageMaker MP -- calls this with the prepared model rather than ``self.model``,
+        and an override without the parameter is a ``TypeError`` there.
+        """
+        model = self.model if model is None else model
+        if self.optimizer is None and getattr(model, "dflash_fp32_master_weights", False):
+            # Built here rather than left to HF: the flag asks for an fp32 master copy of the
+            # draft, and that lives in the optimizer. `create_optimizer` below wraps its own
+            # work in `if self.optimizer is None`, so setting it here skips that entirely --
+            # including the decay/no-decay grouping, which is why this reproduces it.
+            # `Trainer.create_optimizer` prefers an explicitly supplied class over
+            # `args.optim`, and so must this: `optimizer_cls_and_kwargs` is the supported way
+            # to pass one without subclassing, and `ModelOptHFTrainer` uses it. Reading
+            # `args.optim` unconditionally would discard it silently.
+            if self.optimizer_cls_and_kwargs is not None:
+                cls, kwargs = self.optimizer_cls_and_kwargs
+            else:
+                cls, kwargs = self.get_optimizer_cls_and_kwargs(self.args, model)
+            if not issubclass(cls, torch.optim.AdamW):
+                raise ValueError(
+                    f"dflash_fp32_master_weights needs an AdamW-family optimizer to hold the "
+                    f"master weights, but training.optim resolved to {cls.__name__}. Either "
+                    f"set training.optim to an adamw_torch variant, or set "
+                    f"dflash_fp32_master_weights=false to train the draft without an fp32 "
+                    f"master -- which costs acceptance length, but is the only option if the "
+                    f"optimizer is the point (adamw_8bit and adafactor both land here)."
+                )
+            # `optim` defaults to adamw_torch_fused, and the fused kernel writes the update
+            # straight into the parameter it was handed -- which for us is the bf16 model
+            # weight, not the fp32 master, so the master would never advance. foreach is the
+            # multi-tensor path and is equivalent here.
+            if kwargs.pop("fused", False):
+                kwargs.setdefault("foreach", True)
+                print_rank_0(
+                    "dflash_fp32_master_weights: using the foreach AdamW path instead of "
+                    "the fused one, which cannot hold master weights."
+                )
+            decay = self.get_decay_parameter_names(model)
+            named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+            self.optimizer = MasterWeightAdamW(
+                [
+                    {
+                        "params": [p for n, p in named if n in decay],
+                        "weight_decay": self.args.weight_decay,
+                    },
+                    {"params": [p for n, p in named if n not in decay], "weight_decay": 0.0},
+                ],
+                **{k: v for k, v in kwargs.items() if k != "weight_decay"},
+            )
+        # Forwarded only when it was given: the parameter is not in every supported
+        # transformers version, and the caller that passes one is that same version.
+        if model is self.model:
+            super().create_optimizer()
+        else:
+            super().create_optimizer(model)
         if self.lora_lr_multiplier != 1.0:
             lora_ids = {
-                id(p) for n, p in self.model.named_parameters() if "lora_" in n and p.requires_grad
+                id(p) for n, p in model.named_parameters() if "lora_" in n and p.requires_grad
             }
             if lora_ids:
                 new_groups = []
@@ -382,10 +444,21 @@ class EagleTrainingPlot(TrainerCallback):
         except Exception:
             print_rank_0(f"Step {state.global_step} Training Acc: {average_acc}")
         # Log accuracy to HF Trainer's logs dict (picked up by TensorBoard)
-        logs = kwargs.get("logs") or {}
-        for i, draft_acc in enumerate(average_acc):
-            for j, step_acc in enumerate(draft_acc):
-                logs[f"train_acc/parallel_{i}_step_{j}"] = float(step_acc)
+        logs = kwargs.get("logs")
+        if logs is None:
+            logs = {}
+        acc_logs = {
+            f"train_acc/parallel_{i}_step_{j}": float(step_acc)
+            for i, draft_acc in enumerate(average_acc)
+            for j, step_acc in enumerate(draft_acc)
+        }
+        logs.update(acc_logs)
+        # Trainer.log() appends a *copy* of logs to state.log_history before invoking
+        # callbacks, so mutating logs alone never reaches trainer_state.json -- which is
+        # the only file check_regression.py reads. Without this, MIN_FINAL_ACC is
+        # configured, printed to the console every log step, and silently never checked.
+        if state.log_history:
+            state.log_history[-1].update(acc_logs)
         if self.estimate_ar:
             # Calculate mean training AR since last log
             # NOTE: This is only an estimate of the real AR.

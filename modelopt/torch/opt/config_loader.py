@@ -219,6 +219,18 @@ def _parse_modelopt_schema(text: str, config_path: Path | Traversable) -> str | 
     return schema
 
 
+def peek_declared_schema(config_file: str | Path | Traversable) -> str | None:
+    """Return the ``# modelopt-schema:`` path a config file declares, if any.
+
+    Reads only the comment preamble -- no YAML parsing and no ``$import`` resolution --
+    so a caller can find out what kind of config a file is *before* it can be loaded.
+    :func:`modelopt.recipe.load_recipe` uses this to pick a recipe's schema class, which
+    is why a recipe can inherit its body from another one via a top-level ``$import``.
+    """
+    config_path = _resolve_config_path(config_file)
+    return _parse_modelopt_schema(config_path.read_text(encoding="utf-8"), config_path)
+
+
 def _load_raw_config_with_schema(config_file: str | Path | Traversable) -> _RawConfig:
     """Load a config YAML without resolving ``$import`` references."""
     config_path = _resolve_config_path(config_file)
