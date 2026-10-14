@@ -20,8 +20,10 @@ them before it forks the distributed workers, and tests may override them, so th
 matters. Callers do ``from modelopt.torch.utils import env`` then ``env.ep_degree()``.
 
 Distribution plan (see ``resolve_distribution_plan``):
-  MODELOPT_EP_DEGREE        expert-parallel degree; ``""``/unset -> ``"auto"``.
-  MODELOPT_FSDP_SIZE        dense layout: ``"1"`` replicates, ``"world"`` FSDP2-shards; ``""``/unset -> ``"auto"``.
+
+- ``MODELOPT_EP_DEGREE``: expert-parallel degree; ``""``/unset -> ``"auto"``.
+- ``MODELOPT_FSDP_SIZE``: the dense layout. ``"1"`` replicates it; ``"world"``, or the world size as a
+  number, FSDP2-shards it over every rank; ``""``/unset -> ``"auto"``.
 """
 
 import os
