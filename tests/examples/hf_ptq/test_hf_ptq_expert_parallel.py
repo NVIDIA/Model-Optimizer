@@ -293,12 +293,15 @@ def test_a_whole_model_loads_by_the_plan_through_get_model(hf_ptq, monkeypatch, 
 
 
 def test_a_one_rank_fsdp2_run_sets_up_its_group_before_loading(hf_ptq, monkeypatch):
-    """FSDP2 on one rank shards through a process group, of one, which main() did not set up."""
+    """FSDP2 on one rank shards through a process group, of one, which main() did not set up. Its
+    collective timeout is raised above NCCL's 30-minute default, for rank 0's checkpoint write."""
     _serve(monkeypatch, hf_ptq, LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY))
     calls = _record_load_pretrained(hf_ptq, monkeypatch)
     setups = []
     monkeypatch.setattr(
-        hf_ptq, "setup_fsdp2_process_group", lambda plan: setups.append((plan, len(calls)))
+        hf_ptq,
+        "setup_fsdp2_process_group",
+        lambda plan, timeout=None: setups.append((plan, len(calls), timeout)),
     )
     args = _args(
         _dist_state(world_size=1),
@@ -312,7 +315,10 @@ def test_a_one_rank_fsdp2_run_sets_up_its_group_before_loading(hf_ptq, monkeypat
         hf_ptq.load_model(args)
 
     plan = DistributionPlan(dense="fsdp")
-    assert setups == [(plan, 0)], "set up before the load"
+    [(set_up_for, loads_before, timeout)] = setups
+    assert set_up_for == plan
+    assert loads_before == 0, "set up before the load"
+    assert timeout > timedelta(minutes=30)
     assert calls[0]["distribution"] == plan
 
 
@@ -353,39 +359,6 @@ def test_a_rank_device_pins_the_whole_model_to_it(
 
 
 # ------------------------------------------------------------------ process group and dist_state
-
-
-@pytest.mark.parametrize(
-    ("plan", "live_group", "setups"),
-    [
-        (DistributionPlan(dense="fsdp"), False, 1),
-        (DistributionPlan(2, dense="fsdp"), True, 0),
-        (DistributionPlan(), False, 0),
-    ],
-    ids=["fsdp2_on_one_rank", "launched_group", "single_process"],
-)
-def test_fsdp2_on_one_rank_sets_up_a_group_of_its_own(monkeypatch, plan, live_group, setups):
-    """FSDP2 shards through a process group even on one rank, where main() set up none; a
-    distributed launch has its group, and a single process's plan needs none."""
-    calls = []
-    monkeypatch.setattr(example_utils.dist_utils, "is_initialized", lambda: live_group)
-    monkeypatch.setattr(example_utils.dist_utils, "setup", lambda timeout=None: calls.append(0))
-
-    example_utils.setup_fsdp2_process_group(plan)
-
-    assert len(calls) == setups
-
-
-@pytest.mark.parametrize("launch_world", ["1", "2"], ids=["single_process", "distributed_launch"])
-def test_cleanup_destroys_only_the_group_this_script_set_up(monkeypatch, launch_world):
-    """A distributed launch's group is distributed_run's to destroy, after the run."""
-    destroyed = []
-    monkeypatch.setenv("WORLD_SIZE", launch_world)
-    monkeypatch.setattr(example_utils.dist_utils, "cleanup", lambda: destroyed.append(0))
-
-    example_utils.cleanup_distributed()
-
-    assert len(destroyed) == (launch_world == "1")
 
 
 def test_main_owns_the_process_group_around_the_whole_run(hf_ptq, monkeypatch):

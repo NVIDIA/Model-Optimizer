@@ -23,7 +23,6 @@ import os
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +46,6 @@ from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
 from modelopt.torch.models import hf_model_type
 from modelopt.torch.models.hf import checkpoint_has_mtp, prepare_model_for_loading
-from modelopt.torch.utils import distributed as dist_utils
 from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
@@ -55,27 +53,6 @@ from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
-
-
-def setup_fsdp2_process_group(plan: DistributionPlan) -> None:
-    """Set up the one-rank process group a plan that FSDP2-shards the model on one rank needs.
-
-    FSDP2 shards through a process group even on one rank; a distributed launch already has its
-    group (hf_ptq's ``distributed_run``).
-    """
-    if plan.is_fsdp_dense and not dist_utils.is_initialized():
-        # Raise the collective timeout above NCCL's 30-min default: rank 0's checkpoint write can
-        # exceed it, and PyTorch 2.8 has no per-call barrier() timeout (must be set at PG creation).
-        dist_utils.setup(timeout=timedelta(hours=2))
-
-
-def cleanup_distributed():
-    """Destroy the one-rank process group :func:`setup_fsdp2_process_group` set up, if any.
-
-    A distributed launch's group is ``distributed_run``'s to destroy.
-    """
-    if not dist_utils.is_distributed_launch():
-        dist_utils.cleanup()
 
 
 def validate_fsdp2_supported(args, config):

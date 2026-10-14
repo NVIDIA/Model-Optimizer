@@ -389,7 +389,7 @@ def test_fsdp2_rejects_mtp_before_distributed_loading(monkeypatch, tmp_path, has
 
     monkeypatch.setattr(hf_ptq, "load_pretrained", distributed_load)
     # A one-rank FSDP2 run sets up its process group of one right before the load.
-    monkeypatch.setattr(hf_ptq, "setup_fsdp2_process_group", lambda plan: None)
+    monkeypatch.setattr(hf_ptq, "setup_fsdp2_process_group", lambda plan, timeout=None: None)
     error, message = (
         (NotImplementedError, "Nemotron-H MTP")
         if has_mtp
