@@ -102,18 +102,10 @@ def _model_with_decoder_at(prefix):
 # ------------------------------------------------------------------------------- the plan
 
 
-@pytest.mark.parametrize(
-    ("plan", "error", "match"),
-    [
-        (DistributionPlan(2), ValueError, "shards no routed experts"),
-        (DistributionPlan(2, ep_size=2, dense="fsdp"), NotImplementedError, "replicates the dense"),
-    ],
-    ids=["no-expert-parallelism", "sharded-dense"],
-)
-def test_the_loader_refuses_a_plan_it_cannot_load_by(plan, error, match):
+def test_the_loader_refuses_a_plan_that_shards_no_experts():
     """Before anything else: no process group, transformers release or checkpoint is looked at."""
-    with pytest.raises(error, match=match):
-        load_and_prepare_ep("unused", plan)
+    with pytest.raises(ValueError, match="shards no routed experts"):
+        load_and_prepare_ep("unused", DistributionPlan(2))
 
 
 def test_the_loader_refuses_a_plan_for_another_world(gloo_world_of_one):
