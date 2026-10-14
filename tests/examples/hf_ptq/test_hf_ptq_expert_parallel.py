@@ -20,9 +20,9 @@ the model through ``load_pretrained``: with the plan when it shards the experts,
 ``--use_fsdp2``, and otherwise whole through ``get_model``. Every rank then calibrates on its own
 shard of the data, and a whole model is pinned to the rank's own GPU instead of ``"auto"``.
 
-Nothing here needs a process group or a checkpoint: an initialized ``ModelOptSession`` stands in
-for the torchrun session, the configs are tiny real transformers configs served from memory, and
-the loaders are replaced by stand-ins that record how they were called.
+Nothing here needs a process group or a checkpoint: the process group's rank and size are answered
+the way a torchrun launch would, the configs are tiny real transformers configs served from memory,
+and the loaders are replaced by stand-ins that record how they were called.
 """
 
 import contextlib
@@ -39,8 +39,8 @@ from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from torch.utils.data import DataLoader
 from transformers import DeepseekV3Config, LlamaConfig
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch.models import get_spec
-from modelopt.torch.utils.distributed import ModelOptSession, get_active_mo_session
 from modelopt.torch.utils.plugins import model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
@@ -91,48 +91,35 @@ def _checkpoint_is_local(monkeypatch):
 
 @pytest.fixture
 def torchrun(monkeypatch):
-    """Enter the active session as rank ``rank`` of a ``world_size``-rank torchrun launch.
+    """Run as rank ``rank`` of a ``world_size``-rank torchrun launch; returns its ``dist_state``.
 
     Every rank acts as its group's first, deciding for itself; how the ranks agree on what they
-    decide is tested with the session.
+    decide is tested with the collectives.
     """
     monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
     monkeypatch.setattr(torch.distributed, "broadcast_object_list", lambda *a, **k: None)
-    active = get_active_mo_session(required=False)
 
     def enter(world_size, rank=0):
-        active.initialize(
-            distributed=world_size > 1,
-            rank=rank,
-            world_size=world_size,
-            local_rank=rank,
-            device=torch.device(f"cuda:{rank}"),
-            is_main=rank == 0,
-        )
-        return active
+        monkeypatch.setattr(dist, "is_distributed_run", lambda: world_size > 1)
+        monkeypatch.setattr(dist, "size", lambda group=None: world_size)
+        monkeypatch.setattr(dist, "is_master", lambda group=None: rank == 0)
+        monkeypatch.setattr(dist, "local_rank", lambda: rank)
+        return _dist_state(world_size, rank)
 
-    yield enter
-    active._reset()
+    return enter
 
 
-def _session(world_size, rank=0, distributed=True):
-    """The session modelopt_session() yields on ``rank`` of a ``world_size``-rank launch."""
-    session = ModelOptSession()
-    session.initialize(
-        distributed=distributed,
-        rank=rank,
-        world_size=world_size,
-        local_rank=rank,
-        device=torch.device(f"cuda:{rank}"),
-        is_main=rank == 0,
+def _dist_state(world_size, rank=0):
+    """What setup_distributed_args leaves on ``rank`` of a ``world_size``-rank launch."""
+    return example_utils.DistributedState(
+        rank=rank, world_size=world_size, device=torch.device(f"cuda:{rank}"), is_main=rank == 0
     )
-    return session
 
 
-def _args(session, **overrides):
+def _args(dist_state, **overrides):
     """What load_model reads before it picks a loader, as main() leaves it."""
     args = SimpleNamespace(
-        mo_session=session,
+        dist_state=dist_state,
         use_fsdp2=False,
         recipe=None,
         local_checkpoint_path=_CKPT,
@@ -159,13 +146,15 @@ def _deepseek_v3(n_routed_experts):
 # -------------------------------------------------------------------------------- the decision
 
 
-@pytest.mark.parametrize("single_process_session", [False, True])
-def test_a_single_process_run_is_never_expert_parallel(hf_ptq, monkeypatch, single_process_session):
-    """With no distributed session there is nothing to shard over, even for an EP-capable MoE."""
-    session = _session(world_size=1, distributed=False) if single_process_session else None
+@pytest.mark.parametrize("one_rank_group", [False, True], ids=["no_process_group", "one_rank"])
+def test_a_single_process_run_is_never_expert_parallel(
+    hf_ptq, monkeypatch, torchrun, one_rank_group
+):
+    """With no distributed run there is nothing to shard over, even for an EP-capable MoE."""
+    dist_state = torchrun(world_size=1) if one_rank_group else _dist_state(world_size=1)
     _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
 
-    assert hf_ptq._decide_expert_parallel(_args(session)) == (None, None)
+    assert hf_ptq._decide_expert_parallel(_args(dist_state)) == (None, None)
 
 
 def test_use_fsdp2_keeps_the_standalone_fsdp2_loader(hf_ptq, monkeypatch, torchrun):
@@ -305,18 +294,21 @@ def test_a_rank_device_pins_the_whole_model_to_it(
     assert placed == [device_map]
 
 
-# -------------------------------------------------------------------- session and dist_state
+# ------------------------------------------------------------------ process group and dist_state
 
 
 @pytest.mark.parametrize("use_fsdp2", [False, True])
-def test_dist_state_mirrors_the_distributed_session(monkeypatch, use_fsdp2):
-    """Under torchrun dist_state is read from the session that owns the process group, even with
+def test_dist_state_reads_the_live_process_group(monkeypatch, use_fsdp2):
+    """Under torchrun dist_state is read from the process group main() set up, even with
     --use_fsdp2, whose own branch would initialize a second group."""
     monkeypatch.setattr(
         example_utils.dist_utils, "setup", lambda *a, **k: pytest.fail("second process group")
     )
-    session = _session(world_size=4, rank=1)
-    args = SimpleNamespace(mo_session=session, use_fsdp2=use_fsdp2, device="cuda")
+    monkeypatch.setattr(example_utils.dist_utils, "is_distributed_run", lambda: True)
+    monkeypatch.setattr(example_utils.dist_utils, "rank", lambda group=None: 1)
+    monkeypatch.setattr(example_utils.dist_utils, "size", lambda group=None: 4)
+    monkeypatch.setattr(example_utils.dist_utils, "local_rank", lambda: 1)
+    args = SimpleNamespace(use_fsdp2=use_fsdp2, device="cuda")
 
     example_utils.setup_distributed_args(args)
 
@@ -325,15 +317,15 @@ def test_dist_state_mirrors_the_distributed_session(monkeypatch, use_fsdp2):
     )
 
 
-def test_a_single_process_session_leaves_fsdp2_to_set_up_its_group(monkeypatch):
-    """A one-rank --use_fsdp2 launch enters a session that owns no process group, so the FSDP2
-    branch must still create one."""
+def test_a_single_process_fsdp2_run_sets_up_its_own_group(monkeypatch):
+    """A one-rank --use_fsdp2 launch has no process group from main(), so the FSDP2 branch must
+    still create one."""
     setups = []
     monkeypatch.setattr(example_utils.dist_utils, "setup", lambda timeout=None: setups.append(0))
     monkeypatch.setattr(example_utils.dist_utils, "rank", lambda group=None: 0)
     monkeypatch.setattr(example_utils.dist_utils, "size", lambda group=None: 1)
     monkeypatch.setattr(example_utils.dist_utils, "local_rank", lambda: 0)
-    args = SimpleNamespace(mo_session=_session(world_size=1, distributed=False), use_fsdp2=True)
+    args = SimpleNamespace(use_fsdp2=True)
 
     example_utils.setup_distributed_args(args)
 
@@ -341,49 +333,34 @@ def test_a_single_process_session_leaves_fsdp2_to_set_up_its_group(monkeypatch):
     assert args.dist_state.world_size == 1
 
 
-@pytest.mark.parametrize(
-    ("world_size", "use_fsdp2", "enters_session"),
-    [("2", False, True), ("1", True, True), (None, False, False)],
-    ids=["torchrun", "fsdp2", "single_process"],
-)
-def test_main_runs_a_distributed_launch_inside_a_session(
-    hf_ptq, monkeypatch, world_size, use_fsdp2, enters_session
-):
-    """main() opens the session around the whole run, with a collective timeout above NCCL's
-    30-minute default, and closes it even when the run raises -- or the other ranks would wait in
-    their next collective until that timeout."""
-    if world_size is None:
-        monkeypatch.delenv("WORLD_SIZE", raising=False)
-    else:
-        monkeypatch.setenv("WORLD_SIZE", world_size)
-    session = _session(world_size=2)
+def test_main_owns_the_process_group_around_the_whole_run(hf_ptq, monkeypatch):
+    """main() runs inside distributed_run, with a collective timeout above NCCL's 30-minute
+    default, and leaves it even when the run raises -- or the other ranks would wait in their next
+    collective until that timeout. distributed_run itself does nothing in a single process."""
     events, timeouts = [], []
 
     @contextlib.contextmanager
-    def modelopt_session(timeout=None, device=None):
+    def distributed_run(timeout=None):
         timeouts.append(timeout)
-        events.append(("enter", device))
+        events.append("enter")
         try:
-            yield session
+            yield
         finally:
-            events.append(("exit",))
+            events.append("exit")
 
     def main_inner(args):
-        events.append(("run", args.mo_session))
+        events.append("run")
         raise _RunFailedError
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(hf_ptq, "modelopt_session", modelopt_session)
+    monkeypatch.setattr(hf_ptq, "distributed_run", distributed_run)
     monkeypatch.setattr(hf_ptq, "_main_inner", main_inner)
 
     with pytest.raises(_RunFailedError):
-        hf_ptq.main(SimpleNamespace(use_fsdp2=use_fsdp2, device="cuda"))
+        hf_ptq.main(SimpleNamespace(use_fsdp2=False, device="cuda"))
 
-    if enters_session:
-        assert events == [("enter", "cuda"), ("run", session), ("exit",)]
-        assert timeouts[0] > timedelta(minutes=30)
-    else:
-        assert events == [("run", None)]
+    assert events == ["enter", "run", "exit"]
+    assert timeouts[0] > timedelta(minutes=30)
 
 
 # --------------------------------------------------------------------------------- calibration
@@ -404,27 +381,32 @@ def test_distributed_calibration_gives_each_rank_its_own_shard(hf_ptq, monkeypat
     )
     tokenizer = get_tiny_tokenizer()
 
-    def calib_loader(session):
+    def calib_loader(world_size, rank=0):
+        args.dist_state = _dist_state(world_size, rank)
         built, _ = hf_ptq.make_calib_dataloader(
-            args, None, None, tokenizer, torch.device("cpu"), "llama", session
+            args, None, None, tokenizer, torch.device("cpu"), "llama"
         )
         return built
 
-    shards = [[int(b) for b in calib_loader(_session(world_size=2, rank=r))] for r in range(2)]
+    shards = [[int(b) for b in calib_loader(world_size=2, rank=r)] for r in range(2)]
 
     assert len(shards[0]) == len(shards[1]) == 4
     assert sorted(shards[0] + shards[1]) == list(range(8))
-    assert calib_loader(None) is loader
+    assert calib_loader(world_size=1) is loader
 
 
-def _calibration_loop_choice(hf_ptq, monkeypatch, session):
-    """Run mono_quantize under ``session`` and return which calibration loop it built."""
+def _calibration_loop_choice(hf_ptq, monkeypatch, ep_mesh):
+    """Run mono_quantize on a model whose experts are sharded over ``ep_mesh`` (``None``: not
+    expert-parallel) and return which calibration loop it built."""
     model = torch.nn.Linear(2, 2)
     chosen, quantized = [], []
     monkeypatch.setattr(hf_ptq, "is_quantized", lambda m: False)
     monkeypatch.setattr(hf_ptq, "need_calibration", lambda cfg: True)
+    monkeypatch.setattr(hf_ptq, "expert_parallel_mesh", lambda full_model: ep_mesh)
     monkeypatch.setattr(
-        hf_ptq, "distributed_forward_loop", lambda *a: chosen.append("distributed") or object()
+        hf_ptq,
+        "distributed_forward_loop",
+        lambda *a, **k: chosen.append(("distributed", k["ep_mesh"])) or object(),
     )
     monkeypatch.setattr(
         hf_ptq, "create_forward_loop", lambda **k: chosen.append("plain") or object()
@@ -435,7 +417,7 @@ def _calibration_loop_choice(hf_ptq, monkeypatch, session):
     args = SimpleNamespace(
         qformat="fp8",
         calib_with_images=False,
-        mo_session=session,
+        dist_state=_dist_state(world_size=2),
         layerwise_export=False,
         specdec_offline_dataset=None,
     )
@@ -458,13 +440,12 @@ def _calibration_loop_choice(hf_ptq, monkeypatch, session):
 def test_expert_parallel_calibration_runs_through_the_distributed_forward_loop(hf_ptq, monkeypatch):
     """Only distributed_forward_loop re-plants the all-to-all forwards that quantizer insertion
     clobbers, so an expert-parallel run must calibrate through it rather than the plain loop."""
-    session = _session(world_size=2)
-    session.ep_mesh = object()  # what load_and_prepare_ep records
+    ep_mesh = object()  # the mesh load_and_prepare_ep loaded the experts over
 
-    assert _calibration_loop_choice(hf_ptq, monkeypatch, session) == ["distributed"]
+    assert _calibration_loop_choice(hf_ptq, monkeypatch, ep_mesh) == [("distributed", ep_mesh)]
 
 
 def test_fsdp2_calibration_keeps_the_plain_forward_loop(hf_ptq, monkeypatch):
     """Without expert parallelism there is nothing to re-plant: FSDP2 keeps the plain loop and its
     split-on-OOM retry, as on main."""
-    assert _calibration_loop_choice(hf_ptq, monkeypatch, _session(world_size=2)) == ["plain"]
+    assert _calibration_loop_choice(hf_ptq, monkeypatch, ep_mesh=None) == ["plain"]

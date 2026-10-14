@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import argparse
-import contextlib
 import os
 import random
 import time
@@ -104,16 +103,14 @@ from modelopt.torch.utils.dataset_utils import (
 )
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
-    ModelOptSession,
     distributed_forward_loop,
-    is_distributed_launch,
-    modelopt_session,
+    distributed_run,
     set_distribution_plan,
     shard_dataloader,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.mlflow import add_mlflow_args, resolve_mlflow_args
-from modelopt.torch.utils.moe import is_expert_parallel_capable
+from modelopt.torch.utils.moe import expert_parallel_mesh, is_expert_parallel_capable
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     ensure_local_checkpoint,
@@ -204,7 +201,6 @@ def make_calib_dataloader(
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
     model_type: str | None,
-    mo_session: ModelOptSession | None,
     autoquant_gradient_recipe: bool = False,
 ) -> tuple[DataLoader | _DeviceDataLoader, str | None]:
     calib_dataloader = None
@@ -281,8 +277,7 @@ def make_calib_dataloader(
             include_labels=include_labels,
         )
     if (
-        mo_session is not None
-        and mo_session.distributed
+        args.dist_state.world_size > 1
         and calib_dataloader is not None
         and isinstance(calib_dataloader, DataLoader)
     ):
@@ -291,7 +286,7 @@ def make_calib_dataloader(
         # a2a routes each token to its expert-owning rank; dense DP replicates the model per rank; FSDP2
         # shards the params but still feeds each rank its own data.
         calib_dataloader = shard_dataloader(
-            calib_dataloader, mo_session.rank, mo_session.world_size
+            calib_dataloader, args.dist_state.rank, args.dist_state.world_size
         )
     return calib_dataloader, first_text_speech_dataset
 
@@ -612,7 +607,7 @@ def mono_quantize(
             # quantization target; the full forward still exercises that component's quantizers.
             if args.calib_with_images:
                 calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
-            elif getattr(getattr(args, "mo_session", None), "ep_mesh", None) is not None:
+            elif (ep_mesh := expert_parallel_mesh(full_model)) is not None:
                 # An expert-parallel run has to calibrate through distributed_forward_loop, not the
                 # plain one: it is the only caller of _reinstall_a2a_forwards, which re-plants the
                 # torch_a2a expert/router forward wrappers that quantizer insertion clobbers on
@@ -624,7 +619,7 @@ def mono_quantize(
                 # It also restores the use_cache guard the plain loop does not apply. Other
                 # distributed runs (FSDP2) keep the plain loop and its split-on-OOM retry.
                 calibrate_loop = distributed_forward_loop(
-                    language_model, calib_dataloader, args.mo_session
+                    language_model, calib_dataloader, device=args.dist_state.device, ep_mesh=ep_mesh
                 )
             else:
                 calibrate_loop = create_forward_loop(
@@ -1125,7 +1120,6 @@ def quantize_main(
         tokenizer,
         device,
         model_type,
-        args.mo_session,
         autoquant_gradient_recipe=(
             aq_config is not None and aq_config.auto_quantize_method == "gradient"
         ),
@@ -1575,17 +1569,10 @@ def main(args: argparse.Namespace):
     random.seed(RAND_SEED)
     np.random.seed(RAND_SEED)
 
-    # A distributed launch runs inside a ModelOptSession: it owns the process group and is what the
-    # expert-parallel loader reads its rank and device from. Entered here rather than inside
-    # load_model so cleanup still runs if loading raises -- otherwise the surviving ranks block on
-    # the first collective until the NCCL timeout.
-    with contextlib.ExitStack() as _stack:
-        if is_distributed_launch() or args.use_fsdp2:
-            args.mo_session = _stack.enter_context(
-                modelopt_session(timeout=timedelta(hours=3), device=args.device)
-            )
-        else:
-            args.mo_session = None
+    # A distributed launch owns its process group for the whole run. Entered here rather than
+    # inside load_model so cleanup still runs if loading raises -- otherwise the surviving ranks
+    # block on the first collective until the NCCL timeout.
+    with distributed_run(timeout=timedelta(hours=3)):
         _main_inner(args)
 
 
