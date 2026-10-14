@@ -7,7 +7,8 @@ Compared with realquant, fakequant is 2-5x slower, but doesn't require dedicated
 The general fakequant example is tested with vLLM 0.19.1, 0.26.0, 0.28.0, 0.29.0 and 0.30.0. The
 compact NVFP4 attention worker documented below requires vLLM 0.15.0 or newer. The Kimi K3
 low-latency fakequant path needs `KimiK3LowLatencyLinearMethod`, which is present in stock vLLM
-0.28.0, 0.29.0 and 0.30.0 but absent from some older releases.
+0.28.0, 0.29.0 and 0.30.0 but absent from some older releases. For BF16 Kimi K3 weights, it
+supports dense and shared-expert MLP projections; attention projections need separate support.
 
 The fakequant launcher does not support vLLM 0.9.0. Use one of the tested releases above.
 

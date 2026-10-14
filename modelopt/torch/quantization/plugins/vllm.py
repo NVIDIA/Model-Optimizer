@@ -22,7 +22,7 @@ import sys
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
-from functools import cache, partial
+from functools import partial
 from itertools import chain
 from types import ModuleType
 
@@ -506,19 +506,10 @@ def create_parallel_state():
     return ParallelState(dp_group, tp_group, ep_group)
 
 
-def _kimi_shared_bf16_linear_supports_fake_quant(module: torch.nn.Module) -> bool:
-    """Limit the Kimi opt-in to dense BF16 shared-expert projections."""
+def _kimi_mlp_bf16_linear_supports_fake_quant(module: torch.nn.Module) -> bool:
     weight = getattr(module, "weight", None)
-    prefix = getattr(module, "prefix", "")
     return (
-        isinstance(prefix, str)
-        and prefix.endswith(
-            (
-                ".block_sparse_moe.shared_experts.gate_up_proj",
-                ".block_sparse_moe.shared_experts.down_proj",
-            )
-        )
-        and isinstance(weight, torch.Tensor)
+        isinstance(weight, torch.Tensor)
         and weight.ndim == 2
         and weight.dtype == torch.bfloat16
         and weight.layout == torch.strided
@@ -526,26 +517,8 @@ def _kimi_shared_bf16_linear_supports_fake_quant(module: torch.nn.Module) -> boo
     )
 
 
-@cache
-def _linear_fake_quant_checks() -> dict[type, Callable[[torch.nn.Module], bool]]:
-    """Exact method types whose ordinary apply path can receive fake-quantized tensors."""
-    checks = {vllm_linear.UnquantizedLinearMethod: lambda module: True}
-    # Older vLLM releases do not expose the Kimi K3 low-latency method.
-    try:
-        from vllm.models.kimi_k3.nvidia.low_latency_gemm import KimiK3LowLatencyLinearMethod
-    except ModuleNotFoundError as exc:
-        if exc.name not in ("vllm.models", "vllm.models.kimi_k3") and not (
-            exc.name and exc.name.startswith("vllm.models.kimi_k3.")
-        ):
-            raise
-    else:
-        checks[KimiK3LowLatencyLinearMethod] = _kimi_shared_bf16_linear_supports_fake_quant
-    return checks
-
-
 def _supports_fake_quant_linear(module: torch.nn.Module) -> bool:
-    check = _linear_fake_quant_checks().get(type(module.quant_method))
-    return check(module) if check is not None else False
+    return type(module.quant_method) is vllm_linear.UnquantizedLinearMethod
 
 
 def _check_unsupported_quantizers_disabled(module: torch.nn.Module, names) -> None:
@@ -630,27 +603,39 @@ class _KimiGemmRsArFakeQuantGuard:
         return self.gemm_rs_ar(x, weight)
 
 
-def _guard_kimi_gemm_rs_ar(model: torch.nn.Module) -> None:
-    """Route Kimi MLP down projections through ModelOpt when quantizers are enabled."""
-    # K3's model module is already loaded when converting a K3 model.
+def _configure_kimi_mlp_fake_quant(model: torch.nn.Module) -> None:
+    """Enable supported Kimi MLP linears and bypass fused GEMM when quantized."""
+    # Inspect loaded Kimi modules so other models never import K3 during conversion.
     kimi_module = sys.modules.get("vllm.models.kimi_k3.nvidia.model")
     if kimi_module is None:
         return
     kimi_mlp_cls = getattr(kimi_module, "KimiMLP", None)
     if kimi_mlp_cls is None:
         return
+    low_latency_module = sys.modules.get("vllm.models.kimi_k3.nvidia.low_latency_gemm")
+    kimi_method_cls = getattr(low_latency_module, "KimiK3LowLatencyLinearMethod", None)
 
     for module in model.modules():
-        if not isinstance(module, kimi_mlp_cls) or not isinstance(
-            module.down_proj, _VLLMParallelLinear
-        ):
+        if not isinstance(module, kimi_mlp_cls):
+            continue
+        for linear in (module.gate_up_proj, module.down_proj):
+            if (
+                isinstance(linear, _VLLMParallelLinear)
+                and kimi_method_cls is not None
+                and type(getattr(linear, "quant_method", None)) is kimi_method_cls
+                and _kimi_mlp_bf16_linear_supports_fake_quant(linear)
+            ):
+                linear._fake_quant_supported = True
+
+        down_proj = module.down_proj
+        if not isinstance(down_proj, _VLLMParallelLinear):
             continue
         gemm_rs_ar = module.gemm_rs_ar
         if gemm_rs_ar is not None and not isinstance(gemm_rs_ar, _KimiGemmRsArFakeQuantGuard):
-            module.gemm_rs_ar = _KimiGemmRsArFakeQuantGuard(gemm_rs_ar, module.down_proj)
+            module.gemm_rs_ar = _KimiGemmRsArFakeQuantGuard(gemm_rs_ar, down_proj)
 
 
-CUSTOM_POST_CONVERSION_PLUGINS.add(_guard_kimi_gemm_rs_ar)
+CUSTOM_POST_CONVERSION_PLUGINS.add(_configure_kimi_mlp_fake_quant)
 
 
 def post_restore_vllm_parallel_linears(model: torch.nn.Module) -> None:

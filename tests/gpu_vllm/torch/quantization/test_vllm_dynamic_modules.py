@@ -390,33 +390,52 @@ def test_prequantized_linear_rejects_enabled_quantizers(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("path", "dtype", "shape", "expected"),
+    ("parent_name", "projection", "dtype", "shape", "expected"),
     [
-        ("block_sparse_moe.shared_experts.gate_up_proj", torch.bfloat16, (4, 4), True),
-        ("block_sparse_moe.shared_experts.down_proj", torch.bfloat16, (4, 4), True),
-        ("block_sparse_moe.shared_experts.other_proj", torch.bfloat16, (4, 4), False),
-        ("mlp.gate_up_proj", torch.bfloat16, (4, 4), False),
-        ("block_sparse_moe.shared_experts.down_proj", torch.float16, (4, 4), False),
-        ("block_sparse_moe.shared_experts.down_proj", torch.bfloat16, (4, 4, 4), False),
+        ("dense", "gate_up_proj", torch.bfloat16, (4, 4), True),
+        ("dense", "down_proj", torch.bfloat16, (4, 4), True),
+        ("shared", "gate_up_proj", torch.bfloat16, (4, 4), True),
+        ("shared", "down_proj", torch.bfloat16, (4, 4), True),
+        ("dense", "gate_up_proj", torch.float16, (4, 4), False),
+        ("shared", "down_proj", torch.bfloat16, (4, 4, 4), False),
     ],
 )
-def test_kimi_low_latency_linear_fake_quant_support(path, dtype, shape, expected):
-    kimi_method = next(
-        (
-            method
-            for method in vllm_plugin._linear_fake_quant_checks()
-            if method.__name__ == "KimiK3LowLatencyLinearMethod"
-        ),
-        None,
-    )
-    if kimi_method is None:
-        pytest.skip("Kimi K3 low-latency method is not available in this vLLM build")
-    linear = SimpleNamespace(
-        quant_method=object.__new__(kimi_method),
-        prefix=f"model.layers.1.{path}",
-        weight=torch.empty(shape, dtype=dtype),
-    )
-    assert vllm_plugin._supports_fake_quant_linear(linear) is expected
+def test_kimi_mlp_low_latency_linear_fake_quant_support(
+    parent_name, projection, dtype, shape, expected
+):
+    kimi_model = pytest.importorskip("vllm.models.kimi_k3.nvidia.model")
+    kimi_method = pytest.importorskip(
+        "vllm.models.kimi_k3.nvidia.low_latency_gemm"
+    ).KimiK3LowLatencyLinearMethod
+
+    def new_linear(name, weight_dtype, weight_shape):
+        cls = (
+            vllm_plugin._QuantVLLMMergedColumnParallelLinear
+            if name == "gate_up_proj"
+            else vllm_plugin._QuantVLLMRowParallelLinear
+        )
+        linear = _new_attention(cls)
+        linear.weight = torch.nn.Parameter(torch.empty(weight_shape, dtype=weight_dtype))
+        linear.quant_method = object.__new__(kimi_method)
+        linear.prefix = f"arbitrary.{name}"
+        linear._fake_quant_supported = False
+        return linear
+
+    mlp = object.__new__(kimi_model.KimiMLP)
+    torch.nn.Module.__init__(mlp)
+    mlp.gate_up_proj = new_linear("gate_up_proj", torch.bfloat16, (4, 4))
+    mlp.down_proj = new_linear("down_proj", torch.bfloat16, (4, 4))
+    mlp.gemm_rs_ar = None
+    target = getattr(mlp, projection)
+    target.weight = torch.nn.Parameter(torch.empty(shape, dtype=dtype))
+
+    model = torch.nn.Module()
+    setattr(model, parent_name, mlp)
+    model.attention_projection = new_linear("down_proj", torch.bfloat16, (4, 4))
+    vllm_plugin._configure_kimi_mlp_fake_quant(model)
+
+    assert target._fake_quant_supported is expected
+    assert not model.attention_projection._fake_quant_supported
 
 
 def test_missing_kimi_package_keeps_standard_vllm_supported():
@@ -427,14 +446,10 @@ def test_missing_kimi_package_keeps_standard_vllm_supported():
             raise ModuleNotFoundError("No module named 'vllm.models'", name="vllm.models")
         return original_import(name, *args, **kwargs)
 
-    vllm_plugin._linear_fake_quant_checks.cache_clear()
-    try:
-        with patch("builtins.__import__", side_effect=missing_kimi_import):
-            checks = vllm_plugin._linear_fake_quant_checks()
-            assert vllm_plugin.vllm_linear.UnquantizedLinearMethod in checks
-            vllm_plugin._guard_kimi_gemm_rs_ar(torch.nn.Module())
-    finally:
-        vllm_plugin._linear_fake_quant_checks.cache_clear()
+    with patch("builtins.__import__", side_effect=missing_kimi_import):
+        linear = SimpleNamespace(quant_method=vllm_plugin.vllm_linear.UnquantizedLinearMethod())
+        assert vllm_plugin._supports_fake_quant_linear(linear)
+        vllm_plugin._configure_kimi_mlp_fake_quant(torch.nn.Module())
 
 
 def test_kimi_guard_does_not_import_k3_for_other_models():
@@ -447,7 +462,7 @@ def test_kimi_guard_does_not_import_k3_for_other_models():
         return original_import(name, *args, **kwargs)
 
     with patch("builtins.__import__", side_effect=reject_k3_import):
-        vllm_plugin._guard_kimi_gemm_rs_ar(model)
+        vllm_plugin._configure_kimi_mlp_fake_quant(model)
 
 
 @pytest.mark.parametrize("quantizer_name", _VLLMParallelLinear._QUANTIZER_NAMES)
