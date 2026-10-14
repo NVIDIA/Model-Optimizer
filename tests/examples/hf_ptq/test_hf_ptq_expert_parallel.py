@@ -113,9 +113,9 @@ def torchrun(monkeypatch):
 
 
 def _dist_state(world_size, rank=0):
-    """What setup_distributed_args leaves on ``rank`` of a ``world_size``-rank launch."""
-    return example_utils.DistributedState(
-        rank=rank, world_size=world_size, device=torch.device(f"cuda:{rank}"), is_main=rank == 0
+    """What distributed_run yields to ``rank`` of a ``world_size``-rank launch."""
+    return dist.DistributedState(
+        rank=rank, world_size=world_size, device=torch.device(f"cuda:{rank}")
     )
 
 
@@ -355,26 +355,6 @@ def test_a_rank_device_pins_the_whole_model_to_it(
 # ------------------------------------------------------------------ process group and dist_state
 
 
-@pytest.mark.parametrize("use_fsdp2", [False, True])
-def test_dist_state_reads_the_live_process_group(monkeypatch, use_fsdp2):
-    """Under torchrun dist_state is read from the process group main() set up, even with
-    --use_fsdp2, whose own branch would initialize a second group."""
-    monkeypatch.setattr(
-        example_utils.dist_utils, "setup", lambda *a, **k: pytest.fail("second process group")
-    )
-    monkeypatch.setattr(example_utils.dist_utils, "is_distributed_run", lambda: True)
-    monkeypatch.setattr(example_utils.dist_utils, "rank", lambda group=None: 1)
-    monkeypatch.setattr(example_utils.dist_utils, "size", lambda group=None: 4)
-    monkeypatch.setattr(example_utils.dist_utils, "local_rank", lambda: 1)
-    args = SimpleNamespace(use_fsdp2=use_fsdp2, device="cuda")
-
-    example_utils.setup_distributed_args(args)
-
-    assert args.dist_state == example_utils.DistributedState(
-        rank=1, world_size=4, device=torch.device("cuda:1"), is_main=False
-    )
-
-
 @pytest.mark.parametrize(
     ("plan", "live_group", "setups"),
     [
@@ -411,20 +391,23 @@ def test_cleanup_destroys_only_the_group_this_script_set_up(monkeypatch, launch_
 def test_main_owns_the_process_group_around_the_whole_run(hf_ptq, monkeypatch):
     """main() runs inside distributed_run, with a collective timeout above NCCL's 30-minute
     default, and leaves it even when the run raises -- or the other ranks would wait in their next
-    collective until that timeout. distributed_run itself does nothing in a single process."""
-    events, timeouts = [], []
+    collective until that timeout. The run reads its rank, size and device from the state
+    distributed_run yields, which puts a single process on --device."""
+    events, calls, seen = [], [], []
+    state = dist.DistributedState(rank=0, world_size=1, device="cpu")
 
     @contextlib.contextmanager
-    def distributed_run(timeout=None):
-        timeouts.append(timeout)
+    def distributed_run(timeout=None, device="cuda"):
+        calls.append((timeout, device))
         events.append("enter")
         try:
-            yield
+            yield state
         finally:
             events.append("exit")
 
     def main_inner(args):
         events.append("run")
+        seen.append(args.dist_state)
         raise _RunFailedError
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
@@ -432,10 +415,14 @@ def test_main_owns_the_process_group_around_the_whole_run(hf_ptq, monkeypatch):
     monkeypatch.setattr(hf_ptq, "_main_inner", main_inner)
 
     with pytest.raises(_RunFailedError):
-        hf_ptq.main(SimpleNamespace(use_fsdp2=False, device="cuda"))
+        hf_ptq.main(SimpleNamespace(use_fsdp2=False, device="cpu"))
 
     assert events == ["enter", "run", "exit"]
-    assert timeouts[0] > timedelta(minutes=30)
+    timeout, device = calls[0]
+    assert timeout > timedelta(minutes=30)
+    assert device == "cpu"
+    assert len(seen) == 1
+    assert seen[0] is state
 
 
 # --------------------------------------------------------------------------------- calibration
