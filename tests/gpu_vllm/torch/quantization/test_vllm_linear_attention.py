@@ -35,7 +35,9 @@ import modelopt.torch.opt as mto
 from modelopt.torch.opt.conversion import ModeloptStateManager
 from modelopt.torch.quantization.conversion import restore_quantizer_state
 from modelopt.torch.quantization.linear_attention import LinearAttentionConfig
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.plugins.vllm_linear_attention import _QuantVllmLinearAttention
+from modelopt.torch.utils import safe_load
 
 ROOT = Path(__file__).parents[4]
 
@@ -49,18 +51,33 @@ def _example_module(name):
     return module
 
 
-def _state_worker(worker, *, action="audit"):
+def _state_worker(worker, *, action="audit", checkpoint_path=None):
     model = worker.model_runner.model
     if hasattr(model, "unwrap"):
         model = model.unwrap()
     layers = [m for m in model.modules() if isinstance(m, _QuantVllmLinearAttention)]
     assert layers
     if action == "restore":
-        state = worker._state_checkpoint
+        reload = _example_module("vllm_reload_utils")
+        state = safe_load(worker._state_checkpoint, map_location="cpu")
+        for _, entry in state["modelopt_state_dict"]:
+            for field in ("quantizer_state", "linear_attention"):
+                if field in entry["metadata"]:
+                    entry["metadata"][field] = {
+                        "hf." + name: value for name, value in entry["metadata"][field].items()
+                    }
+        state = reload.convert_modelopt_state_to_vllm(
+            state,
+            lambda values: {name.removeprefix("hf."): value for name, value in values.items()},
+        )
+        reload.filter_modelopt_state_quantizer_state_for_model(state, model)
         manager = ModeloptStateManager()
         manager.load_state_dict(state["modelopt_state_dict"], state["modelopt_version"])
         for _, config, metadata in manager.modes_with_states():
             restore_quantizer_state(model, config, metadata)
+        assert all(layer._linear_attn_state.is_enabled for layer in layers)
+        for name, weight in model.named_parameters():
+            torch.testing.assert_close(weight.cpu(), worker._state_weights[name], atol=0, rtol=0)
     for layer in layers:
         if action == "disable":
             layer._linear_attn_state.disable()
@@ -89,7 +106,13 @@ def _state_worker(worker, *, action="audit"):
 
             layer._quantize_cache = checked_call
     if action == "setup":
-        worker._state_checkpoint = copy.deepcopy(mto.modelopt_state(model))
+        enabled = [m for m in model.modules() if isinstance(m, TensorQuantizer) and m.is_enabled]
+        assert {id(m) for m in enabled} == {id(layer._linear_attn_state) for layer in layers}
+        worker._state_weights = {
+            name: p.detach().cpu().clone() for name, p in model.named_parameters()
+        }
+        worker._state_checkpoint = checkpoint_path
+        torch.save(mto.modelopt_state(model), checkpoint_path)
     return [dict(layer._state_calls) for layer in layers]
 
 
@@ -192,7 +215,10 @@ def compiled_worker(request, tmp_path, monkeypatch):
         seed=17,
     )
     try:
-        llm.collective_rpc(_state_worker, kwargs={"action": "setup"})
+        llm.collective_rpc(
+            _state_worker,
+            kwargs={"action": "setup", "checkpoint_path": str(tmp_path / "state.pt")},
+        )
         _generate(llm)
         yield llm
     finally:
@@ -201,7 +227,7 @@ def compiled_worker(request, tmp_path, monkeypatch):
         gc.collect()
 
 
-def test_state_qdq_and_restore(compiled_worker):
+def test_state_ptq_and_restore(compiled_worker):
     llm = compiled_worker
     expected = _generate(llm)
     reports = llm.collective_rpc(_state_worker)

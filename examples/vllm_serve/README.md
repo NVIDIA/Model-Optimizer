@@ -475,19 +475,45 @@ KDA. The state-only recipe uses dynamic INT8 with one scale per key row and 32
 value channels, matching the training recipe. The cache remains FP32; kernels,
 gates, projections and outputs use vLLM's native implementation.
 
+### PTQ on a pretrained model
+
+Point the existing fakequant launcher at the original pretrained checkpoint. This
+state-only recipe leaves weights unchanged and requires no QAT/QAD or optimizer
+steps. Dynamic scales are computed from the live recurrent state, so
+`algorithm: null` needs no calibration dataset.
+
 ```bash
 VLLM_GDN_DECODE_KERNEL=triton VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE=1 \
-python examples/vllm_serve/vllm_serve_fakequant.py /path/to/model \
+python examples/vllm_serve/vllm_serve_fakequant.py /path/to/pretrained-model \
   --modelopt-recipe-path examples/vllm_serve/linear_attention_state_int8.yaml \
   --dtype bfloat16 --tensor-parallel-size 1 --enforce-eager --no-async-scheduling \
   --no-enable-prefix-caching --mamba-cache-mode none --mamba-cache-dtype float32 \
   --additional-config '{"gdn_prefill_backend":"triton","kda_prefill_backend":"triton","kda_decode_backend":"triton"}'
 ```
 
-`algorithm: null` needs no calibration dataset. For FP8 E4M3, change the state
-quantizers' `num_bits` to `[4, 3]`. Both formats use the same `TensorQuantizer`
-configuration and grouping as training. Weight/activation recipes can use the
-worker's existing calibration loop.
+Restart with the same pretrained checkpoint and recipe to reproduce the state
+quantization setup; dynamic state scales do not need to be saved. Request caches
+are transient and are not checkpointed. To compare against unquantized state,
+run the same command without `--modelopt-recipe-path`, keeping all other settings
+and prompts fixed. Weight/activation PTQ can use the worker's existing
+calibration loop but is separate from this state-only example.
+
+For FP8 E4M3, replace the state INT8 import with these quantizer entries:
+
+```yaml
+  - quantizer_name: '*gdn_state_quantizer'
+    cfg: &state_fp8
+      num_bits: [4, 3]
+      axis: [0, 1]
+      type: dynamic
+      pass_through_bwd: true
+  - quantizer_name: '*kda_state_quantizer'
+    cfg: *state_fp8
+```
+
+Keep the disable-all entry and `algorithm: null`. FP8 uses one scale per head's
+`[K, state_block_v]` tile (64 value channels by default); it does not accept the
+INT8 `block_sizes` setting. Use the same format and grouping in training.
 
 ### State boundaries and training alignment
 
