@@ -161,7 +161,8 @@ def apply_distributed_support(
 
     Returns the config to load, unchanged for a model type with no spec or no EP section. The
     generic all-to-all transport is not wired here -- it self-registers in
-    :func:`load_and_prepare_ep`, so nothing about it is per-model.
+    :func:`~modelopt.torch.utils.plugins.model_load_utils.load_and_prepare_ep`, so nothing about it
+    is per-model.
     """
     from modelopt.torch.models import get_spec
 
