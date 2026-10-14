@@ -220,7 +220,7 @@ def decide_distribution_plan(
     session = get_active_mo_session(required=False)
     if not session.initialized:
         return decide()
-    return session.decide("plan", decide)
+    return session.plan.decide(decide)
 
 
 def _decide_distribution_plan_on_rank0(

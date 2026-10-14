@@ -189,7 +189,7 @@ def test_rank0_decides_and_keeps_its_plan_on_the_session(monkeypatch, session):
     ((name, sent_plan, error),) = sent
     assert (name, sent_plan.ep_size, error) == ("plan", 4, None)
     assert plan.ep_size == 4
-    assert active.plan is plan
+    assert active.plan.value is plan
 
 
 def test_other_ranks_adopt_rank0s_plan_without_deciding(monkeypatch, session):
@@ -202,8 +202,9 @@ def test_other_ranks_adopt_rank0s_plan_without_deciding(monkeypatch, session):
         raise AssertionError("a non-zero rank decided its own plan")
 
     monkeypatch.setattr(moe, "_decide_distribution_plan_on_rank0", must_not_decide)
-    assert decide_distribution_plan(moe_cfg(), world_size=8, ep_size=2) is rank0_plan
-    assert active.plan is rank0_plan
+    plan = decide_distribution_plan(moe_cfg(), world_size=8, ep_size=2)
+    assert repr(plan) == repr(rank0_plan)
+    assert active.plan.value is plan
 
 
 def test_rank0_failure_is_broadcast_before_it_raises(monkeypatch, session):
