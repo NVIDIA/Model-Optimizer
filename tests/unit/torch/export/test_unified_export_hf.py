@@ -1121,3 +1121,24 @@ def test_a_single_process_export_ends_on_its_own_outcome():
     _finish_export_together(None)
     with pytest.raises(OSError, match="disk full"):
         _finish_export_together(OSError("disk full"))
+
+
+@pytest.mark.parametrize(
+    ("dense", "ep_size", "flags"),
+    [
+        ("replicate", 1, (False, False)),
+        ("fsdp", 1, (True, False)),
+        ("replicate", 2, (False, True)),
+        ("fsdp", 2, (True, True)),
+    ],
+    ids=["replicated", "fsdp2", "expert-parallel", "both"],
+)
+def test_the_export_takes_how_the_model_is_sharded_from_its_plan(dense, ep_size, flags):
+    """A model can be FSDP2-dense and expert-parallel at once, so the two are read separately."""
+    from modelopt.torch.export.unified_export_hf import _hf_shard_flags
+    from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
+
+    model = torch.nn.Linear(2, 2)
+    set_distribution_plan(model, DistributionPlan(2, ep_size, dense))
+
+    assert _hf_shard_flags(model) == flags

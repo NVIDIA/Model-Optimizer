@@ -154,6 +154,18 @@ def _fsdp2_shard(model, mesh, wrap_root=True):
     return model
 
 
+def test_an_expert_parallel_plan_needs_its_experts_expert_parallel_group(
+    gloo_world_of_one, tmp_path
+):
+    """Without the group the writer could not offset each EP rank's experts, and every rank would
+    write experts 0..n-1 over the others'."""
+    model = _load(_save(_llama_config(), tmp_path / "src"))
+    set_distribution_plan(model, DistributionPlan(2, ep_size=2))
+
+    with pytest.raises(RuntimeError, match="no routed expert carries its expert-parallel group"):
+        _write(model, tmp_path / "export")
+
+
 def _quantize_with_reference(model, quant_cfg):
     """Quantize ``model`` and return what the single-process export writes for a copy of it."""
     torch.manual_seed(1)

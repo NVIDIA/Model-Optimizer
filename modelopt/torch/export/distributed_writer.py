@@ -590,11 +590,16 @@ def _distributed_save_hf_checkpoint_impl(
     # other and the checkpoint would be quietly wrong rather than broken. The coordinate comes from
     # the routed experts' ParallelState -- the same source calibration reads, not transformers'
     # internal ``model._device_mesh``. An expert's data-parallel group is its expert-data-parallel one.
-    from modelopt.torch.utils.distributed import expert_parallel_state
+    from modelopt.torch.utils.distributed import distribution_plan, expert_parallel_state
 
     ep_rank, dp_idx = 0, 0
-    parallel_state = expert_parallel_state(model)
-    if parallel_state is not None:
+    if distribution_plan(model).is_expert_parallel:
+        parallel_state = expert_parallel_state(model)
+        if parallel_state is None:
+            raise RuntimeError(
+                "The model's plan is expert-parallel, but no routed expert carries its expert-parallel "
+                "group: load it with load_and_prepare_ep."
+            )
         ep_rank = parallel_state.expert_model_parallel_group.rank()
         edp_group = parallel_state.data_parallel_group
         if edp_group.is_initialized():

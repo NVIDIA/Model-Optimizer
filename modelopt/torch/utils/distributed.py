@@ -540,7 +540,7 @@ def distributed_run(timeout: timedelta | None = None, device: torch.device | str
 
 
 def expert_parallel_state(model: torch.nn.Module) -> "ParallelState | None":
-    """Return the ``ParallelState`` of the model's routed experts, or ``None`` if they are not expert-parallel.
+    """Return the ``ParallelState`` of the model's routed experts, or ``None`` if none has one.
 
     The expert-parallel loader seeds every routed-expert module with a ``ParallelState`` that carries the
     expert-model-parallel group (``load_and_prepare_ep``); no other module of a HuggingFace model has one.
