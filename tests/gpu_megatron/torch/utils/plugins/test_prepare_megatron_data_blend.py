@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -23,6 +25,9 @@ import pytest
 import yaml
 
 from modelopt.torch.utils.plugins.prepare_megatron_data_blend import main
+
+# The plugins package re-exports the function under the module's name, so import the module itself.
+blend_module = importlib.import_module("modelopt.torch.utils.plugins.prepare_megatron_data_blend")
 
 
 def _setup_test(
@@ -103,3 +108,218 @@ def test_prepare_megatron_data_blend_with_split_and_files_sources(
         f"competitive_programming_python_00_messages{token_suffixes[1]}",
     ]
     assert (output_dir / "config.yaml").read_bytes() == config_path.read_bytes()
+
+
+def _chat(i: int) -> dict:
+    return {
+        "messages": [
+            {"role": "user", "content": f"q{i}"},
+            {"role": "assistant", "content": f"a{i}"},
+        ]
+    }
+
+
+def _image_chat(i: int) -> dict:
+    return {
+        "messages": [
+            {"role": "user", "content": [{"type": "image", "image": "x.png"}]},
+            {"role": "assistant", "content": f"a{i}"},
+        ]
+    }
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+@pytest.fixture
+def chat_blend(tmp_path: Path, monkeypatch):
+    """Two equal-weight ``messages`` sources of 100 rows each; returns (config writer, stream counts)."""
+    calls = {"org/a": 0, "org/b": 0}
+
+    def iter_rows(source, output_dir, shuffle):
+        calls[source["hf_dataset"]] += 1
+        yield from (_chat(i) for i in range(100))
+
+    monkeypatch.setattr(blend_module, "_iter_rows", iter_rows)
+
+    def write_config(**overrides) -> Path:
+        config = {
+            "output_dir": str(tmp_path / "blend"),
+            "output_format": "chat_jsonl",
+            "target_samples": 100,
+            "shuffle": False,
+            "seed": 0,
+            "sources": [
+                {
+                    "hf_dataset": f"org/{n}",
+                    "split": "train",
+                    "content_field": "messages",
+                    "weight": 1,
+                }
+                for n in ("a", "b")
+            ],
+        }
+        config.update(overrides)
+        path = tmp_path / "config.yaml"
+        path.write_text(yaml.safe_dump(config), encoding="utf-8")
+        return path
+
+    return write_config, calls
+
+
+def test_to_chat_handles_all_row_shapes():
+    msgs = [{"role": "user", "content": "hi"}]
+    assert blend_module._to_chat({"messages": msgs}, "messages") == {"messages": msgs}
+    assert blend_module._to_chat({"messages": []}, "messages") is None
+
+    expected = {
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "world"},
+        ]
+    }
+    text = "<extra_id_0>System\n<extra_id_1>User\nhello\n<extra_id_1>Assistant\nworld\n"
+    assert blend_module._to_chat({"text": text}, "text") == expected
+    # Any marker ends a turn, so a trailing or label marker is not trained as content.
+    text = "<extra_id_1>User\nhello\n<extra_id_1>Assistant\nworld\n<extra_id_1>"
+    assert blend_module._to_chat({"text": text}, "text") == expected
+    assert blend_module._to_chat({"text": "def f(): pass"}, "text") == {
+        "messages": [{"role": "assistant", "content": "def f(): pass"}]
+    }
+    assert blend_module._to_chat({"text": ""}, "text") is None
+    # Markers that parse to no turns: dropped, never trained as assistant text.
+    assert blend_module._to_chat({"text": "<extra_id_0>\nraw body\n"}, "text") is None
+
+
+def test_take_chat_rows_skips_non_text_rows_and_gives_up(tmp_path: Path, monkeypatch):
+    source = {"hf_dataset": "org/a", "split": "train", "content_field": "messages"}
+    rows = [_chat(0), _image_chat(1), _chat(2), _chat(3)]
+    monkeypatch.setattr(blend_module, "_iter_rows", lambda *a: iter(rows))
+    got = blend_module._take_chat_rows(source, tmp_path, want=3, shuffle=False)
+    assert [c["messages"][0]["content"] for c in got] == ["q0", "q2", "q3"]
+
+    monkeypatch.setattr(
+        blend_module, "_iter_rows", lambda *a: iter([_image_chat(i) for i in range(50)])
+    )
+    with pytest.raises(RuntimeError, match="only 0/2 usable rows"):
+        blend_module._take_chat_rows(source, tmp_path, want=2, shuffle=False)
+
+
+def test_chat_blend_splits_weighted_rows(tmp_path: Path, chat_blend, monkeypatch):
+    write_config, _ = chat_blend
+    config_path = write_config()
+    monkeypatch.setattr(
+        sys, "argv", ["prepare_megatron_data_blend.py", "--config", str(config_path)]
+    )
+    main()
+    out = tmp_path / "blend"
+    assert len(_read_jsonl(out / "validation.jsonl")) == 5
+    rows = _read_jsonl(out / "train.jsonl") + _read_jsonl(out / "validation.jsonl")
+    # Equal weights: each source contributes its first 50 rows, q0..q49.
+    assert Counter(r["messages"][0]["content"] for r in rows) == {f"q{i}": 2 for i in range(50)}
+    assert (out / "config.yaml").read_bytes() == config_path.read_bytes()
+
+
+def test_chat_blend_reuses_and_rebuilds_cached_parts(tmp_path: Path, chat_blend):
+    write_config, calls = chat_blend
+    config_path = write_config()
+    blend_module.prepare_chat_data_blend(config_path)
+    first = (tmp_path / "blend" / "train.jsonl").read_text(encoding="utf-8")
+    blend_module.prepare_chat_data_blend(config_path)
+    assert calls == {"org/a": 1, "org/b": 1}  # the second run streams nothing
+
+    part = tmp_path / "blend" / "parts" / "00_org--a_None_train.jsonl"
+    part.write_text(part.read_text(encoding="utf-8")[:-20], encoding="utf-8")  # cut mid-record
+    blend_module.prepare_chat_data_blend(config_path)
+    assert calls == {"org/a": 2, "org/b": 1}
+    assert (tmp_path / "blend" / "train.jsonl").read_text(encoding="utf-8") == first
+
+
+def test_chat_blend_writes_parts_atomically(tmp_path: Path, chat_blend, monkeypatch):
+    write_config, _ = chat_blend
+    real_dumps = blend_module.json.dumps
+    calls = {"n": 0}
+
+    def flaky_dumps(obj, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 75:  # partway through the second source's part
+            raise KeyboardInterrupt
+        return real_dumps(obj, *args, **kwargs)
+
+    monkeypatch.setattr(blend_module.json, "dumps", flaky_dumps)
+    with pytest.raises(KeyboardInterrupt):
+        blend_module.prepare_chat_data_blend(write_config())
+    parts = tmp_path / "blend" / "parts"
+    assert not (parts / "01_org--b_None_train.jsonl").exists()
+    assert len(_read_jsonl(parts / "00_org--a_None_train.jsonl")) == 50
+
+
+def test_chat_blend_fails_on_a_bad_source(tmp_path: Path, chat_blend, monkeypatch):
+    write_config, _ = chat_blend
+    real_iter_rows = blend_module._iter_rows
+
+    def iter_rows(source, output_dir, shuffle):
+        if source["hf_dataset"] == "org/b":
+            yield from real_iter_rows(source, output_dir, shuffle)
+            return
+        yield from (_chat(i) for i in range(10))  # yields some rows, then the reader fails
+        raise TypeError("cannot cast")
+
+    monkeypatch.setattr(blend_module, "_iter_rows", iter_rows)
+    with pytest.raises(RuntimeError, match="org/a train: failed to load"):
+        blend_module.prepare_chat_data_blend(write_config())
+    assert not (tmp_path / "blend" / "train.jsonl").exists()
+
+
+def test_chat_blend_fails_on_a_short_or_tiny_blend(chat_blend):
+    write_config, _ = chat_blend
+    with pytest.raises(RuntimeError, match="org/a train: only 100/250 usable rows"):
+        blend_module.prepare_chat_data_blend(write_config(target_samples=500))
+    with pytest.raises(RuntimeError, match="Too few rows"):
+        blend_module.prepare_chat_data_blend(write_config(target_samples=10))
+
+
+def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch):
+    jsonl_path = tmp_path / "chat.jsonl"
+    jsonl_path.write_text("".join(json.dumps(_chat(i)) + "\n" for i in range(40)), encoding="utf-8")
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", Mock(return_value=str(jsonl_path)))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "output_dir": str(tmp_path / "blend"),
+                "output_format": "chat_jsonl",
+                "sources": [
+                    {
+                        "hf_dataset": "org/a",
+                        "files": ["data/chat.jsonl"],
+                        "content_field": "messages",
+                        "weight": 1,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    # No target_samples: every usable row, in file order before mixing.
+    assert blend_module.prepare_chat_data_blend(config_path) == {"validation": 2, "train": 38}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"tokenizer": "x"}, "does not use"),
+        ({"target_tokens": 1000}, "does not use"),
+    ],
+)
+def test_chat_blend_rejects_tokenizer_options(chat_blend, overrides, match):
+    write_config, _ = chat_blend
+    with pytest.raises(ValueError, match=match):
+        blend_module.prepare_chat_data_blend(write_config(**overrides))
+
+
+def test_tokenized_blend_rejects_chat_options(chat_blend):
+    write_config, _ = chat_blend
+    with pytest.raises(ValueError, match="Tokenized blends do not use"):
+        blend_module.prepare_megatron_data_blend(write_config())
