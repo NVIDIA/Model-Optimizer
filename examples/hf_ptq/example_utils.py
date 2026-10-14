@@ -70,18 +70,16 @@ class DistributedState:
 def setup_distributed_args(args):
     """Initialize and attach ``args.dist_state`` (single-process if not distributed).
 
-    When the run already entered a :func:`modelopt_session` -- which it does for any distributed
-    launch, because the expert-parallel loaders need the session object -- the state is a view of
-    that session rather than a second, independently-derived one. Two sources of rank/world would
-    be one too many.
+    A distributed launch has its process group set up by then (hf_ptq's ``distributed_run``), and the
+    state reads its rank and world from that group rather than deriving them a second time.
     """
-    mo_session = getattr(args, "mo_session", None)
-    if mo_session is not None and mo_session.distributed:
+    if dist_utils.is_distributed_run():
+        rank = dist_utils.rank()
         args.dist_state = DistributedState(
-            rank=mo_session.rank,
-            world_size=mo_session.world_size,
-            device=mo_session.device,
-            is_main=mo_session.is_main,
+            rank=rank,
+            world_size=dist_utils.size(),
+            device=torch.device(f"cuda:{dist_utils.local_rank()}"),
+            is_main=rank == 0,
         )
     elif getattr(args, "use_fsdp2", False):
         # Raise the collective timeout above NCCL's 30-min default: rank 0's checkpoint write can
