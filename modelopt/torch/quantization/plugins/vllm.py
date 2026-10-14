@@ -630,7 +630,10 @@ def _configure_kimi_mlp_fake_quant(model: torch.nn.Module) -> None:
         down_proj = module.down_proj
         if not isinstance(down_proj, _VLLMParallelLinear):
             continue
-        gemm_rs_ar = module.gemm_rs_ar
+        # vLLM 0.28 selects GEMM-RS with a bool and bypasses down_proj.forward.
+        if hasattr(module, "run_gemm_rs"):
+            module.run_gemm_rs = False
+        gemm_rs_ar = getattr(module, "gemm_rs_ar", None)
         if gemm_rs_ar is not None and not isinstance(gemm_rs_ar, _KimiGemmRsArFakeQuantGuard):
             module.gemm_rs_ar = _KimiGemmRsArFakeQuantGuard(gemm_rs_ar, down_proj)
 

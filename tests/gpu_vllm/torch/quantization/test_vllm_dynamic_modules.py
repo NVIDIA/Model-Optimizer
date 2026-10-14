@@ -465,9 +465,42 @@ def test_kimi_guard_does_not_import_k3_for_other_models():
         vllm_plugin._configure_kimi_mlp_fake_quant(model)
 
 
+def test_kimi_legacy_gemm_rs_uses_quantized_down_projection():
+    kimi_model = pytest.importorskip("vllm.models.kimi_k3.nvidia.model")
+    if "run_gemm_rs" not in kimi_model.KimiMLP.forward.__code__.co_names:
+        pytest.skip("Kimi MLP no longer uses the legacy GEMM-RS path")
+    kimi_method = pytest.importorskip(
+        "vllm.models.kimi_k3.nvidia.low_latency_gemm"
+    ).KimiK3LowLatencyLinearMethod
+
+    x = torch.ones(128, 2)
+    mlp = object.__new__(kimi_model.KimiMLP)
+    torch.nn.Module.__init__(mlp)
+    mlp.shard_sequence_parallel = False
+    mlp.run_gemm_rs = True
+    mlp.gate_up_proj = Mock(return_value=(x, None))
+    mlp.act_fn = Mock(side_effect=lambda value: value)
+
+    down_proj = object.__new__(vllm_plugin._QuantVLLMRowParallelLinear)
+    torch.nn.Module.__init__(down_proj)
+    down_proj.weight = torch.nn.Parameter(torch.ones(2, 2, dtype=torch.bfloat16))
+    down_proj.quant_method = object.__new__(kimi_method)
+    down_proj._fake_quant_supported = False
+    down_proj.forward = Mock(return_value=(x + 1, None))
+    mlp.down_proj = down_proj
+
+    register_custom_post_conversion_plugins(mlp)
+    assert down_proj._fake_quant_supported
+    assert mlp.run_gemm_rs is False
+    assert torch.equal(mlp(x), x + 1)
+    down_proj.forward.assert_called_once()
+
+
 @pytest.mark.parametrize("quantizer_name", _VLLMParallelLinear._QUANTIZER_NAMES)
 def test_kimi_gemm_rs_ar_bypasses_enabled_fake_quantizers(quantizer_name):
     kimi_model = pytest.importorskip("vllm.models.kimi_k3.nvidia.model")
+    if "gemm_rs_ar" not in kimi_model.KimiMLP.forward.__code__.co_names:
+        pytest.skip("Kimi MLP uses the legacy GEMM-RS path")
     x = torch.ones(128, 2)
     mlp = object.__new__(kimi_model.KimiMLP)
     torch.nn.Module.__init__(mlp)
