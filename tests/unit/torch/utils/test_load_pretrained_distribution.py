@@ -33,7 +33,6 @@ from transformers import AutoModel, DeepseekV3Config, LlamaConfig, LlamaForCausa
 
 import modelopt.torch.models.hf as models_hf
 import modelopt.torch.utils.distributed as dist
-import modelopt.torch.utils.moe as moe
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.plugins import model_load_utils
@@ -132,7 +131,11 @@ def loaders(monkeypatch):
 
         return stub
 
-    monkeypatch.setattr(moe, "load_and_prepare_ep", recording("ep", moe.load_and_prepare_ep))
+    monkeypatch.setattr(
+        model_load_utils,
+        "load_and_prepare_ep",
+        recording("ep", model_load_utils.load_and_prepare_ep),
+    )
     monkeypatch.setattr(
         model_load_utils,
         "parallel_load_and_prepare_fsdp2",
