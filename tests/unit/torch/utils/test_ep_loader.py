@@ -15,10 +15,11 @@
 
 """What the expert-parallel loader reads off the loaded model and its config.
 
-``_routed_expert_modules`` finds the routed-expert containers the EP plan shards,
-``_seed_parallel_states`` gives every module the parallel state its amax syncs over, and
-``_ckpt_quant_method`` reads the checkpoint's native quantization. Everything runs in one CPU
-process.
+The loader takes an expert-parallel plan and keeps its experts out of ModelOpt's per-expert quant
+wrappers, ``_seed_parallel_states`` gives every module the parallel state its amax syncs over,
+``expert_parallel_mesh`` hands calibration the mesh an expert-parallel plan's experts are sharded
+over, and ``_ckpt_quant_method`` reads the checkpoint's native quantization. Everything runs in one
+CPU process.
 """
 
 from types import SimpleNamespace
@@ -27,14 +28,15 @@ import pytest
 import torch
 from torch import nn
 
-from modelopt.torch.utils.distributed import ParallelState
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 from modelopt.torch.utils.moe import (
     _ckpt_quant_method,
     _experts_sharded_over,
-    _routed_expert_modules,
     _seed_parallel_states,
     _transformers_mesh_builder,
+    _unregister_expert_quant_wrappers,
     expert_parallel_mesh,
+    load_and_prepare_ep,
 )
 
 # ----------------------------------------------------------------------------------- tiny MoE
@@ -90,43 +92,32 @@ def _model_with_decoder_at(prefix):
     return root
 
 
-# The plan load_and_prepare_ep hands over after the a2a swap: base-relative keys (no ``model.``),
-# the router replicated, the fused expert params grouped_gemm-sharded, the container a2a-tagged.
-_A2A_PLAN = {
-    "layers.*.mlp.gate": "torch_a2a_router",
-    "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
-    "layers.*.mlp.experts.down_proj": "grouped_gemm",
-    "layers.*.mlp.experts": "torch_a2a_experts",
-}
-
-# ---------------------------------------------------------------------- _routed_expert_modules
+# ------------------------------------------------------------------------------- the plan
 
 
 @pytest.mark.parametrize(
-    "prefix",
-    ["", "model.", "model.language_model.", "language_model.model."],
-    ids=["base-model", "causal-lm", "vlm", "legacy-vlm"],
+    ("plan", "error", "match"),
+    [
+        (DistributionPlan(2), ValueError, "shards no routed experts"),
+        (DistributionPlan(2, ep_size=2, dense="fsdp"), NotImplementedError, "replicates the dense"),
+    ],
+    ids=["no-expert-parallelism", "sharded-dense"],
 )
-def test_routed_experts_are_the_a2a_containers_under_any_prefix(prefix):
-    """The base-relative plan keys match the decoder wherever the model nests it, at every layer
-    index. The router, the grouped_gemm params and the shared experts are not containers."""
-    pytest.importorskip("transformers")
-    model = _model_with_decoder_at(prefix)
-
-    found = _routed_expert_modules(model, _A2A_PLAN)
-
-    modules = dict(model.named_modules())
-    assert found == {
-        name: modules[name] for name in [f"{prefix}layers.{i}.mlp.experts" for i in (0, 1)]
-    }
+def test_the_loader_refuses_a_plan_it_cannot_load_by(plan, error, match):
+    """Before anything else: no process group, transformers release or checkpoint is looked at."""
+    with pytest.raises(error, match=match):
+        load_and_prepare_ep("unused", plan)
 
 
-def test_only_the_a2a_experts_style_marks_a_container():
-    """A plan whose container still carries the stock ``moe_tp_experts`` style names no experts."""
-    pytest.importorskip("transformers")
-    plan = {**_A2A_PLAN, "layers.*.mlp.experts": "moe_tp_experts"}
+def test_the_loader_refuses_a_plan_for_another_world(monkeypatch):
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 4)
 
-    assert _routed_expert_modules(_model_with_decoder_at("model."), plan) == {}
+    with pytest.raises(ValueError, match="is for 2 ranks, but this run has 4"):
+        load_and_prepare_ep("unused", DistributionPlan(2, ep_size=2))
+
+
+# ------------------------------------------------------------------------ quant wrappers
 
 
 @pytest.fixture
@@ -153,9 +144,9 @@ def quant_wrappers():
 def test_the_experts_class_loses_its_quant_wrapper_and_other_classes_keep_theirs(quant_wrappers):
     """Quantization would swap a registered wrapper in for the experts, whose forward drops the EP
     process group the a2a transport injects. Only the routed experts' class is unregistered."""
-    pytest.importorskip("transformers")
+    model = _model_with_decoder_at("model.")
 
-    _routed_expert_modules(_model_with_decoder_at("model."), _A2A_PLAN)
+    _unregister_expert_quant_wrappers([layer.mlp.experts for layer in model.model.layers])
 
     assert _Experts not in quant_wrappers
     assert _SharedExperts in quant_wrappers
@@ -199,35 +190,21 @@ def test_a_sibling_whose_name_extends_an_expert_container_stays_dense():
 # ------------------------------------------------------------------------ expert_parallel_mesh
 
 
-def test_the_expert_parallel_mesh_is_the_one_the_model_was_loaded_over(monkeypatch):
-    """Experts seeded with a live expert-parallel group: the mesh transformers kept on the model."""
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+def test_the_expert_parallel_mesh_is_the_one_the_model_was_loaded_over():
+    """An expert-parallel plan: the mesh transformers kept on the model."""
     model = _model_with_decoder_at("model.")
-    experts = {f"model.layers.{i}.mlp.experts": model.model.layers[i].mlp.experts for i in (0, 1)}
-    _seed_parallel_states(
-        model,
-        experts,
-        dense_state=ParallelState(data_parallel_group=object()),
-        expert_state=ParallelState(expert_model_parallel_group=object()),
-    )
+    set_distribution_plan(model, DistributionPlan(2, ep_size=2))
     model._device_mesh = mesh = object()
 
     assert expert_parallel_mesh(model) is mesh
 
 
-@pytest.mark.parametrize("ep_group", [None, -1], ids=["not-seeded", "one-rank-ep"])
-def test_a_model_without_sharded_experts_has_no_expert_parallel_mesh(monkeypatch, ep_group):
-    """An unseeded model, or one whose expert-parallel group is a single rank, is not EP-sharded."""
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+@pytest.mark.parametrize("plan", [None, DistributionPlan(2)], ids=["no-plan", "replicated"])
+def test_a_model_whose_plan_shards_no_experts_has_no_expert_parallel_mesh(plan):
+    """Even with a device mesh on it, as a load through from_pretrained's own TP can leave."""
     model = _model_with_decoder_at("model.")
-    if ep_group is not None:
-        experts = {"model.layers.0.mlp.experts": model.model.layers[0].mlp.experts}
-        _seed_parallel_states(
-            model,
-            experts,
-            dense_state=ParallelState(),
-            expert_state=ParallelState(expert_model_parallel_group=ep_group),
-        )
+    if plan is not None:
+        set_distribution_plan(model, plan)
     model._device_mesh = object()
 
     assert expert_parallel_mesh(model) is None
