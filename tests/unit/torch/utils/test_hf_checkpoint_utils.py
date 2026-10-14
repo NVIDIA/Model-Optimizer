@@ -227,6 +227,78 @@ def test_sanitize_hf_config_for_deployment_trims_nextn_layer_types():
     assert config_data["layer_types"] == hidden_layer_types
 
 
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("keep_tokenizer", [False, True])
+def test_export_config_reloads_nemotron_h_with_source_auto_map(tmp_path, native, keep_tokenizer):
+    # Native NemotronH is optional on the minimum-Transformers test lane.
+    transformers = pytest.importorskip("transformers", minversion="5.5")
+    from modelopt.torch.export.unified_export_hf import (
+        _write_hf_export_config,
+        save_non_weight_artifacts,
+    )
+
+    source, export = tmp_path / "source", tmp_path / "export"
+    source.mkdir()
+    (source / "configuration_legacy.py").write_text(
+        "from transformers import PretrainedConfig\n"
+        "class LegacyConfig(PretrainedConfig):\n"
+        "    model_type = 'nemotron_h'\n"
+        "    def __init__(self, hybrid_override_pattern='M*', **kwargs):\n"
+        "        self.hybrid_override_pattern = hybrid_override_pattern\n"
+        "        super().__init__(**kwargs)\n"
+        "    @property\n"
+        "    def layers_block_type(self):\n"
+        "        return ['mamba', 'attention']\n"
+    )
+    auto_map = {
+        "AutoConfig": "configuration_legacy.LegacyConfig",
+        "AutoModel": "modeling_legacy.LegacyModel",
+        "AutoModelForCausalLM": "modeling_legacy.LegacyModel",
+    }
+    if keep_tokenizer:
+        auto_map["AutoTokenizer"] = [None, "tokenization_legacy.LegacyTokenizer"]
+    original_auto_map = dict(auto_map)
+    (source / "config.json").write_text(
+        json.dumps({"model_type": "nemotron_h", "auto_map": auto_map})
+    )
+    config = (
+        transformers.NemotronHConfig(layers_block_type=["mamba", "attention"], auto_map=auto_map)
+        if native
+        else transformers.AutoConfig.from_pretrained(
+            source, trust_remote_code=True, local_files_only=True
+        )
+    )
+    model = torch.nn.Module()
+    model.config = config
+    model._modelopt_source_checkpoint = str(source)
+    quant_config = {"quantization": {"quant_algo": "FP8", "kv_cache_quant_algo": "FP8"}}
+
+    save_non_weight_artifacts(model, export)
+    _write_hf_export_config(model, quant_config, export)
+    reloaded = transformers.AutoConfig.from_pretrained(
+        export, trust_remote_code=True, local_files_only=True
+    )
+
+    assert isinstance(reloaded, transformers.NemotronHConfig) == native
+    assert reloaded.layers_block_type == config.layers_block_type
+    assert reloaded.quantization_config["quant_algo"] == "FP8"
+    assert reloaded.quantization_config["kv_cache_scheme"] == {
+        "dynamic": False,
+        "num_bits": 8,
+        "type": "float",
+    }
+    assert config.auto_map == original_auto_map
+    expected_map = {
+        key: value
+        for key, value in original_auto_map.items()
+        if not native or key == "AutoTokenizer"
+    }
+    assert getattr(reloaded, "auto_map", {}) == expected_map
+    assert (export / "configuration_legacy.py").read_text() == (
+        source / "configuration_legacy.py"
+    ).read_text()
+
+
 def test_sanitize_hf_config_for_deployment_adds_rope_theta_to_llama3_rope_parameters():
     """Transformers 5.x requires rope_theta inside llama3 rope_parameters."""
     config_data = {
