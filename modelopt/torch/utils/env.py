@@ -21,8 +21,7 @@ matters. Callers do ``from modelopt.torch.utils import env`` then ``env.ep_degre
 
 Distribution plan (see ``resolve_distribution_plan``):
   MODELOPT_EP_DEGREE        expert-parallel degree; ``""``/unset -> ``"auto"``.
-  MODELOPT_FSDP_SIZE        whether to FSDP2-shard the dense part: ``"1"`` replicates it, ``"world"``
-                            shards it over every rank; ``""``/unset -> ``"auto"``.
+  MODELOPT_FSDP_SIZE        dense layout: ``"1"`` replicates, ``"world"`` FSDP2-shards; ``""``/unset -> ``"auto"``.
 """
 
 import os
