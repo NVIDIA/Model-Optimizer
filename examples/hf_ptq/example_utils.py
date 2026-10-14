@@ -23,7 +23,6 @@ import os
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -56,34 +55,6 @@ from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
-
-
-@dataclass
-class DistributedState:
-    """Example-local distributed state for model loading, dataloader sharding, and rank-0 output."""
-
-    rank: int
-    world_size: int
-    device: torch.device | str
-    is_main: bool
-
-
-def setup_distributed_args(args):
-    """Initialize and attach ``args.dist_state`` (single-process if not distributed).
-
-    A distributed launch has its process group set up by then (hf_ptq's ``distributed_run``), and the
-    state reads its rank and world from that group rather than deriving them a second time.
-    """
-    if dist_utils.is_distributed_run():
-        rank = dist_utils.rank()
-        args.dist_state = DistributedState(
-            rank=rank,
-            world_size=dist_utils.size(),
-            device=torch.device(f"cuda:{dist_utils.local_rank()}"),
-            is_main=rank == 0,
-        )
-    else:
-        args.dist_state = DistributedState(rank=0, world_size=1, device=args.device, is_main=True)
 
 
 def setup_fsdp2_process_group(plan: DistributionPlan) -> None:

@@ -50,7 +50,6 @@ from example_utils import (
     recipe_layerwise_blocks,
     run_nemotron_vl_preview,
     save_source_config,
-    setup_distributed_args,
     setup_fsdp2_process_group,
     validate_fsdp2_supported,
 )
@@ -1552,16 +1551,16 @@ def main(args: argparse.Namespace):
     random.seed(RAND_SEED)
     np.random.seed(RAND_SEED)
 
-    # A distributed launch owns its process group for the whole run. Entered here rather than
-    # inside load_model so cleanup still runs if loading raises -- otherwise the surviving ranks
-    # block on the first collective until the NCCL timeout.
-    with distributed_run(timeout=timedelta(hours=3)):
+    # A distributed launch owns its process group for the whole run, and the run takes this
+    # process's rank, size and device from it. Entered here rather than inside load_model so
+    # cleanup still runs if loading raises -- otherwise the surviving ranks block on the first
+    # collective until the NCCL timeout.
+    with distributed_run(timeout=timedelta(hours=3), device=args.device) as dist_state:
+        args.dist_state = dist_state
         _main_inner(args)
 
 
 def _main_inner(args: argparse.Namespace):
-    setup_distributed_args(args)
-
     try:
         # Entered inside the try: opening the run is fatal by design, and skipping
         # cleanup_distributed would leave the other ranks blocked on the first collective
