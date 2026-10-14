@@ -12,6 +12,8 @@ Changelog
 
 **Bug Fixes**
 
+- Fix ONNX preprocessing with custom TensorRT plugin libraries on TensorRT 11.
+
 0.48.0 (2026-10-xx)
 ^^^^^^^^^^^^^^^^^^^
 
