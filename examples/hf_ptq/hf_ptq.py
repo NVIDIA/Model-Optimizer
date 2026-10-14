@@ -37,7 +37,6 @@ from example_utils import (
     HF_PTQ,
     _prepare_quant_cfg,
     build_quant_cfg,
-    cleanup_distributed,
     create_vlm_calibration_loop,
     generate_excludes_prompt,
     get_model,
@@ -49,7 +48,6 @@ from example_utils import (
     recipe_layerwise_blocks,
     run_nemotron_vl_preview,
     save_source_config,
-    setup_fsdp2_process_group,
     validate_fsdp2_supported,
 )
 from torch.utils.data import DataLoader
@@ -103,6 +101,7 @@ from modelopt.torch.utils.distributed import (
     distributed_forward_loop,
     distributed_run,
     distribution_plan,
+    setup_fsdp2_process_group,
     shard_dataloader,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
@@ -343,7 +342,9 @@ def load_model(args: argparse.Namespace):
     plan, hf_config = _resolve_distribution(args)
     if plan.is_fsdp_dense and not plan.is_expert_parallel:
         validate_fsdp2_supported(args, hf_config)
-    setup_fsdp2_process_group(plan)
+    # Raise the collective timeout above NCCL's 30-min default: rank 0's checkpoint write can
+    # exceed it, and PyTorch 2.8 has no per-call barrier() timeout (must be set at PG creation).
+    setup_fsdp2_process_group(plan, timeout=timedelta(hours=2))
     if plan.is_expert_parallel:
         full_model = load_pretrained(
             args.local_checkpoint_path,
@@ -1540,25 +1541,35 @@ def main(args: argparse.Namespace):
 
 
 def _main_inner(args: argparse.Namespace):
-    try:
-        # Entered inside the try: opening the run is fatal by design, and skipping
-        # cleanup_distributed would leave the other ranks blocked on the first collective
-        # until the NCCL timeout.
-        with mlflow_run(args):
-            # --pyt_ckpt_path stays as given. Every later step reads the local copy of the whole
-            # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local
-            # path.
-            args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
-                args.pyt_ckpt_path
-            )
+    with mlflow_run(args):
+        # --pyt_ckpt_path stays as given. Every later step reads the local copy of the whole
+        # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local
+        # path.
+        args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(args.pyt_ckpt_path)
 
-            # launch a memory monitor to read the currently used GPU memory.
-            launch_memory_monitor()
+        # launch a memory monitor to read the currently used GPU memory.
+        launch_memory_monitor()
 
-            # Force eager execution for all model types.
-            torch.compiler.set_stance("force_eager")
+        # Force eager execution for all model types.
+        torch.compiler.set_stance("force_eager")
 
-            (
+        (
+            full_model,
+            language_model,
+            model_type,
+            calibration_only,
+            processor,
+            tokenizer,
+            device,
+        ) = load_model(args)
+
+        if args.sparsity_fmt != "dense":
+            # Sparse
+            sparsity_main(args, full_model, tokenizer, device)
+        else:
+            # Quantize
+            quantize_main(
+                args,
                 full_model,
                 language_model,
                 model_type,
@@ -1566,25 +1577,7 @@ def _main_inner(args: argparse.Namespace):
                 processor,
                 tokenizer,
                 device,
-            ) = load_model(args)
-
-            if args.sparsity_fmt != "dense":
-                # Sparse
-                sparsity_main(args, full_model, tokenizer, device)
-            else:
-                # Quantize
-                quantize_main(
-                    args,
-                    full_model,
-                    language_model,
-                    model_type,
-                    calibration_only,
-                    processor,
-                    tokenizer,
-                    device,
-                )
-    finally:
-        cleanup_distributed()
+            )
 
 
 if __name__ == "__main__":
