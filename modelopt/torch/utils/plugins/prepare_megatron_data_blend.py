@@ -16,7 +16,9 @@
 """Prepare a weighted Megatron data blend from a YAML configuration."""
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -208,7 +210,8 @@ def _take_chat_rows(
     Fails if the source cannot be read or runs out of usable rows, so the blend cannot change
     silently; gives up after ``10 * want`` rejected rows.
     """
-    # Megatron-Bridge's chat SFT path consumes this output; keep exactly the rows it accepts.
+    # Megatron-Bridge's chat SFT path consumes this output; keep exactly the rows it accepts. Imported
+    # here, not at module scope, because the tokenizing mode does not need Megatron-Bridge installed.
     from megatron.bridge.data.conversation_processing import is_text_only_chat_example
 
     name = f"{source['hf_dataset']} {source.get('split') or source.get('files')}"
@@ -250,13 +253,40 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]] | None:
         return None
 
 
+def _part_path(parts_dir: Path, source: dict[str, Any], shuffle: bool, capped: bool) -> Path:
+    """Return the cache file of a source's selected rows, keyed by every input that selects them.
+
+    A capped part holds the first rows of the source and serves any smaller budget; an uncapped part
+    holds every usable row, so a budget removed between runs never reuses a capped selection.
+    """
+    selection = {key: source.get(key) for key in ("hf_dataset", "config", "split", "files")}
+    selection.update(content_field=source["content_field"], shuffle=shuffle, capped=capped)
+    digest = hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest()[:16]
+    label = source.get("split") or "files"
+    return parts_dir / f"{source['hf_dataset'].replace('/', '--')}_{label}_{digest}.jsonl"
+
+
+def _chat_budgets(config: dict[str, Any]) -> list[int | None]:
+    """Return each source's row budget, ``None`` meaning every usable row; validate the inputs."""
+    weights = [float(source["weight"]) for source in config["sources"]]
+    if not all(math.isfinite(w) and w >= 0 for w in weights) or sum(weights) <= 0:
+        raise ValueError(f"Source weights must be finite, nonnegative and not all zero: {weights}.")
+    target = config.get("target_samples")
+    if target is None:
+        return [None] * len(weights)
+    if isinstance(target, bool) or not isinstance(target, int) or target <= 0:
+        raise ValueError(f"target_samples must be a positive integer, got {target!r}.")
+    return [round(target * w / sum(weights)) for w in weights]
+
+
 def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
     """Write a weighted chat blend as ``train.jsonl`` / ``validation.jsonl``; return their sizes.
 
     For Megatron-Bridge's chat SFT path (``distill.py --sft --sft_hf_dataset``), which renders each
     conversation with the model's chat template and can restrict the loss to assistant tokens.
     Each source contributes ``round(target_samples * weight / sum(weights))`` rows (every usable
-    row if ``target_samples`` is omitted) that the chat path accepts as text-only chat. Hugging Face
+    row if ``target_samples`` is omitted; a source rounded to zero rows is skipped) that the chat
+    path accepts as text-only chat. Hugging Face
     splits are buffer-shuffled unless ``shuffle: false``; ``files`` are read from the beginning.
     The rows are mixed with ``seed`` and ``min(1000, n // 20)`` of them are held out for validation.
     Each source is cached under ``<output_dir>/parts``, so an interrupted run resumes.
@@ -270,20 +300,14 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
     output_dir = Path(config["output_dir"])
     parts_dir = output_dir / "parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
-    target = config.get("target_samples")
     shuffle = bool(config.get("shuffle", True))
-    weight_sum = sum(float(source["weight"]) for source in config["sources"])
 
     rows: list[dict[str, Any]] = []
-    for index, source in enumerate(config["sources"]):
-        want = (
-            None
-            if target is None
-            else max(1, round(int(target) * float(source["weight"]) / weight_sum))
-        )
-        label = source.get("split") or "files"
-        dataset = source["hf_dataset"].replace("/", "--")
-        part = parts_dir / f"{index:02d}_{dataset}_{source.get('config')}_{label}.jsonl"
+    for source, want in zip(config["sources"], _chat_budgets(config)):
+        if want == 0:
+            print(f"{source['hf_dataset']}: weight rounds to 0 rows, skipped", flush=True)
+            continue
+        part = _part_path(parts_dir, source, shuffle, capped=want is not None)
         got = _read_jsonl(part)
         if got is None or (want is not None and len(got) < want):
             got = _take_chat_rows(source, output_dir, want, shuffle)

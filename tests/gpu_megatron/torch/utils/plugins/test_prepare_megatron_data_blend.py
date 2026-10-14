@@ -229,11 +229,110 @@ def test_chat_blend_reuses_and_rebuilds_cached_parts(tmp_path: Path, chat_blend)
     blend_module.prepare_chat_data_blend(config_path)
     assert calls == {"org/a": 1, "org/b": 1}  # the second run streams nothing
 
-    part = tmp_path / "blend" / "parts" / "00_org--a_None_train.jsonl"
+    (part,) = (tmp_path / "blend" / "parts").glob("org--a_*.jsonl")
     part.write_text(part.read_text(encoding="utf-8")[:-20], encoding="utf-8")  # cut mid-record
     blend_module.prepare_chat_data_blend(config_path)
     assert calls == {"org/a": 2, "org/b": 1}
     assert (tmp_path / "blend" / "train.jsonl").read_text(encoding="utf-8") == first
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"shuffle": True},
+        {
+            "sources": [
+                {
+                    "hf_dataset": f"org/{n}",
+                    "split": "test",
+                    "content_field": "messages",
+                    "weight": 1,
+                }
+                for n in ("a", "b")
+            ]
+        },
+    ],
+    ids=["shuffle", "split"],
+)
+def test_chat_blend_does_not_reuse_parts_of_another_selection(chat_blend, change):
+    write_config, calls = chat_blend
+    blend_module.prepare_chat_data_blend(write_config())
+    blend_module.prepare_chat_data_blend(write_config(**change))
+    assert calls == {"org/a": 2, "org/b": 2}
+
+
+def test_chat_blend_does_not_reuse_a_capped_part_without_a_budget(tmp_path: Path, chat_blend):
+    write_config, calls = chat_blend
+    assert blend_module.prepare_chat_data_blend(write_config()) == {"validation": 5, "train": 95}
+    # Every usable row of both sources, not the 50 per source cached by the capped run.
+    sizes = blend_module.prepare_chat_data_blend(write_config(target_samples=None))
+    assert sizes == {"validation": 10, "train": 190}
+    assert calls == {"org/a": 2, "org/b": 2}
+
+
+def test_chat_blend_skips_sources_rounded_to_zero_rows(tmp_path: Path, chat_blend):
+    write_config, calls = chat_blend
+    config = write_config(
+        sources=[
+            {"hf_dataset": "org/a", "split": "train", "content_field": "messages", "weight": 999},
+            {"hf_dataset": "org/b", "split": "train", "content_field": "messages", "weight": 1},
+        ]
+    )
+    assert blend_module.prepare_chat_data_blend(config) == {"validation": 5, "train": 95}
+    assert calls == {"org/a": 1, "org/b": 0}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"target_samples": 0}, "positive integer"),
+        ({"target_samples": 1.5}, "positive integer"),
+        (
+            {
+                "sources": [
+                    {
+                        "hf_dataset": "org/a",
+                        "split": "train",
+                        "content_field": "messages",
+                        "weight": -1,
+                    }
+                ]
+            },
+            "nonnegative",
+        ),
+        (
+            {
+                "sources": [
+                    {
+                        "hf_dataset": "org/a",
+                        "split": "train",
+                        "content_field": "messages",
+                        "weight": 0,
+                    }
+                ]
+            },
+            "not all zero",
+        ),
+        (
+            {
+                "sources": [
+                    {
+                        "hf_dataset": "org/a",
+                        "split": "train",
+                        "content_field": "messages",
+                        "weight": float("nan"),
+                    }
+                ]
+            },
+            "finite",
+        ),
+    ],
+)
+def test_chat_blend_rejects_invalid_budgets(chat_blend, overrides, match):
+    write_config, calls = chat_blend
+    with pytest.raises(ValueError, match=match):
+        blend_module.prepare_chat_data_blend(write_config(**overrides))
+    assert calls == {"org/a": 0, "org/b": 0}
 
 
 def test_chat_blend_writes_parts_atomically(tmp_path: Path, chat_blend, monkeypatch):
@@ -251,8 +350,9 @@ def test_chat_blend_writes_parts_atomically(tmp_path: Path, chat_blend, monkeypa
     with pytest.raises(KeyboardInterrupt):
         blend_module.prepare_chat_data_blend(write_config())
     parts = tmp_path / "blend" / "parts"
-    assert not (parts / "01_org--b_None_train.jsonl").exists()
-    assert len(_read_jsonl(parts / "00_org--a_None_train.jsonl")) == 50
+    assert not list(parts.glob("org--b_*.jsonl"))  # only the interrupted .tmp file was written
+    (part,) = parts.glob("org--a_*.jsonl")
+    assert len(_read_jsonl(part)) == 50
 
 
 def test_chat_blend_fails_on_a_bad_source(tmp_path: Path, chat_blend, monkeypatch):

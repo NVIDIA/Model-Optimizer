@@ -201,11 +201,12 @@ sources:
     weight: 17
 ```
 
-Each source contributes `round(target_samples * weight / sum(weights))` conversations that contain only text.
+Each source contributes `round(target_samples * weight / sum(weights))` conversations that contain only text; a source that rounds to zero is skipped.
 A `text` row becomes one assistant turn, or is split into turns if it uses the `<extra_id_1>User` /
 `<extra_id_1>Assistant` chat markers. The conversations are mixed and `min(1000, n // 20)` of them are held out
-for validation. A source that fails to load or runs out of usable rows stops the run. Each source is cached under
-`<output_dir>/parts`, so an interrupted run resumes.
+for validation. A source that fails to load or runs out of usable rows stops the run. Each source's selection is cached under
+`<output_dir>/parts`, keyed by the settings that choose its rows, so an interrupted run resumes and a changed
+configuration selects afresh.
 
 ## `reasoning_content` for Post-Training v3 Datasets
 
