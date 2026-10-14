@@ -15,9 +15,7 @@
 
 """Utility functions for using torch.distributed."""
 
-import copy
 import functools
-import inspect
 import io
 import os
 import sys
@@ -26,7 +24,7 @@ import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from datetime import timedelta
-from typing import Any, Generic, TypeVar
+from typing import Any, TypeVar
 from warnings import warn
 
 import torch
@@ -37,22 +35,21 @@ from torch.distributed.tensor import DTensor
 __all__ = [
     "DistributedProcessGroup",
     "DistributionPlan",
-    "ModelOptSession",
     "ParallelState",
-    "Synced",
+    "all_reduce",
     "backend",
     "barrier",
+    "broadcast_from",
+    "distributed_run",
     "fsdp2_wrap",
     "gather_bytes",
     "gather_state_dicts",
-    "get_active_mo_session",
     "is_available",
     "is_distributed_launch",
     "is_distributed_run",
     "is_fsdp2_model",
     "is_initialized",
     "is_master",
-    "modelopt_session",
     "rank",
     "size",
 ]
@@ -110,9 +107,8 @@ def is_last_process(group=None) -> bool:
 def is_distributed_launch() -> bool:
     """True if launched distributed (WORLD_SIZE>1), readable BEFORE the process group is set up.
 
-    Env-based (does NOT touch the guarded session -- see :func:`get_active_mo_session`), so parse-time code
-    can detect the launch mode before :func:`modelopt_session` exists. After the session is entered, prefer
-    ``get_active_mo_session().distributed``.
+    Env-based, so parse-time code can detect the launch mode before :func:`distributed_run` sets the
+    process group up. Once it has, :func:`is_distributed_run` reads the live group.
     """
     return int(os.environ.get("WORLD_SIZE", "1")) > 1
 
@@ -340,321 +336,96 @@ class DistributionPlan:
         )
 
 
-_T = TypeVar("_T")
 _V = TypeVar("_V")
 
 
-class Synced(Generic[_T]):
-    """A fact of the session every rank holds the same value of, declared by its type.
+def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
+    """Return ``fn()`` run on ``rank`` only, on every rank.
 
-    ``plan: Synced[DistributionPlan]`` on the session makes ``session.plan`` this handle. Read the
-    value with ``session.plan.value``: local, ``None`` until it is set. Set it with
-    :meth:`broadcast_from`, one rank computing it, or :meth:`all_reduce`, every rank computing its own
-    and the results combined; both are collective, so every rank calls them at the same point.
-    Assigning ``session.plan`` raises, so nothing communicates behind an ``=``. Declare one only for a
-    fact a later stage reads back: a one-off value nothing reads back is
-    :meth:`ModelOptSession.broadcast_from` or :meth:`ModelOptSession.all_reduce`, which keep nothing.
+    For a value that depends on what each rank reads for itself -- the environment, its GPU, files
+    on its node -- so that ranks computing it for themselves could disagree. If ``fn`` raises, every
+    rank raises, instead of waiting in a broadcast ``rank`` never sends. Ranks broadcasting
+    different labels at the same point fail. Collective: every rank calls it at the same point,
+    with the same ``rank``. Outside a distributed run ``fn`` runs alone.
     """
-
-    def __init__(self, holder: "_SyncedHolder", name: str) -> None:
-        """The fact ``name`` of ``holder``."""
-        self._holder = holder
-        self._name = name
-
-    @property
-    def value(self) -> _T | None:
-        """The value every rank holds, read locally; ``None`` until one is set."""
-        return self._holder._synced.get(self._name)
-
-    def broadcast_from(self, fn: Callable[[], _T], rank: int = 0) -> _T:
-        """Set the fact to ``fn()`` run on ``rank`` only; every rank holds and returns that value.
-
-        See :meth:`ModelOptSession.broadcast_from`.
-        """
-        label = self._holder._label(self._name)
-        return self._hold(self._holder._sync_session().broadcast_from(label, fn, rank))
-
-    def all_reduce(self, fn: Callable[[], _T], combine: Callable[[list[_T]], _T]) -> _T:
-        """Set the fact to ``combine`` of every rank's ``fn()``; every rank holds and returns it.
-
-        See :meth:`ModelOptSession.all_reduce`.
-        """
-        label = self._holder._label(self._name)
-        return self._hold(self._holder._sync_session().all_reduce(label, fn, combine))
-
-    def _hold(self, value: _T) -> _T:
-        # The holder keeps its own copy: a later mutation of the caller's object stays the caller's.
-        self._holder._synced[self._name] = copy.deepcopy(value)
-        return self._holder._synced[self._name]
-
-
-class _SyncedAttribute:
-    """What a ``Synced[...]`` annotation installs: reading it gives the fact's :class:`Synced` handle."""
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    def __get__(self, holder, owner=None):
-        return self if holder is None else Synced(holder, self.name)
-
-    def __set__(self, holder, value) -> None:
-        raise AttributeError(
-            f"{type(holder).__name__}.{self.name} is synced: set it with .broadcast_from(fn) or "
-            ".all_reduce(fn, combine), which every rank calls at the same point."
-        )
-
-
-class _SyncedHolder:
-    """Base of a class with synced facts: each ``Synced[...]`` annotation of a subclass becomes one."""
-
-    _synced: dict[str, Any]
-
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        super().__init_subclass__(**kwargs)
-        for name, annotation in inspect.get_annotations(cls, eval_str=True).items():
-            if getattr(annotation, "__origin__", None) is Synced:
-                setattr(cls, name, _SyncedAttribute(name))
-
-    def _sync_session(self) -> "ModelOptSession":
-        """The session whose ranks hold this object's synced facts."""
-        raise NotImplementedError
-
-    def _label(self, name: str) -> str:
-        """How the fact ``name`` is named to the other ranks, which must name the same one."""
-        return name
-
-
-class ModelOptSession(_SyncedHolder):
-    """The live distributed session of a PTQ run: this process's identity, plus the model's EP mesh.
-
-    One class covers both cases: ``distributed`` is False for a single process (``WORLD_SIZE==1``) and
-    True for a real ``torch.distributed`` launch (``WORLD_SIZE>1``). Two parts, with different lifetimes:
-
-    * process IDENTITY (``distributed``/``rank``/``world_size``/``local_rank``/``device``/``is_main``) --
-      stable for the whole run, populated once by :func:`modelopt_session`. Reading ANY before
-      initialization raises, so code cannot silently consume a stale/zero default before the process
-      group is set up.
-    * ``ep_mesh`` -- the expert-parallel device mesh of the loaded model, set by ``load_and_prepare_ep``
-      (``None`` until then, and for a model loaded without expert parallelism).
-
-    Facts annotated :class:`Synced`, such as ``plan``, hold the same value on every rank.
-    """
-
-    #: The :class:`DistributionPlan` of the model this session runs, the same on every rank.
-    plan: Synced[DistributionPlan]
-
-    def __init__(self) -> None:
-        """Create an empty (uninitialized) session; populate identity with :meth:`initialize`."""
-        self._values: dict[str, Any] | None = None
-        self._synced: dict[str, Any] = {}
-        self.ep_mesh = None
-
-    def initialize(
-        self,
-        *,
-        distributed: bool,
-        rank: int,
-        world_size: int,
-        local_rank: int,
-        device,
-        is_main: bool,
-    ) -> None:
-        """Populate the session fields (called by ``modelopt_session``, or directly for tests)."""
-        self._values = {
-            "distributed": distributed,
-            "rank": rank,
-            "world_size": world_size,
-            "local_rank": local_rank,
-            "device": device,
-            "is_main": is_main,
-        }
-
-    def _reset(self) -> None:
-        self._values = None
-        self._synced = {}
-        self.ep_mesh = None
-
-    def _sync_session(self) -> "ModelOptSession":
-        return self
-
-    def broadcast_from(self, label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
-        """Return ``fn()`` run on ``rank`` only, on every rank; keep nothing.
-
-        For a value that depends on what each rank reads for itself -- the environment, its GPU, files
-        on its node -- so that ranks computing it for themselves could disagree. If ``fn`` raises, every
-        rank raises, instead of waiting in a broadcast ``rank`` never sends. Ranks broadcasting
-        different labels at the same point fail. Collective: every rank calls it at the same point,
-        with the same ``rank``. Outside a distributed session ``fn`` runs alone. A fact a later stage
-        reads back is a :class:`Synced` attribute, set with its own ``broadcast_from``.
-        """
-        if not (self.initialized and self.distributed):
-            return fn()
-        if not 0 <= rank < self.world_size:
-            raise ValueError(f"rank={rank} is not a rank of this {self.world_size}-rank run.")
-        sending = torch.distributed.get_rank() == rank
-        value: Any = None
-        error = None
-        if sending:
-            try:
-                value = fn()
-            except Exception as e:
-                # Still send: the other ranks would otherwise wait in the broadcast for this one.
-                error = e
-        # One message from the sending rank: its label, so a rank broadcasting another learns the two
-        # are out of step, and its value or its error. The error goes as text: the other ranks only
-        # need to stop, and an exception is not guaranteed to pickle.
-        message = [(label, value, None if error is None else f"{type(error).__name__}: {error}")]
-        torch.distributed.broadcast_object_list(message, group_src=rank)
-        sent_label, value, sent_error = message[0]
-        if error is not None:
-            raise error
-        if sent_error is not None:
-            raise RuntimeError(f"rank {rank} failed to compute {label}: {sent_error}")
-        if sent_label != label:
-            raise RuntimeError(
-                f"Ranks broadcast out of step: this rank broadcast {label!r} while rank {rank} sent "
-                f"{sent_label!r}. Every rank must broadcast them in the same order."
-            )
-        return value
-
-    def all_reduce(self, label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _V]) -> _V:
-        """Return ``combine`` of every rank's ``fn()``, on every rank; keep nothing.
-
-        For a value no later stage reads back from the session; a fact that one does is a
-        :class:`Synced` attribute, set with its own ``all_reduce``. ``combine`` takes the ranks' values
-        in rank order and returns the one every rank gets, e.g. ``min`` for a batch size each rank's
-        memory bounds, where one rank's choice could run another out of memory. If ``fn`` raises on any
-        rank, every rank raises, instead of waiting in the gather that rank never joins. Ranks reducing
-        different labels at the same point fail. Collective; outside a distributed session ``fn`` runs
-        alone.
-        """
-        if not (self.initialized and self.distributed):
-            return combine([fn()])
-        value, error = None, None
+    if not is_distributed_run():
+        return fn()
+    if not 0 <= rank < size():
+        raise ValueError(f"rank={rank} is not a rank of this {size()}-rank run.")
+    sending = torch.distributed.get_rank() == rank
+    value: Any = None
+    error = None
+    if sending:
         try:
             value = fn()
         except Exception as e:
-            # Still join the gather: the other ranks would otherwise wait in it for this one.
+            # Still send: the other ranks would otherwise wait in the broadcast for this one.
             error = e
-        mine = (label, value, None if error is None else f"{type(error).__name__}: {error}")
-        gathered: list[Any] = [None] * torch.distributed.get_world_size()
-        torch.distributed.all_gather_object(gathered, mine)
-        if error is not None:
-            raise error
-        for rank, (_, _, rank_error) in enumerate(gathered):
-            if rank_error is not None:
-                raise RuntimeError(f"rank {rank} failed to compute {label}: {rank_error}")
-        labels = sorted({rank_label for rank_label, _, _ in gathered})
-        if labels != [label]:
-            raise RuntimeError(
-                f"Ranks reduced out of step: {labels} at the same point. Every rank must reduce "
-                "them in the same order."
-            )
-        # The gathered values are unpickled copies, so the result shares nothing with the callers'.
-        return combine([rank_value for _, rank_value, _ in gathered])
-
-    @property
-    def initialized(self) -> bool:
-        """Whether ``modelopt_session`` has populated the state."""
-        return self._values is not None
-
-    def _get(self, key: str):
-        if self._values is None:
-            raise RuntimeError(
-                "session accessed before initialization; enter "
-                "modelopt.torch.utils.distributed.modelopt_session() first"
-            )
-        return self._values[key]
-
-    @property
-    def distributed(self) -> bool:
-        """True for a distributed launch (WORLD_SIZE>1), False for single-process."""
-        return self._get("distributed")
-
-    @property
-    def rank(self) -> int:
-        """Global rank of this process (0 single-process)."""
-        return self._get("rank")
-
-    @property
-    def world_size(self) -> int:
-        """Total number of processes (1 single-process)."""
-        return self._get("world_size")
-
-    @property
-    def local_rank(self) -> int:
-        """Node-local rank of this process (0 single-process)."""
-        return self._get("local_rank")
-
-    @property
-    def device(self):
-        """This process's torch device (``cuda:local_rank`` distributed; the caller default otherwise)."""
-        return self._get("device")
-
-    @property
-    def is_main(self) -> bool:
-        """Whether this is the main process (rank 0)."""
-        return self._get("is_main")
-
-
-# The process-wide ACTIVE session: a single STABLE object created once at import and NEVER rebound.
-# :func:`modelopt_session` mutates it in place via :meth:`ModelOptSession.initialize` / ``_reset`` rather
-# than assigning a new object -- so any held reference stays valid and never goes stale. Module-PRIVATE
-# (not exported): reach it only through :func:`get_active_mo_session`. It exists before initialization;
-# reading its IDENTITY fields (``rank`` etc.) then raises via the per-field guard.
-_active_mo_session: ModelOptSession = ModelOptSession()
-
-
-def get_active_mo_session(required: bool = True) -> ModelOptSession:
-    """Return the process-wide session.
-
-    * ``required=True`` (default) -- fail-fast: raise if no session has been entered yet by
-      :func:`modelopt_session`. Use when the caller genuinely needs a live session.
-    * ``required=False`` -- return the singleton regardless of initialization. Its ``ep_mesh`` is
-      readable (``None``) even before a session is entered, so this is for defensive reads deep in public
-      APIs (export / calibration) that may run with no active session.
-    """
-    if required and not _active_mo_session.initialized:
+    # One message from the sending rank: its label, so a rank broadcasting another learns the two
+    # are out of step, and its value or its error. The error goes as text: the other ranks only
+    # need to stop, and an exception is not guaranteed to pickle.
+    message = [(label, value, None if error is None else f"{type(error).__name__}: {error}")]
+    torch.distributed.broadcast_object_list(message, group_src=rank)
+    sent_label, value, sent_error = message[0]
+    if error is not None:
+        raise error
+    if sent_error is not None:
+        raise RuntimeError(f"rank {rank} failed to compute {label}: {sent_error}")
+    if sent_label != label:
         raise RuntimeError(
-            "no active session; enter modelopt.torch.utils.distributed.modelopt_session() first"
+            f"Ranks broadcast out of step: this rank broadcast {label!r} while rank {rank} sent "
+            f"{sent_label!r}. Every rank must broadcast them in the same order."
         )
-    return _active_mo_session
+    return value
+
+
+def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _V]) -> _V:
+    """Return ``combine`` of every rank's ``fn()``, on every rank.
+
+    ``combine`` takes the ranks' values in rank order and returns the one every rank gets, e.g.
+    ``min`` for a batch size each rank's memory bounds, where one rank's choice could run another
+    out of memory. If ``fn`` raises on any rank, every rank raises, instead of waiting in the gather
+    that rank never joins. Ranks reducing different labels at the same point fail. Collective;
+    outside a distributed run ``fn`` runs alone.
+    """
+    if not is_distributed_run():
+        return combine([fn()])
+    value, error = None, None
+    try:
+        value = fn()
+    except Exception as e:
+        # Still join the gather: the other ranks would otherwise wait in it for this one.
+        error = e
+    mine = (label, value, None if error is None else f"{type(error).__name__}: {error}")
+    gathered: list[Any] = [None] * torch.distributed.get_world_size()
+    torch.distributed.all_gather_object(gathered, mine)
+    if error is not None:
+        raise error
+    for rank_, (_, _, rank_error) in enumerate(gathered):
+        if rank_error is not None:
+            raise RuntimeError(f"rank {rank_} failed to compute {label}: {rank_error}")
+    labels = sorted({rank_label for rank_label, _, _ in gathered})
+    if labels != [label]:
+        raise RuntimeError(
+            f"Ranks reduced out of step: {labels} at the same point. Every rank must reduce "
+            "them in the same order."
+        )
+    # The gathered values are unpickled copies, so the result shares nothing with the callers'.
+    return combine([rank_value for _, rank_value, _ in gathered])
 
 
 @contextmanager
-def modelopt_session(timeout: timedelta | None = None, device=None):
-    """Populate the active session for the block, then tear down.
+def distributed_run(timeout: timedelta | None = None):
+    """Own the process group for the block on a distributed launch; do nothing otherwise.
 
-    On a distributed launch (WORLD_SIZE>1) this initializes the process group (binding the local CUDA
-    device) with ``timeout`` and records rank/world_size/local_rank/``cuda:local_rank``/is_main; it
-    DESTROYS the group on exit even if the body raises. Single-process records the trivial single-rank
-    topology -- with ``device`` as the device (the caller's default, e.g. the ``--device`` CLI value, since
-    there is no local rank to derive one) -- and enter/exit are no-ops around the body.
-
-    Yields the session (also reachable via :func:`get_active_mo_session`); it is reset on exit.
+    On a distributed launch (``WORLD_SIZE>1``) this sets the process group up, binding this rank's
+    CUDA device, with ``timeout``, and destroys it on exit even if the body raises.
     """
     owns_group = is_distributed_launch()
     if owns_group:
         setup(timeout=timeout)
-        _active_mo_session.initialize(
-            distributed=True,
-            rank=rank(),
-            world_size=size(),
-            local_rank=local_rank(),
-            device=torch.device(f"cuda:{local_rank()}"),
-            is_main=rank() == 0,
-        )
-    else:
-        _active_mo_session.initialize(
-            distributed=False,
-            rank=0,
-            world_size=1,
-            local_rank=0,
-            device=torch.device(device) if device is not None else None,
-            is_main=True,
-        )
     try:
-        yield _active_mo_session
+        yield
     finally:
         # If the body is unwinding due to an exception, PRINT it here BEFORE cleanup()'s collective
         # barrier. A per-rank exception (only some ranks raise) otherwise makes those ranks enter the
@@ -663,7 +434,7 @@ def modelopt_session(timeout: timedelta | None = None, device=None):
         exc = sys.exc_info()[1]
         if exc is not None:
             print(
-                f"[modelopt_session][rank {os.environ.get('RANK', '?')}] body raised "
+                f"[distributed_run][rank {os.environ.get('RANK', '?')}] body raised "
                 f"{type(exc).__name__}: {exc}",
                 flush=True,
             )
@@ -671,7 +442,6 @@ def modelopt_session(timeout: timedelta | None = None, device=None):
             sys.stderr.flush()
         if owns_group:
             cleanup()
-        _active_mo_session._reset()
 
 
 def cleanup():

@@ -13,17 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the distributed PTQ session: the distribution plan, the session handle, its synced
-facts and one-off collectives, launch detection."""
+
+"""Unit tests for distributed PTQ: the distribution plan, the collectives that fail together, the
+process group's lifetime, launch detection."""
+
+from datetime import timedelta
 
 import pytest
 import torch.distributed
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
-    ModelOptSession,
-    Synced,
-    get_active_mo_session,
+    all_reduce,
+    broadcast_from,
+    distributed_run,
     is_distributed_launch,
 )
 
@@ -62,69 +66,21 @@ def test_repr_names_the_degrees():
     assert "fsdp_size=8" in repr(DistributionPlan(world_size=8, ep_size=8, fsdp_size=8))
 
 
-# ------------------------------------------------------------------------------------- session handle
+# ------------------------------------------------------------------------------------ collectives
 
 
-def test_required_session_fails_fast_when_none_was_entered():
-    with pytest.raises(RuntimeError, match="no active session"):
-        get_active_mo_session()
-
-
-def test_optional_session_is_readable_without_a_session():
-    """Export / calibration read the session defensively; they must not explode with no session."""
-    session = get_active_mo_session(required=False)
-    assert session is not None
-    assert not session.initialized
-    assert session.ep_mesh is None
-
-
-def test_identity_reads_raise_before_initialization():
-    """A stale or zero default would silently mislabel every rank; reading early must fail instead."""
-    with pytest.raises(RuntimeError, match="before initialization"):
-        _ = ModelOptSession().rank
-
-
-def test_reset_clears_the_identity_and_the_ep_mesh():
-    session = ModelOptSession()
-    session.initialize(
-        distributed=True, rank=1, world_size=2, local_rank=1, device=None, is_main=False
-    )
-    session.ep_mesh = object()
-    assert (session.rank, session.world_size, session.is_main) == (1, 2, False)
-    session._reset()
-    assert not session.initialized
-    assert session.ep_mesh is None
-
-
-# ----------------------------------------------------------------------------------- synced facts
-
-
-class _Session(ModelOptSession):
-    """A session with a second synced fact, and a plain attribute."""
-
-    other: Synced[int]
-    note: str
-
-
-def _session(rank=None):
-    """Rank ``rank`` of a two-rank session; ``None``: a single process."""
-    session = _Session()
-    session.initialize(
-        distributed=rank is not None,
-        rank=rank or 0,
-        world_size=1 if rank is None else 2,
-        local_rank=rank or 0,
-        device=None,
-        is_main=not rank,
-    )
-    return session
+def _run_with_ranks(monkeypatch, world_size):
+    """Make this process look like one rank of a live ``world_size``-rank run."""
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: world_size)
 
 
 def _as_rank(monkeypatch, rank, received=None):
-    """Answer the session's broadcasts as ``rank``; returns ``(message, sending rank)`` for each.
+    """Answer the broadcasts of a two-rank run as ``rank``; returns ``(message, sending rank)`` for each.
 
     A rank that is not the sending one receives ``received``, as the sending rank would have sent it.
     """
+    _run_with_ranks(monkeypatch, 2)
     sent = []
 
     def broadcast_object_list(message, group=None, group_src=None):
@@ -138,17 +94,17 @@ def _as_rank(monkeypatch, rank, received=None):
 
 
 def _gather_as_rank(monkeypatch, rank, others):
-    """Answer the session's gathers as ``rank``; returns what each gather was handed.
+    """Answer the gathers as ``rank``; returns what each gather was handed.
 
     ``others`` are the other ranks' messages in rank order, as they would have sent them.
     """
+    _run_with_ranks(monkeypatch, len(others) + 1)
     sent = []
 
     def all_gather_object(gathered, mine, group=None):
         sent.append(mine)
         gathered[:] = [*others[:rank], mine, *others[rank:]]
 
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: len(others) + 1)
     monkeypatch.setattr(torch.distributed, "all_gather_object", all_gather_object)
     monkeypatch.setattr(
         torch.distributed, "broadcast_object_list", lambda *a, **k: pytest.fail("a rank broadcast")
@@ -156,82 +112,47 @@ def _gather_as_rank(monkeypatch, rank, others):
     return sent
 
 
-def test_only_facts_annotated_synced_are_synced():
-    """The annotation carries both the value's type and the synced semantic."""
-    session = _session()
-    assert isinstance(session.other, Synced)
-    assert isinstance(session.plan, Synced)
-    assert "note" not in vars(_Session)
-
-
-def test_a_synced_fact_cannot_be_assigned():
-    """Setting one is collective: broadcast_from or all_reduce, never a bare assignment."""
-    with pytest.raises(AttributeError, match=r"plan is synced: set it with \.broadcast_from"):
-        _session().plan = DistributionPlan(world_size=1)
-
-
-def test_a_plain_attribute_assigns_without_a_collective(monkeypatch):
-    for collective in ("broadcast_object_list", "all_gather_object"):
-        monkeypatch.setattr(
-            torch.distributed, collective, lambda *a, **k: pytest.fail("a collective ran")
-        )
-    session = _session(rank=1)
-    session.note = "local"
-    assert session.note == "local"
-
-
 def test_a_single_process_computes_alone(monkeypatch):
-    """Nothing to sync with: no collective, and an uninitialized session behaves the same."""
+    """Nothing to sync with: no collective."""
     for collective in ("broadcast_object_list", "all_gather_object"):
         monkeypatch.setattr(
             torch.distributed, collective, lambda *a, **k: pytest.fail("a collective ran")
         )
-    for session in (_session(), _Session()):
-        plan = DistributionPlan(world_size=1)
-        assert session.plan.value is None
-        assert session.plan.broadcast_from(lambda: plan).world_size == 1
-        assert session.plan.value.world_size == 1
-        assert session.other.all_reduce(lambda: 4, min) == 4
-        assert session.broadcast_from("x", lambda: 3) == 3
-        assert session.all_reduce("smallest", lambda: 4, min) == 4
+    assert broadcast_from("x", lambda: 3) == 3
+    assert all_reduce("smallest", lambda: 4, min) == 4
 
 
-def test_the_sending_rank_sends_its_value_and_keeps_its_own_copy(monkeypatch):
+def test_the_sending_rank_sends_its_value(monkeypatch):
     sent = _as_rank(monkeypatch, 0)
-    session, plan = _session(rank=0), DistributionPlan(world_size=2, ep_size=2)
+    plan = DistributionPlan(world_size=2, ep_size=2)
 
-    held = session.plan.broadcast_from(lambda: plan)
-
+    assert broadcast_from("plan", lambda: plan) is plan
     assert sent == [(("plan", plan, None), 0)]
-    assert held is session.plan.value
-    assert held.ep_size == 2
-    assert held is not plan, "mutating the caller's object must not reach the session"
 
 
-def test_other_ranks_hold_the_sending_ranks_value_without_running_fn(monkeypatch):
+def test_other_ranks_take_the_sending_ranks_value_without_running_fn(monkeypatch):
     rank0_plan = DistributionPlan(world_size=2, ep_size=2)
     _as_rank(monkeypatch, 1, received=("plan", rank0_plan, None))
-    session = _session(rank=1)
 
-    held = session.plan.broadcast_from(lambda: pytest.fail("a rank that does not send ran fn"))
+    plan = broadcast_from("plan", lambda: pytest.fail("a rank that does not send ran fn"))
 
-    assert held.ep_size == session.plan.value.ep_size == 2
+    assert plan.ep_size == 2
 
 
 def test_any_rank_can_broadcast(monkeypatch):
     """With rank=1, rank 1 runs fn and sends it; rank 0 takes rank 1's value."""
     sent = _as_rank(monkeypatch, 1)
-    assert _session(rank=1).broadcast_from("x", lambda: "rank 1's", rank=1) == "rank 1's"
+    assert broadcast_from("x", lambda: "rank 1's", rank=1) == "rank 1's"
     assert sent == [(("x", "rank 1's", None), 1)]
 
     _as_rank(monkeypatch, 0, received=("x", "rank 1's", None))
-    held = _session(rank=0).broadcast_from("x", lambda: pytest.fail("rank 0 ran fn"), rank=1)
-    assert held == "rank 1's"
+    assert broadcast_from("x", lambda: pytest.fail("rank 0 ran fn"), rank=1) == "rank 1's"
 
 
-def test_a_rank_outside_the_run_cannot_broadcast():
+def test_a_rank_outside_the_run_cannot_broadcast(monkeypatch):
+    _run_with_ranks(monkeypatch, 2)
     with pytest.raises(ValueError, match="rank=2 is not a rank of this 2-rank run"):
-        _session(rank=0).broadcast_from("x", lambda: 0, rank=2)
+        broadcast_from("x", lambda: 0, rank=2)
 
 
 def test_the_sending_rank_failing_still_reaches_the_broadcast(monkeypatch):
@@ -242,46 +163,29 @@ def test_the_sending_rank_failing_still_reaches_the_broadcast(monkeypatch):
         raise ValueError("bad degrees")
 
     with pytest.raises(ValueError, match="bad degrees"):
-        _session(rank=0).broadcast_from("x", fail)
+        broadcast_from("x", fail)
     assert sent == [(("x", None, "ValueError: bad degrees"), 0)]
 
 
 def test_other_ranks_raise_when_the_sending_rank_failed(monkeypatch):
     _as_rank(monkeypatch, 1, received=("x", None, "ValueError: bad degrees"))
     with pytest.raises(RuntimeError, match=r"rank 0 failed to compute x.*bad degrees"):
-        _session(rank=1).broadcast_from("x", lambda: 0)
+        broadcast_from("x", lambda: 0)
 
 
 def test_ranks_broadcasting_out_of_step_fail(monkeypatch):
-    """Rank 0 sending one fact while rank 1 expects another would cross the two values."""
+    """Rank 0 sending one value while rank 1 expects another would cross the two."""
     _as_rank(monkeypatch, 1, received=("other", 7, None))
     with pytest.raises(RuntimeError, match="out of step"):
-        _session(rank=1).plan.broadcast_from(lambda: DistributionPlan(world_size=2))
+        broadcast_from("plan", lambda: DistributionPlan(world_size=2))
 
 
 def test_all_reduce_gives_every_rank_the_combined_value(monkeypatch):
     """Every rank's value counts, and every rank gets the same result."""
     sent = _gather_as_rank(monkeypatch, 1, others=[("smallest", 8, None), ("smallest", 2, None)])
 
-    assert _session(rank=1).all_reduce("smallest", lambda: 4, min) == 2
+    assert all_reduce("smallest", lambda: 4, min) == 2
     assert sent == [("smallest", 4, None)]
-
-
-def test_a_facts_all_reduce_holds_the_combined_value(monkeypatch):
-    _gather_as_rank(monkeypatch, 1, others=[("other", 8, None)])
-    session = _session(rank=1)
-
-    assert session.other.all_reduce(lambda: 4, min) == 4
-    assert session.other.value == 4
-
-
-def test_the_sessions_own_all_reduce_keeps_nothing(monkeypatch):
-    _gather_as_rank(monkeypatch, 1, others=[("smallest", 8, None)])
-    session = _session(rank=1)
-
-    session.all_reduce("smallest", lambda: 4, min)
-
-    assert session._synced == {}
 
 
 def test_a_rank_failing_to_compute_still_joins_the_gather(monkeypatch):
@@ -292,27 +196,50 @@ def test_a_rank_failing_to_compute_still_joins_the_gather(monkeypatch):
         raise ValueError("no memory reading")
 
     with pytest.raises(ValueError, match="no memory reading"):
-        _session(rank=1).all_reduce("smallest", fail, min)
+        all_reduce("smallest", fail, min)
     assert sent == [("smallest", None, "ValueError: no memory reading")]
 
 
 def test_the_other_ranks_raise_when_one_failed_to_compute(monkeypatch):
     _gather_as_rank(monkeypatch, 0, others=[("smallest", None, "ValueError: no memory reading")])
     with pytest.raises(RuntimeError, match=r"rank 1 failed to compute smallest.*memory"):
-        _session(rank=0).all_reduce("smallest", lambda: 4, min)
+        all_reduce("smallest", lambda: 4, min)
 
 
 def test_ranks_reducing_out_of_step_fail(monkeypatch):
     _gather_as_rank(monkeypatch, 0, others=[("other", 8, None)])
     with pytest.raises(RuntimeError, match="out of step"):
-        _session(rank=0).all_reduce("smallest", lambda: 4, min)
+        all_reduce("smallest", lambda: 4, min)
 
 
-def test_reset_clears_synced_facts():
-    session = _session()
-    session.plan.broadcast_from(lambda: DistributionPlan(world_size=1))
-    session._reset()
-    assert session.plan.value is None
+# ---------------------------------------------------------------------------------- process group
+
+
+def test_a_single_process_sets_no_group_up(monkeypatch):
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    monkeypatch.setattr(dist, "setup", lambda **kwargs: pytest.fail("set a group up"))
+    monkeypatch.setattr(dist, "cleanup", lambda: pytest.fail("tore a group down"))
+    with distributed_run():
+        pass
+
+
+def test_a_distributed_launch_owns_the_group_even_when_the_body_raises(monkeypatch, capsys):
+    """The group is torn down on the way out, and the body's error is printed first: a rank failing
+    alone would otherwise wait in the cleanup barrier while the rest sit in a collective."""
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    calls = []
+    monkeypatch.setattr(dist, "setup", lambda timeout=None: calls.append(("setup", timeout)))
+    monkeypatch.setattr(dist, "cleanup", lambda: calls.append(("cleanup", capsys.readouterr().out)))
+
+    with (
+        pytest.raises(ValueError, match="calibration failed"),
+        distributed_run(timeout=timedelta(hours=1)),
+    ):
+        raise ValueError("calibration failed")
+
+    assert calls[0] == ("setup", timedelta(hours=1))
+    assert calls[1][0] == "cleanup"
+    assert "calibration failed" in calls[1][1], "the error must be printed before the cleanup"
 
 
 # ------------------------------------------------------------------------------------ launch detect
@@ -320,7 +247,7 @@ def test_reset_clears_synced_facts():
 
 @pytest.mark.parametrize(("world", "expected"), [(None, False), ("1", False), ("8", True)])
 def test_launch_detection_reads_the_env_before_any_process_group(monkeypatch, world, expected):
-    """Must work at parse time, before modelopt_session exists."""
+    """Must work at parse time, before distributed_run sets the process group up."""
     monkeypatch.delenv("WORLD_SIZE", raising=False)
     if world is not None:
         monkeypatch.setenv("WORLD_SIZE", world)
