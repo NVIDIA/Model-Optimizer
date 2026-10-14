@@ -761,8 +761,8 @@ def load_and_prepare_ep(
 
     # DP=EP all-to-all: no FSDP. Non-experts stay replicated per rank (from_pretrained already placed
     # them on this rank's GPU); experts stay EP-sharded on the ep submesh. The model carries
-    # model._device_mesh = ep_submesh (sparse_moe_mesh["ep"]), which the export uses to detect EP and the
-    # per-expert distributed writer reads for the ep_rank offset + dp-replica dedup.
+    # model._device_mesh = ep_submesh (sparse_moe_mesh["ep"]), which calibration re-installs the
+    # all-to-all forwards over (expert_parallel_mesh).
     if hasattr(model, "tie_weights"):
         model.tie_weights()
     if freeze:
