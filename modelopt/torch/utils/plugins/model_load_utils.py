@@ -712,9 +712,10 @@ def resolve_distribution_plan(
     * ``dense``: ``"replicate"`` or ``"fsdp"`` for the rest of the model, or ``"auto"``, which
       FSDP2-shards it when a whole copy would take more than 60% of one GPU's memory.
 
-    ``None`` reads ``MODELOPT_EP_DEGREE`` and ``MODELOPT_FSDP_SIZE`` (``1`` replicates, ``world``
-    shards) from rank 0's environment, both defaulting to ``"auto"``. A single process holds the
-    whole model unless ``dense="fsdp"`` asks for FSDP2 on one rank.
+    ``None`` reads ``MODELOPT_EP_DEGREE`` and ``MODELOPT_FSDP_SIZE`` (``1`` replicates; ``world``,
+    or the world size as a number, shards) from rank 0's environment, both defaulting to
+    ``"auto"``. A single process holds the whole model unless ``dense="fsdp"`` asks for FSDP2 on
+    one rank.
     """
     from modelopt.torch.utils import distributed as dist
 
