@@ -42,9 +42,11 @@ from .megatron_preprocess_data import megatron_preprocess_data
 __all__ = ["prepare_chat_data_blend", "prepare_megatron_data_blend"]
 
 # A turn of a ``text`` row in the NeMo chat format: ``<extra_id_1>User\n...``. Any marker ends the
-# turn, so a trailing delimiter or a label marker is not kept as content.
+# turn, so a trailing delimiter is not kept as content. The role must be followed by a newline, a
+# marker or the end, so ``<extra_id_1>Userguide`` is no role at all.
 _CHAT_TURN = re.compile(
-    r"<extra_id_\d+>(User|Assistant|System)\n?(.*?)(?=<extra_id_\d+>|\Z)", re.DOTALL
+    r"<extra_id_\d+>(User|Assistant|System)(?:\n|(?=<extra_id_\d+>|\Z))(.*?)(?=<extra_id_\d+>|\Z)",
+    re.DOTALL,
 )
 _CHAT_ROLES = {"User": "user", "Assistant": "assistant", "System": "system"}
 _CHAT_MARKER = re.compile(r"<extra_id_\d+>")
@@ -177,37 +179,49 @@ def _prepare_sources(
 def _to_chat(
     row: dict[str, Any], content_field: str, reasoning_content: ReasoningContentMode = "native"
 ) -> dict[str, Any] | None:
-    """Convert a source row to ``{"messages": [...]}``, or ``None`` if it has no usable content.
+    """Convert a source row to ``{"messages": [...]}``, or ``None`` if it has nothing to train on.
 
-    ``messages`` go through :func:`prepare_messages_for_chat_template` with ``reasoning_content``.
-    A ``text`` row in the NeMo chat format (``<extra_id_1>User`` / ``Assistant`` markers) is split
-    into turns; any other ``text`` row becomes one assistant turn, so all of it is trained.
+    ``messages`` go through :func:`prepare_messages_for_chat_template` with ``reasoning_content``,
+    and a non-empty ``tools`` list is kept for the chat template. A ``text`` row in the NeMo chat
+    format (``<extra_id_1>User`` / ``Assistant`` markers) is split into turns; any other ``text``
+    row becomes one assistant turn, so all of it is trained.
     """
     if content_field == "messages":
         messages = row.get("messages")
         if not messages:
             return None
         messages = prepare_messages_for_chat_template(messages, reasoning_content=reasoning_content)
-        return {"messages": messages}
-    text = row.get("text") or ""
-    if not text:
-        return None
-    if "<extra_id_" in text:
+        chat: dict[str, Any] = {"messages": messages}
+        # As in the tokenizing mode: the chat template renders the tool definitions into the prompt.
+        if row.get("tools"):
+            chat["tools"] = row["tools"]
+    else:
+        text = row.get("text") or ""
+        if not text:
+            return None
+        if "<extra_id_" not in text:
+            return {"messages": [{"role": "assistant", "content": text}]}
         matches = _CHAT_TURN.findall(text)
+        # Markers that parse to no turns make the row malformed, not plain text: falling through
+        # would train the raw <extra_id_*> delimiters as assistant content. A marker without a known
+        # role (a Tool turn, or a SteerLM label line) or a known turn left empty would silently cut
+        # it out of the conversation, so drop the row. Only a bare delimiter at the very end needs no
+        # role, and only the System block, which real rows leave empty, may be empty.
+        roleless = len(_CHAT_MARKER.findall(text)) - len(matches)
+        if roleless > (1 if _CHAT_TRAILING_MARKER.search(text) else 0) or any(
+            not content.strip() and role != "System" for role, content in matches
+        ):
+            return None
         turns = [
             {"role": _CHAT_ROLES[role], "content": content.strip()}
             for role, content in matches
             if content.strip()
         ]
-        # Markers that parse to no turns make the row malformed, not plain text: falling through
-        # would train the raw <extra_id_*> delimiters as assistant content. A marker without a known
-        # role (e.g. Tool) would silently cut its turn out of the conversation, so drop the row; only
-        # a bare delimiter at the very end needs no role.
-        roleless = len(_CHAT_MARKER.findall(text)) - len(matches)
-        if not turns or roleless > (1 if _CHAT_TRAILING_MARKER.search(text) else 0):
-            return None
-        return {"messages": turns}
-    return {"messages": [{"role": "assistant", "content": text}]}
+        chat = {"messages": turns}
+    # Nothing in a row without an assistant turn is trained under assistant-only loss.
+    if not any(turn.get("role") == "assistant" for turn in chat["messages"]):
+        return None
+    return chat
 
 
 def _iter_rows(
@@ -267,7 +281,7 @@ def _take_chat_rows(
             if want is not None and len(rows) >= want:
                 break
     except Exception as e:  # e.g. a gated split, or a schema the streaming reader cannot cast
-        raise RuntimeError(f"{name}: failed to load") from e
+        raise RuntimeError(f"{name}: failed to read or convert") from e
     if not rows or (want is not None and len(rows) < want):
         gave_up = want is not None and rejected > 10 * want
         reason = f"gave up after {rejected} rejected rows" if gave_up else "source exhausted"
@@ -305,7 +319,7 @@ def _part_path(
     selection = {key: source.get(key) for key in ("hf_dataset", "config", "split", "files")}
     selection.update(settings, content_field=source["content_field"], capped=capped)
     digest = hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest()[:16]
-    label = source.get("split") or "files"
+    label = source.get("split") or Path(source["files"][0]).name.split(".")[0]
     return parts_dir / f"{source['hf_dataset'].replace('/', '--')}_{label}_{digest}.jsonl"
 
 
@@ -316,6 +330,9 @@ def _chat_budgets(config: dict[str, Any]) -> list[int | None]:
         raise ValueError(f"Source weights must be finite, nonnegative and not all zero: {weights}.")
     target = config.get("target_samples")
     if target is None:
+        if any("split" in source for source in config["sources"]):
+            # Every row of a split would be held in memory, which a large split does not fit.
+            raise ValueError("target_samples is required when a source is a Hugging Face split.")
         return [None] * len(weights)
     if isinstance(target, bool) or not isinstance(target, int) or target <= 0:
         raise ValueError(f"target_samples must be a positive integer, got {target!r}.")
@@ -327,18 +344,23 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
 
     For Megatron-Bridge's chat SFT path (``distill.py --sft --sft_hf_dataset``), which renders each
     conversation with the model's chat template and can restrict the loss to assistant tokens.
-    Each source contributes ``round(target_samples * weight / sum(weights))`` rows (every usable
-    row if ``target_samples`` is omitted; a source rounded to zero rows is skipped) that the chat
-    path accepts as text-only chat. ``content_field`` must be ``messages`` or ``text``; ``messages``
-    keep ``reasoning_content`` for the chat template by default (``reasoning_content: native``; set
-    ``inline`` for a template that ignores the field, or ``strip``). Hugging Face splits are
-    buffer-shuffled with ``seed`` unless ``shuffle: false``; ``files`` (``.jsonl`` or ``.jsonl.gz``)
-    are read from the beginning, skipping malformed records. The rows are mixed with ``seed`` and
-    ``min(1000, n // 20)`` of them are held out for validation. Each source is cached under
-    ``<output_dir>/parts``, keyed by the settings that select its rows, so an interrupted run
-    resumes.
+    Each source contributes ``round(target_samples * weight / sum(weights))`` rows (a source rounded
+    to zero rows is skipped) that the chat path accepts as text-only chat; ``target_samples`` may be
+    omitted only for ``files`` sources, to keep every usable row. ``content_field`` must be
+    ``messages`` or ``text``; ``messages`` keep ``reasoning_content`` for the chat template by
+    default (``reasoning_content: native``; set ``inline`` for a template that ignores the field, or
+    ``strip``). Hugging Face splits are buffer-shuffled with ``seed`` unless ``shuffle: false``;
+    ``files`` (``.jsonl`` or ``.jsonl.gz``) are read from the beginning, skipping malformed records.
+    The rows are mixed with ``seed`` and ``min(1000, n // 20)`` of them are held out for validation.
+    Each source is cached under ``<output_dir>/parts``, keyed by the settings that select its rows,
+    so an interrupted run resumes.
     """
     config = load_config(config_path)
+    if config.get("output_format") != "chat_jsonl":
+        raise ValueError(
+            "prepare_chat_data_blend writes output_format: chat_jsonl, "
+            f"got {config.get('output_format')!r}."
+        )
     ignored = {"tokenizer", "target_tokens"} & config.keys()
     if ignored:
         raise ValueError(f"output_format: chat_jsonl does not use {sorted(ignored)}.")
@@ -355,6 +377,7 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
             f"reasoning_content must be one of {sorted(REASONING_CONTENT_MODES)}, "
             f"got {reasoning_content!r}."
         )
+    budgets = _chat_budgets(config)
     output_dir = Path(config["output_dir"])
     parts_dir = output_dir / "parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
@@ -366,7 +389,7 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
         settings["seed"] = seed
 
     rows: list[dict[str, Any]] = []
-    for source, want in zip(config["sources"], _chat_budgets(config)):
+    for source, want in zip(config["sources"], budgets):
         if want == 0:
             print(f"{source['hf_dataset']}: weight rounds to 0 rows, skipped", flush=True)
             continue
@@ -391,12 +414,15 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
 def prepare_megatron_data_blend(config_path: Path) -> list[tuple[float, str]]:
     """Download and tokenize the configured weighted data sources."""
     config = load_config(config_path)
-    chat_keys = {"target_samples", "shuffle", "seed", "reasoning_content"} & config.keys()
-    if config.get("output_format", "megatron") != "megatron" or chat_keys:
+    output_format = config.get("output_format", "megatron")
+    if output_format != "megatron":
         raise ValueError(
-            "Tokenized blends do not use output_format: chat_jsonl, target_samples, shuffle, seed "
-            "or reasoning_content; run prepare_chat_data_blend for chat JSONL."
+            f"Unknown output_format {output_format!r} for a tokenized blend; use megatron, or "
+            "chat_jsonl with prepare_chat_data_blend."
         )
+    chat_keys = {"target_samples", "shuffle", "seed", "reasoning_content"} & config.keys()
+    if chat_keys:
+        raise ValueError(f"Tokenized blends do not use {sorted(chat_keys)}.")
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     target_tokens = config.get("target_tokens")
@@ -413,13 +439,11 @@ def main() -> None:
     """Prepare a data blend from the supplied configuration."""
     parser = _build_parser()
     args = parser.parse_args()
-    output_format = load_config(args.config).get("output_format", "megatron")
-    if output_format == "chat_jsonl":
+    # Each entry point rejects a config written for the other.
+    if load_config(args.config).get("output_format") == "chat_jsonl":
         sizes = prepare_chat_data_blend(args.config)
         print(f"Prepared chat JSONL: {sizes}. See train.jsonl, validation.jsonl and config.yaml.")
         return
-    if output_format != "megatron":
-        raise ValueError(f"Unknown output_format {output_format!r}; use megatron or chat_jsonl.")
     blend = prepare_megatron_data_blend(args.config)
     print(f"Prepared {len(blend)} data paths. See data_blend.txt and config.yaml in the output.")
 

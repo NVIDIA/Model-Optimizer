@@ -185,7 +185,7 @@ when it loads the data. Run it in an environment with Megatron-Bridge, whose tex
 ```yaml
 output_dir: /path/to/chat_blend
 output_format: chat_jsonl
-target_samples: 36_800  # Optional; omit to keep every usable row.
+target_samples: 36_800  # Required with split sources; omit only for files sources, to keep every row.
 shuffle: false          # Optional; take the first rows of each split in order (default: buffer shuffle).
 seed: 1234              # Optional; seeds the shuffle, the cross-source mix and the validation hold-out.
 reasoning_content: native  # Optional; native (default), inline or strip.
@@ -202,12 +202,13 @@ sources:
     weight: 17
 ```
 
-Each source contributes `round(target_samples * weight / sum(weights))` conversations that contain only text;
-a source that rounds to zero is skipped. `content_field` must be `messages` or `text`:
+Each source contributes `round(target_samples * weight / sum(weights))` conversations that contain only text
+and have an assistant turn; a source that rounds to zero is skipped. `content_field` must be `messages` or `text`:
 
 - A `text` row becomes one assistant turn, or is split into turns if it uses the `<extra_id_1>User` /
-  `<extra_id_1>Assistant` / `System` chat markers. A row with a marker for any other role is dropped.
-- `messages` are prepared as in the tokenizing mode (JSON-string `tool_calls` arguments become dicts), except
+  `<extra_id_1>Assistant` / `System` chat markers. A row with a marker for any other role (such as a SteerLM
+  label line) or with an empty turn other than `System` is dropped.
+- `messages` and a row's `tools` are prepared as in the tokenizing mode (JSON-string `tool_calls` arguments become dicts), except
   that `reasoning_content` stays on the message by default (`native`), because the chat template is applied
   later, at training time. Use `inline` if your model's chat template ignores `reasoning_content`, so the
   reasoning is kept as a `<think>` block in `content` (see [below](#reasoning_content-for-post-training-v3-datasets)),
@@ -217,6 +218,7 @@ a source that rounds to zero is skipped. `content_field` must be `messages` or `
 mixed and `min(1000, n // 20)` of them are held out for validation. A source that fails to load, has no usable
 rows, or runs out of them stops the run. Each source's selection is cached under `<output_dir>/parts`, keyed by
 the settings that choose its rows, so an interrupted run resumes and a changed configuration selects afresh.
+Nothing prunes `parts`; delete it once `train.jsonl` is written to reclaim the space.
 
 ## `reasoning_content` for Post-Training v3 Datasets
 
