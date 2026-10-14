@@ -2,7 +2,7 @@
 
 End-to-end W4A4 quantization of a NemotronH omni vision-language checkpoint (architecture `NemotronH_Omni_Reasoning_V3`), a Mamba-Transformer MoE language model with a vision tower: mixed NVFP4/FP8 post-training quantization → Quantization-Aware Distillation (QAD) → Hugging Face export → vLLM serving. This document covers:
 
-1. **[Data Preparation](#1-data-preparation)**: the chat-format QAD blend
+1. **[Data Preparation](#1-data-preparation)**: the chat-format QAD blend, from `data_blend.yaml`
 2. **[Quantization](#2-quantization)**: W4A4 PTQ with `examples/megatron_bridge/quantize.py`
 3. **[QAD](#3-quantization-aware-distillation-qad)**: distillation from the BF16 teacher with `examples/megatron_bridge/distill.py`
 4. **[Export](#4-export)**: the deployable Hugging Face checkpoint
@@ -26,6 +26,8 @@ All checkpoints were served with the same vLLM settings (see [Section 5](#5-eval
 | SciCode (problem) | 15.10 | 13.65 | 15.38 |
 | τ³-bench banking | 18.88 | 17.40 | 20.10 |
 
+MMLU-ProX scores a response only if it ends with the answer phrase in the question's language. Most of the QAD gain comes from fewer responses missing that phrase (11.3% for PTQ, 5.4% after QAD); on the responses with a readable answer, accuracy rises from 83.9 to 85.8.
+
 The exported W4A4 checkpoint is **70 GB**.
 
 ---
@@ -38,12 +40,13 @@ PTQ and export launch with `torchrun`; QAD runs on 8 nodes with the `sbatch` scr
 
 ### 1. Data Preparation
 
-Generate the QAD data with [`build_qad_blend.py`](build_qad_blend.py):
+QAD trains on a weighted blend of 11 text-only chat sources, defined in [`data_blend.yaml`](data_blend.yaml) and computing the loss on assistant tokens only. Set `output_dir` in that file, then write the blend as chat JSONL with the [chat JSONL mode of `prepare_megatron_data_blend`](../../../dataset/MEGATRON_DATA_PREP.md#chat-jsonl-blends-for-assistant-only-loss):
 
 ```bash
-python /opt/Model-Optimizer/examples/megatron_bridge/tutorials/NemotronH-Omni-W4A4-QAD/build_qad_blend.py \
-    --output_dir /path/to/qad_blend
+python -m modelopt.torch.utils.plugins.prepare_megatron_data_blend --config data_blend.yaml
 ```
+
+This writes `train.jsonl` (35,800 conversations) and `validation.jsonl` (1,000) to `output_dir`. Run it in the container: Megatron-Bridge's text-only chat filter selects the rows.
 
 ---
 
