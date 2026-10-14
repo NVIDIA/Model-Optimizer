@@ -340,7 +340,8 @@ def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
     return [
         ckpt_key
         for ckpt_key in weight_map
-        if (_resolve_target(plan, ckpt_key)[0] if plan else ckpt_key) not in model_param_names
+        if ckpt_key not in model_param_names
+        and (_resolve_target(plan, ckpt_key)[0] if plan else ckpt_key) not in model_param_names
     ]
 
 
