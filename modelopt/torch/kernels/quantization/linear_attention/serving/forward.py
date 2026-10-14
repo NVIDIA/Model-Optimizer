@@ -23,6 +23,10 @@ import torch
 @cache
 def _kernels(precision):
     # Defer optional serving/model dependencies until their explicit profile is selected.
+    if precision == "replayssm":
+        from .replay import _prefill_kernels
+
+        return _prefill_kernels()
     import vllm
 
     if vllm.__version__ != "0.30.0":

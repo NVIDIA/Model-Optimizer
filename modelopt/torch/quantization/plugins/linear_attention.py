@@ -117,6 +117,7 @@ class _LinearAttentionQuantMixin(QuantModule):
             state_quantizer_config(
                 self._linear_attn_state,
                 name=self.linear_attention_quantizer_names[0],
+                state_codec=self.linear_attention_config.state_codec,
             )
             if self.linear_attention_config.backend != "serving":
                 raise ValueError(

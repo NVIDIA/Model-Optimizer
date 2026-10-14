@@ -316,3 +316,8 @@ backward, so long suffixes can be slow. Each prefix and suffix token runs one
 native forward. Kernel/cache agreement does not establish pretrained-model
 quality recovery, full serving-engine equivalence, or training speed. Prefill
 GEMM quantization and approximate inverse are outside this example.
+
+## Optional ReplaySSM profile
+
+See [ReplaySSM state QAT](REPLAYSSM.md) for the optional INT8/Hadamard fork,
+its checkpoint window, and the proposed two-precision extension.
