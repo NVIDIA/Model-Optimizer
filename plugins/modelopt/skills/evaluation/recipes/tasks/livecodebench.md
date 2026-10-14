@@ -13,9 +13,7 @@ Use this inside the top-level `evaluation.tasks` list:
 ```yaml
 - name: ns_livecodebench
   container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
-  # The image's judge (`livecodebench` branch @ fddc0ea) misgrades binary stdio
-  # (`sys.stdin.buffer` / `sys.stdout.buffer`); pin the fixed one (wasiahmad/livecodebench#1).
-  # The assert fails the task if the pin did not take.
+  # Pin the binary-stdio judge fix (wasiahmad/livecodebench#1).
   pre_cmd: |-
     python -m pip install --quiet --no-cache-dir --no-deps --force-reinstall "git+https://github.com/wasiahmad/livecodebench.git@7b16053825437528ce2e00a58213f0ae4f6e5f92" &&
     python -c "import json, importlib.metadata as m; c = json.loads(m.distribution('livecodebench').read_text('direct_url.json'))['vcs_info']['commit_id']; assert c == '7b16053825437528ce2e00a58213f0ae4f6e5f92', c"
