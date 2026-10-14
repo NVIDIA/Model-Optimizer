@@ -112,20 +112,6 @@ def test_expert_parallel_model_matches_the_whole_model(
     dist_workers.run(_sharded_model_matches_the_whole_one, str(tmp_path), fsdp_dense, ep_degree)
 
 
-def _init_session(rank, size):
-    device = torch.device(f"cuda:{rank}")
-    session = ModelOptSession()
-    session.initialize(
-        distributed=True,
-        rank=rank,
-        world_size=size,
-        local_rank=rank,
-        device=device,
-        is_main=rank == 0,
-    )
-    return session, device
-
-
 def _batches(size):
     """Every rank's batch, the same on all ranks: each trains on its own, the reference on all."""
     return [
@@ -199,10 +185,10 @@ def _assert_grads_match_the_whole_model(model, per_batch, rank, size, ep_degree)
 
 
 def _sharded_model_backward_matches_the_whole_one(rank, size, ckpt_dir, fsdp_dense, ep_degree):
-    session, device = _init_session(rank, size)
+    device = torch.device(f"cuda:{rank}")
     config = AutoConfig.from_pretrained(ckpt_dir)
     model = load_and_prepare_ep(
-        ckpt_dir, session, ep_degree, hf_config=config, fsdp_dense=fsdp_dense, freeze=False
+        ckpt_dir, ep_degree, hf_config=config, fsdp_dense=fsdp_dense, freeze=False
     )
     whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16).to(device)
 

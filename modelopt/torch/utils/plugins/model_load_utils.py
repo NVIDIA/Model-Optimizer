@@ -1585,7 +1585,7 @@ def _experts_sharded_over(ep_mesh):
 _DENSE_STRATEGIES = ("replicated", "sharded")
 
 
-def _resolve_dense_strategy(dense_strategy, fsdp_dense, hf_config, mo_session):
+def _resolve_dense_strategy(dense_strategy, fsdp_dense, hf_config):
     """Resolve the ``dense_strategy`` governing how the EP hybrid places and loads dense modules.
 
     The strategies:
@@ -1608,9 +1608,11 @@ def _resolve_dense_strategy(dense_strategy, fsdp_dense, hf_config, mo_session):
         )
     # block-fp8 dense can't be DCP-dequantized (F8_E8M0) -> fall back to replicated dense (from_pretrained's
     # FineGrainedFP8Config(dequantize=True) path materializes it in bf16 per rank).
+    from .distributed import is_master
+
     if dense_strategy == "sharded" and _ckpt_quant_method(hf_config) == "fp8":
         dense_strategy = "replicated"
-        if mo_session.rank == 0:
+        if is_master():
             print(
                 "[ep] block-fp8 checkpoint: sharded dense unavailable (DCP can't dequant F8_E8M0) "
                 "-> dense_strategy=replicated",
@@ -1677,7 +1679,7 @@ def _ep_dense_meta_load(is_expert):
             m.get_device = orig
 
 
-def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, mo_session, expert_modules):
+def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, expert_modules):
     """Fully-distributed dense load for the EP hybrid.
 
     FSDP2-shard the (meta) dense modules and DCP-load each rank's shard directly from the checkpoint -- dense is NEVER
@@ -1690,9 +1692,9 @@ def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, mo_sessio
     the same loader that backs the DP and FSDP2-full paths -- here just fed a partially-meta model (dense
     meta, experts already real) and a dense-only name set.
     """
-    from .distributed import _meta_dcp_load
+    from .distributed import _meta_dcp_load, is_master, local_rank
 
-    device = torch.device(f"cuda:{mo_session.local_rank}")
+    device = torch.device(f"cuda:{local_rank()}")
     # FSDP2-shard the dense modules. Their params are meta plain tensors -> fully_shard makes them meta Shard
     # DTensors; experts are passed as ignored_params and stay EP-sharded.
     n_dense = _fsdp2_shard_dense(model, fsdp_mesh, expert_modules)
@@ -1704,7 +1706,7 @@ def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, mo_sessio
         for n, _ in model.named_parameters()
         if n.endswith((".weight", ".bias")) and not is_expert(n)
     }
-    if mo_session.rank == 0:
+    if is_master():
         print(
             f"[ep] dense-distributed load: FSDP2-sharded {n_dense} dense module(s); "
             f"meta+DCP-loading {len(dense_names)} dense param(s) (experts left EP-sharded)",
@@ -1932,7 +1934,7 @@ def load_and_prepare_ep(
     #   "sharded"    -- dense left on meta during from_pretrained (get_device->meta via
     #                   _ep_dense_meta_load), then FSDP2-sharded + DCP-loaded (never replicated).
     # ``dense_strategy`` (explicit) wins; else derive from ``fsdp_dense`` (the plan).
-    dense_strategy = _resolve_dense_strategy(dense_strategy, fsdp_dense, hf_config, mo_session)
+    dense_strategy = _resolve_dense_strategy(dense_strategy, fsdp_dense, hf_config)
     _dense_ctx = (
         _ep_dense_meta_load(is_expert_fn)
         if dense_strategy == "sharded"
@@ -1947,7 +1949,7 @@ def load_and_prepare_ep(
     ):
         model = loader.from_pretrained(ckpt_path, **from_pretrained_kwargs)
     model.eval()
-    if dense_strategy == "sharded" and mo_session.rank == 0:
+    if dense_strategy == "sharded" and is_master():
         _nmeta = [n for n, p in model.named_parameters() if p.is_meta]
         _dense_meta = [n for n in _nmeta if not is_expert_fn(n)]
         print(
@@ -2005,11 +2007,11 @@ def load_and_prepare_ep(
         # Collective: rank 0 makes the checkpoint local (downloading a Hub ID once); the others wait.
         _, local_dir = ensure_local_checkpoint(ckpt_path)
         n_dense = _load_ep_dense_distributed(
-            model, dense_fsdp_mesh, local_dir, is_expert_fn, mo_session, expert_modules.values()
+            model, dense_fsdp_mesh, local_dir, is_expert_fn, expert_modules.values()
         )
         # The keep-sharded writer reads each weight's own mesh/placements, so it dedups the ``edp``
         # replicas at EDP>1.
-        if mo_session.rank == 0:
+        if is_master():
             _dims = tuple(dense_fsdp_mesh.shape)
             print(
                 f"[ep] dense_strategy=sharded: FSDP2-sharded {n_dense} dense module(s) on mesh "
