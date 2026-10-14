@@ -72,7 +72,7 @@ SOURCES = [
     ),
 ]
 TURN = re.compile(
-    r"<extra_id_\d+>(User|Assistant|System)\n?(.*?)(?=<extra_id_\d+>(?:User|Assistant|System)|\Z)",
+    r"<extra_id_\d+>(User|Assistant|System)\n?(.*?)(?=<extra_id_\d+>|\Z)",
     re.DOTALL,
 )
 ROLE = {"User": "user", "Assistant": "assistant", "System": "system"}
