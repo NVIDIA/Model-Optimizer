@@ -34,6 +34,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     prepare_messages_for_chat_template,
 )
+from modelopt.torch.utils.distributed import DistributionPlan
 
 
 def test_prepare_messages_for_chat_template():
@@ -406,6 +407,7 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
             raise torch.cuda.OutOfMemoryError
 
     model = Mock(spec=torch.nn.Module)
+    model.modules.return_value = []  # no plan recorded and no FSDP2 module: a single process's
     # get_max_batch_size calls the module (model(...)) so FSDP2 hooks fire, not model.forward,
     # so route the mock's __call__ via side_effect.
     model.side_effect = fake_call
@@ -437,7 +439,8 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
 
 
 def test_get_max_batch_size_takes_the_smallest_ranks_in_a_distributed_run(monkeypatch):
-    """Every rank must run the same number of calibration steps, so ranks agree on one batch size.
+    """Every rank must run the same number of calibration steps, so ranks agree on one batch size
+    for a model whose plan distributes it over them.
 
     Rank 1 of two, on cuda:1, measures its own GPU only, probes with one forward (an OOM retry
     would run a different number of collective-bearing forwards per rank), and takes rank 0's
@@ -456,6 +459,7 @@ def test_get_max_batch_size_takes_the_smallest_ranks_in_a_distributed_run(monkey
     seen_batch_sizes: list[int] = []
     model = Mock(spec=torch.nn.Module, side_effect=lambda x: seen_batch_sizes.append(x.shape[0]))
     model.__class__.__name__ = "DummyModel"
+    model._modelopt_distribution_plan = DistributionPlan(2)
     device_props = Mock()
     device_props.total_memory = 10**12
     measured = []
