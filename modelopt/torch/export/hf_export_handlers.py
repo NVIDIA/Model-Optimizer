@@ -21,7 +21,7 @@ import warnings
 import torch.nn as nn
 
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update
-from modelopt.torch.utils.distributed import is_fsdp2_model
+from modelopt.torch.utils.distributed import distribution_plan
 
 from .layer_utils import get_expert_linear_names, is_quantlinear, set_expert_quantizer_amax
 from .moe_utils import _export_fused_experts, _export_fused_experts_keep_fused
@@ -76,7 +76,7 @@ def _export_weight(
     # index_put_, which DTensor cannot dispatch. Open a window per module for that path only, and
     # reshard on the way out: a layer left unsharded holds all of its weights on every rank, and
     # FSDP2 later puts its own shards back over anything packed in it outside a window.
-    if ctx.keep_fused_experts and is_fsdp2_model(ctx.model):
+    if ctx.keep_fused_experts and distribution_plan(ctx.model).is_fsdp_dense:
         with _fsdp2_weight_window(ctx.model, module):
             _export_quantized_weight(module, ctx.dtype, weight_name)
         return
@@ -182,7 +182,7 @@ def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContex
     the per-expert split happens later on the sharded weight (``split_fused_experts_state_dict``).
     Otherwise (single process, or gather export) it splits into full per-expert submodules here.
     """
-    if ctx.keep_fused_experts and is_fsdp2_model(ctx.model):
+    if ctx.keep_fused_experts and distribution_plan(ctx.model).is_fsdp_dense:
         # FSDP2 owns the fused weights here: fold them inside a weight-update window, which hands
         # FSDP2 the packed weights. Replaced behind its back, they would be overwritten with its
         # original shards the next time the layer reshards, and exported unquantized.

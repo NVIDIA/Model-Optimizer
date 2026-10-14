@@ -24,6 +24,7 @@ fused-experts module quantized with FP8 and NVFP4. Sharded cases run on a gloo p
 rank in process, and two spawned ranks where a non-zero expert offset matters.
 """
 
+import contextlib
 import copy
 import math
 import types
@@ -56,6 +57,7 @@ from modelopt.torch.export.moe_utils import (
 from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 NUM_EXPERTS = 4
 HIDDEN_DIM = 32
@@ -599,6 +601,37 @@ def test_fused_experts_handler_keeps_experts_fused_only_when_asked(keep_fused):
         assert "gate_up_proj" not in names
 
 
+@pytest.mark.parametrize("dense", ["fsdp", "replicate"])
+def test_fused_experts_fold_in_a_weight_window_when_the_plan_shards_the_dense_part(
+    monkeypatch, dense
+):
+    """FSDP2 owns the fused weights when it shards the dense part around them: folded outside a
+    weight-update window, they would be overwritten with its original shards at the next reshard."""
+    import modelopt.torch.export.hf_export_handlers as handlers
+
+    events = []
+
+    @contextlib.contextmanager
+    def window(root, module):
+        events.append("open")
+        yield
+        events.append("close")
+
+    monkeypatch.setattr(handlers, "_fsdp2_weight_window", window)
+    monkeypatch.setattr(
+        handlers, "_export_fused_experts_keep_fused", lambda module, dtype: events.append("fold")
+    )
+    experts = _quantized_experts(_KeepFusedGatedExperts, mtq.FP8_DEFAULT_CFG)
+    container = nn.Module()
+    container.experts = experts
+    set_distribution_plan(container, DistributionPlan(2, ep_size=2, dense=dense))
+    ctx = ExportContext(model=container, dtype=torch.bfloat16, keep_fused_experts=True)
+
+    ExportModuleRegistry.match(experts)(PREFIX, experts, ctx)
+
+    assert events == (["open", "fold", "close"] if dense == "fsdp" else ["fold"])
+
+
 def test_quant_linear_handler_packs_an_fsdp2_sharded_nvfp4_weight(gloo_world_of_one):
     """On the no-gather path the model is still sharded when a linear is packed.
 
@@ -613,6 +646,7 @@ def test_quant_linear_handler_packs_an_fsdp2_sharded_nvfp4_weight(gloo_world_of_
     ExportModuleRegistry.match(ref[0])("0", ref[0], ExportContext(model=ref, dtype=torch.bfloat16))
     fully_shard(model[0], mesh=gloo_world_of_one)
     fully_shard(model, mesh=gloo_world_of_one)
+    set_distribution_plan(model, DistributionPlan(dense="fsdp"))
     ctx = ExportContext(model=model, dtype=torch.bfloat16, keep_fused_experts=True)
 
     ExportModuleRegistry.match(model[0])("0", model[0], ctx)
