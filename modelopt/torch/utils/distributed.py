@@ -55,6 +55,7 @@ __all__ = [
     "is_master",
     "rank",
     "set_distribution_plan",
+    "setup_fsdp2_process_group",
     "size",
 ]
 
@@ -469,14 +470,18 @@ class DistributedState:
 
 @contextmanager
 def distributed_run(timeout: timedelta | None = None, device: torch.device | str = "cuda"):
-    """Own the process group for the block on a distributed launch, and yield this process's state.
+    """Own the run's process group for the block, and yield this process's state.
 
     On a distributed launch (``WORLD_SIZE>1``) this sets the process group up, binding this rank's
-    CUDA device, with ``timeout``, and destroys it on exit even if the body raises. It yields this
-    rank's :class:`DistributedState`, on that CUDA device. A single process sets nothing up and is
-    rank 0 of a run of one, on ``device``.
+    CUDA device, with ``timeout``. It yields this rank's :class:`DistributedState`, on that CUDA
+    device. A single process sets nothing up and is rank 0 of a run of one, on ``device``.
+
+    On exit, even if the body raises, it destroys the group the run set up: the launch's, or one the
+    body set up, such as the one-rank group of :func:`setup_fsdp2_process_group`. A group that was
+    already there when the run began is the caller's, and is left as it is.
     """
     owns_group = is_distributed_launch()
+    group_was_there = is_initialized()
     if owns_group:
         setup(timeout=timeout)
     try:
@@ -499,8 +504,19 @@ def distributed_run(timeout: timedelta | None = None, device: torch.device | str
             )
             traceback.print_exc()
             sys.stderr.flush()
-        if owns_group:
+        if owns_group or (not group_was_there and is_initialized()):
             cleanup()
+
+
+def setup_fsdp2_process_group(plan: DistributionPlan, timeout: timedelta | None = None) -> None:
+    """Set up the process group a single process needs to FSDP2-shard by ``plan``.
+
+    FSDP2 shards through a process group even on one rank. A distributed launch already has its
+    group (:func:`distributed_run`), and a plan that does not FSDP2-shard needs none. Inside a
+    :func:`distributed_run`, the run destroys the group on exit.
+    """
+    if plan.is_fsdp_dense and not is_initialized():
+        setup(timeout=timeout)
 
 
 def cleanup():
