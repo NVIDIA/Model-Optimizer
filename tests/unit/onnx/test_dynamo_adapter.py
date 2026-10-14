@@ -410,6 +410,7 @@ def test_normalize_rejects_unsupported_weight_topologies(kind):
         normalize_dynamo_weight_paths(_unsupported_nvfp4_model(kind))
 
 
+@pytest.mark.parametrize("domain", ["", "trt"])
 @pytest.mark.parametrize(
     ("prefix_shape", "transpose", "axis"),
     [
@@ -420,7 +421,7 @@ def test_normalize_rejects_unsupported_weight_topologies(kind):
         ((2, 2, 2), True, -1),
     ],
 )
-def test_normalize_int4_path_preserves_values_and_layout(prefix_shape, transpose, axis):
+def test_normalize_int4_path_preserves_values_and_layout(prefix_shape, transpose, axis, domain):
     values = np.arange(-4, 4, dtype=np.float32).reshape(2, 4)
     scale_shape = (*prefix_shape[:-1], 1) if prefix_shape else (2, 2)
     initializers = [_tensor("weight", values), _tensor("scale", np.ones(scale_shape))]
@@ -439,6 +440,7 @@ def test_normalize_int4_path_preserves_values_and_layout(prefix_shape, transpose
             ["blocked" if prefix_shape else "weight", "scale"],
             ["weight_dq"],
             name="weight_dequantizer",
+            domain=domain,
             block_size=2,
             **({} if axis is None else {"axis": axis}),
         )
@@ -462,6 +464,7 @@ def test_normalize_int4_path_preserves_values_and_layout(prefix_shape, transpose
         initializers=initializers,
         inputs=[_value("input", dtype, (1, 4 if transpose else 2))],
         outputs=[_value("output", dtype, (1, 2 if transpose else 4))],
+        trt_opset=1 if domain else None,
     )
 
     normalize_dynamo_weight_paths(model)
@@ -473,6 +476,7 @@ def test_normalize_int4_path_preserves_values_and_layout(prefix_shape, transpose
     ]
     marker = model.graph.node[0]
     assert marker.name == "__modelopt_dynamo_int4__weight_dequantizer"
+    assert marker.domain == ""
     assert marker.input[0] == "weight"
     attributes = {attr.name: helper.get_attribute_value(attr) for attr in marker.attribute}
     assert attributes["_target_shape"] == [2, 4]

@@ -434,7 +434,8 @@ def normalize_dynamo_weight_paths(model: onnx.ModelProto) -> onnx.ModelProto:
                 not isinstance(producer, onnx.NodeProto)
                 or producer.op_type != "TRT_FP4DynamicQuantize"
             ):
-                _validate_marker_domain(marker, "")
+                if marker.domain != "trt":
+                    _validate_marker_domain(marker, "")
                 kind = "int4"
         elif marker.op_type in {
             "TRT_FP8QuantizeLinear",
@@ -490,6 +491,7 @@ def normalize_dynamo_weight_paths(model: onnx.ModelProto) -> onnx.ModelProto:
             if not marker.name.startswith(_DYNAMO_INT4_NODE_PREFIX):
                 marker.name = f"{_DYNAMO_INT4_NODE_PREFIX}{marker.name}"
             _normalize_int4_path(graph, marker, weight, prefix_reshape, path, terminal, producers)
+            marker.domain = ""
         elif kind == "mxfp8" and not marker.name.startswith(_DYNAMO_MXFP8_NODE_PREFIX):
             marker.name = f"{_DYNAMO_MXFP8_NODE_PREFIX}{marker.name}"
         elif kind == "nvfp4":
