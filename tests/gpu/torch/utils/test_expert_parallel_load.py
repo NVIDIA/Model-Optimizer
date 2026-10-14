@@ -239,7 +239,10 @@ def _quantized_sharded_model_trains_like_the_whole_one(
     device = torch.device(f"cuda:{rank}")
     config = AutoConfig.from_pretrained(ckpt_dir)
     model = load_and_prepare_ep(
-        ckpt_dir, ep_degree, hf_config=config, fsdp_dense=fsdp_dense, freeze=False
+        ckpt_dir,
+        DistributionPlan(size, ep_size=ep_degree, dense="fsdp" if fsdp_dense else "replicate"),
+        hf_config=config,
+        freeze=False,
     )
     whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16).to(device)
 
