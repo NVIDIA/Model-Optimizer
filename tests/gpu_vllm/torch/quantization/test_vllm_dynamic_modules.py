@@ -412,6 +412,15 @@ def test_vllm_linear_restores_method_and_weight_after_fake_quant_forward_error()
     assert linear.weight is original_weight
 
 
+@pytest.fixture
+def fake_parallel_state(monkeypatch):
+    monkeypatch.setattr(
+        vllm_plugin,
+        "create_parallel_state",
+        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
+    )
+
+
 @pytest.mark.parametrize(
     ("parent_name", "projection", "dtype", "shape", "expected"),
     [
@@ -424,7 +433,7 @@ def test_vllm_linear_restores_method_and_weight_after_fake_quant_forward_error()
     ],
 )
 def test_kimi_mlp_low_latency_linear_fake_quant_support(
-    monkeypatch, parent_name, projection, dtype, shape, expected
+    fake_parallel_state, parent_name, projection, dtype, shape, expected
 ):
     kimi_model = pytest.importorskip("vllm.models.kimi_k3.nvidia.model")
     kimi_method = pytest.importorskip(
@@ -455,11 +464,6 @@ def test_kimi_mlp_low_latency_linear_fake_quant_support(
     model = torch.nn.Module()
     setattr(model, parent_name, mlp)
     model.attention_projection = new_linear("down_proj", torch.bfloat16, (4, 4))
-    monkeypatch.setattr(
-        vllm_plugin,
-        "create_parallel_state",
-        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
-    )
     vllm_plugin.vllm_replace_quant_module_hook(model)
     for linear in (mlp.gate_up_proj, mlp.down_proj, model.attention_projection):
         linear._setup()
@@ -468,34 +472,21 @@ def test_kimi_mlp_low_latency_linear_fake_quant_support(
     assert not model.attention_projection._fake_quant_supported
 
 
-def test_missing_kimi_package_keeps_standard_vllm_supported():
+def test_non_kimi_conversion_never_imports_kimi():
     original_import = __import__
 
-    def missing_kimi_import(name, *args, **kwargs):
+    def reject_kimi_import(name, *args, **kwargs):
         if name.startswith("vllm.models.kimi_k3"):
-            raise ModuleNotFoundError("No module named 'vllm.models'", name="vllm.models")
+            raise AssertionError("Kimi imported while converting another model")
         return original_import(name, *args, **kwargs)
 
-    with patch("builtins.__import__", side_effect=missing_kimi_import):
+    with patch("builtins.__import__", side_effect=reject_kimi_import):
         linear = SimpleNamespace(quant_method=vllm_plugin.vllm_linear.UnquantizedLinearMethod())
         assert vllm_plugin._supports_fake_quant_linear(linear)
-        vllm_plugin.vllm_replace_quant_module_hook(torch.nn.Module())
+        vllm_plugin.vllm_replace_quant_module_hook(torch.nn.Linear(2, 2))
 
 
-def test_kimi_guard_does_not_import_k3_for_other_models():
-    model = torch.nn.Linear(2, 2)
-    original_import = __import__
-
-    def reject_k3_import(name, *args, **kwargs):
-        if name == "vllm.models.kimi_k3.nvidia.model":
-            raise RuntimeError("K3 model imported while converting another model")
-        return original_import(name, *args, **kwargs)
-
-    with patch("builtins.__import__", side_effect=reject_k3_import):
-        vllm_plugin.vllm_replace_quant_module_hook(model)
-
-
-def test_kimi_legacy_gemm_rs_uses_quantized_down_projection(monkeypatch):
+def test_kimi_legacy_gemm_rs_uses_quantized_down_projection(fake_parallel_state):
     kimi_model = pytest.importorskip("vllm.models.kimi_k3.nvidia.model")
     if "run_gemm_rs" not in kimi_model.KimiMLP.forward.__code__.co_names:
         pytest.skip("Kimi MLP no longer uses the legacy GEMM-RS path")
@@ -519,11 +510,6 @@ def test_kimi_legacy_gemm_rs_uses_quantized_down_projection(monkeypatch):
     down_proj.forward = Mock(return_value=(x + 1, None))
     mlp.down_proj = down_proj
 
-    monkeypatch.setattr(
-        vllm_plugin,
-        "create_parallel_state",
-        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
-    )
     vllm_plugin.vllm_replace_quant_module_hook(mlp)
     down_proj._setup()
     assert down_proj._fake_quant_supported
@@ -575,7 +561,7 @@ def test_kimi_gemm_rs_ar_bypasses_enabled_fake_quantizers(quantizer_name):
     assert gemm_rs_ar.call_count == 2
 
 
-def test_kimi_gemm_rs_guard_tracks_converted_down_projection(monkeypatch):
+def test_kimi_gemm_rs_guard_tracks_converted_down_projection(fake_parallel_state):
     kimi_model = pytest.importorskip("vllm.models.kimi_k3.nvidia.model")
     if "gemm_rs_ar" not in kimi_model.KimiMLP.forward.__code__.co_names:
         pytest.skip("Kimi MLP uses the legacy GEMM-RS path")
@@ -598,11 +584,6 @@ def test_kimi_gemm_rs_guard_tracks_converted_down_projection(monkeypatch):
 
     vllm_plugin.vllm_replace_quant_module_hook(mlp)
     guard = mlp.gemm_rs_ar
-    monkeypatch.setattr(
-        vllm_plugin,
-        "create_parallel_state",
-        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
-    )
     converted = vllm_plugin.QuantModuleRegistry.convert(down_proj)
 
     assert converted is down_proj
