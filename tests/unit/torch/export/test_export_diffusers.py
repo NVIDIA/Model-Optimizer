@@ -16,6 +16,7 @@
 import copy
 import inspect
 import json
+import types
 from pathlib import Path
 
 import numpy as np
@@ -213,6 +214,22 @@ def test_export_diffusers_pipeline_config_serialization(tmp_path, setting, expec
     assert model_index["setting"] == expected
     assert set(model_index) & set(pipe.components) == {"unet"}
     assert {path.name for path in export_dir.iterdir() if path.is_dir()} == {"unet"}
+
+
+def test_a_pipeline_is_exported_without_a_distribution_plan(tmp_path, monkeypatch):
+    """A pipeline is not a module: nothing distributes one, so the export reads no plan of it."""
+    exported = []
+    monkeypatch.setattr(unified_export_hf, "is_diffusers_object", lambda model: True)
+    monkeypatch.setattr(
+        unified_export_hf,
+        "_export_diffusers_checkpoint",
+        lambda pipe, *a, **k: exported.append(pipe),
+    )
+    pipe = types.SimpleNamespace(config=None)
+
+    export_hf_checkpoint(pipe, export_dir=tmp_path)
+
+    assert exported == [pipe]
 
 
 def test_export_diffusers_unet_quantized_matches_llm_config(tmp_path, monkeypatch):
