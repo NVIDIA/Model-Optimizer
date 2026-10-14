@@ -17,10 +17,12 @@
 
 import importlib.util
 import json
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
     wrap_in_parent_with_tied_keys,
@@ -1091,3 +1093,31 @@ def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_pat
     assert written["text_config"].get("base_model_ep_plan") == source_plan
     assert config.distributed_config is distributed_config
     assert config.text_config.base_model_ep_plan is swapped_plan
+
+
+def _finish_export_job(failing_rank, rank, size):
+    from modelopt.torch.export.unified_export_hf import _finish_export_together
+
+    if failing_rank is None:
+        _finish_export_together(None)
+    elif rank == failing_rank:
+        with pytest.raises(OSError, match="disk full"):
+            _finish_export_together(OSError("disk full"))
+    else:
+        with pytest.raises(RuntimeError, match=rf"rank {failing_rank} failed.*disk full"):
+            _finish_export_together(None)
+
+
+@pytest.mark.parametrize("failing_rank", [None, 0, 1])
+def test_every_rank_fails_an_export_that_any_rank_failed(failing_rank):
+    """A barrier alone lets the ranks that wrote their shards carry on as if the export succeeded."""
+    spawn_multiprocess_job(2, partial(_finish_export_job, failing_rank), backend="gloo")
+
+
+def test_a_single_process_export_ends_on_its_own_outcome():
+    """Nothing to wait for: the export's own error, if any, is all that is raised."""
+    from modelopt.torch.export.unified_export_hf import _finish_export_together
+
+    _finish_export_together(None)
+    with pytest.raises(OSError, match="disk full"):
+        _finish_export_together(OSError("disk full"))
