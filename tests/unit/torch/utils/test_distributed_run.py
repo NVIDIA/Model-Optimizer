@@ -25,6 +25,7 @@ from torch import nn
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils.distributed import (
+    DistributedState,
     DistributionPlan,
     all_reduce,
     broadcast_from,
@@ -258,6 +259,25 @@ def test_a_single_process_sets_no_group_up(monkeypatch):
     monkeypatch.setattr(dist, "cleanup", lambda: pytest.fail("tore a group down"))
     with distributed_run():
         pass
+
+
+def test_a_single_process_is_rank_0_of_one_on_the_given_device(monkeypatch):
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    with distributed_run(device="cpu") as state:
+        assert state == DistributedState(rank=0, world_size=1, device="cpu")
+        assert state.is_main
+
+
+def test_a_distributed_launch_yields_this_ranks_state_on_its_cuda_device(monkeypatch):
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setattr(dist, "setup", lambda timeout=None: None)
+    monkeypatch.setattr(dist, "cleanup", lambda: None)
+    monkeypatch.setattr(dist, "rank", lambda group=None: 2)
+    monkeypatch.setattr(dist, "size", lambda group=None: 4)
+    monkeypatch.setattr(dist, "local_rank", lambda: 1)
+    with distributed_run(device="cpu") as state:
+        assert state == DistributedState(rank=2, world_size=4, device=torch.device("cuda:1"))
+        assert not state.is_main
 
 
 def test_a_distributed_launch_owns_the_group_even_when_the_body_raises(monkeypatch, capsys):
