@@ -26,9 +26,12 @@ export NEL_SLURM_PARTITION="<slurm-partition>"
 export NEL_OUTPUT_DIR="/shared/path/to/evaluation-results"
 export MODEL_CHECKPOINT="/shared/path/to/checkpoint"
 
+# See execution.mounts.evaluation in nel_configs/h100_slurm_execution.yaml
+# for why the checkpoint mount is passed via -o.
 # Run MMLU and WikiText.
 nemo-evaluator-launcher run --config nel_config.yaml \
-    -o deployment.served_model_name=qwen3-8b-ptq
+    -o deployment.served_model_name=qwen3-8b-ptq \
+    -o "++execution.mounts.evaluation={$MODEL_CHECKPOINT: /checkpoint}"
 ```
 
 Use the BF16 teacher or an exported Hugging Face PTQ/QAD checkpoint. The checkpoint directory must be accessible on the cluster and contain the model files, without symlinks to unmounted locations.

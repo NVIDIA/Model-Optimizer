@@ -1,5 +1,5 @@
 # Shared single-GPU Slurm execution settings for H100 evaluation.
-# NEL mounts deployment.checkpoint_path in the server; mount it in the evaluator too.
+# NEL mounts the server checkpoint automatically; pass the evaluator mount with -o.
 execution:
   hostname: ${oc.env:NEL_SLURM_HOST}
   username: ${oc.env:SLURM_USER}
@@ -16,4 +16,8 @@ execution:
   mounts:
     mount_home: false
     deployment: {}
-    evaluation: '${oc.create:''{"${oc.env:MODEL_CHECKPOINT}": "/checkpoint"}''}'
+    # NEL 0.2.6 validates this field as a dictionary before resolving oc.create,
+    # so the expression deriving the mount from MODEL_CHECKPOINT was rejected.
+    # The README therefore supplies a concrete mapping via the CLI instead:
+    # -o "++execution.mounts.evaluation={$MODEL_CHECKPOINT: /checkpoint}"
+    evaluation: {}
