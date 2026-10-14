@@ -21,7 +21,6 @@ import pytest
 import torch.distributed as dist
 
 import modelopt.torch.utils.moe as moe
-from modelopt.torch.utils.distributed import get_active_mo_session
 from modelopt.torch.utils.moe import (
     _resolve_ep_size,
     choose_ep_dp_degrees,
@@ -143,28 +142,8 @@ def test_unknown_dense_size_defaults_to_replication():
 # ------------------------------------------------------------------------------- rank-0 decision
 
 
-@pytest.fixture
-def session():
-    """Enter the active session as ``rank`` of an 8-rank run."""
-    active = get_active_mo_session(required=False)
-
-    def enter(rank):
-        active.initialize(
-            distributed=True,
-            rank=rank,
-            world_size=8,
-            local_rank=rank,
-            device=None,
-            is_main=not rank,
-        )
-        return active
-
-    yield enter
-    active._reset()
-
-
 def _as_rank(monkeypatch, rank, rank0_message=None):
-    """Answer the session's broadcast as ``rank``; returns what this rank handed it.
+    """Run as ``rank`` of an 8-rank run, answering its broadcast; returns what this rank handed it.
 
     A non-zero rank receives ``rank0_message``, as rank 0 would have sent it.
     """
@@ -175,13 +154,14 @@ def _as_rank(monkeypatch, rank, rank0_message=None):
         if rank != 0:
             message[0] = rank0_message
 
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda group=None: 8)
     monkeypatch.setattr(dist, "get_rank", lambda group=None: rank)
     monkeypatch.setattr(dist, "broadcast_object_list", broadcast_object_list)
     return sent
 
 
-def test_rank0_decides_and_keeps_its_plan_on_the_session(monkeypatch, session):
-    active = session(0)
+def test_rank0_decides_and_sends_its_plan(monkeypatch):
     sent = _as_rank(monkeypatch, 0)
 
     plan = decide_distribution_plan(moe_cfg(), world_size=8, ep_size=4)
@@ -189,13 +169,11 @@ def test_rank0_decides_and_keeps_its_plan_on_the_session(monkeypatch, session):
     ((name, sent_plan, error),) = sent
     assert (name, sent_plan.ep_size, error) == ("plan", 4, None)
     assert plan.ep_size == 4
-    assert active.plan.value is plan
 
 
-def test_other_ranks_adopt_rank0s_plan_without_deciding(monkeypatch, session):
+def test_other_ranks_adopt_rank0s_plan_without_deciding(monkeypatch):
     """A non-zero rank's own inputs (here an EP knob of 2) must not leak into the plan."""
     rank0_plan = decide_distribution_plan(moe_cfg(), world_size=8, ep_size=4)
-    active = session(1)
     _as_rank(monkeypatch, 1, rank0_message=("plan", rank0_plan, None))
 
     def must_not_decide(*args, **kwargs):
@@ -204,12 +182,10 @@ def test_other_ranks_adopt_rank0s_plan_without_deciding(monkeypatch, session):
     monkeypatch.setattr(moe, "_decide_distribution_plan_on_rank0", must_not_decide)
     plan = decide_distribution_plan(moe_cfg(), world_size=8, ep_size=2)
     assert repr(plan) == repr(rank0_plan)
-    assert active.plan.value is plan
 
 
-def test_rank0_failure_is_broadcast_before_it_raises(monkeypatch, session):
+def test_rank0_failure_is_broadcast_before_it_raises(monkeypatch):
     """Rank 0 must still reach the broadcast on failure, or every other rank hangs in it."""
-    session(0)
     sent = _as_rank(monkeypatch, 0)
     with pytest.raises(ValueError, match="must divide world_size"):
         decide_distribution_plan(moe_cfg(), world_size=8, ep_size=3)
@@ -218,14 +194,13 @@ def test_rank0_failure_is_broadcast_before_it_raises(monkeypatch, session):
     assert "ValueError" in error
 
 
-def test_other_ranks_raise_when_rank0_failed(monkeypatch, session):
-    session(1)
+def test_other_ranks_raise_when_rank0_failed(monkeypatch):
     _as_rank(monkeypatch, 1, rank0_message=("plan", None, "ValueError: bad degrees"))
     with pytest.raises(RuntimeError, match=r"rank 0 failed to compute.*bad degrees"):
         decide_distribution_plan(moe_cfg(), world_size=8)
 
 
-def test_without_a_session_the_process_decides_alone(monkeypatch):
+def test_a_single_process_decides_alone(monkeypatch):
     monkeypatch.setattr(
         dist, "broadcast_object_list", lambda *a, **k: pytest.fail("a collective ran")
     )
