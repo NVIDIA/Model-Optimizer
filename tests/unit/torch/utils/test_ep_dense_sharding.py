@@ -127,43 +127,41 @@ def _config(quant_method=None, *, on_text_config=False):
     return SimpleNamespace(quantization_config=quantization_config)
 
 
-_RANK0 = SimpleNamespace(rank=0)
-
-
 @pytest.mark.parametrize(
     ("dense_strategy", "fsdp_dense"), [("replicated", True), ("sharded", False)]
 )
 def test_an_explicit_dense_strategy_overrides_the_plan(dense_strategy, fsdp_dense):
-    assert _resolve_dense_strategy(dense_strategy, fsdp_dense, _config(), _RANK0) == (
-        dense_strategy
-    )
+    assert _resolve_dense_strategy(dense_strategy, fsdp_dense, _config()) == dense_strategy
 
 
 @pytest.mark.parametrize(("fsdp_dense", "expected"), [(True, "sharded"), (False, "replicated")])
 def test_without_an_explicit_strategy_the_plan_decides(fsdp_dense, expected):
-    assert _resolve_dense_strategy(None, fsdp_dense, _config(), _RANK0) == expected
+    assert _resolve_dense_strategy(None, fsdp_dense, _config()) == expected
 
 
 @pytest.mark.parametrize("on_text_config", [False, True], ids=["causal-lm", "vlm"])
 @pytest.mark.parametrize("rank", [0, 1])
-def test_a_block_fp8_checkpoint_keeps_the_dense_part_replicated(capsys, on_text_config, rank):
+def test_a_block_fp8_checkpoint_keeps_the_dense_part_replicated(
+    monkeypatch, capsys, on_text_config, rank
+):
     """DCP cannot dequantize block-fp8 dense weights, while ``from_pretrained`` dequantizes them
     as it replicates. Rank 0 says it fell back."""
     config = _config("fp8", on_text_config=on_text_config)
+    monkeypatch.setattr(mto_dist, "is_master", lambda group=None: rank == 0)
 
-    assert _resolve_dense_strategy(None, True, config, SimpleNamespace(rank=rank)) == ("replicated")
+    assert _resolve_dense_strategy(None, True, config) == "replicated"
     assert ("block-fp8" in capsys.readouterr().out) == (rank == 0)
 
 
 @pytest.mark.parametrize("quant_method", ["mxfp4", "compressed-tensors"])
 def test_other_native_quantization_keeps_the_dense_part_sharded(quant_method):
-    assert _resolve_dense_strategy(None, True, _config(quant_method), _RANK0) == "sharded"
+    assert _resolve_dense_strategy(None, True, _config(quant_method)) == "sharded"
 
 
 @pytest.mark.parametrize("dense_strategy", ["fsdp", "Sharded"])
 def test_an_unknown_dense_strategy_is_rejected(dense_strategy):
     with pytest.raises(ValueError, match="dense_strategy must be one of"):
-        _resolve_dense_strategy(dense_strategy, False, _config(), _RANK0)
+        _resolve_dense_strategy(dense_strategy, False, _config())
 
 
 # ------------------------------------------------------------------------- _ep_dense_meta_load
@@ -405,10 +403,10 @@ def test_the_dense_load_shards_first_then_asks_for_exactly_the_meta_dense_params
         loads.append((local_dir, device, load_names, sharded))
 
     monkeypatch.setattr(mto_dist, "_meta_dcp_load", record_load)
-    session = SimpleNamespace(rank=0, local_rank=3)
+    monkeypatch.setattr(mto_dist, "local_rank", lambda: 3)
 
     wrapped = _load_ep_dense_distributed(
-        model, fsdp_mesh, str(tmp_path), _is_expert, session, model.experts()
+        model, fsdp_mesh, str(tmp_path), _is_expert, model.experts()
     )
 
     assert wrapped == 2
