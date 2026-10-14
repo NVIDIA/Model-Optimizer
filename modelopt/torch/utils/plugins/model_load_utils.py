@@ -53,6 +53,7 @@ from modelopt.torch.utils.distributed import (
     broadcast_state_dict,
     is_initialized,
     set_distribution_plan,
+    size,
 )
 from modelopt.torch.utils.fsdp2_utils import fsdp2_wrap
 from modelopt.torch.utils.logging import print_rank_0, warn_rank_0
@@ -972,8 +973,7 @@ def parallel_load_and_prepare_fsdp2(
     a smaller value lowers the peak transient GPU memory at the cost of more collectives (default 8;
     pass ``None`` to broadcast all of a source's layers at once).
 
-    The model records how it is distributed, as :func:`~modelopt.torch.utils.distributed.fsdp2_wrap`
-    does.
+    The model records how it is distributed, as :func:`fsdp2_wrap` does.
     """
     resolved_path = _resolve_checkpoint_dir(ckpt_path, rank)
     weight_map = indexed_weight_map(resolved_path)
