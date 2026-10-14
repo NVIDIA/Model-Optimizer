@@ -238,7 +238,6 @@ def compute_fp4_scales(
     scale = amax / 6.0  # FP4 max representable value is 6.0
 
     if quantize_block_scales:
-        from modelopt.torch.quantization.tensor_quant import scaled_e4m3_impl
         from modelopt.torch.quantization.utils import reduce_amax
 
         if global_amax is None:
@@ -246,7 +245,14 @@ def compute_fp4_scales(
 
         global_amax = global_amax.float()
         scale_fp8_quant_amax = global_amax * (E4M3_MAX / fp8_max_for_normalization) / 6.0
-        scale = scaled_e4m3_impl(scale, scale_fp8_quant_amax)
+        # Same arithmetic as the scaled_e4m3_impl CUDA extension (true divisions, so results stay
+        # bit-identical), minus its amax <= 2**-24 floor, which zeroes every block once
+        # global_amax < 6 * 2**-24. Only a zero (or underflowing) amax takes the unit fallback.
+        fp8_scale = torch.full_like(scale_fp8_quant_amax, E4M3_MAX) / scale_fp8_quant_amax
+        fp8_scale = torch.where(fp8_scale.isinf(), E4M3_MAX, fp8_scale)
+        fp8_scale_inv = torch.ones_like(fp8_scale) / fp8_scale
+        scale = scale.mul_(fp8_scale).clamp_(max=E4M3_MAX).to(torch.float8_e4m3fn).float()
+        scale = scale.mul_(fp8_scale_inv)
 
     return scale
 

@@ -373,6 +373,31 @@ class Testfp4:
             scaled = triton_kernel.fp4_fake_quant_block(x * factor, x.float().abs().amax() * factor)
             assert torch.equal(scaled, reference * factor)
 
+    @pytest.mark.skipif(not triton_kernel.IS_AVAILABLE, reason="triton kernel is not available")
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    def test_static_fp4_kernel_scales_with_small_inputs(self, dtype):
+        """Static counterpart of ``test_fp4_kernel_scales_with_small_inputs``.
+
+        A global amax below 6 * 2**-24 must not zero the FP8-quantized block scales, while an
+        all-zero tensor still quantizes to zeros.
+        """
+        torch.manual_seed(0)
+        x = (torch.randn(8, 64, device="cuda") * 10).to(dtype)
+        amax = x.float().abs().view(-1, 16).amax(-1)
+        reference = triton_kernel.static_blockwise_fp4_fake_quant(x, amax, amax.max())
+        assert reference.abs().amax() > 0
+        for factor in (2.0**-10, 2.0**-20, 2.0**-30):
+            scaled = triton_kernel.static_blockwise_fp4_fake_quant(
+                x * factor, amax * factor, amax.max() * factor
+            )
+            assert torch.equal(scaled, reference * factor)
+
+        zeros = torch.zeros_like(x)
+        output = triton_kernel.static_blockwise_fp4_fake_quant(
+            zeros, torch.zeros_like(amax), torch.zeros_like(amax.max())
+        )
+        assert torch.equal(output, zeros)
+
     @pytest.mark.skipif(
         not hasattr(triton_kernel, "fp4_fake_quant_block"),
         reason="fp4_fake_quant_block requires compute >= 8.9",
