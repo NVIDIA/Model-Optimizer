@@ -278,7 +278,7 @@ def test_a_replicated_plan_loads_the_whole_model_on_every_rank(
 
     assert auto_class.calls == [{"device_map": placed}]
     assert loaders == {}
-    assert (active.plan.ep_size, active.plan.fsdp_size) == (1, 1)
+    assert (active.plan.value.ep_size, active.plan.value.fsdp_size) == (1, 1)
 
 
 @pytest.mark.parametrize("distribution", ["fsdp2", DistributionPlan(2, fsdp_size=2)])
@@ -332,7 +332,7 @@ def test_an_expert_parallel_plan_is_refused(session, serve, loaders, auto_class,
 
     with pytest.raises(NotImplementedError, match="shards the routed experts"):
         load_pretrained(str(tmp_path), auto_class, distribution=DistributionPlan(2, ep_size=2))
-    assert active.plan is None
+    assert active.plan.value is None
     assert loaders == {}
     assert auto_class.calls == []
 
@@ -358,7 +358,7 @@ def test_every_rank_loads_the_plan_rank0_was_handed(
 
     assert auto_class.calls == [], "rank 1 loaded the whole model, as its own plan says"
     assert "fsdp2" in loaders
-    assert active.plan is rank0_plan
+    assert repr(active.plan.value) == repr(rank0_plan)
 
 
 def test_the_plan_a_load_runs_is_kept_on_the_session(
@@ -370,7 +370,7 @@ def test_the_plan_a_load_runs_is_kept_on_the_session(
 
     load_pretrained(str(tmp_path), distribution=DistributionPlan(2, fsdp_size=2))
 
-    assert active.plan.fsdp_size == 2
+    assert active.plan.value.fsdp_size == 2
 
 
 def test_a_plan_for_another_world_is_refused(session, serve, tmp_path):
