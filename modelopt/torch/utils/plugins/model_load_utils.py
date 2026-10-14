@@ -610,8 +610,8 @@ def load_pretrained(
         _route(distribution)  # A plan this rank refuses leaves the session as it was.
         # Every rank loads the plan rank 0 was handed, as it would one the session decided: ranks
         # loading different plans would build mismatched meshes and hang.
-        session.plan = distribution
-        distribution = session.plan
+        handed = distribution
+        distribution = session.plan.decide(lambda: handed)
     route = _route(distribution)
     if model_type is None:
         # The load uses the config passed for it, if any, so the loading hook follows that one.
