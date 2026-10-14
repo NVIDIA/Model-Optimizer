@@ -1073,7 +1073,6 @@ def _decide_distribution(
 ) -> DistributionPlan:
     """The plan :func:`resolve_distribution_plan` returns, decided by this rank alone."""
     from modelopt.torch.utils.moe import (
-        _ckpt_quant_method,
         _ep_config,
         _routed_expert_modules,
         choose_ep_dp_degrees,
@@ -1278,7 +1277,11 @@ def _ep_aware_caching_allocator_warmup(
                 from transformers.integrations.tensor_parallel import _get_parameter_tp_plan
             except Exception:
                 _get_parameter_tp_plan = None
-            ws = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
+            ws = (
+                torch.distributed.get_world_size()
+                if torch.distributed.is_available() and torch.distributed.is_initialized()
+                else 1
+            )
             tp_plan = (getattr(model, "_tp_plan", None) or {}) if ws > 1 else {}
             tied = set(getattr(model, "all_tied_weights_keys", {}) or {})
             total: dict = defaultdict(int)
@@ -1313,7 +1316,10 @@ def _ep_aware_caching_allocator_warmup(
                 ):
                     nb //= ws  # preserve stock TP sharding credit for any tp-planned params
                 total[dev] += nb
-            if not (dist.is_available() and dist.is_initialized()) or dist.get_rank() == 0:
+            if (
+                not (torch.distributed.is_available() and torch.distributed.is_initialized())
+                or torch.distributed.get_rank() == 0
+            ):
                 gib = 1024**3
                 sizes = ", ".join(f"{d}: {b / gib:.1f} GiB" for d, b in total.items())
                 print(
@@ -1394,8 +1400,6 @@ def _fsdp2_shard_dense(model: nn.Module, fsdp_mesh, expert_modules) -> int:
     Returns the number of layers wrapped.
     """
     from torch.distributed.fsdp import fully_shard
-
-    from .distributed import _fsdp2_wrap_modules
 
     # Every routed-expert param is EP-sharded on the ``ep`` mesh; FSDP must IGNORE them so it never tries
     # to reshard them onto ``fsdp_mesh``. Ignored params not present in a given layer are simply no-ops.
@@ -1574,7 +1578,7 @@ def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, expert_mo
     the same loader that backs the DP and FSDP2-full paths -- here just fed a partially-meta model (dense
     meta, experts already real) and a dense-only name set.
     """
-    from .distributed import _meta_dcp_load, is_master, local_rank
+    from modelopt.torch.utils.distributed import is_master, local_rank
 
     device = torch.device(f"cuda:{local_rank()}")
     # FSDP2-shard the dense modules. Their params are meta plain tensors -> fully_shard makes them meta Shard
@@ -1867,8 +1871,6 @@ def load_and_prepare_ep(
         # DCP-load each rank's shard directly (never replicated anywhere). EDP=1 -> the 1D full-world dense
         # mesh (the original, validated layout); EDP>1 -> the 2D (edp, ep) mesh (fully_shard replicates dim0
         # ``edp``, shards dim1 ``ep``), so the meta+DCP loader fills [Replicate(edp), Shard(ep)] DTensors.
-        from .plugins.hf_checkpoint_utils import ensure_local_checkpoint
-
         dense_fsdp_mesh = dense_mesh["dp"] if dp == 1 else sparse_moe_mesh
         # Collective: rank 0 makes the checkpoint local (downloading a Hub ID once); the others wait.
         _, local_dir = ensure_local_checkpoint(ckpt_path)

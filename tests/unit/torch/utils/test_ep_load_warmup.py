@@ -30,7 +30,7 @@ pytest.importorskip("transformers")
 
 from transformers import modeling_utils
 
-from modelopt.torch.utils.moe import _ep_aware_caching_allocator_warmup
+from modelopt.torch.utils.plugins.model_load_utils import _ep_aware_caching_allocator_warmup
 
 if not hasattr(modeling_utils, "get_total_byte_count"):
     pytest.skip("transformers has no get_total_byte_count to size", allow_module_level=True)

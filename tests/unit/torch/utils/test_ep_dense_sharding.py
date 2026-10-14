@@ -34,8 +34,9 @@ from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tenso
 
 import modelopt.torch.utils.distributed as mto_dist
 import modelopt.torch.utils.moe as moe
+import modelopt.torch.utils.plugins.model_load_utils as model_load_utils
 from modelopt.torch.utils.distributed import DistributionPlan
-from modelopt.torch.utils.moe import (
+from modelopt.torch.utils.plugins.model_load_utils import (
     _ep_dense_meta_load,
     _fsdp2_shard_dense,
     _load_ep_dense_distributed,
@@ -378,7 +379,7 @@ def test_the_dense_load_shards_first_then_asks_for_exactly_the_meta_dense_params
         sharded = [isinstance(layer.self_attn.weight, DTensor) for layer in loaded.model.layers]
         loads.append((local_dir, device, load_names, sharded))
 
-    monkeypatch.setattr(mto_dist, "_meta_dcp_load", record_load)
+    monkeypatch.setattr(model_load_utils, "_meta_dcp_load", record_load)
     monkeypatch.setattr(mto_dist, "local_rank", lambda: 3)
 
     wrapped = _load_ep_dense_distributed(
