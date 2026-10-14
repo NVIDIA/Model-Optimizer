@@ -644,6 +644,9 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     :func:`_off_dtype_params`), since FSDP2 rejects a shard group that mixes dtypes. They stay
     replicated and are moved onto the shards' device, which ``fully_shard`` does not do for the
     params it ignores.
+
+    The model records that it is FSDP2-sharded over the process group
+    (:func:`set_distribution_plan`).
     """
     # Lazy import: layerwise_calib imports this module at top level (circular).
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -674,7 +677,7 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
         _move_to_fsdp_device(model, ignored_params)
     if config is not None and architectures:
         config.architectures = architectures
-
+    set_distribution_plan(model, DistributionPlan(size(), dense="fsdp"))
     return decoder_layers
 
 
