@@ -131,7 +131,7 @@ def validate_gdn_quantizer(
 
 
 def state_quantizer_config(
-    quantizer: TensorQuantizer, *, name="state_quantizer"
+    quantizer: TensorQuantizer, *, name="state_quantizer", state_codec="tile"
 ) -> tuple[str, int]:
     """Validate the state quantizer and derive its format and last-axis group size.
 
@@ -140,6 +140,11 @@ def state_quantizer_config(
     validate_gdn_quantizer(
         quantizer, name=name, num_bits=tuple(_STATE_FORMATS), block_sizes=(16, 32, 64, 128)
     )
+    if state_codec == "int8_hadamard32":
+        if quantizer.num_bits != 8:
+            raise ValueError("int8_hadamard32 requires INT8 state quantization")
+        if quantizer.block_sizes is not None:
+            raise ValueError("TensorQuantizer block_sizes requires state_codec='tile'")
     if quantizer.block_sizes is not None:
         return _STATE_FORMATS[quantizer.num_bits], quantizer.block_sizes[-1]
     if quantizer.axis != (0, 1):
@@ -147,10 +152,10 @@ def state_quantizer_config(
     return _STATE_FORMATS[quantizer.num_bits], 0
 
 
-def _resolve_state_quantizer(state_quantizer):
+def _resolve_state_quantizer(state_quantizer, *, state_codec="tile"):
     """Validate an enabled quantizer once; return None when state QDQ is inactive."""
     if state_quantizer is not None and state_quantizer.is_enabled:
-        state_quantizer_config(state_quantizer)
+        state_quantizer_config(state_quantizer, state_codec=state_codec)
         if state_quantizer._if_quant:
             return state_quantizer
     return None
