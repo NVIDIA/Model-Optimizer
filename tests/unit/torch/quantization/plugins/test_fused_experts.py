@@ -29,7 +29,7 @@ from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_par
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.export.model_utils import _release_exported_tensors
-from modelopt.torch.export.moe_utils import _export_fused_experts
+from modelopt.torch.export.moe_utils import _export_fused_experts, _fallback_amax
 from modelopt.torch.export.quant_utils import get_quant_config, get_quantization_format
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
@@ -702,7 +702,8 @@ class TestExportFusedExperts:
     def test_w4a8_sequential_weight_quantizer_exports_split_block_amax(
         self, monkeypatch, amax_state
     ):
-        """W4A8 AWQ weights use a SequentialQuantizer: an INT4 block stage (per-block ``_amax``)
+        """W4A8 AWQ weights use a SequentialQuantizer: an INT4 block stage (flat per-block
+        ``_amax`` of shape ``(rows * blocks, 1)``, as block-quant calibration records it)
         followed by a per-tensor FP8 stage. Export must treat each stage on its own: slice the
         block amax into the gate/up halves (updating the stale ``_amax_shape_for_export``), and
         for experts that saw no calibration tokens derive a per-block fallback instead of
@@ -728,7 +729,7 @@ class TestExportFusedExperts:
                 int4._amax_shape_for_export = (rows, -1)
                 if amax_state != "missing":
                     # Row r of gate_up carries the marker r + 1, so a wrong slice is visible.
-                    marker = torch.arange(1, rows + 1).float().unsqueeze(-1).expand(rows, blocks)
+                    marker = torch.arange(1, rows + 1).float().repeat_interleave(blocks)[:, None]
                     int4.amax = (
                         marker.clone() if amax_state == "calibrated" else torch.zeros_like(marker)
                     )
@@ -788,6 +789,8 @@ class TestExportFusedExperts:
             ("per_tensor", (1,), (1,)),
             ("per_channel", (INTERMEDIATE_DIM, 1), (HIDDEN_DIM, 1)),
             ("per_block", (INTERMEDIATE_DIM, 2), (HIDDEN_DIM, 2)),
+            # What block-quant calibration records: (rows * blocks, 1).
+            ("flat_block", (INTERMEDIATE_DIM, 2), (HIDDEN_DIM, 2)),
         ],
     )
     def test_uncalibrated_zero_amax_fallback_keeps_layout(
@@ -802,15 +805,19 @@ class TestExportFusedExperts:
             )
         try:
             converted = QuantModuleRegistry.convert(experts)
-            layouts = {"per_tensor": (1,), "per_channel": (None, 1), "per_block": (None, 2)}
+            layouts = {
+                "per_tensor": lambda rows: (1,),
+                "per_channel": lambda rows: (rows, 1),
+                "per_block": lambda rows: (rows, 2),
+                "flat_block": lambda rows: (rows * 2, 1),
+            }
             for idx in range(NUM_EXPERTS):
                 for wq, rows in (
                     (converted.gate_up_proj_weight_quantizers[idx], 2 * INTERMEDIATE_DIM),
                     (converted.down_proj_weight_quantizers[idx], HIDDEN_DIM),
                 ):
                     wq._disabled = False
-                    shape = layouts[amax_layout]
-                    wq.amax = torch.zeros(*(rows if d is None else d for d in shape))
+                    wq.amax = torch.zeros(*layouts[amax_layout](rows))
 
             seen = []
 
@@ -834,8 +841,6 @@ class TestExportFusedExperts:
                 QuantModuleRegistry.unregister(expert_type)
 
     def test_fallback_amax_refuses_layouts_it_cannot_group(self):
-        from modelopt.torch.export.moe_utils import _fallback_amax
-
         quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=1))
         quantizer.amax = torch.zeros(1, HIDDEN_DIM)  # per input channel: not a (rows, blocks) grid
         with pytest.raises(ValueError, match="Cannot derive amax"):

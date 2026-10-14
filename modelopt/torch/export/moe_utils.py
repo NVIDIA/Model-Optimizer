@@ -73,7 +73,7 @@ def _fallback_amax(weight: torch.Tensor, quantizer) -> torch.Tensor:
     like = getattr(quantizer, "_amax", None)
     block_sizes = getattr(quantizer, "block_sizes", None)
     block = block_sizes.get(-1) if block_sizes and block_sizes.get("type") == "static" else None
-    # Integer static-block stages (INT4 of W4A8) export a (rows, blocks) amax. Float-block formats
+    # Integer static-block stages (INT4 of W4A8) need a per-block amax. Float-block formats
     # (NVFP4) keep a per-tensor amax plus separate block scales, so they take the scalar path.
     if like is None and isinstance(quantizer.num_bits, int) and block:
         if weight.shape[-1] % block:
@@ -84,14 +84,22 @@ def _fallback_amax(weight: torch.Tensor, quantizer) -> torch.Tensor:
     if like is None or like.numel() == 1:
         amax = torch.maximum(weight.amax(), -weight.amin()).float()
         return amax if like is None else amax.view_as(like)
-    # Only a (rows, blocks) layout can be grouped from the weight; refuse to guess otherwise.
-    if like.dim() != 2 or like.shape[0] != weight.shape[0] or weight.shape[-1] % like.shape[-1]:
+    # Block-quant calibration records the flat (rows * blocks, 1); also accept (rows, blocks).
+    # Refuse any other layout (e.g. per input channel) rather than guess its grouping.
+    rows = weight.shape[0]
+    if like.dim() == 2 and like.shape[-1] == 1 and like.shape[0] % rows == 0:
+        blocks = like.shape[0] // rows
+    elif like.dim() == 2 and like.shape[0] == rows:
+        blocks = like.shape[1]
+    else:
+        blocks = 0
+    if not blocks or weight.shape[-1] % blocks:
         raise ValueError(
             f"Cannot derive amax of shape {tuple(like.shape)} from a weight of shape "
             f"{tuple(weight.shape)}."
         )
-    groups = weight.reshape(weight.shape[0], like.shape[-1], -1)
-    return torch.maximum(groups.amax(dim=-1), -groups.amin(dim=-1)).float()
+    groups = weight.reshape(rows, blocks, -1)
+    return torch.maximum(groups.amax(dim=-1), -groups.amin(dim=-1)).float().reshape(like.shape)
 
 
 def _export_fused_experts(
