@@ -51,11 +51,11 @@ from example_utils import (
     run_nemotron_vl_preview,
     save_source_config,
     setup_distributed_args,
+    setup_fsdp2_process_group,
     validate_fsdp2_supported,
 )
 from torch.utils.data import DataLoader
 from transformers import (
-    AutoConfig,
     AutoModelForCausalLM,
     AutoProcessor,
     PreTrainedTokenizer,
@@ -102,15 +102,14 @@ from modelopt.torch.utils.dataset_utils import (
     get_supported_datasets,
 )
 from modelopt.torch.utils.distributed import (
-    DistributionPlan,
     distributed_forward_loop,
     distributed_run,
-    set_distribution_plan,
+    distribution_plan,
     shard_dataloader,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.mlflow import add_mlflow_args, resolve_mlflow_args
-from modelopt.torch.utils.moe import expert_parallel_mesh, is_expert_parallel_capable
+from modelopt.torch.utils.moe import expert_parallel_mesh
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     ensure_local_checkpoint,
@@ -276,18 +275,13 @@ def make_calib_dataloader(
             device=device,
             include_labels=include_labels,
         )
-    if (
-        args.dist_state.world_size > 1
-        and calib_dataloader is not None
-        and isinstance(calib_dataloader, DataLoader)
-    ):
+    world_size = distribution_plan(language_model).world_size
+    if world_size > 1 and calib_dataloader is not None and isinstance(calib_dataloader, DataLoader):
         # Every distributed calibration path is data-parallel over the world, so each rank calibrates
         # on its own per-rank shard (and the quantizer amax is synced across ranks): MoE expert-parallel
         # a2a routes each token to its expert-owning rank; dense DP replicates the model per rank; FSDP2
         # shards the params but still feeds each rank its own data.
-        calib_dataloader = shard_dataloader(
-            calib_dataloader, args.dist_state.rank, args.dist_state.world_size
-        )
+        calib_dataloader = shard_dataloader(calib_dataloader, args.dist_state.rank, world_size)
     return calib_dataloader, first_text_speech_dataset
 
 
@@ -329,33 +323,26 @@ def _validate_recipe_calibration(args: argparse.Namespace, recipe) -> None:
         )
 
 
-def _decide_expert_parallel(args: argparse.Namespace):
-    """Return ``(plan, hf_config)`` when this run should be expert-parallel, else ``(None, None)``.
+def _resolve_distribution(args: argparse.Namespace):
+    """Decide how this run distributes the model: ``(plan, hf_config)``.
 
-    ``resolve_distribution_plan`` decides, as ``load_pretrained`` would on its own; deciding first
-    lets a run that loads the model whole go through ``get_model``'s placement.
+    ``resolve_distribution_plan`` decides, and --use_fsdp2 asks it for FSDP2 and no expert
+    parallelism. Without --use_fsdp2 a plan that FSDP2-shards the whole model is refused: the
+    FSDP2 run is the flag's, which checks what this script cannot do with it.
     """
-    # --use_fsdp2 asks for the standalone FSDP2 loader explicitly; the EP
-    # auto-decision below has no way to know that, so without this it can pick EP anyway
-    # (MODELOPT_EP_DEGREE set explicitly, or "auto" resolving non-trivially for the model)
-    # and load_model's `elif args.use_fsdp2:` branch is never reached.
-    if args.use_fsdp2:
-        return None, None
-
     plan, hf_config = resolve_distribution_plan(
-        args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
+        args.local_checkpoint_path,
+        trust_remote_code=args.trust_remote_code,
+        ep_size=1 if args.use_fsdp2 else None,
+        dense="fsdp" if args.use_fsdp2 else None,
     )
-    if plan is None or plan.is_expert_parallel:  # None: not a distributed run
-        return plan, hf_config
-    if plan.is_fsdp_dense:
-        # FSDP2 alone runs only under --use_fsdp2, which checks what this script cannot do with it.
+    if plan.is_fsdp_dense and not plan.is_expert_parallel and not args.use_fsdp2:
         raise RuntimeError(
-            f"The plan shards the dense part over {plan.fsdp_size} ranks but leaves ep_size=1. "
-            "Pass --use_fsdp2 to shard it with FSDP2"
-            + (", or set MODELOPT_EP_DEGREE>1" if is_expert_parallel_capable(hf_config) else "")
-            + ", or set MODELOPT_FSDP_SIZE=1 if the model does fit one GPU."
+            f"{plan!r} FSDP2-shards the model, which this script does under --use_fsdp2. Pass it, "
+            "or set MODELOPT_FSDP_SIZE=1 if the model does fit one GPU; an MoE can instead shard its "
+            "experts (MODELOPT_EP_DEGREE above 1)."
         )
-    return None, None
+    return plan, hf_config
 
 
 def load_model(args: argparse.Namespace):
@@ -363,36 +350,32 @@ def load_model(args: argparse.Namespace):
     calibration_only = False
     if args.use_fsdp2 and _recipe_is_kv_auto_quantize(args.recipe):
         raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
-    _ep_plan, _ep_config = _decide_expert_parallel(args)
-    if _ep_plan is not None:
+    plan, hf_config = _resolve_distribution(args)
+    if plan.is_fsdp_dense and not plan.is_expert_parallel:
+        validate_fsdp2_supported(args, hf_config)
+    setup_fsdp2_process_group(plan)
+    if plan.is_expert_parallel:
         full_model = load_pretrained(
             args.local_checkpoint_path,
-            distribution=_ep_plan,
-            hf_config=_ep_config,
+            distribution=plan,
+            hf_config=hf_config,
             trust_remote_code=args.trust_remote_code,
             attn_implementation=args.attn_implementation,
         )
-    elif args.use_fsdp2:
-        hf_config = AutoConfig.from_pretrained(
-            args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
-        )
-        validate_fsdp2_supported(args, hf_config)
+    elif plan.is_fsdp_dense:
         full_model = load_pretrained(
             args.local_checkpoint_path,
-            distribution="fsdp2",
+            distribution=plan,
             hf_config=hf_config,
             trust_remote_code=args.trust_remote_code,
             cpu_offload=args.cpu_offload,
             attn_implementation=args.attn_implementation,
         )
-        # Calibration sizes its batch, and the export writes, by how the model is distributed.
-        set_distribution_plan(
-            full_model, DistributionPlan(args.dist_state.world_size, dense="fsdp")
-        )
     elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
             args.local_checkpoint_path,
             args.dist_state.device,
+            distribution=plan,
             gpu_mem_percentage=args.gpu_max_mem_percentage,
             trust_remote_code=args.trust_remote_code,
             use_seq_device_map=args.use_seq_device_map,
@@ -416,9 +399,6 @@ def load_model(args: argparse.Namespace):
         with init_quantized_weights(
             quant_cfg, gpu_mem_percentage=args.gpu_max_mem_percentage, quant_gemm=False
         ):
-            hf_config = AutoConfig.from_pretrained(
-                args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
-            )
             model_kwargs = {"trust_remote_code": args.trust_remote_code}
             if args.attn_implementation is not None:
                 model_kwargs["attn_implementation"] = args.attn_implementation
@@ -426,7 +406,7 @@ def load_model(args: argparse.Namespace):
                 args.local_checkpoint_path,
                 AutoModelForCausalLM,
                 model_type=hf_config.model_type,
-                distribution="sequential",
+                distribution=plan,
                 **model_kwargs,
             )
         calibration_only = True
@@ -438,7 +418,7 @@ def load_model(args: argparse.Namespace):
     # model reports its own sub-config's type, which varies across transformers versions.
     model_type = hf_model_type(full_model)
 
-    if args.use_fsdp2:
+    if plan.is_fsdp_dense:
         device = args.dist_state.device
     else:
         device = full_model.device
@@ -607,7 +587,7 @@ def mono_quantize(
             # quantization target; the full forward still exercises that component's quantizers.
             if args.calib_with_images:
                 calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
-            elif (ep_mesh := expert_parallel_mesh(full_model)) is not None:
+            elif distribution_plan(full_model).is_expert_parallel:
                 # An expert-parallel run has to calibrate through distributed_forward_loop, not the
                 # plain one: it is the only caller of _reinstall_a2a_forwards, which re-plants the
                 # torch_a2a expert/router forward wrappers that quantizer insertion clobbers on
@@ -619,7 +599,10 @@ def mono_quantize(
                 # It also restores the use_cache guard the plain loop does not apply. Other
                 # distributed runs (FSDP2) keep the plain loop and its split-on-OOM retry.
                 calibrate_loop = distributed_forward_loop(
-                    language_model, calib_dataloader, device=args.dist_state.device, ep_mesh=ep_mesh
+                    language_model,
+                    calib_dataloader,
+                    device=args.dist_state.device,
+                    ep_mesh=expert_parallel_mesh(full_model),
                 )
             else:
                 calibrate_loop = create_forward_loop(
@@ -1623,7 +1606,7 @@ def _main_inner(args: argparse.Namespace):
                     device,
                 )
     finally:
-        cleanup_distributed(args)
+        cleanup_distributed()
 
 
 if __name__ == "__main__":

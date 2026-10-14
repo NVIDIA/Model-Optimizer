@@ -49,6 +49,7 @@ from modelopt.torch.export.model_utils import is_multimodal_model
 from modelopt.torch.models import hf_model_type
 from modelopt.torch.models.hf import checkpoint_has_mtp, prepare_model_for_loading
 from modelopt.torch.utils import distributed as dist_utils
+from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
@@ -81,24 +82,28 @@ def setup_distributed_args(args):
             device=torch.device(f"cuda:{dist_utils.local_rank()}"),
             is_main=rank == 0,
         )
-    elif getattr(args, "use_fsdp2", False):
-        # Raise the collective timeout above NCCL's 30-min default: rank 0's checkpoint write can
-        # exceed it, and PyTorch 2.8 has no per-call barrier() timeout (must be set at PG creation).
-        dist_utils.setup(timeout=timedelta(hours=2))
-        rank = dist_utils.rank()
-        args.dist_state = DistributedState(
-            rank=rank,
-            world_size=dist_utils.size(),
-            device=torch.device(f"cuda:{dist_utils.local_rank()}"),
-            is_main=rank == 0,
-        )
     else:
         args.dist_state = DistributedState(rank=0, world_size=1, device=args.device, is_main=True)
 
 
-def cleanup_distributed(args):
-    """Destroy the process group if ``--use_fsdp2`` set it up."""
-    if getattr(args, "use_fsdp2", False):
+def setup_fsdp2_process_group(plan: DistributionPlan) -> None:
+    """Set up the one-rank process group a plan that FSDP2-shards the model on one rank needs.
+
+    FSDP2 shards through a process group even on one rank; a distributed launch already has its
+    group (hf_ptq's ``distributed_run``).
+    """
+    if plan.is_fsdp_dense and not dist_utils.is_initialized():
+        # Raise the collective timeout above NCCL's 30-min default: rank 0's checkpoint write can
+        # exceed it, and PyTorch 2.8 has no per-call barrier() timeout (must be set at PG creation).
+        dist_utils.setup(timeout=timedelta(hours=2))
+
+
+def cleanup_distributed():
+    """Destroy the one-rank process group :func:`setup_fsdp2_process_group` set up, if any.
+
+    A distributed launch's group is ``distributed_run``'s to destroy.
+    """
+    if not dist_utils.is_distributed_launch():
         dist_utils.cleanup()
 
 
@@ -568,6 +573,7 @@ def _fmt_max_memory(max_memory: dict) -> str:
 def get_model(
     ckpt_path,
     device="cuda",
+    distribution: DistributionPlan | None = None,
     gpu_mem_percentage=0.8,
     trust_remote_code=False,
     use_seq_device_map=False,
@@ -577,6 +583,8 @@ def get_model(
     max_gpu_memory_gb=None,
 ):
     print(f"Initializing model from {ckpt_path}")
+    # The plan to load the whole model by on every rank; a single process's by default.
+    plan = distribution or DistributionPlan()
 
     _disk_offload = offload_folder is not None
     if _disk_offload and max_cpu_memory_gb is None:
@@ -590,7 +598,7 @@ def get_model(
     device_map = "auto"
     if device == "cpu":
         device_map = "cpu"
-    elif ":" in str(device) and dist_utils.size() > 1:
+    elif ":" in str(device) and plan.world_size > 1:
         # Under torchrun each rank asks for its own "cuda:<local_rank>". Do not fall through to
         # "auto": accelerate runs its placement heuristic INDEPENDENTLY in every rank, and on a node
         # whose GPUs are all idle every rank scores them identically and picks the SAME card. All ranks'
@@ -688,7 +696,7 @@ def get_model(
             ckpt_path,
             AutoModelForCausalLM,
             model_type=hf_config.model_type,
-            distribution="sequential",
+            distribution=plan,
             device_map=device_map,
             **model_kwargs,
         )
@@ -700,7 +708,7 @@ def get_model(
                 ckpt_path,
                 AutoModelForCausalLM,
                 model_type=hf_config.model_type,
-                distribution="sequential",
+                distribution=plan,
                 device_map="auto",
                 trust_remote_code=trust_remote_code,
                 dtype="auto",
@@ -727,7 +735,7 @@ def get_model(
             ckpt_path,
             AutoModelForCausalLM,
             model_type=hf_config.model_type,
-            distribution="sequential",
+            distribution=plan,
             device_map="cpu" if device == "cpu" else "sequential",
             **model_kwargs,
         )
@@ -828,7 +836,7 @@ def get_model(
             ckpt_path,
             auto_model_module,
             model_type=hf_config.model_type,
-            distribution="sequential",
+            distribution=plan,
             device_map=device_map,
             **model_kwargs2,
         )
