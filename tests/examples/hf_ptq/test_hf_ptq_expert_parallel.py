@@ -292,36 +292,6 @@ def test_a_whole_model_loads_by_the_plan_through_get_model(hf_ptq, monkeypatch, 
     assert loads == [(torch.device("cuda:1"), DistributionPlan(4))]
 
 
-def test_a_one_rank_fsdp2_run_sets_up_its_group_before_loading(hf_ptq, monkeypatch):
-    """FSDP2 on one rank shards through a process group, of one, which main() did not set up. Its
-    collective timeout is raised above NCCL's 30-minute default, for rank 0's checkpoint write."""
-    _serve(monkeypatch, hf_ptq, LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY))
-    calls = _record_load_pretrained(hf_ptq, monkeypatch)
-    setups = []
-    monkeypatch.setattr(
-        hf_ptq,
-        "setup_fsdp2_process_group",
-        lambda plan, timeout=None: setups.append((plan, len(calls), timeout)),
-    )
-    args = _args(
-        _dist_state(world_size=1),
-        use_fsdp2=True,
-        cpu_offload=False,
-        specdec_offline_dataset=None,
-        low_memory_mode=False,
-    )
-
-    with pytest.raises(_LoaderReachedError):
-        hf_ptq.load_model(args)
-
-    plan = DistributionPlan(dense="fsdp")
-    [(set_up_for, loads_before, timeout)] = setups
-    assert set_up_for == plan
-    assert loads_before == 0, "set up before the load"
-    assert timeout > timedelta(minutes=30)
-    assert calls[0]["distribution"] == plan
-
-
 # ------------------------------------------------------------------------- per-rank placement
 
 

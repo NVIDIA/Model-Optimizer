@@ -102,7 +102,6 @@ from modelopt.torch.utils.distributed import (
     distributed_forward_loop,
     distributed_run,
     distribution_plan,
-    setup_fsdp2_process_group,
     shard_dataloader,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
@@ -351,9 +350,6 @@ def load_model(args: argparse.Namespace):
     plan, hf_config = _resolve_distribution(args)
     if plan.is_fsdp_dense and not plan.is_expert_parallel:
         validate_fsdp2_supported(args, hf_config)
-    # Raise the collective timeout above NCCL's 30-min default: rank 0's checkpoint write can
-    # exceed it, and PyTorch 2.8 has no per-call barrier() timeout (must be set at PG creation).
-    setup_fsdp2_process_group(plan, timeout=timedelta(hours=2))
     if plan.is_expert_parallel:
         full_model = load_pretrained(
             args.local_checkpoint_path,
