@@ -93,12 +93,7 @@ from modelopt.torch.quantization.utils import (
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
-from modelopt.torch.utils.distributed import (
-    DistributionPlan,
-    all_reduce,
-    distribution_plan,
-    is_fsdp2_model,
-)
+from modelopt.torch.utils.distributed import all_reduce, distribution_plan, is_fsdp2_model
 from modelopt.torch.utils.perf import maybe_clear_cuda_cache
 
 try:
@@ -1057,19 +1052,17 @@ def pack_quantized_weights(
 
 
 def _hf_shard_flags(model: nn.Module) -> tuple[bool, bool]:
-    """Return ``(fsdp2_sharded, ep_sharded)`` for an HF model about to be exported.
+    """Return ``(fsdp2_sharded, ep_sharded)`` for an HF model about to be exported, from its plan.
 
     Expert parallelism shards the experts too, just not by FSDP2: transformers pre-slices the expert
     params across the EP group. The two are reported separately because a model can be both at once,
-    FSDP2-dense with expert-parallel experts. Neither holds without an initialized process group.
+    FSDP2-dense with expert-parallel experts. A diffusers pipeline is not a module, and nothing here
+    distributes one.
     """
-    from modelopt.torch.utils.distributed import expert_parallel_state
-
-    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+    if not isinstance(model, nn.Module):
         return False, False
-    fsdp2_sharded = is_fsdp2_model(model)
-    ep_sharded = torch.distributed.get_world_size() > 1 and expert_parallel_state(model) is not None
-    return fsdp2_sharded, ep_sharded
+    plan = distribution_plan(model)
+    return plan.is_fsdp_dense, plan.is_expert_parallel
 
 
 def _process_hf_model_for_export(
