@@ -23,8 +23,9 @@ import time
 import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 from warnings import warn
 
 import torch
@@ -41,6 +42,7 @@ __all__ = [
     "barrier",
     "broadcast_from",
     "distributed_run",
+    "distribution_plan",
     "fsdp2_wrap",
     "gather_bytes",
     "gather_state_dicts",
@@ -51,6 +53,7 @@ __all__ = [
     "is_initialized",
     "is_master",
     "rank",
+    "set_distribution_plan",
     "size",
 ]
 
@@ -294,24 +297,30 @@ def setup(timeout: timedelta | None = None):
         torch.distributed.init_process_group("cpu:gloo,cuda:nccl", timeout=timeout)
 
 
+@dataclass(frozen=True)
 class DistributionPlan:
-    """How a HuggingFace MoE model is distributed for PTQ, as decided by ``decide_distribution_plan``.
+    """How a model is distributed over the ranks of a run.
 
-    * ``ep_size``   -- expert-parallel degree: the routed experts are sharded over ``ep_size`` ranks.
-    * ``fsdp_size`` -- dense-FSDP degree: ``1`` replicates the dense (non-expert) part on every rank; ``>1``
-                       FSDP2-shards it alongside the expert-parallel experts.
+    * ``world_size`` -- the ranks that hold the model; ``1`` for a single process.
+    * ``ep_size`` -- the expert-parallel degree: an MoE's routed experts are sharded over groups of
+      ``ep_size`` ranks. ``1`` shards none.
+    * ``dense`` -- how the rest of the model, all of it without expert parallelism, is placed:
+      ``"replicate"`` gives every rank a whole copy, ``"fsdp"`` FSDP2-shards it.
 
-    Every rank calibrates on its own data, so data-parallelism spans the whole world, and each expert
+    Every rank calibrates on its own data, so data parallelism spans the whole world, and each expert
     shard is replicated ``edp = world_size / ep_size`` times.
     """
 
-    def __init__(self, world_size: int, ep_size: int = 1, fsdp_size: int = 1) -> None:
-        """Build the plan, rejecting an expert-parallel degree that cannot divide the world."""
-        if world_size % ep_size != 0:
-            raise ValueError(f"ep_size={ep_size} must divide world_size={world_size}")
-        self.world_size = world_size
-        self.ep_size = ep_size
-        self.fsdp_size = fsdp_size
+    world_size: int = 1
+    ep_size: int = 1
+    dense: Literal["replicate", "fsdp"] = "replicate"
+
+    def __post_init__(self) -> None:
+        """Reject a plan no load could carry out, before any rank starts on it."""
+        if self.world_size % self.ep_size != 0:
+            raise ValueError(f"ep_size={self.ep_size} must divide world_size={self.world_size}")
+        if self.dense not in ("replicate", "fsdp"):
+            raise ValueError(f"dense={self.dense!r}: expected 'replicate' or 'fsdp'.")
 
     @property
     def edp(self) -> int:
@@ -325,15 +334,41 @@ class DistributionPlan:
 
     @property
     def is_fsdp_dense(self) -> bool:
-        """Whether the dense part is FSDP-sharded rather than replicated."""
-        return self.fsdp_size > 1
+        """Whether the dense part is FSDP2-sharded rather than replicated."""
+        return self.dense == "fsdp"
 
-    def __repr__(self) -> str:
-        dense = f"fsdp_size={self.fsdp_size}" if self.is_fsdp_dense else "dense=replicate"
-        return (
-            f"DistributionPlan(world={self.world_size}, ep_size={self.ep_size}, edp={self.edp}, "
-            f"{dense})"
+
+_PLAN_ATTR = "_modelopt_distribution_plan"
+
+
+def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> None:
+    """Record that ``model`` is distributed as ``plan``, on it and on every submodule.
+
+    Code handed a submodule, such as a VLM's language model, then reads the same plan as code handed
+    the whole model. ``load_pretrained`` records the plan it loads by; code that distributes a model
+    itself records it here before calibrating or exporting the model.
+    """
+    for module in model.modules():
+        setattr(module, _PLAN_ATTR, plan)
+
+
+def distribution_plan(model: torch.nn.Module) -> DistributionPlan:
+    """How ``model`` is distributed: the plan recorded on it (:func:`set_distribution_plan`).
+
+    A model with no plan recorded is a single process's, unless it shows otherwise: one that is
+    FSDP2-sharded, or held in a run of several ranks, raises rather than be taken for one.
+    """
+    plan = getattr(model, _PLAN_ATTR, None)
+    if plan is not None:
+        return plan
+    sharded = is_fsdp2_model(model)
+    if sharded or size() > 1:
+        how = "is FSDP2-sharded" if sharded else f"is held in a run of {size()} ranks"
+        raise RuntimeError(
+            f"{type(model).__name__} {how}, but has no distribution plan recorded. Load it with "
+            "load_pretrained, or record how it is distributed with set_distribution_plan()."
         )
+    return DistributionPlan()
 
 
 _V = TypeVar("_V")
