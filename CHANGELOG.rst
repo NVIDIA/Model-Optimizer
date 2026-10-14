@@ -141,6 +141,7 @@ Changelog
 - Fix ``hf_ptq`` overwriting a model's existing ``pad_token`` with ``eos_token`` when the model already has a valid padding token. The exported tokenizer now preserves the source model's padding configuration.
 - Fix Hugging Face exports dropping off-index safetensors such as GLM-4.7's ``mtp.safetensors``.
 - Fix Megatron-Core checkpoint saving for quantized grouped MoE experts when tensor and expert parallelism are both enabled.
+- Fix FP8 fake quantization treating a positive amax at or below 2**-24 as zero, which silently zeroed such tensors and channels and every block of a static NVFP4 weight (``NVFP4StaticQuantizer``, including LSQ) with a global amax below ~3.6e-7. Fake quantization now matches the exported checkpoint.
 - Fix ``megatron_preprocess_data`` with ``workers > 1`` segfaulting when run in a process that has already initialized CUDA or other native threads (for example in-process after GPU work): the tokenization worker pool now uses the ``forkserver`` start method instead of ``fork``.
 - Fix unified HuggingFace export of RADIO-based VLMs retaining post-conversion vision and
   projector names instead of restoring the hub layout; deployment loaders could skip those weights.
