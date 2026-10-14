@@ -23,6 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import transformers
 import yaml
 from _test_utils.mlflow import clean_env  # noqa: F401
 from _test_utils.torch.transformers_models import get_tiny_qwen3
@@ -356,7 +357,7 @@ def test_fsdp2_kv_autoquant_rejected_before_model_load(monkeypatch):
     hf_ptq = _import_hf_ptq(monkeypatch)
     monkeypatch.setattr(hf_ptq, "_recipe_is_kv_auto_quantize", lambda _: True)
     monkeypatch.setattr(
-        hf_ptq.AutoConfig,
+        transformers.AutoConfig,
         "from_pretrained",
         lambda *_args, **_kwargs: pytest.fail("The model config must not be loaded."),
     )
@@ -387,6 +388,8 @@ def test_fsdp2_rejects_mtp_before_distributed_loading(monkeypatch, tmp_path, has
         raise RuntimeError("distributed loader reached")
 
     monkeypatch.setattr(hf_ptq, "load_pretrained", distributed_load)
+    # A one-rank FSDP2 run sets up its process group of one right before the load.
+    monkeypatch.setattr(hf_ptq, "setup_fsdp2_process_group", lambda plan: None)
     error, message = (
         (NotImplementedError, "Nemotron-H MTP")
         if has_mtp

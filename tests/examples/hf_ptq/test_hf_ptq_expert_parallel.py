@@ -15,10 +15,11 @@
 
 """Expert-parallel PTQ wiring in ``examples/hf_ptq``.
 
-Under torchrun, hf_ptq.py decides a distribution plan with ``resolve_distribution_plan`` and loads
-the model through ``load_pretrained``: with the plan when it shards the experts, as FSDP2 under
-``--use_fsdp2``, and otherwise whole through ``get_model``. Every rank then calibrates on its own
-shard of the data, and a whole model is pinned to the rank's own GPU instead of ``"auto"``.
+hf_ptq.py decides a distribution plan once, with ``resolve_distribution_plan``, and loads the model
+by it through ``load_pretrained``: expert-parallel, FSDP2-sharded under ``--use_fsdp2``, or whole
+through ``get_model``. Everything after reads the plan back from the model: every rank of a
+distributed plan calibrates on its own shard of the data, an expert-parallel one through the
+distributed forward loop, and a whole model is pinned to the rank's own GPU instead of ``"auto"``.
 
 Nothing here needs a process group or a checkpoint: the process group's rank and size are answered
 the way a torchrun launch would, the configs are tiny real transformers configs served from memory,
@@ -37,10 +38,11 @@ import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from torch.utils.data import DataLoader
-from transformers import DeepseekV3Config, LlamaConfig
+from transformers import AutoConfig, DeepseekV3Config, LlamaConfig
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.models import get_spec
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 from modelopt.torch.utils.plugins import model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
@@ -100,6 +102,7 @@ def torchrun(monkeypatch):
     monkeypatch.setattr(torch.distributed, "broadcast_object_list", lambda *a, **k: None)
 
     def enter(world_size, rank=0):
+        monkeypatch.setattr(dist, "is_initialized", lambda: world_size > 1)
         monkeypatch.setattr(dist, "is_distributed_run", lambda: world_size > 1)
         monkeypatch.setattr(dist, "size", lambda group=None: world_size)
         monkeypatch.setattr(dist, "is_master", lambda group=None: rank == 0)
@@ -131,14 +134,25 @@ def _args(dist_state, **overrides):
 
 
 def _serve(monkeypatch, hf_ptq, config):
-    """Answer hf_ptq's config read with ``config`` rather than a checkpoint on disk."""
-    monkeypatch.setattr(hf_ptq.AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
+    """Answer every config read with ``config`` rather than a checkpoint on disk."""
+    monkeypatch.setattr(AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
     return config
 
 
 def _deepseek_v3(n_routed_experts):
-    """DeepSeek-V3 without a plan of its own, so only its model spec can make it EP-capable."""
-    config = DeepseekV3Config(n_routed_experts=n_routed_experts, **_TINY)
+    """DeepSeek-V3 without a plan of its own, so only its model spec can make it EP-capable.
+
+    Its one layer is an MoE layer: DeepSeek-V3's first layers are dense by default.
+    """
+    config = DeepseekV3Config(
+        n_routed_experts=n_routed_experts,
+        first_k_dense_replace=0,
+        moe_intermediate_size=8,
+        n_group=1,
+        topk_group=1,
+        num_experts_per_tok=1,
+        **_TINY,
+    )
     config.base_model_ep_plan = None  # holds even if a later transformers ships a plan
     return config
 
@@ -154,43 +168,35 @@ def test_a_single_process_run_is_never_expert_parallel(
     dist_state = torchrun(world_size=1) if one_rank_group else _dist_state(world_size=1)
     _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
 
-    assert hf_ptq._decide_expert_parallel(_args(dist_state)) == (None, None)
+    assert hf_ptq._resolve_distribution(_args(dist_state))[0] == DistributionPlan()
 
 
-def test_use_fsdp2_keeps_the_standalone_fsdp2_loader(hf_ptq, monkeypatch, torchrun):
-    """--use_fsdp2 names its loader, so even an explicit EP degree for an EP-capable MoE must not
+def test_use_fsdp2_plans_fsdp2_without_expert_parallelism(hf_ptq, monkeypatch, torchrun):
+    """--use_fsdp2 names its load, so even an explicit EP degree for an EP-capable MoE must not
     divert the run to the expert-parallel one."""
     monkeypatch.setenv("MODELOPT_EP_DEGREE", "2")
     _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
     args = _args(torchrun(world_size=2), use_fsdp2=True)
 
-    assert hf_ptq._decide_expert_parallel(args) == (None, None)
+    assert hf_ptq._resolve_distribution(args)[0] == DistributionPlan(2, dense="fsdp")
 
 
-@pytest.mark.parametrize(
-    ("config", "ep_capable"),
-    [(_deepseek_v3(n_routed_experts=3), True), (LlamaConfig(**_TINY), False)],
-    ids=["moe_no_ep_degree", "dense"],
-)
-def test_dense_sharding_without_expert_parallelism_needs_use_fsdp2(
-    hf_ptq, monkeypatch, torchrun, config, ep_capable
-):
+def test_dense_sharding_without_expert_parallelism_needs_use_fsdp2(hf_ptq, monkeypatch, torchrun):
     """Without expert parallelism a plan that shards the dense part is an FSDP2 run, which this
     script runs only under --use_fsdp2, the flag its FSDP2 checks hang off; so it must fail and point
     there rather than load the model whole on every rank."""
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
-    _serve(monkeypatch, hf_ptq, config)
+    _serve(monkeypatch, hf_ptq, LlamaConfig(**_TINY))
 
-    with pytest.raises(RuntimeError, match="--use_fsdp2") as raised:
-        hf_ptq._decide_expert_parallel(_args(torchrun(world_size=2)))
-    assert ("MODELOPT_EP_DEGREE" in str(raised.value)) == ep_capable
+    with pytest.raises(RuntimeError, match="--use_fsdp2"):
+        hf_ptq._resolve_distribution(_args(torchrun(world_size=2)))
 
 
 def test_a_dense_model_under_torchrun_runs_data_parallel(hf_ptq, monkeypatch, torchrun):
     """A dense model has no experts to shard, so it loads whole on every rank, through get_model."""
     _serve(monkeypatch, hf_ptq, LlamaConfig(**_TINY))
 
-    assert hf_ptq._decide_expert_parallel(_args(torchrun(world_size=4))) == (None, None)
+    assert hf_ptq._resolve_distribution(_args(torchrun(world_size=4)))[0] == DistributionPlan(4)
 
 
 # ---------------------------------------------------------------------------------- load_model
@@ -223,9 +229,8 @@ def test_load_model_loads_an_expert_parallel_plan_through_load_pretrained(
         hf_ptq.load_model(args)
 
     (call,) = calls
-    plan = call["distribution"]
     assert call["ckpt_path"] == _CKPT
-    assert (plan.ep_size, plan.is_fsdp_dense) == (4, True)
+    assert call["distribution"] == DistributionPlan(4, ep_size=4, dense="fsdp")
     assert call["kwargs"] == {
         "hf_config": served,
         "trust_remote_code": True,
@@ -251,13 +256,64 @@ def test_use_fsdp2_loads_through_load_pretrained(hf_ptq, monkeypatch, torchrun):
         hf_ptq.load_model(args)
 
     (call,) = calls
-    assert call["distribution"] == "fsdp2"
+    assert call["distribution"] == DistributionPlan(2, dense="fsdp")
     assert call["kwargs"] == {
         "hf_config": served,
         "trust_remote_code": False,
         "cpu_offload": True,
         "attn_implementation": None,
     }
+
+
+def test_a_whole_model_loads_by_the_plan_through_get_model(hf_ptq, monkeypatch, torchrun):
+    """Data-parallel, every rank loads the whole model, by the plan, onto its own GPU."""
+    _serve(monkeypatch, hf_ptq, LlamaConfig(**_TINY))
+    loads = []
+
+    def get_model(ckpt_path, device, **kwargs):
+        loads.append((device, kwargs["distribution"]))
+        raise _LoaderReachedError
+
+    monkeypatch.setattr(hf_ptq, "get_model", get_model)
+    args = _args(
+        torchrun(world_size=4, rank=1),
+        specdec_offline_dataset=None,
+        low_memory_mode=False,
+        gpu_max_mem_percentage=0.8,
+        use_seq_device_map=False,
+        offload_folder=None,
+        max_cpu_memory_gb=None,
+        max_gpu_memory_gb=None,
+    )
+
+    with pytest.raises(_LoaderReachedError):
+        hf_ptq.load_model(args)
+
+    assert loads == [(torch.device("cuda:1"), DistributionPlan(4))]
+
+
+def test_a_one_rank_fsdp2_run_sets_up_its_group_before_loading(hf_ptq, monkeypatch):
+    """FSDP2 on one rank shards through a process group, of one, which main() did not set up."""
+    _serve(monkeypatch, hf_ptq, LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY))
+    calls = _record_load_pretrained(hf_ptq, monkeypatch)
+    setups = []
+    monkeypatch.setattr(
+        hf_ptq, "setup_fsdp2_process_group", lambda plan: setups.append((plan, len(calls)))
+    )
+    args = _args(
+        _dist_state(world_size=1),
+        use_fsdp2=True,
+        cpu_offload=False,
+        specdec_offline_dataset=None,
+        low_memory_mode=False,
+    )
+
+    with pytest.raises(_LoaderReachedError):
+        hf_ptq.load_model(args)
+
+    plan = DistributionPlan(dense="fsdp")
+    assert setups == [(plan, 0)], "set up before the load"
+    assert calls[0]["distribution"] == plan
 
 
 # ------------------------------------------------------------------------- per-rank placement
@@ -282,14 +338,16 @@ def test_a_rank_device_pins_the_whole_model_to_it(
     LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY).save_pretrained(tmp_path)
     placed = []
 
+    plan = DistributionPlan(world_size)
+
     def load_pretrained(ckpt_path, auto_class, **kwargs):
+        assert kwargs["distribution"] == plan
         placed.append(kwargs["device_map"])
         return torch.nn.Linear(1, 1)
 
     monkeypatch.setattr(example_utils, "load_pretrained", load_pretrained)
-    monkeypatch.setattr(example_utils.dist_utils, "size", lambda group=None: world_size)
 
-    example_utils.get_model(str(tmp_path), device=device)
+    example_utils.get_model(str(tmp_path), device=device, distribution=plan)
 
     assert placed == [device_map]
 
@@ -317,20 +375,37 @@ def test_dist_state_reads_the_live_process_group(monkeypatch, use_fsdp2):
     )
 
 
-def test_a_single_process_fsdp2_run_sets_up_its_own_group(monkeypatch):
-    """A one-rank --use_fsdp2 launch has no process group from main(), so the FSDP2 branch must
-    still create one."""
-    setups = []
-    monkeypatch.setattr(example_utils.dist_utils, "setup", lambda timeout=None: setups.append(0))
-    monkeypatch.setattr(example_utils.dist_utils, "rank", lambda group=None: 0)
-    monkeypatch.setattr(example_utils.dist_utils, "size", lambda group=None: 1)
-    monkeypatch.setattr(example_utils.dist_utils, "local_rank", lambda: 0)
-    args = SimpleNamespace(use_fsdp2=True)
+@pytest.mark.parametrize(
+    ("plan", "live_group", "setups"),
+    [
+        (DistributionPlan(dense="fsdp"), False, 1),
+        (DistributionPlan(2, dense="fsdp"), True, 0),
+        (DistributionPlan(), False, 0),
+    ],
+    ids=["fsdp2_on_one_rank", "launched_group", "single_process"],
+)
+def test_fsdp2_on_one_rank_sets_up_a_group_of_its_own(monkeypatch, plan, live_group, setups):
+    """FSDP2 shards through a process group even on one rank, where main() set up none; a
+    distributed launch has its group, and a single process's plan needs none."""
+    calls = []
+    monkeypatch.setattr(example_utils.dist_utils, "is_initialized", lambda: live_group)
+    monkeypatch.setattr(example_utils.dist_utils, "setup", lambda timeout=None: calls.append(0))
 
-    example_utils.setup_distributed_args(args)
+    example_utils.setup_fsdp2_process_group(plan)
 
-    assert len(setups) == 1
-    assert args.dist_state.world_size == 1
+    assert len(calls) == setups
+
+
+@pytest.mark.parametrize("launch_world", ["1", "2"], ids=["single_process", "distributed_launch"])
+def test_cleanup_destroys_only_the_group_this_script_set_up(monkeypatch, launch_world):
+    """A distributed launch's group is distributed_run's to destroy, after the run."""
+    destroyed = []
+    monkeypatch.setenv("WORLD_SIZE", launch_world)
+    monkeypatch.setattr(example_utils.dist_utils, "cleanup", lambda: destroyed.append(0))
+
+    example_utils.cleanup_distributed()
+
+    assert len(destroyed) == (launch_world == "1")
 
 
 def test_main_owns_the_process_group_around_the_whole_run(hf_ptq, monkeypatch):
@@ -383,8 +458,10 @@ def test_distributed_calibration_gives_each_rank_its_own_shard(hf_ptq, monkeypat
 
     def calib_loader(world_size, rank=0):
         args.dist_state = _dist_state(world_size, rank)
+        model = torch.nn.Linear(2, 2)
+        set_distribution_plan(model, DistributionPlan(world_size))
         built, _ = hf_ptq.make_calib_dataloader(
-            args, None, None, tokenizer, torch.device("cpu"), "llama"
+            args, model, None, tokenizer, torch.device("cpu"), "llama"
         )
         return built
 
@@ -395,10 +472,11 @@ def test_distributed_calibration_gives_each_rank_its_own_shard(hf_ptq, monkeypat
     assert calib_loader(world_size=1) is loader
 
 
-def _calibration_loop_choice(hf_ptq, monkeypatch, ep_mesh):
-    """Run mono_quantize on a model whose experts are sharded over ``ep_mesh`` (``None``: not
-    expert-parallel) and return which calibration loop it built."""
+def _calibration_loop_choice(hf_ptq, monkeypatch, plan, ep_mesh=None):
+    """Run mono_quantize on a model distributed as ``plan``, its experts loaded over ``ep_mesh``, and
+    return which calibration loop it built."""
     model = torch.nn.Linear(2, 2)
+    set_distribution_plan(model, plan)
     chosen, quantized = [], []
     monkeypatch.setattr(hf_ptq, "is_quantized", lambda m: False)
     monkeypatch.setattr(hf_ptq, "need_calibration", lambda cfg: True)
@@ -441,11 +519,16 @@ def test_expert_parallel_calibration_runs_through_the_distributed_forward_loop(h
     """Only distributed_forward_loop re-plants the all-to-all forwards that quantizer insertion
     clobbers, so an expert-parallel run must calibrate through it rather than the plain loop."""
     ep_mesh = object()  # the mesh load_and_prepare_ep loaded the experts over
+    plan = DistributionPlan(2, ep_size=2)
 
-    assert _calibration_loop_choice(hf_ptq, monkeypatch, ep_mesh) == [("distributed", ep_mesh)]
+    assert _calibration_loop_choice(hf_ptq, monkeypatch, plan, ep_mesh) == [
+        ("distributed", ep_mesh)
+    ]
 
 
 def test_fsdp2_calibration_keeps_the_plain_forward_loop(hf_ptq, monkeypatch):
     """Without expert parallelism there is nothing to re-plant: FSDP2 keeps the plain loop and its
     split-on-OOM retry, as on main."""
-    assert _calibration_loop_choice(hf_ptq, monkeypatch, ep_mesh=None) == ["plain"]
+    plan = DistributionPlan(2, dense="fsdp")
+
+    assert _calibration_loop_choice(hf_ptq, monkeypatch, plan, ep_mesh=object()) == ["plain"]
