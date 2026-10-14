@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``load_pretrained`` in a distributed session, on real GPUs.
+"""``load_pretrained`` in a distributed run, on real GPUs.
 
 Left to decide, it FSDP2-shards a dense model when asked to, and otherwise gives every rank the whole
 model on its own GPU. Whichever load runs, every rank ends up with the checkpoint's weights and the
@@ -30,7 +30,6 @@ transformers = pytest.importorskip("transformers")
 from torch.distributed.tensor import DTensor
 from transformers import AutoModelForCausalLM, LlamaConfig
 
-from modelopt.torch.utils.distributed import get_active_mo_session
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 _TINY = {
@@ -54,17 +53,8 @@ def _full(tensor):
 
 
 def _load_and_check(rank, size, ckpt_dir, knobs, expected):
-    """Enter a distributed session as torchrun would, load with the plan left to decide, check it."""
+    """Load on every rank of the run with the plan left to decide, and check what each rank holds."""
     device = torch.device(f"cuda:{rank}")
-    session = get_active_mo_session(required=False)
-    session.initialize(
-        distributed=True,
-        rank=rank,
-        world_size=size,
-        local_rank=rank,
-        device=device,
-        is_main=rank == 0,
-    )
     os.environ.update(knobs)
     try:
         model = load_pretrained(ckpt_dir)
@@ -86,7 +76,6 @@ def _load_and_check(rank, size, ckpt_dir, knobs, expected):
     finally:
         for knob in knobs:
             del os.environ[knob]
-        session._reset()
 
 
 def test_a_dense_model_loads_whole_on_every_rank(need_2_gpus, dist_workers, tmp_path):
