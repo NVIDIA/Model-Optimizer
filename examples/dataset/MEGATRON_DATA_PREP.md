@@ -187,7 +187,8 @@ output_dir: /path/to/chat_blend
 output_format: chat_jsonl
 target_samples: 36_800  # Optional; omit to keep every usable row.
 shuffle: false          # Optional; take the first rows of each split in order (default: buffer shuffle).
-seed: 1234              # Optional; seeds the cross-source mix and the validation hold-out.
+seed: 1234              # Optional; seeds the shuffle, the cross-source mix and the validation hold-out.
+reasoning_content: native  # Optional; native (default), inline or strip.
 sources:
   - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
     config: Nemotron-SFT-General
@@ -201,12 +202,21 @@ sources:
     weight: 17
 ```
 
-Each source contributes `round(target_samples * weight / sum(weights))` conversations that contain only text; a source that rounds to zero is skipped.
-A `text` row becomes one assistant turn, or is split into turns if it uses the `<extra_id_1>User` /
-`<extra_id_1>Assistant` chat markers. The conversations are mixed and `min(1000, n // 20)` of them are held out
-for validation. A source that fails to load or runs out of usable rows stops the run. Each source's selection is cached under
-`<output_dir>/parts`, keyed by the settings that choose its rows, so an interrupted run resumes and a changed
-configuration selects afresh.
+Each source contributes `round(target_samples * weight / sum(weights))` conversations that contain only text;
+a source that rounds to zero is skipped. `content_field` must be `messages` or `text`:
+
+- A `text` row becomes one assistant turn, or is split into turns if it uses the `<extra_id_1>User` /
+  `<extra_id_1>Assistant` / `System` chat markers. A row with a marker for any other role is dropped.
+- `messages` are prepared as in the tokenizing mode (JSON-string `tool_calls` arguments become dicts), except
+  that `reasoning_content` stays on the message by default (`native`), because the chat template is applied
+  later, at training time. Use `inline` if your model's chat template ignores `reasoning_content`, so the
+  reasoning is kept as a `<think>` block in `content` (see [below](#reasoning_content-for-post-training-v3-datasets)),
+  or `strip` to drop it.
+
+`files` may be `.jsonl` or `.jsonl.gz`; malformed records in them are skipped with a warning. The conversations are
+mixed and `min(1000, n // 20)` of them are held out for validation. A source that fails to load, has no usable
+rows, or runs out of them stops the run. Each source's selection is cached under `<output_dir>/parts`, keyed by
+the settings that choose its rows, so an interrupted run resumes and a changed configuration selects afresh.
 
 ## `reasoning_content` for Post-Training v3 Datasets
 

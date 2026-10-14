@@ -16,6 +16,7 @@
 """Prepare a weighted Megatron data blend from a YAML configuration."""
 
 import argparse
+import gzip
 import hashlib
 import json
 import math
@@ -29,7 +30,12 @@ from typing import Any, cast
 
 import huggingface_hub
 import yaml
-from datasets import load_dataset
+
+from modelopt.torch.utils import (
+    REASONING_CONTENT_MODES,
+    ReasoningContentMode,
+    prepare_messages_for_chat_template,
+)
 
 from .megatron_preprocess_data import megatron_preprocess_data
 
@@ -41,6 +47,8 @@ _CHAT_TURN = re.compile(
     r"<extra_id_\d+>(User|Assistant|System)\n?(.*?)(?=<extra_id_\d+>|\Z)", re.DOTALL
 )
 _CHAT_ROLES = {"User": "user", "Assistant": "assistant", "System": "system"}
+_CHAT_MARKER = re.compile(r"<extra_id_\d+>")
+_CHAT_TRAILING_MARKER = re.compile(r"<extra_id_\d+>\s*\Z")
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -70,7 +78,7 @@ def load_config(path: Path) -> dict[str, Any]:
 
     With ``output_format: chat_jsonl``, the blend is written as chat JSONL instead (see
     :func:`prepare_chat_data_blend`): ``tokenizer`` and ``target_tokens`` are not used, and the
-    optional ``target_samples``, ``shuffle`` and ``seed`` keys apply.
+    optional ``target_samples``, ``shuffle``, ``seed`` and ``reasoning_content`` keys apply.
     """
     with path.open(encoding="utf-8") as stream:
         return cast("dict[str, Any]", yaml.safe_load(stream))
@@ -166,49 +174,79 @@ def _prepare_sources(
     return blend
 
 
-def _to_chat(row: dict[str, Any], content_field: str) -> dict[str, Any] | None:
+def _to_chat(
+    row: dict[str, Any], content_field: str, reasoning_content: ReasoningContentMode = "native"
+) -> dict[str, Any] | None:
     """Convert a source row to ``{"messages": [...]}``, or ``None`` if it has no usable content.
 
+    ``messages`` go through :func:`prepare_messages_for_chat_template` with ``reasoning_content``.
     A ``text`` row in the NeMo chat format (``<extra_id_1>User`` / ``Assistant`` markers) is split
     into turns; any other ``text`` row becomes one assistant turn, so all of it is trained.
     """
     if content_field == "messages":
-        return {"messages": row["messages"]} if row.get("messages") else None
+        messages = row.get("messages")
+        if not messages:
+            return None
+        messages = prepare_messages_for_chat_template(messages, reasoning_content=reasoning_content)
+        return {"messages": messages}
     text = row.get("text") or ""
     if not text:
         return None
     if "<extra_id_" in text:
+        matches = _CHAT_TURN.findall(text)
         turns = [
             {"role": _CHAT_ROLES[role], "content": content.strip()}
-            for role, content in _CHAT_TURN.findall(text)
+            for role, content in matches
             if content.strip()
         ]
         # Markers that parse to no turns make the row malformed, not plain text: falling through
-        # would train the raw <extra_id_*> delimiters as assistant content.
-        return {"messages": turns} if turns else None
+        # would train the raw <extra_id_*> delimiters as assistant content. A marker without a known
+        # role (e.g. Tool) would silently cut its turn out of the conversation, so drop the row; only
+        # a bare delimiter at the very end needs no role.
+        roleless = len(_CHAT_MARKER.findall(text)) - len(matches)
+        if not turns or roleless > (1 if _CHAT_TRAILING_MARKER.search(text) else 0):
+            return None
+        return {"messages": turns}
     return {"messages": [{"role": "assistant", "content": text}]}
 
 
-def _iter_rows(source: dict[str, Any], output_dir: Path, shuffle: bool) -> Iterator[dict[str, Any]]:
+def _iter_rows(
+    source: dict[str, Any], output_dir: Path, shuffle: bool, seed: int
+) -> Iterator[dict[str, Any]]:
     """Yield the rows of a source: its ``files`` in order, or its Hugging Face split, streamed."""
     if "files" in source:
         for path in _download_files(source, output_dir):
-            with open(path, encoding="utf-8") as f:
-                yield from (json.loads(line) for line in f if line.strip())
+            opener = gzip.open if path.endswith(".gz") else open
+            with opener(path, "rt", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        yield json.loads(line)
+                    except ValueError as e:
+                        # As in the tokenizing reader: some Nemotron files carry a malformed record.
+                        print(f"[WARN] Skipping malformed JSONL record in {path}: {e}", flush=True)
         return
+    from datasets import load_dataset
+
     dataset = load_dataset(
         source["hf_dataset"], source.get("config"), split=source["split"], streaming=True
     )
-    yield from dataset.shuffle(seed=42) if shuffle else dataset
+    yield from dataset.shuffle(seed=seed) if shuffle else dataset
 
 
 def _take_chat_rows(
-    source: dict[str, Any], output_dir: Path, want: int | None, shuffle: bool
+    source: dict[str, Any],
+    output_dir: Path,
+    want: int | None,
+    shuffle: bool,
+    seed: int,
+    reasoning_content: ReasoningContentMode,
 ) -> list[dict[str, Any]]:
     """Return the first ``want`` usable chat rows of a source (all of them if ``want`` is None).
 
-    Fails if the source cannot be read or runs out of usable rows, so the blend cannot change
-    silently; gives up after ``10 * want`` rejected rows.
+    Fails if the source cannot be read, has no usable row, or runs out of them, so the blend cannot
+    change silently; gives up after ``10 * want`` rejected rows.
     """
     # Megatron-Bridge's chat SFT path consumes this output; keep exactly the rows it accepts. Imported
     # here, not at module scope, because the tokenizing mode does not need Megatron-Bridge installed.
@@ -218,8 +256,8 @@ def _take_chat_rows(
     rows: list[dict[str, Any]] = []
     rejected = 0
     try:
-        for row in _iter_rows(source, output_dir, shuffle):
-            chat = _to_chat(row, source["content_field"])
+        for row in _iter_rows(source, output_dir, shuffle, seed):
+            chat = _to_chat(row, source["content_field"], reasoning_content)
             if chat is None or not is_text_only_chat_example(chat):
                 rejected += 1
                 if want is not None and rejected > 10 * want:
@@ -230,8 +268,11 @@ def _take_chat_rows(
                 break
     except Exception as e:  # e.g. a gated split, or a schema the streaming reader cannot cast
         raise RuntimeError(f"{name}: failed to load") from e
-    if want is not None and len(rows) < want:
-        raise RuntimeError(f"{name}: only {len(rows)}/{want} usable rows")
+    if not rows or (want is not None and len(rows) < want):
+        gave_up = want is not None and rejected > 10 * want
+        reason = f"gave up after {rejected} rejected rows" if gave_up else "source exhausted"
+        budget = "any" if want is None else want
+        raise RuntimeError(f"{name}: only {len(rows)}/{budget} usable rows ({reason})")
     print(f"{name}: {len(rows)} rows ({rejected} rejected)", flush=True)
     return rows
 
@@ -253,14 +294,16 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]] | None:
         return None
 
 
-def _part_path(parts_dir: Path, source: dict[str, Any], shuffle: bool, capped: bool) -> Path:
+def _part_path(
+    parts_dir: Path, source: dict[str, Any], settings: dict[str, Any], capped: bool
+) -> Path:
     """Return the cache file of a source's selected rows, keyed by every input that selects them.
 
     A capped part holds the first rows of the source and serves any smaller budget; an uncapped part
     holds every usable row, so a budget removed between runs never reuses a capped selection.
     """
     selection = {key: source.get(key) for key in ("hf_dataset", "config", "split", "files")}
-    selection.update(content_field=source["content_field"], shuffle=shuffle, capped=capped)
+    selection.update(settings, content_field=source["content_field"], capped=capped)
     digest = hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest()[:16]
     label = source.get("split") or "files"
     return parts_dir / f"{source['hf_dataset'].replace('/', '--')}_{label}_{digest}.jsonl"
@@ -286,10 +329,14 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
     conversation with the model's chat template and can restrict the loss to assistant tokens.
     Each source contributes ``round(target_samples * weight / sum(weights))`` rows (every usable
     row if ``target_samples`` is omitted; a source rounded to zero rows is skipped) that the chat
-    path accepts as text-only chat. Hugging Face
-    splits are buffer-shuffled unless ``shuffle: false``; ``files`` are read from the beginning.
-    The rows are mixed with ``seed`` and ``min(1000, n // 20)`` of them are held out for validation.
-    Each source is cached under ``<output_dir>/parts``, so an interrupted run resumes.
+    path accepts as text-only chat. ``content_field`` must be ``messages`` or ``text``; ``messages``
+    keep ``reasoning_content`` for the chat template by default (``reasoning_content: native``; set
+    ``inline`` for a template that ignores the field, or ``strip``). Hugging Face splits are
+    buffer-shuffled with ``seed`` unless ``shuffle: false``; ``files`` (``.jsonl`` or ``.jsonl.gz``)
+    are read from the beginning, skipping malformed records. The rows are mixed with ``seed`` and
+    ``min(1000, n // 20)`` of them are held out for validation. Each source is cached under
+    ``<output_dir>/parts``, keyed by the settings that select its rows, so an interrupted run
+    resumes.
     """
     config = load_config(config_path)
     ignored = {"tokenizer", "target_tokens"} & config.keys()
@@ -297,24 +344,40 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
         raise ValueError(f"output_format: chat_jsonl does not use {sorted(ignored)}.")
     if any("max_samples" in source for source in config["sources"]):
         raise ValueError("output_format: chat_jsonl does not use max_samples; set target_samples.")
+    fields = {source["content_field"] for source in config["sources"]} - {"messages", "text"}
+    if fields:
+        raise ValueError(
+            f"output_format: chat_jsonl reads content_field messages or text: {fields}."
+        )
+    reasoning_content = config.get("reasoning_content", "native")
+    if reasoning_content not in REASONING_CONTENT_MODES:
+        raise ValueError(
+            f"reasoning_content must be one of {sorted(REASONING_CONTENT_MODES)}, "
+            f"got {reasoning_content!r}."
+        )
     output_dir = Path(config["output_dir"])
     parts_dir = output_dir / "parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
     shuffle = bool(config.get("shuffle", True))
+    seed = int(config.get("seed", 1234))
+    # Everything besides the source itself that decides which rows a part holds.
+    settings = {"shuffle": shuffle, "reasoning_content": reasoning_content}
+    if shuffle:
+        settings["seed"] = seed
 
     rows: list[dict[str, Any]] = []
     for source, want in zip(config["sources"], _chat_budgets(config)):
         if want == 0:
             print(f"{source['hf_dataset']}: weight rounds to 0 rows, skipped", flush=True)
             continue
-        part = _part_path(parts_dir, source, shuffle, capped=want is not None)
+        part = _part_path(parts_dir, source, settings, capped=want is not None)
         got = _read_jsonl(part)
-        if got is None or (want is not None and len(got) < want):
-            got = _take_chat_rows(source, output_dir, want, shuffle)
+        if not got or (want is not None and len(got) < want):
+            got = _take_chat_rows(source, output_dir, want, shuffle, seed, reasoning_content)
             _write_jsonl(part, got)
         rows.extend(got[:want])
 
-    random.Random(int(config.get("seed", 1234))).shuffle(rows)
+    random.Random(seed).shuffle(rows)
     num_validation = min(1000, len(rows) // 20)
     splits = {"validation": rows[:num_validation], "train": rows[num_validation:]}
     if not splits["train"] or not splits["validation"]:
@@ -328,11 +391,11 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
 def prepare_megatron_data_blend(config_path: Path) -> list[tuple[float, str]]:
     """Download and tokenize the configured weighted data sources."""
     config = load_config(config_path)
-    chat_keys = {"target_samples", "shuffle", "seed"} & config.keys()
+    chat_keys = {"target_samples", "shuffle", "seed", "reasoning_content"} & config.keys()
     if config.get("output_format", "megatron") != "megatron" or chat_keys:
         raise ValueError(
-            "Tokenized blends do not use output_format: chat_jsonl, target_samples, shuffle or "
-            "seed; run prepare_chat_data_blend for chat JSONL."
+            "Tokenized blends do not use output_format: chat_jsonl, target_samples, shuffle, seed "
+            "or reasoning_content; run prepare_chat_data_blend for chat JSONL."
         )
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)

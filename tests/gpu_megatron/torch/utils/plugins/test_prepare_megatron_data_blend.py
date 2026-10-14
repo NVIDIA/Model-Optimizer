@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gzip
 import importlib
 import json
 import sys
@@ -137,7 +138,7 @@ def chat_blend(tmp_path: Path, monkeypatch):
     """Two equal-weight ``messages`` sources of 100 rows each; returns (config writer, stream counts)."""
     calls = {"org/a": 0, "org/b": 0}
 
-    def iter_rows(source, output_dir, shuffle):
+    def iter_rows(source, output_dir, shuffle, seed):
         calls[source["hf_dataset"]] += 1
         yield from (_chat(i) for i in range(100))
 
@@ -190,20 +191,47 @@ def test_to_chat_handles_all_row_shapes():
     assert blend_module._to_chat({"text": ""}, "text") is None
     # Markers that parse to no turns: dropped, never trained as assistant text.
     assert blend_module._to_chat({"text": "<extra_id_0>\nraw body\n"}, "text") is None
+    # A role without a mapping would cut its turn out of the middle: the whole row is dropped.
+    text = "<extra_id_1>User\nq\n<extra_id_1>Tool\nresult\n<extra_id_1>Assistant\na\n"
+    assert blend_module._to_chat({"text": text}, "text") is None
+
+
+@pytest.mark.parametrize(
+    ("mode", "assistant"),
+    [
+        ("native", {"role": "assistant", "content": "4", "reasoning_content": "2+2"}),
+        ("inline", {"role": "assistant", "content": "<think>\n2+2\n</think>\n4"}),
+        ("strip", {"role": "assistant", "content": "4"}),
+    ],
+)
+def test_to_chat_prepares_messages_like_the_tokenizing_mode(mode, assistant):
+    messages = [
+        {"role": "user", "content": "2+2?"},
+        {"role": "assistant", "content": "4", "reasoning_content": "2+2"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"function": {"name": "add", "arguments": '{"a": 2, "b": 2}'}}],
+        },
+    ]
+    chat = blend_module._to_chat({"messages": messages}, "messages", mode)
+    assert chat["messages"][1] == assistant
+    # JSON-string tool-call arguments become dicts, as the Nemotron v3 chat templates expect.
+    assert chat["messages"][2]["tool_calls"][0]["function"]["arguments"] == {"a": 2, "b": 2}
 
 
 def test_take_chat_rows_skips_non_text_rows_and_gives_up(tmp_path: Path, monkeypatch):
     source = {"hf_dataset": "org/a", "split": "train", "content_field": "messages"}
     rows = [_chat(0), _image_chat(1), _chat(2), _chat(3)]
     monkeypatch.setattr(blend_module, "_iter_rows", lambda *a: iter(rows))
-    got = blend_module._take_chat_rows(source, tmp_path, want=3, shuffle=False)
+    got = blend_module._take_chat_rows(source, tmp_path, 3, False, 0, "native")
     assert [c["messages"][0]["content"] for c in got] == ["q0", "q2", "q3"]
 
     monkeypatch.setattr(
         blend_module, "_iter_rows", lambda *a: iter([_image_chat(i) for i in range(50)])
     )
-    with pytest.raises(RuntimeError, match="only 0/2 usable rows"):
-        blend_module._take_chat_rows(source, tmp_path, want=2, shuffle=False)
+    with pytest.raises(RuntimeError, match=r"only 0/2 usable rows \(gave up after 21 rejected"):
+        blend_module._take_chat_rows(source, tmp_path, 2, False, 0, "native")
 
 
 def test_chat_blend_splits_weighted_rows(tmp_path: Path, chat_blend, monkeypatch):
@@ -259,6 +287,59 @@ def test_chat_blend_does_not_reuse_parts_of_another_selection(chat_blend, change
     blend_module.prepare_chat_data_blend(write_config())
     blend_module.prepare_chat_data_blend(write_config(**change))
     assert calls == {"org/a": 2, "org/b": 2}
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ({"shuffle": True, "seed": 0}, {"shuffle": True, "seed": 1}),
+        ({}, {"reasoning_content": "inline"}),
+        (
+            {
+                "sources": [
+                    {
+                        "hf_dataset": "org/a",
+                        "files": ["a.jsonl"],
+                        "content_field": "messages",
+                        "weight": 1,
+                    }
+                ]
+            },
+            {
+                "sources": [
+                    {
+                        "hf_dataset": "org/a",
+                        "files": ["b.jsonl"],
+                        "content_field": "messages",
+                        "weight": 1,
+                    }
+                ]
+            },
+        ),
+    ],
+    ids=["seed", "reasoning_content", "files"],
+)
+def test_chat_blend_reselects_after_a_settings_change(chat_blend, first, second):
+    write_config, calls = chat_blend
+    blend_module.prepare_chat_data_blend(write_config(**first))
+    blend_module.prepare_chat_data_blend(write_config(**first))  # cached
+    blend_module.prepare_chat_data_blend(write_config(**second))
+    assert calls["org/a"] == 2
+
+
+def test_chat_blend_fails_on_a_source_without_usable_rows(chat_blend, monkeypatch):
+    write_config, _ = chat_blend
+
+    def iter_rows(source, output_dir, shuffle, seed):
+        make_row = _chat if source["hf_dataset"] == "org/a" else _image_chat
+        yield from (make_row(i) for i in range(100))
+
+    monkeypatch.setattr(blend_module, "_iter_rows", iter_rows)
+    # Without target_samples, an all-rejected source must not drop out of the blend silently.
+    with pytest.raises(
+        RuntimeError, match=r"org/b train: only 0/any usable rows \(source exhausted"
+    ):
+        blend_module.prepare_chat_data_blend(write_config(target_samples=None))
 
 
 def test_chat_blend_does_not_reuse_a_capped_part_without_a_budget(tmp_path: Path, chat_blend):
@@ -359,9 +440,9 @@ def test_chat_blend_fails_on_a_bad_source(tmp_path: Path, chat_blend, monkeypatc
     write_config, _ = chat_blend
     real_iter_rows = blend_module._iter_rows
 
-    def iter_rows(source, output_dir, shuffle):
+    def iter_rows(source, output_dir, shuffle, seed):
         if source["hf_dataset"] == "org/b":
-            yield from real_iter_rows(source, output_dir, shuffle)
+            yield from real_iter_rows(source, output_dir, shuffle, seed)
             return
         yield from (_chat(i) for i in range(10))  # yields some rows, then the reader fails
         raise TypeError("cannot cast")
@@ -411,6 +492,21 @@ def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch):
     [
         ({"tokenizer": "x"}, "does not use"),
         ({"target_tokens": 1000}, "does not use"),
+        ({"reasoning_content": "drop"}, "reasoning_content must be one of"),
+        # A row with both columns must not silently be read from ``text``.
+        (
+            {
+                "sources": [
+                    {
+                        "hf_dataset": "org/a",
+                        "split": "train",
+                        "content_field": "conversations",
+                        "weight": 1,
+                    }
+                ]
+            },
+            "content_field messages or text",
+        ),
     ],
 )
 def test_chat_blend_rejects_tokenizer_options(chat_blend, overrides, match):
@@ -423,3 +519,20 @@ def test_tokenized_blend_rejects_chat_options(chat_blend):
     write_config, _ = chat_blend
     with pytest.raises(ValueError, match="Tokenized blends do not use"):
         blend_module.prepare_megatron_data_blend(write_config())
+
+
+def test_chat_blend_reads_gzip_files_and_skips_malformed_records(tmp_path: Path, monkeypatch):
+    plain, packed = tmp_path / "a.jsonl", tmp_path / "b.jsonl.gz"
+    lines = [json.dumps(_chat(i)) for i in range(20)]
+    plain.write_text(
+        "\n".join([*lines[:10], '{"messages": [', *lines[10:]]) + "\n", encoding="utf-8"
+    )
+    with gzip.open(packed, "wt", encoding="utf-8") as f:
+        f.writelines(json.dumps(_chat(i)) + "\n" for i in range(20, 40))
+    paths = {"data/a.jsonl": str(plain), "data/b.jsonl.gz": str(packed)}
+    monkeypatch.setattr(
+        huggingface_hub, "hf_hub_download", lambda repo_id, filename, **kwargs: paths[filename]
+    )
+    source = {"hf_dataset": "org/a", "files": list(paths), "content_field": "messages"}
+    rows = list(blend_module._iter_rows(source, tmp_path / "blend", False, 0))
+    assert [r["messages"][0]["content"] for r in rows] == [f"q{i}" for i in range(40)]
