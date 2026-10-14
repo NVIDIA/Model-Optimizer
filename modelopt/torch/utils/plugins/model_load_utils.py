@@ -592,7 +592,7 @@ def load_pretrained(
         # Every rank loads the plan rank 0 was handed, as it would one the session decided: ranks
         # loading different plans would build mismatched meshes and hang.
         handed = distribution
-        distribution = session.plan.decide(lambda: handed)
+        distribution = session.plan.broadcast_from(lambda: handed)
     route = _route(distribution)
     if model_type is None:
         model_type = (
