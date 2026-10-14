@@ -15,6 +15,8 @@
 
 """Tests for _QuantFusedExperts: generic fused MoE quantization and export."""
 
+import warnings
+
 import pytest
 import torch
 import torch.nn as nn
@@ -32,7 +34,7 @@ from modelopt.torch.export.quant_utils import get_quant_config, get_quantization
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
 from modelopt.torch.quantization.model_calib import local_hessian_calibrate
-from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
+from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
     _fused_experts_wrapper_class,
     _is_fused_experts_module,
@@ -695,6 +697,149 @@ class TestExportFusedExperts:
         finally:
             if QuantModuleRegistry.get(expert_type) is not None:
                 QuantModuleRegistry.unregister(expert_type)
+
+    @pytest.mark.parametrize("amax_state", ["calibrated", "zero", "missing"])
+    def test_w4a8_sequential_weight_quantizer_exports_split_block_amax(
+        self, monkeypatch, amax_state
+    ):
+        """W4A8 AWQ weights use a SequentialQuantizer: an INT4 block stage (per-block ``_amax``)
+        followed by a per-tensor FP8 stage. Export must treat each stage on its own: slice the
+        block amax into the gate/up halves (updating the stale ``_amax_shape_for_export``), and
+        for experts that saw no calibration tokens derive a per-block fallback instead of
+        forcing a scalar into the block stage (``Changing shape when setting amax``).
+        """
+        block = 16
+        experts = _SyntheticFusedExperts()
+        expert_type = type(experts)
+        if QuantModuleRegistry.get(expert_type) is None:
+            QuantModuleRegistry.register({expert_type: "test.SyntheticFusedExperts"})(
+                _QuantFusedExperts
+            )
+        try:
+            converted = QuantModuleRegistry.convert(experts)
+
+            def _w4a8_quantizer(rows, fused):
+                int4 = TensorQuantizer(
+                    QuantizerAttributeConfig(num_bits=4, block_sizes={-1: block, "type": "static"})
+                )
+                fp8 = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3)))
+                # gate_up_proj reduces over HIDDEN_DIM, down_proj over INTERMEDIATE_DIM.
+                blocks = (HIDDEN_DIM if fused else INTERMEDIATE_DIM) // block
+                int4._amax_shape_for_export = (rows, -1)
+                if amax_state != "missing":
+                    # Row r of gate_up carries the marker r + 1, so a wrong slice is visible.
+                    marker = torch.arange(1, rows + 1).float().unsqueeze(-1).expand(rows, blocks)
+                    int4.amax = (
+                        marker.clone() if amax_state == "calibrated" else torch.zeros_like(marker)
+                    )
+                    fp8.amax = torch.tensor(2.0 if amax_state == "calibrated" else 0.0)
+                return SequentialQuantizer(int4, fp8)
+
+            for idx in range(NUM_EXPERTS):
+                converted.gate_up_proj_weight_quantizers[idx] = _w4a8_quantizer(
+                    2 * INTERMEDIATE_DIM, fused=True
+                )
+                converted.down_proj_weight_quantizers[idx] = _w4a8_quantizer(
+                    HIDDEN_DIM, fused=False
+                )
+
+            seen = []
+
+            def _spy_export(wrapper, dtype, **_kwargs):
+                int4, fp8 = wrapper.weight_quantizer
+                seen.append(
+                    (
+                        wrapper.weight.shape[0],
+                        int4.export_amax().detach().clone(),
+                        fp8._amax.detach().clone(),
+                    )
+                )
+
+            monkeypatch.setattr(
+                "modelopt.torch.export.unified_export_hf._export_quantized_weight",
+                _spy_export,
+            )
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                _export_fused_experts(converted, torch.float16)
+            fallback_warned = any("was not calibrated" in str(w.message) for w in caught)
+            assert fallback_warned == (amax_state != "calibrated")
+
+            assert len(seen) == 3 * NUM_EXPERTS
+            for rows, int4_amax, fp8_amax in seen:
+                assert int4_amax.shape[0] == rows  # sliced to the projection, not the fused rows
+                assert torch.all(int4_amax > 0)
+                assert torch.all(fp8_amax > 0)
+            # Export order per expert is gate, up, down; gate and up must share the FP8 stage.
+            for gate, up in zip(seen[0::3], seen[1::3]):
+                assert torch.equal(gate[2], up[2])
+            if amax_state == "calibrated":
+                gate_up_rows = {int4_amax[0, 0].item() for rows, int4_amax, _ in seen if rows == 16}
+                # gate starts at row marker 1, up at INTERMEDIATE_DIM + 1.
+                assert gate_up_rows == {1.0, float(INTERMEDIATE_DIM + 1)}
+        finally:
+            if QuantModuleRegistry.get(expert_type) is not None:
+                QuantModuleRegistry.unregister(expert_type)
+
+    @pytest.mark.parametrize(
+        ("amax_layout", "expected_gate_shape", "expected_down_shape"),
+        [
+            ("per_tensor", (1,), (1,)),
+            ("per_channel", (INTERMEDIATE_DIM, 1), (HIDDEN_DIM, 1)),
+            ("per_block", (INTERMEDIATE_DIM, 2), (HIDDEN_DIM, 2)),
+        ],
+    )
+    def test_uncalibrated_zero_amax_fallback_keeps_layout(
+        self, monkeypatch, amax_layout, expected_gate_shape, expected_down_shape
+    ):
+        """The weight-derived fallback must reproduce the layout of the quantizer's zero amax."""
+        experts = _SyntheticFusedExperts()
+        expert_type = type(experts)
+        if QuantModuleRegistry.get(expert_type) is None:
+            QuantModuleRegistry.register({expert_type: "test.SyntheticFusedExperts"})(
+                _QuantFusedExperts
+            )
+        try:
+            converted = QuantModuleRegistry.convert(experts)
+            layouts = {"per_tensor": (1,), "per_channel": (None, 1), "per_block": (None, 2)}
+            for idx in range(NUM_EXPERTS):
+                for wq, rows in (
+                    (converted.gate_up_proj_weight_quantizers[idx], 2 * INTERMEDIATE_DIM),
+                    (converted.down_proj_weight_quantizers[idx], HIDDEN_DIM),
+                ):
+                    wq._disabled = False
+                    shape = layouts[amax_layout]
+                    wq.amax = torch.zeros(*(rows if d is None else d for d in shape))
+
+            seen = []
+
+            def _spy_export(wrapper, dtype, **_kwargs):
+                seen.append(wrapper.weight_quantizer._amax.detach().clone())
+
+            monkeypatch.setattr(
+                "modelopt.torch.export.unified_export_hf._export_quantized_weight",
+                _spy_export,
+            )
+            with pytest.warns(UserWarning, match="was not calibrated"):
+                _export_fused_experts(converted, torch.float16)
+
+            assert all(torch.all(a > 0) for a in seen)
+            # Export order per expert is gate, up, down.
+            for gate, up, down in zip(seen[0::3], seen[1::3], seen[2::3]):
+                assert gate.shape == up.shape == expected_gate_shape
+                assert down.shape == expected_down_shape
+        finally:
+            if QuantModuleRegistry.get(expert_type) is not None:
+                QuantModuleRegistry.unregister(expert_type)
+
+    def test_fallback_amax_refuses_layouts_it_cannot_group(self):
+        from modelopt.torch.export.moe_utils import _fallback_amax
+
+        quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=1))
+        quantizer.amax = torch.zeros(1, HIDDEN_DIM)  # per input channel: not a (rows, blocks) grid
+        with pytest.raises(ValueError, match="Cannot derive amax"):
+            _fallback_amax(torch.randn(INTERMEDIATE_DIM, HIDDEN_DIM), quantizer)
 
 
 # ---------------------------------------------------------------------------
