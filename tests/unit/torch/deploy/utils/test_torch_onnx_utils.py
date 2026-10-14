@@ -72,6 +72,16 @@ class _PythonScalarArgs(nn.Module):
         return x * scale + count if flag else x / scale - count
 
 
+class _LeadingPythonScalarArgs(nn.Module):
+    def forward(self, flag: bool, x):
+        return x + 1 if flag else x - 1
+
+
+class _InterleavedPythonScalarArgs(nn.Module):
+    def forward(self, flag: bool, x, count: int, y, scale: float):
+        return x + y * scale + count if flag else x - y * scale - count
+
+
 def _make_fp8_model(source_dtype, kind="fp8"):
     if kind == "format":
         model = nn.Sequential(*(nn.Linear(128, 128, bias=False) for _ in range(2)))
@@ -140,10 +150,24 @@ def test_onnx_dynamo_export(skip_on_windows, model: BaseDeployModel):
         assert next(item.version for item in exported.opset_import if item.domain == "") == 23
 
 
-def test_onnx_export_explicit_python_scalars():
-    payload, _ = get_onnx_bytes_and_metadata(
-        _PythonScalarArgs().eval(),
-        (torch.ones(1), False, 3, 2.5),
+@pytest.mark.parametrize(
+    ("model", "args", "input_names"),
+    [
+        (_PythonScalarArgs(), (torch.ones(1), False, 3, 2.5), ["x"]),
+        (_LeadingPythonScalarArgs(), (True, torch.ones(1)), ["x"]),
+        (
+            _InterleavedPythonScalarArgs(),
+            (False, torch.ones(1), 3, torch.full((1,), 2.0), 2.5),
+            ["x", "y"],
+        ),
+    ],
+    ids=["trailing", "leading", "interleaved"],
+)
+def test_onnx_export_explicit_python_scalars(model, args, input_names):
+    model.eval()
+    payload, metadata = get_onnx_bytes_and_metadata(
+        model,
+        args,
         dynamo_export=True,
         onnx_opset=23,
     )
@@ -152,11 +176,18 @@ def test_onnx_export_explicit_python_scalars():
     )
 
     onnx.checker.check_model(exported)
-    assert [value.name for value in exported.graph.input] == ["x"]
-    assert [node.op_type for node in exported.graph.node if node.op_type in {"Div", "Sub"}] == [
-        "Div",
-        "Sub",
-    ]
+    assert [value.name for value in exported.graph.input] == input_names
+    assert metadata["input_none_names"] == []
+    assert len(metadata["input_tree_spec"].names) == len(args)
+
+    inference_args = tuple(
+        value + 2 if isinstance(value, torch.Tensor) else value for value in args
+    )
+    inputs = generate_onnx_input(metadata, inference_args)
+    assert list(inputs) == input_names
+    session = ort.InferenceSession(exported.SerializeToString(), providers=["CPUExecutionProvider"])
+    actual = session.run(None, {name: value.numpy() for name, value in inputs.items()})[0]
+    torch.testing.assert_close(torch.from_numpy(actual), model(*inference_args))
 
 
 def test_legacy_export_default_opset_remains_20():

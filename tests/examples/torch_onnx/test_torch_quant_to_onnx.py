@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import copy
 import importlib.util
 import os
 import sys
@@ -139,6 +140,60 @@ def test_cli_rejects_dynamo_opset_below_23(monkeypatch, capsys, tmp_path):
         torch_quant_to_onnx.main()
 
     assert "--dynamo_export requires --onnx_opset=23 or newer" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("enabled_int4_layer", [None, 0, 1])
+def test_cli_trt_build_checks_enabled_int4_weights(
+    monkeypatch, capsys, tmp_path, enabled_int4_layer
+):
+    example = _load_example_module(
+        "torch_quant_to_onnx_for_test", "examples/torch_onnx/torch_quant_to_onnx.py"
+    )
+    model = torch.nn.Sequential(*(torch.nn.Linear(128, 128) for _ in range(3))).eval()
+    inputs = torch.randn(1, 128)
+    config = copy.deepcopy(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG)
+    config["quant_cfg"].extend(
+        [
+            {
+                "quantizer_name": "2.weight_quantizer",
+                "cfg": {"num_bits": (4, 3), "block_sizes": None},
+            },
+            {"quantizer_name": "2.input_quantizer", "cfg": {"num_bits": (4, 3)}, "enable": True},
+        ]
+    )
+    model = mtq.quantize(model, config, forward_loop=lambda candidate: candidate(inputs))
+    for index in range(2):
+        if index != enabled_int4_layer:
+            model[index].weight_quantizer.disable()
+
+    onnx_path = tmp_path / "mixed.onnx"
+    monkeypatch.setattr(
+        sys, "argv", ["torch_quant_to_onnx.py", "--onnx_save_path", str(onnx_path), "--trt_build"]
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(example.timm, "create_model", lambda *_args, **_kwargs: model)
+    monkeypatch.setattr(example, "get_model_input_shape", lambda _model: (128,))
+    monkeypatch.setattr(example, "load_calibration_data", lambda *_args, **_kwargs: [inputs])
+    monkeypatch.setattr(example, "quantize_model", lambda *_args: model)
+    builds = []
+    monkeypatch.setattr(
+        example, "build_trt_engine", lambda path, *_args, **_kwargs: builds.append(path)
+    )
+
+    if enabled_int4_layer is not None:
+        with pytest.raises(SystemExit, match="2"):
+            example.main()
+        assert "exported graph contains INT4 AWQ weights" in capsys.readouterr().err
+        assert not onnx_path.exists()
+        assert builds == []
+    else:
+        example.main()
+        exported = onnx.load(onnx_path)
+        onnx.checker.check_model(exported, full_check=True)
+        assert all(
+            tensor.data_type != onnx.TensorProto.INT4 for tensor in exported.graph.initializer
+        )
+        assert builds == [str(onnx_path)]
 
 
 # TODO: Add int4_awq once the INT4 exporter supports non-MatMul/Gemm consumer patterns

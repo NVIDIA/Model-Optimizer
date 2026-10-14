@@ -340,12 +340,12 @@ def split_args_kwargs(args_tuple):
 
 
 def is_int4_quantized(model: nn.Module) -> bool:
-    """Check if the model is quantized in INT4 mode.
-    This method does not check if the model has been quantized in mixed precision format."""
+    """Check whether the model contains enabled INT4 weight-only quantization."""
     for _, module in model.named_modules():
         if (
             hasattr(module, "input_quantizer")
             and hasattr(module, "weight_quantizer")
+            and module.weight_quantizer.is_enabled
             and module.weight_quantizer._num_bits == 4
             and module.input_quantizer._disabled
         ):
@@ -569,12 +569,16 @@ def get_onnx_bytes_and_metadata(
     # Get input tree spec, see generate_onnx_input for more info as well on this
     flat_input, tree_spec_input = flatten_tree(named_args)
 
-    # input names are the names of the flattened input tree spec but without None values
-    input_names = [k for k, v in zip(tree_spec_input.names, flat_input) if v is not None]
+    # Dynamo specializes Python scalars, so only tensor leaves become graph inputs.
+    input_names = [
+        k
+        for k, v in zip(tree_spec_input.names, flat_input)
+        if (isinstance(v, torch.Tensor) if dynamo_export else v is not None)
+    ]
 
     # we also want to record the input names that are None so we can remove them from the input
     # during inference.
-    input_none_names = list(set(tree_spec_input.names) - set(input_names))
+    input_none_names = [k for k, v in zip(tree_spec_input.names, flat_input) if v is None]
 
     if not onnx_load_path:
         if onnx_opset is None:
