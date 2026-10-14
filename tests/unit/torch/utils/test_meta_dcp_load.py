@@ -39,7 +39,7 @@ from _test_utils.torch.transformers_models import get_tiny_llama
 from accelerate import init_empty_weights
 from transformers import AutoModelForImageTextToText, Qwen2_5_VLConfig
 
-from modelopt.torch.utils.distributed import (
+from modelopt.torch.utils.plugins.model_load_utils import (
     _fsdp2_wrap_modules,
     _map_ckpt_keys_to_model,
     _meta_dcp_load,
