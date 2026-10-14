@@ -32,7 +32,7 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM, Qwen3MoeConfig
 
 from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
-from modelopt.torch.utils.moe import load_and_prepare_ep
+from modelopt.torch.utils.plugins.model_load_utils import load_and_prepare_ep
 
 NUM_EXPERTS = 8
 
