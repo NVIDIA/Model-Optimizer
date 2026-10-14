@@ -815,9 +815,10 @@ def distributed_forward_loop(model, dataloader, device=None, ep_mesh=None):
     """Build an ``mtq.quantize`` ``forward_loop`` for a distributed (e.g. expert-parallel) model.
 
     Moves each batch onto ``device``, when given, and runs the captured ``model`` forward (the EP
-    all-reduce / all-to-all collectives fire inside that forward). An expert-parallel model passes
-    the ``ep_mesh`` its experts are sharded over, for the all-to-all forwards that quantizer insertion
-    drops to be re-installed before the first forward. ``mtq.quantize`` hands the
+    all-reduce / all-to-all collectives fire inside that forward). A model whose plan
+    (:func:`distribution_plan`) is expert-parallel passes the ``ep_mesh`` its experts are sharded
+    over, for the all-to-all forwards that quantizer insertion drops to be re-installed before the
+    first forward; any other model passes none. ``mtq.quantize`` hands the
     ``forward_loop`` callback an inner module that this closure ignores, calling the captured
     top-level ``model`` instead so the full distributed forward (and its collectives) runs.
 
@@ -829,6 +830,13 @@ def distributed_forward_loop(model, dataloader, device=None, ep_mesh=None):
     """
     # Local import to avoid any import cycle within modelopt.torch.utils.
     from modelopt.torch.utils.dataset_utils import _disable_use_cache
+
+    plan = distribution_plan(model)
+    if plan.is_expert_parallel != (ep_mesh is not None):
+        raise ValueError(
+            f"{plan!r}: an expert-parallel model calibrates with the ep_mesh its routed experts "
+            "are sharded over, and any other model without one."
+        )
 
     def calibrate(_inner_model):
         _reinstall_a2a_forwards(model, ep_mesh)
