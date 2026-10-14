@@ -152,7 +152,8 @@ quantize:
       enable: true
       cfg:
         $import: fp8
-    # Megatron-Core lm_head.
+    # Megatron-Core lm_head. Effective only with untied embeddings: for a tied output_layer the
+    # Megatron checkpoint save drops its quantizer state, so it reloads and exports BF16.
     - quantizer_name: '*output_layer.weight_quantizer'
       enable: true
       cfg:
@@ -164,6 +165,9 @@ quantize:
     - quantizer_name: '*vision_model*'
       enable: false
     - quantizer_name: '*vision_projector*'
+      enable: false
+    # Megatron-Bridge names the projector vision_projection.
+    - quantizer_name: '*vision_projection*'
       enable: false
     - quantizer_name: '*radio_model*'
       enable: false
@@ -183,6 +187,8 @@ quantize:
     # quantization like any other. Image calibration supplies no audio, so those input
     # quantizers collect no amax and the export drops the input scale while still writing an
     # FP8 weight scale -- a layer that claims W8A8 with no activation scale. Keep it BF16.
+    # Megatron-Bridge builds no audio branch for the omni wrapper; these guards also cover the
+    # Megatron-Core attention rules should it name one sound_encoder / sound_projector.
     - quantizer_name: '*audio_tower*'
       enable: false
     - quantizer_name: '*sound_encoder*'

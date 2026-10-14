@@ -106,8 +106,9 @@ def to_chat(row: dict, field: str) -> dict | None:
         turns = [
             {"role": ROLE[r], "content": c.strip()} for r, c in TURN.findall(text) if c.strip()
         ]
-        if turns:
-            return {"messages": turns}
+        # Markers that parse to no turns make the row malformed, not plain text: falling through
+        # would train the raw <extra_id_*> delimiters as assistant content.
+        return {"messages": turns} if turns else None
     return {"messages": [{"role": "assistant", "content": text}]}
 
 

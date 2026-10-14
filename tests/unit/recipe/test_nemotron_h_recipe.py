@@ -166,7 +166,9 @@ def _nemotron_h_mcore() -> nn.Module:
 
     Names follow a real PTQ checkpoint: the language model sits under ``language_model``,
     attention is ``self_attention.linear_qkv`` / ``linear_proj``, lm_head is ``output_layer``,
-    and the MTP block nests its attention and MoE layers under ``mtp_model_layer.layers``.
+    and the MTP block nests its attention and MoE layers under ``mtp_model_layer.layers``. The
+    projector is ``vision_projection``. Megatron-Bridge builds no audio branch, but one is
+    included so the test pins the audio guards against the Megatron-Core attention rules too.
     """
     model = nn.Module()
     lm = model.language_model = nn.Module()
@@ -182,7 +184,11 @@ def _nemotron_h_mcore() -> nn.Module:
     lm.mtp.layers = nn.ModuleList([mtp_block])
     model.vision_model = nn.Module()
     model.vision_model.blocks = nn.ModuleList([_Expert(), _mcore_attention()])
-    model.vision_projector = nn.Linear(_WIDTH, _WIDTH, bias=False)
+    # An attention layer stands in under the projector to prove its guard.
+    model.vision_projection = nn.ModuleList([_mcore_attention()])
+    model.sound_projector = nn.Module()
+    model.sound_projector.sound_encoder = nn.Module()
+    model.sound_projector.sound_encoder.layers = nn.ModuleList([_mcore_attention()])
     return model
 
 

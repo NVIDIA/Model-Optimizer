@@ -91,6 +91,8 @@ def test_to_chat_handles_all_three_row_shapes():
         "messages": [{"role": "assistant", "content": "def f(): pass"}]
     }
     assert blend.to_chat({"text": ""}, "text") is None
+    # Markers that parse to no turns: dropped, never trained as assistant text.
+    assert blend.to_chat({"text": "<extra_id_0>\nraw body\n"}, "text") is None
 
 
 def test_take_skips_rejected_rows_and_gives_up_after_too_many(monkeypatch):

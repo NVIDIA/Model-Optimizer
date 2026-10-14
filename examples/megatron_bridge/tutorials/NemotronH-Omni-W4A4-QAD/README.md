@@ -150,6 +150,7 @@ torchrun --nproc_per_node 4 /opt/Model-Optimizer/examples/megatron_bridge/export
 ```
 
 - The exporter writes the quantized language model, including the MTP head, under `language_model.`, and copies `vision_model.`, `vision_projector.` and `mlp1.` from the source checkpoint.
+- The MTP head exports through the standard language-model mapping; `--export_extra_modules` is for EAGLE and Medusa heads and is not needed here.
 - The MTP head can be replaced after export by a separately trained MTP head in the same format.
 - It exports the latest `iter_*` under `--megatron_path`. To export another iteration, point `--megatron_path` at a directory holding a link to that `iter_*` and a matching `latest_checkpointed_iteration.txt`.
 - The backbone KV cache is cast at the fixed FP8 range, so the export has no backbone `k_scale` / `v_scale`; vLLM then uses a scale of 1.0, which is that range. Only the MTP attention carries a calibrated pair.
