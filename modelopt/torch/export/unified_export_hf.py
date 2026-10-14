@@ -96,7 +96,7 @@ from modelopt.torch.quantization.utils import (
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
-from modelopt.torch.utils.distributed import is_fsdp2_model
+from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan, is_fsdp2_model
 from modelopt.torch.utils.perf import maybe_clear_cuda_cache
 
 try:
@@ -2010,14 +2010,10 @@ def export_hf_checkpoint(
     # emits it from rank 0 alone, so on the other ranks a full read is host memory spent and thrown
     # away -- and the carried set is the large stuff. The KEY list is still resolved everywhere,
     # because get_quant_config runs per rank and the configs have to agree.
-    _writes_extra = (
-        not (
-            torch.distributed.is_available()
-            and torch.distributed.is_initialized()
-            and is_fsdp2_model(model)
-        )
-        or torch.distributed.get_rank() == 0
-    )
+    # How the model is distributed decides how it is exported. A diffusers pipeline is not a module,
+    # and nothing here distributes one.
+    plan = distribution_plan(model) if isinstance(model, nn.Module) else DistributionPlan()
+    _writes_extra = not plan.is_fsdp_dense or torch.distributed.get_rank() == 0
     _carried = read_unplaced_weights(model, keys_only=not _writes_extra)
     if _writes_extra and _carried:
         extra_state_dict = {**_carried, **(extra_state_dict or {})}
@@ -2063,11 +2059,7 @@ def export_hf_checkpoint(
         )
         return
 
-    is_fsdp2_sharded = (
-        torch.distributed.is_available()
-        and torch.distributed.is_initialized()
-        and is_fsdp2_model(model)
-    )
+    is_fsdp2_sharded = plan.is_fsdp_dense
     use_no_gather_writer = (
         is_fsdp2_sharded and os.environ.get("MODELOPT_FSDP2_EXPORT") == "nogather"
     )
