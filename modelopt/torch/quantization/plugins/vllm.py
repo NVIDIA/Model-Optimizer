@@ -601,6 +601,23 @@ class _VLLMParallelLinear(QuantModule):
             self.quant_method = original_quant_method
 
 
+def _kimi_down_proj_has_enabled_quantizers(down_proj: torch.nn.Module) -> bool:
+    return any(
+        (quantizer := getattr(down_proj, name, None)) is not None and quantizer.is_enabled
+        for name in _VLLMParallelLinear._QUANTIZER_NAMES
+    )
+
+
+class _KimiGemmRsFakeQuantGuard:
+    """Keep vLLM 0.28 GEMM-RS when the down projection is not fake-quantized."""
+
+    def __init__(self, down_proj: vllm_linear.RowParallelLinear) -> None:
+        self.down_proj = down_proj
+
+    def __bool__(self) -> bool:
+        return not _kimi_down_proj_has_enabled_quantizers(self.down_proj)
+
+
 class _KimiGemmRsArFakeQuantGuard:
     """Keep Kimi's fused collective GEMM for projections without enabled fake quantizers."""
 
@@ -609,8 +626,8 @@ class _KimiGemmRsArFakeQuantGuard:
         self.down_proj = down_proj
 
     def should_run(self, x: torch.Tensor) -> bool:
-        return not any(
-            getattr(self.down_proj, name).is_enabled for name in self.down_proj._QUANTIZER_NAMES
+        return not _kimi_down_proj_has_enabled_quantizers(
+            self.down_proj
         ) and self.gemm_rs_ar.should_run(x)
 
     def __call__(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -630,9 +647,9 @@ def _prepare_kimi_mlp_fake_quant(module: torch.nn.Module, kimi_method_cls: type 
     down_proj = module.down_proj
     if not isinstance(down_proj, (vllm_linear.RowParallelLinear, _VLLMParallelLinear)):
         return
-    # vLLM 0.28 selects GEMM-RS with a bool and bypasses down_proj.forward.
-    if hasattr(module, "run_gemm_rs"):
-        module.run_gemm_rs = False
+    # vLLM 0.28 checks this flag before calling down_proj.forward.
+    if getattr(module, "run_gemm_rs", False) is True:
+        module.run_gemm_rs = _KimiGemmRsFakeQuantGuard(down_proj)
     gemm_rs_ar = getattr(module, "gemm_rs_ar", None)
     if gemm_rs_ar is not None and not isinstance(gemm_rs_ar, _KimiGemmRsArFakeQuantGuard):
         # QuantModule conversion updates down_proj in place, preserving this reference.

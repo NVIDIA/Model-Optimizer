@@ -486,15 +486,20 @@ def test_non_kimi_conversion_never_imports_kimi():
         vllm_plugin.vllm_replace_quant_module_hook(torch.nn.Linear(2, 2))
 
 
-def test_kimi_legacy_gemm_rs_uses_quantized_down_projection(fake_parallel_state):
+def test_kimi_legacy_gemm_rs_routes_by_down_proj_quantizers(fake_parallel_state, monkeypatch):
     kimi_model = pytest.importorskip("vllm.models.kimi_k3.nvidia.model")
     if "run_gemm_rs" not in kimi_model.KimiMLP.forward.__code__.co_names:
         pytest.skip("Kimi MLP no longer uses the legacy GEMM-RS path")
     kimi_method = pytest.importorskip(
         "vllm.models.kimi_k3.nvidia.low_latency_gemm"
     ).KimiK3LowLatencyLinearMethod
+    gemm_rs_module = pytest.importorskip("vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs")
 
     x = torch.ones(128, 2)
+    fused = Mock(return_value=x + 2)
+    fused.should_run.return_value = True
+    monkeypatch.setattr(gemm_rs_module, "get_gemm_rs", lambda: fused)
+
     mlp = object.__new__(kimi_model.KimiMLP)
     torch.nn.Module.__init__(mlp)
     mlp.shard_sequence_parallel = False
@@ -502,20 +507,36 @@ def test_kimi_legacy_gemm_rs_uses_quantized_down_projection(fake_parallel_state)
     mlp.gate_up_proj = Mock(return_value=(x, None))
     mlp.act_fn = Mock(side_effect=lambda value: value)
 
-    down_proj = object.__new__(vllm_plugin._QuantVLLMRowParallelLinear)
+    down_proj = object.__new__(vllm_plugin.vllm_linear.RowParallelLinear)
     torch.nn.Module.__init__(down_proj)
     down_proj.weight = torch.nn.Parameter(torch.ones(2, 2, dtype=torch.bfloat16))
     down_proj.quant_method = object.__new__(kimi_method)
-    down_proj._fake_quant_supported = False
-    down_proj.forward = Mock(return_value=(x + 1, None))
     mlp.down_proj = down_proj
 
     vllm_plugin.vllm_replace_quant_module_hook(mlp)
-    down_proj._setup()
+    guard = mlp.run_gemm_rs
+    vllm_plugin.vllm_replace_quant_module_hook(mlp)
+    assert mlp.run_gemm_rs is guard
+    assert vllm_plugin.QuantModuleRegistry.convert(down_proj) is down_proj
+    assert guard.down_proj is down_proj
     assert down_proj._fake_quant_supported
-    assert mlp.run_gemm_rs is False
+    down_proj.forward = Mock(return_value=(x + 1, None))
+
+    assert not guard
     assert torch.equal(mlp(x), x + 1)
     down_proj.forward.assert_called_once()
+    fused.assert_not_called()
+
+    for name in _VLLMParallelLinear._QUANTIZER_NAMES:
+        getattr(down_proj, name).disable()
+    assert guard
+    assert torch.equal(mlp(x), x + 2)
+    fused.assert_called_once_with(x, down_proj.weight)
+
+    down_proj.weight_quantizer.enable()
+    assert not guard
+    assert torch.equal(mlp(x), x + 1)
+    assert down_proj.forward.call_count == 2
 
 
 @pytest.mark.parametrize("quantizer_name", _VLLMParallelLinear._QUANTIZER_NAMES)

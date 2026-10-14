@@ -9,8 +9,8 @@ compact NVFP4 attention worker documented below requires vLLM 0.15.0 or newer. T
 low-latency fakequant path needs `KimiK3LowLatencyLinearMethod`, which is present in stock vLLM
 0.28.0, 0.29.0 and 0.30.0 but absent from some older releases. For BF16 Kimi K3 weights, it
 supports dense and shared-expert MLP projections; attention projections need separate support.
-On vLLM 0.28.0, ModelOpt disables Kimi's fused GEMM-RS MLP path during conversion so the
-fake-quantized down projection runs.
+On vLLM 0.28.0, ModelOpt bypasses Kimi's fused GEMM-RS MLP path when down-projection
+fake quantizers are enabled and retains it when they are disabled.
 
 The fakequant launcher does not support vLLM 0.9.0. Use one of the tested releases above.
 
