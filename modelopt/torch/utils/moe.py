@@ -198,30 +198,25 @@ def decide_distribution_plan(
     * ``fsdp_size`` -- ``auto`` -> ``1`` (replicate the dense part) when it fits one GPU, else
       ``world_size`` (FSDP2-shard it); ``"world"`` -> ``world_size``.
 
-    Inside a :class:`~modelopt.torch.utils.distributed.ModelOptSession` the session decides it and
-    keeps it as ``session.plan``: on a distributed run once, on rank 0, and every other rank adopts
-    rank 0's decision instead of making its own
-    (:meth:`~modelopt.torch.utils.distributed.ModelOptSession.broadcast_from`). The inputs are all
-    read locally -- the env knobs, this GPU's memory, the config on this rank's filesystem -- so
-    ranks deciding independently could disagree, and a disagreement surfaces as a hang at mesh
-    creation rather than as an error. Collective: every rank must call it. If rank 0 fails to decide,
-    every rank raises. Without a session, this process decides alone.
+    On a distributed run it is decided once, on rank 0, and every other rank adopts rank 0's
+    decision instead of making its own (:func:`~modelopt.torch.utils.distributed.broadcast_from`).
+    The inputs are all read locally -- the env knobs, this GPU's memory, the config on this rank's
+    filesystem -- so ranks deciding independently could disagree, and a disagreement surfaces as a
+    hang at mesh creation rather than as an error. Collective on a distributed run: every rank must
+    call it. If rank 0 fails to decide, every rank raises. A single process decides alone.
     """
-    from .distributed import get_active_mo_session
+    from .distributed import broadcast_from
 
-    def decide():
-        return _decide_distribution_plan_on_rank0(
+    return broadcast_from(
+        "plan",
+        lambda: _decide_distribution_plan_on_rank0(
             hf_config,
             world_size,
             ep_size=ep_size,
             fsdp_size=fsdp_size,
             device_mem_bytes=device_mem_bytes,
-        )
-
-    session = get_active_mo_session(required=False)
-    if not session.initialized:
-        return decide()
-    return session.plan.broadcast_from(decide)
+        ),
+    )
 
 
 def _decide_distribution_plan_on_rank0(
