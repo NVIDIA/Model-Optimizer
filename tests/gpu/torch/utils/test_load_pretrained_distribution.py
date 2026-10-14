@@ -30,6 +30,7 @@ transformers = pytest.importorskip("transformers")
 from torch.distributed.tensor import DTensor
 from transformers import AutoModelForCausalLM, LlamaConfig
 
+from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 _TINY = {
@@ -73,6 +74,8 @@ def _load_and_check(rank, size, ckpt_dir, knobs, expected):
             torch.testing.assert_close(_full(param).cpu(), whole_params[name])
         assert model._modelopt_unplaced_source_keys == []
         assert model._modelopt_source_checkpoint == ckpt_dir
+        dense = "replicate" if expected == "replicated" else "fsdp"
+        assert distribution_plan(model) == DistributionPlan(size, dense=dense)
     finally:
         for knob in knobs:
             del os.environ[knob]
