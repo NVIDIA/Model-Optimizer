@@ -65,6 +65,7 @@ from modelopt.torch.export.unified_export_hf import (
     _export_transformers_checkpoint,
     export_hf_checkpoint,
 )
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
 def _cpu_device_query():
@@ -160,11 +161,12 @@ def _llama_config():
 
 def _fsdp2_shard(model, mesh, wrap_root=True):
     """Shard each decoder layer, and the root too unless ``wrap_root`` is off (as expert parallelism
-    leaves it, sharding only the dense layers)."""
+    leaves it, sharding only the dense layers), and record that the model is FSDP2-sharded."""
     for layer in model.model.layers:
         fully_shard(layer, mesh=mesh)
     if wrap_root:
         fully_shard(model, mesh=mesh)
+    set_distribution_plan(model, DistributionPlan(mesh.size(), dense="fsdp"))
     return model
 
 
