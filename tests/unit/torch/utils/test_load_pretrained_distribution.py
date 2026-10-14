@@ -296,12 +296,34 @@ def test_the_fsdp2_load_refuses_a_quantized_checkpoint(
     assert loaders == {}
 
 
-def test_the_fsdp2_load_needs_a_process_group(serve, loaders, tmp_path):
-    """FSDP2 on one rank still shards through a process group, of one."""
-    serve(LlamaConfig(**_TINY))
+@pytest.mark.parametrize("quantized", [False, True])
+def test_a_single_process_fsdp2_load_sets_up_its_group_of_one(
+    monkeypatch, serve, loaders, tmp_path, quantized
+):
+    """FSDP2 on one rank still shards through a process group, of one, which the load sets up once
+    nothing can refuse it: a refused load leaves no group behind."""
+    config = serve(LlamaConfig(**_TINY))
+    if quantized:
+        config.quantization_config = {"quant_method": "fp8"}
+    live = []
+    monkeypatch.setattr(dist, "is_initialized", lambda: bool(live))
+    monkeypatch.setattr(dist, "setup", lambda timeout=None: live.append(0))
+    # What a group of one answers once it is up.
+    monkeypatch.setattr(dist, "rank", lambda group=None: 0)
+    monkeypatch.setattr(dist, "size", lambda group=None: 1)
+    monkeypatch.setattr(dist, "local_rank", lambda: 0)
+    plan = DistributionPlan(dense="fsdp")
 
-    with pytest.raises(RuntimeError, match=r"needs a torch\.distributed process group"):
-        load_pretrained(str(tmp_path), distribution=DistributionPlan(dense="fsdp"))
+    if quantized:
+        with pytest.raises(NotImplementedError, match="cannot dequantize"):
+            load_pretrained(str(tmp_path), distribution=plan)
+        assert live == []
+        return
+    load_pretrained(str(tmp_path), distribution=plan)
+
+    assert live == [0]
+    call = loaders.pop("fsdp2")
+    assert (call["rank"], call["world_size"]) == (0, 1)
 
 
 def test_anything_but_a_plan_is_refused(serve, tmp_path):
