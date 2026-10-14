@@ -33,10 +33,14 @@ from torch.utils.data import DataLoader, IterableDataset
 
 import modelopt.torch.utils.distributed as mto_dist
 from modelopt.torch.utils.distributed import (
+    DistributionPlan,
     _reinstall_a2a_forwards,
     distributed_forward_loop,
+    set_distribution_plan,
     shard_dataloader,
 )
+
+_EXPERT_PARALLEL = DistributionPlan(world_size=2, ep_size=2)
 
 # ------------------------------------------------------------------------------------- data helpers
 
@@ -441,6 +445,7 @@ def test_forward_loop_frees_the_allocator_cache_around_the_forwards(monkeypatch)
     )
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: events.append("empty_cache"))
     model, mesh = _Recorder(on_forward=lambda: events.append("forward")), _FakeMesh()
+    set_distribution_plan(model, _EXPERT_PARALLEL)
     forward_loop = distributed_forward_loop(
         model, [{"input_ids": torch.zeros(1, 1)}] * 2, ep_mesh=mesh
     )
@@ -464,6 +469,7 @@ def test_forward_loop_replants_a2a_wrappers_dropped_after_it_was_built(monkeypat
     """
     styles = _install_fake_tp(monkeypatch)
     model, mesh = _MoEModel(), _FakeMesh()
+    set_distribution_plan(model, _EXPERT_PARALLEL)
     forward_loop = distributed_forward_loop(
         model, [{"input_ids": torch.ones(2, 4)}] * 3, ep_mesh=mesh
     )
@@ -475,3 +481,18 @@ def test_forward_loop_replants_a2a_wrappers_dropped_after_it_was_built(monkeypat
 
     assert [layer.experts.groups for layer in model.layers] == [[mesh.group] * 6] * 2
     assert len(styles["torch_a2a_experts"].installed) == 2
+
+
+@pytest.mark.parametrize(
+    ("plan", "mesh"),
+    [(_EXPERT_PARALLEL, None), (DistributionPlan(world_size=2), _FakeMesh())],
+    ids=["expert-parallel-without-mesh", "mesh-for-a-replicated-model"],
+)
+def test_the_ep_mesh_comes_with_an_expert_parallel_plan_only(plan, mesh):
+    """Without its mesh, the experts' forward would run with no EP group at the first step; a mesh
+    for a model whose plan shards no experts would be ignored."""
+    model = _Recorder()
+    set_distribution_plan(model, plan)
+
+    with pytest.raises(ValueError, match="calibrates with the ep_mesh"):
+        distributed_forward_loop(model, [{"input_ids": torch.zeros(1, 1)}], ep_mesh=mesh)
