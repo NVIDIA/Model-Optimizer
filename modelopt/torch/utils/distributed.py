@@ -348,11 +348,12 @@ class Synced(Generic[_T]):
     """A fact of the session every rank holds the same value of, declared by its type.
 
     ``plan: Synced[DistributionPlan]`` on the session makes ``session.plan`` this handle. Read the
-    value with ``session.plan.value``: local, ``None`` until it is set. Set it with :meth:`decide`, one
-    rank computing it, or :meth:`agree`, every rank does; both are collective, so every rank calls them
-    at the same point. Assigning ``session.plan`` raises, so nothing communicates behind an ``=``.
-    Declare one only for a fact a later stage reads back: a one-off decision nothing reads back is
-    :meth:`ModelOptSession.decide` or :meth:`ModelOptSession.agree`, which keep nothing.
+    value with ``session.plan.value``: local, ``None`` until it is set. Set it with
+    :meth:`broadcast_from`, one rank computing it, or :meth:`all_reduce`, every rank computing its own
+    and the results combined; both are collective, so every rank calls them at the same point.
+    Assigning ``session.plan`` raises, so nothing communicates behind an ``=``. Declare one only for a
+    fact a later stage reads back: a one-off value nothing reads back is
+    :meth:`ModelOptSession.broadcast_from` or :meth:`ModelOptSession.all_reduce`, which keep nothing.
     """
 
     def __init__(self, holder: "_SyncedHolder", name: str) -> None:
@@ -365,21 +366,21 @@ class Synced(Generic[_T]):
         """The value every rank holds, read locally; ``None`` until one is set."""
         return self._holder._synced.get(self._name)
 
-    def decide(self, fn: Callable[[], _T], rank: int = 0) -> _T:
+    def broadcast_from(self, fn: Callable[[], _T], rank: int = 0) -> _T:
         """Set the fact to ``fn()`` run on ``rank`` only; every rank holds and returns that value.
 
-        See :meth:`ModelOptSession.decide`.
+        See :meth:`ModelOptSession.broadcast_from`.
         """
         label = self._holder._label(self._name)
-        return self._hold(self._holder._sync_session().decide(label, fn, rank))
+        return self._hold(self._holder._sync_session().broadcast_from(label, fn, rank))
 
-    def agree(self, fn: Callable[[], _T], combine: "Callable[[list[_T]], _T] | None" = None) -> _T:
-        """Set the fact to what every rank agrees on from ``fn()``, run on each.
+    def all_reduce(self, fn: Callable[[], _T], combine: Callable[[list[_T]], _T]) -> _T:
+        """Set the fact to ``combine`` of every rank's ``fn()``; every rank holds and returns it.
 
-        See :meth:`ModelOptSession.agree`.
+        See :meth:`ModelOptSession.all_reduce`.
         """
         label = self._holder._label(self._name)
-        return self._hold(self._holder._sync_session().agree(label, fn, combine))
+        return self._hold(self._holder._sync_session().all_reduce(label, fn, combine))
 
     def _hold(self, value: _T) -> _T:
         # The holder keeps its own copy: a later mutation of the caller's object stays the caller's.
@@ -398,8 +399,8 @@ class _SyncedAttribute:
 
     def __set__(self, holder, value) -> None:
         raise AttributeError(
-            f"{type(holder).__name__}.{self.name} is synced: set it with .decide(fn) or "
-            ".agree(fn), which every rank calls at the same point."
+            f"{type(holder).__name__}.{self.name} is synced: set it with .broadcast_from(fn) or "
+            ".all_reduce(fn, combine), which every rank calls at the same point."
         )
 
 
@@ -421,16 +422,6 @@ class _SyncedHolder:
     def _label(self, name: str) -> str:
         """How the fact ``name`` is named to the other ranks, which must name the same one."""
         return name
-
-
-def _agreed(label: str, values: list[Any]) -> Any:
-    """The value every rank passed to :meth:`ModelOptSession.agree`; raise if any rank passed another."""
-    for rank, value in enumerate(values):
-        if value != values[0]:
-            raise RuntimeError(
-                f"Ranks disagree on {label}: rank 0 has {values[0]!r}, rank {rank} has {value!r}."
-            )
-    return values[0]
 
 
 class ModelOptSession(_SyncedHolder):
@@ -486,70 +477,62 @@ class ModelOptSession(_SyncedHolder):
     def _sync_session(self) -> "ModelOptSession":
         return self
 
-    def decide(self, label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
+    def broadcast_from(self, label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
         """Return ``fn()`` run on ``rank`` only, on every rank; keep nothing.
 
         For a value that depends on what each rank reads for itself -- the environment, its GPU, files
-        on its node -- so that ranks deciding for themselves could disagree. If ``fn`` raises, every
-        rank raises, instead of waiting in a broadcast ``rank`` never sends. Ranks deciding different
-        labels at the same point fail. Collective: every rank calls it at the same point, with the same
-        ``rank``. Outside a distributed session ``fn`` runs alone. A fact a later stage reads back is a
-        :class:`Synced` attribute, set with its own ``decide``.
+        on its node -- so that ranks computing it for themselves could disagree. If ``fn`` raises, every
+        rank raises, instead of waiting in a broadcast ``rank`` never sends. Ranks broadcasting
+        different labels at the same point fail. Collective: every rank calls it at the same point,
+        with the same ``rank``. Outside a distributed session ``fn`` runs alone. A fact a later stage
+        reads back is a :class:`Synced` attribute, set with its own ``broadcast_from``.
         """
         if not (self.initialized and self.distributed):
             return fn()
         if not 0 <= rank < self.world_size:
             raise ValueError(f"rank={rank} is not a rank of this {self.world_size}-rank run.")
-        deciding = torch.distributed.get_rank() == rank
+        sending = torch.distributed.get_rank() == rank
         value: Any = None
         error = None
-        if deciding:
+        if sending:
             try:
                 value = fn()
             except Exception as e:
                 # Still send: the other ranks would otherwise wait in the broadcast for this one.
                 error = e
-        # One message from the deciding rank: what it decided, so a rank deciding another learns the
-        # two are out of step, and its value or its error. The error goes as text: the other ranks only
+        # One message from the sending rank: its label, so a rank broadcasting another learns the two
+        # are out of step, and its value or its error. The error goes as text: the other ranks only
         # need to stop, and an exception is not guaranteed to pickle.
         message = [(label, value, None if error is None else f"{type(error).__name__}: {error}")]
         torch.distributed.broadcast_object_list(message, group_src=rank)
-        decided_label, value, decided_error = message[0]
+        sent_label, value, sent_error = message[0]
         if error is not None:
             raise error
-        if decided_error is not None:
-            raise RuntimeError(f"rank {rank} failed to decide {label}: {decided_error}")
-        if decided_label != label:
+        if sent_error is not None:
+            raise RuntimeError(f"rank {rank} failed to compute {label}: {sent_error}")
+        if sent_label != label:
             raise RuntimeError(
-                f"Ranks decided out of step: this rank decided {label!r} while rank {rank} decided "
-                f"{decided_label!r}. Every rank must decide them in the same order."
+                f"Ranks broadcast out of step: this rank broadcast {label!r} while rank {rank} sent "
+                f"{sent_label!r}. Every rank must broadcast them in the same order."
             )
         return value
 
-    def agree(
-        self,
-        label: str,
-        value_fn: Callable[[], _V],
-        combine: "Callable[[list[_V]], _V] | None" = None,
-    ) -> _V:
-        """Return what every rank agrees on from ``value_fn()``, run on each; keep nothing.
+    def all_reduce(self, label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _V]) -> _V:
+        """Return ``combine`` of every rank's ``fn()``, on every rank; keep nothing.
 
-        For a decision no later stage reads back from the session; a fact that one does is a
-        :class:`Synced` attribute, set with its own ``agree``. ``combine`` takes the ranks' values in rank
-        order and returns the one every rank gets, e.g. ``min`` for a batch size each rank's memory
-        bounds, where one rank's choice could run another out of memory. Without it every rank must pass
-        the same value, e.g. the library versions each runs: a rank that differs makes every rank raise,
-        where adopting one rank's value would hide the difference until a collective hangs on it. If
-        ``value_fn`` raises on any rank, every rank raises, instead of waiting in the gather that rank
-        never joins. Ranks agreeing on different labels at the same point fail. Collective; outside a
-        distributed session ``value_fn`` runs alone.
+        For a value no later stage reads back from the session; a fact that one does is a
+        :class:`Synced` attribute, set with its own ``all_reduce``. ``combine`` takes the ranks' values
+        in rank order and returns the one every rank gets, e.g. ``min`` for a batch size each rank's
+        memory bounds, where one rank's choice could run another out of memory. If ``fn`` raises on any
+        rank, every rank raises, instead of waiting in the gather that rank never joins. Ranks reducing
+        different labels at the same point fail. Collective; outside a distributed session ``fn`` runs
+        alone.
         """
-        combine = combine or functools.partial(_agreed, label)
         if not (self.initialized and self.distributed):
-            return combine([value_fn()])
+            return combine([fn()])
         value, error = None, None
         try:
-            value = value_fn()
+            value = fn()
         except Exception as e:
             # Still join the gather: the other ranks would otherwise wait in it for this one.
             error = e
@@ -560,11 +543,11 @@ class ModelOptSession(_SyncedHolder):
             raise error
         for rank, (_, _, rank_error) in enumerate(gathered):
             if rank_error is not None:
-                raise RuntimeError(f"rank {rank} failed to agree on {label}: {rank_error}")
+                raise RuntimeError(f"rank {rank} failed to compute {label}: {rank_error}")
         labels = sorted({rank_label for rank_label, _, _ in gathered})
         if labels != [label]:
             raise RuntimeError(
-                f"Ranks agreed out of step: {labels} at the same point. Every rank must agree on "
+                f"Ranks reduced out of step: {labels} at the same point. Every rank must reduce "
                 "them in the same order."
             )
         # The gathered values are unpickled copies, so the result shares nothing with the callers'.

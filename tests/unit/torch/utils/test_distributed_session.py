@@ -14,7 +14,7 @@
 # limitations under the License.
 
 """Unit tests for the distributed PTQ session: the distribution plan, the session handle, its synced
-facts and one-off decisions, launch detection."""
+facts and one-off collectives, launch detection."""
 
 import pytest
 import torch.distributed
@@ -120,17 +120,17 @@ def _session(rank=None):
     return session
 
 
-def _as_rank(monkeypatch, rank, decided=None):
+def _as_rank(monkeypatch, rank, received=None):
     """Answer the session's broadcasts as ``rank``; returns ``(message, sending rank)`` for each.
 
-    A rank that is not the sending one receives ``decided``, as the sending rank would have sent it.
+    A rank that is not the sending one receives ``received``, as the sending rank would have sent it.
     """
     sent = []
 
     def broadcast_object_list(message, group=None, group_src=None):
         sent.append((message[0], group_src))
         if rank != group_src:
-            message[0] = decided
+            message[0] = received
 
     monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: rank)
     monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast_object_list)
@@ -151,7 +151,7 @@ def _gather_as_rank(monkeypatch, rank, others):
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: len(others) + 1)
     monkeypatch.setattr(torch.distributed, "all_gather_object", all_gather_object)
     monkeypatch.setattr(
-        torch.distributed, "broadcast_object_list", lambda *a, **k: pytest.fail("a rank decided")
+        torch.distributed, "broadcast_object_list", lambda *a, **k: pytest.fail("a rank broadcast")
     )
     return sent
 
@@ -165,8 +165,8 @@ def test_only_facts_annotated_synced_are_synced():
 
 
 def test_a_synced_fact_cannot_be_assigned():
-    """Setting one is collective, so it goes through decide or agree, never a bare assignment."""
-    with pytest.raises(AttributeError, match=r"plan is synced: set it with \.decide"):
+    """Setting one is collective: broadcast_from or all_reduce, never a bare assignment."""
+    with pytest.raises(AttributeError, match=r"plan is synced: set it with \.broadcast_from"):
         _session().plan = DistributionPlan(world_size=1)
 
 
@@ -180,7 +180,7 @@ def test_a_plain_attribute_assigns_without_a_collective(monkeypatch):
     assert session.note == "local"
 
 
-def test_a_single_process_decides_and_agrees_alone(monkeypatch):
+def test_a_single_process_computes_alone(monkeypatch):
     """Nothing to sync with: no collective, and an uninitialized session behaves the same."""
     for collective in ("broadcast_object_list", "all_gather_object"):
         monkeypatch.setattr(
@@ -189,116 +189,102 @@ def test_a_single_process_decides_and_agrees_alone(monkeypatch):
     for session in (_session(), _Session()):
         plan = DistributionPlan(world_size=1)
         assert session.plan.value is None
-        assert session.plan.decide(lambda: plan).world_size == 1
+        assert session.plan.broadcast_from(lambda: plan).world_size == 1
         assert session.plan.value.world_size == 1
-        assert session.other.agree(lambda: 4, min) == 4
-        assert session.decide("x", lambda: 3) == 3
-        assert session.agree("smallest", lambda: 4, min) == 4
-        assert session.agree("versions", lambda: "2.6") == "2.6"
+        assert session.other.all_reduce(lambda: 4, min) == 4
+        assert session.broadcast_from("x", lambda: 3) == 3
+        assert session.all_reduce("smallest", lambda: 4, min) == 4
 
 
-def test_the_deciding_rank_sends_its_value_and_keeps_its_own_copy(monkeypatch):
+def test_the_sending_rank_sends_its_value_and_keeps_its_own_copy(monkeypatch):
     sent = _as_rank(monkeypatch, 0)
     session, plan = _session(rank=0), DistributionPlan(world_size=2, ep_size=2)
 
-    decided = session.plan.decide(lambda: plan)
+    held = session.plan.broadcast_from(lambda: plan)
 
     assert sent == [(("plan", plan, None), 0)]
-    assert decided is session.plan.value
-    assert decided.ep_size == 2
-    assert decided is not plan, "mutating the caller's object must not reach the session"
+    assert held is session.plan.value
+    assert held.ep_size == 2
+    assert held is not plan, "mutating the caller's object must not reach the session"
 
 
-def test_other_ranks_hold_the_deciding_ranks_value_without_running_fn(monkeypatch):
+def test_other_ranks_hold_the_sending_ranks_value_without_running_fn(monkeypatch):
     rank0_plan = DistributionPlan(world_size=2, ep_size=2)
-    _as_rank(monkeypatch, 1, decided=("plan", rank0_plan, None))
+    _as_rank(monkeypatch, 1, received=("plan", rank0_plan, None))
     session = _session(rank=1)
 
-    decided = session.plan.decide(lambda: pytest.fail("a rank that does not decide ran fn"))
+    held = session.plan.broadcast_from(lambda: pytest.fail("a rank that does not send ran fn"))
 
-    assert decided.ep_size == session.plan.value.ep_size == 2
+    assert held.ep_size == session.plan.value.ep_size == 2
 
 
-def test_any_rank_can_decide(monkeypatch):
+def test_any_rank_can_broadcast(monkeypatch):
     """With rank=1, rank 1 runs fn and sends it; rank 0 takes rank 1's value."""
     sent = _as_rank(monkeypatch, 1)
-    assert _session(rank=1).decide("x", lambda: "rank 1's", rank=1) == "rank 1's"
+    assert _session(rank=1).broadcast_from("x", lambda: "rank 1's", rank=1) == "rank 1's"
     assert sent == [(("x", "rank 1's", None), 1)]
 
-    _as_rank(monkeypatch, 0, decided=("x", "rank 1's", None))
-    assert _session(rank=0).decide("x", lambda: pytest.fail("rank 0 decided"), rank=1) == "rank 1's"
+    _as_rank(monkeypatch, 0, received=("x", "rank 1's", None))
+    held = _session(rank=0).broadcast_from("x", lambda: pytest.fail("rank 0 ran fn"), rank=1)
+    assert held == "rank 1's"
 
 
-def test_a_rank_outside_the_run_cannot_decide():
+def test_a_rank_outside_the_run_cannot_broadcast():
     with pytest.raises(ValueError, match="rank=2 is not a rank of this 2-rank run"):
-        _session(rank=0).decide("x", lambda: 0, rank=2)
+        _session(rank=0).broadcast_from("x", lambda: 0, rank=2)
 
 
-def test_the_deciding_rank_failing_still_reaches_the_broadcast(monkeypatch):
-    """The deciding rank must still send on failure, or every other rank hangs in the broadcast."""
+def test_the_sending_rank_failing_still_reaches_the_broadcast(monkeypatch):
+    """The sending rank must still send on failure, or every other rank hangs in the broadcast."""
     sent = _as_rank(monkeypatch, 0)
 
     def fail():
         raise ValueError("bad degrees")
 
     with pytest.raises(ValueError, match="bad degrees"):
-        _session(rank=0).decide("x", fail)
+        _session(rank=0).broadcast_from("x", fail)
     assert sent == [(("x", None, "ValueError: bad degrees"), 0)]
 
 
-def test_other_ranks_raise_when_the_deciding_rank_failed(monkeypatch):
-    _as_rank(monkeypatch, 1, decided=("x", None, "ValueError: bad degrees"))
-    with pytest.raises(RuntimeError, match=r"rank 0 failed to decide x.*bad degrees"):
-        _session(rank=1).decide("x", lambda: 0)
+def test_other_ranks_raise_when_the_sending_rank_failed(monkeypatch):
+    _as_rank(monkeypatch, 1, received=("x", None, "ValueError: bad degrees"))
+    with pytest.raises(RuntimeError, match=r"rank 0 failed to compute x.*bad degrees"):
+        _session(rank=1).broadcast_from("x", lambda: 0)
 
 
-def test_ranks_deciding_out_of_step_fail(monkeypatch):
-    """Rank 0 deciding one fact while rank 1 decides another would cross the two values."""
-    _as_rank(monkeypatch, 1, decided=("other", 7, None))
+def test_ranks_broadcasting_out_of_step_fail(monkeypatch):
+    """Rank 0 sending one fact while rank 1 expects another would cross the two values."""
+    _as_rank(monkeypatch, 1, received=("other", 7, None))
     with pytest.raises(RuntimeError, match="out of step"):
-        _session(rank=1).plan.decide(lambda: DistributionPlan(world_size=2))
+        _session(rank=1).plan.broadcast_from(lambda: DistributionPlan(world_size=2))
 
 
-def test_agree_gives_every_rank_the_combined_value(monkeypatch):
+def test_all_reduce_gives_every_rank_the_combined_value(monkeypatch):
     """Every rank's value counts, and every rank gets the same result."""
     sent = _gather_as_rank(monkeypatch, 1, others=[("smallest", 8, None), ("smallest", 2, None)])
 
-    assert _session(rank=1).agree("smallest", lambda: 4, min) == 2
+    assert _session(rank=1).all_reduce("smallest", lambda: 4, min) == 2
     assert sent == [("smallest", 4, None)]
 
 
-def test_a_facts_agree_holds_the_combined_value(monkeypatch):
+def test_a_facts_all_reduce_holds_the_combined_value(monkeypatch):
     _gather_as_rank(monkeypatch, 1, others=[("other", 8, None)])
     session = _session(rank=1)
 
-    assert session.other.agree(lambda: 4, min) == 4
+    assert session.other.all_reduce(lambda: 4, min) == 4
     assert session.other.value == 4
 
 
-def test_session_decide_and_agree_keep_nothing(monkeypatch):
+def test_the_sessions_own_all_reduce_keeps_nothing(monkeypatch):
     _gather_as_rank(monkeypatch, 1, others=[("smallest", 8, None)])
     session = _session(rank=1)
 
-    session.agree("smallest", lambda: 4, min)
+    session.all_reduce("smallest", lambda: 4, min)
 
     assert session._synced == {}
 
 
-def test_without_combine_every_rank_must_pass_the_same_value(monkeypatch):
-    _gather_as_rank(monkeypatch, 1, others=[("versions", "2.6", None)])
-    assert _session(rank=1).agree("versions", lambda: "2.6") == "2.6"
-
-
-def test_ranks_that_disagree_all_raise(monkeypatch):
-    """Adopting rank 0's value instead would hide the difference until a collective hangs on it."""
-    _gather_as_rank(monkeypatch, 0, others=[("versions", "2.5", None)])
-    with pytest.raises(
-        RuntimeError, match=r"disagree on versions: rank 0 has '2.6', rank 1 has '2.5'"
-    ):
-        _session(rank=0).agree("versions", lambda: "2.6")
-
-
-def test_a_rank_failing_to_agree_still_joins_the_gather(monkeypatch):
+def test_a_rank_failing_to_compute_still_joins_the_gather(monkeypatch):
     """A failing rank must still reach the gather, or every other rank waits in it."""
     sent = _gather_as_rank(monkeypatch, 1, others=[("smallest", 8, None)])
 
@@ -306,25 +292,25 @@ def test_a_rank_failing_to_agree_still_joins_the_gather(monkeypatch):
         raise ValueError("no memory reading")
 
     with pytest.raises(ValueError, match="no memory reading"):
-        _session(rank=1).agree("smallest", fail, min)
+        _session(rank=1).all_reduce("smallest", fail, min)
     assert sent == [("smallest", None, "ValueError: no memory reading")]
 
 
-def test_the_other_ranks_raise_when_one_failed_to_agree(monkeypatch):
+def test_the_other_ranks_raise_when_one_failed_to_compute(monkeypatch):
     _gather_as_rank(monkeypatch, 0, others=[("smallest", None, "ValueError: no memory reading")])
-    with pytest.raises(RuntimeError, match=r"rank 1 failed to agree on smallest.*memory"):
-        _session(rank=0).agree("smallest", lambda: 4, min)
+    with pytest.raises(RuntimeError, match=r"rank 1 failed to compute smallest.*memory"):
+        _session(rank=0).all_reduce("smallest", lambda: 4, min)
 
 
-def test_ranks_agreeing_out_of_step_fail(monkeypatch):
+def test_ranks_reducing_out_of_step_fail(monkeypatch):
     _gather_as_rank(monkeypatch, 0, others=[("other", 8, None)])
     with pytest.raises(RuntimeError, match="out of step"):
-        _session(rank=0).agree("smallest", lambda: 4, min)
+        _session(rank=0).all_reduce("smallest", lambda: 4, min)
 
 
 def test_reset_clears_synced_facts():
     session = _session()
-    session.plan.decide(lambda: DistributionPlan(world_size=1))
+    session.plan.broadcast_from(lambda: DistributionPlan(world_size=1))
     session._reset()
     assert session.plan.value is None
 
