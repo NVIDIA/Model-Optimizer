@@ -77,9 +77,37 @@ QAD improves both metrics over PTQ but remains below the BF16 teacher. The quant
 
 </details>
 
+## Run evaluations
+
+From `examples/llm_qat/evaluation/`, configure access to your Slurm cluster:
+
+```bash
+pip install "nemo-evaluator-launcher[all]==0.2.6"
+
+export NEL_SLURM_HOST="<cluster-login-host>"
+export SLURM_USER="<cluster-username>"
+export NEL_SLURM_ACCOUNT="<slurm-account>"
+export NEL_SLURM_PARTITION="<slurm-partition>"
+export NEL_OUTPUT_DIR="/shared/path/to/evaluation-results"
+export MODEL_CHECKPOINT="/shared/path/to/checkpoint"
+
+# Run MMLU and WikiText.
+nemo-evaluator-launcher run --config nel_config.yaml \
+    -o deployment.served_model_name=qwen3-8b-ptq
+```
+
+Use the BF16 teacher or an exported Hugging Face PTQ/QAD checkpoint. The checkpoint directory must be accessible on the cluster and contain the model files, without symlinks to unmounted locations.
+
+For the teacher, download a self-contained directory on the cluster; no additional `/blobs` mounts are needed:
+
+```bash
+hf download Qwen/Qwen3-8B --local-dir /shared/path/to/qwen3-8b-teacher
+export MODEL_CHECKPOINT="/shared/path/to/qwen3-8b-teacher"
+```
+
+Add `--dry-run` to preview, or `-t lm-evaluation-harness.mmlu` / `-t lm-evaluation-harness.wikitext` to select one benchmark. NEL 0.2.6 launches one Slurm job per benchmark; results are saved under `NEL_OUTPUT_DIR`.
+
 ## File structure
 
-NeMo Evaluator Launcher (NEL) configurations and evaluation results for the [Hugging Face QAT/QAD tutorial](../README.md).
-
-- `nel_configs/`: shared benchmark recipes, Slurm execution settings, and vLLM deployment settings.
-- `results/<model-and-hardware>/<benchmark-and-scope>/`: each evaluation's config `nel_config.yaml`.
+- `nel_config.yaml`: entry point containing the MMLU and WikiText recipes.
+- `nel_configs/`: shared Slurm execution and vLLM deployment settings.
