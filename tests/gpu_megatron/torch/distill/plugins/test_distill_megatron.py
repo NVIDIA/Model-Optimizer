@@ -33,7 +33,7 @@ from modelopt.torch.distill.plugins.megatron import (
     LogitsKLLoss,
     TopKLogitsKLLoss,
     TopLogitsKLLoss,
-    _mtp_excluded_from_quantization,
+    _has_quantized_backbone_with_unquantized_mtp,
     adjust_distillation_model_for_mcore,
     setup_distillation_config,
 )
@@ -237,7 +237,8 @@ def _test_topk_logits_kl_loss(kd_kwargs, rank, size):
 def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size):
     """Test that skip_lm_loss only zeroes the main LM head, unless MTP is left out of quantization.
 
-    ``freeze_mtp`` zeroes the MTP loss and freezes the MTP head regardless.
+    An explicit ``freeze_mtp`` overrides that: ``True`` zeroes the MTP loss and freezes the MTP head,
+    ``False`` keeps both.
     """
     set_seed(SEED)
 
@@ -281,7 +282,7 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size)
         mtp_num_layers=mtp_num_layers,
     ).cuda()
     if quantized:
-        # A quantized body with the MTP head left out of quantization.
+        # Quantization-state fixture: a quantized body with the MTP head left out of quantization.
         student_model.decoder.weight_quantizer = TensorQuantizer()
 
     distill_cfg = setup_distillation_config(
@@ -301,7 +302,7 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size)
     adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
 
     # An untrained MTP head is frozen so DDP doesn't wait for its grads.
-    mtp_skipped = freeze_mtp or (quantized and skip_lm_loss)
+    mtp_skipped = (quantized and skip_lm_loss) if freeze_mtp is None else freeze_mtp
     with distillation_model.hide_teacher_model():
         mtp_params = [p for n, p in distillation_model.named_parameters() if "mtp" in n.split(".")]
     assert mtp_params
@@ -343,8 +344,8 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size)
     assert recorded_losses[-1].any() != skip_lm_loss, "Main LM head loss is zero iff skip_lm_loss"
 
 
-def _test_freeze_mtp_with_quantized_mtp(freeze_mtp, kd_loss_alpha, rank, size):
-    """With the MTP head quantized too, only ``freeze_mtp`` keeps it out of a training step."""
+def _test_freeze_mtp_training_step(mtp_quantized, freeze_mtp, kd_loss_alpha, rank, size):
+    """Through a training step, the MTP head is frozen exactly when ``freeze_mtp`` resolves to it."""
     set_seed(SEED)
 
     vocab_size = 32
@@ -365,10 +366,12 @@ def _test_freeze_mtp_with_quantized_mtp(freeze_mtp, kd_loss_alpha, rank, size):
     }
     teacher_model = get_mcore_gpt_model(initialize_megatron=True, **model_kwargs).cuda()
     student_model = get_mcore_gpt_model(initialize_megatron=False, **model_kwargs).cuda()
-    # A recipe that quantizes the MTP head as well as the body.
+    # Quantization-state fixtures: a quantized body, with or without a quantized MTP head.
     student_model.decoder.weight_quantizer = TensorQuantizer()
-    student_model.mtp.weight_quantizer = TensorQuantizer()
-    assert not _mtp_excluded_from_quantization(student_model)
+    if mtp_quantized:
+        student_model.mtp.weight_quantizer = TensorQuantizer()
+    assert _has_quantized_backbone_with_unquantized_mtp(student_model) != mtp_quantized
+    frozen = (kd_loss_alpha == 1.0 and not mtp_quantized) if freeze_mtp is None else freeze_mtp
 
     distill_cfg = setup_distillation_config(
         config_or_path=DistillationConfig(kd_loss_alpha=kd_loss_alpha, freeze_mtp=freeze_mtp),
@@ -386,7 +389,7 @@ def _test_freeze_mtp_with_quantized_mtp(freeze_mtp, kd_loss_alpha, rank, size):
         adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
     if rank == 0:
         frozen_msg = [w for w in caught if "MTP head is frozen" in str(w.message)]
-        assert bool(frozen_msg) == freeze_mtp
+        assert bool(frozen_msg) == frozen
 
     with distillation_model.hide_teacher_model():
         named_params = dict(distillation_model.named_parameters())
@@ -425,8 +428,8 @@ def _test_freeze_mtp_with_quantized_mtp(freeze_mtp, kd_loss_alpha, rank, size):
     assert any(p.grad is not None and p.grad.any() for p in body_params.values())
     # The MTP head trains unless frozen; frozen, it gets no gradient and the step leaves it as is.
     mtp_trained = any(p.grad is not None and p.grad.any() for p in mtp_params.values())
-    assert mtp_trained != freeze_mtp
-    if freeze_mtp:
+    assert mtp_trained != frozen
+    if frozen:
         assert all(torch.equal(p, mtp_before[n]) for n, p in mtp_params.items())
 
 
@@ -555,11 +558,12 @@ def test_distillation_config_top_p_validation():
 @pytest.mark.parametrize(
     ("quantized", "skip_lm_loss", "freeze_mtp"),
     [
-        (False, True, False),
-        (True, True, False),
-        (True, False, False),
+        (False, True, None),
+        (True, True, None),
+        (True, False, None),
         (False, True, True),
         (False, False, True),
+        (True, True, False),  # explicit False overrides the automatic freeze
     ],
 )
 def test_skip_lm_loss_with_mtp(dist_workers, quantized, skip_lm_loss, freeze_mtp):
@@ -567,14 +571,27 @@ def test_skip_lm_loss_with_mtp(dist_workers, quantized, skip_lm_loss, freeze_mtp
     dist_workers.run(partial(_test_skip_lm_loss_with_mtp, quantized, skip_lm_loss, freeze_mtp))
 
 
-@pytest.mark.parametrize(("freeze_mtp", "kd_loss_alpha"), [(True, 1.0), (True, 0.5), (False, 1.0)])
-def test_freeze_mtp_with_quantized_mtp(dist_workers, freeze_mtp, kd_loss_alpha):
-    """With the MTP head quantized too, only ``freeze_mtp`` keeps it out of a training step."""
-    dist_workers.run(partial(_test_freeze_mtp_with_quantized_mtp, freeze_mtp, kd_loss_alpha))
+@pytest.mark.parametrize(
+    ("mtp_quantized", "freeze_mtp", "kd_loss_alpha"),
+    [
+        (True, None, 1.0),  # automatic: a quantized MTP head keeps training
+        (False, None, 1.0),  # automatic: an unquantized MTP head is frozen
+        (False, False, 1.0),  # explicit False overrides the automatic freeze
+        (True, True, 1.0),
+        (True, True, 0.5),
+        (False, True, 0.5),
+        (True, False, 1.0),
+    ],
+)
+def test_freeze_mtp_training_step(dist_workers, mtp_quantized, freeze_mtp, kd_loss_alpha):
+    """Through a training step, the MTP head is frozen exactly when ``freeze_mtp`` resolves to it."""
+    dist_workers.run(
+        partial(_test_freeze_mtp_training_step, mtp_quantized, freeze_mtp, kd_loss_alpha)
+    )
 
 
-def test_mtp_excluded_from_quantization():
-    """MTP loss is skipped only when the model is quantized and MTP is left out of it."""
+def test_has_quantized_backbone_with_unquantized_mtp():
+    """True only for a model with MTP and enabled quantizers, none of them inside MTP."""
 
     def _quantizer(enabled: bool) -> TensorQuantizer:
         quantizer = TensorQuantizer()
@@ -592,18 +609,20 @@ def test_mtp_excluded_from_quantization():
             model.mtp.weight_quantizer = _quantizer(mtp_quant)
         return model
 
-    # Plain distillation (e.g. pruning recovery) still trains the MTP head.
-    assert not _mtp_excluded_from_quantization(
+    # Nothing quantized.
+    assert not _has_quantized_backbone_with_unquantized_mtp(
         _model(with_mtp=True, body_quant=False, mtp_quant=False)
     )
-    # QAD with MTP excluded from the recipe: no quantization error to recover there.
-    assert _mtp_excluded_from_quantization(_model(with_mtp=True, body_quant=True, mtp_quant=False))
-    # QAD with a quantized MTP head: keep its loss.
-    assert not _mtp_excluded_from_quantization(
+    # Quantized backbone, MTP left out of quantization.
+    assert _has_quantized_backbone_with_unquantized_mtp(
+        _model(with_mtp=True, body_quant=True, mtp_quant=False)
+    )
+    # MTP quantized too.
+    assert not _has_quantized_backbone_with_unquantized_mtp(
         _model(with_mtp=True, body_quant=True, mtp_quant=True)
     )
     # No MTP at all.
-    assert not _mtp_excluded_from_quantization(
+    assert not _has_quantized_backbone_with_unquantized_mtp(
         _model(with_mtp=False, body_quant=True, mtp_quant=False)
     )
 

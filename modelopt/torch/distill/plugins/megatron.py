@@ -71,8 +71,11 @@ class DistillationConfig:
             Only the smallest prefix of the (sorted) Top-K whose cumulative teacher probability
             reaches this value contributes to the loss. Requires ``logit_kl_topk``. Must be in (0, 1].
         logit_kl_top_p_min_k: Minimum number of Top-K entries kept per token when top-P is active.
-        freeze_mtp: Keep the student's MTP head fixed: skip its loss, which otherwise also trains the
-            shared layers it reads from, and freeze its parameters. Default: ``False``.
+        freeze_mtp: Whether to freeze the student's MTP-specific parameters and disable its auxiliary
+            MTP loss, which otherwise also trains the shared layers it reads from. ``True`` freezes
+            it and ``False`` keeps it training. ``None`` (default) freezes it only when
+            ``kd_loss_alpha == 1.0`` and the student is quantized except for its MTP head, since
+            there is then no quantization error for the MTP loss to recover.
     """
 
     intermediate_layer_pairs: list[tuple[str, ...]] = field(default_factory=list)
@@ -82,7 +85,7 @@ class DistillationConfig:
     logit_kl_topk: int | None = None
     logit_kl_top_p: float | None = None
     logit_kl_top_p_min_k: int = 1
-    freeze_mtp: bool = False
+    freeze_mtp: bool | None = None
     criterion: Criterion | None = None
     loss_balancer: mtd.DistillationLossBalancer | None = None
 
@@ -670,20 +673,16 @@ class ProjectionLayer(MegatronModule):
 ########################################################
 
 
-def _mtp_excluded_from_quantization(model: nn.Module) -> bool:
-    """Whether the model is quantized but its MTP submodules are not.
-
-    Only then is the MTP loss pure overhead, since distillation has no quantization error to
-    recover there. Plain distillation (e.g. pruning recovery) still trains the MTP head.
-    """
-    has_mtp = model_quantized = mtp_quantized = False
+def _has_quantized_backbone_with_unquantized_mtp(model: nn.Module) -> bool:
+    """Whether ``model`` has MTP submodules and enabled quantizers, none of them inside MTP."""
+    has_mtp = backbone_quantized = mtp_quantized = False
     for name, module in model.named_modules():
         is_mtp = "mtp" in name.split(".")
         has_mtp |= is_mtp
         if isinstance(module, TensorQuantizer) and module.is_enabled:
-            model_quantized = True
             mtp_quantized |= is_mtp
-    return has_mtp and model_quantized and not mtp_quantized
+            backbone_quantized |= not is_mtp
+    return has_mtp and backbone_quantized and not mtp_quantized
 
 
 def adjust_distillation_model_for_mcore(
@@ -702,13 +701,15 @@ def adjust_distillation_model_for_mcore(
     # Uses a per-forward call counter so that MTP head calls (which always precede the
     # main LM head call in _postprocess) still receive real CE loss even when
     # skip_lm_loss=True — only the final main-head call is zeroed.
-    # An MTP head left out of quantization is exempt from that: there is no quantization
-    # error to recover there, and its CE materialises an fp32 [seq, vocab] tensor.
-    # ``freeze_mtp`` skips the MTP loss unconditionally.
+    # ``freeze_mtp`` decides whether the MTP head trains. Unset, it is frozen only when the LM loss
+    # is skipped and the student is quantized except for its MTP head: there is then no
+    # quantization error to recover there, and its CE materialises an fp32 [seq, vocab] tensor.
     skip_lm_loss = distill_cfg.skip_lm_loss
-    skip_mtp_loss = distill_cfg.freeze_mtp or (
-        skip_lm_loss and _mtp_excluded_from_quantization(model)
-    )
+    if distill_cfg.freeze_mtp is None:
+        with model.hide_teacher_model():
+            skip_mtp_loss = skip_lm_loss and _has_quantized_backbone_with_unquantized_mtp(model)
+    else:
+        skip_mtp_loss = distill_cfg.freeze_mtp
     if skip_mtp_loss:
         # Freeze the untrained MTP head: DDP's overlapped grad reduce asserts on params with no grad.
         num_frozen = 0

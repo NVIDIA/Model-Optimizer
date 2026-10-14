@@ -261,8 +261,11 @@ def get_args():
     )
     parser.add_argument(
         "--freeze_mtp",
-        action="store_true",
-        help="Keep the student's MTP head at its input weights: skip its loss and freeze it.",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Freeze the student's MTP-specific parameters and disable its MTP loss "
+        "(--no-freeze_mtp keeps them training). Unset, they are frozen only when "
+        "--kd_loss_alpha is 1.0 and the student is quantized except for its MTP head.",
     )
     parser.add_argument(
         "--no_async_save",
