@@ -372,7 +372,8 @@ def filter_modelopt_state_quantizer_state_for_model(
     Align quantizer_state in modelopt_state metadata with the model.
 
     - Removes keys not in the model (handles TP sharding - each rank has a subset).
-    - Removes keys only when the quantizer is disabled (in the model).
+    - Preserves saved linear-attention state regardless of conversion defaults.
+    - Removes other keys when the quantizer is disabled (in the model).
     - Adds keys for quantizers in the model but not in metadata (e.g. disabled/excluded).
     Modifies modelopt_state in place. Call after convert_to_quantized_model so the model has
     quantizers.
@@ -399,12 +400,13 @@ def filter_modelopt_state_quantizer_state_for_model(
         metadata = mode_entry[1].get("metadata", {})
         if "quantizer_state" in metadata:
             saved = metadata["quantizer_state"]
+            linear_keys = {
+                name for name in saved if re.search(r"(?:gdn|kda)_(?:state|w)_quantizer$", name)
+            }
             missing_linear = [
                 name
-                for name, state in saved.items()
-                if re.search(r"(?:gdn|kda)_(?:state|w)_quantizer$", name)
-                and not state.get("_disabled", False)
-                and name not in model_keys
+                for name in linear_keys
+                if not saved[name].get("_disabled", False) and name not in model_keys
             ]
             if missing_linear:
                 raise ValueError(f"Saved linear-attention quantizers are missing: {missing_linear}")
@@ -419,7 +421,9 @@ def filter_modelopt_state_quantizer_state_for_model(
             filtered = {
                 k: v
                 for k, v in saved.items()
-                if k in model_keys and (k not in disabled_keys or _has_buffers(v))
+                # Saved state wins over defaults when training selectors no longer match.
+                if k in model_keys
+                and (k in linear_keys or k not in disabled_keys or _has_buffers(v))
             }
             # Add state for quantizers in model but not in metadata (e.g. disabled/excluded)
             for k in model_keys - filtered.keys():
