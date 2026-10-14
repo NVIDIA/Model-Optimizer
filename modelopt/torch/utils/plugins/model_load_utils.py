@@ -429,8 +429,6 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs) -> nn.Module
         )
     trust_remote_code = kwargs.pop("trust_remote_code", False)
     hf_config = kwargs.pop("hf_config", None)
-    if not dist.is_initialized():
-        raise RuntimeError("The FSDP2 load needs a torch.distributed process group (torchrun).")
     if hf_config is None:
         hf_config = AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
     if getattr(hf_config, "quantization_config", None) is not None:
@@ -438,6 +436,10 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs) -> nn.Module
         raise NotImplementedError(
             f"The FSDP2 load cannot dequantize this {model_type} checkpoint; load it unsharded."
         )
+    if not dist.is_initialized():
+        # FSDP2 shards through a process group even on one rank; a plan for more ranks than one
+        # was refused without a group. A run (distributed_run) destroys the group on exit.
+        dist.setup()
     return parallel_load_and_prepare_fsdp2(
         ckpt_path,
         torch.device("cuda", dist.local_rank()),
@@ -464,7 +466,9 @@ def load_pretrained(
 
     * ``dense="fsdp"``: a causal LM FSDP2-sharded over the whole process group, each rank reading its
       own layers (:func:`parallel_load_and_prepare_fsdp2`, whose ``cpu_offload``, ``mp_policy`` and
-      ``broadcast_chunk_size`` ``kwargs`` may set).
+      ``broadcast_chunk_size`` ``kwargs`` may set). A single process has no group to shard through,
+      so the load sets up one of one rank, which
+      :func:`~modelopt.torch.utils.distributed.distributed_run` destroys with the run.
     * otherwise ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class`` defaults to
       ``AutoModelForCausalLM``), placed as ``kwargs`` say. Every rank of a distributed run gets the
       whole model, ``device_map`` defaulting to the rank's GPU.
