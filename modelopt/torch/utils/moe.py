@@ -199,11 +199,12 @@ def decide_distribution_plan(
 
     Inside a :class:`~modelopt.torch.utils.distributed.ModelOptSession` the session decides it and
     keeps it as ``session.plan``: on a distributed run once, on rank 0, and every other rank adopts
-    rank 0's decision instead of making its own (:meth:`~modelopt.torch.utils.distributed.ModelOptSession.decide`).
-    The inputs are all read locally -- the env knobs, this GPU's memory, the config on this rank's
-    filesystem -- so ranks deciding independently could disagree, and a disagreement surfaces as a
-    hang at mesh creation rather than as an error. Collective: every rank must call it. If rank 0
-    fails to decide, every rank raises. Without a session, this process decides alone.
+    rank 0's decision instead of making its own
+    (:meth:`~modelopt.torch.utils.distributed.ModelOptSession.broadcast_from`). The inputs are all
+    read locally -- the env knobs, this GPU's memory, the config on this rank's filesystem -- so
+    ranks deciding independently could disagree, and a disagreement surfaces as a hang at mesh
+    creation rather than as an error. Collective: every rank must call it. If rank 0 fails to decide,
+    every rank raises. Without a session, this process decides alone.
     """
     from .distributed import get_active_mo_session
 
@@ -219,7 +220,7 @@ def decide_distribution_plan(
     session = get_active_mo_session(required=False)
     if not session.initialized:
         return decide()
-    return session.plan.decide(decide)
+    return session.plan.broadcast_from(decide)
 
 
 def _decide_distribution_plan_on_rank0(

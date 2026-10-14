@@ -221,7 +221,7 @@ def test_rank0_failure_is_broadcast_before_it_raises(monkeypatch, session):
 def test_other_ranks_raise_when_rank0_failed(monkeypatch, session):
     session(1)
     _as_rank(monkeypatch, 1, rank0_message=("plan", None, "ValueError: bad degrees"))
-    with pytest.raises(RuntimeError, match=r"rank 0 failed to decide.*bad degrees"):
+    with pytest.raises(RuntimeError, match=r"rank 0 failed to compute.*bad degrees"):
         decide_distribution_plan(moe_cfg(), world_size=8)
 
 
