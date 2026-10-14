@@ -19,6 +19,7 @@ import time
 import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_llama
+from _test_utils.torch.quantization.quantize_common import get_awq_config
 from conftest import requires_triton
 
 import modelopt.torch.quantization as mtq
@@ -26,6 +27,7 @@ from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.model_calib import gptq
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 from modelopt.torch.quantization.utils.calib_utils import (
+    GPTQHelper,
     compute_hessian_inverse,
     gptq_blockwise_update,
     gptq_blockwise_update_fused_scalar,
@@ -147,6 +149,75 @@ def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer):
 
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
     model = mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
+
+
+def test_awq_gptq_chain_collects_hessian_in_smoothed_coordinates(monkeypatch):
+    """GPTQ must collect its Hessian in AWQ's transformed input coordinates."""
+    captured = []
+    original_update_weights = GPTQHelper.update_weights
+
+    def capture_hessian(self, block_size, perc_damp):
+        pre_quant_scale = self.module.input_quantizer.pre_quant_scale
+        assert pre_quant_scale is not None
+        captured.append(
+            (
+                self.hessian.detach().clone(),
+                self.n_samples,
+                pre_quant_scale.detach().clone(),
+            )
+        )
+        return original_update_weights(self, block_size, perc_damp)
+
+    monkeypatch.setattr(GPTQHelper, "update_weights", capture_hessian)
+
+    torch.manual_seed(3407)
+    model = torch.nn.Linear(16, 16, bias=False, device="cuda").eval()
+
+    generator = torch.Generator(device="cuda")
+    generator.manual_seed(91337)
+    calibration_data = [
+        torch.randn(8, 16, generator=generator, device="cuda")
+        for _ in range(4)
+    ]
+
+    def forward_loop(module):
+        for batch in calibration_data:
+            module(batch)
+
+    config = get_awq_config("awq_lite", block_size=8)
+    config["algorithm"] = [
+        {"method": "awq_lite", "alpha_step": 0.1},
+        {"method": "gptq", "layerwise": {"enable": False}},
+    ]
+
+    mtq.quantize(model, config, forward_loop=forward_loop)
+
+    assert len(captured) == 1
+    actual_hessian, actual_n_samples, pre_quant_scale = captured[0]
+    assert not model.input_quantizer.is_enabled
+    assert not torch.equal(pre_quant_scale, torch.ones_like(pre_quant_scale))
+
+    expected_hessian = torch.zeros_like(actual_hessian)
+    expected_n_samples = 0
+    for batch in calibration_data:
+        expected_hessian, expected_n_samples = update_hessian(
+            batch * pre_quant_scale,
+            expected_hessian,
+            expected_n_samples,
+        )
+
+    untransformed_hessian = torch.zeros_like(actual_hessian)
+    untransformed_n_samples = 0
+    for batch in calibration_data:
+        untransformed_hessian, untransformed_n_samples = update_hessian(
+            batch,
+            untransformed_hessian,
+            untransformed_n_samples,
+        )
+
+    assert actual_n_samples == expected_n_samples
+    assert not torch.equal(actual_hessian, untransformed_hessian)
+    torch.testing.assert_close(actual_hessian, expected_hessian, rtol=0, atol=0)
 
 
 # ---------------------------------------------------------------------------
