@@ -618,7 +618,7 @@ def shard_dataloader(loader, rank: int, world_size: int):
     )
 
 
-def _reinstall_a2a_forwards(model, mo_session) -> int:
+def _reinstall_a2a_forwards(model, ep_mesh) -> int:
     """Re-plant the torch_a2a TP forward wrappers that quantizer insertion clobbered.
 
     transformers installs its TP input/output transforms by REPLACING ``module.forward`` with an
@@ -629,9 +629,9 @@ def _reinstall_a2a_forwards(model, mo_session) -> int:
 
     Called at the top of the calibration loop: after conversion (so it wraps the QUANTIZED forward)
     and before the first forward. Idempotent via a per-module flag, so repeated calibration passes
-    do not stack wrappers (which would inject the process_group argument twice).
+    do not stack wrappers (which would inject the process_group argument twice). ``ep_mesh`` is the
+    mesh the routed experts are sharded over; without one there is nothing to re-plant.
     """
-    ep_mesh = getattr(mo_session, "ep_mesh", None) if mo_session is not None else None
     if ep_mesh is None:
         return 0
     try:
@@ -668,7 +668,7 @@ def _reinstall_a2a_forwards(model, mo_session) -> int:
             ALL_PARALLEL_STYLES[style_name].install_forward(mod, ep_mesh)
             mod._modelopt_a2a_forward_reinstalled = True
             n += 1
-    if n and (mo_session is None or getattr(mo_session, "rank", 0) == 0):
+    if n and is_master():
         print(
             f"[ep] re-installed {n} torch_a2a forward wrapper(s) clobbered by quantizer insertion",
             flush=True,
@@ -676,11 +676,13 @@ def _reinstall_a2a_forwards(model, mo_session) -> int:
     return n
 
 
-def distributed_forward_loop(model, dataloader, mo_session: "ModelOptSession | None" = None):
+def distributed_forward_loop(model, dataloader, device=None, ep_mesh=None):
     """Build an ``mtq.quantize`` ``forward_loop`` for a distributed (e.g. expert-parallel) model.
 
-    Moves each batch onto this rank's ``mo_session.device`` and runs the captured ``model`` forward (the
-    EP all-reduce / all-to-all collectives fire inside that forward). ``mtq.quantize`` hands the
+    Moves each batch onto ``device``, when given, and runs the captured ``model`` forward (the EP
+    all-reduce / all-to-all collectives fire inside that forward). An expert-parallel model passes
+    the ``ep_mesh`` its experts are sharded over, for the all-to-all forwards that quantizer insertion
+    drops to be re-installed before the first forward. ``mtq.quantize`` hands the
     ``forward_loop`` callback an inner module that this closure ignores, calling the captured
     top-level ``model`` instead so the full distributed forward (and its collectives) runs.
 
@@ -693,10 +695,8 @@ def distributed_forward_loop(model, dataloader, mo_session: "ModelOptSession | N
     # Local import to avoid any import cycle within modelopt.torch.utils.
     from modelopt.torch.utils.dataset_utils import _disable_use_cache
 
-    device = mo_session.device if mo_session is not None else None
-
     def calibrate(_inner_model):
-        _reinstall_a2a_forwards(model, mo_session)
+        _reinstall_a2a_forwards(model, ep_mesh)
         with _disable_use_cache(model):
             # Reclaim the caching allocator's reserved-but-unused pool left by the load/quantizer-insertion
             # memory peak. Without this, torch hoards ~the whole GPU (e.g. 91 GB live weights vs 275 GB

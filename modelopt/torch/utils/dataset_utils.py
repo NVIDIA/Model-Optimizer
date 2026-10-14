@@ -1004,16 +1004,14 @@ def get_max_batch_size(
 ):
     """Get the maximum batch size that can be used for the model.
 
-    Inside a distributed :class:`~modelopt.torch.utils.distributed.ModelOptSession` it is collective:
-    every rank calls it, and every rank gets the smallest batch size any rank's GPU allows
-    (:meth:`~modelopt.torch.utils.distributed.ModelOptSession.all_reduce`), so that all run the same
-    number of calibration steps. Each rank then measures its own GPU only and probes with a single
+    On a distributed run it is collective: every rank calls it, and every rank gets the smallest
+    batch size any rank's GPU allows (:func:`~modelopt.torch.utils.distributed.all_reduce`), so that
+    all run the same number of calibration steps. Each rank then measures its own GPU only and probes with a single
     forward: retrying a smaller batch after an out-of-memory error would run a different number of
     forwards, and of the collectives inside them, on each rank.
     """
-    from .distributed import get_active_mo_session
+    from .distributed import all_reduce, is_distributed_run, local_rank
 
-    session = get_active_mo_session(required=False)
     args = (
         model,
         max_sample_length,
@@ -1021,10 +1019,9 @@ def get_max_batch_size(
         sample_input_single_batch,
         enable_grad,
     )
-    if session.initialized and session.distributed:
-        return session.all_reduce(
-            "calib_batch_size", lambda: _max_batch_size(*args, device=session.device), min
-        )
+    if is_distributed_run():
+        device = torch.device("cuda", local_rank())
+        return all_reduce("calib_batch_size", lambda: _max_batch_size(*args, device=device), min)
     return _max_batch_size(*args)
 
 
