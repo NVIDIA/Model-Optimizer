@@ -470,7 +470,6 @@ def _load_sharded(route, plan, ckpt_path, auto_class, model_type, kwargs, hub_op
 
         return load_and_prepare_ep(
             ckpt_path,
-            dist.get_active_mo_session(),
             plan.ep_size,
             trust_remote_code=trust_remote_code,
             hf_config=hf_config,
