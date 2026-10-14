@@ -22,9 +22,10 @@ import torch.distributed
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
     ModelOptSession,
+    Synced,
+    SyncedAttribute,
     get_active_mo_session,
     is_distributed_launch,
-    synced,
 )
 
 # --------------------------------------------------------------------------------- DistributionPlan
@@ -100,10 +101,10 @@ def test_reset_clears_the_identity_and_the_ep_mesh():
 
 
 class _Session(ModelOptSession):
-    """A session with a second synced attribute, and one held on a group of its own."""
+    """A session with a second synced attribute, and a plain one."""
 
-    other = synced()
-    grouped = synced(group=lambda session: "ep-group")
+    other: Synced[int]
+    note: str
 
 
 def _session(rank=None):
@@ -155,6 +156,23 @@ def _gather_as_rank(monkeypatch, rank, others):
         torch.distributed, "broadcast_object_list", lambda *a, **k: pytest.fail("rank 0 decided")
     )
     return sent
+
+
+def test_only_attributes_annotated_synced_are_synced():
+    """The annotation carries both the value's type and the synced semantic."""
+    assert isinstance(vars(_Session)["other"], SyncedAttribute)
+    assert isinstance(vars(ModelOptSession)["plan"], SyncedAttribute)
+    assert "note" not in vars(_Session)
+
+
+def test_a_plain_attribute_assigns_without_a_collective(monkeypatch):
+    for collective in ("broadcast_object_list", "all_gather_object"):
+        monkeypatch.setattr(
+            torch.distributed, collective, lambda *a, **k: pytest.fail("a collective ran")
+        )
+    session = _session(rank=1)
+    session.note = "local"
+    assert session.note == "local"
 
 
 def test_a_synced_attribute_is_plain_in_a_single_process(monkeypatch):
@@ -227,12 +245,6 @@ def test_ranks_setting_different_attributes_fail_instead_of_mixing_them(monkeypa
         _session(rank=1).plan = DistributionPlan(world_size=2)
 
 
-def test_a_synced_attribute_is_held_on_its_group(monkeypatch):
-    sent = _as_rank(monkeypatch, 0)
-    _session(rank=0).grouped = 5
-    assert sent == [(("grouped", 5, None), "ep-group")]
-
-
 def test_agree_gives_every_rank_the_combined_value(monkeypatch):
     """Every rank's value counts, and every rank gets the same result."""
     sent = _gather_as_rank(monkeypatch, 1, others=[("smallest", 8, None), ("smallest", 2, None)])
@@ -286,12 +298,6 @@ def test_ranks_agreeing_out_of_step_fail(monkeypatch):
     _gather_as_rank(monkeypatch, 0, others=[("other", 8, None)])
     with pytest.raises(RuntimeError, match="out of step"):
         _session(rank=0).agree("smallest", lambda: 4, min)
-
-
-def test_agree_gathers_on_its_group(monkeypatch):
-    sent = _gather_as_rank(monkeypatch, 0, others=[("smallest", 1, None)])
-    assert _session(rank=0).agree("smallest", lambda: 5, min, group="ep-group") == 1
-    assert sent == [(("smallest", 5, None), "ep-group")]
 
 
 def test_only_synced_attributes_can_be_decided():
