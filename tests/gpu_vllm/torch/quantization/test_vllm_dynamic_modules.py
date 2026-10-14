@@ -56,7 +56,6 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins import vllm as vllm_plugin
-from modelopt.torch.quantization.plugins.custom import register_custom_post_conversion_plugins
 from modelopt.torch.quantization.plugins.vllm import (
     _ATTENTION_TYPES,
     VllmMLAAttention,
@@ -389,22 +388,28 @@ def test_prequantized_linear_rejects_enabled_quantizers(monkeypatch):
     assert unquantized._fake_quant_supported
 
 
-def test_vllm_linear_restores_quant_method_after_fake_quant_forward_error():
+def test_vllm_linear_restores_method_and_weight_after_fake_quant_forward_error():
     linear = _new_attention(_TestQuantVLLMLinear)
-    original_method = object()
-    fake_method = Mock()
-    fake_method.apply.side_effect = [RuntimeError("fake quant failed"), torch.ones(2, 4)]
+    original_method = Mock()
+    original_method.apply.side_effect = [RuntimeError("fake quant failed"), torch.ones(2, 4)]
+    original_weight = torch.nn.Parameter(torch.ones(4, 4))
+    linear.weight = original_weight
     linear.quant_method = original_method
-    linear.fake_quant_method = fake_method
+    linear.fake_quant_method = vllm_plugin.FakeQuantMethod(original_method)
     linear._fake_quant_supported = True
+    linear.input_quantizer = Mock(is_enabled=False)
+    linear.weight_quantizer = Mock(is_enabled=True, side_effect=lambda weight: weight + 1)
+    linear.output_quantizer = Mock(side_effect=lambda output: output)
     inputs = torch.zeros(2, 4)
 
     with pytest.raises(RuntimeError, match="fake quant failed"):
         linear(inputs)
 
     assert linear.quant_method is original_method
+    assert linear.weight is original_weight
     assert torch.equal(linear(inputs), torch.ones_like(inputs))
     assert linear.quant_method is original_method
+    assert linear.weight is original_weight
 
 
 @pytest.mark.parametrize(
@@ -419,7 +424,7 @@ def test_vllm_linear_restores_quant_method_after_fake_quant_forward_error():
     ],
 )
 def test_kimi_mlp_low_latency_linear_fake_quant_support(
-    parent_name, projection, dtype, shape, expected
+    monkeypatch, parent_name, projection, dtype, shape, expected
 ):
     kimi_model = pytest.importorskip("vllm.models.kimi_k3.nvidia.model")
     kimi_method = pytest.importorskip(
@@ -450,7 +455,14 @@ def test_kimi_mlp_low_latency_linear_fake_quant_support(
     model = torch.nn.Module()
     setattr(model, parent_name, mlp)
     model.attention_projection = new_linear("down_proj", torch.bfloat16, (4, 4))
-    vllm_plugin._configure_kimi_mlp_fake_quant(model)
+    monkeypatch.setattr(
+        vllm_plugin,
+        "create_parallel_state",
+        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
+    )
+    vllm_plugin.vllm_replace_quant_module_hook(model)
+    for linear in (mlp.gate_up_proj, mlp.down_proj, model.attention_projection):
+        linear._setup()
 
     assert target._fake_quant_supported is expected
     assert not model.attention_projection._fake_quant_supported
@@ -467,7 +479,7 @@ def test_missing_kimi_package_keeps_standard_vllm_supported():
     with patch("builtins.__import__", side_effect=missing_kimi_import):
         linear = SimpleNamespace(quant_method=vllm_plugin.vllm_linear.UnquantizedLinearMethod())
         assert vllm_plugin._supports_fake_quant_linear(linear)
-        vllm_plugin._configure_kimi_mlp_fake_quant(torch.nn.Module())
+        vllm_plugin.vllm_replace_quant_module_hook(torch.nn.Module())
 
 
 def test_kimi_guard_does_not_import_k3_for_other_models():
@@ -480,10 +492,10 @@ def test_kimi_guard_does_not_import_k3_for_other_models():
         return original_import(name, *args, **kwargs)
 
     with patch("builtins.__import__", side_effect=reject_k3_import):
-        vllm_plugin._configure_kimi_mlp_fake_quant(model)
+        vllm_plugin.vllm_replace_quant_module_hook(model)
 
 
-def test_kimi_legacy_gemm_rs_uses_quantized_down_projection():
+def test_kimi_legacy_gemm_rs_uses_quantized_down_projection(monkeypatch):
     kimi_model = pytest.importorskip("vllm.models.kimi_k3.nvidia.model")
     if "run_gemm_rs" not in kimi_model.KimiMLP.forward.__code__.co_names:
         pytest.skip("Kimi MLP no longer uses the legacy GEMM-RS path")
@@ -507,7 +519,13 @@ def test_kimi_legacy_gemm_rs_uses_quantized_down_projection():
     down_proj.forward = Mock(return_value=(x + 1, None))
     mlp.down_proj = down_proj
 
-    register_custom_post_conversion_plugins(mlp)
+    monkeypatch.setattr(
+        vllm_plugin,
+        "create_parallel_state",
+        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
+    )
+    vllm_plugin.vllm_replace_quant_module_hook(mlp)
+    down_proj._setup()
     assert down_proj._fake_quant_supported
     assert mlp.run_gemm_rs is False
     assert torch.equal(mlp(x), x + 1)
@@ -540,8 +558,8 @@ def test_kimi_gemm_rs_ar_bypasses_enabled_fake_quantizers(quantizer_name):
     gemm_rs_ar.should_run.side_effect = lambda inputs: inputs.shape[0] >= 128
     mlp.gemm_rs_ar = gemm_rs_ar
 
-    register_custom_post_conversion_plugins(mlp)
-    register_custom_post_conversion_plugins(mlp)
+    vllm_plugin.vllm_replace_quant_module_hook(mlp)
+    vllm_plugin.vllm_replace_quant_module_hook(mlp)
     assert isinstance(mlp.gemm_rs_ar, vllm_plugin._KimiGemmRsArFakeQuantGuard)
     assert torch.equal(mlp(x), x + 2)
     assert gemm_rs_ar.call_count == 1
@@ -555,6 +573,46 @@ def test_kimi_gemm_rs_ar_bypasses_enabled_fake_quantizers(quantizer_name):
     getattr(down_proj, quantizer_name).disable()
     assert torch.equal(mlp(x), x + 2)
     assert gemm_rs_ar.call_count == 2
+
+
+def test_kimi_gemm_rs_guard_tracks_converted_down_projection(monkeypatch):
+    kimi_model = pytest.importorskip("vllm.models.kimi_k3.nvidia.model")
+    if "gemm_rs_ar" not in kimi_model.KimiMLP.forward.__code__.co_names:
+        pytest.skip("Kimi MLP uses the legacy GEMM-RS path")
+    kimi_method = pytest.importorskip(
+        "vllm.models.kimi_k3.nvidia.low_latency_gemm"
+    ).KimiK3LowLatencyLinearMethod
+
+    mlp = object.__new__(kimi_model.KimiMLP)
+    torch.nn.Module.__init__(mlp)
+    mlp.gate_up_proj = Mock()
+
+    down_proj = object.__new__(vllm_plugin.vllm_linear.RowParallelLinear)
+    torch.nn.Module.__init__(down_proj)
+    down_proj.weight = torch.nn.Parameter(torch.ones(2, 2, dtype=torch.bfloat16))
+    down_proj.quant_method = object.__new__(kimi_method)
+    mlp.down_proj = down_proj
+    gemm_rs_ar = Mock()
+    gemm_rs_ar.should_run.return_value = True
+    mlp.gemm_rs_ar = gemm_rs_ar
+
+    vllm_plugin.vllm_replace_quant_module_hook(mlp)
+    guard = mlp.gemm_rs_ar
+    monkeypatch.setattr(
+        vllm_plugin,
+        "create_parallel_state",
+        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
+    )
+    converted = vllm_plugin.QuantModuleRegistry.convert(down_proj)
+
+    assert converted is down_proj
+    assert guard.down_proj is down_proj
+    assert down_proj._fake_quant_supported
+    for name in _VLLMParallelLinear._QUANTIZER_NAMES:
+        getattr(down_proj, name).disable()
+    assert guard.should_run(torch.ones(128, 2))
+    down_proj.weight_quantizer.enable()
+    assert not guard.should_run(torch.ones(128, 2))
 
 
 def test_unregistered_unquantized_subclass_is_unsupported():
