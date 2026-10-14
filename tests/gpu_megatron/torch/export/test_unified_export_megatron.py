@@ -979,14 +979,39 @@ def test_qkv_slicing_records_hf_excludes_for_unquantized_fused_qkv():
     assert "backbone.layers.0.mixer.v_proj" in exporter.exclude_modules
 
 
-def _make_exporter_for_mtp(model_dir: Path) -> GPTModelExporter:
+def _make_exporter_for_mtp(model_dir: Path, arch: str | None = None) -> GPTModelExporter:
     """Create a minimal GPTModelExporter instance for testing _get_mtp_state_dict."""
     exporter = object.__new__(GPTModelExporter)
     exporter._hf_pretrained_model_name = str(model_dir)
     exporter._state_dict = {}  # MTP keys are absent — they should be picked up
     exporter.exclude_modules = []
     exporter.rules = {}  # a Qwen-style ``mtp.*`` checkpoint, not MTP stored as decoder layers
+    exporter.all_mcore_mappings = all_mcore_hf_export_mapping[arch] if arch else {}
     return exporter
+
+
+@pytest.mark.parametrize(
+    ("arch", "mtp_prefix"),
+    [
+        ("NemotronHForCausalLM", "mtp."),
+        ("NemotronH_Omni_Reasoning_V3", "language_model.mtp."),
+    ],
+)
+def test_mtp_state_dict_prefix_follows_mapping(tmp_path, arch, mtp_prefix):
+    """Without a live MTP, the source MTP is copied from the root the arch's mapping uses."""
+    model_dir = tmp_path / "fake_hf_model"
+    model_dir.mkdir()
+    tensors = {
+        "language_model.backbone.embeddings.weight": torch.zeros(64, 32),
+        f"{mtp_prefix}layers.0.enorm.weight": torch.ones(32),
+    }
+    save_file(tensors, str(model_dir / "model.safetensors"))
+
+    exporter = _make_exporter_for_mtp(model_dir, arch)
+    mtp_state_dict = exporter._get_mtp_state_dict()
+
+    assert list(mtp_state_dict) == [f"{mtp_prefix}layers.0.enorm.weight"]
+    assert exporter.exclude_modules == [mtp_prefix.removesuffix(".") + "*"]
 
 
 def test_mtp_state_dict_single_safetensors(tmp_path):

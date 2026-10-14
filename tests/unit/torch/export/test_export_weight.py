@@ -29,6 +29,7 @@ from modelopt.torch.export.unified_export_hf import (
 )
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml.common import pin_packed_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils import quantizer_attr_names
 
@@ -185,6 +186,19 @@ def test_export_repacks_a_weight_changed_since_fake_quant(num_bits):
     _export_quantized_weight(linear, torch.bfloat16)
 
     assert torch.equal(linear.weight, expected)
+
+
+@pytest.mark.parametrize("num_bits", sorted(GGML_FORMAT_REGISTRY))
+def test_export_drops_the_payload_gptq_pinned(num_bits):
+    """GPTQ pins its payload to the quantizer as a buffer; only the packed weight is exported."""
+    linear = _iq_linear(num_bits)
+    packed, _ = GGML_FORMAT_REGISTRY[num_bits].quantize(linear.weight.detach())
+    pin_packed_weight(linear.weight_quantizer, num_bits, packed)
+
+    _export_quantized_weight(linear, torch.bfloat16)
+    state_dict = postprocess_state_dict(linear.state_dict(), maxbound=448, quantization=None)
+
+    assert list(state_dict) == ["weight"]
 
 
 class QuantMoELinear(nn.Module):

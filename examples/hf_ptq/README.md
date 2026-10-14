@@ -421,14 +421,40 @@ export HF_PATH=<the downloaded checkpoint from the Hugging Face hub, or simply t
 scripts/huggingface_example.sh --model $HF_PATH --recipe general/auto_quantize/nvfp4_fp8_at_5p4bits --calib_batch_size 4
 ```
 
-The recipe quantizes the less accuracy-sensitive layers with the more aggressive format (e.g. NVFP4) and
-keeps the more sensitive ones at higher precision (or unquantized), so the model meets the recipe's
+The recipe quantizes the less accuracy-sensitive layers with the more aggressive format (e.g. NVFP4)
+and keeps the more sensitive ones at higher precision (or unquantized), so the model meets the recipe's
 `effective_bits` target. To author your own, copy a shipped recipe and adjust `candidate_formats`,
-`constraints.effective_bits`, `auto_quantize_method` (`gradient` / `kl_div`), `score_size`,
-`module_search_spaces` (optional per-module candidate overrides), `disabled_layers` (excluded from
-the search), and `cost_excluded_layers` (kept out of the bit-budget accounting — e.g. VL vision
-towers). Recipes can splice a shared base `disabled_layers` set via `$import` (see
+`constraints.effective_bits`, `auto_quantize_method` (`gradient`, `kl_div`, or `aumann_shapley`),
+`method_options`, `score_size`, `module_search_spaces` (optional per-module candidate overrides),
+`disabled_layers` (excluded from the search), and `cost_excluded_layers` (kept out of the bit-budget
+accounting — e.g. VL vision towers). Recipes can splice a shared base `disabled_layers` set via `$import` (see
 `modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
+
+An Aumann-Shapley recipe can target effective bits:
+
+```yaml
+auto_quantize:
+  constraints:
+    effective_bits: 5.4
+  auto_quantize_method: aumann_shapley
+  method_options:
+    num_path_nodes: 2
+    damage_link: coverage
+```
+
+Or it can minimize weight cost while keeping predicted damage under a bound:
+
+```yaml
+auto_quantize:
+  constraints: {}
+  auto_quantize_method: aumann_shapley
+  method_options:
+    num_path_nodes: 2
+    max_predicted_damage: 0.01
+```
+
+These fragments omit the candidate formats and other shared recipe fields. Choose either
+`constraints.effective_bits` or `method_options.max_predicted_damage`; recipes that set both are rejected.
 
 AutoQuantize recipes support two mutually exclusive search-space styles:
 
@@ -516,6 +542,10 @@ formats in `kv_cache_quantized_layers`. `mtq.auto_quantize` returns the sensitiv
 selected recipe in its search state; `--kv_auto_quantize_checkpoint` stores that resumable state,
 including the candidate quantizer tensors needed for replay.
 
+KV-only recipes leave weights in their original precision, so `hf_quant_config.json` contains
+`quantization.quant_algo: null` and `quantized_layers: {}`. Validate their quantization through
+`kv_cache_quant_algo`, `kv_cache_quantized_layers`, and the exported K/V scaling tensors.
+
 KV sensitivity scoring runs one reference forward plus one forward per eligible-layer candidate
 for every scoring step. Choose the recipe's `auto_quantize.score_size` with the number of eligible
 layers and candidates in mind. Peak scoring memory also grows with the number of selected tokens
@@ -547,7 +577,7 @@ The example scripts above also have an additional flag `--tasks`, where the actu
 
 > *If GPU out-of-memory error is reported running the scripts, please try editing the scripts and reducing the max batch size to save GPU memory.*
 
-> *NOTE: AutoQuantize requires backpropagation of the model. Models without backpropagation support (e.g., Llama-4) will not work with AutoQuantize when using the `gradient` method. The `kl_div` method does not require backpropagation.*
+> *NOTE: AutoQuantize requires backpropagation of the model. Models without backpropagation support (e.g., Llama-4) will not work with AutoQuantize when using the `gradient` or `aumann_shapley` methods. Aumann-Shapley does not need labels, but it still backpropagates its comparison loss. The `kl_div` method does not require backpropagation.*
 
 ## Real Quant
 
@@ -645,7 +675,7 @@ with torch.inference_mode():
 python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --qformat fp8 --export_path <quantized_ckpt_path> --trust_remote_code
 ```
 
-> *For exporting fake-quantized models for vLLM serving (e.g., for research or kernels not yet supported in real-quant), use the `--vllm_fakequant_export` flag. See [vllm_serve/README.md](../vllm_serve/README.md) for details.*
+> *For exporting fake-quantized models for vLLM serving (e.g., for research or kernels not yet supported in real-quant), use the `--vllm_fakequant_export` flag. See [vllm_serve/README.md](../vllm_serve/README.md) for details. When every quantizer is a weight quantizer, as in the GGML recipes (IQ, Q8_0), the export is a plain BF16 checkpoint that a stock vLLM image serves directly.*
 
 ### Hugging Face framework [Script](./scripts/huggingface_example.sh)
 

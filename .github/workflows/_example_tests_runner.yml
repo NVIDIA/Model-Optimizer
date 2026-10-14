@@ -90,15 +90,29 @@ jobs:
           find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do python3 -m pip install -r "$req_file" || exit 1; done
       - name: Run tests
         id: run_tests
+        shell: bash
         continue-on-error: ${{ inputs.allow_failure }}
         env:
           # Absolute paths so subprocesses running from different working directories
           # all find the config and write .coverage.* files to the same location.
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
+          # sys.monitoring records the same lines as the default C tracer at a fraction of the
+          # overhead; the tracer slowed each hf_ptq example run by ~60%. Needs Python 3.12+.
+          COVERAGE_CORE: sysmon
         run: |
           echo "Running tests for: ${{ inputs.example }}"
-          python3 -m pytest tests/examples/${{ inputs.example }} --cov
+          pytest_args=()
+          if [[ "${{ inputs.example }}" == "diffusers" ]]; then
+            # Keep legacy ONNX/TRT tests available manually during deprecation.
+            pytest_args+=(--ignore=tests/examples/diffusers/test_diffusers_onnx_trt.py)
+          fi
+          if [[ "${{ inputs.example }}" == "hf_ptq" && "${{ github.ref }}" == refs/heads/pull-request/* ]]; then
+            # One GPU on PR runners: small-model tests share it and the rest run alone on it
+            # (tests/examples/hf_ptq/conftest.py). The 2-GPU nightly stays serial.
+            pytest_args+=(-n 4)
+          fi
+          python3 -m pytest tests/examples/${{ inputs.example }} --cov "${pytest_args[@]}"
       - name: Flag allowed failure
         if: ${{ inputs.allow_failure && steps.run_tests.outcome == 'failure' }}
         run: |

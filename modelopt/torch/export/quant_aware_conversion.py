@@ -251,9 +251,25 @@ def _apply_merge_rule(state_dict: dict[str, torch.Tensor], rule: _MergeRule) -> 
         state_dict[target_key] = merged
 
 
+def _idempotent_pattern(pattern: str, repl: str) -> str:
+    """Stop a rename rule from re-matching its own replacement.
+
+    Tensors copied from the source checkpoint skip the forward conversion and reach the reverse
+    pass already in hub naming, so a rule like ``input_conditioner`` ->
+    ``radio_model.input_conditioner`` would add its prefix twice. When the replacement is
+    ``<prefix> + <pattern>``, skip keys that already carry the prefix.
+    """
+    if len(repl) > len(pattern) and repl.endswith(pattern):
+        return f"(?<!{re.escape(repl[: -len(pattern)])}){pattern}"
+    return pattern
+
+
 def _compile_rename_rules(rename_rules: list[RenameRule]):
     """Pre-compile rename rules into ``(compiled_pattern, repl, scope_prefixes)`` triples."""
-    return [(re.compile(r.pattern), r.repl, r.scope_prefixes) for r in rename_rules]
+    return [
+        (re.compile(_idempotent_pattern(r.pattern, r.repl)), r.repl, r.scope_prefixes)
+        for r in rename_rules
+    ]
 
 
 def _sub_scoped(pattern: re.Pattern, repl: str, key: str, scope_prefixes: tuple[str, ...]) -> str:

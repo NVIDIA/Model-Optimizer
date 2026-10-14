@@ -743,6 +743,27 @@ def test_indexer_q_patterns_need_the_query_quantizer():
         mtq.unregister(_ToyIndexer)
 
 
+class _ToyMegaMoEExperts(torch.nn.Module):
+    """Stands in for MoE experts no plugin converts, like vLLM's fused Mega-MoE kernels."""
+
+    def forward(self, x):
+        return x
+
+
+@pytest.mark.parametrize("quantizer_name", ["dispatch_quantizer", "combine_quantizer"])
+def test_moe_comm_patterns_on_unconverted_experts_raise(quantizer_name):
+    model = torch.nn.Sequential(torch.nn.Linear(16, 16), _ToyMegaMoEExperts())
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": f"*{quantizer_name}", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    with pytest.raises(RuntimeError, match=rf"{quantizer_name}.*\(_ToyMegaMoEExperts\)"):
+        mtq.quantize(model, config, lambda m: m(torch.randn(2, 16)))
+
+
 def test_indexer_k_sequential_cfg_on_converted_indexer_pass():
     """A list-valued cfg makes the quantizer a SequentialQuantizer, which still counts as attached."""
     config = copy.deepcopy(INDEXER_K_ONLY_CFG)

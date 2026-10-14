@@ -17,6 +17,7 @@
 
 import contextvars
 import importlib
+import inspect
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -31,7 +32,13 @@ from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_g
 
 from ...utils.distributed import ParallelState
 from ..conversion import set_quantizer_by_cfg
-from ..nn import QuantLinearConvBase, QuantModule, QuantModuleRegistry, TensorQuantizer
+from ..nn import (
+    QuantLinearConvBase,
+    QuantModule,
+    QuantModuleRegistry,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from .custom import CUSTOM_MODEL_PLUGINS
 
 _NVFP4_ATTENTION_QUANTIZER_CFG = {
@@ -236,6 +243,10 @@ _FUSED_MOE_KERNEL_TARGETS = _collect_fused_moe_kernel_targets()
 
 _moe_fakequant_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "moe_fakequant_active", default=False
+)
+# Set by the combine hook, so each MoE forward can check that vLLM called the hooked finalize.
+_moe_combine_quantized: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "moe_combine_quantized", default=False
 )
 
 
@@ -712,6 +723,10 @@ class _QuantFusedMoEBase(QuantModule):
         """
         if self._prequantized:
             _check_prequantized_quantizers_disabled(self, self._QUANTIZER_NAMES)
+        if self._prequantized or not any(
+            getattr(self, name).is_enabled for name in self._QUANTIZER_NAMES
+        ):
+            # Nothing to fake-quantize inside the kernels (e.g. a communication-only recipe).
             yield
             return
         assert _FUSED_MOE_KERNEL_TARGETS, "No vLLM fused-MoE kernel entry point found to patch"
@@ -777,20 +792,121 @@ if _has_routed_experts_cls:
         """Expert-weight owner of the vLLM >= 0.24 ``MoERunner`` pipeline.
 
         ``MoERunner`` calls ``forward_modular``/``forward_monolithic`` instead of ``__call__``.
+        ``dispatch_quantizer`` and ``combine_quantizer`` fake-quantize the expert-parallel
+        communication: the routed tokens entering the MoE kernel's prepare step (dispatch) and
+        the expert output entering its finalize step (combine).
         """
+
+        def _setup(self):
+            super()._setup()
+            # Not in _QUANTIZER_NAMES: they act on activations, so pre-quantized experts allow them.
+            self.dispatch_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
+            self.combine_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
+            self.dispatch_quantizer.disable()
+            self.combine_quantizer.disable()
 
         def forward(self, *args, **kwargs):
             # Keep vLLM's own "call forward_modular/forward_monolithic instead" error rather
             # than the inherited (hidden_states, router_logits) signature.
             return RoutedExperts.forward(self, *args, **kwargs)
 
-        def forward_modular(self, *args, **kwargs):
-            with self._fakequant_moe_kernels():
-                return super().forward_modular(*args, **kwargs)
+        def forward_modular(self, x, *args, **kwargs):
+            with self._combine_hooked(), self._fakequant_moe_kernels():
+                return super().forward_modular(self.dispatch_quantizer(x), *args, **kwargs)
 
-        def forward_monolithic(self, *args, **kwargs):
-            with self._fakequant_moe_kernels():
-                return super().forward_monolithic(*args, **kwargs)
+        def forward_monolithic(self, x, *args, **kwargs):
+            with self._combine_hooked(), self._fakequant_moe_kernels():
+                return super().forward_monolithic(self.dispatch_quantizer(x), *args, **kwargs)
+
+        @contextmanager
+        def _combine_hooked(self):
+            """Hook the combine for this forward and raise if vLLM did not call the hooked step."""
+            self._hook_combine()
+            token = _moe_combine_quantized.set(False)
+            try:
+                yield
+                if self.combine_quantizer.is_enabled and not _moe_combine_quantized.get():
+                    # E.g. vLLM deferred finalize (UnfinalizedMoEOutput) without expert parallelism.
+                    raise RuntimeError(
+                        f"{self.layer_name}: vLLM's MoE kernel did not call the finalize step that"
+                        " combine_quantizer hooks; enable expert parallelism."
+                    )
+            finally:
+                _moe_combine_quantized.reset(token)
+
+        def _hook_combine(self) -> None:
+            """Route the expert output that the kernel's finalize sends through combine_quantizer."""
+            if not self.combine_quantizer.is_enabled:
+                return
+            if getattr(self.moe_config, "use_passthrough_all2all", False):
+                # E.g. --moe-backend flashinfer_moe_ep_*: finalize only sees the combined output.
+                raise RuntimeError(
+                    f"{self.layer_name}: the MoE backend combines inside its kernel, where"
+                    " combine_quantizer cannot reach; use another one."
+                )
+            moe_kernel = getattr(self.quant_method, "moe_kernel", None)
+            if moe_kernel is None:
+                raise RuntimeError(
+                    f"{self.layer_name}: combine_quantizer needs a vLLM modular MoE kernel, which"
+                    f" {type(self.quant_method).__name__} does not use."
+                )
+            # Every forward: a later quantize call may reconfigure combine_quantizer.
+            self._check_combine_scale(moe_kernel)
+            # vLLM builds one prepare/finalize object per layer and may rebuild it (elastic EP).
+            prepare_finalize = moe_kernel.prepare_finalize
+            if getattr(prepare_finalize, "_combine_quantizer_owner", None) is self:
+                return
+            # The kernel calls finalize or, for async backends, finalize_async; neither calls the other.
+            for name in ("finalize", "finalize_async"):
+                if not hasattr(prepare_finalize, name):
+                    continue
+                finalize = getattr(prepare_finalize, name)
+                parameters = list(inspect.signature(finalize).parameters)
+                if "fused_expert_output" not in parameters:
+                    raise RuntimeError(
+                        f"{self.layer_name}: {type(prepare_finalize).__name__}.{name} takes no"
+                        " fused_expert_output for combine_quantizer."
+                    )
+                index = parameters.index("fused_expert_output")
+                setattr(prepare_finalize, name, partial(self._quantize_combine, finalize, index))
+            prepare_finalize._combine_quantizer_owner = self
+
+        def _check_combine_scale(self, moe_kernel) -> None:
+            """Require a fixed global scale on payloads with rows that no token fills."""
+            prepare_finalize = moe_kernel.prepare_finalize
+            backend = type(prepare_finalize).__name__
+            if not (
+                prepare_finalize.activation_format.name == "BatchedExperts"  # DeepEP LL, NIXL
+                or backend == "FlashInferNVLinkOneSidedPrepareAndFinalize"
+                # DeepEP v2 with CUDA graphs sends worst-case rows, which these experts leave stale.
+                or (
+                    backend == "DeepEPV2PrepareAndFinalize"
+                    and getattr(prepare_finalize, "use_cudagraph", False)
+                    and type(getattr(moe_kernel, "fused_experts", None)).__name__
+                    == "HummingIndexedExperts"
+                )
+            ):
+                return
+            quantizer = self.combine_quantizer
+            members = quantizer if isinstance(quantizer, SequentialQuantizer) else (quantizer,)
+            # MX formats have no global scale; block scales stay within a row.
+            if not all(
+                q.is_mx_format or q._use_constant_amax or q._constant_amax is not None
+                for q in members
+                if q.is_enabled
+            ):
+                raise RuntimeError(
+                    f"{self.layer_name}: {backend} sends unused padding rows, which would enter"
+                    " combine_quantizer's global scale; set constant_amax."
+                )
+
+        def _quantize_combine(self, finalize, index, *args, **kwargs):
+            if self.combine_quantizer.is_enabled:
+                fused_output = args[index] if len(args) > index else kwargs["fused_expert_output"]
+                # In place: the payload can alias the output buffer or a communication workspace.
+                fused_output.copy_(self.combine_quantizer(fused_output))
+                _moe_combine_quantized.set(True)
+            return finalize(*args, **kwargs)
 
 
 @QuantModuleRegistry.register({vllm_attention.Attention: "vllm_Attention"})

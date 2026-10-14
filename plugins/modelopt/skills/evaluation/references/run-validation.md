@@ -39,6 +39,9 @@ independent validation item fails, label the result incomplete or invalid and
 return findings and a recommendation to the parent (or user); do not
 automatically resubmit a completed run.
 
+For Terminal-Bench 2.1, also complete the [run health screen](../recipes/tasks/aa_next/terminal_bench_2_1.md#run-health-screen)
+and include its evidence and verdict before reporting `pass@1`.
+
 ### Bounded Evaluation-Failure Policy (Parent and Evaluator)
 
 Accept complete runs with **<2% failures in each applicable gate**, measured

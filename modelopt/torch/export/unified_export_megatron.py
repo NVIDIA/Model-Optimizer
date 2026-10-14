@@ -883,6 +883,10 @@ class GPTModelExporter:
         if self.rules.get("mtp_in_decoder_layers", False):
             return self._copy_decoder_mtp_layers_from_pretrained()
 
+        # The MTP root follows the arch's own mapping when it has one: "mtp." for Nemotron-H,
+        # "language_model.mtp." for a VLM that nests it.
+        mtp_rule = self.all_mcore_mappings.get("mtp.eh_proj")
+        mtp_prefix = mtp_rule.target_name_or_prefix.split("layers.")[0] if mtp_rule else "mtp."
         mtp_exists = False
 
         if os.path.isdir(self._hf_pretrained_model_name):
@@ -917,7 +921,7 @@ class GPTModelExporter:
                 safetensors_index = json.load(f)
             model_dir = safetensors_index_file.parent
             for key in safetensors_index["weight_map"]:
-                if key.startswith("mtp.") and key not in self._state_dict:
+                if key.startswith(mtp_prefix) and key not in self._state_dict:
                     mtp_state_dict[key] = get_safetensor(model_dir, key)
                     mtp_exists = True
             if mtp_exists:
@@ -925,14 +929,14 @@ class GPTModelExporter:
         elif single_safetensors_file is not None and single_safetensors_file.exists():
             with safe_open(str(single_safetensors_file), framework="pt", device="cpu") as f:
                 for key in f.keys():  # noqa: SIM118
-                    if key.startswith("mtp.") and key not in self._state_dict:
+                    if key.startswith(mtp_prefix) and key not in self._state_dict:
                         mtp_state_dict[key] = f.get_tensor(key)
                         mtp_exists = True
             if mtp_exists:
                 print(f"Exported MTP using {single_safetensors_file=}")
 
         if mtp_exists:
-            self.exclude_modules.append("mtp*")
+            self.exclude_modules.append(mtp_prefix.removesuffix(".") + "*")
         return mtp_state_dict
 
     def _copy_decoder_mtp_layers_from_pretrained(self) -> dict[str, torch.Tensor]:

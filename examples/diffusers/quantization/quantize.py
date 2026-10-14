@@ -18,6 +18,7 @@ import copy
 import logging
 import sys
 import time as time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -428,8 +429,8 @@ def create_argument_parser() -> argparse.ArgumentParser:
             # Basic INT8 quantization with SmoothQuant
             %(prog)s --model flux-dev --format int8 --quant-algo smoothquant --collect-method global_min
 
-            # FP8 quantization with ONNX export
-            %(prog)s --model sd3-medium --format fp8 --onnx-dir ./onnx_models/
+            # FP8 quantization with Hugging Face checkpoint export
+            %(prog)s --model sd3-medium --format fp8 --hf-ckpt-dir ./hf_ckpt/
 
             # FP8 quantization with weight compression (reduces memory footprint)
             %(prog)s --model flux-dev --format fp8 --compress
@@ -441,7 +442,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
             %(prog)s --model ltx-video-dev --format fp8 --batch-size 1 --calib-size 32 --ltx-skip-upsampler
 
             # Restore and export a previously quantized model
-            %(prog)s --model flux-schnell --restore-from ./checkpoints/ --onnx-dir ./exports/
+            %(prog)s --model flux-schnell --restore-from ./checkpoints/ --hf-ckpt-dir ./exports/
         """,
     )
     model_group = parser.add_argument_group("Model Configuration")
@@ -563,7 +564,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
         type=str,
         help="Path to save quantized PyTorch checkpoint",
     )
-    export_group.add_argument("--onnx-dir", type=str, help="Directory for ONNX export")
+    export_group.add_argument(
+        "--onnx-dir",
+        type=str,
+        help="Deprecated in 0.48.0; removal no earlier than 0.49.0. Use --hf-ckpt-dir instead.",
+    )
     export_group.add_argument(
         "--hf-ckpt-dir",
         type=str,
@@ -613,6 +618,16 @@ def main() -> None:
 
     parser = create_argument_parser()
     args, unknown_args = parser.parse_known_args()
+
+    if args.onnx_dir:
+        warnings.warn(
+            "The Diffusers ONNX/TensorRT workflow is deprecated in ModelOpt 0.48.0 "
+            "and will be removed no earlier than 0.49.0. "
+            "Export a unified Hugging Face checkpoint with quantize.py --hf-ckpt-dir "
+            "and use a compatible diffusion deployment backend.",
+            FutureWarning,
+            stacklevel=2,
+        )
 
     model_type = ModelType(args.model)
     if args.backbone is None:
