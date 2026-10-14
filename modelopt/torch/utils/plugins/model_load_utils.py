@@ -445,30 +445,22 @@ _SHARDED_LOAD_OPTIONS = {
 }
 
 
-def _distributed_session():
-    """The active ``ModelOptSession`` when it runs distributed, else ``None``."""
-    from modelopt.torch.utils.distributed import get_active_mo_session
-
-    session = get_active_mo_session(required=False)
-    return session if session.initialized and session.distributed else None
-
-
 def _decide_distribution(ckpt_path: str, trust_remote_code: bool, ep_size, fsdp_size):
     """:func:`resolve_distribution_plan` for a local ``ckpt_path``."""
+    from modelopt.torch.utils import distributed as dist
     from modelopt.torch.utils import env
     from modelopt.torch.utils.moe import decide_distribution_plan
 
-    session = _distributed_session()
-    if session is None:
+    if not dist.is_distributed_run():
         return None, None
     hf_config = AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
     plan = decide_distribution_plan(
         hf_config,
-        session.world_size,
+        dist.size(),
         ep_size=env.ep_degree() if ep_size is None else ep_size,
         fsdp_size=env.fsdp_size() if fsdp_size is None else fsdp_size,
     )
-    if session.is_main:
+    if dist.is_master():
         print(f"Distribution: {plan!r}", flush=True)
     return plan, hf_config
 
@@ -480,21 +472,23 @@ def resolve_distribution_plan(
     ep_size: "int | str | None" = None,
     fsdp_size: "int | str | None" = None,
 ) -> tuple[DistributionPlan | None, PretrainedConfig | None]:
-    """Decide how :func:`load_pretrained` distributes ``ckpt_path`` in this session.
+    """Decide how :func:`load_pretrained` distributes ``ckpt_path`` in this run.
 
     Returns ``(plan, hf_config)``: a :class:`~modelopt.torch.utils.distributed.DistributionPlan`
     and the config it was decided from, which a sharded load takes back as
     ``load_pretrained(ckpt_path, distribution=plan, hf_config=hf_config)`` rather than read it
-    again. Outside a distributed :class:`~modelopt.torch.utils.distributed.ModelOptSession`:
-    ``(None, None)``, the model loads whole. ``load_pretrained`` decides the same way on its own;
-    deciding first is for a caller that loads an unsharded model differently.
+    again. Outside a distributed run: ``(None, None)``, the model loads whole.
+    ``load_pretrained`` decides the same way on its own; deciding first is for a caller that loads
+    an unsharded model differently.
 
     :func:`~modelopt.torch.utils.moe.decide_distribution_plan` decides, once on rank 0, from
     ``ep_size`` and ``fsdp_size``; ``None`` reads ``MODELOPT_EP_DEGREE`` and ``MODELOPT_FSDP_SIZE``
     (:mod:`modelopt.torch.utils.env`), which default to ``"auto"``. Collective: every rank must
     call it.
     """
-    if _distributed_session() is None:
+    from modelopt.torch.utils import distributed as dist
+
+    if not dist.is_distributed_run():
         return None, None
     _, ckpt_path = ensure_local_checkpoint(ckpt_path)
     return _decide_distribution(ckpt_path, trust_remote_code, ep_size, fsdp_size)
@@ -509,8 +503,10 @@ def _route(distribution: DistributionPlan | str) -> str:
             f"distribution={distribution!r}: expected None, 'sequential', 'fsdp2' or a "
             "DistributionPlan."
         )
-    plan, session = distribution, _distributed_session()
-    world_size = session.world_size if session is not None else 1
+    from modelopt.torch.utils import distributed as dist
+
+    plan, distributed = distribution, dist.is_distributed_run()
+    world_size = dist.size() if distributed else 1
     if plan.world_size != world_size:
         raise ValueError(f"{plan!r} is for {plan.world_size} ranks, but this run has {world_size}.")
     if plan.is_expert_parallel:
@@ -526,7 +522,7 @@ def _route(distribution: DistributionPlan | str) -> str:
                 f"so fsdp_size must be {plan.world_size}."
             )
         return _FSDP2
-    return "replicated" if session is not None else "sequential"
+    return "replicated" if distributed else "sequential"
 
 
 def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs) -> nn.Module:
@@ -589,9 +585,8 @@ def load_pretrained(
 
     ``distribution`` decides how the model is placed:
 
-    * ``None`` (default): the active :class:`~modelopt.torch.utils.distributed.ModelOptSession`
-      decides. Without one, or in a single-process one, the model loads whole; in a distributed one,
-      as :func:`resolve_distribution_plan` decides.
+    * ``None`` (default): a single process loads the model whole; a distributed run loads it as
+      :func:`resolve_distribution_plan` decides.
     * ``"sequential"``: ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class``
       defaults to ``AutoModelForCausalLM``), placed as ``kwargs`` say. Each rank that calls it gets
       the whole model.
@@ -604,8 +599,8 @@ def load_pretrained(
       - ``fsdp_size > 1``: as ``"fsdp2"``;
       - otherwise as ``"sequential"`` on every rank, ``device_map`` defaulting to the rank's GPU.
 
-      A plan with ``ep_size > 1`` raises: no load here shards the routed experts. The plan is kept
-      as ``session.plan``, the same on every rank.
+      A plan with ``ep_size > 1`` raises: no load here shards the routed experts. On a distributed
+      run every rank loads the plan rank 0 was handed.
 
     A sharded load builds the model class and places it itself. Besides its own options it takes
     ``trust_remote_code``, ``attn_implementation`` and ``hf_config`` (the config to load with), and
@@ -644,6 +639,7 @@ def load_pretrained(
         )
     # Importing modelopt.torch.models registers every model spec; only callers of this need them.
     from modelopt.torch.models.hf import prepare_model_for_loading
+    from modelopt.torch.utils import distributed as dist
 
     hub_options = {
         k: kwargs.pop(k) for k in ("token", "cache_dir", "local_files_only") if k in kwargs
@@ -654,18 +650,22 @@ def load_pretrained(
     if subfolder:
         ckpt_path = os.path.join(ckpt_path, subfolder)
     trust_remote_code = kwargs.get("trust_remote_code", False)
-    session = _distributed_session()
     if distribution is None:
         plan, hf_config = _decide_distribution(ckpt_path, trust_remote_code, None, None)
         distribution = "sequential" if plan is None else plan
         if plan is not None and plan.is_fsdp_dense:
             kwargs.setdefault("hf_config", hf_config)
-    elif session is not None and isinstance(distribution, DistributionPlan):
-        _route(distribution)  # A plan this rank refuses leaves the session as it was.
-        # Every rank loads the plan rank 0 was handed, as it would one the session decided: ranks
-        # loading different plans would build mismatched meshes and hang.
+    elif dist.is_distributed_run() and isinstance(distribution, DistributionPlan):
+        # Every rank loads the plan rank 0 was handed, as it would one it decided: ranks loading
+        # different plans would build mismatched meshes and hang. Rank 0 checks it before it sends,
+        # so a plan it refuses raises on every rank instead of leaving them in the broadcast.
         handed = distribution
-        distribution = session.plan.broadcast_from(lambda: handed)
+
+        def checked() -> DistributionPlan:
+            _route(handed)
+            return handed
+
+        distribution = dist.broadcast_from("plan", checked)
     route = _route(distribution)
     if model_type is None:
         # The load uses the config passed for it, if any, so the loading hook follows that one.
@@ -685,7 +685,7 @@ def load_pretrained(
         if route == "replicated":
             # Each rank takes the whole model onto its own GPU. Left to "auto", every rank's
             # accelerate could pick the same idle GPU.
-            kwargs.setdefault("device_map", {"": str(session.device)})
+            kwargs.setdefault("device_map", {"": f"cuda:{dist.local_rank()}"})
         auto_class = auto_class or AutoModelForCausalLM
         with prepare_model_for_loading(
             model_type,
