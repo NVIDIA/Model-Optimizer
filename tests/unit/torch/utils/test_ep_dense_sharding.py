@@ -16,9 +16,9 @@
 """How the expert-parallel loader places the dense (non-expert) part of an MoE.
 
 ``from_pretrained`` always EP-shards the experts. ``_make_expert_param_matcher`` tells their params
-from the dense ones, ``_resolve_dense_strategy`` picks between replicating the dense part and
-sharding it, ``_ep_dense_meta_load`` keeps the dense weights off the device during
-``from_pretrained`` when they are sharded, and ``_fsdp2_shard_dense`` /
+from the dense ones, the distribution plan says whether the dense part is replicated or sharded,
+``_ep_dense_meta_load`` keeps the dense weights off the device during ``from_pretrained`` when they
+are sharded, and ``_fsdp2_shard_dense`` /
 ``_load_ep_dense_distributed`` FSDP2-shard them around the experts. The FSDP2 cases run on a
 one-rank gloo process group on CPU.
 """
@@ -33,12 +33,14 @@ from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 
 import modelopt.torch.utils.distributed as mto_dist
+import modelopt.torch.utils.moe as moe
+from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.moe import (
     _ep_dense_meta_load,
     _fsdp2_shard_dense,
     _load_ep_dense_distributed,
     _make_expert_param_matcher,
-    _resolve_dense_strategy,
+    load_and_prepare_ep,
 )
 
 # ------------------------------------------------------------------ _make_expert_param_matcher
@@ -116,52 +118,26 @@ def test_without_a_plan_nothing_is_an_expert(plan):
     assert not _make_expert_param_matcher(plan)("model.layers.0.mlp.experts.gate_up_proj")
 
 
-# --------------------------------------------------------------------- _resolve_dense_strategy
-
-
-def _config(quant_method=None, *, on_text_config=False):
-    """An HF config whose checkpoint is natively quantized with ``quant_method`` (if any)."""
-    quantization_config = {"quant_method": quant_method} if quant_method else None
-    if on_text_config:
-        return SimpleNamespace(text_config=SimpleNamespace(quantization_config=quantization_config))
-    return SimpleNamespace(quantization_config=quantization_config)
-
-
-@pytest.mark.parametrize(
-    ("dense_strategy", "fsdp_dense"), [("replicated", True), ("sharded", False)]
-)
-def test_an_explicit_dense_strategy_overrides_the_plan(dense_strategy, fsdp_dense):
-    assert _resolve_dense_strategy(dense_strategy, fsdp_dense, _config()) == dense_strategy
-
-
-@pytest.mark.parametrize(("fsdp_dense", "expected"), [(True, "sharded"), (False, "replicated")])
-def test_without_an_explicit_strategy_the_plan_decides(fsdp_dense, expected):
-    assert _resolve_dense_strategy(None, fsdp_dense, _config()) == expected
+# ------------------------------------------------------------------ a block-fp8 checkpoint
 
 
 @pytest.mark.parametrize("on_text_config", [False, True], ids=["causal-lm", "vlm"])
-@pytest.mark.parametrize("rank", [0, 1])
-def test_a_block_fp8_checkpoint_keeps_the_dense_part_replicated(
-    monkeypatch, capsys, on_text_config, rank
-):
-    """DCP cannot dequantize block-fp8 dense weights, while ``from_pretrained`` dequantizes them
-    as it replicates. Rank 0 says it fell back."""
-    config = _config("fp8", on_text_config=on_text_config)
-    monkeypatch.setattr(mto_dist, "is_master", lambda group=None: rank == 0)
+def test_a_block_fp8_checkpoints_dense_part_is_not_sharded(monkeypatch, on_text_config):
+    """DCP cannot dequantize block-fp8 dense weights, so a plan sharding them is refused before the
+    load starts, where from_pretrained would dequantize them as it replicated them."""
+    pytest.importorskip("transformers")
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 2)
+    monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
+    quantization_config = {"quant_method": "fp8"}
+    config = (
+        SimpleNamespace(text_config=SimpleNamespace(quantization_config=quantization_config))
+        if on_text_config
+        else SimpleNamespace(quantization_config=quantization_config)
+    )
 
-    assert _resolve_dense_strategy(None, True, config) == "replicated"
-    assert ("block-fp8" in capsys.readouterr().out) == (rank == 0)
-
-
-@pytest.mark.parametrize("quant_method", ["mxfp4", "compressed-tensors"])
-def test_other_native_quantization_keeps_the_dense_part_sharded(quant_method):
-    assert _resolve_dense_strategy(None, True, _config(quant_method)) == "sharded"
-
-
-@pytest.mark.parametrize("dense_strategy", ["fsdp", "Sharded"])
-def test_an_unknown_dense_strategy_is_rejected(dense_strategy):
-    with pytest.raises(ValueError, match="dense_strategy must be one of"):
-        _resolve_dense_strategy(dense_strategy, False, _config())
+    with pytest.raises(NotImplementedError, match="block-fp8 checkpoint cannot be sharded"):
+        load_and_prepare_ep("unused", DistributionPlan(2, 2, "fsdp"), hf_config=config)
 
 
 # ------------------------------------------------------------------------- _ep_dense_meta_load

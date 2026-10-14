@@ -1073,6 +1073,7 @@ def _decide_distribution(
 ) -> DistributionPlan:
     """The plan :func:`resolve_distribution_plan` returns, decided by this rank alone."""
     from modelopt.torch.utils.moe import (
+        _ckpt_quant_method,
         _ep_config,
         _routed_expert_modules,
         choose_ep_dp_degrees,
@@ -1109,6 +1110,9 @@ def _decide_distribution(
             f"ep_size={ep_size} must divide the routed experts {hf_config.model_type} shards "
             f"({num_experts})."
         )
+    # The expert-parallel load shards the dense part through Distributed Checkpoint, which cannot
+    # dequantize a block-fp8 checkpoint's F8_E8M0 scales.
+    unshardable = ep_size > 1 and _ckpt_quant_method(hf_config) == "fp8"
     if dense == "auto":
         # Every rank holds a whole copy of what expert parallelism does not shard.
         sharded = (
@@ -1119,7 +1123,19 @@ def _decide_distribution(
         )
         memory = _gpu_memory()
         too_big = memory is not None and replicated > _REPLICATED_SHARE * memory
-        dense = "fsdp" if too_big else "replicate"
+        if too_big and unshardable:
+            print(
+                f"{hf_config.model_type}: the dense part would take more than "
+                f"{_REPLICATED_SHARE:.0%} of a GPU, but a block-fp8 checkpoint's cannot be sharded "
+                "expert-parallel; replicating it.",
+                flush=True,
+            )
+        dense = "fsdp" if too_big and not unshardable else "replicate"
+    elif dense == "fsdp" and unshardable:
+        raise NotImplementedError(
+            f"The dense part of a block-fp8 {hf_config.model_type} checkpoint cannot be sharded "
+            "expert-parallel: Distributed Checkpoint cannot dequantize its F8_E8M0 scales."
+        )
     return DistributionPlan(world_size, ep_size, dense)
 
 
@@ -1282,7 +1298,7 @@ def _ep_aware_caching_allocator_warmup(
                 if is_expert(pname):
                     nb //= ep_degree  # EP-sharded across the ep submesh: only the local shard resides here
                 elif dense_on_meta and pname.endswith((".weight", ".bias")):
-                    # dense_strategy="sharded": _ep_dense_meta_load forces every dense .weight/.bias to
+                    # A sharded dense part: _ep_dense_meta_load forces every dense .weight/.bias to
                     # materialize on META during from_pretrained (they are FSDP2-sharded + DCP-loaded
                     # afterwards), so they occupy NO device memory in the window this warmup sizes.
                     # Counting them at full global size is what pushed Kimi-K3 (EP64, dense=fsdp) to a
@@ -1491,51 +1507,6 @@ def _experts_sharded_over(ep_mesh):
         mixin.initialize_distributed_mesh = original
 
 
-# The two ways the DENSE (non-expert) modules can be placed/loaded in the EP hybrid. Experts are ALWAYS
-# EP-sharded by from_pretrained; only the dense modules vary:
-_DENSE_STRATEGIES = ("replicated", "sharded")
-
-
-def _resolve_dense_strategy(dense_strategy, fsdp_dense, hf_config):
-    """Resolve the ``dense_strategy`` governing how the EP hybrid places and loads dense modules.
-
-    The strategies:
-
-    * ``"replicated"``     -- dense stays replicated per rank (DP dense; from_pretrained default).
-    * ``"sharded"``        -- dense left on ``meta`` during from_pretrained, then FSDP2-sharded + DCP-loaded
-                              so it is never replicated anywhere (the FSDP2-dense path). Implemented via
-                              meta-init + Distributed Checkpoint shard-load, so peak memory is one shard
-                              per rank -- never the full replicated transient of a naive load-then-shard.
-
-    Resolution order: an explicit ``dense_strategy`` wins; otherwise derive from the plan's
-    ``fsdp_dense`` (``plan.is_fsdp_dense``). Block-fp8 checkpoints can't be DCP-dequantized (F8_E8M0),
-    so ``sharded`` falls back to ``replicated`` for them.
-    """
-    if dense_strategy is None:
-        dense_strategy = "sharded" if fsdp_dense else "replicated"
-    if dense_strategy not in _DENSE_STRATEGIES:
-        raise ValueError(
-            f"dense_strategy must be one of {_DENSE_STRATEGIES}; got {dense_strategy!r}"
-        )
-    # block-fp8 dense can't be DCP-dequantized (F8_E8M0) -> fall back to replicated dense (from_pretrained's
-    # FineGrainedFP8Config(dequantize=True) path materializes it in bf16 per rank).
-    from .distributed import is_master
-
-    if dense_strategy == "sharded" and _ckpt_quant_method(hf_config) == "fp8":
-        dense_strategy = "replicated"
-        if is_master():
-            print(
-                "[ep] block-fp8 checkpoint: sharded dense unavailable (DCP can't dequant F8_E8M0) "
-                "-> dense_strategy=replicated",
-                flush=True,
-            )
-    # "sharded" FSDP2-shards dense over the ``ep`` group and replicates over ``edp``: at EDP=1 that is the
-    # full world (1D), at EDP>1 a 2D (edp, ep) HSDP layout aligned with the experts' sparse_moe_mesh. Both
-    # are handled by ``load_and_prepare_ep`` (which picks the mesh) + the shared meta+DCP loader (which fills
-    # [Replicate(edp), Shard(ep)] dense DTensors, exactly like the pure-FSDP2 HSDP-dense path).
-    return dense_strategy
-
-
 @contextlib.contextmanager
 def _ep_dense_meta_load(is_expert):
     """Fully-distributed dense load for the EP hybrid.
@@ -1634,8 +1605,6 @@ def load_and_prepare_ep(
     attn_implementation: str | None = None,
     freeze: bool = True,
     hf_config=None,
-    fsdp_dense: bool = False,
-    dense_strategy: "str | None" = None,
     require_lm_head: bool = True,
 ) -> nn.Module:
     """Load + shard a MoE causal LM for expert-parallel PTQ via the DP=EP all-to-all transport.
@@ -1660,9 +1629,10 @@ def load_and_prepare_ep(
     collectives -> no deadlock by construction. Costs more per-rank memory (non-experts + experts
     replicated across dp) but is the reliable path at scale.
 
-    With ``fsdp_dense`` (or ``dense_strategy="sharded"``) the dense part is instead FSDP2-sharded over
-    the ``ep`` group and each rank loads only its shard from the checkpoint, never the whole of it --
-    for a model whose dense part does not fit one GPU.
+    With ``plan.dense == "fsdp"`` the dense part is instead FSDP2-sharded over the ``ep`` group and each
+    rank loads only its shard from the checkpoint, never the whole of it -- for a model whose dense part
+    does not fit one GPU. A block-fp8 checkpoint cannot be loaded that way: Distributed Checkpoint
+    cannot dequantize its F8_E8M0 scales.
 
     EP CANNOT be applied to a meta-init model (transformers' ``GroupedGemmParallel.shard_tensor``
     slices materialized tensors), so this loads real weights via ``from_pretrained`` over the ``ep``
@@ -1686,8 +1656,6 @@ def load_and_prepare_ep(
 
     if not plan.is_expert_parallel:
         raise ValueError(f"{plan!r} shards no routed experts, which is what this load is for.")
-    if plan.is_fsdp_dense:
-        raise NotImplementedError(f"{plan!r}: this load replicates the dense part on every rank.")
     # This loader assumes the caller has ALREADY initialized (and device-bound) the process group --
     # distributed bring-up belongs to the launcher, not this library function. The example launcher does
     # it in hf_ptq.main() via distributed_run() -> modelopt.torch.utils.distributed.setup() before
@@ -1716,6 +1684,11 @@ def load_and_prepare_ep(
         if attn_implementation is not None:
             config_kwargs["attn_implementation"] = attn_implementation
         hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
+    if plan.is_fsdp_dense and _ckpt_quant_method(hf_config) == "fp8":
+        raise NotImplementedError(
+            f"{plan!r}: the dense part of a block-fp8 checkpoint cannot be sharded, since Distributed "
+            "Checkpoint cannot dequantize its F8_E8M0 scales. Plan dense='replicate'."
+        )
     dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
 
     # Two INDEPENDENT meshes (NeMo-AutoModel style), named by the model part they govern -- two
@@ -1826,28 +1799,23 @@ def load_and_prepare_ep(
     # (the actual EP plan). Always on: falls back to stock sizing on any issue and a mis-size only nudges
     # load speed, never correctness. (See _ep_aware_caching_allocator_warmup.)
     is_expert_fn = _make_expert_param_matcher(swapped_plan)
-    # ONE place decides how the DENSE (non-expert) modules are placed/loaded in the EP hybrid -- experts are
-    # always EP-sharded by from_pretrained. Two strategies:
-    #   "replicated"     -- dense stays replicated per rank (DP dense; from_pretrained default).
-    #   "sharded"    -- dense left on meta during from_pretrained (get_device->meta via
-    #                   _ep_dense_meta_load), then FSDP2-sharded + DCP-loaded (never replicated).
-    # ``dense_strategy`` (explicit) wins; else derive from ``fsdp_dense`` (the plan).
-    dense_strategy = _resolve_dense_strategy(dense_strategy, fsdp_dense, hf_config)
+    # The plan places the DENSE (non-expert) modules; the experts are always EP-sharded by from_pretrained.
+    # A replicated dense part loads with them, on every rank. A sharded one is left on meta during
+    # from_pretrained (get_device->meta via _ep_dense_meta_load), then FSDP2-sharded + DCP-loaded, so it
+    # is never replicated anywhere.
     _dense_ctx = (
-        _ep_dense_meta_load(is_expert_fn)
-        if dense_strategy == "sharded"
-        else contextlib.nullcontext()
+        _ep_dense_meta_load(is_expert_fn) if plan.is_fsdp_dense else contextlib.nullcontext()
     )
     with (
         _ep_aware_caching_allocator_warmup(
-            ep_degree, swapped_plan, dense_on_meta=dense_strategy == "sharded"
+            ep_degree, swapped_plan, dense_on_meta=plan.is_fsdp_dense
         ),
         _dense_ctx,
         _experts_sharded_over(ep_submesh),
     ):
         model = loader.from_pretrained(ckpt_path, **from_pretrained_kwargs)
     model.eval()
-    if dense_strategy == "sharded" and is_master():
+    if plan.is_fsdp_dense and is_master():
         _nmeta = [n for n, p in model.named_parameters() if p.is_meta]
         _dense_meta = [n for n in _nmeta if not is_expert_fn(n)]
         print(
@@ -1893,8 +1861,8 @@ def load_and_prepare_ep(
     # FSDP-gathered full weight (identical per rank); activation amax syncs over the whole world via the
     # dense ``dp`` group registered below.
     #
-    # "sharded" shards dense (see above); "replicated" leaves dense data-parallel and needs no post-load step.
-    if dense_strategy == "sharded":
+    # A replicated dense part stays data-parallel and needs no post-load step.
+    if plan.is_fsdp_dense:
         # Fully-distributed dense: dense was left on meta during from_pretrained; FSDP2-shard it and
         # DCP-load each rank's shard directly (never replicated anywhere). EDP=1 -> the 1D full-world dense
         # mesh (the original, validated layout); EDP>1 -> the 2D (edp, ep) mesh (fully_shard replicates dim0
@@ -1912,7 +1880,7 @@ def load_and_prepare_ep(
         if is_master():
             _dims = tuple(dense_fsdp_mesh.shape)
             print(
-                f"[ep] dense_strategy=sharded: FSDP2-sharded {n_dense} dense module(s) on mesh "
+                f"[ep] dense sharded: FSDP2-sharded {n_dense} dense module(s) on mesh "
                 f"{dense_fsdp_mesh.mesh_dim_names}={_dims} (shard over ep={ep_degree}, replicate over "
                 f"edp={dp}); experts EP-sharded on ep",
                 flush=True,
