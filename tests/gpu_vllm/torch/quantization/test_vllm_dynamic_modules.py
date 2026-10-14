@@ -389,6 +389,24 @@ def test_prequantized_linear_rejects_enabled_quantizers(monkeypatch):
     assert unquantized._fake_quant_supported
 
 
+def test_vllm_linear_restores_quant_method_after_fake_quant_forward_error():
+    linear = _new_attention(_TestQuantVLLMLinear)
+    original_method = object()
+    fake_method = Mock()
+    fake_method.apply.side_effect = [RuntimeError("fake quant failed"), torch.ones(2, 4)]
+    linear.quant_method = original_method
+    linear.fake_quant_method = fake_method
+    linear._fake_quant_supported = True
+    inputs = torch.zeros(2, 4)
+
+    with pytest.raises(RuntimeError, match="fake quant failed"):
+        linear(inputs)
+
+    assert linear.quant_method is original_method
+    assert torch.equal(linear(inputs), torch.ones_like(inputs))
+    assert linear.quant_method is original_method
+
+
 @pytest.mark.parametrize(
     ("parent_name", "projection", "dtype", "shape", "expected"),
     [

@@ -582,9 +582,10 @@ class _VLLMParallelLinear(QuantModule):
         # Manually replace quant_method instead
         self._quant_method = self.quant_method
         self.quant_method = self.fake_quant_method
-        output = super().forward(input_)
-        self.quant_method = self._quant_method
-        return output
+        try:
+            return super().forward(input_)
+        finally:
+            self.quant_method = self._quant_method
 
 
 class _KimiGemmRsArFakeQuantGuard:
