@@ -178,6 +178,23 @@ class TestScaledE4M3:
         xq = tensor_quant.scaled_e4m3(x, amax, None, 4, 3)
         assert torch.isfinite(xq).all()
 
+    @pytest.mark.parametrize("device", ["cuda", "cpu"])
+    @pytest.mark.parametrize(
+        "amax_dims", [None, (1, 2), (2,)], ids=["per_tensor", "per_channel", "multi_axis"]
+    )
+    def test_small_amax_scales_output(self, device, amax_dims):
+        """Scaling the input and amax by a power of two scales the output by the same factor.
+
+        A positive amax below 2**-24 is not zero and must not flush the tensor to zero.
+        """
+        torch.manual_seed(0)
+        x = torch.randn(4, 3, 16, device=device) * 10
+        amax = x.abs().amax() if amax_dims is None else x.abs().amax(amax_dims, keepdim=True)
+        reference = tensor_quant.scaled_e4m3(x, amax, None, 4, 3)
+        for factor in (2.0**-30, 2.0**-60):
+            scaled = tensor_quant.scaled_e4m3(x * factor, amax * factor, None, 4, 3)
+            assert torch.equal(scaled, reference * factor)
+
 
 class Testfp4:
     @pytest.mark.skipif(not NATIVE_E4M3_AVAILABLE, reason="Native E4M3 requires compute >= 8.9")
