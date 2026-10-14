@@ -121,22 +121,35 @@ def _weight_source(graph, producers, consumers, marker: onnx.NodeProto):
     return initializers[weight_name], reshape
 
 
-def _is_static_value(producers, name: str, seen: set[str] | None = None) -> bool:
-    producer = producers.get(name)
-    if isinstance(producer, onnx.TensorProto):
-        return True
-    if not isinstance(producer, onnx.NodeProto):
-        return False
-    if producer.op_type == "Constant":
-        return True
-    inputs = [input_name for input_name in producer.input if input_name]
-    if not inputs or name in (seen or set()):
-        return False
-    visited = {*seen, name} if seen is not None else {name}
-    return all(_is_static_value(producers, input_name, visited) for input_name in inputs)
+def _is_static_value(producers, name: str, cache: dict[str, bool]) -> bool:
+    stack: list[tuple[str, list[str] | None]] = [(name, None)]
+    visiting = set()
+    while stack:
+        current, inputs = stack.pop()
+        if current in cache:
+            continue
+        if inputs is not None:
+            cache[current] = all(cache[input_name] for input_name in inputs)
+            visiting.remove(current)
+            continue
+        producer = producers.get(current)
+        if isinstance(producer, onnx.TensorProto):
+            cache[current] = True
+        elif not isinstance(producer, onnx.NodeProto):
+            cache[current] = False
+        elif producer.op_type == "Constant":
+            cache[current] = True
+        elif current in visiting or not any(producer.input):
+            cache[current] = False
+        else:
+            inputs = [input_name for input_name in producer.input if input_name]
+            visiting.add(current)
+            stack.append((current, inputs))
+            stack.extend((input_name, None) for input_name in reversed(inputs))
+    return cache[name]
 
 
-def _has_static_weight_source(producers, name: str) -> bool:
+def _has_static_weight_source(producers, name: str, cache: dict[str, bool]) -> bool:
     producer = producers.get(name)
     if isinstance(producer, onnx.TensorProto):
         return True
@@ -171,7 +184,7 @@ def _has_static_weight_source(producers, name: str) -> bool:
         data_name = producer.input[0]
         seen.add(data_name)
         producer = producers.get(data_name)
-    if _is_static_value(producers, data_name):
+    if _is_static_value(producers, data_name, cache):
         raise NotImplementedError(
             f"Unsupported Dynamo quantized weight '{name}': unsupported static or dynamic transformation "
             "before the quantization marker."
@@ -402,6 +415,7 @@ def normalize_dynamo_weight_paths(model: onnx.ModelProto) -> onnx.ModelProto:
     graph = model.graph
     producers = get_tensor_producer_nodes(graph, get_initializer_producers=True)
     consumers = get_tensor_consumer_nodes(graph)
+    static_values: dict[str, bool] = {}
 
     for marker in list(graph.node):
         kind = None
@@ -410,7 +424,7 @@ def normalize_dynamo_weight_paths(model: onnx.ModelProto) -> onnx.ModelProto:
             _validate_marker_domain(marker, "trt")
             kind = "nvfp4"
         elif marker.op_type == "TRT_MXFP8DequantizeLinear" and _has_static_weight_source(
-            producers, marker.input[0]
+            producers, marker.input[0], static_values
         ):
             _validate_marker_domain(marker, "trt")
             kind = "mxfp8"
@@ -425,7 +439,7 @@ def normalize_dynamo_weight_paths(model: onnx.ModelProto) -> onnx.ModelProto:
         elif marker.op_type in {
             "TRT_FP8QuantizeLinear",
             "QuantizeLinear",
-        } and _has_static_weight_source(producers, marker.input[0]):
+        } and _has_static_weight_source(producers, marker.input[0], static_values):
             expected_domain = "trt" if marker.op_type == "TRT_FP8QuantizeLinear" else ""
             _validate_marker_domain(marker, expected_domain)
             dq = _single_consumer(consumers, marker.output[0], marker.input[0])

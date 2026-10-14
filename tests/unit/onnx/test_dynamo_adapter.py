@@ -58,6 +58,44 @@ def _nvfp4_marker(weight="weight", output="weight_dq"):
     return helper.make_node("TRT_FP4QDQ", [weight], [output], domain="trt", block_size=16)
 
 
+@pytest.mark.parametrize("static_source", [False, True])
+def test_normalize_handles_deep_shared_provenance(static_source):
+    nodes = []
+    source = "source"
+    for index in range(2000):
+        output = f"value_{index}"
+        nodes.append(helper.make_node("Add" if index % 2 else "Mul", [source, source], [output]))
+        source = output
+    for index in range(2):
+        nodes.extend(
+            [
+                helper.make_node("QuantizeLinear", [source, "scale", "zero"], [f"q_{index}"]),
+                helper.make_node(
+                    "DequantizeLinear", [f"q_{index}", "scale", "zero"], [f"dq_{index}"]
+                ),
+                helper.make_node("MatMul", ["other", f"dq_{index}"], [f"output_{index}"]),
+            ]
+        )
+    model = _model(
+        nodes,
+        initializers=[
+            _tensor("scale", 0.25),
+            _tensor("zero", 0, np.uint8),
+            *([_tensor("source", np.ones((4, 4)))] if static_source else []),
+        ],
+        inputs=[_value("other"), *([] if static_source else [_value("source", shape=(4, 4))])],
+        outputs=[_value(f"output_{index}") for index in range(2)],
+    )
+    original = model.SerializeToString()
+
+    if static_source:
+        with pytest.raises(NotImplementedError, match="before the quantization marker"):
+            normalize_dynamo_weight_paths(model)
+    else:
+        assert normalize_dynamo_weight_paths(model) is model
+    assert model.SerializeToString() == original
+
+
 @pytest.mark.parametrize(
     ("quantize_op", "dequantize_op", "domain"),
     [
