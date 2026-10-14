@@ -94,6 +94,49 @@ def test_openai_media_value_inlines_local_media_as_a_data_uri(tmp_path):
     assert base64.b64decode(value.split(",", 1)[1]) == b"\x89PNG\r\n\x1a\n"
 
 
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("frame.webp", "image/webp"),
+        ("frame.bmp", "image/bmp"),
+        ("clip.mkv", "video/x-matroska"),
+        ("clip.mov", "video/quicktime"),
+    ],
+)
+def test_openai_media_value_inline_resolves_media_types(tmp_path, name, expected):
+    """Types beyond the original hardcoded map resolve, and webp/mkv stay covered.
+
+    mimetypes' table is platform-dependent and misses webp on some systems, so those
+    two are registered explicitly; this pins that they cannot silently regress.
+    """
+
+    media = tmp_path / name
+    media.write_bytes(b"payload")
+
+    value = server_generate_vlm_sglang._as_openai_media_value(
+        str(media), None, None, None, media_inline=True
+    )
+
+    assert value.startswith(f"data:{expected};base64,")
+
+
+def test_openai_media_value_inline_rejects_unknown_media_type(tmp_path):
+    """An unrecognised suffix must fail, not be sent as application/octet-stream.
+
+    A data: URI carries its own type declaration, so a wrong one makes the server
+    misinterpret the payload rather than reject it -- a silent corruption instead of
+    a loud failure.
+    """
+
+    media = tmp_path / "notes.txt"
+    media.write_bytes(b"not media")
+
+    with pytest.raises(ValueError, match="expected an image/\\* or video/\\* type"):
+        server_generate_vlm_sglang._as_openai_media_value(
+            str(media), None, None, None, media_inline=True
+        )
+
+
 def test_openai_media_value_inline_rejects_missing_media(tmp_path):
     """Inlining a file that is not there must fail loudly, not send an empty payload."""
 

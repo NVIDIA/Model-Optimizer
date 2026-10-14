@@ -35,6 +35,7 @@ import argparse
 import base64
 import concurrent.futures
 import json
+import mimetypes
 import os
 import sys
 import traceback
@@ -144,26 +145,32 @@ def _resolve_media_path(
     return None
 
 
-_MEDIA_MIME = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-    ".gif": "image/gif",
-    ".mp4": "video/mp4",
-    ".webm": "video/webm",
-    ".mkv": "video/x-matroska",
-}
+# mimetypes' table is platform-dependent and misses webp on some systems, which the
+# previous hardcoded map covered. Register the gaps so deferring to mimetypes cannot
+# regress a format that already worked.
+for _ext, _mime in ((".webp", "image/webp"), (".mkv", "video/x-matroska")):
+    mimetypes.add_type(_mime, _ext)
 
 _WARNED_LOCAL_MEDIA = False
 
 
 def _as_data_uri(path: str) -> str:
-    """Inline a local media file as a base64 ``data:`` URI."""
+    """Inline a local media file as a base64 ``data:`` URI.
+
+    A ``data:`` URI carries its own type declaration, so an unrecognised suffix must
+    not fall back to ``application/octet-stream``: the server would take that at face
+    value and misinterpret the payload rather than reject it. Fail here instead, where
+    the offending path can still be named.
+    """
     file_path = Path(path)
     if not file_path.exists():
         raise FileNotFoundError(f"cannot inline missing media file: {path}")
-    mime = _MEDIA_MIME.get(file_path.suffix.lower(), "application/octet-stream")
+    mime, _ = mimetypes.guess_type(file_path.name)
+    if mime is None or not mime.startswith(("image/", "video/")):
+        raise ValueError(
+            f"cannot inline {path}: resolved to {mime or 'no known media type'}, "
+            "expected an image/* or video/* type"
+        )
     return f"data:{mime};base64," + base64.b64encode(file_path.read_bytes()).decode()
 
 
