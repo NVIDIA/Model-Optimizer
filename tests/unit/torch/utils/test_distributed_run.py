@@ -14,13 +14,14 @@
 # limitations under the License.
 
 
-"""Unit tests for distributed PTQ: the distribution plan, the collectives that fail together, the
-process group's lifetime, launch detection."""
+"""Unit tests for distributed PTQ: the distribution plan and a model's record of it, the collectives
+that fail together, the process group's lifetime, launch detection."""
 
 from datetime import timedelta
 
 import pytest
 import torch.distributed
+from torch import nn
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils.distributed import (
@@ -28,7 +29,9 @@ from modelopt.torch.utils.distributed import (
     all_reduce,
     broadcast_from,
     distributed_run,
+    distribution_plan,
     is_distributed_launch,
+    set_distribution_plan,
 )
 
 # --------------------------------------------------------------------------------- DistributionPlan
@@ -48,9 +51,13 @@ def test_expert_parallel_splits_the_expert_replica_pool():
 
 
 def test_fsdp_dense_plan():
-    plan = DistributionPlan(world_size=8, ep_size=8, fsdp_size=8)
+    plan = DistributionPlan(world_size=8, ep_size=8, dense="fsdp")
     assert plan.is_fsdp_dense
     assert plan.edp == 1
+
+
+def test_the_default_plan_is_a_single_process():
+    assert DistributionPlan() == DistributionPlan(world_size=1, ep_size=1, dense="replicate")
 
 
 def test_an_ep_degree_that_does_not_divide_the_world_is_rejected():
@@ -59,11 +66,41 @@ def test_an_ep_degree_that_does_not_divide_the_world_is_rejected():
         DistributionPlan(world_size=8, ep_size=3)
 
 
-def test_repr_names_the_degrees():
-    assert repr(DistributionPlan(world_size=8, ep_size=2)) == (
-        "DistributionPlan(world=8, ep_size=2, edp=4, dense=replicate)"
-    )
-    assert "fsdp_size=8" in repr(DistributionPlan(world_size=8, ep_size=8, fsdp_size=8))
+def test_an_unknown_dense_layout_is_rejected():
+    with pytest.raises(ValueError, match="expected 'replicate' or 'fsdp'"):
+        DistributionPlan(world_size=8, dense="sharded")
+
+
+# ------------------------------------------------------------------- a model's recorded plan
+
+
+def _model():
+    return nn.Sequential(nn.Linear(2, 2), nn.Sequential(nn.Linear(2, 2)))
+
+
+def test_every_submodule_reads_the_recorded_plan():
+    model, plan = _model(), DistributionPlan(world_size=8, ep_size=8)
+    set_distribution_plan(model, plan)
+    assert all(distribution_plan(module) is plan for module in model.modules())
+
+
+def test_a_model_with_no_plan_is_a_single_process():
+    assert distribution_plan(_model()) == DistributionPlan()
+
+
+def test_an_fsdp2_model_with_no_plan_raises(monkeypatch):
+    monkeypatch.setattr(dist, "is_fsdp2_model", lambda model: True)
+    with pytest.raises(RuntimeError, match="is FSDP2-sharded, but has no distribution plan"):
+        distribution_plan(_model())
+
+
+def test_a_model_with_no_plan_raises_in_a_run_of_several_ranks(monkeypatch):
+    monkeypatch.setattr(dist, "size", lambda group=None: 2)
+    with pytest.raises(RuntimeError, match="held in a run of 2 ranks"):
+        distribution_plan(_model())
+    model, plan = _model(), DistributionPlan(world_size=2)
+    set_distribution_plan(model, plan)
+    assert distribution_plan(model) is plan
 
 
 # ------------------------------------------------------------------------------------ collectives
