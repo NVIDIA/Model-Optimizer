@@ -29,13 +29,13 @@ import torch
 from torch import nn
 
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
-from modelopt.torch.utils.moe import (
+from modelopt.torch.utils.moe import expert_parallel_mesh
+from modelopt.torch.utils.plugins.model_load_utils import (
     _ckpt_quant_method,
     _experts_sharded_over,
     _seed_parallel_states,
     _transformers_mesh_builder,
     _unregister_expert_quant_wrappers,
-    expert_parallel_mesh,
     load_and_prepare_ep,
 )
 
