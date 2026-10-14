@@ -1,0 +1,280 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# =============================================================================
+# Tau3-Banking — STANDALONE gym eval, condensed schema. Read
+# recipes/tasks/gym/tau3_banking.md first. Substitute the .env values of
+# TAU3_USER_BASE_URL / TAU3_USER_MODEL into the <...> placeholders below.
+#   "$SKILL_DIR/scripts/nel-gym.sh" run --config example_tau3_banking.yaml
+# =============================================================================
+defaults:
+  # slurm/default works anywhere; if your install ships a predefined
+  # internal/slurm/<cluster> config, prefer it (pre-fills hostname/partition/gres).
+  - execution: slurm/default
+  - deployment: vllm
+  - _self_
+
+execution:
+  hostname: ???
+  username: ${oc.env:USER}
+  account: ???
+  output_dir: ???        # absolute host path; keeps the response cache across resumes
+  walltime: "04:00:00"
+  # gres: slurm/default ships gpu:8 — set it to the node's GPU count.
+  sbatch_comment: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"480","reason":"benchmarking","description":"Eval benchmark low GPU utilization"}}'
+  mounts:
+    mount_home: false
+    deployment:
+      <HOST_HF_CACHE>: /hf-cache
+    evaluation:
+      <HOST_HF_CACHE>: /hf-cache
+  auto_export:
+    destinations:
+      - mlflow
+  cpu_partition: ???     # auto-export is a separate CPU-only sbatch
+
+deployment:
+  # Carry the model's upstream fragment (layout + env_vars) as a unit — references/gym.md.
+  env_vars:
+    HF_TOKEN: host:HF_TOKEN
+    HF_HOME: lit:/hf-cache
+  checkpoint_path: ???
+  hf_model_handle:
+  served_model_name: ???
+  image: vllm/vllm-openai:v0.26.0   # bump to the EXACT model's recipes.vllm.ai minimum (SKILL Step 3)
+  tensor_parallel_size: ???
+  data_parallel_size: 1
+  gpu_memory_utilization: 0.90
+  # Tool calling is mandatory; --max-model-len = full trained context (see the recipe).
+  # No `#` inside this folded scalar.
+  extra_args: >-
+    --max-model-len ???
+    --max-num-seqs ???
+    --enable-auto-tool-choice
+    --tool-call-parser ???
+    --enable-prefix-caching
+    --enable-chunked-prefill
+
+target:
+  api_endpoint:
+    api_key_name:          # the bootstrap passes `--model-api-key dummy` itself
+
+evaluation:
+  env_vars:
+    INFERENCE_API_KEY: host:INFERENCE_API_KEY   # user-simulator key, expanded at run time
+    NEMO_GYM_TAU2_BENCH_DATA_REF: lit:bxyu/nemo_gym_data
+    TAU2_VENV_PYTHON: lit:/usr/local/bin/python3.12
+    UV_CACHE_DIR: lit:/tmp/tau3-uv-cache
+    UV_HTTP_TIMEOUT: lit:600
+    UV_LINK_MODE: lit:copy
+    UV_PYTHON_DOWNLOADS: lit:never
+    NEL_INVOCATION_ID: runtime:NEL_INVOCATION_ID
+  nemo_evaluator_config:
+    config:
+      params:
+        temperature: 1.0          # from the model card (SKILL Step 3)
+        top_p: 0.95
+        parallelism: 2048         # total Gym concurrency; lower if the user simulator 429s
+        request_timeout: 36000
+        limit_samples:            # null = full run; N = canary (gym eval run --limit N)
+    target:
+      api_endpoint:
+        adapter_config:
+          use_caching: false      # a cache hit across runs would report stale turns
+          params_to_remove:
+            - max_tokens
+            - max_completion_tokens
+          params_to_add:          # the family's reasoning toggle; drop for instruct models
+            chat_template_kwargs:
+              enable_thinking: true
+          tracking_requests_stats: true
+          log_failed_requests: true
+          use_request_logging: true
+          max_logged_requests: 10
+          use_response_logging: true
+          max_logged_responses: 10
+  # STANDALONE: exactly one gym task. Do NOT add other tasks to this list.
+  tasks:
+    - name: nemo_gym
+      container: ???        # gym runtime image (see the recipe); `ls -l` a .sqsh first
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              nemo_gym:
+                allow_limit_samples: true
+                runtime_python: /usr/local/bin/python3.12   # must exist in the image
+                runtime_dependencies: ""
+                benchmark: tau2/configs/banking_bm25_grep_artificial_analysis
+                install_on_the_fly:
+                  url: https://github.com/NVIDIA-NeMo/Gym
+                  commit: e446e4f415b9cde0e95bb813c85e9e3e23f5d893  # pragma: allowlist secret
+                prepare_args: >-
+                  ++use_cached_prepared_benchmarks=false
+                # No `#` inside folded scalars. No ++num_repeats: keep the declared 5.
+                run_args: >-
+                  ++port_range_low=63000
+                  ++port_range_high=64000
+                  ++global_aiohttp_connector_limit_per_host={{config.params.parallelism}}
+                  ++uv_cache_dir=$UV_CACHE_DIR
+                  ++ray_head_node_address=null
+                  ++nemo_gym_log_dir={{config.output_dir}}/nemo_gym_logs
+                  ++observability_enabled=true
+                  ++model_call_capture_dir={{config.output_dir}}/tau3_banking/model_calls_cache
+                  ++overwrite_metrics_conflicts=true
+                  ++split=benchmark
+                  ++reuse_existing_data_preparation=true
+                  ++skip_venv_if_present=true
+                  ++upload_rollouts_to_wandb=false
+                  ++policy_model.responses_api_models.vllm_model.num_workers=4
+                  ++policy_model.responses_api_models.vllm_model.sequential_reasoning_allowed=false
+                  ++gpt-5_4-mini-2026-03-17.responses_api_models.openai_model.openai_base_url=<TAU3_USER_BASE_URL>
+                  ++gpt-5_4-mini-2026-03-17.responses_api_models.openai_model.openai_model=<TAU3_USER_MODEL>
+                  ++gpt-5_4-mini-2026-03-17.responses_api_models.openai_model.openai_api_key=$INFERENCE_API_KEY
+                  ++gpt-5_4-mini-2026-03-17.responses_api_models.openai_model.extra_body._delete_key=max_output_tokens
+                # Condensed-schema `gym eval` bootstrap (references/gym.md). Avoid bash
+                # ${VAR} here (OmegaConf parses it); $VAR is fine.
+                command: |
+                  set -euo pipefail
+                  expected_gym_sha="{{config.params.extra.nemo_gym.install_on_the_fly.commit}}"
+                  gym_url="{{config.params.extra.nemo_gym.install_on_the_fly.url}}"
+                  runtime_root="$(mktemp -d "/tmp/gym-$expected_gym_sha.XXXXXX")"
+                  export GIT_CONFIG_GLOBAL="$runtime_root/gitconfig"
+                  git clone --quiet --filter=blob:none "$gym_url" "$runtime_root/Gym"
+                  cd "$runtime_root/Gym"
+                  git checkout --quiet --detach "$expected_gym_sha"
+                  actual_gym_sha="$(git rev-parse HEAD)"
+                  if [ "$actual_gym_sha" != "$expected_gym_sha" ]; then
+                    echo "Expected Gym $expected_gym_sha, found $actual_gym_sha" >&2
+                    exit 1
+                  fi
+                  echo "=== NeMo Gym commit ===" && git rev-parse HEAD
+                  uv venv \
+                    --system-site-packages \
+                    --python {{config.params.extra.nemo_gym.runtime_python}} \
+                    .venv
+                  uv sync \
+                    --frozen \
+                    --extra dev \
+                    --no-default-groups \
+                    --no-install-package ray
+                  {% if config.params.extra.nemo_gym.runtime_dependencies %}
+                  uv pip install \
+                    --python .venv/bin/python \
+                    {{config.params.extra.nemo_gym.runtime_dependencies}}
+                  {% endif %}
+                  export PATH="$runtime_root/Gym/.venv/bin:$PATH"
+                  gym eval prepare \
+                    --benchmark "{{config.params.extra.nemo_gym.benchmark}}" \
+                    {{config.params.extra.nemo_gym.prepare_args}}
+                  set -- gym eval run \
+                    --benchmark "{{config.params.extra.nemo_gym.benchmark}}" \
+                    --model-type vllm_model \
+                    --model-url "{{target.api_endpoint.url}}" \
+                    --model "{{target.api_endpoint.model_id}}" \
+                    --model-api-key dummy \
+                    --output "{{config.output_dir}}/evaluator_rollouts.jsonl" \
+                    --concurrency "{{config.params.parallelism}}" \
+                    --temperature "{{config.params.temperature}}" \
+                    --top-p "{{config.params.top_p}}" \
+                    --resume
+                  {% if config.params.limit_samples is not none %}
+                  {% if not config.params.extra.nemo_gym.allow_limit_samples %}
+                  echo "{{config.params.extra.nemo_gym.benchmark}} does not support --limit" >&2
+                  exit 1
+                  {% else %}
+                  set -- "$@" --limit "{{config.params.limit_samples}}"
+                  {% endif %}
+                  {% endif %}
+                  set -- "$@" {{config.params.extra.nemo_gym.run_args}}
+                  unset RAY_ADDRESS
+                  gym_eval_launcher_pid=""
+                  gym_eval_pgid=""
+                  gym_eval_is_running() {
+                    kill -0 -- "-$gym_eval_pgid" 2>/dev/null ||
+                      kill -0 "$gym_eval_launcher_pid" 2>/dev/null
+                  }
+                  signal_gym_eval() {
+                    gym_eval_signal="$1"
+                    gym_eval_target="$2"
+                    if gym_eval_signal_error=$(
+                      kill "$gym_eval_signal" -- "$gym_eval_target" 2>&1
+                    ); then
+                      return
+                    fi
+                    case "$gym_eval_signal_error" in
+                      *"No such process"*) return ;;
+                      *) printf '%s\n' "$gym_eval_signal_error" >&2; return 1 ;;
+                    esac
+                  }
+                  cleanup_gym_eval() {
+                    if [ -z "$gym_eval_launcher_pid" ]; then
+                      set +u
+                      gym_eval_launcher_pid=$!
+                      set -u
+                    fi
+                    case "$gym_eval_launcher_pid" in
+                      ""|*[!0-9]*) return ;;
+                    esac
+                    gym_eval_pgid=$gym_eval_launcher_pid
+                    signal_gym_eval -TERM "-$gym_eval_pgid"
+                    signal_gym_eval -TERM "$gym_eval_launcher_pid"
+                    cleanup_attempt=0
+                    while gym_eval_is_running &&
+                          [ "$cleanup_attempt" -lt 30 ]; do
+                      sleep 1
+                      cleanup_attempt=$((cleanup_attempt + 1))
+                    done
+                    if gym_eval_is_running; then
+                      signal_gym_eval -KILL "-$gym_eval_pgid"
+                      signal_gym_eval -KILL "$gym_eval_launcher_pid"
+                    fi
+                  }
+                  terminate_gym_eval() {
+                    gym_eval_signal_status="$1"
+                    trap - EXIT TERM INT
+                    cleanup_gym_eval
+                    exit "$gym_eval_signal_status"
+                  }
+                  trap cleanup_gym_eval EXIT
+                  trap 'terminate_gym_eval 143' TERM
+                  trap 'terminate_gym_eval 130' INT
+                  set +m
+                  setsid --wait "$@" &
+                  gym_eval_launcher_pid=$!
+                  gym_eval_pgid=$gym_eval_launcher_pid
+                  set +e
+                  wait "$gym_eval_launcher_pid"
+                  gym_eval_status=$?
+                  set -e
+                  cleanup_gym_eval
+                  trap - EXIT TERM INT
+                  exit "$gym_eval_status"
+
+export:
+  # LITERAL values only (auto-export resolves this block without deployment/
+  # evaluation nodes). Keep the sampling tags EQUAL to evaluation params above.
+  mlflow:
+    tracking_uri: ${oc.env:MLFLOW_TRACKING_URI}
+    experiment_name: ${oc.env:USER}/CHANGEME-served-model-name
+    description: 'CHANGEME-served-model-name | Tau3-Banking | T=1.0, top_p=0.95, 5 repeats'
+    # Exporter defaults: upload only the required artifacts, no logs. Keep them — the
+    # user-simulator key is expanded into Gym's argv at run time.
+    tags:
+      framework: vllm
+      model: CHANGEME-served-model-name
+      benchmark: nemo_gym.tau3_banking
+      temperature: '1.0'
+      top_p: '0.95'
