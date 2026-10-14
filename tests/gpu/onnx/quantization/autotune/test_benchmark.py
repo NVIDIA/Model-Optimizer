@@ -347,6 +347,7 @@ class TestTensorRTPyBenchmark:
 
     @pytest.fixture(autouse=True)
     def _require_tensorrt_and_torch_cuda(self):
+        """Skip benchmark integration tests when TensorRT or CUDA is unavailable."""
         pytest.importorskip("tensorrt")
         if not bm.TORCH_CUDA_AVAILABLE:
             pytest.skip("CUDA not available")
