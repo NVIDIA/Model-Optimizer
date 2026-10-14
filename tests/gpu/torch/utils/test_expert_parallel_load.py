@@ -31,7 +31,6 @@ if Version(transformers.__version__) < Version("5.7"):
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM, Qwen3MoeConfig
 
-from modelopt.torch.utils.distributed import ModelOptSession
 from modelopt.torch.utils.moe import load_and_prepare_ep
 
 NUM_EXPERTS = 8
@@ -60,17 +59,8 @@ def _local(tensor):
 
 def _sharded_model_matches_the_whole_one(rank, size, ckpt_dir, ep_degree):
     device = torch.device(f"cuda:{rank}")
-    session = ModelOptSession()
-    session.initialize(
-        distributed=True,
-        rank=rank,
-        world_size=size,
-        local_rank=rank,
-        device=device,
-        is_main=rank == 0,
-    )
     config = AutoConfig.from_pretrained(ckpt_dir)  # carries qwen3_moe's own base_model_ep_plan
-    model = load_and_prepare_ep(ckpt_dir, session, ep_degree, hf_config=config).eval()
+    model = load_and_prepare_ep(ckpt_dir, ep_degree, hf_config=config).eval()
     whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16).to(device).eval()
 
     # Each rank holds its contiguous share of every layer's experts within its EP group, whose
