@@ -35,6 +35,7 @@ from torch.distributed.tensor import DTensor
 
 __all__ = [
     "DistributedProcessGroup",
+    "DistributedState",
     "DistributionPlan",
     "ParallelState",
     "all_reduce",
@@ -449,18 +450,41 @@ def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _
     return combine([rank_value for _, rank_value, _ in gathered])
 
 
+@dataclass(frozen=True)
+class DistributedState:
+    """This process's place in a run: its rank, the run's size, and the device it computes on.
+
+    :func:`distributed_run` yields it, for a single process too (rank 0 of a run of one).
+    """
+
+    rank: int
+    world_size: int
+    device: torch.device | str
+
+    @property
+    def is_main(self) -> bool:
+        """Whether this is rank 0, the rank that writes the run's outputs."""
+        return self.rank == 0
+
+
 @contextmanager
-def distributed_run(timeout: timedelta | None = None):
-    """Own the process group for the block on a distributed launch; do nothing otherwise.
+def distributed_run(timeout: timedelta | None = None, device: torch.device | str = "cuda"):
+    """Own the process group for the block on a distributed launch, and yield this process's state.
 
     On a distributed launch (``WORLD_SIZE>1``) this sets the process group up, binding this rank's
-    CUDA device, with ``timeout``, and destroys it on exit even if the body raises.
+    CUDA device, with ``timeout``, and destroys it on exit even if the body raises. It yields this
+    rank's :class:`DistributedState`, on that CUDA device. A single process sets nothing up and is
+    rank 0 of a run of one, on ``device``.
     """
     owns_group = is_distributed_launch()
     if owns_group:
         setup(timeout=timeout)
     try:
-        yield
+        yield (
+            DistributedState(rank(), size(), torch.device(f"cuda:{local_rank()}"))
+            if owns_group
+            else DistributedState(0, 1, device)
+        )
     finally:
         # If the body is unwinding due to an exception, PRINT it here BEFORE cleanup()'s collective
         # barrier. A per-rank exception (only some ranks raise) otherwise makes those ranks enter the
