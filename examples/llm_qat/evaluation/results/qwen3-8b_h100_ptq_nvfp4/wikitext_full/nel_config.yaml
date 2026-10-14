@@ -1,4 +1,3 @@
-# Full benchmark coverage; NEL 0.2.6. Replace mount placeholders; see ../../../README.md.
 defaults:
   - execution: slurm/default
   - ../../../nel_configs/h100_slurm_execution@_global_
