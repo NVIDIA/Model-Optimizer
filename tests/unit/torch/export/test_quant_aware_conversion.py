@@ -253,13 +253,26 @@ def test_guard_is_inert_when_source_is_unknown(source_keys):
     assert rename("model.embeddings.weight") == "backbone.embedding.weight"
 
 
-def test_mixed_namespace_rename_applies_only_where_the_source_needs_it():
+# The same container rename shows up in two shapes depending on how the model declares it:
+# one bare container rule, or a rule per anchored leaf. The per-key resolution must give
+# the same answer either way, so every mixed-namespace assertion runs against both.
+_MIXED_RULE_SHAPES = {
+    "bare-container": [RenameRule(r"\.mlp\.", ".block_sparse_moe.")],
+    "anchored-leaves": [
+        RenameRule(r"\.mlp\.experts\.", ".block_sparse_moe.experts."),
+        RenameRule(r"\.mlp\.gate\.", ".block_sparse_moe.gate."),
+    ],
+}
+
+
+@pytest.mark.parametrize("shape", list(_MIXED_RULE_SHAPES))
+def test_mixed_namespace_rename_applies_only_where_the_source_needs_it(shape):
     """One rule, two namespaces: suppression is per key, never per rule.
 
     A rule that rewrites only already-canonical source keys would be discarded by a
     rule-level guard, taking the sparse-layer renames it is actually needed for with it.
     """
-    rename = _SourceAwareRenamer([RenameRule(r"\.mlp\.", ".block_sparse_moe.")], _MIXED_SOURCE_KEYS)
+    rename = _SourceAwareRenamer(_MIXED_RULE_SHAPES[shape], _MIXED_SOURCE_KEYS)
 
     # Sparse text layers: the rename is what restores their source names.
     assert (
@@ -281,14 +294,15 @@ def test_mixed_namespace_rename_applies_only_where_the_source_needs_it():
     )
 
 
+@pytest.mark.parametrize("shape", list(_MIXED_RULE_SHAPES))
 @pytest.mark.parametrize("suffix", [".weight", ".weight_scale", ".input_scale"])
-def test_mixed_namespace_scales_follow_their_weight(suffix):
+def test_mixed_namespace_scales_follow_their_weight(suffix, shape):
     """A module's scale tensors must not be split across the two namespaces.
 
     Scale names never appear in the source checkpoint, so they are resolved by the
     weight they belong to rather than judged absent on their own.
     """
-    rename = _SourceAwareRenamer([RenameRule(r"\.mlp\.", ".block_sparse_moe.")], _MIXED_SOURCE_KEYS)
+    rename = _SourceAwareRenamer(_MIXED_RULE_SHAPES[shape], _MIXED_SOURCE_KEYS)
     sparse = "language_model.model.layers.1.mlp.experts.0.w1"
     dense = "language_model.model.layers.0.mlp.down_proj"
     assert (

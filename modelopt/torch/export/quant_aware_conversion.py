@@ -724,9 +724,10 @@ def _build_reverse_rules(
     Returns tensor-transform rules, rename rules, fused expert leaves, and the key set
     of the checkpoint the model was loaded from (``None`` when it cannot be read). The
     expert leaves guard against experts that were not pre-expanded; the key set lets
-    :class:`_SourceAwareRenamer` resolve a rename against the names the checkpoint has. Returns empty lists when
-    no mapping applies (export unchanged). Uses transformers' own
-    ``reverse_transform()`` to get correctly-reversed name patterns, then translates them:
+    :class:`_SourceAwareRenamer` resolve a rename against the names the checkpoint has.
+    Returns empty lists when no mapping applies (export unchanged). Uses transformers'
+    own ``reverse_transform()`` to get correctly-reversed name patterns, then translates
+    them:
 
     * ``WeightRenaming`` -> :class:`RenameRule` (carries scale siblings for free).
     * Expert ``WeightConverter`` (reverse contains ``SplitModulelist``): ModelOpt's
