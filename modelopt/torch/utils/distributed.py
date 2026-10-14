@@ -26,7 +26,7 @@ import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from datetime import timedelta
-from typing import Annotated, Any, TypeVar
+from typing import Any, Generic, TypeVar
 from warnings import warn
 
 import torch
@@ -40,7 +40,6 @@ __all__ = [
     "ModelOptSession",
     "ParallelState",
     "Synced",
-    "SyncedAttribute",
     "backend",
     "barrier",
     "fsdp2_wrap",
@@ -342,55 +341,86 @@ class DistributionPlan:
 
 
 _T = TypeVar("_T")
+_V = TypeVar("_V")
 
 
-class _SyncedMark:
-    """What :data:`Synced` attaches to an annotation."""
+class Synced(Generic[_T]):
+    """A fact of the session every rank holds the same value of, declared by its type.
 
-    def __repr__(self) -> str:
-        return "synced"
-
-
-#: Annotate a session attribute with its type as ``Synced[<type>]`` to make every rank hold the same
-#: value of it: ``plan: Synced[DistributionPlan | None]``. See :class:`SyncedAttribute`.
-Synced = Annotated[_T, _SyncedMark()]
-
-
-class SyncedAttribute:
-    """A session attribute annotated :data:`Synced`, which every rank holds the same value of.
-
-    Declare one by its type, ``plan: Synced[DistributionPlan | None]``, for a fact a later stage reads
-    back from the session; a one-off decision that nothing reads back is
-    :meth:`ModelOptSession.agree`. Reading it is local. Assigning it is collective: every rank assigns
-    it at the same point, and each then holds the value rank 0 assigned -- whatever the others passed
-    -- so no rank drifts from the rest. :meth:`ModelOptSession.decide` sets one from a function run on
-    rank 0 only. Assign a new value rather than mutating the one held, which would change this rank's
-    copy only. Outside a distributed session it is a plain attribute.
+    ``plan: Synced[DistributionPlan]`` on the session makes ``session.plan`` this handle. Read the
+    value with ``session.plan.value``: local, ``None`` until it is set. Set it with :meth:`decide`, one
+    rank computing it, or :meth:`agree`, every rank does; both are collective, so every rank calls them
+    at the same point. Assigning ``session.plan`` raises, so nothing communicates behind an ``=``.
+    Declare one only for a fact a later stage reads back: a one-off decision nothing reads back is
+    :meth:`ModelOptSession.decide` or :meth:`ModelOptSession.agree`, which keep nothing.
     """
 
+    def __init__(self, holder: "_SyncedHolder", name: str) -> None:
+        """The fact ``name`` of ``holder``."""
+        self._holder = holder
+        self._name = name
+
+    @property
+    def value(self) -> _T | None:
+        """The value every rank holds, read locally; ``None`` until one is set."""
+        return self._holder._synced.get(self._name)
+
+    def decide(self, fn: Callable[[], _T], rank: int = 0) -> _T:
+        """Set the fact to ``fn()`` run on ``rank`` only; every rank holds and returns that value.
+
+        See :meth:`ModelOptSession.decide`.
+        """
+        label = self._holder._label(self._name)
+        return self._hold(self._holder._sync_session().decide(label, fn, rank))
+
+    def agree(self, fn: Callable[[], _T], combine: "Callable[[list[_T]], _T] | None" = None) -> _T:
+        """Set the fact to what every rank agrees on from ``fn()``, run on each.
+
+        See :meth:`ModelOptSession.agree`.
+        """
+        label = self._holder._label(self._name)
+        return self._hold(self._holder._sync_session().agree(label, fn, combine))
+
+    def _hold(self, value: _T) -> _T:
+        # The holder keeps its own copy: a later mutation of the caller's object stays the caller's.
+        self._holder._synced[self._name] = copy.deepcopy(value)
+        return self._holder._synced[self._name]
+
+
+class _SyncedAttribute:
+    """What a ``Synced[...]`` annotation installs: reading it gives the fact's :class:`Synced` handle."""
+
     def __init__(self, name: str) -> None:
-        """The synced attribute ``name``."""
         self.name = name
 
-    def __get__(self, session, owner=None):
-        if session is None:
-            return self
-        return session._synced.get(self.name)
+    def __get__(self, holder, owner=None):
+        return self if holder is None else Synced(holder, self.name)
 
-    def __set__(self, session, value) -> None:
-        session._sync(self, lambda: value, decide=False)
+    def __set__(self, holder, value) -> None:
+        raise AttributeError(
+            f"{type(holder).__name__}.{self.name} is synced: set it with .decide(fn) or "
+            ".agree(fn), which every rank calls at the same point."
+        )
 
 
 class _SyncedHolder:
-    """Base of a class with synced attributes: each ``Synced[...]`` annotation of a subclass becomes one."""
+    """Base of a class with synced facts: each ``Synced[...]`` annotation of a subclass becomes one."""
+
+    _synced: dict[str, Any]
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         for name, annotation in inspect.get_annotations(cls, eval_str=True).items():
-            if any(
-                isinstance(mark, _SyncedMark) for mark in getattr(annotation, "__metadata__", ())
-            ):
-                setattr(cls, name, SyncedAttribute(name))
+            if getattr(annotation, "__origin__", None) is Synced:
+                setattr(cls, name, _SyncedAttribute(name))
+
+    def _sync_session(self) -> "ModelOptSession":
+        """The session whose ranks hold this object's synced facts."""
+        raise NotImplementedError
+
+    def _label(self, name: str) -> str:
+        """How the fact ``name`` is named to the other ranks, which must name the same one."""
+        return name
 
 
 def _agreed(label: str, values: list[Any]) -> Any:
@@ -416,11 +446,11 @@ class ModelOptSession(_SyncedHolder):
     * ``ep_mesh`` -- the expert-parallel device mesh of the loaded model, set by ``load_and_prepare_ep``
       (``None`` until then, and for a model loaded without expert parallelism).
 
-    Attributes annotated :data:`Synced`, such as ``plan``, hold the same value on every rank.
+    Facts annotated :class:`Synced`, such as ``plan``, hold the same value on every rank.
     """
 
     #: The :class:`DistributionPlan` of the model this session runs, the same on every rank.
-    plan: Synced[DistributionPlan | None]
+    plan: Synced[DistributionPlan]
 
     def __init__(self) -> None:
         """Create an empty (uninitialized) session; populate identity with :meth:`initialize`."""
@@ -453,72 +483,66 @@ class ModelOptSession(_SyncedHolder):
         self._synced = {}
         self.ep_mesh = None
 
-    def decide(self, name: str, decide_fn: Callable[[], Any]) -> Any:
-        """Set the synced attribute ``name`` to ``decide_fn()``, run on rank 0 only.
+    def _sync_session(self) -> "ModelOptSession":
+        return self
 
-        The other ranks take that value instead of computing their own, which could differ when it
-        depends on what each rank reads for itself: the environment, its GPU, files on its node. If
-        ``decide_fn`` raises, every rank raises, instead of waiting in a collective rank 0 never
-        joins. Collective, like assigning the attribute. Returns the value.
+    def decide(self, label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
+        """Return ``fn()`` run on ``rank`` only, on every rank; keep nothing.
+
+        For a value that depends on what each rank reads for itself -- the environment, its GPU, files
+        on its node -- so that ranks deciding for themselves could disagree. If ``fn`` raises, every
+        rank raises, instead of waiting in a broadcast ``rank`` never sends. Ranks deciding different
+        labels at the same point fail. Collective: every rank calls it at the same point, with the same
+        ``rank``. Outside a distributed session ``fn`` runs alone. A fact a later stage reads back is a
+        :class:`Synced` attribute, set with its own ``decide``.
         """
-        attribute = getattr(type(self), name, None)
-        if not isinstance(attribute, SyncedAttribute):
-            raise AttributeError(f"ModelOptSession.{name} is not a synced attribute")
-        self._sync(attribute, decide_fn, decide=True)
-        return self._synced[name]
-
-    def _sync(
-        self, attribute: SyncedAttribute, value_fn: Callable[[], Any], *, decide: bool
-    ) -> None:
-        """Store ``value_fn()`` from rank 0 under ``attribute`` on every rank."""
-        name = attribute.name
         if not (self.initialized and self.distributed):
-            self._synced[name] = value_fn()
-            return
-        first = torch.distributed.get_rank() == 0
-        value, error = None, None
-        if first or not decide:
+            return fn()
+        if not 0 <= rank < self.world_size:
+            raise ValueError(f"rank={rank} is not a rank of this {self.world_size}-rank run.")
+        deciding = torch.distributed.get_rank() == rank
+        value: Any = None
+        error = None
+        if deciding:
             try:
-                value = value_fn()
+                value = fn()
             except Exception as e:
-                if not first:
-                    raise
+                # Still send: the other ranks would otherwise wait in the broadcast for this one.
                 error = e
-        # One message from the first rank: which attribute it set, so a rank setting another learns the
+        # One message from the deciding rank: what it decided, so a rank deciding another learns the
         # two are out of step, and its value or its error. The error goes as text: the other ranks only
         # need to stop, and an exception is not guaranteed to pickle.
-        message = [(name, value, None if error is None else f"{type(error).__name__}: {error}")]
-        torch.distributed.broadcast_object_list(message, group_src=0)
-        first_name, value, first_error = message[0]
+        message = [(label, value, None if error is None else f"{type(error).__name__}: {error}")]
+        torch.distributed.broadcast_object_list(message, group_src=rank)
+        decided_label, value, decided_error = message[0]
         if error is not None:
             raise error
-        if first_error is not None:
-            raise RuntimeError(f"rank 0 failed to decide ModelOptSession.{name}: {first_error}")
-        if first_name != name:
+        if decided_error is not None:
+            raise RuntimeError(f"rank {rank} failed to decide {label}: {decided_error}")
+        if decided_label != label:
             raise RuntimeError(
-                f"Ranks set synced session attributes out of step: this rank set {name!r} while rank "
-                f"0 set {first_name!r}. Every rank must set them in the same order."
+                f"Ranks decided out of step: this rank decided {label!r} while rank {rank} decided "
+                f"{decided_label!r}. Every rank must decide them in the same order."
             )
-        # The first rank's own object stays the caller's; a copy keeps a later mutation of it local.
-        self._synced[name] = copy.deepcopy(value) if first else value
+        return value
 
     def agree(
         self,
         label: str,
-        value_fn: Callable[[], Any],
-        combine: "Callable[[list[Any]], Any] | None" = None,
-    ) -> Any:
+        value_fn: Callable[[], _V],
+        combine: "Callable[[list[_V]], _V] | None" = None,
+    ) -> _V:
         """Return what every rank agrees on from ``value_fn()``, run on each; keep nothing.
 
-        For a decision no later stage reads back from the session (a fact that one does is a
-        :data:`Synced` attribute). ``combine`` takes the ranks' values in rank order and returns the
-        one every rank gets, e.g. ``min`` for a batch size each rank's memory bounds, where one rank's
-        choice could run another out of memory. Without it every rank must pass the same value, e.g.
-        the library versions each runs: a rank that differs makes every rank raise, where adopting
-        one rank's value would hide the difference until a collective hangs on it. If ``value_fn``
-        raises on any rank, every rank raises, instead of waiting in the gather that rank never joins.
-        Ranks agreeing on different labels at the same point fail. Collective; outside a distributed
-        session ``value_fn`` runs alone.
+        For a decision no later stage reads back from the session; a fact that one does is a
+        :class:`Synced` attribute, set with its own ``agree``. ``combine`` takes the ranks' values in rank
+        order and returns the one every rank gets, e.g. ``min`` for a batch size each rank's memory
+        bounds, where one rank's choice could run another out of memory. Without it every rank must pass
+        the same value, e.g. the library versions each runs: a rank that differs makes every rank raise,
+        where adopting one rank's value would hide the difference until a collective hangs on it. If
+        ``value_fn`` raises on any rank, every rank raises, instead of waiting in the gather that rank
+        never joins. Ranks agreeing on different labels at the same point fail. Collective; outside a
+        distributed session ``value_fn`` runs alone.
         """
         combine = combine or functools.partial(_agreed, label)
         if not (self.initialized and self.distributed):
