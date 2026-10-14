@@ -615,8 +615,8 @@ def parallel_load_and_prepare_fsdp2(
     a smaller value lowers the peak transient GPU memory at the cost of more collectives (default 8;
     pass ``None`` to broadcast all of a source's layers at once).
 
-    The model records how it is distributed
-    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`).
+    The model records how it is distributed, as :func:`~modelopt.torch.utils.distributed.fsdp2_wrap`
+    does.
     """
     resolved_path = _resolve_checkpoint_dir(ckpt_path, rank)
     weight_map = indexed_weight_map(resolved_path)
@@ -708,7 +708,6 @@ def parallel_load_and_prepare_fsdp2(
         _promote_non_dtensor_to_gpu(model, device)
     if hasattr(model, "tie_weights"):
         model.tie_weights()
-    set_distribution_plan(model, DistributionPlan(world_size, dense="fsdp"))
     return model
 
 

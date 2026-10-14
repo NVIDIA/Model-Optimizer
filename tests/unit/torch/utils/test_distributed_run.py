@@ -156,6 +156,23 @@ def test_a_model_with_no_plan_raises_in_a_run_of_several_ranks(cpu_dist_workers)
     cpu_dist_workers.run(_no_plan_on_several_ranks_job)
 
 
+def test_fsdp2_wrap_records_that_the_model_is_sharded_over_the_process_group(monkeypatch):
+    """Whatever wraps the model, the export and calibration read the plan rather than the wrap."""
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+
+    model = nn.Sequential(nn.Linear(2, 2), nn.Linear(2, 2))
+    monkeypatch.setattr(
+        LayerActivationCollector, "get_decoder_layers", staticmethod(lambda model: list(model))
+    )
+    monkeypatch.setattr(dist, "fully_shard", lambda module, **kwargs: None)
+    monkeypatch.setattr(dist, "size", lambda group=None: 4)
+
+    dist.fsdp2_wrap(model)
+
+    plan = DistributionPlan(4, dense="fsdp")
+    assert all(distribution_plan(module) == plan for module in model.modules())
+
+
 # ------------------------------------------------------------------------------------ collectives
 
 
