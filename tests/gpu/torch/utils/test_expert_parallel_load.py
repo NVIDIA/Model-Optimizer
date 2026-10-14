@@ -37,6 +37,7 @@ from modelopt.torch.utils.distributed import (
     distribution_plan,
     set_distribution_plan,
 )
+from modelopt.torch.utils.moe import expert_parallel_mesh
 from modelopt.torch.utils.plugins.model_load_utils import load_and_prepare_ep
 
 NUM_EXPERTS = 8
@@ -235,17 +236,20 @@ def _quantized_sharded_model_trains_like_the_whole_one(
     from modelopt.torch.utils.distributed import distributed_forward_loop
 
     cfg = {"fp8": mtq.FP8_DEFAULT_CFG, "nvfp4": mtq.NVFP4_DEFAULT_CFG}[fmt]
-    session, device = _init_session(rank, size)
+    device = torch.device(f"cuda:{rank}")
     config = AutoConfig.from_pretrained(ckpt_dir)
     model = load_and_prepare_ep(
-        ckpt_dir, session, ep_degree, hf_config=config, fsdp_dense=fsdp_dense, freeze=False
+        ckpt_dir, ep_degree, hf_config=config, fsdp_dense=fsdp_dense, freeze=False
     )
     whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16).to(device)
 
     # Calibrate as hf_ptq does: each rank on its own batch, the reference on all of them.
     batches = _batches(size)
     mine = batches[rank].to(device)
-    mtq.quantize(model, cfg, distributed_forward_loop(model, [{"input_ids": mine}], session))
+    forward_loop = distributed_forward_loop(
+        model, [{"input_ids": mine}], device=device, ep_mesh=expert_parallel_mesh(model)
+    )
+    mtq.quantize(model, cfg, forward_loop)
     mtq.quantize(whole, cfg, lambda m: [m(b.to(device)) for b in batches])
 
     # Expert-parallel calibration reaches the whole model's scales: weight scales from this rank's
