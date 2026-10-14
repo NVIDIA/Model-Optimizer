@@ -560,6 +560,8 @@ def expert_parallel_state(model: torch.nn.Module) -> "ParallelState | None":
         if state is not None and state.expert_model_parallel_group.is_initialized():
             return state
     return None
+
+
 class _StridedIterableShard(IterableDataset):
     """Rank-strided shard of a streaming ``IterableDataset`` (no ``len()`` required).
 
