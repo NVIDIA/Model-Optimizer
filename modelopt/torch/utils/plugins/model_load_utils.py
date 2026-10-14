@@ -453,8 +453,6 @@ def _load_sharded(route, plan, ckpt_path, auto_class, model_type, kwargs) -> nn.
     trust_remote_code = kwargs.pop("trust_remote_code", False)
     hf_config = kwargs.pop("hf_config", None)
     if route == _EXPERT_PARALLEL:
-        from modelopt.torch.utils.moe import load_and_prepare_ep
-
         return load_and_prepare_ep(
             ckpt_path, plan, trust_remote_code=trust_remote_code, hf_config=hf_config, **kwargs
         )
@@ -494,7 +492,7 @@ def load_pretrained(
     the model over the run's ranks by, :func:`resolve_distribution_plan`'s by default. By the plan:
 
     * ``ep_size > 1``: the routed experts sharded as they load, the dense part replicated or
-      FSDP2-sharded as the plan says (:func:`~modelopt.torch.utils.moe.load_and_prepare_ep`, whose
+      FSDP2-sharded as the plan says (:func:`load_and_prepare_ep`, whose
       ``freeze`` and ``require_lm_head`` ``kwargs`` may set);
     * otherwise ``dense="fsdp"``: a causal LM FSDP2-sharded over the whole process group, each rank
       reading its own layers (:func:`parallel_load_and_prepare_fsdp2`, whose ``cpu_offload``,
