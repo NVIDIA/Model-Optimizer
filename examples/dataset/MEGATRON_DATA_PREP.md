@@ -185,7 +185,7 @@ when it loads the data. Run it in an environment with Megatron-Bridge, whose tex
 ```yaml
 output_dir: /path/to/chat_blend
 output_format: chat_jsonl
-target_samples: 36_800  # Required with split sources; omit only for files sources, to keep every row.
+target_samples: 36_800  # Total conversations; required, since the selected rows are mixed in memory.
 shuffle: false          # Optional; take the first rows of each split in order (default: buffer shuffle).
 seed: 1234              # Optional; seeds the shuffle, the cross-source mix and the validation hold-out.
 reasoning_content: native  # Optional; native (default), inline or strip.
@@ -208,7 +208,8 @@ and have an assistant turn; a source that rounds to zero is skipped. `content_fi
 - A `text` row becomes one assistant turn, or is split into turns if it uses the `<extra_id_1>User` /
   `<extra_id_1>Assistant` / `System` chat markers. A row with a marker for any other role (such as a SteerLM
   label line) or with an empty turn other than `System` is dropped.
-- `messages` and a row's `tools` are prepared as in the tokenizing mode (JSON-string `tool_calls` arguments become dicts), except
+- `messages` and a row's `tools` are prepared as in the tokenizing mode (JSON-string `tool_calls` arguments
+  become dicts), and a top-level `system` prompt is kept for Megatron-Bridge to prepend. The one difference is
   that `reasoning_content` stays on the message by default (`native`), because the chat template is applied
   later, at training time. Use `inline` if your model's chat template ignores `reasoning_content`, so the
   reasoning is kept as a `<think>` block in `content` (see [below](#reasoning_content-for-post-training-v3-datasets)),

@@ -30,6 +30,7 @@ from typing import Any, cast
 
 import huggingface_hub
 import yaml
+from datasets import load_dataset
 
 from modelopt.torch.utils import (
     REASONING_CONTENT_MODES,
@@ -182,7 +183,7 @@ def _to_chat(
     """Convert a source row to ``{"messages": [...]}``, or ``None`` if it has nothing to train on.
 
     ``messages`` go through :func:`prepare_messages_for_chat_template` with ``reasoning_content``,
-    and a non-empty ``tools`` list is kept for the chat template. A ``text`` row in the NeMo chat
+    and non-empty ``tools`` and ``system`` fields are kept for the chat path. A ``text`` row in the NeMo chat
     format (``<extra_id_1>User`` / ``Assistant`` markers) is split into turns; any other ``text``
     row becomes one assistant turn, so all of it is trained.
     """
@@ -192,9 +193,11 @@ def _to_chat(
             return None
         messages = prepare_messages_for_chat_template(messages, reasoning_content=reasoning_content)
         chat: dict[str, Any] = {"messages": messages}
-        # As in the tokenizing mode: the chat template renders the tool definitions into the prompt.
-        if row.get("tools"):
-            chat["tools"] = row["tools"]
+        # As in the tokenizing mode, the chat template renders the tool definitions into the prompt;
+        # Megatron-Bridge turns a top-level system prompt into the leading system message.
+        for key in ("tools", "system"):
+            if row.get(key):
+                chat[key] = row[key]
     else:
         text = row.get("text") or ""
         if not text:
@@ -241,8 +244,6 @@ def _iter_rows(
                         # As in the tokenizing reader: some Nemotron files carry a malformed record.
                         print(f"[WARN] Skipping malformed JSONL record in {path}: {e}", flush=True)
         return
-    from datasets import load_dataset
-
     dataset = load_dataset(
         source["hf_dataset"], source.get("config"), split=source["split"], streaming=True
     )
@@ -252,15 +253,15 @@ def _iter_rows(
 def _take_chat_rows(
     source: dict[str, Any],
     output_dir: Path,
-    want: int | None,
+    want: int,
     shuffle: bool,
     seed: int,
     reasoning_content: ReasoningContentMode,
 ) -> list[dict[str, Any]]:
-    """Return the first ``want`` usable chat rows of a source (all of them if ``want`` is None).
+    """Return the first ``want`` usable chat rows of a source.
 
-    Fails if the source cannot be read, has no usable row, or runs out of them, so the blend cannot
-    change silently; gives up after ``10 * want`` rejected rows.
+    Fails if the source cannot be read or runs out of usable rows, so the blend cannot change
+    silently; gives up after ``10 * want`` rejected rows.
     """
     # Megatron-Bridge's chat SFT path consumes this output; keep exactly the rows it accepts. Imported
     # here, not at module scope, because the tokenizing mode does not need Megatron-Bridge installed.
@@ -272,21 +273,21 @@ def _take_chat_rows(
     try:
         for row in _iter_rows(source, output_dir, shuffle, seed):
             chat = _to_chat(row, source["content_field"], reasoning_content)
-            if chat is None or not is_text_only_chat_example(chat):
+            # Judge the source row's top-level media keys too, which the conversion does not keep.
+            if chat is None or not is_text_only_chat_example({**row, **chat}):
                 rejected += 1
-                if want is not None and rejected > 10 * want:
+                if rejected > 10 * want:
                     break
                 continue
             rows.append(chat)
-            if want is not None and len(rows) >= want:
+            if len(rows) >= want:
                 break
     except Exception as e:  # e.g. a gated split, or a schema the streaming reader cannot cast
         raise RuntimeError(f"{name}: failed to read or convert") from e
-    if not rows or (want is not None and len(rows) < want):
-        gave_up = want is not None and rejected > 10 * want
+    if len(rows) < want:
+        gave_up = rejected > 10 * want
         reason = f"gave up after {rejected} rejected rows" if gave_up else "source exhausted"
-        budget = "any" if want is None else want
-        raise RuntimeError(f"{name}: only {len(rows)}/{budget} usable rows ({reason})")
+        raise RuntimeError(f"{name}: only {len(rows)}/{want} usable rows ({reason})")
     print(f"{name}: {len(rows)} rows ({rejected} rejected)", flush=True)
     return rows
 
@@ -308,34 +309,29 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]] | None:
         return None
 
 
-def _part_path(
-    parts_dir: Path, source: dict[str, Any], settings: dict[str, Any], capped: bool
-) -> Path:
+def _part_path(parts_dir: Path, source: dict[str, Any], settings: dict[str, Any]) -> Path:
     """Return the cache file of a source's selected rows, keyed by every input that selects them.
 
-    A capped part holds the first rows of the source and serves any smaller budget; an uncapped part
-    holds every usable row, so a budget removed between runs never reuses a capped selection.
+    A part holds the first usable rows of the source, so it serves any budget it covers.
     """
     selection = {key: source.get(key) for key in ("hf_dataset", "config", "split", "files")}
-    selection.update(settings, content_field=source["content_field"], capped=capped)
+    selection.update(settings, content_field=source["content_field"])
     digest = hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest()[:16]
     label = source.get("split") or Path(source["files"][0]).name.split(".")[0]
     return parts_dir / f"{source['hf_dataset'].replace('/', '--')}_{label}_{digest}.jsonl"
 
 
-def _chat_budgets(config: dict[str, Any]) -> list[int | None]:
-    """Return each source's row budget, ``None`` meaning every usable row; validate the inputs."""
+def _chat_budgets(config: dict[str, Any]) -> list[int]:
+    """Return each source's row budget; validate the inputs."""
     weights = [float(source["weight"]) for source in config["sources"]]
     if not all(math.isfinite(w) and w >= 0 for w in weights) or sum(weights) <= 0:
         raise ValueError(f"Source weights must be finite, nonnegative and not all zero: {weights}.")
+    # Required: the selected rows are held in memory to be mixed, which a whole source may not fit.
     target = config.get("target_samples")
-    if target is None:
-        if any("split" in source for source in config["sources"]):
-            # Every row of a split would be held in memory, which a large split does not fit.
-            raise ValueError("target_samples is required when a source is a Hugging Face split.")
-        return [None] * len(weights)
     if isinstance(target, bool) or not isinstance(target, int) or target <= 0:
-        raise ValueError(f"target_samples must be a positive integer, got {target!r}.")
+        raise ValueError(
+            f"target_samples is required and must be a positive integer, got {target!r}."
+        )
     return [round(target * w / sum(weights)) for w in weights]
 
 
@@ -345,8 +341,7 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
     For Megatron-Bridge's chat SFT path (``distill.py --sft --sft_hf_dataset``), which renders each
     conversation with the model's chat template and can restrict the loss to assistant tokens.
     Each source contributes ``round(target_samples * weight / sum(weights))`` rows (a source rounded
-    to zero rows is skipped) that the chat path accepts as text-only chat; ``target_samples`` may be
-    omitted only for ``files`` sources, to keep every usable row. ``content_field`` must be
+    to zero rows is skipped) that the chat path accepts as text-only chat. ``content_field`` must be
     ``messages`` or ``text``; ``messages`` keep ``reasoning_content`` for the chat template by
     default (``reasoning_content: native``; set ``inline`` for a template that ignores the field, or
     ``strip``). Hugging Face splits are buffer-shuffled with ``seed`` unless ``shuffle: false``;
@@ -393,9 +388,9 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
         if want == 0:
             print(f"{source['hf_dataset']}: weight rounds to 0 rows, skipped", flush=True)
             continue
-        part = _part_path(parts_dir, source, settings, capped=want is not None)
+        part = _part_path(parts_dir, source, settings)
         got = _read_jsonl(part)
-        if not got or (want is not None and len(got) < want):
+        if got is None or len(got) < want:
             got = _take_chat_rows(source, output_dir, want, shuffle, seed, reasoning_content)
             _write_jsonl(part, got)
         rows.extend(got[:want])

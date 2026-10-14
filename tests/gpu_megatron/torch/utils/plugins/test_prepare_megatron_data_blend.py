@@ -178,10 +178,11 @@ def test_to_chat_handles_all_row_shapes():
     assert blend_module._to_chat({"messages": []}, "messages") is None
     # Nothing would be trained under assistant-only loss.
     assert blend_module._to_chat({"messages": msgs[:1]}, "messages") is None
-    # Tool definitions reach the chat template, as in the tokenizing mode.
+    # Tool definitions and a top-level system prompt reach the chat path.
     tools = [{"type": "function", "function": {"name": "add"}}]
-    chat = blend_module._to_chat({"messages": msgs, "tools": tools}, "messages")
-    assert chat == {"messages": msgs, "tools": tools}
+    row = {"messages": msgs, "tools": tools, "system": "Be brief.", "id": 7}
+    chat = blend_module._to_chat(row, "messages")
+    assert chat == {"messages": msgs, "tools": tools, "system": "Be brief."}
     # Unlike the tokenizing mode, reasoning_content stays on the message by default (native).
     reasoning = [{"role": "assistant", "content": "4", "reasoning_content": "2+2"}]
     assert blend_module._to_chat({"messages": reasoning}, "messages")["messages"] == reasoning
@@ -222,7 +223,8 @@ def test_to_chat_handles_all_row_shapes():
 
 def test_take_chat_rows_skips_non_text_rows_and_fails_without_enough(tmp_path: Path, monkeypatch):
     source = _source("a")
-    rows = [_chat(0), _image_chat(1), _chat(2), _chat(3)]
+    # Media is rejected inside message content and as a top-level key the conversion drops.
+    rows = [_chat(0), _image_chat(1), {**_chat(9), "images": ["a.png"]}, _chat(2), _chat(3)]
     monkeypatch.setattr(blend_module, "_iter_rows", lambda *a: iter(rows))
     got = blend_module._take_chat_rows(source, tmp_path, 3, False, 0, "native")
     assert [c["messages"][0]["content"] for c in got] == ["q0", "q2", "q3"]
@@ -231,9 +233,6 @@ def test_take_chat_rows_skips_non_text_rows_and_fails_without_enough(tmp_path: P
     monkeypatch.setattr(blend_module, "_iter_rows", lambda *a: iter(images))
     with pytest.raises(RuntimeError, match=r"only 0/2 usable rows \(gave up after 21 rejected"):
         blend_module._take_chat_rows(source, tmp_path, 2, False, 0, "native")
-    # Without a budget, an all-rejected source must not drop out of the blend silently.
-    with pytest.raises(RuntimeError, match=r"only 0/any usable rows \(source exhausted"):
-        blend_module._take_chat_rows(source, tmp_path, None, False, 0, "native")
 
 
 def test_chat_blend_splits_weighted_rows(tmp_path: Path, chat_blend, monkeypatch):
@@ -280,12 +279,8 @@ def test_chat_blend_reuses_and_rebuilds_cached_parts(tmp_path: Path, chat_blend)
         ({}, {"shuffle": True}),
         ({"shuffle": True, "seed": 0}, {"shuffle": True, "seed": 1}),
         ({}, {"reasoning_content": "inline"}),
-        (  # a capped part must not stand in for every row
-            {"sources": [_source("a", split=None, files=["a.jsonl"])]},
-            {"sources": [_source("a", split=None, files=["a.jsonl"])], "target_samples": None},
-        ),
     ],
-    ids=["split", "files", "shuffle", "seed", "reasoning_content", "no_budget"],
+    ids=["split", "files", "shuffle", "seed", "reasoning_content"],
 )
 def test_chat_blend_reselects_after_a_selection_change(chat_blend, first, second):
     write_config, calls = chat_blend
@@ -299,7 +294,7 @@ def test_chat_blend_reselects_after_a_selection_change(chat_blend, first, second
     [
         ({"target_samples": 0}, "positive integer"),
         ({"target_samples": 1.5}, "positive integer"),
-        # Every row of a Hugging Face split would be held in memory.
+        # A whole source would be held in memory.
         ({"target_samples": None}, "target_samples is required"),
         ({"output_format": "megatron"}, "writes output_format: chat_jsonl"),
         ({"sources": [_source("a", weight=-1)]}, "nonnegative"),
@@ -372,10 +367,10 @@ def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch):
     config = {
         "output_dir": str(tmp_path / "blend"),
         "output_format": "chat_jsonl",
+        "target_samples": 40,
         "sources": [_source("a", split=None, files=list(paths))],
     }
     config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
-    # No target_samples: every usable row.
     assert blend_module.prepare_chat_data_blend(config_path) == {"validation": 2, "train": 38}
     out = tmp_path / "blend"
     rows = _read_jsonl(out / "train.jsonl") + _read_jsonl(out / "validation.jsonl")
