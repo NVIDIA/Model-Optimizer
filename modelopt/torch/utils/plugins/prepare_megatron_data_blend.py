@@ -206,13 +206,16 @@ def _to_chat(
             return {"messages": [{"role": "assistant", "content": text}]}
         matches = _CHAT_TURN.findall(text)
         # Markers that parse to no turns make the row malformed, not plain text: falling through
-        # would train the raw <extra_id_*> delimiters as assistant content. A marker without a known
-        # role (a Tool turn, or a SteerLM label line) or a known turn left empty would silently cut
-        # it out of the conversation, so drop the row. Only a bare delimiter at the very end needs no
-        # role, and only the System block, which real rows leave empty, may be empty.
+        # would train the raw <extra_id_*> delimiters as assistant content. Text before the first
+        # marker, a marker without a known role (a Tool turn, or a SteerLM label line) or a known turn
+        # left empty would silently cut it out of the conversation, so drop the row. Only a bare
+        # delimiter at the very end needs no role, and only the System block, which real rows leave
+        # empty, may be empty.
         roleless = len(_CHAT_MARKER.findall(text)) - len(matches)
-        if roleless > (1 if _CHAT_TRAILING_MARKER.search(text) else 0) or any(
-            not content.strip() and role != "System" for role, content in matches
+        if (
+            not _CHAT_MARKER.match(text.lstrip())
+            or roleless > (1 if _CHAT_TRAILING_MARKER.search(text) else 0)
+            or any(not content.strip() and role != "System" for role, content in matches)
         ):
             return None
         turns = [
@@ -261,7 +264,8 @@ def _take_chat_rows(
     """Return the first ``want`` usable chat rows of a source.
 
     Fails if the source cannot be read or runs out of usable rows, so the blend cannot change
-    silently; gives up after ``10 * want`` rejected rows.
+    silently; gives up after ``10 * want + 100`` rejected rows, a floor that keeps a small budget from
+    misjudging a source by its first few rows.
     """
     # Megatron-Bridge's chat SFT path consumes this output; keep exactly the rows it accepts. Imported
     # here, not at module scope, because the tokenizing mode does not need Megatron-Bridge installed.
@@ -270,13 +274,14 @@ def _take_chat_rows(
     name = f"{source['hf_dataset']} {source.get('split') or source.get('files')}"
     rows: list[dict[str, Any]] = []
     rejected = 0
+    max_rejected = 10 * want + 100
     try:
         for row in _iter_rows(source, output_dir, shuffle, seed):
             chat = _to_chat(row, source["content_field"], reasoning_content)
             # Judge the source row's top-level media keys too, which the conversion does not keep.
             if chat is None or not is_text_only_chat_example({**row, **chat}):
                 rejected += 1
-                if rejected > 10 * want:
+                if rejected > max_rejected:
                     break
                 continue
             rows.append(chat)
@@ -285,7 +290,7 @@ def _take_chat_rows(
     except Exception as e:  # e.g. a gated split, or a schema the streaming reader cannot cast
         raise RuntimeError(f"{name}: failed to read or convert") from e
     if len(rows) < want:
-        gave_up = rejected > 10 * want
+        gave_up = rejected > max_rejected
         reason = f"gave up after {rejected} rejected rows" if gave_up else "source exhausted"
         raise RuntimeError(f"{name}: only {len(rows)}/{want} usable rows ({reason})")
     print(f"{name}: {len(rows)} rows ({rejected} rejected)", flush=True)

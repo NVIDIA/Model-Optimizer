@@ -209,6 +209,8 @@ def test_to_chat_handles_all_row_shapes():
     text = "<extra_id_1>User\nq\n<extra_id_1>Tool\nresult\n<extra_id_1>Assistant\na\n"
     assert blend_module._to_chat({"text": text}, "text") is None
     for text in (
+        # Text before the first marker would be cut from the conversation.
+        "preamble\n<extra_id_1>User\nq\n<extra_id_1>Assistant\na\n",
         # A SteerLM label line is no role either.
         "<extra_id_1>User\nq\n<extra_id_1>Assistant\n<extra_id_2>quality:4\na\n",
         # A role must end at a newline: this is no User turn.
@@ -229,9 +231,9 @@ def test_take_chat_rows_skips_non_text_rows_and_fails_without_enough(tmp_path: P
     got = blend_module._take_chat_rows(source, tmp_path, 3, False, 0, "native")
     assert [c["messages"][0]["content"] for c in got] == ["q0", "q2", "q3"]
 
-    images = [_image_chat(i) for i in range(50)]
+    images = [_image_chat(i) for i in range(200)]
     monkeypatch.setattr(blend_module, "_iter_rows", lambda *a: iter(images))
-    with pytest.raises(RuntimeError, match=r"only 0/2 usable rows \(gave up after 21 rejected"):
+    with pytest.raises(RuntimeError, match=r"only 0/2 usable rows \(gave up after 121 rejected"):
         blend_module._take_chat_rows(source, tmp_path, 2, False, 0, "native")
 
 
