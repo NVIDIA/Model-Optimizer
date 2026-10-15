@@ -33,6 +33,8 @@ from transformers import AutoModel, DeepseekV3Config, LlamaConfig, LlamaForCausa
 
 import modelopt.torch.models.hf as models_hf
 import modelopt.torch.utils.distributed as dist
+import modelopt.torch.utils.moe as moe
+from modelopt.torch.models import get_spec
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.plugins import model_load_utils
@@ -229,28 +231,58 @@ def test_a_load_it_decides_reads_the_config_once(
 
 
 def test_an_expert_parallel_plan_loads_through_the_ep_loader(
-    run_as, serve, loaders, auto_class, tmp_path
+    run_as, serve, loaders, auto_class, monkeypatch, tmp_path
 ):
-    """An EP plan loads through load_and_prepare_ep, with the plan, and through no other load."""
+    """Decided automatically, an EP plan loads through load_and_prepare_ep -- with the plan and the
+    spec-prepared config -- and through no other load."""
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
     run_as(4)
-    serve(_deepseek_v3(n_routed_experts=8))
-    plan = DistributionPlan(4, ep_size=4, dense="fsdp")
+    served = serve(_deepseek_v3(n_routed_experts=8))
 
     model = load_pretrained(
-        str(tmp_path),
-        distribution=plan,
-        trust_remote_code=True,
-        attn_implementation="eager",
-        freeze=False,
+        str(tmp_path), trust_remote_code=True, attn_implementation="eager", freeze=False
     )
 
     call = loaders.pop("ep")
+    plan = DistributionPlan(4, ep_size=4, dense="fsdp")
     assert (call["ckpt_path"], call["plan"]) == (str(tmp_path), plan)
     assert (call["trust_remote_code"], call["attn_implementation"]) == (True, "eager")
     assert call["freeze"] is False
+    assert call["hf_config"] is served
+    assert served.base_model_ep_plan == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
     assert distribution_plan(model) == plan
     assert loaders == {}
     assert auto_class.calls == []
+
+
+@pytest.mark.parametrize(
+    ("planned", "given_config", "preparations"),
+    [(False, False, 1), (True, False, 1), (True, True, 0)],
+    ids=["decided_by_the_load", "planned", "planned_with_its_config"],
+)
+def test_a_load_prepares_its_config_once(
+    run_as, serve, loaders, monkeypatch, tmp_path, planned, given_config, preparations
+):
+    """A model's EP preparation can patch its modeling code, so a load runs it once, and not at all
+    when handed the config resolve_distribution_plan prepared."""
+    run_as(4)
+    config = serve(_deepseek_v3(n_routed_experts=8))
+    prepared = []
+
+    def apply_distributed_support(model_type, hf_config, **kwargs):
+        prepared.append(model_type)
+        hf_config.base_model_ep_plan = get_spec("deepseek_v3").ep_spec.base_model_ep_plan
+        return hf_config
+
+    monkeypatch.setattr(moe, "apply_distributed_support", apply_distributed_support)
+    kwargs = {"distribution": DistributionPlan(4, ep_size=4)} if planned else {}
+    if given_config:
+        kwargs["hf_config"] = config
+
+    load_pretrained(str(tmp_path), **kwargs)
+
+    assert len(prepared) == preparations
+    assert loaders["ep"]["hf_config"] is config
 
 
 def _every_rank_loads_rank0s_plan_job(rank, size, ckpt):
