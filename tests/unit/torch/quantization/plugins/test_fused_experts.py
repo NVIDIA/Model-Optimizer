@@ -1731,15 +1731,18 @@ class TestQwen3VLMoeTextExperts:
                 QuantModuleRegistry.unregister(experts_type)
 
 
+@pytest.mark.parametrize("activation_scheme", ["dynamic", "static"])
 @pytest.mark.parametrize("fold", [True, False])
 @pytest.mark.parametrize("has_gate", [True, False])
 @pytest.mark.parametrize("block_size", [(128, 128), (64, 128), None])
-def test_native_fp8_experts_scales(has_gate, block_size, fold):
+def test_native_fp8_experts_scales(has_gate, block_size, fold, activation_scheme):
     torch.manual_seed(42)
     config = PretrainedConfig(
         hidden_size=256, intermediate_size=256, num_experts=2, hidden_act="silu"
     )
-    experts = FP8Experts(config, block_size=block_size, has_gate=has_gate)
+    experts = FP8Experts(
+        config, block_size=block_size, has_gate=has_gate, activation_scheme=activation_scheme
+    )
     first = "gate_up_proj" if has_gate else "up_proj"
     expected = {}
     for name in (first, "down_proj"):
@@ -1795,4 +1798,4 @@ def test_native_fp8_experts_scales(has_gate, block_size, fold):
         else:
             torch.testing.assert_close(exported.up_proj.weight, expected[first][idx])
         torch.testing.assert_close(exported.down_proj.weight, expected["down_proj"][idx])
-    assert not any("scale_inv" in key for key in experts.state_dict())
+    assert not any("scale_inv" in key or "activation_scale" in key for key in experts.state_dict())

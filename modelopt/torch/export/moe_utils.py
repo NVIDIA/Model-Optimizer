@@ -42,7 +42,8 @@ def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
         "down_proj_input_quantizer",
         f"{first_proj_attr}_scale_inv",
         "down_proj_scale_inv",
-        f"{first_proj_attr}_activation_scale",
+        "gate_up_proj_activation_scale",
+        "up_proj_activation_scale",
         "down_proj_activation_scale",
     ):
         if hasattr(module, attr):
