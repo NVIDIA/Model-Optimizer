@@ -13,12 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import partial
-
 import pytest
 import torch
 import torch.distributed as dist
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.quantization.models import SimpleLinear
 from torch.nn.parallel import DistributedDataParallel
 
@@ -65,12 +62,11 @@ def _test_uneven_amax_sync_helper(rank, size):
         quantizer._set_buffer("_amax", torch.tensor(7.0))
     quantizer.sync_amax_across_distributed_group(DistributedProcessGroup(dist.group.WORLD))
     assert quantizer.amax.item() == 7.0
-    dist.destroy_process_group()
 
 
-def test_amax_sync_with_a_rank_that_never_calibrated(skip_on_windows):
+def test_amax_sync_with_a_rank_that_never_calibrated(cpu_dist_workers):
     """The rank without an amax still joins the sync, contributing a zero on the group's device."""
-    spawn_multiprocess_job(2, _test_uneven_amax_sync_helper, backend="gloo")
+    cpu_dist_workers.run(_test_uneven_amax_sync_helper)
 
 
 def _sync(quantizer):
@@ -83,12 +79,11 @@ def _calibrated_zero_amax_helper(rank, size):
     _sync(quantizer)
     assert quantizer.amax is not None
     assert quantizer.amax.item() == 0.0
-    dist.destroy_process_group()
 
 
-def test_a_calibrated_zero_amax_survives_the_sync(skip_on_windows):
+def test_a_calibrated_zero_amax_survives_the_sync(cpu_dist_workers):
     """An all-zero weight calibrates to amax 0, which is not "never calibrated"."""
-    spawn_multiprocess_job(2, _calibrated_zero_amax_helper, backend="gloo")
+    cpu_dist_workers.run(_calibrated_zero_amax_helper)
 
 
 def _calibrators_dtype_helper(rank, size):
@@ -103,23 +98,21 @@ def _calibrators_dtype_helper(rank, size):
     assert per_tensor.amax.item() == 3.0
     assert per_channel.amax.dtype == torch.bfloat16
     assert per_channel.amax.tolist() == [1.0, 3.0]
-    dist.destroy_process_group()
 
 
-def test_the_sync_leaves_every_rank_the_calibrators_dtype(skip_on_windows):
+def test_the_sync_leaves_every_rank_the_calibrators_dtype(cpu_dist_workers):
     """Including a rank that never calibrated the quantizer and so had no amax of its own."""
-    spawn_multiprocess_job(2, _calibrators_dtype_helper, backend="gloo")
+    cpu_dist_workers.run(_calibrators_dtype_helper)
 
 
 def _never_calibrated_helper(rank, size):
     quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
     _sync(quantizer)
     assert getattr(quantizer, "_amax", None) is None
-    dist.destroy_process_group()
 
 
-def test_a_quantizer_no_rank_calibrated_stays_uncalibrated(skip_on_windows):
-    spawn_multiprocess_job(2, _never_calibrated_helper, backend="gloo")
+def test_a_quantizer_no_rank_calibrated_stays_uncalibrated(cpu_dist_workers):
+    cpu_dist_workers.run(_never_calibrated_helper)
 
 
 def _expert_input_amax_helper(rank, size, share):
@@ -145,10 +138,9 @@ def _expert_input_amax_helper(rank, size, share):
     else:
         with pytest.raises(RuntimeError, match="MoE calibration incomplete"):
             max_calibrate(model, forward_loop)
-    dist.destroy_process_group()
 
 
 @pytest.mark.parametrize("share", [False, True], ids=["megatron", "opted-in"])
-def test_only_modules_that_opt_in_share_expert_input_amax_before_the_check(skip_on_windows, share):
+def test_only_modules_that_opt_in_share_expert_input_amax_before_the_check(cpu_dist_workers, share):
     """Megatron's experts keep main's check-then-sync; HF fused experts share the input amax first."""
-    spawn_multiprocess_job(2, partial(_expert_input_amax_helper, share=share), backend="gloo")
+    cpu_dist_workers.run(_expert_input_amax_helper, share=share)
