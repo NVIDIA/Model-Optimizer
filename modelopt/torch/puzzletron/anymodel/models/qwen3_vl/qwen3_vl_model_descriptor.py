@@ -15,6 +15,7 @@
 
 # mypy: ignore-errors
 
+import inspect
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List
@@ -105,8 +106,13 @@ class Qwen3VLModelDescriptor(ModelDescriptor):
             model.config.vision_config if hasattr(model.config, "vision_config") else None
         )
         if vision_config is not None:
-            head_dim = vision_config.hidden_size // vision_config.num_heads
-            model.model.visual.rotary_pos_emb = Qwen3VLMoeVisionRotaryEmbedding(head_dim // 2).to(
+            # transformers 5.17 builds the vision RoPE from the vision config instead of its dim.
+            if "config" in inspect.signature(Qwen3VLMoeVisionRotaryEmbedding).parameters:
+                rotary_pos_emb = Qwen3VLMoeVisionRotaryEmbedding(vision_config)
+            else:
+                head_dim = vision_config.hidden_size // vision_config.num_heads
+                rotary_pos_emb = Qwen3VLMoeVisionRotaryEmbedding(head_dim // 2)
+            model.model.visual.rotary_pos_emb = rotary_pos_emb.to(
                 device=runtime.device, dtype=runtime.dtype
             )
 

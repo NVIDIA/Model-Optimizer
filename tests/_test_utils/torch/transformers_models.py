@@ -14,12 +14,16 @@
 # limitations under the License.
 
 import contextlib
+import json
+import re
+from collections import defaultdict
 from functools import partial
 from pathlib import Path
 
 import pytest
 import torch
 from _test_utils.torch.misc import set_seed
+from safetensors.torch import load_file, save_file
 
 transformers = pytest.importorskip("transformers")
 from transformers import (
@@ -34,10 +38,14 @@ from transformers import (
     Gemma3Config,
     GptOssConfig,
     LlamaConfig,
+    LlamaForSequenceClassification,
+    MixtralConfig,
     NemotronConfig,
     PreTrainedModel,
     Qwen3Config,
     Qwen3MoeConfig,
+    Qwen3VLConfig,
+    Qwen3VLTextConfig,
     T5Config,
     T5ForConditionalGeneration,
     ViTConfig,
@@ -202,9 +210,6 @@ create_tiny_qwen3_moe_dir = partial(_create_tiny_qwen3_dir, moe=True)
 
 ##### Qwen3-VL #####
 def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
-    # Lazy imports — Qwen3VL requires transformers>=4.57
-    from transformers import Qwen3VLConfig
-
     set_seed(SEED)
 
     # Defaults: hidden_size=num_attention_heads*head_dim (e.g. 4*8=32).
@@ -220,7 +225,16 @@ def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
         "head_dim": 8,
         "max_position_embeddings": 32,
         "vocab_size": 32,
+        "rope_scaling": {"rope_type": "default", "mrope_section": [1, 1, 2]},
     }
+    # Transformers 4.x names this field rope_scaling; 5.x renamed it to rope_parameters.
+    # Supplying it avoids the 4.57 Qwen3-VL constructor dereferencing a None rope config.
+    rope_field = (
+        "rope_parameters"
+        if "rope_parameters" in getattr(Qwen3VLTextConfig, "__annotations__", {})
+        else "rope_scaling"
+    )
+    text_kwargs[rope_field] = {"rope_type": "default", "mrope_section": [1, 1, 2]}
     text_kwargs.update(config_kwargs)
     # Pass as dicts — transformers 5.3.0 Qwen3VLConfig.__init__ only handles
     # vision_config/text_config when they are dicts or None, not instances.
@@ -324,14 +338,28 @@ def create_tiny_gemma3vl_dir(
 QWEN3_5_VL_REF = "Qwen/Qwen3.5-0.8B"
 
 
-def _get_tiny_qwen3_5_vl(moe: bool = False, **config_kwargs) -> PreTrainedModel:
+class _TinyQwen35Tokenizer:
+    """Minimal offline tokenizer contract required to construct a tiny Qwen3.5-VL model."""
+
+    image_token_id = 1
+    video_token_id = 2
+    vision_bos_token_id = 3
+    vision_eos_token_id = 4
+
+    def __len__(self):
+        return 32
+
+
+def _get_tiny_qwen3_5_vl(moe: bool = False, *, tokenizer=None, **config_kwargs) -> PreTrainedModel:
     # Lazy imports — Qwen3.5-VL requires a recent transformers version.
     from transformers import Qwen3_5Config, Qwen3_5MoeConfig
 
     set_seed(SEED)
 
-    # Vocab + vision token ids derive from the ref tokenizer to match the saved processor.
-    tokenizer = _get_tiny_vlm_tokenizer(AutoTokenizer.from_pretrained(QWEN3_5_VL_REF))
+    # Vocab + vision token ids normally derive from the reference tokenizer. Tests that do not
+    # exercise processing may inject the minimal offline contract above instead.
+    if tokenizer is None:
+        tokenizer = _get_tiny_vlm_tokenizer(AutoTokenizer.from_pretrained(QWEN3_5_VL_REF))
 
     # Hybrid GatedDeltaNet (linear attention) + gated full-attention (layer_types auto-generated).
     text_kwargs = {
@@ -390,6 +418,45 @@ def _get_tiny_qwen3_5_vl(moe: bool = False, **config_kwargs) -> PreTrainedModel:
     return AutoModelForImageTextToText.from_config(cfg)
 
 
+def _pack_qwen3_5_moe_experts(dir_path: Path | str) -> None:
+    """Repack a saved Qwen3.5-MoE fixture's experts the way released checkpoints store them.
+
+    transformers unpacks routed experts on save, but the released BF16 Qwen3.5 checkpoints store
+    them packed as ``experts.gate_up_proj`` / ``experts.down_proj``, so the fixture matches those.
+    Quantized export deliberately writes per-expert instead, matching the NVFP4 releases.
+    """
+    dir_path = Path(dir_path)
+    shards = sorted(dir_path.glob("*.safetensors"))
+    state_dict: dict[str, torch.Tensor] = {}
+    for shard in shards:
+        state_dict.update(load_file(str(shard)))
+
+    per_expert = re.compile(r"^(.*\.mlp\.experts)\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$")
+    grouped: dict[str, dict[int, dict[str, torch.Tensor]]] = defaultdict(lambda: defaultdict(dict))
+    for key in list(state_dict):
+        match = per_expert.match(key)
+        if match:
+            base, expert_id, proj = match.groups()
+            grouped[base][int(expert_id)][proj] = state_dict.pop(key)
+    if not grouped:
+        return
+
+    for base, experts in grouped.items():
+        ids = sorted(experts)
+        # gate first, then up, along the output dim -- the order the packed tensor is split on.
+        state_dict[f"{base}.gate_up_proj"] = torch.stack(
+            [torch.cat([experts[i]["gate_proj"], experts[i]["up_proj"]], dim=0) for i in ids]
+        )
+        state_dict[f"{base}.down_proj"] = torch.stack([experts[i]["down_proj"] for i in ids])
+
+    for shard in shards:
+        shard.unlink()
+    save_file(state_dict, str(dir_path / "model.safetensors"), metadata={"format": "pt"})
+    index = dir_path / "model.safetensors.index.json"
+    if index.exists():
+        index.unlink()
+
+
 def _create_tiny_qwen3_5_vl_dir(
     tmp_path: Path | str,
     with_processor: bool = False,
@@ -398,7 +465,7 @@ def _create_tiny_qwen3_5_vl_dir(
     moe: bool = False,
     **config_kwargs,
 ) -> Path | tuple[Path, PreTrainedModel]:
-    return _create_tiny_vlm_dir(
+    result = _create_tiny_vlm_dir(
         Path(tmp_path) / ("tiny_qwen3_5_moe_vl" if moe else "tiny_qwen3_5_vl"),
         QWEN3_5_VL_REF,
         _get_tiny_qwen3_5_vl,
@@ -407,12 +474,20 @@ def _create_tiny_qwen3_5_vl_dir(
         moe=moe,
         **config_kwargs,
     )
+    if moe:
+        _pack_qwen3_5_moe_experts(result[0] if isinstance(result, tuple) else result)
+    return result
 
 
 get_tiny_qwen3_5_vl = partial(_get_tiny_qwen3_5_vl, moe=False)
 create_tiny_qwen3_5_vl_dir = partial(_create_tiny_qwen3_5_vl_dir, moe=False)
 get_tiny_qwen3_5_moe_vl = partial(_get_tiny_qwen3_5_vl, moe=True)
 create_tiny_qwen3_5_moe_vl_dir = partial(_create_tiny_qwen3_5_vl_dir, moe=True)
+
+
+def get_tiny_qwen3_5_vl_offline(**config_kwargs) -> PreTrainedModel:
+    """Build a dense tiny Qwen3.5-VL without downloading its reference tokenizer."""
+    return _get_tiny_qwen3_5_vl(moe=False, tokenizer=_TinyQwen35Tokenizer(), **config_kwargs)
 
 
 ##### NEMOTRON #####
@@ -447,12 +522,39 @@ def create_tiny_nemotron_dir(
 
 
 ##### NEMOTRON-H (Mamba + Attention + MoE/MLP hybrid) #####
+def _match_released_nemotron_h_embedding_name() -> None:
+    """Save NemotronH's embedding as ``backbone.embeddings`` like released checkpoints do.
+
+    transformers <= 5.15 renames it to the legacy singular on save, so a saved fixture disagrees
+    with every real checkpoint on one tensor. Dropped upstream in 5.16, where this is a no-op
+    since there is no such rule left to remove.
+    """
+    # Optional dependency: conversion_mapping is transformers 5.x only, while NemotronH also
+    # exists on the 4.57 floor of the support matrix.
+    try:
+        from transformers.conversion_mapping import (
+            get_checkpoint_conversion_mapping,
+            register_checkpoint_conversion_mapping,
+        )
+    except ImportError:
+        return
+
+    mapping = get_checkpoint_conversion_mapping("nemotron_h")
+    if mapping is None:
+        return
+    kept = [m for m in mapping if getattr(m, "source_patterns", None) != ["embedding.weight"]]
+    if len(kept) != len(mapping):
+        register_checkpoint_conversion_mapping("nemotron_h", kept, overwrite=True)
+
+
 def get_tiny_nemotron_h(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
 
     # Lazy import — NemotronHConfig only exists in newer transformers builds, and this
     # module is imported broadly (including by the min-transformers CI job).
     from transformers import NemotronHConfig
+
+    _match_released_nemotron_h_embedding_name()
 
     # Tiny NemotronH hybrid. hybrid_override_pattern letters: M=Mamba, E=MoE/FFN, *=Attention.
     # "ME*E" matches the NemotronH default and exercises Mamba + MoE + attention layers.
@@ -537,6 +639,147 @@ def create_tiny_deepseek_v3_dir(
     )
 
 
+##### GLM-5.3-FLASH / DEEPSEEK-V4 (config-only, for vLLM ``load_format="dummy"``) #####
+def _write_config_dir(dir_path: Path, config: dict) -> Path:
+    dir_path.mkdir(parents=True, exist_ok=True)
+    (dir_path / "config.json").write_text(json.dumps(config, indent=2))
+    return dir_path
+
+
+def create_tiny_glm5_next_config_dir(tmp_path: Path | str, **config_kwargs) -> Path:
+    """Text-only zai-org/GLM-5.3-Flash config with one KDA and one sparse-attention layer, 8 experts.
+
+    Hidden and attention shapes stay at the released values because vLLM's sparse-attention and
+    k-pool indexer kernels only support those. There are no weights: boot vLLM with dummy weights.
+    """
+    config = {
+        "architectures": ["Glm5NextForCausalLM"],
+        "model_type": "glm5_next",
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "first_k_dense_replace": 1,
+        "hc_eps": 1e-06,
+        "hc_mult": 4,
+        "hc_sinkhorn_iters": 20,
+        "head_dim": 0,
+        "hidden_act": "silu",
+        "hidden_size": 4096,
+        "index_head_dim": 128,
+        "index_kpool": 4,
+        "index_kpool_always_select_tail": True,
+        "index_kpool_compress": True,
+        "index_n_heads": 32,
+        "index_topk": 2048,
+        "index_share_for_mtp_iteration": True,
+        "indexer_rope_interleave": True,
+        "indexer_types": ["full", "full"],
+        "initializer_range": 0.02,
+        "intermediate_size": 12288,
+        "kv_lora_rank": 512,
+        "layer_types": ["linear_attention", "deepseek_sparse_attention"],
+        "linear_attn_config": {
+            "num_heads": 64,
+            "gate_lower_bound": -5.0,
+            "head_dim": 128,
+            "short_conv_kernel_size": 4,
+            "kda_layers": [0],
+            "full_attn_layers": [1],
+        },
+        "max_position_embeddings": 1048576,
+        "mhc": True,
+        "mla_use_nope": True,
+        "mlp_layer_types": ["dense", "sparse"],
+        "moe_intermediate_size": 2048,
+        "moe_router_dtype": "float32",
+        "n_group": 1,
+        "n_routed_experts": 8,
+        "n_shared_experts": 1,
+        "norm_topk_prob": True,
+        "num_attention_heads": 64,
+        "num_experts_per_tok": 2,
+        "num_hidden_layers": 2,
+        "num_key_value_heads": 64,
+        "num_nextn_predict_layers": 0,
+        "q_lora_rank": 1536,
+        "qk_head_dim": 256,
+        "qk_nope_head_dim": 256,
+        "qk_rope_head_dim": 0,
+        "rms_norm_eps": 1e-05,
+        "routed_scaling_factor": 2.5,
+        "scoring_func": "sigmoid",
+        "swiglu_limit": 10.0,
+        "tie_word_embeddings": False,
+        "topk_group": 1,
+        "topk_method": "noaux_tc",
+        "v_head_dim": 256,
+        "vocab_size": 154880,
+        **config_kwargs,
+    }
+    return _write_config_dir(Path(tmp_path) / "tiny_glm5_next", config)
+
+
+def create_tiny_deepseek_v4_config_dir(tmp_path: Path | str, **config_kwargs) -> Path:
+    """deepseek-ai/DeepSeek-V4-Pro config with two layers (compress ratios 128 and 4) and 8 experts.
+
+    The ratio-4 layer carries the lightning indexer. Shapes stay at the released values because
+    vLLM's sparse-attention kernels only support those. There are no weights: boot vLLM with dummy
+    weights. The released FP8/FP4 checkpoint quantization is dropped, so weights are bf16.
+    """
+    config = {
+        "architectures": ["DeepseekV4ForCausalLM"],
+        "model_type": "deepseek_v4",
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": 0,
+        "eos_token_id": 1,
+        "compress_ratios": [128, 4],
+        "compress_rope_theta": 160000,
+        "hc_eps": 1e-06,
+        "hc_mult": 4,
+        "hc_sinkhorn_iters": 20,
+        "head_dim": 512,
+        "hidden_act": "silu",
+        "hidden_size": 7168,
+        "index_head_dim": 128,
+        "index_n_heads": 64,
+        "index_topk": 1024,
+        "initializer_range": 0.02,
+        "max_position_embeddings": 1048576,
+        "moe_intermediate_size": 3072,
+        "n_routed_experts": 8,
+        "n_shared_experts": 1,
+        "norm_topk_prob": True,
+        "num_attention_heads": 128,
+        "num_experts_per_tok": 2,
+        "num_hash_layers": 1,
+        "num_hidden_layers": 2,
+        "num_key_value_heads": 1,
+        "num_nextn_predict_layers": 0,
+        "o_groups": 16,
+        "o_lora_rank": 1024,
+        "q_lora_rank": 1536,
+        "qk_rope_head_dim": 64,
+        "rms_norm_eps": 1e-06,
+        "rope_scaling": {
+            "beta_fast": 32,
+            "beta_slow": 1,
+            "factor": 16,
+            "original_max_position_embeddings": 65536,
+            "type": "yarn",
+        },
+        "rope_theta": 10000,
+        "routed_scaling_factor": 2.5,
+        "scoring_func": "sqrtsoftplus",
+        "sliding_window": 128,
+        "swiglu_limit": 10.0,
+        "tie_word_embeddings": False,
+        "topk_method": "noaux_tc",
+        "vocab_size": 129280,
+        **config_kwargs,
+    }
+    return _write_config_dir(Path(tmp_path) / "tiny_deepseek_v4", config)
+
+
 ##### GPT-OSS #####
 def get_tiny_gpt_oss(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
@@ -567,6 +810,25 @@ def create_tiny_gpt_oss_dir(
     )
 
 
+##### MIXTRAL #####
+def get_tiny_mixtral(**config_kwargs) -> PreTrainedModel:
+    set_seed(SEED)
+    kwargs = {
+        "dtype": torch.bfloat16,
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "num_local_experts": 4,
+        "num_experts_per_tok": 2,
+        "max_position_embeddings": 32,
+        "vocab_size": 32,
+    }
+    kwargs.update(config_kwargs)
+    return AutoModelForCausalLM.from_config(MixtralConfig(**kwargs))
+
+
 ##### LLAMA #####
 def get_tiny_llama(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
@@ -590,6 +852,35 @@ def create_tiny_llama_dir(
     return _create_tiny_llm_dir(
         Path(tmp_path) / "tiny_llama",
         get_tiny_llama,
+        with_tokenizer=with_tokenizer,
+        **config_kwargs,
+    )
+
+
+def get_tiny_llama_seq_cls(**config_kwargs) -> PreTrainedModel:
+    set_seed(SEED)
+    kwargs = {
+        "dtype": torch.bfloat16,
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 32,
+        "vocab_size": 32,
+        "num_labels": 1,
+        "pad_token_id": 0,
+    }
+    kwargs.update(config_kwargs)
+    return LlamaForSequenceClassification(LlamaConfig(**kwargs))
+
+
+def create_tiny_llama_seq_cls_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
+) -> Path:
+    return _create_tiny_llm_dir(
+        Path(tmp_path) / "tiny_llama_seq_cls",
+        get_tiny_llama_seq_cls,
         with_tokenizer=with_tokenizer,
         **config_kwargs,
     )
@@ -641,10 +932,6 @@ def get_tiny_bert(**config_kwargs) -> PreTrainedModel:
     }
     kwargs.update(config_kwargs)
     return AutoModelForQuestionAnswering.from_config(BertConfig(**kwargs))
-
-
-def create_tiny_bert_dir(tmp_path: Path | str, **config_kwargs) -> Path:
-    return _create_tiny_llm_dir(Path(tmp_path) / "tiny_bert", get_tiny_bert, **config_kwargs)
 
 
 ##### ViT (vision) #####

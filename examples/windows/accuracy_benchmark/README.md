@@ -41,7 +41,7 @@ The table below lists the setup steps to prepare your environment for evaluating
 | **Install PyTorch and Related Packages** | `pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128` |
 | **Install ONNX Runtime Packages** | `pip install onnxruntime-directml==1.21.1` <br> `pip install onnxruntime-genai-directml==0.6.0` |
 | **Install Benchmark Requirements** | `pip install -r requirements.txt` |
-| **Download MMLU Data** | `mkdir data` <br> `curl -o .\data\mmlu.tar https://people.eecs.berkeley.edu/~hendrycks/data.tar` <br> `tar -xf .\data\mmlu.tar -C .\data` <br> `Move-Item .\data\data .\data\mmlu` |
+| **Download MMLU Data** | `mkdir data` <br> `curl.exe -L -o .\data\mmlu.tar https://huggingface.co/datasets/cais/mmlu/resolve/c30699e8356da336a370243923dbaf21066bb9fe/data.tar` <br> `tar -xf .\data\mmlu.tar -C .\data` <br> `Move-Item .\data\data .\data\mmlu` |
 
 ### Evaluation Methods
 

@@ -64,8 +64,7 @@ def init_child_from_parent(
     max_layer_workers: Optional[int] = None,  # Auto-calculate optimal workers if None
 ) -> None:
     """
-    Init child models from parent models in the style of bypass training,
-    but without having to run the entire bypass pipeline.
+    Initialize a child model from a parent model using AnyModel pruning.
 
     Uses AnyModel approach with deci_x_patcher for heterogeneous layer configurations.
 

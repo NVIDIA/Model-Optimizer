@@ -14,35 +14,38 @@
 # limitations under the License.
 
 import pytest
+from _test_utils.examples.diffusers_example_runner import run_example_in_process
+from _test_utils.examples.run_command import set_in_process_runner
+from _test_utils.fs_utils import assert_unmodified_tree
+from _test_utils.torch.diffusers_models import (
+    create_tiny_pixart_pipeline_dir,
+    create_tiny_qwen_image_pipeline_dir,
+)
 
 
-@pytest.fixture(scope="session")
-def tiny_wan22_path(tmp_path_factory):
-    """Create a tiny Wan 2.2 (14B-style) pipeline and return its path.
+@pytest.fixture
+def in_process_examples():
+    """Run example scripts in the pytest process; see ``_test_utils.examples.diffusers_example_runner``.
 
-    Built once per session and shared across all tests that need it.
+    Opt-in per test module (``pytestmark``). Per test, not per session: the hook is a module-global
+    in ``run_command`` and must not leak into example suites collected later in the session.
     """
+    set_in_process_runner(run_example_in_process)
     try:
-        from _test_utils.torch.diffusers_models import create_tiny_wan22_pipeline_dir
-    except ImportError:
-        pytest.skip("Wan 2.2 diffusers models not available (requires diffusers with WanPipeline)")
-
-    tmp_path = tmp_path_factory.mktemp("wan22")
-    return str(create_tiny_wan22_pipeline_dir(tmp_path))
+        yield
+    finally:
+        set_in_process_runner(None)
 
 
 @pytest.fixture(scope="session")
 def tiny_qwen_image_path(tmp_path_factory):
-    """Create a tiny Qwen-Image pipeline and return its path (built once per session).
-
-    SKETCH fixture for the recipe-level DMD2 e2e (``test_fastgen_recipe_e2e.py``).
-    See ``create_tiny_qwen_image_pipeline_dir`` for caveats — notably the tiny
-    Qwen2.5-VL text encoder, which needs in-container validation.
-    """
-    try:
-        from _test_utils.torch.diffusers_models import create_tiny_qwen_image_pipeline_dir
-    except ImportError:
-        pytest.skip("Qwen-Image diffusers models not available")
-
     tmp_path = tmp_path_factory.mktemp("qwen_image")
-    return str(create_tiny_qwen_image_pipeline_dir(tmp_path))
+    with assert_unmodified_tree(create_tiny_qwen_image_pipeline_dir(tmp_path)) as path:
+        yield str(path)
+
+
+@pytest.fixture(scope="session")
+def tiny_pixart_path(tmp_path_factory):
+    tmp_path = tmp_path_factory.mktemp("pixart")
+    with assert_unmodified_tree(create_tiny_pixart_pipeline_dir(tmp_path)) as path:
+        yield str(path)

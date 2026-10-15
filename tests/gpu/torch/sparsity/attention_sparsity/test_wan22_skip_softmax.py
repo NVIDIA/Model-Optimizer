@@ -31,9 +31,8 @@ pytestmark = [
     pytest.mark.filterwarnings("ignore::DeprecationWarning"),
 ]
 
-diffusers = pytest.importorskip("diffusers")
-
 import numpy as np
+from _test_utils.torch.diffusers_models import get_tiny_wan22_transformer
 from diffusers import WanPipeline
 
 import modelopt.torch.opt as mto
@@ -41,20 +40,15 @@ from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNE
 
 if TRITON_KERNEL_AVAILABLE:
     import modelopt.torch.sparsity.attention_sparsity as mtsa
+    from modelopt.torch.sparsity.attention_sparsity.methods.triton_skip_softmax import (
+        TritonSkipSoftmaxMethod,
+    )
     from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
 
 # ---------------------------------------------------------------------------
 # Tiny Wan 2.2 pipeline fixture — shared across tests (pipeline load is costly)
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def tiny_wan22_path(tmp_path_factory):
-    """Create and save a tiny Wan 2.2 pipeline to disk once per module."""
-    from _test_utils.torch.diffusers_models import create_tiny_wan22_pipeline_dir
-
-    return str(create_tiny_wan22_pipeline_dir(tmp_path_factory.mktemp("tiny_wan22")))
 
 
 @pytest.fixture
@@ -168,10 +162,6 @@ class TestWan22PipelineE2E:
 
     def test_measure_sparsity_counts_accumulate(self, tiny_wan22_pipe):
         """measure_sparsity=True + a permissive threshold → nonzero sparsity counters."""
-        from modelopt.torch.sparsity.attention_sparsity.methods.triton_skip_softmax import (
-            TritonSkipSoftmaxMethod,
-        )
-
         _sparsify_both_transformers(tiny_wan22_pipe, _skip_softmax_cfg(threshold=0.25))
 
         # Enable measurement + reset counters on every sparse module
@@ -204,8 +194,6 @@ class TestWan22PipelineE2E:
         ``attn2`` modules keep the default method. The restored model must show the
         identical (module_name → method) mapping.
         """
-        from _test_utils.torch.diffusers_models import get_tiny_wan22_transformer
-
         _sparsify_both_transformers(tiny_wan22_pipe, _skip_softmax_cfg())
         state = mto.modelopt_state(tiny_wan22_pipe.transformer)
 
@@ -247,10 +235,6 @@ class TestWan22Calibration:
 
     def test_calibration_collects_stats_per_module(self, tiny_wan22_pipe):
         """A forward pass under calibration_mode populates per-module _last_stats."""
-        from modelopt.torch.sparsity.attention_sparsity.methods.triton_skip_softmax import (
-            TritonSkipSoftmaxMethod,
-        )
-
         _sparsify_both_transformers(tiny_wan22_pipe, _skip_softmax_cfg())
 
         threshold_trials = [1e-3, 1e-2, 1e-1]

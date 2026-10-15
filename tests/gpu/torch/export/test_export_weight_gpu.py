@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import math
 
 import torch
@@ -22,6 +23,7 @@ from torch.nn import functional as F
 from torch.nn import init
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.quant_utils import postprocess_state_dict
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.nn.modules.quant_module import QuantModule, QuantModuleRegistry
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import TensorQuantizer
@@ -121,3 +123,45 @@ def test_export_per_block_quantized_weight():
     assert hasattr(model.linears[2], quantizer_attrs.output_quantizer)
     assert not getattr(model.linears[2], quantizer_attrs.output_quantizer).is_enabled
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
+
+
+def test_export_compressed_nvfp4_weight():
+    """``mtq.compress`` (used by ``hf_ptq --low_memory_mode``) leaves the weight as packed NVFP4
+    nibbles, so per-block scales cannot be recomputed from it. The export must reuse the scales
+    stored on the quantizer and must not leak those internal buffers into the state_dict.
+    """
+    in_features, block_size = 256, 16
+    calib = lambda x: x(torch.randn(1, 4, in_features).cuda())  # noqa: E731
+
+    model = ToyModel(dims=[in_features, in_features, in_features, in_features]).cuda()
+    reference = mtq.quantize(copy.deepcopy(model), mtq.NVFP4_DEFAULT_CFG, calib)
+    compressed = mtq.quantize(copy.deepcopy(model), mtq.NVFP4_DEFAULT_CFG, calib)
+    mtq.compress(compressed)
+
+    quantizer_attrs = quantizer_attr_names("weight")
+    ref_module, compressed_module = reference.linears[2], compressed.linears[2]
+    _export_quantized_weight(ref_module, torch.float16, "weight")
+    _export_quantized_weight(compressed_module, torch.float16, "weight")
+
+    ref_scale = getattr(ref_module, quantizer_attrs.weight_scale)
+    compressed_scale = getattr(compressed_module, quantizer_attrs.weight_scale)
+
+    # Per-block scale covers the logical input dim, not the packed one.
+    assert compressed_scale.shape == ref_scale.shape
+    assert compressed_scale.shape[-1] == in_features // block_size
+
+    # weight_scale * weight_scale_2 is what dequantization consumes; it must match the
+    # uncompressed export rather than the compression-time normalization.
+    ref_2 = getattr(ref_module, quantizer_attrs.weight_scale_2)
+    compressed_2 = getattr(compressed_module, quantizer_attrs.weight_scale_2)
+    assert torch.allclose(
+        compressed_scale.float() * compressed_2.float(),
+        ref_scale.float() * ref_2.float(),
+        rtol=0.05,
+    )
+
+    # Internal compression buffers must be stripped by postprocess_state_dict, which keys off
+    # RealQuantLinear.list_of_scale_tensors -- a missing underscore there let _double_scale leak.
+    stripped = postprocess_state_dict(compressed.state_dict(), 1.0, None)
+    assert not any(key.endswith("weight_quantizer._double_scale") for key in stripped)
+    assert not any(key.endswith("weight_quantizer._scale") for key in stripped)

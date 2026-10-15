@@ -1,0 +1,45 @@
+# Set to the target model's Hugging Face ID or local tokenizer path.
+tokenizer: <target-model-tokenizer>
+output_dir: <session-model-workspace>/data/nemotron-cascade-2-through-1000
+target_tokens: 17_300_000_000
+sources:
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: math
+    split: train
+    content_field: messages
+    weight: 21.1
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: science
+    split: train
+    content_field: messages
+    weight: 10.9
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: chat
+    split: train
+    content_field: messages
+    weight: 56.2
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: instruction_following
+    split: train
+    content_field: messages
+    weight: 3.3
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: safety
+    split: train
+    content_field: messages
+    weight: 0.02
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: conversational_agent
+    split: train
+    content_field: messages
+    weight: 3.3
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: swe
+    split: train
+    content_field: messages
+    weight: 1.8
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: terminal_agent
+    split: train
+    content_field: messages
+    weight: 3.3

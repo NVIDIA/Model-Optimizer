@@ -26,6 +26,8 @@ from openai import AsyncOpenAI
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
+from modelopt.torch.speculative.utils import get_conversation_input_ids
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -199,9 +201,7 @@ async def main(args: argparse.Namespace) -> None:
                     f,
                 )
 
-            input_ids = tokenizer.apply_chat_template(
-                conversations, return_tensors=None, add_generation_template=False, tokenize=True
-            )
+            input_ids = get_conversation_input_ids(tokenizer, conversations)
             num_input_tokens = len(input_ids)
             if num_input_tokens <= 10 or num_input_tokens > args.max_seq_len:
                 num_too_long += 1

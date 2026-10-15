@@ -88,6 +88,34 @@ def cp_gather_logits(local_logits: torch.Tensor, cp_group, global_seq_len: int) 
     return torch.cat(chunks, dim=1)
 
 
+def _assert_mamba_within_int32_indexing(model: MegatronModule, batch_size: int, seq_length: int):
+    """Guard Mamba2 calibration against int32 activation-indexing overflow.
+
+    The SSD Triton kernels index activations with int32, so ``batch * seq * mamba in_proj`` must stay
+    < 2**31 or they hit a cryptic CUDA 'illegal memory access'. Fail fast with the max safe batch.
+    """
+    d = getattr(model, "_modelopt_max_mamba_in_proj", None)
+    if d is None:
+        d = max(
+            (m.in_proj.weight.shape[0] for m in model.modules() if hasattr(m, "in_proj")), default=0
+        )
+        model._modelopt_max_mamba_in_proj = d
+    if d and batch_size * seq_length * d >= 2**31:
+        raise ValueError(
+            f"{batch_size=} x {seq_length=} x mamba in_proj={d} overflows int32 in the Mamba2 kernels. "
+            f"Reduce calibration batch size to <= {2**31 // (seq_length * d)}."
+        )
+
+
+def _masks_causally_itself(model: MegatronModule) -> bool:
+    """Whether the model's attention applies causal masking internally and rejects an explicit mask.
+
+    DeepSeek-V4 hybrid attention (``CompressedSparseAttention``) raises on any ``attention_mask``;
+    Megatron training runs it with ``attention_mask=None``.
+    """
+    return getattr(model.config, "experimental_attention_variant", None) == "dsv4_hybrid"
+
+
 def get_current_memory_info():
     """Get current memory usage."""
     remaining_mem, total_mem = torch.cuda.mem_get_info()
@@ -157,11 +185,15 @@ def megatron_prefill(
 
     padded_seq_len = tokens.shape[-1]
 
+    # Fail fast with a clear message if the Mamba activation would overflow int32 kernel indexing.
+    _assert_mamba_within_int32_indexing(model, batch_size, padded_seq_len)
+
     cp_size = mpu.get_context_parallel_world_size()
 
     # Under CP a local triu mask would be wrong for the per-rank zigzag chunks; pass None and let
-    # the CP-aware causal attention build it. Without CP the causal mask must be supplied explicitly.
-    if cp_size > 1:
+    # the CP-aware causal attention build it. DeepSeek-V4 hybrid attention masks causally itself.
+    # Otherwise the causal mask must be supplied explicitly.
+    if cp_size > 1 or _masks_causally_itself(model):
         attention_mask = None
     else:
         attention_mask = (
@@ -356,8 +388,9 @@ def megatron_generate(
 
         # ModelOpt transformer_spec uses arbitrary attention mask type by default; compute causal
         # mask for prefill. During decode, attn_mask_type is overridden to "no_mask" by
-        # SelfAttention.forward() when inference_context is provided.
-        if seq_len > 1:
+        # SelfAttention.forward() when inference_context is provided. DeepSeek-V4 hybrid attention
+        # masks causally itself and rejects an explicit mask.
+        if seq_len > 1 and not _masks_causally_itself(model):
             attention_mask = (
                 torch.triu(torch.ones((batch_size, seq_len, seq_len), device=device), diagonal=1)
                 .bool()
@@ -372,10 +405,12 @@ def megatron_generate(
             .expand(batch_size, -1)
         )
 
-        # Check if this is a VLM model (vision inputs only passed at step 0 / prefill)
-        _has_pixel_values = step == 0 and pixel_values is not None
-        _has_image_grid_thw = step == 0 and image_grid_thw is not None
-        _has_image_sizes = step == 0 and image_sizes is not None
+        # VLM vision inputs: KV-cache decoding consumes them in the prefill step only, but without
+        # a cache every step recomputes the full prefix and must replay them to stay grounded.
+        _replay_vision_inputs = step == 0 or inference_context is None
+        _has_pixel_values = _replay_vision_inputs and pixel_values is not None
+        _has_image_grid_thw = _replay_vision_inputs and image_grid_thw is not None
+        _has_image_sizes = _replay_vision_inputs and image_sizes is not None
         has_vision_inputs = _has_pixel_values or _has_image_grid_thw or _has_image_sizes
 
         # For PP, receive activations from the previous stage before calling forward.

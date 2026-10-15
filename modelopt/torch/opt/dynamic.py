@@ -1043,13 +1043,31 @@ class _DMRegistryCls:
 
         def decorator(dm_class: type[_DMRegistryCls.T]) -> type[_DMRegistryCls.T]:
             """Register dnn_class with appropriate nn_class."""
+            # Validate all entries first so a bad one cannot leave a partial registration behind,
+            # and so it fails here instead of during a much later issubclass() lookup.
             for nn_cls_, key in cls_to_key.items():
+                assert isinstance(nn_cls_, type) and issubclass(nn_cls_, nn.Module), (
+                    f"Cannot register {key}: {nn_cls_} is not a subclass of nn.Module!"
+                )
                 assert nn_cls_ not in self._registry, f"{nn_cls_} already registered!"
+            for nn_cls_, key in cls_to_key.items():
                 self._registry[nn_cls_] = dm_class
                 self._key_registry[nn_cls_] = key
             return dm_class
 
         return decorator
+
+    def register_subclass(self, nn_cls: type[nn.Module], key: str) -> None:
+        """Register ``nn_cls`` like its registered base class, if it has one and is not covered yet.
+
+        Needed for subclasses that override ``forward``, which the automatic lookup skips.
+        """
+        if nn_cls in self:
+            return
+        for base_cls in self._registry:
+            if issubclass(nn_cls, base_cls):
+                self.register({nn_cls: key})(self[base_cls])
+                return
 
     def unregister(self, nn_cls: type[nn.Module] | type[T]) -> None:
         """Unregister a previously registered dynamic base module and all its inherited modules.

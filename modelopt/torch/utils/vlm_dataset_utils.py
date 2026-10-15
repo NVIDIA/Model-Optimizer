@@ -30,6 +30,7 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader
 
+from .logging import warn_rank_0
 from .nemotron_vlm_dataset_utils import NemotronTarPlusJsonlIterable, list_repo_files_cached
 
 # Use dict to store the config for each dataset.
@@ -74,14 +75,38 @@ class _ShardedIterable(torch.utils.data.IterableDataset):
     seeded identically across ranks (as our VLM datasets are).
     """
 
-    def __init__(self, base, rank: int, world: int):
+    def __init__(self, base, rank: int, world: int, per_rank: int):
         super().__init__()
         self._base = base
         self._rank = rank
         self._world = world
+        self._per_rank = per_rank
 
     def __iter__(self):
-        return itertools.islice(iter(self._base), self._rank, None, self._world)
+        # Yield exactly ``per_rank`` items: a rank left short blocks its peers forever on the next
+        # collective. Do not derive the count from ``len(base)`` -- streaming sources define no
+        # ``__len__``, and those that do report the requested count rather than what they deliver.
+        # Streams can come up short (skipped shards, decode failures), so pad by repeating.
+        count = 0
+        last = None
+        for item in itertools.islice(iter(self._base), self._rank, None, self._world):
+            if count >= self._per_rank:
+                return
+            last = item
+            count += 1
+            yield item
+        if count < self._per_rank:
+            if count == 0:
+                raise RuntimeError(
+                    f"Rank {self._rank} received no calibration samples "
+                    f"(need {self._per_rank}); the dataset stream is empty."
+                )
+            warn_rank_0(
+                f"Calibration stream delivered {count} of {self._per_rank} samples for rank "
+                f"{self._rank}; repeating the last sample to keep ranks in step."
+            )
+            for _ in range(self._per_rank - count):
+                yield last
 
 
 def _extract_text_from_messages(messages: Any) -> str | None:
@@ -505,7 +530,14 @@ def get_vlm_dataset_dataloader(
         # Discriminate on dataset kind, not __len__: the streaming wrapper is an IterableDataset
         # that also defines __len__, and DataLoader rejects a sampler on an IterableDataset.
         if isinstance(dataset, torch.utils.data.IterableDataset):
-            dataset = _ShardedIterable(dataset, rank=dp_rank, world=dp_size)
+            if num_samples < dp_size:
+                raise ValueError(
+                    f"num_samples ({num_samples}) must be at least the data-parallel size "
+                    f"({dp_size}); otherwise some ranks get no calibration samples."
+                )
+            dataset = _ShardedIterable(
+                dataset, rank=dp_rank, world=dp_size, per_rank=num_samples // dp_size
+            )
         else:
             from torch.utils.data.distributed import DistributedSampler
 

@@ -1,0 +1,149 @@
+# NVIDIA Nemotron 3 Nano 30B-A3B NVFP4 quantization-aware distillation (QAD).
+#
+# The pipeline converts the Hugging Face BF16 model to an MCore teacher,
+# quantizes a separate MCore student, distills the student for 400 iterations,
+# and exports the resulting checkpoint. The training task uses an explicit
+# Nemotron-Post-Training-Dataset-v2 chat shard so Hugging Face Datasets does not
+# prepare the repository's other large splits.
+#
+# Training topology: 2 nodes x 8 GPUs, TP=2, PP=1, CP=1, EP=4, ETP=1.
+# This gives DP=8 and EDP=4. With micro-batch-size=1 and global-batch-size=16,
+# train-samples=6400 produces 400 iterations. To run at 16K instead, change both
+# --seq-length and --max-position-embeddings to 16384.
+#
+# Requirements:
+#   - The BF16 model is mounted at /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.
+#   - HF_TOKEN can access the gated nvidia/Nemotron-Post-Training-Dataset-v2 dataset.
+#
+# Usage from tools/launcher:
+#   source .env-slurm
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/megatron_lm_qad.yaml --yes
+
+job_name: Nemotron-3-Nano-30B-A3B_QAD_32k_400iter
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note: "NVFP4 TEGroupedMLP QAD at 32K for 400 iterations on one explicit Nemotron post-training chat shard"
+
+  # Import the BF16 Hugging Face checkpoint as the MCore teacher checkpoint.
+  task_0:
+    script: common/megatron_bridge/import/import.sh
+    environment:
+      - HF_MODEL_ID: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - OUTPUT_DIR: /cicd/megatron-lm-bf16/nvidia
+      - TORCH_DTYPE: bfloat16
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.06.00
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 4
+
+  # Quantize the teacher checkpoint into the NVFP4 student checkpoint.
+  task_1:
+    script: common/megatron_lm/quantize/quantize.sh
+    args:
+      - --seq-length 4096 --max-position-embeddings 32768
+      - --calib-size 32
+      - --skip-generate
+      - --export-default-te-spec
+    environment:
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - QUANT_CFG: MAMBA_MOE_NVFP4_AGGRESSIVE_CFG
+      - MLM_MODEL_CKPT: /cicd/megatron-lm-bf16/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-MCore
+      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - RUN_MMLU: "false"
+      - RUN_EXPORT: "false"
+      - DP: "1"
+      - CP: "1"
+      - TP: "2"
+      - PP: "1"
+      - EP: "4"
+      - ETP: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.06.00
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      nodes: 1
+      ntasks_per_node: 8
+      gpus_per_node: 8
+
+  # Distill the quantized student from the BF16 teacher on chat-template data.
+  task_2:
+    script: common/megatron_lm/train/sft.sh
+    args:
+      # Data
+      - --seq-length 32768 --max-position-embeddings 32768
+      - --micro-batch-size 1 --global-batch-size 16
+      - --train-samples 6400
+      - --lr-decay-samples 6400
+      - --lr-warmup-samples 0
+      - --split 99,1,0
+      - --finetune-data-split chat
+      - --finetune-data-files data/chat-00000-of-00012.parquet
+      # QAD
+      - --modelopt-enabled
+      - --export-default-te-spec
+      - --export-kd-teacher-load /cicd/megatron-lm-bf16/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-MCore
+      - --attention-dropout 0.0 --hidden-dropout 0.0
+      - --no-check-for-nan-in-loss-and-grad
+      - --recompute-granularity selective
+      - --recompute-modules layernorm moe
+      - --sequence-parallel
+      - --ckpt-fully-parallel-load --ckpt-fully-parallel-save
+      # Optimizer
+      - --lr 5.0e-6
+      - --lr-decay-style constant
+      - --clip-grad 1.0 --weight-decay 0.0
+      - --adam-beta1 0.9 --adam-beta2 0.95
+      - --init-method-std 0.010
+      - --use-distributed-optimizer
+      # Evaluation and checkpoints
+      - --eval-iters 2 --eval-interval 25
+      - --save-interval 50 --log-interval 10
+      - --dist-ckpt-strictness log_all
+    environment:
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - MLM_MODEL_CKPT: /cicd/megatron-lm/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - MLM_MODEL_SAVE: /cicd/megatron-lm-qad/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - MLM_TRAIN_SCRIPT: finetune
+      - DATASET: nvidia/Nemotron-Post-Training-Dataset-v2
+      - DP: "1"
+      - CP: "1"
+      - TP: "2"
+      - PP: "1"
+      - EP: "4"
+      - ETP: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.06.00
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      nodes: 2
+      ntasks_per_node: 8
+      gpus_per_node: 8
+
+  task_3:
+    script: common/megatron_lm/export/export.sh
+    args:
+      - --export-default-te-spec
+      - --dist-ckpt-strictness log_all
+    environment:
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - MLM_MODEL_CKPT: /cicd/megatron-lm-qad/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - EXPORT_DIR: /cicd/export/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_NVFP4_QAD
+      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - DP: "1"
+      - CP: "1"
+      - TP: "1"
+      - PP: "4"
+      - EP: "1"
+      - ETP: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.06.00
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4

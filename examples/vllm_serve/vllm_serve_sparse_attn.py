@@ -15,14 +15,14 @@
 
 """Launch vLLM with sparse attention.
 
-Configuration is read exclusively from ``<ckpt>/config.json``'s
-``sparse_attention_config`` block, written during calibration by
+The default ``SparseAttnWorker`` reads configuration exclusively from
+``<ckpt>/config.json``'s ``sparse_attention_config`` block, written by
 ``examples/llm_sparsity/attention_sparsity/hf_sa.py``. If the checkpoint has
-no such block, the worker logs a message and the server runs as standard
+no such block, that worker logs a message and the server runs as standard
 vLLM.
 
-Combined sparse attention + quantization is not handled by this launcher; it
-will be added in a follow-up PR once the combined path is tested.
+The launcher defaults to ``sparse_attn_worker.SparseAttnWorker``. Pass
+``--worker-cls sparse_attn_worker.QuantSparseAttnWorker`` for quant+sparse.
 
 Usage:
     python vllm_serve_sparse_attn.py <path/to/modelopt-exported-ckpt>
@@ -36,9 +36,12 @@ import uvloop
 import vllm
 from packaging import version
 from vllm.entrypoints.openai.api_server import run_server
-from vllm.entrypoints.openai.cli_args import make_arg_parser
 
 vllm_version = version.parse(vllm.__version__)
+try:  # vLLM 0.29 moved the serve argument parser out of ``vllm.entrypoints.openai``
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+except ImportError:
+    from vllm.entrypoints.openai.cli_args import make_arg_parser
 if vllm_version <= version.parse("0.11.0"):
     from vllm.utils import FlexibleArgumentParser
 else:

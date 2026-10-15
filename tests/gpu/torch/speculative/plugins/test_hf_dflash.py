@@ -18,37 +18,23 @@
 These tests require a CUDA GPU. CPU-only tests are in tests/unit/.
 """
 
-from copy import deepcopy
-
 import pytest
 import torch
+from _test_utils.torch.speculative.dflash import get_dflash_config
 from _test_utils.torch.transformers_models import get_tiny_llama
 
 import modelopt.torch.speculative as mtsp
-from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 
 BLOCK_SIZE = 4
 NUM_DRAFT_LAYERS = 2
 SEQ_LEN = 16  # must be multiple of BLOCK_SIZE
 
 
-def _get_dflash_config(block_size=BLOCK_SIZE, num_layers=NUM_DRAFT_LAYERS):
-    """Create a DFlash config for testing."""
-    config = deepcopy(DFLASH_DEFAULT_CFG["config"])
-    config["dflash_block_size"] = block_size
-    config["dflash_use_torch_compile"] = False
-    config["dflash_mask_token_id"] = 0
-    config["dflash_architecture_config"] = {
-        "num_hidden_layers": num_layers,
-    }
-    return config
-
-
 @pytest.fixture
 def dflash_model():
     """Create a tiny DFlash model on GPU."""
     model = get_tiny_llama(num_hidden_layers=4)
-    config = _get_dflash_config()
+    config = get_dflash_config()
     mtsp.convert(model, [("dflash", config)])
     model = model.cuda()
     return model
@@ -120,7 +106,7 @@ class TestDFlashTrainingForwardGPU:
     def model(self):
         """Create a tiny DFlash model in training mode on GPU."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         model = model.cuda()
         model.train()
@@ -206,7 +192,7 @@ class TestDFlashOfflineForwardGPU:
         """Create a tiny DFlash model with dflash_offline=True on GPU."""
         model = get_tiny_llama(num_hidden_layers=self.NUM_BASE_LAYERS)
         model.config.num_orig_hidden_layers = self.NUM_BASE_LAYERS
-        config = _get_dflash_config()
+        config = get_dflash_config()
         config["dflash_offline"] = True
         mtsp.convert(model, [("dflash", config)])
         model = model.cuda()
@@ -264,3 +250,62 @@ class TestDFlashOfflineForwardGPU:
         assert hasattr(output, "logits")
         assert output.logits is not None
         assert torch.isfinite(output.loss).item()
+
+
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2, reason="needs 2 GPUs to shard the base model across devices"
+)
+class TestShardedBaseGeneration:
+    """AR validation loads with ``device_map="auto"``, which shards the base model.
+
+    ``target_layer_ids`` spans early and late layers, so on a multi-GPU box the selected
+    hidden states come off different devices. Concatenating them without gathering first
+    raises ``Expected all tensors to be on the same device`` for every sample, which is
+    what broke ``test_dflash_ar_validate`` on the 2-GPU nightly runner.
+    """
+
+    @staticmethod
+    def _shard_hidden_states(model, spare_device):
+        """Make the base model report early hidden states from another device.
+
+        Standing in for accelerate's dispatch: the base forward stays whole, but its output
+        is spread the way a real ``device_map="auto"`` split would spread it.
+        """
+        base_forward = model._base_model.forward
+
+        def sharded_forward(*args, input_ids=None, **kwargs):
+            # accelerate's AlignDevicesHook moves inputs to each submodule's device.
+            if input_ids is not None:
+                input_ids = input_ids.to(next(model._base_model.layers[-1].parameters()).device)
+            out = base_forward(*args, input_ids=input_ids, **kwargs)
+            hidden = list(out.hidden_states)
+            for i in range(len(hidden) // 2):
+                hidden[i] = hidden[i].to(spare_device)
+            out.hidden_states = tuple(hidden)
+            return out
+
+        model._base_model.forward = sharded_forward
+
+    def test_generate_gathers_sharded_hidden_states(self):
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", get_dflash_config(block_size=4))])
+        model = model.to("cuda:1").eval()
+
+        # The fix is only exercised if the split actually separates two target layers.
+        assert (
+            min(model.target_layer_ids)
+            < len(model._base_model.layers) // 2
+            <= max(model.target_layer_ids)
+        ), model.target_layer_ids
+
+        self._shard_hidden_states(model, spare_device=torch.device("cuda:0"))
+
+        input_ids = torch.tensor([[1, 2, 3, 4]], device="cuda:0")
+        with torch.no_grad():
+            base_token, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=2)
+
+        # validate_online cats both onto the running sequence, so both must come back on
+        # the caller's device rather than wherever the draft happened to run.
+        assert base_token.device == input_ids.device
+        assert draft_tokens.device == input_ids.device
+        assert draft_tokens.shape == (1, 2)

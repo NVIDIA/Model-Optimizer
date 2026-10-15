@@ -14,72 +14,81 @@
 # limitations under the License.
 """Utility functions for model type detection and classification."""
 
-import re
+import warnings
+from contextlib import contextmanager
 
 import torch.nn as nn
 
-MODEL_NAME_TO_TYPE = {
-    "GPT2": "gpt",
-    "Mllama": "mllama",
-    "Llama4": "llama4",
-    "Llama": "llama",
-    "Mistral": "llama",
-    "GPTJ": "gptj",
-    "FalconForCausalLM": "falcon",
-    "RWForCausalLM": "falcon",
-    "baichuan": "baichuan",
-    "MPT": "mpt",
-    "Bloom": "bloom",
-    "ChatGLM": "chatglm",
-    "Qwen3Moe": "qwen3moe",
-    "Qwen3Next": "qwen3next",
-    "QWen": "qwen",
-    "RecurrentGemma": "recurrentgemma",
-    # DiffusionGemma must come before "Gemma" — get_model_type substring-matches
-    # in order, and "gemma" is a substring of "diffusiongemma".
-    "DiffusionGemma": "diffusion_gemma",
-    "Gemma3": "gemma3",
-    "Gemma2": "gemma2",
-    "Gemma": "gemma",
-    "phi3small": "phi3small",
-    "phi3": "phi3",
-    "PhiMoEForCausalLM": "phi3",
-    "Phi4MMForCausalLM": "phi4mm",
-    "phi": "phi",
-    "TLGv4ForCausalLM": "phi",
-    "MixtralForCausalLM": "llama",
-    "ArcticForCausalLM": "llama",
-    "StarCoder": "gpt",
-    "Dbrx": "dbrx",
-    "T5": "t5",
-    "Bart": "bart",
-    "GLM": "glm",
-    "InternLM2ForCausalLM": "internlm",
-    "ExaoneForCausalLM": "exaone",
-    "NemotronH": "nemotron_h",
-    "Nemotron": "gpt",
-    "Deepseek": "deepseek",
-    "Whisper": "whisper",
-    "gptoss": "gptoss",
-    "MiniMax": "minimax",
-}
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
-__doc__ = f"""Utility functions for model type detection and classification.
+__all__ = [
+    "TiedWeightMap",
+    "get_language_model_from_vl",
+    "get_model_type",
+    "is_multimodal_model",
+]
 
-    .. code-block:: python
-
-        {MODEL_NAME_TO_TYPE=}
-"""
-
-__all__ = ["get_language_model_from_vl", "get_model_type", "is_multimodal_model"]
+# Deprecated in 0.48.0, scheduled for removal in 0.49.0 together with the TensorRT-LLM checkpoint
+# export, the only consumer of these TensorRT-LLM model names. The shims below import from
+# .trtllm lazily: importing it here is circular, since trtllm/__init__ loads model_config_export,
+# which imports ..quant_utils, which imports TiedWeightMap from this module before it is defined.
+_MODEL_TYPE_DEPRECATION_MSG = (
+    "{name} returns TensorRT-LLM model names and is deprecated as of 0.48.0; it will be removed "
+    "in 0.49.0. Use the Hugging Face model type, model.config.model_type, instead. "
+    "export_tensorrt_llm_checkpoint now detects its decoder_type when it is omitted."
+)
 
 
-def get_model_type(model):
-    """Try get the model type from the model name. If not found, return None."""
-    for k, v in MODEL_NAME_TO_TYPE.items():
-        if k.lower() in type(model).__name__.lower():
-            return v
-    return None
+@contextmanager
+def _release_exported_tensors(root: nn.Module):
+    """Drop what the export pass adds to ``root``, once the block has persisted it.
+
+    The handlers register scale buffers on existing sub-modules and attach per-expert holder
+    modules. Neither an accelerate offload window nor an FSDP2 reshard reclaims those, so a
+    caller that runs the pass once per unit accumulates them. An export that raises releases
+    nothing, leaving the unit intact to be inspected.
+    """
+    before = {name: (set(mod._modules), set(mod._buffers)) for name, mod in root.named_modules()}
+
+    yield
+
+    # list(): deleting a child mutates the _modules dict the traversal walks.
+    for name, module in list(root.named_modules()):
+        children_before, buffers_before = before.get(name, (set(), set()))
+        for child_name in set(module._modules) - children_before:
+            delattr(module, child_name)
+        for buf_name in set(module._buffers) - buffers_before:
+            module._buffers[buf_name] = None
+
+
+def __getattr__(name: str):
+    if name == "MODEL_NAME_TO_TYPE":
+        from .trtllm.decoder_type import MODEL_NAME_TO_DECODER_TYPE
+
+        warnings.warn(
+            _MODEL_TYPE_DEPRECATION_MSG.format(name="MODEL_NAME_TO_TYPE"),
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return MODEL_NAME_TO_DECODER_TYPE
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def get_model_type(model: nn.Module):
+    """Try get the TensorRT-LLM model type from the model name. If not found, return None.
+
+    .. deprecated:: 0.48.0
+        Returns TensorRT-LLM model names and will be removed in 0.49.0. Use the Hugging Face
+        model type, ``model.config.model_type``, instead.
+    """
+    from .trtllm.decoder_type import get_decoder_type
+
+    warnings.warn(
+        _MODEL_TYPE_DEPRECATION_MSG.format(name="get_model_type"),
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return get_decoder_type(model)
 
 
 def is_multimodal_model(model):
@@ -88,10 +97,6 @@ def is_multimodal_model(model):
     This function detects various multimodal model architectures by checking for:
     - Standard vision configurations (vision_config)
     - Language model attributes (language_model)
-    - Specific multimodal model types (phi4mm)
-    - Vision LoRA configurations
-    - Audio processing capabilities
-    - Image embedding layers
     - Nemotron-Parse conditional generation models
 
     Args:
@@ -104,31 +109,22 @@ def is_multimodal_model(model):
         >>> model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
         >>> is_multimodal_model(model)
         True
-
-        >>> model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-4-multimodal-instruct")
-        >>> is_multimodal_model(model)
-        True
     """
     config = model.config
 
-    # Check for Nemotron-Parse encoder-decoder architecture
-    architectures = getattr(config, "architectures", [])
+    # Check for Nemotron-Parse encoder-decoder architecture. `or []` because a model built with
+    # from_config has the attribute set to None rather than absent, so the default never applies.
+    architectures = getattr(config, "architectures", None) or []
     is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
 
     return (
         hasattr(config, "vision_config")  # Standard vision config (e.g., Qwen2.5-VL)
         or hasattr(model, "language_model")  # Language model attribute (e.g., LLaVA)
-        or getattr(config, "model_type", "") == "phi4mm"  # Phi-4 multimodal
-        or hasattr(config, "vision_lora")  # Vision LoRA configurations
-        or hasattr(config, "audio_processor")  # Audio processing capabilities
-        or (
-            hasattr(config, "embd_layer") and hasattr(config.embd_layer, "image_embd_layer")
-        )  # Image embedding layers
         or is_nemotron_parse  # Nemotron-Parse conditional generation model
     )
 
 
-def get_language_model_from_vl(model) -> list[nn.Module] | None:
+def get_language_model_from_vl(model, *, strict: bool = False) -> list[nn.Module] | None:
     """Extract the language model lineage from a Vision-Language Model (VLM).
 
     This function handles the common patterns for accessing the language model component
@@ -137,6 +133,12 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
 
     Args:
         model: The VLM model instance to extract the language model from
+        strict: Raise if distinct direct and nested language-model roots are present. Generic
+            export callers retain the historical nested-root preference by default; search
+            boundaries can opt in to fail-closed ambiguity handling.
+
+    Raises:
+        ValueError: If ``strict`` is True and the model exposes competing language-model roots.
 
     Returns:
         list: the lineage path towards the language model
@@ -147,12 +149,22 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
         >>> # lineage[0] is vlm_model
         >>> # lineage[1] is vlm_model.language_model
     """
-    # always prioritize model.model.langauge_model
-    if hasattr(model, "model") and hasattr(model.model, "language_model"):
-        return [model, model.model, model.model.language_model]
-
-    if hasattr(model, "language_model"):
-        return [model, model.language_model]
+    nested_parent = getattr(model, "model", None)
+    nested_language_model = getattr(nested_parent, "language_model", None)
+    direct_language_model = getattr(model, "language_model", None)
+    if (
+        strict
+        and nested_language_model is not None
+        and direct_language_model is not None
+        and nested_language_model is not direct_language_model
+    ):
+        raise ValueError(
+            "Found multiple language-model roots; refusing to select one by traversal order."
+        )
+    if nested_language_model is not None:
+        return [model, nested_parent, nested_language_model]
+    if direct_language_model is not None:
+        return [model, direct_language_model]
 
     # Pattern 3: For encoder-decoder VL models (e.g., Nemotron-Parse), the decoder is the language model.
     # Only match if the model is detected as multimodal to avoid matching non-VLM encoder-decoder
@@ -164,82 +176,118 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
     return None
 
 
-def _collect_canonical_tied_patterns(
-    model: nn.Module,
-) -> tuple[list[re.Pattern], list[str]]:
-    """Walk the model and collect canonical-side tied-weight matchers.
+def _owns_exported_state(module: nn.Module) -> bool:
+    """Whether the module has parameters or persistent buffers of its own to export."""
+    if next(module.parameters(recurse=False), None) is not None:
+        return True
+    non_persistent = getattr(module, "_non_persistent_buffers_set", frozenset())
+    return any(name not in non_persistent for name, _ in module.named_buffers(recurse=False))
 
-    Patterns are submodule-prefixed regexes from each module's
-    ``_tied_weights_keys`` dict-style declaration (the prefix matters
-    for nested models where the dict lives on an inner submodule).
-    Side substrings are dot-separated tokens that appear only on the
-    canonical side of those declarations — needed because modelopt's
-    per-expert unpacking creates post-export keys (e.g.
-    ``…experts.Y.gate_proj.input_scale``) that HF's regexes never knew
-    about. List-style (legacy) declarations are skipped.
+
+def get_export_units(model):
+    """Split the model into groups that can be exported independently.
+
+    One per decoder layer, plus one for everything else holding state. Every rank builds the same
+    list.
     """
-    patterns: list[re.Pattern] = []
-    alias_token_set: set[str] = set()
-    canonical_token_set: set[str] = set()
+    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
+    if not decoder_layers:
+        # Without layers everything lands in one unit, so a single rank would own the whole model
+        # -- the host-RAM blow-up this split exists to avoid. The offloaded exporter refuses the
+        # same case; do not silently degrade into it.
+        raise RuntimeError(
+            "Export requires discoverable decoder layers. The model architecture is not supported "
+            "by LayerActivationCollector."
+        )
+    # A module object reused across layers (ALBERT-style sharing) would land in two units under one
+    # name, so two ranks would emit the same keys and the merged index would reference only one of
+    # the copies. Refuse rather than write a checkpoint whose index does not match its shards.
+    if len({id(layer) for layer in decoder_layers}) != len(decoder_layers):
+        raise NotImplementedError(
+            "Export does not support models that reuse the same decoder layer object more than "
+            "once: the shared layer has a single name, so its weights cannot be assigned to one "
+            "owner. Export without FSDP2, which builds the state dict in one process."
+        )
+    in_layer = {id(sm) for layer in decoder_layers for sm in layer.modules()}
+    owning = [m for m in model.modules() if id(m) not in in_layer and _owns_exported_state(m)]
+    # Drop any module that another owning module already contains: its state_dict covers the
+    # descendant, so keeping both would run the descendant's export handler twice.
+    owning_ids = {id(m) for m in owning}
+    covered = {
+        id(descendant)
+        for m in owning
+        for descendant in m.modules()
+        if descendant is not m and id(descendant) in owning_ids
+    }
+    root_leaves = [m for m in owning if id(m) not in covered]
+    # `covered` only drops modules held by another *owning* module. A container that holds the
+    # decoder layers and owns direct state of its own is not covered by anything, so it would land
+    # here and its state_dict() would re-emit every layers.N.* key that the layer units already
+    # own -- two ranks writing one key, and a merged index that references only one copy. No
+    # supported architecture does this (causal-mask style buffers are non-persistent), so refuse
+    # rather than guess how to split such a container's own state from its layers'.
+    if any(id(sub) in in_layer for m in root_leaves for sub in m.modules()):
+        raise NotImplementedError(
+            "Export does not support models where a module holding the decoder layers also owns "
+            "parameters or persistent buffers of its own: its state dict would duplicate every "
+            "decoder-layer tensor. Export without FSDP2, which builds the state dict in one "
+            "process."
+        )
+    return [[layer] for layer in decoder_layers] + [root_leaves]
 
-    def _tokens(s: str) -> set[str]:
-        """Identifiers in a regex string, with regex specials as separators."""
-        return {tok for tok in re.split(r"[^A-Za-z0-9_]+", s) if tok}
 
-    for name, submodule in model.named_modules():
-        tied = getattr(submodule, "_tied_weights_keys", None)
-        if not isinstance(tied, dict) or not tied:
-            continue
-        prefix = f"{name}." if name else ""
-        for alias_pat, canonical_pat in tied.items():
-            patterns.append(re.compile(prefix + canonical_pat))
-            alias_token_set.update(_tokens(prefix + alias_pat))
-            canonical_token_set.update(_tokens(prefix + canonical_pat))
+class TiedWeightMap:
+    """Name-based lookups over HF's ``{alias: canonical}`` tie map (``model.all_tied_weights_keys``).
 
-    # Tokens unique to the canonical side become substring matchers.
-    side_substrings = sorted(canonical_token_set - alias_token_set)
-    return patterns, side_substrings
-
-
-def _reorder_canonical_first(state_dict: dict, model: nn.Module) -> dict:
-    r"""Reorder ``state_dict`` so canonical-side tied keys iterate first.
-
-    Lets the downstream first-wins data_ptr dedup keep canonical names.
-    Uses both regex patterns and substring matchers from
-    :func:`_collect_canonical_tied_patterns`. Gated on the model class
-    name to scope the reorder to DiffusionGemma; other tied
-    encoder-decoder models that ship dict-style ``_tied_weights_keys``
-    can be added to the allowlist here. Mirrors the ``model_type``
-    dispatch used for the Whisper and Nemotron-VL branches elsewhere
-    in ``unified_export_hf.py``.
+    Export sites ask for a *group key*: both sides of a tie share one key, an untied parameter
+    returns ``None``. The key is a name, so it survives packing / FSDP / offload, where a
+    ``data_ptr`` would not.
     """
-    model_type = type(model).__name__.lower()
-    if "diffusiongemma" not in model_type and "diffusion_gemma" not in model_type:
-        return state_dict
 
-    canonical_patterns, side_substrings = _collect_canonical_tied_patterns(model)
-    if not canonical_patterns and not side_substrings:
-        return state_dict
+    def __init__(self, model: nn.Module) -> None:
+        """Source the tie map from HF's ``all_tied_weights_keys``.
 
-    def _has_side_substring(key: str) -> bool:
-        # Require the token to appear as a proper dot-separated path
-        # component, not just as a substring of an unrelated identifier.
-        for tok in side_substrings:
-            if (
-                f".{tok}." in key
-                or key.startswith(f"{tok}.")
-                or key.endswith(f".{tok}")
-                or key == tok
-            ):
-                return True
-        return False
+        HF's ``{target: source}`` == our ``{alias: canonical}``, resolved at load, config-gated,
+        ``torch.equal``-pruned, and name-based so it survives FSDP shard / offload. Absent on a
+        non-``PreTrainedModel`` -> empty map (the ``data_ptr`` backstop in postprocess is the net).
+        """
+        all_tied = getattr(model, "all_tied_weights_keys", None)
+        # Warn whenever a tie is declared (embedding tie or any ``_tied_weights_keys`` entry, e.g.
+        # encoder/decoder or fused-MoE) but the name-based map is missing, not just for embeddings.
+        declares_tie = bool(
+            getattr(getattr(model, "config", None), "tie_word_embeddings", False)
+        ) or bool(getattr(model, "_tied_weights_keys", None))
+        if all_tied is None and declares_tie:
+            warnings.warn(
+                "This model declares tied weights but has no model.all_tied_weights_keys, so the "
+                "exported checkpoint may keep duplicate copies of the tied weights."
+            )
+        # Drop any self-entry (alias == canonical): HF should not emit one, but a target==source
+        # pair would schedule the kept canonical for deletion, so filter it out defensively.
+        self.alias_to_canonical: dict[str, str] = {
+            alias: canonical for alias, canonical in (all_tied or {}).items() if alias != canonical
+        }
+        self.canonical_names: set[str] = set(self.alias_to_canonical.values())
 
-    head: dict = {}
-    tail: dict = {}
-    for k, v in state_dict.items():
-        if any(p.search(k) for p in canonical_patterns) or _has_side_substring(k):
-            head[k] = v
-        else:
-            tail[k] = v
-    head.update(tail)
-    return head
+    def group_key(self, param_full_name: str) -> str | None:
+        """Canonical group key for a parameter name, or ``None`` if untied.
+
+        Both sides of a tie return the same key, so it does not matter which side export
+        visits first.
+        """
+        if param_full_name in self.alias_to_canonical:
+            return self.alias_to_canonical[param_full_name]
+        if param_full_name in self.canonical_names:
+            return param_full_name
+        return None
+
+    def container_group_key(self, container_name: str, first_proj_attr: str) -> str | None:
+        """Group key for a fused-experts container, or ``None`` if untied.
+
+        The tie lives on the container's 3-D projection (e.g. ``…experts.gate_up_proj``);
+        stripping that suffix gives one key shared by all the container's projections.
+        """
+        gk = self.group_key(f"{container_name}.{first_proj_attr}")
+        if gk is None:
+            return None
+        return gk.removesuffix(f".{first_proj_attr}")

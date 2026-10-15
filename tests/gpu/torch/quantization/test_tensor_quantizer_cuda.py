@@ -126,3 +126,24 @@ class TestTensorQuantizerfp4:
         output_contiguous = quantizer(contiguous_tensor)
         output_non_contiguous = quantizer(non_contiguous_tensor)
         assert torch.equal(output_contiguous, output_non_contiguous)
+
+
+def test_use_constant_amax_captures_in_cuda_graph():
+    """The cast-mode amax makes no host copy, so the quantizer can be captured in a CUDA graph."""
+    quantizer = tensor_quantizer.TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=(4, 3), use_constant_amax=True)
+    ).cuda()
+    static_in = torch.randn(8, 64, device="cuda")
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        quantizer(static_in)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        static_out = quantizer(static_in)
+
+    new_in = torch.randn_like(static_in)
+    static_in.copy_(new_in)
+    graph.replay()
+    assert torch.equal(static_out, quantizer(new_in))

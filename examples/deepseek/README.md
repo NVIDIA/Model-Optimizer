@@ -128,6 +128,10 @@ python ${DS_V4}/inference/convert.py \
 
 ### Calibrate routed experts
 
+The quantization config defaults to the built-in routed-expert NVFP4 setup. Pass
+`--recipe models/deepseek-ai/DeepSeek-V4-Pro-0813/ptq/nvfp4_experts_only`
+to load the same config from [modelopt_recipes](../../modelopt_recipes/ptq.md) instead.
+
 Single node:
 
 ```bash
@@ -196,3 +200,25 @@ data-derived scale). The flag only affects routed-expert **weights** — activat
 [`examples/hf_ptq/cast_mxfp4_to_nvfp4.py`](../hf_ptq/cast_mxfp4_to_nvfp4.py); the
 V4 twist is that w1/w3 share one `scale_2` (fused GEMM1), so `k_max` is taken over
 both projections.
+
+### DeepSeek-V4.1-Flash
+
+The same three steps produce `nvidia/DeepSeek-V4.1-Flash-NVFP4`, with these differences:
+
+- V4.1-Flash's `convert.py` has no `--n-experts` flag (it infers the expert counts from
+  the tensor names). Pass `--expert-dtype fp4` to keep the routed experts in MXFP4:
+
+  ```bash
+  python ${DS_V4}/inference/convert.py \
+      --hf-ckpt-path ${DS_V4} \
+      --save-path ${MP_CKPT} \
+      --model-parallel ${MP} \
+      --expert-dtype fp4
+  ```
+
+- The published checkpoint was calibrated with `--calib_size 512` (512 samples from each
+  default dataset), `--calib_seq 512` and `--batch_size 4` at `MP=8` on two 4-GPU nodes,
+  and exported with `--cast_mxfp4_to_nvfp4`.
+
+`ptq.py` detects V4.1's 32x32 FP8 blocks and its tokenizer-aware `Transformer` on its own;
+`--trust_remote_code` is not needed.

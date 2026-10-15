@@ -23,13 +23,20 @@ with import_plugin("megatron_calibration"):
 with import_plugin("megatron_generate"):
     from .megatron_generate import *
 
+with import_plugin("megatron_layer_specs"):
+    from .megatron_layer_specs import *
+
 with import_plugin("megatron_mmlu"):
     from .megatron_mmlu import *
 
 with import_plugin("megatron_preprocess_data"):
     from .megatron_preprocess_data import *
 
+with import_plugin("prepare_megatron_data_blend"):
+    from .prepare_megatron_data_blend import *
+
 # NOTE: Dont pre-import megatron bridge plugin here to avoid circular dependency issues.
-#   We dont register anything so this isnt a problem.
+#   It registers an instantiate allowlist prefix on import, which only the ModelOpt entrypoints
+#   that import it need, so leaving it out here is still fine.
 # with import_plugin("megatron bridge"):
 #     from .mbridge import *

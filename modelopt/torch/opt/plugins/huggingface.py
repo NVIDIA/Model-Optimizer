@@ -19,7 +19,7 @@ import functools
 import os
 import threading
 import warnings
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from typing import Any
 
 import torch
@@ -72,7 +72,7 @@ def _get_modelopt_state_path(model_name_or_path: str) -> str:
 
 
 @contextmanager
-def _patch_model_init_for_modelopt(cls, model_path, extra_context=None):
+def _patch_model_init_for_modelopt(cls, model_path):
     """Patch for `cls.init` method to restore ModelOpt state after `init`."""
     # Note: Keeping original config in local as the package will be shared among threads
     added_original_init = False
@@ -90,8 +90,7 @@ def _patch_model_init_for_modelopt(cls, model_path, extra_context=None):
         modelopt_state_path = _get_modelopt_state_path(model_path)
         _original__init__(self, *args, **kwargs)
         if os.path.isfile(modelopt_state_path):
-            with extra_context() if extra_context else nullcontext():
-                restore_from_modelopt_state(self, modelopt_state_path=modelopt_state_path)
+            restore_from_modelopt_state(self, modelopt_state_path=modelopt_state_path)
 
             print_rank_0(f"Restored ModelOpt state from {modelopt_state_path}")
 

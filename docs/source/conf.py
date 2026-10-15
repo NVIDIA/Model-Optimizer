@@ -105,9 +105,12 @@ suppress_warnings = ["ref.python"]
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
-html_theme = "sphinx_rtd_theme"
+html_theme = "shibuya"
 html_theme_options = {
-    "style_external_links": True,
+    "accent_color": "green",
+    "color_mode": "auto",
+    "dark_code": True,
+    "globaltoc_expand_depth": 1,
 }
 
 # Add any paths that contain custom static files (such as style sheets) here,
@@ -116,7 +119,8 @@ html_theme_options = {
 html_static_path = ["_static"]
 
 html_title = f"Model Optimizer {version}"
-html_css_files = ["custom.css"]
+html_css_files = ["custom.css", "announcements.css"]
+html_js_files = ["announcements.js"]
 html_permalinks_icon = "#"  # default icon not rendering properly
 
 # TODO: left here as reference for future

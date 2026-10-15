@@ -20,7 +20,12 @@ from typing import Any
 
 import torch.nn as nn
 
-from .distillation_model import DistillationModel, student_output_capture_fwd_hook
+from .distillation_model import (
+    DistillationModel,
+    _clear_captured_output,
+    _warn_once_about_stale_output,
+    student_output_capture_fwd_hook,
+)
 
 __all__ = ["LayerwiseDistillationModel"]
 
@@ -58,10 +63,10 @@ class LayerwiseDistillationModel(DistillationModel):
         for student_layer, teacher_layer in self._layers_to_loss:
             setattr(student_layer, "_teacher_layer", [teacher_layer])
             handle_s1 = student_layer.register_forward_pre_hook(student_input_bypass_fwd_hook)
-            setattr(student_layer, "_intermediate_output", None)
+            _clear_captured_output(student_layer)
             handle_s2 = student_layer.register_forward_hook(student_output_capture_fwd_hook)
             setattr(teacher_layer, "_intermediate_input", None)
-            setattr(teacher_layer, "_intermediate_output", None)
+            _clear_captured_output(teacher_layer)
             handle_t = teacher_layer.register_forward_hook(teacher_input_output_capture_fwd_hook)
             self._hook_handles.update([handle_s1, handle_s2, handle_t])
 
@@ -104,9 +109,10 @@ def teacher_input_output_capture_fwd_hook(module: nn.Module, input: Any, output:
 
     if module._intermediate_output is not None:
         # NOTE: cannot tell if train or eval since teacher is always eval
-        warnings.warn(
-            f"Teacher's Module `{type(module).__name__}` already has an intermediate output stored."
-            " This is expected when `DistillationModel.compute_kd_loss` is not called in eval mode."
+        _warn_once_about_stale_output(
+            module,
+            "Teacher",
+            "Expected in eval mode, where the loss is not required.",
         )
 
     module._intermediate_input = input

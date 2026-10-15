@@ -58,6 +58,74 @@ pipeline:
       gpus_per_node: 4
 ```
 
+### Inline Command (no wrapper script)
+
+A task can carry an `inline` shell command instead of a `script:` path (no
+wrapper `.sh` needed) — good for one-liner jobs like Megatron-Bridge's
+`torchrun` scripts. `<<global_vars.X>>` is resolved; `args` must be omitted
+(combining `inline` with non-empty `args` raises a `ValueError`). The
+packaged repo is at `modules/Model-Optimizer/...` with the run dir as CWD.
+
+For the launcher (`torchrun` locally, `python`+`srun` on Slurm), reference
+`$LAUNCH_SCRIPT` (plain `$VAR`, **not** `${...}` which collides with the config
+loader) and set its local value in `environment`; on Slurm the launcher
+overrides it to `python`, so set `ntasks_per_node = gpus_per_node`.
+
+> **`inline` must be a single line** — the CLI layer rejects multi-line values.
+> Use a YAML **folded** scalar (`>-`), not a literal block (`|`) or `\`
+> continuations; chain commands with `&&`.
+
+```yaml
+job_name: Qwen3-8B_mbridge_prune
+pipeline:
+  global_vars:
+    output_dir: /cicd/megatron-bridge
+  task_0:
+    environment:
+      - LAUNCH_SCRIPT: torchrun --nproc_per_node 2
+    inline: >-
+      $LAUNCH_SCRIPT
+      modules/Model-Optimizer/examples/megatron_bridge/prune_minitron.py
+      --hf_model_name_or_path Qwen/Qwen3-8B
+      --pp_size 2
+      --prune_target_params 6e9
+      --output_hf_path <<global_vars.output_dir>>/Qwen3-8B-Pruned-6B
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.08
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      nodes: 1
+      ntasks_per_node: 2
+      gpus_per_node: 2
+```
+
+### Installing extra pip reqs (`reqs` / `reqs_file`)
+
+A task may pip-install **in the container before the command**
+(`pip install [-r reqs_file] [reqs] && <command>`):
+
+- `reqs` — a raw `pip install` argument string. Write specifiers unquoted; the
+  launcher shell-quotes each token, so `<` `>` `=` are safe.
+- `reqs_file` — a `requirements.txt` path (relative to the run dir, i.e. under
+  `modules/Model-Optimizer/...`).
+
+```yaml
+  task_0:
+    reqs: "transformers<5"           # or: "transformers<5 fire" for several packages
+    inline: >-
+      python .../prune_minitron.py ...
+  task_2:
+    reqs_file: modules/Model-Optimizer/examples/llm_eval/requirements.txt
+    inline: >-
+      python .../lm_eval_hf.py ...
+```
+
+Both work with `inline` and `script` tasks and resolve `<<global_vars.X>>`.
+
+On Slurm the install runs once per node (on local rank 0 behind a filesystem
+barrier keyed on job/step/node IDs), so multi-node tasks are supported and
+concurrent pip on a node is avoided.
+
 ### Multi-task Pipeline
 
 Tasks run sequentially — `task_1` starts only after `task_0` completes.

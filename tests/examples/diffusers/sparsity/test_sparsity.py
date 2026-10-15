@@ -28,9 +28,16 @@ import math
 import pytest
 import torch
 from _test_utils.examples.run_command import run_example_command
-from _test_utils.torch.diffusers_models import create_tiny_wan22_pipeline_dir
+from diffusers import AutoencoderKLWan, WanPipeline
+
+import modelopt.torch.sparsity.attention_sparsity as mtsa
+from modelopt.torch.export import export_hf_checkpoint
+from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
 EXAMPLE_PATH = "diffusers/sparsity"
+
+# Run the example scripts in this process: ~20s of startup saved per step (see conftest).
+pytestmark = pytest.mark.usefixtures("in_process_examples")
 
 # Tiny inference settings — fast but exercises all code paths
 _TINY_ARGS = [
@@ -49,12 +56,6 @@ _TINY_ARGS = [
     "--negative-prompt",
     "",
 ]
-
-
-@pytest.fixture(scope="session")
-def tiny_wan22_path(tmp_path_factory):
-    """Create a tiny Wan 2.2 pipeline saved to disk (session-scoped)."""
-    return str(create_tiny_wan22_pipeline_dir(tmp_path_factory.mktemp("tiny_wan22")))
 
 
 def test_wan22_baseline(tiny_wan22_path, tmp_path):
@@ -153,7 +154,7 @@ def test_wan22_export_sparse_checkpoint(tiny_wan22_path, tmp_path):
     assert not (export_dir / "sparse.yaml").exists(), "Unexpected top-level sparse.yaml"
 
 
-def test_wan22_calibrated_export(tmp_path):
+def test_wan22_calibrated_export(tiny_wan22_path, tmp_path):
     """Inject calibration params via the Python API and verify the exported config.
 
     Calibration can't succeed on tiny models via the Triton kernel (not enough
@@ -162,13 +163,7 @@ def test_wan22_calibrated_export(tmp_path):
     (top-level ``threshold_scale_factor`` of the form ``a * exp(b * target_sparsity)``)
     and that the dense (cross-attention) layers are recorded under ``ignore``.
     """
-    from diffusers import AutoencoderKLWan, WanPipeline
-
-    import modelopt.torch.sparsity.attention_sparsity as mtsa
-    from modelopt.torch.export import export_hf_checkpoint
-    from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
-
-    pipe_dir = create_tiny_wan22_pipeline_dir(tmp_path / "model")
+    pipe_dir = tiny_wan22_path
     vae = AutoencoderKLWan.from_pretrained(pipe_dir, subfolder="vae", torch_dtype=torch.float32)
     pipe = WanPipeline.from_pretrained(pipe_dir, vae=vae, torch_dtype=torch.bfloat16)
     pipe.to("cuda")

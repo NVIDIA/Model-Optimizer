@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Alias recipe for nvidia/Qwen3.5-397B-A17B-NVFP4-V2 (source Qwen/Qwen3.5-397B-A17B). The
+# qwen3_5_moe architecture recipe already produces this release's scheme -- NVFP4 (MSE static
+# weights, dynamic inputs) on the LM routed experts, ModelOpt-default FP8 elsewhere, and an FP8
+# KV cache -- so this entry imports that recipe wholesale instead of copying its body.
+
+imports:
+  base: model_type/qwen3_5_moe/ptq/nvfp4_experts_mse-fp8_rest-kv_fp8
+
+$import: base
+metadata:
+  description: >-
+    Qwen/Qwen3.5-397B-A17B quantized with the qwen3_5_moe architecture recipe -- NVFP4 (MSE
+    static weights, dynamic inputs) on the LM routed experts, ModelOpt-default FP8 on every other
+    Linear layer, and an FP8 KV cache -- as published in nvidia/Qwen3.5-397B-A17B-NVFP4-V2.

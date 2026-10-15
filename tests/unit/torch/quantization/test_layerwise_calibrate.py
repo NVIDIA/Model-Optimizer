@@ -26,7 +26,11 @@ import torch.nn as nn
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
-from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector, _SkipLayer
+from modelopt.torch.quantization.utils.layerwise_calib import (
+    LayerActivationCollector,
+    _OutsideQuantizerCalibrator,
+    _SkipLayer,
+)
 
 
 class _DecoderBlock(nn.Module):
@@ -63,6 +67,15 @@ class _SimpleTransformerModel(nn.Module):
         return x
 
 
+class _TransformerWithLMHead(_SimpleTransformerModel):
+    def __init__(self, n_layers=3, dim=16):
+        super().__init__(n_layers=n_layers, dim=dim)
+        self.lm_head = nn.Linear(dim, 32, bias=False)
+
+    def forward(self, x, **kwargs):
+        return self.lm_head(super().forward(x, **kwargs))
+
+
 class _FlatMLP(nn.Module):
     """No decoder-layer structure -- should be rejected by layerwise_calibrate."""
 
@@ -72,6 +85,48 @@ class _FlatMLP(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+class _TrackingQuantizer(TensorQuantizer):
+    """Deterministic quantizer used to distinguish QDQ and FP activations."""
+
+    def __init__(self):
+        super().__init__(amax=3.0)
+        self.calls = 0
+
+    def forward(self, x):
+        self.calls += 1
+        return x / 2 if self.is_enabled else x
+
+
+class _QuantizedLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.quantizer = _TrackingQuantizer()
+
+    def forward(self, x):
+        return self.quantizer(x)
+
+
+class _QuantizedTail(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.quantizer = _TrackingQuantizer()
+        self.inputs = []
+
+    def forward(self, x):
+        self.inputs.append(x.detach().clone())
+        return self.quantizer(x)
+
+
+class _ModelWithQuantizedTail(nn.Module):
+    def __init__(self, with_tail=True):
+        super().__init__()
+        self.layers = nn.ModuleList([_QuantizedLayer()])
+        self.tail = _QuantizedTail() if with_tail else nn.Identity()
+
+    def forward(self, x):
+        return self.tail(self.layers[0](x))
 
 
 class _SimpleTwoLayerModel(nn.Module):
@@ -243,6 +298,190 @@ def test_layerwise_calib_empty_forward_loop_raises(monkeypatch):
         )
 
 
+@pytest.mark.parametrize("raises", [False, True])
+def test_outside_calibrator_hides_and_restores_layer_aliases(raises):
+    model = _ModelWithQuantizedTail()
+    original = model.layers[0]
+    model.layers_alias = model.layers
+    model.layer_alias = original
+
+    def calib_func(target, _forward_loop):
+        assert isinstance(target.layers[0], _SkipLayer)
+        assert target.layers_alias[0] is target.layers[0]
+        assert target.layer_alias is target.layers[0]
+        assert original not in target.modules()
+        if raises:
+            raise RuntimeError("injected")
+
+    calibrator = _OutsideQuantizerCalibrator(
+        model,
+        [original],
+        lambda target: target(torch.tensor([2.0])),
+        calib_func,
+        {},
+        qdq_from_prev=True,
+    )
+    assert {(id(parent), name) for parent, name, _ in calibrator.transformer_layer_slots} == {
+        (id(model), "layer_alias"),
+        (id(model.layers), "0"),
+    }
+
+    if raises:
+        with pytest.raises(RuntimeError, match="injected"):
+            calibrator.calibrate()
+    else:
+        calibrator.calibrate()
+
+    assert model.layers[0] is original
+    assert model.layers_alias[0] is original
+    assert model.layer_alias is original
+
+
+@pytest.mark.parametrize(
+    ("qdq_from_prev", "expected_tail_input"),
+    [(True, 1.0), (False, 2.0)],
+)
+def test_layerwise_calibrates_only_outside_quantizers_with_full_model_forward(
+    monkeypatch, qdq_from_prev, expected_tail_input
+):
+    monkeypatch.setattr(
+        LayerActivationCollector,
+        "_decoder_layer_support",
+        [(lambda m: hasattr(m, "layers"), lambda m: list(m.layers))],
+    )
+    model = _ModelWithQuantizedTail()
+    decoder_quantizer = model.layers[0].quantizer
+    calibrated_quantizers = []
+    calibrated_targets = []
+    decoder_amax_before_extra_pass = []
+
+    def calib_func(target, target_forward_loop):
+        calibrated_targets.append(target)
+        if target is model:
+            decoder_amax_before_extra_pass.append(decoder_quantizer._amax.clone())
+        calibrated_quantizers.append(
+            {id(module) for module in target.modules() if isinstance(module, TensorQuantizer)}
+        )
+        target_forward_loop(target)
+
+    layerwise_calibrate(
+        model,
+        lambda m: m(torch.tensor([2.0])),
+        calib_func,
+        get_qdq_activations_from_prev_layer=qdq_from_prev,
+    )
+
+    assert calibrated_targets == [model.layers[0], model]
+    assert calibrated_quantizers == [{id(decoder_quantizer)}, {id(model.tail.quantizer)}]
+    torch.testing.assert_close(model.tail.inputs[-1], torch.tensor([expected_tail_input]))
+    torch.testing.assert_close(decoder_quantizer._amax, decoder_amax_before_extra_pass[0])
+    assert decoder_quantizer.calls == (2 if qdq_from_prev else 1)
+    assert decoder_quantizer.is_enabled
+
+
+def test_layerwise_skips_full_model_pass_without_outside_quantizer(monkeypatch):
+    _register_test_discoverer(monkeypatch)
+    model = _ModelWithQuantizedTail(with_tail=False)
+    calibrated_targets = []
+
+    def calib_func(target, target_forward_loop):
+        calibrated_targets.append(target)
+        target_forward_loop(target)
+
+    layerwise_calibrate(model, lambda m: m(torch.tensor([2.0])), calib_func)
+
+    assert calibrated_targets == [model.layers[0]]
+
+
+@pytest.mark.parametrize(
+    ("offloaded", "with_tail", "warns"),
+    [
+        (True, True, True),
+        (False, True, False),
+        (True, False, False),
+    ],
+)
+def test_layerwise_offload_warning_gating(monkeypatch, offloaded, with_tail, warns):
+    _register_test_discoverer(monkeypatch)
+    model = _ModelWithQuantizedTail(with_tail=with_tail)
+    warnings = []
+    monkeypatch.setattr(
+        "modelopt.torch.quantization.utils.layerwise_calib.has_accelerate_offload",
+        lambda target: target is model and offloaded,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.quantization.utils.layerwise_calib.warn_rank_0", warnings.append
+    )
+
+    layerwise_calibrate(model, lambda m: m(torch.tensor([2.0])), lambda *_args: None)
+
+    assert bool(warnings) is warns
+    if warns:
+        assert "CPU- or disk-offloaded" in warnings[0]
+
+
+@pytest.mark.parametrize(
+    ("skip_forward_without_activation_calib", "expected_forward_calls"),
+    [(None, 2), (False, 2), (True, 1)],
+)
+def test_layerwise_max_outside_calibration_uses_configured_forward_behavior(
+    monkeypatch, skip_forward_without_activation_calib, expected_forward_calls
+):
+    _register_test_discoverer(monkeypatch)
+    config = copy.deepcopy(mtq.INT8_WEIGHT_ONLY_CFG)
+    config["quant_cfg"].append({"quantizer_name": "*lm_head*weight_quantizer", "enable": True})
+    algorithm = {"method": "max", "layerwise": {"enable": True}}
+    if skip_forward_without_activation_calib is not None:
+        algorithm["skip_forward_without_activation_calib"] = skip_forward_without_activation_calib
+    config["algorithm"] = algorithm
+    model = _TransformerWithLMHead(n_layers=1, dim=16)
+    forward_calls = 0
+
+    def forward_loop(target):
+        nonlocal forward_calls
+        forward_calls += 1
+        target(torch.randint(0, 32, (2, 8)))
+
+    mtq.quantize(model, config, forward_loop=forward_loop)
+
+    assert forward_calls == expected_forward_calls
+
+
+def test_layerwise_export_rejects_enabled_outside_quantizer(monkeypatch, tmp_path):
+    _register_test_discoverer(monkeypatch)
+    model = _ModelWithQuantizedTail()
+
+    with pytest.raises(ValueError, match="outside transformer layers"):
+        layerwise_calibrate(
+            model,
+            lambda m: m(torch.tensor([2.0])),
+            lambda *_args, **_kwargs: None,
+            export_dir=str(tmp_path / "export"),
+        )
+
+    assert not (tmp_path / "export").exists()
+
+
+def test_layerwise_export_rejects_weight_only_outside_quantizer(monkeypatch, tmp_path):
+    _register_test_discoverer(monkeypatch)
+    config = copy.deepcopy(mtq.INT8_WEIGHT_ONLY_CFG)
+    config["quant_cfg"].append({"quantizer_name": "*lm_head*weight_quantizer", "enable": True})
+    algorithm = {
+        "method": "max",
+        "layerwise": {"enable": True, "export_dir": str(tmp_path / "export")},
+    }
+    config["algorithm"] = algorithm
+
+    with pytest.raises(ValueError, match="outside transformer layers"):
+        mtq.quantize(
+            _TransformerWithLMHead(n_layers=1, dim=16),
+            config,
+            forward_loop=lambda model: model(torch.randint(0, 32, (2, 8))),
+        )
+
+    assert not (tmp_path / "export").exists()
+
+
 # ---------------------------------------------------------------------------
 # Skip / run / capture path verification tests
 # ---------------------------------------------------------------------------
@@ -313,8 +552,8 @@ def test_skip_output_preserves_tuple_structure(monkeypatch):
         collector._unpatch_all_layers()
 
 
-def test_skip_output_preserves_shape_with_inter_layer_norm(monkeypatch):
-    """Skip outputs must have correct shape for un-patched LayerNorm between layers."""
+def test_inter_layer_op_raises_descriptive_error(monkeypatch):
+    """Real-device inter-layer ops on meta skip placeholders raise an actionable error."""
     _register_test_discoverer(monkeypatch)
     model = _InterLayerNormModel(n_layers=5, dim=16)
     data = [torch.randn(2, 16) for _ in range(3)]
@@ -326,9 +565,9 @@ def test_skip_output_preserves_shape_with_inter_layer_norm(monkeypatch):
     collector = LayerActivationCollector(model)
     collector._patch_all_layers()
     try:
-        for layer in model.layers:
-            inputs = collector.get_input_activations(layer, forward_loop)
-            assert len(inputs) == len(data)
+        with pytest.raises(RuntimeError, match="non-layerwise calibration"):
+            for layer in model.layers:
+                collector.get_input_activations(layer, forward_loop)
     finally:
         collector._unpatch_all_layers()
 
@@ -612,6 +851,56 @@ def _int8_cfg_with_algorithm(algorithm: dict) -> dict:
     return cfg
 
 
+def test_layerwise_calibrate_uses_global_layer_tqdm(monkeypatch):
+    _register_test_discoverer(monkeypatch)
+
+    class _FakeTqdm:
+        instances = []
+
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.postfixes = []
+            self.updates = []
+            self.closed = False
+            _FakeTqdm.instances.append(self)
+
+        def set_postfix_str(self, status, refresh=True):
+            self.postfixes.append((status, refresh))
+
+        def update(self, n=1):
+            self.updates.append(n)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("modelopt.torch.quantization.model_calib.tqdm", _FakeTqdm)
+
+    torch.manual_seed(0)
+    model = _SimpleTransformerModel(n_layers=3, dim=16)
+    calib_data = [torch.randint(0, 32, (2, 8)) for _ in range(2)]
+
+    def forward_loop(m):
+        for batch in calib_data:
+            m(batch)
+
+    def calib_func(layer, layer_forward_loop):
+        layer_forward_loop(layer)
+
+    layerwise_calibrate(model, forward_loop, calib_func)
+
+    assert len(_FakeTqdm.instances) == 1
+    pbar = _FakeTqdm.instances[0]
+    assert pbar.kwargs["total"] == 3
+    assert pbar.kwargs["initial"] == 0
+    assert pbar.kwargs["desc"] == "Layerwise calibration"
+    assert pbar.kwargs["dynamic_ncols"] is True
+    assert pbar.updates == [1, 1, 1]
+    assert pbar.closed
+    assert any(status.startswith("Calibrating layer 1/3") for status, _ in pbar.postfixes)
+    assert any(status.startswith("Calibrating layer 3/3") for status, _ in pbar.postfixes)
+
+
 def _awq_layerwise_config() -> dict:
     """INT4 weight-only AWQ config sized for the _DecoderBlock test model."""
     cfg = copy.deepcopy(mtq.INT4_AWQ_CFG)
@@ -619,7 +908,7 @@ def _awq_layerwise_config() -> dict:
     for entry in cfg["quant_cfg"]:
         if entry.get("quantizer_name") == "*weight_quantizer":
             entry.setdefault("cfg", {})["block_sizes"] = {-1: 8, "type": "static"}
-    cfg["algorithm"] = {"method": "awq_lite", "alpha_step": 0.5, "layerwise": True}
+    cfg["algorithm"] = {"method": "awq_lite", "alpha_step": 0.5, "layerwise": {"enable": True}}
     return cfg
 
 
@@ -629,12 +918,12 @@ def _svdquant_layerwise_config() -> dict:
     for entry in cfg["quant_cfg"]:
         if entry.get("quantizer_name") == "*weight_quantizer":
             entry.setdefault("cfg", {})["block_sizes"] = {-1: 8, "type": "static"}
-    cfg["algorithm"] = {"method": "svdquant", "lowrank": 4, "layerwise": True}
+    cfg["algorithm"] = {"method": "svdquant", "lowrank": 4, "layerwise": {"enable": True}}
     return cfg
 
 
 def test_mtq_quantize_layerwise_e2e_max(monkeypatch):
-    """End-to-end: mtq.quantize with layerwise=True produces populated amax values.
+    """End-to-end: mtq.quantize with layerwise enabled produces populated amax values.
 
     ``max`` is the representative algorithm for the layerwise happy path because
     every other algorithm seeds amax via max_calibrate first — if max works, the
@@ -643,7 +932,7 @@ def test_mtq_quantize_layerwise_e2e_max(monkeypatch):
     CUDA) or unnecessary duplication.
     """
     _register_test_discoverer(monkeypatch)
-    config = _int8_cfg_with_algorithm({"method": "max", "layerwise": True})
+    config = _int8_cfg_with_algorithm({"method": "max", "layerwise": {"enable": True}})
 
     torch.manual_seed(0)
     model = _SimpleTransformerModel(n_layers=3, dim=16)
@@ -675,6 +964,25 @@ def test_mtq_quantize_layerwise_e2e_max(monkeypatch):
         model(calib_data[0])
 
 
+def test_mtq_quantize_layerwise_calibrates_lm_head(monkeypatch):
+    _register_test_discoverer(monkeypatch)
+    config = _int8_cfg_with_algorithm(
+        {
+            "method": "max",
+            "layerwise": {"enable": True, "get_qdq_activations_from_prev_layer": True},
+        }
+    )
+    config["quant_cfg"].append({"quantizer_name": "*lm_head*", "enable": True})
+    model = _TransformerWithLMHead(n_layers=2, dim=16)
+    calib_data = [torch.randint(0, 32, (2, 8))]
+
+    mtq.quantize(model, config, forward_loop=lambda m: [m(batch) for batch in calib_data])
+
+    assert model.lm_head.input_quantizer._amax is not None
+    with torch.no_grad():
+        model(calib_data[0])
+
+
 @pytest.mark.parametrize(
     "algorithm",
     ["gptq", "awq_lite", "smoothquant", "mse"],
@@ -697,7 +1005,7 @@ def test_mtq_quantize_layerwise_dispatches_for_algorithm(monkeypatch, algorithm)
     if algorithm == "awq_lite":
         config = _awq_layerwise_config()
     else:
-        config = _int8_cfg_with_algorithm({"method": algorithm, "layerwise": True})
+        config = _int8_cfg_with_algorithm({"method": algorithm, "layerwise": {"enable": True}})
 
     torch.manual_seed(0)
     model = _SimpleTransformerModel(n_layers=2, dim=16)
@@ -868,20 +1176,24 @@ def test_layerwise_save_every_writes_next_inputs_only_at_window_boundaries(monke
 
 
 @pytest.mark.parametrize(
-    ("n_layers", "save_every", "rewind_to"),
+    ("scenario", "n_layers", "save_every", "calib_mutates_weights", "rewind_to"),
     [
+        # Pins the quantizer_buffers.pt restore path (no weights.pt on disk).
+        ("non_mutating", 3, 1, False, 0),
         # Pins the per-call snapshot fix: each save() captures the
         # just-calibrated layer's state before the next-layer capture forward
         # swaps it to _SkipLayer.
-        (4, 2, 1),
+        ("save_every", 4, 2, True, 1),
     ],
 )
 def test_layerwise_checkpoint_resume_matches_one_shot_amax(
-    monkeypatch, tmp_path, n_layers, save_every, rewind_to
+    monkeypatch, tmp_path, scenario, n_layers, save_every, calib_mutates_weights, rewind_to
 ):
     """Full run → rewind manifest → fresh resume reproduces one-shot ``_amax``.
 
-    Covers the per-window save/resume path with always-full-weight saves.
+    Single test covering both checkpoint optimizations. For the
+    non-mutating calibration case also asserts the on-disk shape (no
+    ``weights.pt``, ``quantizer_buffers.pt`` present per layer).
     """
     _register_test_discoverer(monkeypatch)
 
@@ -896,6 +1208,7 @@ def test_layerwise_checkpoint_resume_matches_one_shot_amax(
                     "enable": True,
                     "checkpoint_dir": str(ckpt_dir),
                     "save_every": save_every,
+                    "calib_mutates_weights": calib_mutates_weights,
                 },
             }
         )
@@ -912,12 +1225,19 @@ def test_layerwise_checkpoint_resume_matches_one_shot_amax(
     setup_model = _SimpleTransformerModel(n_layers=n_layers, dim=16)
     mtq.quantize(setup_model, build_cfg(resume_dir), forward_loop=forward_loop)
 
+    if scenario == "non_mutating":
+        for name in _layer_dir_names(resume_dir):
+            d = resume_dir / name
+            assert not (d / "weights.pt").exists()
+            assert (d / "quantizer_buffers.pt").exists()
+
     (resume_dir / "manifest.json").write_text(
         json.dumps(
             {
                 "last_completed_layer": rewind_to,
                 "num_layers": n_layers,
                 "save_every": save_every,
+                "calib_mutates_weights": calib_mutates_weights,
             }
         )
     )
@@ -926,7 +1246,7 @@ def test_layerwise_checkpoint_resume_matches_one_shot_amax(
     resumed_model = _SimpleTransformerModel(n_layers=n_layers, dim=16)
     mtq.quantize(resumed_model, build_cfg(resume_dir), forward_loop=forward_loop)
 
-    _assert_amax_close(_collect_amax(resumed_model), baseline_amax, "resume")
+    _assert_amax_close(_collect_amax(resumed_model), baseline_amax, f"{scenario} resume")
 
 
 def test_layerwise_save_every_mid_window_crash_recovers_at_prev_boundary(monkeypatch, tmp_path):
@@ -1003,6 +1323,7 @@ def test_layerwise_checkpoint_mismatch_save_every_raises(monkeypatch, tmp_path):
                 "last_completed_layer": 1,
                 "num_layers": 4,
                 "save_every": 2,
+                "calib_mutates_weights": True,
             }
         )
     )

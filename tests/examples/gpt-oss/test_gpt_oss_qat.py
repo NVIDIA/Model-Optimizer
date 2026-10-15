@@ -90,8 +90,8 @@ class GPTOSS:
             "configs/sft_lora.yaml",
             "--model_name_or_path",
             self.model_path,
-            "--quant_cfg",
-            "MXFP4_MLP_WEIGHT_ONLY_CFG",
+            "--recipe",
+            "general/ptq/mxfp4_mlp_weight_only",
             "--output_dir",
             str(qat_output_dir),
         ]
@@ -134,8 +134,8 @@ class GPTOSS:
             "configs/sft_full.yaml",
             "--model_name_or_path",
             str(sft_dir),
-            "--quant_cfg",
-            "MXFP4_MLP_WEIGHT_ONLY_CFG",
+            "--recipe",
+            "general/ptq/mxfp4_mlp_weight_only",
             "--output_dir",
             str(qat_output_dir),
         ]
@@ -224,9 +224,6 @@ class GPTOSS:
             model_path_override: Optional path to the model to deploy (e.g., MXFP4 checkpoint).
                                 If None, uses self.model_path
         """
-        # Skip if tensorrt_llm is not available
-        pytest.importorskip("tensorrt_llm")
-
         # Use override path if provided, otherwise use original model path
         deploy_model_path = model_path_override or self.model_path
 
