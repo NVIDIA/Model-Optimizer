@@ -189,12 +189,11 @@ def _assert_grads_match_the_whole_model(model, per_batch, rank, size, ep_degree)
 def _sharded_model_backward_matches_the_whole_one(rank, size, ckpt_dir, fsdp_dense, ep_degree):
     device = torch.device(f"cuda:{rank}")
     config = AutoConfig.from_pretrained(ckpt_dir)
-    model = load_and_prepare_ep(
-        ckpt_dir,
-        DistributionPlan(size, ep_size=ep_degree, dense="fsdp" if fsdp_dense else "replicate"),
-        hf_config=config,
-        freeze=False,
-    )
+    plan = DistributionPlan(size, ep_size=ep_degree, dense="fsdp" if fsdp_dense else "replicate")
+    model = load_and_prepare_ep(ckpt_dir, plan, hf_config=config, freeze=False)
+    set_distribution_plan(
+        model, plan
+    )  # loaded directly, so recorded here, as load_pretrained would
     whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16).to(device)
 
     batches = _batches(size)
@@ -238,12 +237,11 @@ def _quantized_sharded_model_trains_like_the_whole_one(
     cfg = {"fp8": mtq.FP8_DEFAULT_CFG, "nvfp4": mtq.NVFP4_DEFAULT_CFG}[fmt]
     device = torch.device(f"cuda:{rank}")
     config = AutoConfig.from_pretrained(ckpt_dir)
-    model = load_and_prepare_ep(
-        ckpt_dir,
-        DistributionPlan(size, ep_size=ep_degree, dense="fsdp" if fsdp_dense else "replicate"),
-        hf_config=config,
-        freeze=False,
-    )
+    plan = DistributionPlan(size, ep_size=ep_degree, dense="fsdp" if fsdp_dense else "replicate")
+    model = load_and_prepare_ep(ckpt_dir, plan, hf_config=config, freeze=False)
+    set_distribution_plan(
+        model, plan
+    )  # loaded directly, so recorded here, as load_pretrained would
     whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16).to(device)
 
     # Calibrate as hf_ptq does: each rank on its own batch, the reference on all of them.
