@@ -974,7 +974,7 @@ class _QuantFP8Experts(_QuantFusedExperts):
     def get_expert_weight(self, name, idx, dtype=None):
         weight = getattr(self, name)[idx]
         if weight.element_size() > 1:
-            return weight
+            return weight if dtype is None else weight.to(dtype)
         dtype = dtype or torch.get_default_dtype()
         scales = getattr(self, f"{name}_scale_inv")[idx].to(dtype)
         rows, cols = self.block_size or (weight.shape[0] // scales.shape[0], weight.shape[1])

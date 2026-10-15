@@ -1779,6 +1779,10 @@ def test_native_fp8_experts_scales(has_gate, block_size, fold):
         quantizer.disable()
     if fold:
         experts.fold_weight()
+        torch.testing.assert_close(
+            experts(inputs.bfloat16(), indices, routing),
+            copy.deepcopy(reference).bfloat16()(inputs.bfloat16(), indices, routing),
+        )
     torch.testing.assert_close(
         experts(inputs, indices, routing), reference(inputs, indices, routing)
     )
