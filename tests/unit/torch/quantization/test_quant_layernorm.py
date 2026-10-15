@@ -15,9 +15,11 @@
 
 """Tests for ``torch.nn.LayerNorm`` being registered in ``QuantModuleRegistry``."""
 
+import pytest
 import torch
 import torch.nn as nn
 
+import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 
 
@@ -29,3 +31,15 @@ def test_layernorm_quant_wrapper_is_identity_when_quantizers_disabled():
     x = torch.randn(2, 8)
     ref = nn.functional.layer_norm(x, (8,), qln.weight, qln.bias, eps=qln.eps)
     assert torch.allclose(qln(x), ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [mtq.INT8_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG],
+    ids=["int8", "fp8", "nvfp4"],
+)
+def test_default_presets_keep_layernorm_inputs_unquantized(config):
+    model = mtq.quantize(nn.Sequential(nn.Linear(16, 16), nn.LayerNorm(16)), config)
+
+    assert model[0].input_quantizer.is_enabled
+    assert not model[1].input_quantizer.is_enabled

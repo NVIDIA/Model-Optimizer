@@ -21,8 +21,10 @@
 # names from modelopt.torch.export directly.
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_hf_ckpt_remote_code,
+    copy_non_model_files,
     copy_non_safetensor_files_from_ckpt,
     copy_off_index_safetensors,
+    ensure_local_checkpoint,
     indexed_weight_map,
     load_multimodal_components,
     locate_source_keys,

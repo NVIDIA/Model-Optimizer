@@ -270,6 +270,13 @@ the final path after any move.
 
 ## Triage (gate failure → decision)
 
+For completed evaluations, apply
+[evaluation run validation](../evaluation/references/run-validation.md) before
+triage; its policy overrides retry actions below. Warn but do not retry solely
+for failures below tolerance. For runs that fail tolerance or an independent
+validation check, return findings and a recommendation to the parent/user for
+review; do not automatically resubmit.
+
 Map a gate's `failure_class` to the next action:
 
 | `failure_class` | Action |
@@ -281,7 +288,7 @@ Map a gate's `failure_class` to the next action:
 | `CHECKPOINT_NOT_SERVABLE` | The Step 2b canary could not load/generate. Usually a tensor-naming or config-schema mismatch between the exporter and the serving stack, or missing/dangling auxiliary files (tokenizer). Fix the export; do not evaluate. |
 | `VERBOSITY_EXCEEDED` | Re-check run hygiene first (mixed reasoning effort, partial runs, unequal sample counts) — that has explained every false positive so far. If the delta survives matched, complete runs, it is a real behavioural change; do not publish on accuracy alone. |
 | `DEPLOYMENT_HEALTH_FAILED` | Drop to the **deployment** skill: reproduce serving standalone (`/health` + one generation), debug flags / image / TP / env, then carry the working command into NEL's `deployment.command` and retry the eval. If it can't serve, `POINT_INFEASIBLE`. |
-| `EVAL_JUDGE_FAILED` | Usually transient (auth / rate limit) — wait and retry. |
+| `EVAL_JUDGE_FAILED` | For completed runs, apply evaluation run validation above; return tolerance failures to the parent/user without automatic retry. Otherwise investigate auth/rate limits before retrying. |
 | `SAMPLE_ACCOUNTING_FAILED` | Investigate dropped/failed samples before trusting scores. |
 | `EXTERNAL_BASELINE_MISMATCH` | Investigate baseline configuration, correct it, rerun the baseline, and repeat external sanity before comparison. |
 | `USER_CONFIG_ERROR` | Correct it from the request, workspace, or model/config metadata and retry; if irrecoverable, return `ANOMALOUS` with evidence. |

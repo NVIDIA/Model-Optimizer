@@ -136,8 +136,10 @@ SKILL.md Step 3 (same vLLM). The 0.2.6 `command:` maps to structured `services.<
 Size TP/DP + backend defaults (`--max-num-seqs = ceil(max_parallelism/DP)`, MoE
 `--enable-expert-parallel`, …) per `references/parallelism.md` + Step 3. **Sampling
 is a mandatory model-card lookup** (Step 3 / `references/model-card-research.md`,
-never generic defaults): `generation.temperature`/`top_p` (+`max_tokens` if the card
-caps output) and `proxy.extra_body` for any card extras (`skip_special_tokens`, thinking toggles).
+never generic defaults): `generation.temperature`/`top_p` and `proxy.extra_body`
+for card extras (`skip_special_tokens`, thinking toggles). For per-response budgets,
+follow the selected task's generation policy and [generic precedence guidance](model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
+Keep context limits and timeouts separate from output budgets.
 
 Put per-model reasoning config in `extra_body.chat_template_kwargs` (e.g. `enable_thinking`
 for Qwen/Nemotron), not as loose top-level keys. Only add extras the card or
@@ -246,4 +248,6 @@ kwargs after `--` (e.g. `-- -o copy_artifacts=true`).
   retries (≤8); lower `max_concurrent` if frequent.
 - `solver failed — grading 0.0` agent crashes are rare but real (e.g. terminus-2
   tmux `send-keys`) — distinguish from genuine misses + task timeouts; the final
-  report breaks them out.
+  report breaks them out. Apply `run-validation.md`'s bounded failure policy:
+  verify protocol-valid scored failures and complete trial accounting. A harness
+  crash leaving missing/unscored trials is a blocker, not a zero score.

@@ -812,21 +812,6 @@ def build_mlp_config(
     return config
 
 
-def _get_dbrx_expert(experts: nn.Module, export_id: int, linear_name: str):
-    # DBRX experts layout is:
-    # experts:
-    #   w1[0]
-    #   w1[1]
-    #   ...
-    #   w2[0]
-    #   w2[1]
-    #   ...
-    #   v1[0]
-    #   v1[1]
-    #   ...
-    return getattr(experts, linear_name)[export_id]
-
-
 def _build_stacked_linear(experts: nn.Module, module_name, linear_type, num_experts, expert_getter):
     config = LinearConfig(linear_type=linear_type)
 
@@ -991,7 +976,7 @@ def build_stacked_experts(
 def build_moe_config(module: nn.Module, decoder_type) -> MOEConfig:
     """Builds the MOE config for the module."""
     assert is_moe(module)
-    assert decoder_type in ["llama", "dbrx", "phi3", "deepseek", "qwen"]
+    assert decoder_type in ["llama", "phi3", "deepseek", "qwen"]
 
     config = MOEConfig()
 
@@ -1003,8 +988,6 @@ def build_moe_config(module: nn.Module, decoder_type) -> MOEConfig:
         else:
             # For huggingface model
             config.router = build_linear_config(module.gate, LINEAR_ROW)
-    elif decoder_type == "dbrx":
-        config.router = build_linear_config(module.router.layer, LINEAR_ROW)
     elif decoder_type == "deepseek":
         # Build a linear on the fly.
         router_linear = nn.Linear(module.gate.gating_dim, module.gate.n_routed_experts, bias=None)
@@ -1059,13 +1042,6 @@ def build_moe_config(module: nn.Module, decoder_type) -> MOEConfig:
                 len(module.experts),
                 _get_expert_attr,
             )
-    elif decoder_type == "dbrx":
-        experts.fc, experts.proj = build_stacked_experts(
-            module.experts.mlp,
-            ["w1_linear", "w2_linear", "v1_linear"],
-            len(module.experts.mlp.w1_linear),
-            _get_dbrx_expert,
-        )
     elif decoder_type in ["deepseek", "qwen"]:
         experts.fc, experts.proj = build_stacked_experts(
             module.experts,
@@ -1078,7 +1054,7 @@ def build_moe_config(module: nn.Module, decoder_type) -> MOEConfig:
 
     config.experts = experts
 
-    # activation for mixtral and dbrx
+    # activation for mixtral
     config.hidden_act = "swiglu"
 
     return config
@@ -1220,12 +1196,7 @@ def build_decoder_config(
     # Set all config fields in modelopt from HF config
     _set_layer_config_from_metaconfig(config, model_metadata_config)
 
-    if type(module).__name__ == "DbrxBlock":
-        # Flatten DBRX attention and ffn
-        module_layers = {}
-        module_layers.update(dict(getattr(module, "norm_attn_norm").named_children()))
-        module_layers.update({"ffn": module.ffn})
-    elif decoder_type == "t5":
+    if decoder_type == "t5":
         # Combine two modules (T5LayerSelfAttention, T5LayerFF) / three modules
         # ((T5LayerSelfAttention, T5LayerCrossAttention, T5LayerFF)) of T5 model
         # (depending on whether it's encoder / decoder) into one decoder layer
@@ -1536,10 +1507,6 @@ def update_experts_avg_prequant_scale(experts: nn.Module):
         get_func = _get_expert_attr
         num_experts = len(experts.experts)
         experts = experts.experts
-    elif "dbrx" in type(experts).__name__.lower():
-        get_func = _get_dbrx_expert
-        num_experts = len(getattr(experts.experts.mlp, experts_linear_names[0]))
-        experts = experts.experts.mlp
     else:
         raise NotImplementedError("MoE model not supported")
 
@@ -1568,8 +1535,6 @@ def get_experts_linear_names(model: torch.nn.Module):
     """Returns linear layer names based on decoder type for MoE models."""
     if "mixtral" in type(model).__name__.lower():
         return ["w1", "w2", "w3"]
-    elif "dbrx" in type(model).__name__.lower():
-        return ["w1_linear", "w2_linear", "v1_linear"]
     else:
         raise NotImplementedError("MoE model not supported")
 

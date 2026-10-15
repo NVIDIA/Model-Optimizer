@@ -179,12 +179,14 @@ nvinfer1::DataType IdentityConv::getOutputDataType(int32_t index,
   return inputTypes[0];
 }
 
+#if NV_TENSORRT_MAJOR < 11
 bool IdentityConv::isOutputBroadcastAcrossBatch(int32_t outputIndex, bool const *inputIsBroadcasted,
                                                 int32_t nbInputs) const noexcept {
   return false;
 }
 
 bool IdentityConv::canBroadcastInputAcrossBatch(int32_t inputIndex) const noexcept { return false; }
+#endif
 
 int32_t IdentityConv::enqueue(int32_t batchSize, void const *const *inputs, void *const *outputs,
                               void *workspace, cudaStream_t stream) noexcept {

@@ -30,6 +30,7 @@ __all__ = [
     "EAGLE_MTP_DEFAULT_CFG",
     "DFlashConfig",
     "EagleConfig",
+    "ExternalDraftConfig",
     "MedusaConfig",
     "eagle3_default_config",
     "eagle_mtp_default_config",
@@ -322,7 +323,8 @@ class DFlashConfig(ModeloptBaseConfig):
         description=(
             "LiLiCorr only: absolute weight of the cross-entropy term on the reranker's "
             "per-slot conditional. The objective is "
-            "loss = dflash_loss + w_ce*CE + w_margin*hinge + w_pen*penalty. The weights are "
+            "loss = dflash_loss + w_ce*CE + w_margin*hinge + w_pen*penalty "
+            "(+ w_cal*calibration, see dflash_lilicorr_w_cal). The weights are "
             "absolute — there is no outer multiplier scaling the three terms as a group — so "
             "each is the coefficient with which its term enters the total, and "
             "`loss == origin_loss + lilicorr_loss` holds exactly. Both halves and all three "
@@ -369,8 +371,23 @@ class DFlashConfig(ModeloptBaseConfig):
             "reranker's expected target-rejection over its own candidate distribution. Each "
             "competing candidate is weighted by the target model's logit gap to the ground "
             "truth, so candidates the target finds plausible are penalized lightly and "
-            "confident wrong ones hard. Requires the target's logits, hence online training "
-            "(dflash_offline=False). Both shipped variants use 0.25. "
+            "confident wrong ones hard. Requires the target's logits: online training reads "
+            "them directly, offline training reconstructs them from the captured final hidden "
+            "state. Both shipped variants use 0.25. "
+            "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
+    dflash_lilicorr_w_cal: float = ModeloptField(
+        default=0.0,
+        ge=0.0,
+        allow_inf_nan=False,
+        description=(
+            "LiLiCorr only: absolute weight of the optional calibration term, a KL divergence "
+            "from the target's distribution renormalized over each slot's k candidates to "
+            "the reranker's. An alternative to w_pen whose gradient does not scale with the "
+            "target's logit gap. Requires the target's logits, like w_pen. 0.0 (default) is a "
+            "no-op, and it is not part of the three weights' all-or-nothing validation. "
             "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
         ),
     )
@@ -449,6 +466,50 @@ class MedusaConfig(ModeloptBaseConfig):
     medusa_num_layers: int = ModeloptField(
         default=1,
         description=("The number of ResBlocks used in medusa head."),
+    )
+
+
+class ExternalDraftConfig(ModeloptBaseConfig):
+    """External (standalone) draft model config.
+
+    The converted module is a pretrained causal LM used directly as the draft. It
+    keeps its own embeddings and lm_head; the base model contributes only cached
+    hidden states, projected by the base lm_head to obtain teacher logits.
+    """
+
+    external_loss: Literal["soft_ce", "tvd", "tvd_deploy"] = ModeloptField(
+        default="tvd",
+        description=(
+            "Training objective. ``soft_ce`` matches the Eagle offline objective. "
+            "``tvd`` is total-variation distance between the two untruncated "
+            "distributions. ``tvd_deploy`` puts both through the serving filter first "
+            "(``external_top_k`` then ``external_top_p``), making it the acceptance the "
+            "deployed pair will see: ``alpha = 1 - TVD``."
+        ),
+    )
+
+    external_top_k: int = ModeloptField(
+        default=20,
+        ge=0,
+        description=(
+            "Top-k of the serving filter, applied to *both* the base and the "
+            "draft by ``external_loss='tvd_deploy'``. 0 disables the top-k stage."
+        ),
+    )
+
+    external_top_p: float = ModeloptField(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Top-p of the serving filter, applied to *both* the base and the "
+            "draft by ``external_loss='tvd_deploy'``. 0 or 1.0 disables the nucleus stage."
+        ),
+    )
+
+    external_report_acc: bool = ModeloptField(
+        default=True,
+        description=("Whether to report top-1 agreement with the base model during training."),
     )
 
 

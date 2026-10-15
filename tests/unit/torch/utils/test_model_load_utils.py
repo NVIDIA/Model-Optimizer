@@ -17,23 +17,28 @@
 
 import pytest
 import torch
-from packaging.version import Version
+from safetensors.torch import save_file
 
 pytest.importorskip("accelerate")
+
+from _test_utils.torch.transformers_models import (
+    _TinyQwen35Tokenizer,
+    get_tiny_qwen3_5_moe_vl,
+    get_tiny_qwen3_5_vl,
+)
 
 from modelopt.torch.utils.plugins.model_load_utils import (
     _conversion_plan,
     _convert_keys,
     _resolve_target,
     record_unplaced_source_keys,
+    unplaced_source_keys,
 )
 
 
 def _build_tiny_qwen3_moe():
     """A tiny meta-init Qwen3-MoE (fused ``gate_up_proj`` + ``down_proj`` experts) for converter tests."""
-    transformers = pytest.importorskip("transformers")
-    if Version(transformers.__version__) < Version("5.0"):
-        pytest.skip("multi-source fused-MoE conversion needs transformers>=5")
+    pytest.importorskip("transformers")
     from accelerate import init_empty_weights
     from transformers import AutoConfig, AutoModelForCausalLM
 
@@ -99,6 +104,16 @@ def test_checkpoint_key_converter_multisource_expert_fusion():
     for e in range(n_exp):
         assert _resolve_target(plan, f"{prefix}mlp.experts.{e}.gate_proj.weight")[0] == gname
         assert _resolve_target(plan, f"{prefix}mlp.experts.{e}.up_proj.weight")[0] == gname
+
+
+@pytest.mark.parametrize("factory", [get_tiny_qwen3_5_vl, get_tiny_qwen3_5_moe_vl])
+def test_unplaced_keys_preserve_registered_qwen_vlm_parameters(tmp_path, factory):
+    model = factory(tokenizer=_TinyQwen35Tokenizer())
+    state = {name: tensor.contiguous() for name, tensor in model.state_dict().items()}
+    state["mtp.eh_proj.weight"] = torch.zeros(2, 2)
+    save_file(state, tmp_path / "model.safetensors")
+
+    assert unplaced_source_keys(model, str(tmp_path)) == ["mtp.eh_proj.weight"]
 
 
 # --- the loader's own accounting of what it could not place --------------------------------------

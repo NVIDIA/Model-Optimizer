@@ -21,7 +21,9 @@ catch regressions in CI.
 
 Environment variables (all optional — no check if unset):
     MAX_FINAL_LOSS:  Final loss must be below this value
-    MIN_FINAL_ACC:   Final accuracy must be above this value (any key containing 'acc')
+    MIN_FINAL_ACC:   Final accuracy must be above this value (any key containing 'acc').
+                     A threshold whose metric is absent fails the check rather than
+                     passing unevaluated.
     MAX_FINAL_PERPLEXITY: Final perplexity must be below this value
 
 Usage:
@@ -112,7 +114,14 @@ def check_regression(metrics):
         thresh = float(thresh_str)
         val = metrics.get(metric_key)
         if val is None:
-            messages.append(f"WARNING: {env_var} set but '{metric_key}' not found in metrics")
+            # Setting a threshold asserts the run must be checked against it. If the
+            # metric never reaches trainer_state.json the assertion cannot be satisfied,
+            # so fail rather than stamping PASS on an unchecked run.
+            messages.append(
+                f"REGRESSION: {env_var}={thresh} was set but '{metric_key}' is absent from "
+                "trainer_state.json, so the threshold was never evaluated"
+            )
+            passed = False
             continue
         if check_fn(val, thresh):
             messages.append(f"PASS: {metric_key}={val:.3f} (threshold: {env_var}={thresh})")

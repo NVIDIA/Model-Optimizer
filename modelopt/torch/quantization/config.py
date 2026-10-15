@@ -1232,9 +1232,10 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
     )
     block_size: int | None = ModeloptField(
         default=128,
+        gt=0,
         title="Block size for GPTQ weight update.",
-        description="""The block size for GPTQ weight update, which must be a multiple of the
-        group_size used in the quantization.""",
+        description="""The block size for GPTQ weight update, which must be positive and a multiple
+        of the group_size used in the quantization.""",
     )
     fused: bool = ModeloptField(
         default=False,
@@ -1242,6 +1243,29 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         description="""When True, use a fused Triton kernel that combines quantization and
         per-column error propagation into one launch per GPTQ block.""",
     )
+    importance_weighted: bool = ModeloptField(
+        default=False,
+        title="Weight the codebook search by the Hessian diagonal.",
+        description="""When True, formats whose codebook search takes a per-input-column importance
+        (the GGML IQ1 and IQ2 formats) weight it by the square root of the Hessian diagonal,
+        llama.cpp's imatrix statistic. Other formats ignore it.""",
+    )
+
+
+class ImatrixCalibConfig(QuantizeAlgorithmConfig):
+    """The config for imatrix calibration.
+
+    Encodes each weight once, its codebook search weighted by the square root of its inputs'
+    per-column second moment ``E[x_j^2]`` -- llama.cpp's importance matrix. Covers the GGML formats
+    with a weighted search,
+    on dense linears and on each expert of HF fused-MoE experts, which GPTQ does not reach. A
+    weight that already holds final codes, such as GPTQ's, is left alone, so
+    ``[{method: gptq}, {method: imatrix}]`` runs GPTQ where it applies and imatrix on the rest.
+    By default the statistics come from a single forward pass, as llama.cpp collects them; with
+    ``layerwise`` enabled, each layer's are collected after the earlier layers are quantized.
+    """
+
+    method: Literal["imatrix"] = ModeloptField("imatrix")
 
 
 _ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig

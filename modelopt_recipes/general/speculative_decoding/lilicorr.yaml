@@ -11,7 +11,8 @@
 # The objective is the DFlash block loss plus three weighted terms:
 #   loss = dflash_loss + w_ce*CE + w_margin*hinge + w_pen*penalty
 # No outer multiplier, so `loss == origin_loss + lilicorr_loss` holds exactly.
-# Online training is required (the penalty reads the target model's logits).
+# The penalty reads the target model's logits: online training has them directly,
+# offline/streaming training reconstructs them from the captured final hidden state.
 #
 # This file is the published `base` variant. The `margin` variant differs only in
 # the composition of the cross-entropy weight — see the two-line override below.
@@ -29,8 +30,6 @@ model:
 
 # maps to DataArguments (main.py)
 data:
-  # Online only: the distractor penalty weights each candidate by the target
-  # model's own logit gap, so there has to be a target model in the process.
   mode: online
   data_path:
   # Jinja chat template with {% generation %} tags for answer_only_loss.

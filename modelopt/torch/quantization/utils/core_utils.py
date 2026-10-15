@@ -635,7 +635,9 @@ def enable_weight_access_and_writeback(
     """
     if _get_enclosing_fsdp_module(module, root_model, names) is not None:
         context = fsdp2_weight_access_and_writeback_context(module, root_model, writeback, names)
-    elif is_quantized_parallel_linear(module) and hasattr(module, "_hf_tp_plan"):
+    elif is_quantized_parallel_linear(module) and hasattr(
+        module, "enable_weight_access_and_writeback"
+    ):
         # HF transformers TP sharded linear layer
         context = module.enable_weight_access_and_writeback()
     elif hasattr(module, "_hf_hook"):
@@ -666,7 +668,9 @@ def requires_weight_materialization(module, root_model, names: "ModuleNames | No
         return False
     if _get_enclosing_fsdp_module(module, root_model, names) is not None:
         return True
-    if is_quantized_parallel_linear(module) and hasattr(module, "_hf_tp_plan"):
+    if is_quantized_parallel_linear(module) and hasattr(
+        module, "enable_weight_access_and_writeback"
+    ):
         return True
     hook = getattr(module, "_hf_hook", None)
     if hook is None:

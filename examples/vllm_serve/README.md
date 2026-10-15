@@ -4,10 +4,20 @@ This is a simple example to demonstrate calibrating and serving ModelOpt fakequa
 
 Compared with realquant, fakequant is 2-5x slower, but doesn't require dedicated kernel support and facilitates research.
 
-The general fakequant example is tested with vLLM 0.9.0, 0.19.1, 0.26.0, 0.28.0, 0.29.0 and 0.30.0. The
-compact NVFP4 attention worker documented below requires vLLM 0.15.0 or newer.
+The general fakequant example is tested with vLLM 0.19.1, 0.26.0, 0.28.0, 0.29.0 and 0.30.0. The
+compact NVFP4 attention worker documented below requires vLLM 0.15.0 or newer. The Kimi K3
+low-latency fakequant path needs `KimiK3LowLatencyLinearMethod`, which is present in stock vLLM
+0.28.0, 0.29.0 and 0.30.0 but absent from some older releases. For BF16 Kimi K3 weights, it
+supports dense and shared-expert MLP projections; attention projections need separate support.
+On vLLM 0.28.0, ModelOpt bypasses Kimi's fused GEMM-RS MLP path when down-projection
+fake quantizers are enabled and retains it when they are disabled.
+
+The fakequant launcher does not support vLLM 0.9.0. Use one of the tested releases above.
 
 ## Prepare environment
+
+Run the commands below from the ModelOpt repository root (`/workspace/Model-Optimizer`
+in the Docker image).
 
 Use the Dockerfile to build an environment with vLLM 0.30.0:
 
@@ -15,12 +25,8 @@ Use the Dockerfile to build an environment with vLLM 0.30.0:
 docker build -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.30.0 .
 ```
 
-To build the same environment with another tested vLLM release, override `VLLM_VERSION`:
-
-```bash
-docker build --build-arg VLLM_VERSION=0.26.0 \
-  -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.26.0 .
-```
+The Dockerfile defaults to vLLM 0.30.0. Override `VLLM_VERSION` only when
+building for a different tested release.
 
 For a direct installation from the ModelOpt repository root, install the tested vLLM
 release and the ModelOpt extras used by this example:
@@ -35,34 +41,64 @@ for details about installing partial dependency sets.
 
 ## Calibrate and serve fake quant model in vLLM
 
-Step 1: Configure quantization settings.  
-You can either edit the `quant_config` dictionary in `vllm_serve_fakequant.py`, or set the following environment variables to control quantization behavior:
+Step 1: Configure quantization with the ModelOpt CLI flags below. Each flag falls back to its corresponding environment variable when omitted:
 
-| Variable        | Description                                      | Default             |
-|-----------------|--------------------------------------------------|---------------------|
-| QUANT_DATASET   | Dataset name for calibration                     | cnn_dailymail       |
-| QUANT_CALIB_SIZE| Number of samples used for calibration           | 512                 |
-| QUANT_CFG       | Quantization config                              | None                |
-| KV_QUANT_CFG    | KV-cache quantization config                     | None                |
-| QUANT_FILE_PATH | Optional path to exported quantizer state dict `quantizer_state.pth` | None |
-| MODELOPT_STATE_PATH | Optional path to exported `vllm_fq_modelopt_state.pth` (restores quantizer state and parameters) | None |
-| CALIB_BATCH_SIZE | Calibration batch size                           | 1                  |
-| RECIPE_PATH      | Optional path to a ModelOpt PTQ recipe YAML  | None |
+| CLI flag | Environment fallback | Description | Default / auto-detection |
+| --- | --- | --- | --- |
+| `--modelopt-quant-cfg` | `QUANT_CFG` | Weight/activation config (planned deprecation) | Unset |
+| `--modelopt-kv-quant-cfg` | `KV_QUANT_CFG` | KV-cache config (planned deprecation) | Unset |
+| `--modelopt-quant-file-path` | `QUANT_FILE_PATH` | Megatron export's `quantizer_state.pth`; requires a config or recipe | `<model_dir>/quantizer_state.pth` when present with a recipe |
+| `--modelopt-state-path` | `MODELOPT_STATE_PATH` | HF export's full ModelOpt state | `<model_dir>/vllm_fq_modelopt_state.pth` when present |
+| `--modelopt-recipe-path` | `RECIPE_PATH` | PTQ recipe YAML or exported Megatron `quant_recipe.yaml` | `<model_dir>/quant_recipe.yaml` when present |
+| `--modelopt-quant-dataset` | `QUANT_DATASET` | Calibration dataset | `cnn_dailymail` |
+| `--modelopt-quant-calib-size` | `QUANT_CALIB_SIZE` | Calibration sample count | `512` |
+| `--modelopt-calib-batch-size` | `CALIB_BATCH_SIZE` | Calibration batch size | `1` |
 
-Set these variables in your shell or Docker environment as needed to customize calibration.
+CLI values take precedence over their environment fallbacks. `--modelopt-quant-cfg` /
+`--modelopt-kv-quant-cfg` and `--modelopt-recipe-path` are mutually exclusive because a
+recipe already carries its quantization configuration. With no explicit ModelOpt quantization
+settings, HF full state takes precedence over Megatron sidecars in a local model directory.
 
-Step 2: Run the following command, with all supported flag as `vllm serve`:
+`QUANT_CFG` and `KV_QUANT_CFG` (and their CLI flags) will be deprecated in a future
+release. They still work today. For new runs, use a PTQ recipe through `RECIPE_PATH` or
+`--modelopt-recipe-path`; the recipe can include both model and KV-cache quantization.
+Unset `QUANT_CFG` and `KV_QUANT_CFG` when switching to a recipe, since the launcher
+rejects mixing them.
+
+Run the launcher directly from the repository checkout; the example does not
+need a separate package installation.
+
+Step 2: Serve with the launcher. It accepts every stock vLLM flag plus the ModelOpt flags above:
 
 ```bash
-python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
+python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
+  -tp 8 --host 0.0.0.0 --port 8000 \
+  --modelopt-quant-cfg NVFP4_DEFAULT_CFG \
+  --modelopt-quant-dataset cnn_dailymail \
+  --modelopt-quant-calib-size 512
 ```
+
+The launcher assumes the vLLM `serve` subcommand when given a model path; spelling out
+`serve` is optional. For an exported HF or Megatron fakequant directory containing the
+standard sidecars, no ModelOpt path flags are required:
+
+```bash
+python3 examples/vllm_serve/vllm_serve_fakequant.py <export_dir> \
+  -tp 8 --host 0.0.0.0 --port 8000
+```
+
+When fakequant is requested explicitly or auto-detected, the launcher selects
+`fakequant_worker.FakeQuantWorker` unless `--worker-cls` is supplied. Without ModelOpt
+settings or recognized sidecars, it delegates to stock vLLM. ModelOpt flags belong to
+this launcher; stock `vllm serve` does not recognize them.
 
 Hybrid attention/Mamba models such as Nemotron 3 Nano are supported on vLLM 0.26.0, 0.28.0, 0.29.0 and
 0.30.0. For example, calibrate and serve with NVFP4 KV-cache fakequant as follows:
 
 ```bash
-KV_QUANT_CFG=NVFP4_KV_CFG QUANT_CALIB_SIZE=512 \
-  python vllm_serve_fakequant.py <nemotron3_nano_model_path> -tp 8 \
+python3 examples/vllm_serve/vllm_serve_fakequant.py <nemotron3_nano_model_path> \
+  -tp 8 --modelopt-kv-quant-cfg NVFP4_KV_CFG \
+  --modelopt-quant-calib-size 512 \
   --max-model-len 8192 --enforce-eager --host 0.0.0.0 --port 8000
 ```
 
@@ -147,7 +183,8 @@ this server actually quantized, so the numbers an evaluation produces can be tra
 a recipe:
 
 ```bash
-RECIPE_PATH=<PATH_TO_RECIPE> python vllm_serve_fakequant.py <model_path> -tp 8 \
+python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
+  -tp 8 --modelopt-recipe-path <PATH_TO_RECIPE> \
   --host 0.0.0.0 --port 8000 \
   --mlflow https://<your-mlflow-server>/
 ```
@@ -156,7 +193,7 @@ This is the *quantization* tracking server. It is unrelated to any tracking serv
 evaluation harness exports its scores to — NeMo Evaluator Launcher, for instance, has its
 own `export.mlflow.tracking_uri`. Keep the two separate.
 
-Quantization runs in the vLLM **worker**, not in `vllm_serve_fakequant.py`, so that is where
+Quantization runs in the vLLM **worker**, not in the launcher, so that is where
 the run is recorded: the launcher validates the URI and hands the settings to the workers
 through the environment, and global rank 0 opens the run. It opens *before the weights
 load*, so a bad URI or a missing token fails within seconds rather than after a load and a
@@ -186,10 +223,10 @@ and every serve of it can be found together.
 
 Other flags:
 
-- `--mlflow_experiment` — defaults to
+- `--mlflow-experiment` — defaults to
   `$USER/vllm_serve_fakequant/<model basename>-<recipe name>`, falling back to
   `$QUANT_CFG`/`$KV_QUANT_CFG` when no recipe is used.
-- `--mlflow_run_name` — defaults to the UTC start time, `YYYYmmdd-HHMMSS`.
+- `--mlflow-run-name` — defaults to the UTC start time, `YYYYmmdd-HHMMSS`.
 - `$MLFLOW_TRACKING_URI` enables tracking on its own; `--mlflow` overrides it. A URI taken
   from the environment is best-effort — if the client is missing or the server is
   unreachable the server warns and serves untracked. An explicit `--mlflow` fails loudly
@@ -208,7 +245,7 @@ Step 1: export the model with bf16 weights and quantizer state. To export the mo
 - For **HF** models, use `examples/hf_ptq/hf_ptq.py` with `--vllm_fakequant_export`:
 
 ```bash
-python ../hf_ptq/hf_ptq.py \
+python3 examples/hf_ptq/hf_ptq.py \
   --pyt_ckpt_path <MODEL_PATH> \
   --recipe <PATH_TO_RECIPE> \
   --calib_size 512 \
@@ -221,23 +258,35 @@ python ../hf_ptq/hf_ptq.py \
 
   Note: `--pyt_ckpt_path` can point to either an HF checkpoint or a ModelOpt-saved checkpoint (e.g., a QAT/QAD checkpoint produced by `examples/llm_qat/train.py`). If the input checkpoint is already quantized, the script will **skip re-quantization** and only export artifacts for vLLM fakequant reload.
 
-- For **MCore** models, export the model with flag `--export-vllm-fq` as described in [Megatron-LM README](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-nvfp4-quantization-qauntization-aware-training-and-model-export). This generates `quantizer_state.pth`, which contains quantizer tensors for vLLM reload via `QUANT_FILE_PATH`.
+- For **MCore** models, export the model with flag `--export-vllm-fq` as described in [Megatron-LM README](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-nvfp4-quantization-qauntization-aware-training-and-model-export). This generates `quant_recipe.yaml` and `quantizer_state.pth` for vLLM fakequant reload.
 
 Step 2: use the exported artifacts when serving:
 
-- **HF export**: pass the exported `vllm_fq_modelopt_state.pth` via `MODELOPT_STATE_PATH`
+- **HF export**: pass the exported `vllm_fq_modelopt_state.pth` via `--modelopt-state-path`
 
 ```bash
 # HF
-MODELOPT_STATE_PATH=<vllm_fq_modelopt_state.pth> python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
+python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
+  -tp 8 --modelopt-state-path <vllm_fq_modelopt_state.pth> \
+  --host 0.0.0.0 --port 8000
 ```
 
-- **MCore export**: pass the exported `quantizer_state.pth` via `QUANT_FILE_PATH` and set `QUANT_CFG` to match the MCore quantization recipe
+- **MCore export**: pass the exported recipe and quantizer tensors directly. The loader maps HF quantizer names to vLLM and keeps folded weight quantizers disabled. Custom quantization backends must be registered in the serving environment; the recipe preserves their names and arguments.
 
 ```bash
 # MCore
-QUANT_CFG=<quant_cfg> QUANT_FILE_PATH=<quantizer_state.pth> python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
+python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
+  -tp 8 --modelopt-recipe-path <model_path>/quant_recipe.yaml \
+  --modelopt-quant-file-path <model_path>/quantizer_state.pth \
+  --host 0.0.0.0 --port 8000
 ```
+
+Megatron-LM fakequant export rejects MTP quantization and effective activation pre-quantization
+scales, including SmoothQuant/AWQ smoothing scales. Weight-quantizer transforms are folded into
+backbone weights; MTP weights remain unquantized.
+
+For Nemotron-H with BF16 MTP, add
+`--speculative-config '{"method":"mtp","num_speculative_tokens":1}'` and keep MTP quantizers disabled.
 
 ## Fake-quantize the sparse-attention indexer query and K cache
 
@@ -266,8 +315,11 @@ quantize:
     - $import: indexer_q_nvfp4
 ```
 
+Save the recipe above as `indexer_nvfp4_only.yaml` in the repository root, then serve:
+
 ```bash
-RECIPE_PATH=indexer_nvfp4_only.yaml python vllm_serve_fakequant.py <model_path> -tp 8 \
+python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
+  -tp 8 --modelopt-recipe-path indexer_nvfp4_only.yaml \
   --host 0.0.0.0 --port 8000
 ```
 
@@ -286,6 +338,114 @@ Notes:
 - vLLM quantizes the DeepSeek-V4 indexer key and query without a Hadamard rotation and the
   GLM-5.3-Flash ones after one, so the fake quantization applies in that basis.
 
+### Indexer scorer kernel arguments
+
+GLM-5.3-Flash's indexer scores each key as `k_scale * sum_h W[h] * ReLU(q_h . k)` in DeepGEMM, from
+the FP8 query and key and the effective head weights `W` (with the query scale folded in).
+`indexer_scorer_kwargs_quantizer` passes keyword arguments to that scorer kernel, per layer, e.g. the
+numerics options of a DeepGEMM build. It stays disabled unless a recipe enables it with
+`backend: scorer_kwargs`; its `backend_extra_args` are the arguments. For example, this recipe sums
+the heads in BF16:
+
+```yaml
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+
+metadata:
+  description: BF16 head sum in the indexer scorer.
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*indexer_scorer_kwargs_quantizer'
+      cfg:
+        backend: scorer_kwargs
+        backend_extra_args: {logits_dtype: bfloat16}
+```
+
+Plugins can add quantizers that turn their own configs into such arguments with
+`register_indexer_scorer_kwargs_quantizer` of `modelopt.torch.quantization.plugins.vllm_indexer`.
+Stock DeepGEMM takes `logits_dtype` (on SM100 GPUs); other arguments need a DeepGEMM build that takes
+them and declares them, with their values, in `deep_gemm.MQA_LOGITS_NUMERICS`, such as a DeepGEMM
+fork. ModelOpt ships none. vLLM imports an installed `deep_gemm` before its own copy, so install
+such a build into the serving environment and serve:
+
+```bash
+pip install --no-deps --no-build-isolation <DeepGEMM source directory or git URL>
+RECIPE_PATH=<recipe>.yaml \
+  python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
+```
+
+Notes:
+
+- Scores that come out NaN, e.g. from overflowing reduced-precision arithmetic in the scorer, are set
+  to `-inf` before top-k, as vLLM's prefill top-k mishandles NaN.
+- DeepSeek-V4 rejects the scorer quantizers.
+
+## Fake-quantize MoE expert-parallel communication
+
+To study compressed expert-parallel (EP) communication, fake-quantize what the MoE layers send
+between ranks. vLLM's routed-experts module (vLLM 0.24 or newer) gets two quantizers:
+`dispatch_quantizer` sees the routed tokens entering the MoE kernel's prepare step, which sends them
+to the expert ranks, and `combine_quantizer` sees the expert output entering its finalize step,
+which sends it back. Both work for any MoE layer built on vLLM's fused-MoE layer and with any
+all-to-all backend. Enable them by importing the `configs/ptq/units/moe_dispatch_nvfp4` and
+`configs/ptq/units/moe_combine_nvfp4` units into a recipe, for example `moe_comm_nvfp4_only.yaml`:
+
+```yaml
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  moe_dispatch_nvfp4: configs/ptq/units/moe_dispatch_nvfp4
+  moe_combine_nvfp4: configs/ptq/units/moe_combine_nvfp4
+
+metadata:
+  description: NVFP4 fake quantization of the MoE expert-parallel dispatch and combine only.
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: moe_dispatch_nvfp4
+    - $import: moe_combine_nvfp4
+```
+
+```bash
+RECIPE_PATH=moe_comm_nvfp4_only.yaml python vllm_serve_fakequant.py <model_path> \
+  --data-parallel-size 8 --enable-expert-parallel --moe-backend auto --host 0.0.0.0 --port 8000
+```
+
+Drop one of the two units to quantize only the dispatch or only the combine. `algorithm: max`
+calibrates one NVFP4 global scale per layer and direction, the max over all DP and EP ranks, so
+serving clips larger values; with `algorithm: null` it is computed from each call's tensor. Pass
+`--moe-backend auto` or your production backend: the launcher's `triton` default is only needed to
+fake-quantize the experts themselves.
+
+Notes:
+
+- The combine quantizer sees what the all-to-all backend sends: router-weighted partial sums per
+  token and rank for the default `allgather_reducescatter`, DeepEP high-throughput and the FlashInfer
+  backends, and unweighted per-expert rows for DeepEP low-latency and NIXL. These two, FlashInfer
+  one-sided and DeepEP v2 under CUDA graphs with the Humming indexed experts also send unused
+  padding rows, which would enter a calibrated or per-call global scale, so they require a constant
+  one (`constant_amax`).
+- The router and the shared experts see the unquantized tokens, and the combine reduction (for
+  example the reduce-scatter sum) and the residual add stay unquantized.
+- Tokens handled by experts on their own rank are quantized too, although they are not sent.
+- When the expert kernels quantize their inputs (for example FP8 or NVFP4 experts), vLLM quantizes
+  the dispatched tokens again, so the expert inputs carry both roundings.
+- Without data parallelism (`--enable-expert-parallel` with tensor parallelism only), vLLM runs no
+  all-to-all; the quantizers then emulate one over the same expert partition.
+- The DeepGEMM Mega-MoE backend of DeepSeek-V4 and Kimi-K3 (`--moe-backend deep_gemm_mega_moe`)
+  fuses dispatch, expert GEMMs and combine into one kernel. The dispatch quantizer sees its input
+  tokens. The combine quantizer sees the per-(token, expert) outputs, already weighted by the
+  router, which the kernel leaves in its buffer; they are summed again after quantization. There,
+  the combine needs a calibrated (`algorithm: max`) or constant global scale, and quantizing the
+  dispatch needs `VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION=1` (the fused shared expert would
+  read the quantized tokens too).
+- The FlashInfer MoE-EP backends (`flashinfer_moe_ep_*`) combine inside their kernel, so a recipe
+  enabling the combine quantizer raises an error there.
+
 ## Serve a model with sparse attention in vLLM
 
 Apply ModelOpt sparse attention at serve time. Right after model load, the launcher replaces each native attention implementation with its matching ModelOpt adapter: `ModelOptSparseAttentionImpl` for FlashAttention or `ModelOptSparseFlashInferImpl` for FlashInfer. Both adapters use the same Triton kernel with paged KV cache support.
@@ -298,10 +458,12 @@ Workflow:
 2. Serve the exported checkpoint with `--enforce-eager` (CUDA graph capture is not yet validated with the sparse attention kernel — see Known Problems):
 
    ```bash
-   python vllm_serve_sparse_attn.py <EXPORT_DIR> --enforce-eager -tp 8 --host 0.0.0.0 --port 8000
+   python3 examples/vllm_serve/vllm_serve_sparse_attn.py <EXPORT_DIR> --enforce-eager -tp 8 --host 0.0.0.0 --port 8000
    ```
 
-If the checkpoint has no `sparse_attention_config`, the sparse-only installer passes through and vLLM runs unchanged. Whole-model fakequant flows remain handled by `vllm_serve_fakequant.py`; the compact attention-only path is below.
+If the checkpoint has no `sparse_attention_config`, the sparse-only installer passes through
+and vLLM runs unchanged. Whole-model fakequant flows use the fakequant launcher with ModelOpt
+flags; the compact attention-only path is below.
 
 ### Calibrate skip-softmax thresholds through vLLM
 
@@ -309,10 +471,10 @@ Instead of the HF path in step 1, thresholds can be calibrated directly through 
 
 ```bash
 # One-time: fetch the RULER essay haystack
-bash ../llm_sparsity/attention_sparsity/download_ruler_data.sh
+bash examples/llm_sparsity/attention_sparsity/download_ruler_data.sh
 
-python calibrate_sparse_attn.py <CKPT> \
-  --calib_data_dir ../llm_sparsity/attention_sparsity/data \
+python3 examples/vllm_serve/calibrate_sparse_attn.py <CKPT> \
+  --calib_data_dir examples/llm_sparsity/attention_sparsity/data \
   --target_sparse_ratio 0.5 \
   --decode_tokens 32 --tensor_parallel_size 8 --update_checkpoint_config
 ```
@@ -355,7 +517,7 @@ vLLM 0.15.0 or newer is required when either worker activates a ModelOpt attenti
 Use the same launcher with the compact worker. By default, vLLM selects the backend for the model and platform; NemotronH on Blackwell selects FlashInfer:
 
 ```bash
-python vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
+python3 examples/vllm_serve/vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
   --no-enable-prefix-caching \
   --worker-cls sparse_attn_worker.QuantSparseAttnWorker
 ```
@@ -376,6 +538,6 @@ Unsupported features are sliding window, ALiBi, softcap, sinks, FP8 KV cache, cr
 
 ## Known Problems
 
-1. **MCore reload does not use `MODELOPT_STATE_PATH`**; use `QUANT_FILE_PATH` and make sure `QUANT_CFG` matches the quantization recipe used for the original MCore model (otherwise quantizer keys/config won’t align).
-2. KV cache quantization export and reload is not supported in MCore yet.
-3. **Keep vLLM's torch.compile cache off** (`VLLM_DISABLE_COMPILE_CACHE=1`, which this launcher sets by default). The cache is not keyed on the fake quant, so a graph compiled earlier for the same model without it is reused and the fake quant is silently skipped. If you run `FakeQuantWorker` without this launcher, set it yourself or pass `--enforce-eager`.
+1. **MCore reload uses export sidecars rather than `MODELOPT_STATE_PATH`**. Current exports write both `quantizer_state.pth` and `quant_recipe.yaml`; serving the export directory through this launcher auto-detects both. For a legacy export without the YAML sidecar, pass `QUANT_FILE_PATH` and set `QUANT_CFG` to match the original MCore quantization recipe.
+2. **Channel-wise activation/KV ranges remain unsupported.** MCore KV fakequant export/reload is supported through the exported quantizer recipe and ranges described above.
+3. **Keep vLLM's torch.compile cache off** (`VLLM_DISABLE_COMPILE_CACHE=1`, which the launcher sets when fakequant is requested). The cache is not keyed on the fake quant, so a graph compiled earlier for the same model without it is reused and the fake quant is silently skipped. If you run `FakeQuantWorker` without this launcher, set it yourself or pass `--enforce-eager`.

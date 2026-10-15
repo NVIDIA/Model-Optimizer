@@ -24,6 +24,9 @@
 //                 (IQ2_XS, IQ2_XXS), rather than storing all eight (IQ2_S)
 //   store(payload, entries, signs, locals)  writes every vector's grid entry and 8-bit sign mask
 //                 and every group's local scale; called by every thread once the search is done
+//
+// A weighted encode scales each value's squared error by its column's importance w, so the search
+// compares sum w (|x| - s q)^2 = (w x . x) - 2 s (w |x| . q) + s^2 (w q . q) instead.
 
 #pragma once
 
@@ -68,18 +71,47 @@ __device__ __forceinline__ float iq2_dot(const float *x, const float *q, bool od
     return magnitude_dot(x, q);
 }
 
-// The input's sign mask, with the weakest coordinate flipped when the format stores parity and
-// the count of negatives is odd.
+// The weighted dot and norm of |x| against one codebook vector; under the even-parity sign rule the
+// coordinate with the smallest weighted penalty is the one flipped.
 template <bool kParitySigns>
-__device__ __forceinline__ uint8_t iq2_sign_mask(const float *x, const float *q, bool odd_parity) {
+__device__ __forceinline__ float weighted_iq2_dot(const float *x, const float *w, const float *q,
+                                                  bool odd_parity, float &qnorm) {
+  float dot = 0.0f;
+  float weakest = FLT_MAX;
+  qnorm = 0.0f;
+#pragma unroll
+  for (int j = 0; j < kVectorSize; ++j) {
+    const float term = fabsf(x[j]) * q[j] * w[j];
+    dot += term;
+    weakest = fminf(weakest, term);
+    qnorm = fmaf(w[j], q[j] * q[j], qnorm);
+  }
+  return kParitySigns && odd_parity ? dot - 2.0f * weakest : dot;
+}
+
+// The dot of |x| against an entry and the entry's norm, weighted when w is given.
+template <bool kParitySigns, bool kWeighted>
+__device__ __forceinline__ float iq2_terms(const float *x, const float *w, const float *q,
+                                           float unweighted_qnorm, bool odd_parity, float &qnorm) {
+  if constexpr (kWeighted)
+    return weighted_iq2_dot<kParitySigns>(x, w, q, odd_parity, qnorm);
+  qnorm = unweighted_qnorm;
+  return iq2_dot<kParitySigns>(x, q, odd_parity);
+}
+
+// The input's sign mask, with the weakest coordinate flipped when the format stores parity and
+// the count of negatives is odd. Weighted, the weakest is the smallest importance-scaled penalty.
+template <bool kParitySigns, bool kWeighted>
+__device__ __forceinline__ uint8_t iq2_sign_mask(const float *x, const float *w, const float *q,
+                                                 bool odd_parity) {
   int flip_index = -1;
   if constexpr (kParitySigns) {
     if (odd_parity) {
       flip_index = 0;
-      float weakest = fabsf(x[0]) * q[0];
+      float weakest = kWeighted ? fabsf(x[0]) * q[0] * w[0] : fabsf(x[0]) * q[0];
 #pragma unroll
       for (int j = 1; j < kVectorSize; ++j) {
-        const float term = fabsf(x[j]) * q[j];
+        const float term = kWeighted ? fabsf(x[j]) * q[j] * w[j] : fabsf(x[j]) * q[j];
         if (term < weakest) {
           weakest = term;
           flip_index = j;
@@ -109,9 +141,27 @@ __device__ __forceinline__ bool load_signed_vector(const scalar_t *source, float
   return (negative_count & 1) != 0;
 }
 
-template <typename Format, typename scalar_t>
+// Loads vector slot's importance from the block's 256 weights and replaces xnorm by the weighted
+// squared norm; a no-op when unweighted.
+template <bool kWeighted>
+__device__ __forceinline__ void load_importance(const float *weights, int slot,
+                                                const float (&x)[kVectorSize],
+                                                float (&w)[kVectorSize], float &xnorm) {
+  if constexpr (kWeighted) {
+    const float *source = weights + slot * kVectorSize;
+    xnorm = 0.0f;
+#pragma unroll
+    for (int j = 0; j < kVectorSize; ++j) {
+      w[j] = source[j];
+      xnorm = fmaf(w[j], x[j] * x[j], xnorm);
+    }
+  }
+}
+
+template <typename Format, bool kWeighted, typename scalar_t>
 __global__ void iq2_encode(const scalar_t *input, int64_t num_blocks, const float *grid,
-                           const __half *scales, uint8_t *output) {
+                           const __half *scales, const float *importance, int64_t blocks_per_row,
+                           uint8_t *output) {
   constexpr int kEntries = Format::kEntries;
   constexpr int kGroups = Format::kGroups;
   constexpr int kVectorsPerGroup = Format::kVectorsPerGroup;
@@ -150,6 +200,7 @@ __global__ void iq2_encode(const scalar_t *input, int64_t num_blocks, const floa
   __syncthreads();
 
   const scalar_t *source = input + block * kBlockSize;
+  const float *weights = kWeighted ? importance + (block % blocks_per_row) * kBlockSize : nullptr;
   uint8_t *payload = output + block * Format::kPayloadBytes;
   const __half d_half = scales[block];
   const uint16_t d_bits = __half_as_ushort(d_half);
@@ -166,21 +217,25 @@ __global__ void iq2_encode(const scalar_t *input, int64_t num_blocks, const floa
     // Score every local scale: each vector's best error under it, summed over the group.
 #pragma unroll
     for (int vector = 0; vector < kVectorsPerGroup; ++vector) {
+      const int slot = group * kVectorsPerGroup + vector;
       float x[kVectorSize];
+      float w[kVectorSize];
       float xnorm;
-      const bool odd_parity =
-          load_signed_vector(source + (group * kVectorsPerGroup + vector) * kVectorSize, x, xnorm);
+      const bool odd_parity = load_signed_vector(source + slot * kVectorSize, x, xnorm);
+      load_importance<kWeighted>(weights, slot, x, w, xnorm);
       float local_best[kIq2LocalScales];
 #pragma unroll
       for (int local = 0; local < kIq2LocalScales; ++local)
         local_best[local] = FLT_MAX;
       for (int entry = tid; entry < kEntries; entry += blockDim.x) {
-        const float dot = iq2_dot<kParitySigns>(x, shared_grid + entry * kVectorSize, odd_parity);
+        float qnorm;
+        const float dot = iq2_terms<kParitySigns, kWeighted>(
+            x, w, shared_grid + entry * kVectorSize, grid_norm[entry], odd_parity, qnorm);
 #pragma unroll
         for (int local = 0; local < kIq2LocalScales; ++local) {
           const float scale = d * (2 * local + 1) * kIq2LocalScaleStep;
           local_best[local] =
-              fminf(local_best[local], clamped_quant_error(xnorm, dot, grid_norm[entry], scale));
+              fminf(local_best[local], clamped_quant_error(xnorm, dot, qnorm, scale));
         }
       }
       block_min_accumulate<kIq2LocalScales>(local_best, warp_best, group_error);
@@ -206,13 +261,16 @@ __global__ void iq2_encode(const scalar_t *input, int64_t num_blocks, const floa
     for (int vector = 0; vector < kVectorsPerGroup; ++vector) {
       const int slot = group * kVectorsPerGroup + vector;
       float x[kVectorSize];
+      float w[kVectorSize];
       float xnorm;
       const bool odd_parity = load_signed_vector(source + slot * kVectorSize, x, xnorm);
+      load_importance<kWeighted>(weights, slot, x, w, xnorm);
       unsigned long long key = ~0ULL;
       for (int entry = tid; entry < kEntries; entry += blockDim.x) {
-        const float error = clamped_quant_error(
-            xnorm, iq2_dot<kParitySigns>(x, shared_grid + entry * kVectorSize, odd_parity),
-            grid_norm[entry], selected_scale);
+        float qnorm;
+        const float dot = iq2_terms<kParitySigns, kWeighted>(
+            x, w, shared_grid + entry * kVectorSize, grid_norm[entry], odd_parity, qnorm);
+        const float error = clamped_quant_error(xnorm, dot, qnorm, selected_scale);
         const unsigned long long candidate = error_key(error, entry);
         key = candidate < key ? candidate : key;
       }
@@ -220,7 +278,8 @@ __global__ void iq2_encode(const scalar_t *input, int64_t num_blocks, const floa
       if (tid == 0) {
         const int entry = static_cast<int>(key & (kEntries - 1));
         entries[slot] = static_cast<uint16_t>(entry);
-        signs[slot] = iq2_sign_mask<kParitySigns>(x, shared_grid + entry * kVectorSize, odd_parity);
+        signs[slot] = iq2_sign_mask<kParitySigns, kWeighted>(
+            x, w, shared_grid + entry * kVectorSize, odd_parity);
       }
     }
   }
@@ -228,13 +287,15 @@ __global__ void iq2_encode(const scalar_t *input, int64_t num_blocks, const floa
   Format::store(payload, entries, signs, locals);
 }
 
-// Packs one IQ2 format, once check_scaled_pack_inputs has accepted the arguments.
+// Packs one IQ2 format, once check_scaled_pack_inputs (and check_importance, if given) accepted it.
 template <typename Format>
 at::Tensor iq2_encode_blocks(const at::Tensor &input, const at::Tensor &grid,
-                             const at::Tensor &scales) {
+                             const at::Tensor &scales,
+                             const std::optional<at::Tensor> &importance) {
   const auto values = input.contiguous();
   const auto table = grid.contiguous();
   const auto block_scales = scales.contiguous();
+  const auto weights = importance.has_value() ? importance->contiguous() : at::Tensor();
   c10::cuda::CUDAGuard guard(values.device());
   const int64_t num_blocks = values.numel() / kBlockSize;
   at::Tensor output =
@@ -242,10 +303,18 @@ at::Tensor iq2_encode_blocks(const at::Tensor &input, const at::Tensor &grid,
   const auto stream = c10::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::ScalarType::Half, at::ScalarType::BFloat16, values.scalar_type(), "iq2_pack", [&] {
-        iq2_encode<Format, scalar_t><<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
-            values.data_ptr<scalar_t>(), num_blocks, table.data_ptr<float>(),
-            reinterpret_cast<const __half *>(block_scales.data_ptr<at::Half>()),
-            output.data_ptr<uint8_t>());
+        const auto *half_scales =
+            reinterpret_cast<const __half *>(block_scales.data_ptr<at::Half>());
+        if (weights.defined()) {
+          iq2_encode<Format, true, scalar_t><<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
+              values.data_ptr<scalar_t>(), num_blocks, table.data_ptr<float>(), half_scales,
+              weights.data_ptr<float>(), weights.size(0), output.data_ptr<uint8_t>());
+        } else {
+          iq2_encode<Format, false, scalar_t>
+              <<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
+                  values.data_ptr<scalar_t>(), num_blocks, table.data_ptr<float>(), half_scales,
+                  nullptr, 1, output.data_ptr<uint8_t>());
+        }
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
   return output;

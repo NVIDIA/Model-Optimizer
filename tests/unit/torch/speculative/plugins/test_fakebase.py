@@ -161,7 +161,7 @@ def test_load_vlm_or_llm_uses_transformers5_vlm_auto_class(monkeypatch):
 
     assert load_vlm_or_llm("qwen3-vl", dtype="auto") is not None
     assert captured["args"] == ("qwen3-vl",)
-    assert captured["kwargs"]["torch_dtype"] == "auto"
+    assert captured["kwargs"]["dtype"] == "auto"
 
 
 class TestFakeBaseRopeTheta:

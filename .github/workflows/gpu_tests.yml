@@ -57,7 +57,7 @@ jobs:
           # Covers the RoutedExperts layout (0.24+)
           - example: gpu_vllm
             timeout: 15
-            container_image: docker.io/vllm/vllm-openai:v0.26.0
+            container_image: docker.io/vllm/vllm-openai:v0.30.0
           # Covers the legacy FusedMoE / SharedFusedMoE registration branches (vLLM < 0.24)
           - example: gpu_vllm
             timeout: 15

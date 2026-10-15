@@ -316,36 +316,44 @@ def test_legacy_graph_utils_module_is_removed():
     assert importlib.util.find_spec("modelopt.onnx.quantization.graph_utils") is None
 
 
+_FUTURE_LEGACY_IMPORT_XFAIL = pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="Legacy calibrated implementation imports are expected to be unavailable",
+)
+
+
+def _future_legacy_import(module_name, removed_symbol, *, id):
+    return pytest.param(module_name, removed_symbol, id=id, marks=_FUTURE_LEGACY_IMPORT_XFAIL)
+
+
 @pytest.mark.parametrize(
     ("module_name", "removed_symbol"),
     [
-        pytest.param("modelopt.onnx.quantization.int8", "quantize", id="int8-mode-function"),
-        pytest.param("modelopt.onnx.quantization.fp8", "quantize", id="fp8-mode-function"),
+        _future_legacy_import(
+            "modelopt.onnx.quantization.int8", "quantize", id="int8-mode-function"
+        ),
+        _future_legacy_import("modelopt.onnx.quantization.fp8", "quantize", id="fp8-mode-function"),
         pytest.param("modelopt.onnx.quantization.ort_patching", None, id="ort-patching-module"),
-        pytest.param("modelopt.onnx.quantization.qdq_utils", None, id="qdq-utils-module"),
-        pytest.param(
+        _future_legacy_import("modelopt.onnx.quantization.qdq_utils", None, id="qdq-utils-module"),
+        _future_legacy_import(
             "modelopt.onnx.quantization.qdq_utils",
             "quantize_weights_to_int4",
             id="int4-exporter-helper",
         ),
-        pytest.param(
+        _future_legacy_import(
             "modelopt.onnx.quantization.qdq_utils",
             "quantize_weights_to_mxfp8",
             id="mxfp8-exporter-helper",
         ),
-        pytest.param(
+        _future_legacy_import(
             "modelopt.onnx.quantization.qdq_utils",
             "fp4qdq_to_2dq",
             id="fp4-to-2dq-exporter-helper",
         ),
     ],
 )
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Legacy calibrated implementation imports are expected to be unavailable",
-)
-def test_future_legacy_calibrated_imports_are_removed(module_name, removed_symbol):
+def test_legacy_calibrated_imports_are_removed(module_name, removed_symbol):
     module_spec = importlib.util.find_spec(module_name)
     if removed_symbol is None:
         assert module_spec is None

@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 31 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 37 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -58,11 +58,17 @@ supported combinations.
 | `int4_blockwise_weight_only` | INT4 W4A16, block 128, weights only | none | max |
 | `nvfp4_mlp_weight_only` | NVFP4 W4A16 (block 32), MLP + MoE weights only | none | max |
 | `mxfp4_mlp_weight_only` | MXFP4 W4A16, MLP + MoE weights only | none | none (no calibration) |
-| `iq1_s` | IQ1_S W1A16, eligible linears | none | none (no calibration) |
-| `iq1_m` | IQ1_M W1A16 (1.75 bpw), eligible linears | none | none (no calibration) |
-| `iq2_xxs` | IQ2_XXS W2A16 (2.06 bpw), eligible linears | none | none (no calibration) |
-| `iq2_xs` | IQ2_XS W2A16 (2.31 bpw), eligible linears | none | none (no calibration) |
-| `iq2_s` | IQ2_S W2A16 (2.56 bpw), eligible linears | none | none (no calibration) |
+| `iq1_s` | IQ1_S W1A16, MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for fused MoE experts |
+| `iq1_s_experts_only` | IQ1_S W1A16, MoE routed experts only | none | imatrix |
+| `iq1_m` | IQ1_M W1A16 (1.75 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for fused MoE experts |
+| `iq1_m_experts_only` | IQ1_M W1A16 (1.75 bpw), MoE routed experts only | none | imatrix |
+| `iq2_xxs` | IQ2_XXS W2A16 (2.06 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for fused MoE experts |
+| `iq2_xxs_experts_only` | IQ2_XXS W2A16 (2.06 bpw), MoE routed experts only | none | imatrix |
+| `iq2_xs` | IQ2_XS W2A16 (2.31 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for fused MoE experts |
+| `iq2_xs_experts_only` | IQ2_XS W2A16 (2.31 bpw), MoE routed experts only | none | imatrix |
+| `iq2_s` | IQ2_S W2A16 (2.56 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for fused MoE experts |
+| `iq2_s_experts_only` | IQ2_S W2A16 (2.56 bpw), MoE routed experts only | none | imatrix |
+| `q8_0` | Q8_0 W8A16 (8.5 bpw), eligible linears | none | none (no calibration) |
 
 </details>
 
@@ -121,8 +127,9 @@ activations are quantized too** (W4A4/W8A8 vs weight-only W4A16).
 #### Weight-only schemes (activations stay BF16)
 
 Quantize weights only; activations run in BF16. This shrinks the model
-(memory-bound decode win) with much lower accuracy risk than W4A4, and **needs no
-calibration forward pass**.
+(memory-bound decode win) with much lower accuracy risk than W4A4. Most of these
+**need no calibration forward pass**; the IQ recipes are the exception, since they
+calibrate with GPTQ.
 
 These are usually recommended for **low-concurrency deployments** — edge and
 on-device/client use cases — where the workload is memory-bandwidth-bound and
@@ -142,13 +149,26 @@ activations and tensor-core math are what deliver the throughput.
   activations. Needs no calibration forward pass; the QAT starting point for the
   GPT-OSS family (see `examples/gpt-oss`).
 - **`iq1_s` / `iq1_m` / `iq2_xxs` / `iq2_xs` / `iq2_s`** — GGML-compatible IQ weights
-  on the eligible linear layers, with BF16 activations; `lm_head`, MoE routers,
-  `conv1d` and the vision branch stay in BF16 like every other preset. The formats
-  trade size against accuracy in order: 1.56, 1.75, 2.06, 2.31 and 2.56 bits per weight. No calibration data is
-  required. Quantized weights must have a final dimension divisible by 256.
+  on the MLP/MoE layers, with BF16 activations; attention, `lm_head`, MoE routers,
+  `conv1d` and the vision branch stay in BF16. The formats trade size against
+  accuracy in order: 1.56, 1.75, 2.06, 2.31 and 2.56 bits per weight. Weights are
+  calibrated with layerwise GPTQ (`block_size: 256`, `perc_damp: 0.3`), so calibration
+  data is required. GPTQ does not reach fused-MoE experts, so imatrix follows it and
+  weights each expert's search by the tokens routed to it. Quantized weights must have a
+  final dimension divisible by 256.
   Unified HF export writes the packed GGML blocks; Megatron export additionally
   requires tensor and pipeline parallel sizes of 1, and does not support
   fused-MoE experts.
+- **`iq1_s_experts_only` / `iq1_m_experts_only` / `iq2_xxs_experts_only` /
+  `iq2_xs_experts_only` / `iq2_s_experts_only`** — the same IQ formats on the MoE routed
+  experts only (`*.experts.*`, `*block_sparse_moe*`), calibrated with imatrix alone; shared
+  experts, dense layers and attention stay in BF16.
+- **`q8_0`** — GGML-compatible weight-only quantization on eligible linear layers,
+  with BF16 activations; `lm_head`, MoE routers, `conv1d` and the vision branch stay
+  in BF16. Q8_0 uses 8.5 bits per weight and requires no calibration data. Quantized
+  weights must have a final dimension divisible by 32. Unified HF and Megatron
+  export write packed GGML blocks; Megatron requires tensor and pipeline parallel
+  sizes of 1 and does not support fused-MoE experts.
 
 ---
 
@@ -298,7 +318,7 @@ that baseline. The deviations come in four kinds:
 
 | Kind | What changes vs. the general recipe | Examples |
 |------|-------------------------------------|----------|
-| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama` |
+| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama`, `nemotron_h` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
 | **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma` |
 | **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/NVIDIA-Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
@@ -316,7 +336,7 @@ folder may carry a `README.md` spelling out that delta.
 > genuinely deviate and aliases the ones that don't; see
 > [`models/README.md`](models/README.md) for the alias format and when to write one.
 
-### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama`
+### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama`, `nemotron_h`
 
 **`minimax_m3_vl/ptq/mxfp8_nvfp4_experts`** applies MXFP8 to the language-model
 linear layers and MSE-calibrated NVFP4 to routed experts, with expert
@@ -396,6 +416,27 @@ recipes, for Step-3.7 checkpoints; Step-3.5 has its own recipe above.
   vLLM on the Marlin dequant fallback, which measured *slower* than BF16. The `_mcore` suffix is
   load-bearing: selectors are Megatron-Core leaf names (`mlp.experts.linear_fc1`,
   `self_attention.linear_qkv`), so under `hf_ptq.py` nothing matches and `mtq.quantize` raises.
+
+- **`nemotron_h/ptq/nvfp4-aggressive-mse`** is the **aggressive** tier for hybrid Mamba-MoE
+  NemotronH checkpoints, including the omni VL wrappers:
+  - MoE routed + shared experts → NVFP4 W4A4, `group_size 16`, **static** weight scales
+    (`nvfp4_static`) with dynamic NVFP4 activations (`nvfp4`)
+  - attention q/k/v/out, Mamba `in/out_proj`, `lm_head` → FP8
+  - MTP block-1 routed + shared experts → identical treatment to the main experts; the MTP rules
+    are inert on checkpoints without an MTP tail
+  - latent MoE, embeddings, router and the vision tower → **BF16**
+  - KV cache → FP8, **asymmetric**: the language-model backbone casts at a fixed FP8 range
+    (`use_constant_amax`, as in `configs/ptq/units/kv_fp8_cast`, so no `k_scale`/`v_scale` is
+    exported) while MTP attention stays data-calibrated and keeps its pair
+
+  Calibration is weight-MSE with an FP8-scale sweep, which is why the weight quantizers are
+  `static`. Use `--calib_with_images` on VL checkpoints: the vision tower must see image batches
+  even though it stays BF16.
+
+  Rules list both Hugging Face and Megatron-Core spellings where they differ (attention
+  `linear_qkv`/`linear_proj`, `output_layer`, the MTP `mtp_model_layer.layers`), so the same
+  recipe applies under `examples/megatron_bridge/quantize.py`; there, static NVFP4 weights need
+  `--tp_size 1`.
 
 ### Algorithm overrides — `gemma`, `gemma4`, `mpt`
 
@@ -509,11 +550,11 @@ checkpoint's** quant config verbatim:
   wildcards reach `linear_attn.conv1d` too — matching the published checkpoint,
   whose `hf_quant_config.json` lists `linear_attn.conv1d` as FP8 on every gated-delta
   layer (the full-attention layers have no `conv1d`). The
-  source ships as native block-FP8 (`weight_block_size [128, 128]`); the loader
-  dequantizes it to BF16 before quantizers are inserted, so the scales are
-  calibrated against BF16 weights, not the shipped FP8.
-- **`models/zai-org/GLM-5.3-Flash/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`** is
-  the NVFP4 config for `zai-org/GLM-5.3-Flash`, a `glm5_next` VLM MoE with
+  source is the plain-BF16 `Qwen/Qwen3.8-2.4T-A95B` (no `quantization_config`), so
+  the scales are calibrated directly against BF16 weights. The block-FP8
+  `Qwen/Qwen3.8-2.4T-A95B-FP8` is a separate release, not the validated source.
+- **`models/zai-org/GLM-5.3-Flash-BF16/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`** is
+  the NVFP4 config for `zai-org/GLM-5.3-Flash-BF16`, a `glm5_next` VLM MoE with
   **hybrid attention** — KDA (linear-attention) layers interleaved with NoPE
   sparse-MLA layers. Routed experts **and** the dense MLP → NVFP4 W4A4; KV cache
   → FP8 cast; everything else stays BF16 (shared experts, router gate, both
@@ -553,11 +594,24 @@ entry is a thin **alias** that imports that recipe wholesale and overrides only
   `model_type/qwen3_5_moe/ptq/nvfp4_experts_mse-fp8_rest-kv_fp8` — NVFP4 (MSE static weights)
   on the routed experts, ModelOpt-default FP8 elsewhere, and an FP8 KV cache — as published in
   `nvidia/Qwen3.5-397B-A17B-NVFP4-V2`.
-- **`models/zai-org/GLM-5.1/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast`** and
-  **`models/zai-org/GLM-5.2/ptq/...`** alias
+- **`models/moonshotai/Kimi-K2.7-Code/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast`**
+  aliases `general/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast` — expert-only NVFP4 with
+  the expert `input_scale` pinned to 1.0 (no activation calibration) and an FP8 KV cache in
+  cast mode — as published in `nvidia/Kimi-K2.7-Code-NVFP4`.
+- **`models/google/gemma-4-26B-A4B-it/ptq/nvfp4_experts_only-kv_fp8_cast`** and
+  **`models/google/diffusiongemma-26B-A4B-it/ptq/...`** alias
+  `general/ptq/nvfp4_experts_only-kv_fp8_cast` — expert-only NVFP4 with max calibration and an
+  FP8 KV cache in cast mode — as published in `nvidia/Gemma-4-26B-A4B-NVFP4` and
+  `nvidia/diffusiongemma-26B-A4B-it-NVFP4`.
+- **`models/zai-org/GLM-5.2/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast`** aliases
   `general/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast` — expert-only NVFP4 with the
   expert `input_scale` pinned to 1.0 and an FP8 KV cache in cast mode — as published in
-  `nvidia/GLM-5.1-NVFP4` and `nvidia/GLM-5.2-NVFP4`.
+  `nvidia/GLM-5.2-NVFP4`.
+- **`models/zai-org/GLM-5.1/ptq/nvfp4_experts_only-kv_fp8_cast`** aliases
+  `general/ptq/nvfp4_experts_only-kv_fp8_cast` — expert-only NVFP4 with calibrated
+  activation scales and an FP8 KV cache in cast mode — as published in
+  `nvidia/GLM-5.1-NVFP4`. Unlike GLM-5.2, this release's exported expert `input_scale`
+  tensors are calibrated rather than pinned to 1.0.
 - **`models/MiniMaxAI/MiniMax-M2.5/ptq/nvfp4_experts_only-kv_fp8_cast`** aliases
   `general/ptq/nvfp4_experts_only-kv_fp8_cast` — expert-only NVFP4 with an FP8 KV cache in
   cast mode — as published in `nvidia/MiniMax-M2.5-NVFP4`.

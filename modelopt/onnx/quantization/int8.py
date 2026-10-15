@@ -35,7 +35,7 @@ from modelopt.onnx.quantization.graph_selection import (
     find_nodes_from_matmul_to_exclude,
     find_nodes_to_exclude,
 )
-from modelopt.onnx.quantization.ort_patching import _quantize_static as quantize_static
+from modelopt.onnx.quantization.ort_quantization import _quantize_static as quantize_static
 from modelopt.onnx.quantization.ort_utils import configure_ort
 from modelopt.onnx.quantization.partitioning import (
     find_fusible_partitions,
@@ -51,6 +51,7 @@ from modelopt.onnx.quantization.qdq_graph import (
     filter_quantizable_kgen_heads,
     find_conv_to_layernorm_nodes,
     get_concat_eliminated_tensors,
+    remove_dla_scalar_input_qdq,
     remove_partial_input_qdq,
 )
 from modelopt.onnx.quantization.qdq_utils import has_qdq_nodes, replace_scale_values
@@ -299,6 +300,8 @@ def quantize(
         onnx_model = onnx.load(tmp_onnx_path)
         graph = gs.import_onnx(onnx_model)
         remove_partial_input_qdq(graph, no_quantize_inputs)
+        if kwargs.get("target_dla", False):
+            remove_dla_scalar_input_qdq(graph)
         onnx_model = gs.export_onnx(graph)
 
         if calibration_cache_path:

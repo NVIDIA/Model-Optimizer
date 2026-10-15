@@ -18,16 +18,22 @@
 The pipeline is world-agnostic: with ``torch.distributed`` uninitialized, ``rank/size`` are
 ``0/1``, the unshard window is a no-op, and rank 0 owns every unit. So these cover unit
 enumeration, per-tensor export, the shard writer, index naming and tied-weight dropping without a
-GPU. The multi-rank unshard collective needs real FSDP2 and is covered in ``tests/gpu``.
+GPU. ``test_streaming_export_two_cpu_ranks`` adds one two-rank gloo run; the multi-rank paths
+on GPU are covered in ``tests/gpu``.
 """
 
 import copy
+import faulthandler
 import json
+from functools import partial
 from pathlib import Path
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from safetensors.torch import load_file
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -38,7 +44,7 @@ transformers = pytest.importorskip("transformers")
 from transformers import AutoModelForCausalLM, LlamaConfig
 
 
-def _tiny_quantized_llama(quant_cfg=None, tie=True):
+def _tiny_quantized_llama(quant_cfg=None, tie=True, mesh=None):
     mto.enable_huggingface_checkpointing()
     torch.manual_seed(0)
     cfg = LlamaConfig(
@@ -52,6 +58,10 @@ def _tiny_quantized_llama(quant_cfg=None, tie=True):
         architectures=["LlamaForCausalLM"],
     )
     model = AutoModelForCausalLM.from_config(cfg).eval()
+    if mesh is not None:
+        for layer in model.model.layers:
+            fully_shard(layer, mesh=mesh)
+        fully_shard(model, mesh=mesh)
     calib = [torch.randint(0, 128, (1, 8)) for _ in range(4)]
     return mtq.quantize(model, quant_cfg or mtq.FP8_DEFAULT_CFG, lambda m: [m(x) for x in calib])
 
@@ -102,14 +112,13 @@ def test_streaming_export_drops_tied_alias_and_writes_config(tmp_path):
 def test_streaming_export_drops_tied_alias_without_hf_tie_map(tmp_path, monkeypatch):
     """The alias must be dropped even when HF declares no tie map.
 
-    ``all_tied_weights_keys`` only exists on transformers>=5.0, so at our floor the map is
-    empty and nothing declares the tie by name. The resident path still catches it with an
-    address pass over the whole state dict; the streaming path has to take the same
-    information off the live model, before it copies each tensor to host.
+    Without ``all_tied_weights_keys`` (e.g. a tie HF never declared) nothing names the tie. The
+    resident path still catches it with an address pass over the whole state dict; the streaming
+    path has to take the same information off the live model, before it copies each tensor to host.
     """
     model = _tiny_quantized_llama(tie=True)
     assert model.lm_head.weight is model.model.embed_tokens.weight, "fixture is not tied"
-    # Simulate the transformers floor: the attribute is simply not there.
+    # Hide HF's tie map: the attribute is simply not there.
     monkeypatch.setattr(
         type(model), "all_tied_weights_keys", property(lambda self: None), raising=False
     )
@@ -144,3 +153,29 @@ def test_streaming_export_extra_state_dict_mtp(tmp_path):
     loaded = _load_all(d)
     assert "model.layers.99.mtp.weight" in loaded
     assert torch.equal(loaded["model.layers.99.mtp.weight"], extra["model.layers.99.mtp.weight"])
+
+
+def _two_rank_streaming_export(rank, size, export_dir):
+    # A deadlocked rank exits with its stack instead of hanging the run on the join.
+    faulthandler.dump_traceback_later(45, exit=True)
+    # The unsharded reference is built and exported on every rank, so any collective its
+    # calibration or export issues has a partner.
+    expected, _ = _export_transformers_checkpoint(_tiny_quantized_llama(tie=False), torch.bfloat16)
+    # Calibrating after sharding leaves the root's parameters unsharded: FSDP2 skips the root's
+    # post-forward reshard. That is the state in which the owner's state_dict() used to reshard
+    # them on its rank alone, so the next gather window ran a collective the other rank skipped.
+    model = _tiny_quantized_llama(tie=False, mesh=init_device_mesh("cpu", (size,)))
+    _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=export_dir)
+    torch.distributed.barrier()
+    faulthandler.cancel_dump_traceback_later()
+    if rank != 0:
+        return
+    exported = _load_all(Path(export_dir))
+    assert set(exported) == set(expected)
+    for key, tensor in expected.items():
+        assert torch.equal(exported[key].float(), tensor.float()), key
+
+
+def test_streaming_export_two_cpu_ranks(tmp_path, skip_on_windows):
+    """Two gloo ranks export what a single process does, without a rank waiting on the other."""
+    spawn_multiprocess_job(2, partial(_two_rank_streaming_export, export_dir=str(tmp_path)))
