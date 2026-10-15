@@ -43,7 +43,6 @@ from modelopt.torch.utils.distributed import (
     broadcast_state_dict,
     is_initialized,
     set_distribution_plan,
-    size,
 )
 from modelopt.torch.utils.logging import print_rank_0
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
@@ -607,8 +606,10 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     that mixes dtypes. They stay replicated and are moved onto the shards' device, which
     ``fully_shard`` does not do for the params it ignores.
 
-    The model records that it is FSDP2-sharded over the process group
-    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`).
+    It records no distribution plan: :func:`load_pretrained` records the plan it loads by, and a
+    caller that wraps a model itself records one
+    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`) before calibrating or
+    exporting it.
     """
     # Lazy import: layerwise_calib imports this module at top level (circular).
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -639,7 +640,6 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
         _move_to_fsdp_device(model, ignored_params)
     if config is not None and architectures:
         config.architectures = architectures
-    set_distribution_plan(model, DistributionPlan(size(), dense="fsdp"))
     return decoder_layers
 
 
@@ -671,7 +671,7 @@ def parallel_load_and_prepare_fsdp2(
     a smaller value lowers the peak transient GPU memory at the cost of more collectives (default 8;
     pass ``None`` to broadcast all of a source's layers at once).
 
-    The model records how it is distributed, as :func:`fsdp2_wrap` does.
+    It records no distribution plan, as :func:`fsdp2_wrap` does not; :func:`load_pretrained` does.
     """
     resolved_path = _resolve_checkpoint_dir(ckpt_path, rank)
     weight_map = indexed_weight_map(resolved_path)
