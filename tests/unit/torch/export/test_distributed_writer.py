@@ -20,8 +20,12 @@ get wrong is structural: a tensor missing, duplicated, mis-assembled from its sh
 left out of the weight index. These tests drive each piece directly, on CPU.
 """
 
+import contextlib
 import json
 import math
+from datetime import timedelta
+from functools import partial
+from unittest import mock
 
 import pytest
 import torch
@@ -359,3 +363,54 @@ def test_write_even_shards_fails_loudly_when_no_rank_has_anything_to_write(
 ):
     with pytest.raises(RuntimeError, match="produced no shards"):
         _write_even_shards({}, tmp_path, "1MB", 0, 1)
+
+
+@contextlib.contextmanager
+def _bounded_collectives(seconds=10):
+    """Run the writer's default-group collectives on a new group that gives up after ``seconds``.
+
+    A rank that fails alone can leave a peer waiting in a collective it never joins. On this group
+    that wait raises in seconds instead of hanging for the default group's timeout, and the default
+    group, which the worker pool keeps for the next test, never falls out of step.
+    """
+    group = dist.new_group(timeout=timedelta(seconds=seconds))
+    with (
+        mock.patch.object(dist, "all_gather_object", partial(dist.all_gather_object, group=group)),
+        mock.patch.object(dist, "barrier", partial(dist.barrier, group=group)),
+    ):
+        yield
+
+
+def _one_rank_fails_job(rank, world_size, tmp_dir, fails):
+    failing_rank, step, target = {
+        "shard": (1, "shards written", "safetensors.torch.save_file"),
+        "index": (0, "index written", "json.dump"),
+    }[fails]
+    if rank == failing_rank:
+        failure = mock.patch(target, side_effect=OSError("disk full"))
+        expected = pytest.raises(OSError, match="disk full")
+    else:
+        failure = contextlib.nullcontext()
+        expected = pytest.raises(
+            RuntimeError, match=f"rank {failing_rank} failed to compute {step}: OSError: disk full"
+        )
+    with _bounded_collectives(), failure, expected:
+        _write_even_shards({f"rank{rank}.weight": torch.ones(2)}, tmp_dir, "1MB", rank, world_size)
+
+
+@pytest.mark.parametrize("fails", ["shard", "index"])
+def test_a_write_that_fails_on_one_rank_fails_on_every_rank(cpu_dist_workers, tmp_path, fails):
+    """Not just on the rank that failed, while its peers wait in a collective it never joins."""
+    cpu_dist_workers.run(_one_rank_fails_job, tmp_dir=tmp_path, fails=fails)
+
+
+def _cross_rank_collision_job(rank, world_size, tmp_dir):
+    with (
+        _bounded_collectives(),
+        pytest.raises(RuntimeError, match="name collision across ranks"),
+    ):
+        _write_even_shards({"model.norm.weight": torch.ones(2)}, tmp_dir, "1MB", rank, world_size)
+
+
+def test_a_name_two_ranks_both_write_fails_the_write_on_every_rank(cpu_dist_workers, tmp_path):
+    cpu_dist_workers.run(_cross_rank_collision_job, tmp_dir=tmp_path)
