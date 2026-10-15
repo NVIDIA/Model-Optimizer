@@ -17,6 +17,7 @@
 
 import copy
 import warnings
+from contextlib import nullcontext
 
 import pytest
 import torch
@@ -1791,6 +1792,7 @@ def test_native_fp8_experts_scales(has_gate, block_size, fold, activation_scheme
         torch.testing.assert_close(quantizer.amax, weight.abs().amax())
         quantizer.disable()
     if fold:
+        experts.unpack_weight()
         experts.fold_weight()
         torch.testing.assert_close(
             experts(inputs.bfloat16(), indices, routing),
@@ -1809,3 +1811,54 @@ def test_native_fp8_experts_scales(has_gate, block_size, fold, activation_scheme
             torch.testing.assert_close(exported.up_proj.weight, expected[first][idx])
         torch.testing.assert_close(exported.down_proj.weight, expected["down_proj"][idx])
     assert not any("scale_inv" in key or "activation_scale" in key for key in experts.state_dict())
+
+
+@pytest.mark.parametrize("has_gate", [True, False])
+@pytest.mark.parametrize("exception", [True, False])
+def test_native_fp8_experts_unpacked_temporary_fold(has_gate, exception):
+    torch.manual_seed(42)
+    config = PretrainedConfig(
+        hidden_size=32, intermediate_size=32, num_experts=2, hidden_act="silu"
+    )
+    experts = FP8Experts(config, block_size=None, has_gate=has_gate)
+    first = "gate_up_proj" if has_gate else "up_proj"
+    for name in (first, "down_proj"):
+        weight = getattr(experts, name)
+        scales = getattr(experts, f"{name}_scale_inv")
+        with torch.no_grad():
+            weight.copy_(torch.randn(weight.shape).to(weight.dtype))
+            scales.copy_(torch.linspace(0.01, 0.08, scales.numel()).reshape(scales.shape))
+    mtq.quantize(
+        experts,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": None}},
+            ],
+            "algorithm": "max",
+        },
+    )
+    experts.unpack_weight()
+    params = {name: getattr(experts, name) for name in (first, "down_proj")}
+    state = copy.deepcopy(experts.state_dict())
+    quantizers = [q for _, q in experts.iter_weights_for_calibration()]
+    inputs = torch.randn(2, 32)
+    indices = torch.tensor([[0], [1]])
+    routing = torch.ones(2, 1)
+    expected = experts(inputs, indices, routing)
+    expected_exit = pytest.raises(RuntimeError, match="fold exit") if exception else nullcontext()
+    with expected_exit, mtq.temporarily_fold_weights(experts):
+        assert all(not q.is_enabled for q in quantizers)
+        for name, param in params.items():
+            assert getattr(experts, name) is param
+            assert param.dtype == torch.get_default_dtype()
+            assert not torch.equal(param, state[name])
+        torch.testing.assert_close(experts(inputs, indices, routing), expected)
+        if exception:
+            raise RuntimeError("fold exit")
+    for name, param in params.items():
+        assert getattr(experts, name) is param
+        assert param.dtype == torch.get_default_dtype()
+    assert all(q.is_enabled for q in quantizers)
+    torch.testing.assert_close(experts.state_dict(), state, rtol=0, atol=0)
+    torch.testing.assert_close(experts(inputs, indices, routing), expected)

@@ -985,7 +985,8 @@ class _QuantFP8Experts(_QuantFusedExperts):
         # Preserve the FP8 view's storage offset for the per-expert quantizer lookup.
         return torch.nn.functional.linear(input, weight)
 
-    def fold_weight(self, keep_attrs=False):
+    def unpack_weight(self):
+        """Materialize floating weights before folding; retain scales for native forward."""
         for name in (self._first_proj_attr, "down_proj"):
             weight = getattr(self, name)
             if weight.element_size() == 1:
@@ -993,7 +994,6 @@ class _QuantFP8Experts(_QuantFusedExperts):
                 for idx in range(self.num_experts):
                     unpacked[idx].copy_(self.get_expert_weight(name, idx))
                 setattr(self, name, nn.Parameter(unpacked, requires_grad=False))
-        super().fold_weight(keep_attrs)
 
 
 def _get_fused_experts_quantizer_attr_names(module):
