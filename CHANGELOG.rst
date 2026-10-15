@@ -6,6 +6,10 @@ Changelog
 
 **New Features**
 
+*Quantization*
+
+- Add an NVFP4 tied-LSQ QAD recipe that quantizes Qwen3-VL visual attention, MLP, and merger linear layers and exports restored LSQ post-amax scales.
+
 **Backward Breaking Changes**
 
 **Deprecations**

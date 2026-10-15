@@ -27,6 +27,7 @@ CONFIGS_DIR = Path(__file__).resolve().parents[3] / "modelopt_recipes" / "genera
 _LSQ_RECIPES = {
     "nvfp4_dual_lsq-mse_init-fp8_kv.yaml": (False, False),
     "nvfp4_lsq-mse_init-fp8_kv.yaml": (True, True),
+    "nvfp4_lsq-mse_init-fp8_kv-visual-linear.yaml": (True, True),
 }
 
 
@@ -76,3 +77,21 @@ def test_lsq_recipe_resolves_modular_quant_cfg(filename):
     assert input_cfg["block_sizes"]["type"] == "dynamic"
     assert input_cfg["num_bits"] == (2, 1)
     assert kv_cfg["num_bits"] == (4, 3)
+
+
+def test_visual_linear_recipe_reenables_visual_quantizers():
+    quantize = _load_lsq_recipe("nvfp4_lsq-mse_init-fp8_kv-visual-linear.yaml")
+    entries = {entry.quantizer_name: entry for entry in quantize.quant_cfg}
+
+    expected = {
+        "*visual*.attn.*.weight_quantizer": "static",
+        "*visual.*input_quantizer": "dynamic",
+        "*visual*.linear_fc*.weight_quantizer": "static",
+    }
+    for name, block_type in expected.items():
+        cfg = entries[name].cfg.model_dump()
+        assert cfg["num_bits"] == (2, 1)
+        assert cfg["block_sizes"]["type"] == block_type
+
+    assert entries["*visual.*patch_embed*"].enable is False
+    assert entries["*visual.*_bmm_quantizer"].enable is False

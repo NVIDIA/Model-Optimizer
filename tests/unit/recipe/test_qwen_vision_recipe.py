@@ -90,3 +90,52 @@ def test_qwen_vision_recipes_select_expected_quantizers(
     enabled_bmm = {name for name in enabled if name.endswith("_bmm_quantizer")}
     assert bool(enabled_bmm) is quantizes_kv
     assert all(name.startswith("model.language_model.") for name in enabled_bmm)
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_vl", "qwen3_5"])
+def test_nvfp4_lsq_visual_recipe_selects_expected_quantizers(model_type):
+    model = _get_tiny_qwen_vlm(model_type)
+    quant_cfg = load_recipe(
+        "general/qad/nvfp4_lsq-mse_init-fp8_kv-visual-linear"
+    ).quantize.model_dump()
+    quant_cfg["algorithm"] = None
+
+    mtq.quantize(model, quant_cfg, forward_loop=None)
+    modules = dict(model.named_modules())
+    enabled = {name for name, module in modules.items() if getattr(module, "is_enabled", False)}
+
+    expected_visual_suffixes = {
+        "blocks.0.attn.qkv.weight_quantizer",
+        "blocks.0.attn.qkv.input_quantizer",
+        "blocks.0.attn.proj.weight_quantizer",
+        "blocks.0.attn.proj.input_quantizer",
+        "blocks.0.mlp.linear_fc1.weight_quantizer",
+        "blocks.0.mlp.linear_fc1.input_quantizer",
+        "blocks.0.mlp.linear_fc2.weight_quantizer",
+        "blocks.0.mlp.linear_fc2.input_quantizer",
+        "merger.linear_fc1.weight_quantizer",
+        "merger.linear_fc1.input_quantizer",
+        "merger.linear_fc2.weight_quantizer",
+        "merger.linear_fc2.input_quantizer",
+    }
+    if model_type == "qwen3_vl":
+        expected_visual_suffixes.update(
+            {
+                "deepstack_merger_list.0.linear_fc1.weight_quantizer",
+                "deepstack_merger_list.0.linear_fc1.input_quantizer",
+                "deepstack_merger_list.0.linear_fc2.weight_quantizer",
+                "deepstack_merger_list.0.linear_fc2.input_quantizer",
+            }
+        )
+    assert {f"model.visual.{suffix}" for suffix in expected_visual_suffixes} <= enabled
+    assert not any("patch_embed" in name for name in enabled)
+    assert not any(
+        name.startswith("model.visual.") and name.endswith("_bmm_quantizer") for name in enabled
+    )
+
+    vision_weight = modules["model.visual.blocks.0.attn.qkv.weight_quantizer"]
+    vision_input = modules["model.visual.blocks.0.attn.qkv.input_quantizer"]
+    assert vision_weight.num_bits == (2, 1)
+    assert vision_weight.block_sizes["type"] == "static"
+    assert vision_input.num_bits == (2, 1)
+    assert vision_input.block_sizes["type"] == "dynamic"

@@ -167,6 +167,7 @@ def test_image_calibration_uses_full_vlm_forward(hf_ptq, monkeypatch):
 @pytest.mark.parametrize(
     "recipe",
     [
+        "general/qad/nvfp4_lsq-mse_init-fp8_kv-visual-linear",
         "model_type/qwen3_vl/ptq/fp8_vision-kv_none",
         "model_type/qwen3_vl/ptq/fp8_vision_lm-kv_fp8_cast",
         "model_type/qwen3_5/ptq/fp8_vision-kv_none",
