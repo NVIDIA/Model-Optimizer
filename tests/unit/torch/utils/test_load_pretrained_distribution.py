@@ -29,10 +29,11 @@ from _test_utils.torch.distributed.utils import bounded_collectives
 
 transformers = pytest.importorskip("transformers")
 
-from transformers import AutoModel, LlamaConfig, LlamaForCausalLM, Qwen3MoeConfig
+from transformers import AutoModel, DeepseekV3Config, LlamaConfig, LlamaForCausalLM
 
 import modelopt.torch.models.hf as models_hf
 import modelopt.torch.utils.distributed as dist
+import modelopt.torch.utils.moe as moe
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.plugins import model_load_utils
@@ -46,6 +47,24 @@ _TINY = {
     "num_key_value_heads": 1,
     "vocab_size": 32,
 }
+
+
+def _deepseek_v3(n_routed_experts=8):
+    """DeepSeek-V3 without a plan of its own, so only its model spec can make it EP-capable.
+
+    Its one layer is an MoE layer: DeepSeek-V3's first layers are dense by default.
+    """
+    config = DeepseekV3Config(
+        n_routed_experts=n_routed_experts,
+        first_k_dense_replace=0,
+        moe_intermediate_size=8,
+        n_group=1,
+        topk_group=1,
+        num_experts_per_tok=1,
+        **_TINY,
+    )
+    config.base_model_ep_plan = None  # holds even if a later transformers ships a plan
+    return config
 
 
 @pytest.fixture(autouse=True)
@@ -206,13 +225,27 @@ def test_a_load_it_decides_reads_the_config_once(
     assert distribution_plan(model) == DistributionPlan(2, dense="fsdp")
 
 
-def test_an_expert_parallel_plan_is_refused(run_as, serve, loaders, auto_class, tmp_path):
-    """No load here shards the routed experts: an EP plan fails before anything loads."""
-    run_as(2)
-    serve(Qwen3MoeConfig(num_experts=8, moe_intermediate_size=8, **_TINY))
+def test_an_expert_parallel_plan_loads_through_the_ep_loader(
+    run_as, serve, loaders, auto_class, tmp_path
+):
+    """An EP plan loads through load_and_prepare_ep, with the plan, and through no other load."""
+    run_as(4)
+    serve(_deepseek_v3(n_routed_experts=8))
+    plan = DistributionPlan(4, ep_size=4, dense="fsdp")
 
-    with pytest.raises(NotImplementedError, match="shards the routed experts"):
-        load_pretrained(str(tmp_path), auto_class, distribution=DistributionPlan(2, ep_size=2))
+    model = load_pretrained(
+        str(tmp_path),
+        distribution=plan,
+        trust_remote_code=True,
+        attn_implementation="eager",
+        freeze=False,
+    )
+
+    call = loaders.pop("ep")
+    assert (call["ckpt_path"], call["plan"]) == (str(tmp_path), plan)
+    assert (call["trust_remote_code"], call["attn_implementation"]) == (True, "eager")
+    assert call["freeze"] is False
+    assert distribution_plan(model) == plan
     assert loaders == {}
     assert auto_class.calls == []
 
@@ -231,7 +264,7 @@ def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path):
     cpu_dist_workers.run(_every_rank_loads_rank0s_plan_job, ckpt=str(tmp_path))
 
 
-@pytest.mark.parametrize("distribution", ["ep", "fsdp2"])
+@pytest.mark.parametrize("sharding", ["expert-parallel", "fsdp2"])
 @pytest.mark.parametrize(
     ("change", "error", "match"),
     [
@@ -242,31 +275,20 @@ def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path):
     ids=["placement", "model_class", "mtp_head"],
 )
 def test_a_sharded_load_refuses_what_it_cannot_honor(
-    run_as,
-    serve,
-    loaders,
-    process_group,
-    monkeypatch,
-    tmp_path,
-    distribution,
-    change,
-    error,
-    match,
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path, sharding, change, error, match
 ):
     """Placement, a model class, a head only a whole model builds: none reaches a sharded load,
     which fails before it starts rather than load something other than what was asked."""
     run_as(2)
-    serve(_deepseek_v3(n_routed_experts=8) if distribution == "ep" else LlamaConfig(**_TINY))
+    expert_parallel = sharding == "expert-parallel"
+    serve(_deepseek_v3() if expert_parallel else LlamaConfig(**_TINY))
     if change.get("mtp"):
         monkeypatch.setattr(models_hf, "checkpoint_has_mtp", lambda *a: True)
-    plan = DistributionPlan(2, ep_size=2) if distribution == "ep" else "fsdp2"
+    plan = DistributionPlan(2, ep_size=2) if expert_parallel else DistributionPlan(2, dense="fsdp")
 
     with pytest.raises(error, match=match):
         load_pretrained(
-            str(tmp_path),
-            change.get("auto_class"),
-            distribution=DistributionPlan(2, dense="fsdp"),
-            **change.get("kwargs", {}),
+            str(tmp_path), change.get("auto_class"), distribution=plan, **change.get("kwargs", {})
         )
     assert loaders == {}
 
