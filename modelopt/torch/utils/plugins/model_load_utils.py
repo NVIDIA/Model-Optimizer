@@ -392,10 +392,21 @@ def record_unplaced_source_keys(
     return keys
 
 
+_EXPERT_PARALLEL = "expert-parallel"
 _FSDP2 = "FSDP2"
 # What each sharded load takes besides the checkpoint. These loads build the model class and place
 # it themselves, so from_pretrained's own arguments (device_map, max_memory, ...) do not reach them.
 _SHARDED_LOAD_OPTIONS = {
+    _EXPERT_PARALLEL: frozenset(
+        {
+            "trust_remote_code",
+            "attn_implementation",
+            "hf_config",
+            "freeze",
+            "require_lm_head",
+            "dense_strategy",
+        }
+    ),
     _FSDP2: frozenset(
         {
             "trust_remote_code",
@@ -426,7 +437,7 @@ def _route(plan: DistributionPlan) -> str | None:
     return _FSDP2 if plan.is_fsdp_dense else None
 
 
-def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options) -> nn.Module:
+def _load_sharded(route, plan, ckpt_path, auto_class, model_type, kwargs, hub_options) -> nn.Module:
     """The sharded load ``route`` names, refusing what it cannot honor before it starts."""
     from modelopt.torch.models.hf import checkpoint_has_mtp
     from modelopt.torch.utils import distributed as dist
@@ -454,6 +465,18 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
         )
     trust_remote_code = kwargs.pop("trust_remote_code", False)
     hf_config = kwargs.pop("hf_config", None)
+    if route == _EXPERT_PARALLEL:
+        from modelopt.torch.utils.moe import load_and_prepare_ep
+
+        return load_and_prepare_ep(
+            ckpt_path,
+            dist.get_active_mo_session(),
+            plan.ep_size,
+            trust_remote_code=trust_remote_code,
+            hf_config=hf_config,
+            fsdp_dense=plan.is_fsdp_dense,
+            **kwargs,
+        )
     if hf_config is None:
         hf_config = AutoConfig.from_pretrained(
             ckpt_path, trust_remote_code=trust_remote_code, **hub_options

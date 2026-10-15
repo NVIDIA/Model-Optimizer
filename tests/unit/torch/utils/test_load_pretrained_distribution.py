@@ -113,6 +113,7 @@ def loaders(monkeypatch):
 
         return stub
 
+    monkeypatch.setattr(moe, "load_and_prepare_ep", recording("ep", moe.load_and_prepare_ep))
     monkeypatch.setattr(
         model_load_utils,
         "parallel_load_and_prepare_fsdp2",
@@ -274,6 +275,7 @@ def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path):
     cpu_dist_workers.run(_every_rank_loads_rank0s_plan_job, ckpt=str(tmp_path))
 
 
+@pytest.mark.parametrize("distribution", ["ep", "fsdp2"])
 @pytest.mark.parametrize(
     ("change", "error", "match"),
     [
@@ -289,15 +291,25 @@ def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path):
     ids=["placement", "model_class", "mtp_head", "two_configs"],
 )
 def test_a_sharded_load_refuses_what_it_cannot_honor(
-    run_as, serve, loaders, process_group, monkeypatch, tmp_path, change, error, match
+    run_as,
+    serve,
+    loaders,
+    process_group,
+    monkeypatch,
+    tmp_path,
+    distribution,
+    change,
+    error,
+    match,
 ):
     """Placement, a model class, a head only a whole model builds, two configs to load with: none
     reaches a sharded load, which fails before it starts rather than load something other than
     what was asked."""
     run_as(2)
-    serve(LlamaConfig(**_TINY))
+    serve(_deepseek_v3(n_routed_experts=8) if distribution == "ep" else LlamaConfig(**_TINY))
     if change.get("mtp"):
         monkeypatch.setattr(models_hf, "checkpoint_has_mtp", lambda *a: True)
+    plan = DistributionPlan(2, ep_size=2) if distribution == "ep" else "fsdp2"
 
     with pytest.raises(error, match=match):
         load_pretrained(
