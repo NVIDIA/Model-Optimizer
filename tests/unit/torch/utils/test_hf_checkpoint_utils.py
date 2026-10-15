@@ -847,6 +847,34 @@ def test_ensure_local_checkpoint_fetches_a_hub_id_in_full(monkeypatch, tmp_path)
     assert calls == [(("org/model",), {})]
 
 
+@pytest.mark.parametrize("hub", ["online", "unreachable", "offline"])
+def test_ensure_local_checkpoint_fetches_the_revision_it_is_asked_for(monkeypatch, tmp_path, hub):
+    """A pinned revision, and the token and cache to fetch it with, reach every Hub call; without
+    them the default branch's snapshot would be returned for it."""
+    error = ConnectionError("no route to host") if hub == "unreachable" else None
+    calls = _fake_hub(monkeypatch, tmp_path, error=error)
+    if hub == "offline":
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    asked = []
+    real_repo_info = hf_checkpoint_utils.HfApi.repo_info
+
+    def repo_info(self, repo_id, **kwargs):
+        asked.append(kwargs)
+        return real_repo_info(self, repo_id)
+
+    monkeypatch.setattr(hf_checkpoint_utils.HfApi, "repo_info", repo_info)
+    hub_kwargs = {"revision": "abc123", "token": "hf_x", "cache_dir": str(tmp_path / "cache")}
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the unreachable Hub's cache warning
+        result = hf_checkpoint_utils.ensure_local_checkpoint("org/model", **hub_kwargs)
+
+    assert result == ("org/model", str(tmp_path))
+    assert asked == ([] if hub == "offline" else [{"revision": "abc123", "token": "hf_x"}])
+    cached = {} if hub == "online" else {"local_files_only": True}
+    assert calls == [(("org/model",), {**cached, **hub_kwargs})]
+
+
 def test_ensure_local_checkpoint_warns_when_only_the_cache_is_left(monkeypatch, tmp_path):
     """snapshot_download falls back to the cache silently; the fallback must be visible."""
     calls = _fake_hub(monkeypatch, tmp_path, error=ConnectionError("no route to host"))
