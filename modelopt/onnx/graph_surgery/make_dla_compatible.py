@@ -37,6 +37,12 @@ from .dla_transforms.dla_graph_cleanup import _remove_unused_initializers
 from .dla_transforms.dla_matmul_to_transpose_conv_transpose import (
     _apply_matmul_to_transpose_conv_transpose,
 )
+from .dla_transforms.dla_model_boundaries import (
+    _apply_fix_instancenorm_channels,
+    _apply_non4d_model_inputs,
+    _apply_non4d_model_outputs,
+    _apply_remove_intermediary_squeeze_unsqueeze,
+)
 from .dla_transforms.dla_remove_deqlin import _apply_remove_deqlin
 from .dla_transforms.dla_remove_qdq import _remove_qdq_from_model
 from .dla_transforms.dla_reorder_nodes import _apply_reorder_nodes
@@ -87,6 +93,10 @@ DLA_TRANSFORMS = (
         "MatMulToTransposeConvTranspose",
         partial(_apply_matmul_to_transpose_conv_transpose, defer_rank_conversion=True),
     ),
+    ("Non4dModelInputs", _apply_non4d_model_inputs),
+    ("Non4dModelOutputs", _apply_non4d_model_outputs),
+    ("RemoveIntermediarySqueezeAndUnsqueeze", _apply_remove_intermediary_squeeze_unsqueeze),
+    ("FixInstanceNormChannelMismatch", _apply_fix_instancenorm_channels),
     ("ShapeInference", infer_shapes),
     ("RemoveUnusedInitializers", _remove_unused_initializers),
 )
