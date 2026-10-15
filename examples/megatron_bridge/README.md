@@ -309,6 +309,8 @@ To export selected iterations instead, use `--export_iterations 200 400 600`.
 
 ### Quantization Aware Distillation (QAD)
 
+For GDN/KDA recurrent-state quantization, use the [linear-attention QAT/QAD example](../llm_qat/linear_attention/README.md). It installs the explicit training phase required by this path; the general `distill.py` command below does not install that phase automatically.
+
 To recover the accuracy lost during [Post-Training Quantization](#post-training-quantization), distill the quantized model (student) from the original, unquantized model (teacher). Pass the quantized **Megatron checkpoint** produced by `quantize.py` via `--student_megatron_path` (the ModelOpt quantizers are restored automatically, so distillation trains the fake-quantized student), while `--student_hf_path` provides the student architecture and `--teacher_hf_path` points to the original unquantized model.
 
 If you do not already have a suitable QAD dataset, start with
