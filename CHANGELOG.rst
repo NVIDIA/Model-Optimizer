@@ -13,6 +13,7 @@ Changelog
 **Bug Fixes**
 
 - Fix ONNX preprocessing with custom TensorRT plugin libraries on TensorRT 11.
+- Fix ``INT8_DEFAULT_CFG``, ``FP8_DEFAULT_CFG``, ``NVFP4_DEFAULT_CFG`` and the other presets and recipes that import ``configs/ptq/units/default_disabled_quantizers`` and enable ``*input_quantizer``: since 0.44 they also quantized ``nn.LayerNorm`` inputs, which adds quantization error to the residual stream of models built on ``nn.LayerNorm`` such as BERT-style encoders. Re-quantize affected models; a recipe that wants ``nn.LayerNorm`` quantizers must enable them after importing that unit.
 - Fix ``fsdp2_aware_weight_update`` masking an error raised during its unshard (e.g. a CUDA OOM) with a spurious ``UnboundLocalError``.
 
 0.48.0 (2026-10-xx)
@@ -68,6 +69,7 @@ Changelog
 
 - Add chat-data distillation to ``examples/megatron_bridge/distill.py``: ``--sft --sft_hf_dataset`` takes a local chat ``.jsonl`` or a Hugging Face Hub dataset, renders each conversation with the model's chat template, and ``--sft_loss_mode`` selects which turns are trained. Requires a Megatron-Bridge with ``DirectHFSFTDatasetConfig``.
 - Add ``freeze_mtp`` to the Megatron ``DistillationConfig`` (``--freeze_mtp`` in ``examples/megatron_bridge/distill.py``): the student's MTP head keeps its input weights and its loss is skipped, so distillation trains the rest of the model on the distillation loss alone.
+- Add ``output_format: chat_jsonl`` to ``prepare_megatron_data_blend``: it writes a weighted blend as ``train.jsonl`` / ``validation.jsonl`` chat data for ``distill.py --sft --sft_hf_dataset``, so the distillation loss can be restricted to assistant tokens. See the `Megatron data preparation guide <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/dataset/MEGATRON_DATA_PREP.md#chat-jsonl-blends-for-assistant-only-loss>`_.
 - Add mergeable LoRA QAD for fake-quantized dense Megatron/Transformer Engine linear layers. Enable it with ``--lora_rank`` in Megatron-Bridge PTQ, train through the normal QAD flow, and export a standalone quantized checkpoint without deployment adapters.
 - Add optional Top-P (nucleus) truncation to the Megatron top-k logits KD loss (now ``TopLogitsKLLoss``) via ``logit_kl_top_p`` and ``logit_kl_top_p_min_k`` in ``DistillationConfig``: after the global Top-K selection, only the smallest prefix whose cumulative teacher probability reaches ``top_p`` (with a floor of ``min_k`` entries) contributes to the KL, mirroring ``--logits-save-top-p`` / ``--logits-save-top-p-min-k`` in Megatron-LM's logits saver.
 - Add an end-to-end W4A4 NVFP4 PTQ and QAD tutorial for Qwen3.6-35B-A3B also covering evaluation and vLLM throughput benchmarking. See `examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/>`_ for details.
