@@ -1832,3 +1832,61 @@ def test_base_lm_loss_needs_labels():
 
     with pytest.raises(ValueError, match="needs labels"):
         model(input_ids=torch.ones(1, SEQ_LEN, dtype=torch.long))
+
+
+def test_packed_data_path_selects_the_packed_mode():
+    """mode is derived from which data-source field is set, never taken on trust."""
+    from modelopt.torch.speculative.plugins.hf_training_args import DataArguments
+
+    assert DataArguments(packed_data_path="/tmp/blocks").mode == "packed"
+    assert DataArguments(data_path="/tmp/chat.jsonl").mode == "online"
+    with pytest.raises(ValueError, match="ambiguous"):
+        DataArguments(packed_data_path="/tmp/blocks", offline_data_path="/tmp/dump")
+
+
+def test_packed_collator_stacks_blocks_and_defaults_labels():
+    """Blocks are already fixed-length and tokenized, so collation is a stack.
+
+    labels defaults to input_ids: for causal LM the shift belongs to the loss, and the
+    DFlash path shifts there.
+    """
+    from modelopt.torch.utils.plugins.transformers_dataset import PackedBlockDataCollator
+
+    rows = [{"input_ids": torch.arange(8)}, {"input_ids": torch.arange(8, 16)}]
+    batch = PackedBlockDataCollator()(rows)
+
+    assert batch["input_ids"].shape == (2, 8)
+    assert torch.equal(batch["labels"], batch["input_ids"])
+    assert torch.equal(batch["attention_mask"], torch.ones(2, 8, dtype=batch["input_ids"].dtype))
+
+
+def test_packed_collator_keeps_explicit_labels_and_truncates_to_train_len():
+    from modelopt.torch.utils.plugins.transformers_dataset import PackedBlockDataCollator
+
+    rows = [{"input_ids": torch.arange(8), "labels": torch.full((8,), -100)}]
+    batch = PackedBlockDataCollator(train_len=4)(rows)
+
+    assert batch["input_ids"].shape == (1, 4)
+    assert torch.equal(batch["labels"], torch.full((1, 4), -100))
+
+
+def test_packed_collator_rejects_rows_without_input_ids():
+    from modelopt.torch.utils.plugins.transformers_dataset import PackedBlockDataCollator
+
+    with pytest.raises(ValueError, match="input_ids"):
+        PackedBlockDataCollator()([{"text": "not tokenised"}])
+
+
+def test_packed_mode_is_not_treated_as_offline():
+    """packed is an online path with a different data source, not an offline one.
+
+    Offline training loads a fake base because hidden states were pre-dumped. Packed
+    batches are plain tokens, so the real base must run forward over them; classifying
+    packed as offline would silently train against a model that is not there.
+    """
+    import re
+    from pathlib import Path
+
+    src = Path(__file__).parents[5] / "examples/speculative_decoding/main.py"
+    line = next(ln for ln in src.read_text().splitlines() if "use_offline_training =" in ln)
+    assert re.search(r'not in \(\s*"online",\s*"packed"\s*\)', line), line
