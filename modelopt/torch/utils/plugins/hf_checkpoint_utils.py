@@ -782,28 +782,31 @@ def copy_non_safetensor_files_from_ckpt(
     return copied_files
 
 
-def _snapshot_download(hub_model_id: str) -> str:
+def _snapshot_download(hub_model_id: str, **hub_kwargs) -> str:
     """``snapshot_download``, but warn when it unexpectedly falls back to the cache.
 
     ``snapshot_download`` silently returns whatever snapshot is cached when the Hub cannot be
     reached; ask the Hub first so that case is visible. A missing repo or revision still raises.
     With ``HF_HUB_OFFLINE`` set the cache is the user's choice, so it is used without a warning.
+    ``hub_kwargs`` (``revision``, ``token``, ``cache_dir``) go to every Hub call that takes them.
     """
     if _is_hf_hub_offline():
         try:
-            return snapshot_download(hub_model_id, local_files_only=True)
+            return snapshot_download(hub_model_id, local_files_only=True, **hub_kwargs)
         except LocalEntryNotFoundError as error:
             raise RuntimeError(
                 f"HF_HUB_OFFLINE is set and {hub_model_id!r} is not in the local cache."
             ) from error
     try:
-        HfApi().repo_info(hub_model_id)
+        HfApi().repo_info(hub_model_id, **{k: v for k, v in hub_kwargs.items() if k != "cache_dir"})
     except (RepositoryNotFoundError, RevisionNotFoundError):
         raise
     except Exception as error:  # offline, unreachable, or refused: only the cache is left
         hub_error = f"{type(error).__name__}: {error}"
         try:
-            local_checkpoint_path = snapshot_download(hub_model_id, local_files_only=True)
+            local_checkpoint_path = snapshot_download(
+                hub_model_id, local_files_only=True, **hub_kwargs
+            )
         except LocalEntryNotFoundError:
             raise RuntimeError(
                 f"Could not reach the Hugging Face Hub for {hub_model_id!r} ({hub_error}), and it "
@@ -815,10 +818,10 @@ def _snapshot_download(hub_model_id: str) -> str:
             "from_pretrained did not need."
         )
         return local_checkpoint_path
-    return snapshot_download(hub_model_id)
+    return snapshot_download(hub_model_id, **hub_kwargs)
 
 
-def _make_local(model_name_or_path: str | os.PathLike) -> tuple[str | None, str]:
+def _make_local(model_name_or_path: str | os.PathLike, **hub_kwargs) -> tuple[str | None, str]:
     """``(hub_model_id, local_checkpoint_path)`` on this rank alone.
 
     See :func:`ensure_local_checkpoint`.
@@ -827,7 +830,7 @@ def _make_local(model_name_or_path: str | os.PathLike) -> tuple[str | None, str]
         return None, str(model_name_or_path)
     hub_model_id = str(model_name_or_path)
     try:
-        return hub_model_id, _snapshot_download(hub_model_id)
+        return hub_model_id, _snapshot_download(hub_model_id, **hub_kwargs)
     except GatedRepoError:
         raise
     except (HFValidationError, RepositoryNotFoundError) as error:
@@ -841,6 +844,10 @@ def _make_local(model_name_or_path: str | os.PathLike) -> tuple[str | None, str]
 def ensure_local_checkpoint(
     model_name_or_path: str | os.PathLike,
     group: "torch.distributed.ProcessGroup | None" = None,
+    *,
+    revision: str | None = None,
+    token: str | bool | None = None,
+    cache_dir: str | os.PathLike | None = None,
 ) -> tuple[str | None, str]:
     """Ensure the whole checkpoint is on local storage.
 
@@ -872,14 +879,24 @@ def ensure_local_checkpoint(
         group: Process group sharing the download. Its timeout must outlast the download, since
             the other ranks wait in it. ``None`` means every rank of the default group, waiting on
             a temporary gloo group whose timeout does.
+        revision: For a Hub model ID, the revision (branch, tag or commit) to fetch; its default
+            branch if ``None``.
+        token: For a Hub model ID, the token to fetch it with; the logged-in one if ``None``.
+        cache_dir: For a Hub model ID, the Hugging Face cache to fetch it into; the default one if
+            ``None``.
 
     Returns:
         ``(hub_model_id, local_checkpoint_path)``.
     """
+    hub_kwargs = {
+        k: v
+        for k, v in {"revision": revision, "token": token, "cache_dir": cache_dir}.items()
+        if v is not None
+    }
     if group is None and not (
         torch.distributed.is_available() and torch.distributed.is_initialized()
     ):
-        return _make_local(model_name_or_path)
+        return _make_local(model_name_or_path, **hub_kwargs)
 
     # Rank 0 decides even for a local path: ranks that each checked for themselves could disagree
     # (a directory on one node's local disk) and part of them would wait here forever. Without a
@@ -894,7 +911,7 @@ def ensure_local_checkpoint(
         result: list[tuple[str | None, str | None, str | None]] = [(None, None, None)]
         if torch.distributed.get_rank(group) == 0:
             try:
-                result = [(*_make_local(model_name_or_path), None)]
+                result = [(*_make_local(model_name_or_path, **hub_kwargs), None)]
             except Exception as error:
                 result = [(None, None, f"{type(error).__name__}: {error}")]
         torch.distributed.broadcast_object_list(result, group=group, group_src=0)
