@@ -38,12 +38,15 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    DeepseekV3Config,
+    GptOssConfig,
     LlamaConfig,
     Qwen2_5_VLConfig,
     Qwen3MoeConfig,
 )
 
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.models import get_spec
 from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.moe import (
     _routed_expert_modules,
@@ -71,6 +74,24 @@ needs_qwen3_moe_ep_plan = pytest.mark.skipif(
 def _qwen3_moe(num_experts=8):
     """Qwen3-MoE, whose base_model_ep_plan ships with transformers itself."""
     return Qwen3MoeConfig(num_experts=num_experts, moe_intermediate_size=8, **_TINY)
+
+
+def _deepseek_v3(n_routed_experts=8):
+    """DeepSeek-V3 without a plan of its own, so only its model spec can make it EP-capable.
+
+    Its one layer is an MoE layer: DeepSeek-V3's first layers are dense by default.
+    """
+    config = DeepseekV3Config(
+        n_routed_experts=n_routed_experts,
+        first_k_dense_replace=0,
+        moe_intermediate_size=8,
+        n_group=1,
+        topk_group=1,
+        num_experts_per_tok=1,
+        **_TINY,
+    )
+    config.base_model_ep_plan = None  # holds even if a later transformers ships a plan
+    return config
 
 
 def _bytes(module):
@@ -382,6 +403,7 @@ def test_an_ep_capable_moe_is_planned_expert_parallel(run_as, serve, tmp_path, c
     assert ("Distribution:" in capsys.readouterr().out) == (rank == 0)
 
 
+@needs_qwen3_moe_ep_plan  # its spec asks for the release that ships its plan
 def test_an_moe_without_an_ep_plan_is_not_expert_parallel(run_as, serve, tmp_path):
     """The config counts 8 experts, but with no base_model_ep_plan nothing could shard them."""
     run_as(4)
@@ -392,11 +414,36 @@ def test_an_moe_without_an_ep_plan_is_not_expert_parallel(run_as, serve, tmp_pat
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4)
 
 
-@needs_qwen3_moe_ep_plan
+def test_the_spec_is_applied_before_the_decision(run_as, serve, tmp_path):
+    """DeepSeek-V3's plan comes only from its spec. Deciding before applying it would read the MoE
+    as dense; applied first, it shards, and the config handed on carries the spec's plan."""
+    run_as(4)
+    serve(_deepseek_v3(n_routed_experts=8))
+
+    plan, hf_config = resolve_distribution_plan(str(tmp_path))
+
+    assert plan == DistributionPlan(4, 4)
+    assert hf_config.base_model_ep_plan == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
+
+
+def test_a_run_without_expert_parallelism_needs_no_spec(run_as, serve, monkeypatch, tmp_path):
+    """GPT-OSS cannot be expert-parallel, which its spec says by refusing. A run that rules expert
+    parallelism out, as FSDP2 does, does not ask its spec, and its spec does not refuse it."""
+    run_as(2)
+    serve(GptOssConfig(num_local_experts=4, **_TINY))
+
+    with pytest.raises(NotImplementedError, match="cannot be quantized expert-parallel yet"):
+        resolve_distribution_plan(str(tmp_path))
+    plan, _ = resolve_distribution_plan(str(tmp_path), ep_size=1, dense="fsdp")
+    assert plan == DistributionPlan(2, dense="fsdp")
+    monkeypatch.setenv("MODELOPT_EP_DEGREE", "1")
+    assert resolve_distribution_plan(str(tmp_path), dense="fsdp")[0] == plan
+
+
 @pytest.mark.parametrize(
     ("config", "ep_degree"),
     [
-        pytest.param(_qwen3_moe(num_experts=3), None, id="auto_finds_no_degree"),
+        pytest.param(_deepseek_v3(n_routed_experts=3), None, id="auto_finds_no_degree"),
         pytest.param(_qwen3_moe(num_experts=8), "1", id="explicit_degree_one"),
     ],
 )
@@ -406,6 +453,8 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
     """No EP degree above 1 divides 3 experts over 2 ranks, and an explicit 1 asks for none. With
     nothing sharded either, every rank would hold the whole MoE: that must fail, not run."""
     if ep_degree is not None:
+        if Version(transformers.__version__) < Version("5.7"):
+            pytest.skip("qwen3_moe's base_model_ep_plan ships in transformers 5.7")
         monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
     run_as(2)
     serve(config)
@@ -414,14 +463,13 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
         resolve_distribution_plan(str(tmp_path))
 
 
-@needs_qwen3_moe_ep_plan
 def test_an_ep_capable_moe_may_be_fsdp2_sharded_instead(run_as, serve, monkeypatch, tmp_path):
     """Asked for no expert parallelism but for dense sharding, the MoE is sharded whole by FSDP2,
     which is not the waste of a replica on every rank."""
     monkeypatch.setenv("MODELOPT_EP_DEGREE", "1")
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
     run_as(2)
-    serve(_qwen3_moe(num_experts=8))
+    serve(_deepseek_v3(n_routed_experts=8))
 
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2, dense="fsdp")
 
