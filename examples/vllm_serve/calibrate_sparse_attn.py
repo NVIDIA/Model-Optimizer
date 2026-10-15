@@ -78,8 +78,8 @@ _LOCKED_ENGINE_KWARGS = frozenset(
 
 def _sparse_ratio(value: str) -> float:
     ratio = float(value)
-    if not math.isfinite(ratio) or not 0.0 <= ratio <= 1.0:
-        raise argparse.ArgumentTypeError("must be a finite value between 0.0 and 1.0")
+    if not math.isfinite(ratio) or not 0.0 < ratio < 1.0:
+        raise argparse.ArgumentTypeError("must be a finite value strictly between 0.0 and 1.0")
     return ratio
 
 
@@ -108,7 +108,7 @@ def _engine_kwargs(value: str) -> dict:
     return kwargs
 
 
-def _load_prompts(llm, args) -> list[str]:
+def _load_prompts(tokenizer, args) -> list[str]:
     """Load override prompts from a file, or build the default RULER set."""
     if args.prompts_file is not None:
         lines = [
@@ -124,7 +124,7 @@ def _load_prompts(llm, args) -> list[str]:
     builder = RulerDatasetBuilder(
         samples=args.calib_samples,
         max_seqlen=args.calib_max_seqlen,
-        tokenizer_name_or_path=llm.get_tokenizer(),
+        tokenizer_name_or_path=tokenizer,
         max_length_filter=int(args.calib_max_seqlen * 1.5),
         data_dir=args.calib_data_dir,
     )
@@ -142,6 +142,29 @@ def _load_prompts(llm, args) -> list[str]:
         f"(token lengths {lengths[0]}..{lengths[-1]})"
     )
     return prompts
+
+
+def _prompts_overlap(prompts: list[str], held_out: list[str]) -> bool:
+    """Compare whitespace-normalized text without altering the inference inputs."""
+    return bool({" ".join(p.split()) for p in prompts} & {" ".join(p.split()) for p in held_out})
+
+
+def _load_ruler_prompts(args, llm_kwargs: dict) -> list[str]:
+    """Build RULER with the serving tokenizer before loading model weights."""
+    # Defer vLLM imports until prompt-file and output-directory checks pass.
+    try:
+        from vllm.tokenizers import get_tokenizer
+    except ImportError:
+        from vllm.transformers_utils.tokenizer import get_tokenizer
+
+    tokenizer = get_tokenizer(
+        llm_kwargs.get("tokenizer") or args.model,
+        tokenizer_mode=llm_kwargs.get("tokenizer_mode", "auto"),
+        trust_remote_code=llm_kwargs.get("trust_remote_code", False),
+        revision=llm_kwargs.get("tokenizer_revision") or llm_kwargs.get("revision"),
+        download_dir=llm_kwargs.get("download_dir"),
+    )
+    return _load_prompts(tokenizer, args)
 
 
 def _preflight_prompt_inputs(args, parser: argparse.ArgumentParser) -> list[str] | None:
@@ -428,13 +451,8 @@ def main():
         )
     except (OSError, ValueError) as err:
         parser.error(str(err))
-    if not 0 < args.target_sparse_ratio < 1:
-        parser.error("--target_sparse_ratio must be strictly between 0 and 1 for refinement")
-    if not 0 < args.sparsity_tolerance < 1:
-        parser.error("--sparsity_tolerance must be strictly between 0 and 1")
-    if prompts is not None and set(prompts) & set(held_out):
+    if prompts is not None and _prompts_overlap(prompts, held_out):
         parser.error("Calibration and held-out prompt files must not overlap")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     if any(
         (args.output_dir / name).exists()
         for name in ("sparse_attention_config.json", "sparse_attention_validation.json")
@@ -479,13 +497,15 @@ def main():
         llm_kwargs["attention_backend"] = args.attention_backend
     if args.engine_kwargs:
         llm_kwargs.update(args.engine_kwargs)
-    llm = LLM(**llm_kwargs)
-
-    # Built after engine init so the RULER builder reuses the engine's tokenizer.
     if prompts is None:
-        prompts = _load_prompts(llm, args)
-    if set(prompts) & set(held_out):
-        parser.error("Calibration and held-out prompts must not overlap")
+        try:
+            prompts = _load_ruler_prompts(args, llm_kwargs)
+        except (OSError, ValueError) as err:
+            parser.error(str(err))
+        if _prompts_overlap(prompts, held_out):
+            parser.error("Calibration and held-out prompts must not overlap")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    llm = LLM(**llm_kwargs)
 
     trials = list(DEFAULT_THRESHOLD_TRIALS)
     n_layers = llm.collective_rpc("sparse_calib_enable", args=(trials,))[0]
@@ -531,6 +551,15 @@ def main():
         {"prefill": args.target_sparse_ratio, "decode": args.target_sparse_ratio},
         existing_config=_existing_sparse_config(args.model),
     )
+    group = sparse_config["config_groups"]["group_0"]
+    validation = {
+        "target_sparsity": deepcopy(group["target_sparsity"]),
+        "tolerance": args.sparsity_tolerance,
+        "metric": "sum(skipped_tiles) / sum(eligible_tiles), across selected layers and TP ranks",
+        "scope": "Single-sequence serving; refined coefficients validated only at this target",
+    }
+    # Candidates carry the intended scope; only a passing candidate is exported.
+    group["validation"] = validation
     print("[ModelOpt] Calibrated threshold_scale_factor:")
     print(json.dumps(sparse_config["config_groups"]["group_0"]["threshold_scale_factor"], indent=2))
     report = {
@@ -541,8 +570,8 @@ def main():
         "target": args.target_sparse_ratio,
         "tolerance": args.sparsity_tolerance,
         "refinement": {"max_steps_per_phase": args.max_refinement_steps, "expansion_factor": 4},
-        "metric": "sum(skipped_tiles) / sum(eligible_tiles), across selected layers and TP ranks",
-        "scope": "Single-sequence serving; refined coefficients validated only at this target",
+        "metric": validation["metric"],
+        "scope": validation["scope"],
         "prompts": {
             split: {
                 "count": len(values),

@@ -38,6 +38,10 @@ def calibration_driver(monkeypatch):
         ["--target_sparse_ratio", "-0.1"],
         ["--target_sparse_ratio", "1.1"],
         ["--target_sparse_ratio", "nan"],
+        ["--target_sparse_ratio", "0"],
+        ["--target_sparse_ratio", "1"],
+        ["--sparsity_tolerance", "0"],
+        ["--sparsity_tolerance", "1"],
         ["--decode_tokens", "-1"],
         ["--engine_kwargs", "[]"],
         ["--engine_kwargs", "not-json"],
@@ -141,6 +145,74 @@ def test_existing_sparse_config_reads_only_dict(calibration_driver, tmp_path):
     assert calibration_driver._existing_sparse_config(str(checkpoint)) is None
 
 
+@pytest.mark.parametrize("source", ["file", "ruler"])
+def test_main_rejects_normalized_overlap_before_engine_or_output(
+    calibration_driver, tmp_path, monkeypatch, source
+):
+    held_out = tmp_path / "held_out.txt"
+    held_out.write_text("same prompt")
+    output_dir = tmp_path / "output"
+    flags = ["--validation_prompts_file", str(held_out), "--output_dir", str(output_dir)]
+
+    def unexpected_engine(**kwargs):
+        pytest.fail("Prompt overlap must be rejected before engine creation")
+
+    monkeypatch.setitem(
+        sys.modules, "vllm", SimpleNamespace(LLM=unexpected_engine, SamplingParams=SimpleNamespace)
+    )
+    if source == "file":
+        calibration = tmp_path / "calibration.txt"
+        calibration.write_text("same\t prompt")
+        flags += ["--prompts_file", str(calibration)]
+    else:
+        essays = tmp_path / "essays"
+        essays.mkdir()
+        (essays / "sample.txt").write_text("essay")
+        flags += [
+            "--calib_data_dir",
+            str(tmp_path),
+            "--trust_remote_code",
+            "--engine_kwargs",
+            json.dumps(
+                {
+                    "tokenizer": "custom",
+                    "tokenizer_mode": "slow",
+                    "tokenizer_revision": "tokenizer-rev",
+                    "revision": "model-rev",
+                }
+            ),
+        ]
+        tokenizer = object()
+
+        def get_tokenizer(name, **kwargs):
+            assert name == "custom"
+            assert kwargs == {
+                "tokenizer_mode": "slow",
+                "trust_remote_code": True,
+                "revision": "tokenizer-rev",
+                "download_dir": None,
+            }
+            return tokenizer
+
+        class Builder:
+            def __init__(self, **kwargs):
+                assert kwargs["tokenizer_name_or_path"] is tokenizer
+
+            def build_calibration_dataset(self):
+                return [{"input": "same\n\tprompt", "length": 2}]
+
+        monkeypatch.setitem(
+            sys.modules, "vllm.tokenizers", SimpleNamespace(get_tokenizer=get_tokenizer)
+        )
+        monkeypatch.setattr(calibration_driver, "RulerDatasetBuilder", Builder)
+
+    monkeypatch.setattr(sys, "argv", ["calibrate_sparse_attn.py", "model", *flags])
+    with pytest.raises(SystemExit) as exc:
+        calibration_driver.main()
+    assert exc.value.code == 2
+    assert not output_dir.exists()
+
+
 @pytest.mark.parametrize("update_checkpoint", [False, True])
 def test_write_config_emits_artifact_and_optionally_updates_checkpoint(
     calibration_driver, tmp_path, monkeypatch, update_checkpoint
@@ -242,3 +314,13 @@ def test_main_freezes_candidate_before_held_out_and_gates_export(
     report = json.loads((output_dir / "sparse_attention_validation.json").read_text())
     assert report["passed"] is held_out_passes
     assert (output_dir / "sparse_attention_config.json").exists() is held_out_passes
+    if held_out_passes:
+        exported = json.loads((output_dir / "sparse_attention_config.json").read_text())
+        assert exported == report["candidate_config"] == report["history"][-1]["config"]
+        validation = exported["config_groups"]["group_0"]["validation"]
+        assert validation == {
+            "target_sparsity": {"prefill": 0.5, "decode": 0.5},
+            "tolerance": 0.02,
+            "metric": report["metric"],
+            "scope": report["scope"],
+        }
