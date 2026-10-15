@@ -21,7 +21,6 @@ from unittest import mock
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from _test_utils.torch.quantization.quantize_common import (
     INT4_AWQ_CLIP_CFG,
@@ -722,11 +721,10 @@ def _test_indexer_check_covers_all_ranks(rank, size):
             mtq.quantize(_ToyStage([rank]), config, lambda m: None)
     finally:
         mtq.unregister(_ToyIndexer)
-    torch.distributed.destroy_process_group()
 
 
-def test_indexer_k_check_covers_all_ranks(skip_on_windows):
-    spawn_multiprocess_job(2, _test_indexer_check_covers_all_ranks, backend="gloo")
+def test_indexer_k_check_covers_all_ranks(cpu_dist_workers):
+    cpu_dist_workers.run(_test_indexer_check_covers_all_ranks)
 
 
 def test_indexer_q_patterns_need_the_query_quantizer():

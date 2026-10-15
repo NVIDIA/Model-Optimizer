@@ -25,12 +25,10 @@ on GPU are covered in ``tests/gpu``.
 import copy
 import faulthandler
 import json
-from functools import partial
 from pathlib import Path
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from safetensors.torch import load_file
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
@@ -156,18 +154,24 @@ def test_streaming_export_extra_state_dict_mtp(tmp_path):
 
 
 def _two_rank_streaming_export(rank, size, export_dir):
-    # A deadlocked rank exits with its stack instead of hanging the run on the join.
+    # A deadlocked rank exits with its stack instead of hanging the run on the join. Cancelled in
+    # ``finally`` because the worker is reused: a leftover timer would kill it in a later test.
     faulthandler.dump_traceback_later(45, exit=True)
-    # The unsharded reference is built and exported on every rank, so any collective its
-    # calibration or export issues has a partner.
-    expected, _ = _export_transformers_checkpoint(_tiny_quantized_llama(tie=False), torch.bfloat16)
-    # Calibrating after sharding leaves the root's parameters unsharded: FSDP2 skips the root's
-    # post-forward reshard. That is the state in which the owner's state_dict() used to reshard
-    # them on its rank alone, so the next gather window ran a collective the other rank skipped.
-    model = _tiny_quantized_llama(tie=False, mesh=init_device_mesh("cpu", (size,)))
-    _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=export_dir)
-    torch.distributed.barrier()
-    faulthandler.cancel_dump_traceback_later()
+    try:
+        # The unsharded reference is built and exported on every rank, so any collective its
+        # calibration or export issues has a partner.
+        expected, _ = _export_transformers_checkpoint(
+            _tiny_quantized_llama(tie=False), torch.bfloat16
+        )
+        # Calibrating after sharding leaves the root's parameters unsharded: FSDP2 skips the
+        # root's post-forward reshard. That is the state in which the owner's state_dict() used
+        # to reshard them on its rank alone, so the next gather window ran a collective the
+        # other rank skipped.
+        model = _tiny_quantized_llama(tie=False, mesh=init_device_mesh("cpu", (size,)))
+        _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=export_dir)
+        torch.distributed.barrier()
+    finally:
+        faulthandler.cancel_dump_traceback_later()
     if rank != 0:
         return
     exported = _load_all(Path(export_dir))
@@ -176,6 +180,6 @@ def _two_rank_streaming_export(rank, size, export_dir):
         assert torch.equal(exported[key].float(), tensor.float()), key
 
 
-def test_streaming_export_two_cpu_ranks(tmp_path, skip_on_windows):
+def test_streaming_export_two_cpu_ranks(tmp_path, cpu_dist_workers):
     """Two gloo ranks export what a single process does, without a rank waiting on the other."""
-    spawn_multiprocess_job(2, partial(_two_rank_streaming_export, export_dir=str(tmp_path)))
+    cpu_dist_workers.run(_two_rank_streaming_export, export_dir=str(tmp_path))

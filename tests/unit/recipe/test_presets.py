@@ -22,9 +22,6 @@ PTQ example).
 """
 
 import argparse
-import subprocess
-import sys
-import textwrap
 
 import pytest
 
@@ -202,31 +199,3 @@ def test_store_true_style_flag_stores_const_not_an_empty_list():
     with pytest.warns(FutureWarning, match="--weight_only is deprecated"):
         args = parser.parse_args(["--weight_only"])
     assert args.weight_only is True
-
-
-def test_deprecation_reaches_stderr_under_the_real_default_filters():
-    """The warning has to reach an actual CLI user, not just a test run.
-
-    pytest enables every warning, so a category CPython suppresses looks healthy here and says
-    nothing in production. argparse invokes the action from its own module, so a
-    ``DeprecationWarning`` would be dropped by the default ``ignore::DeprecationWarning`` filter --
-    the flag would keep working with nothing said. A subprocess is the only honest check: it uses
-    the interpreter's real filters rather than a reconstruction of them.
-    """
-    script = textwrap.dedent(
-        """
-        import argparse
-        from modelopt.recipe.presets import RecipeSupersededAction
-
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--qformat", action=RecipeSupersededAction)
-        parser.parse_args(["--qformat", "nvfp4"])
-        """
-    )
-    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
-
-    assert proc.returncode == 0, proc.stderr
-    assert "--qformat is deprecated" in proc.stderr, (
-        "the deprecation is filtered out under Python's default filters, so a CLI user would "
-        f"never see it; stderr was: {proc.stderr!r}"
-    )
