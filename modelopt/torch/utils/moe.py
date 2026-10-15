@@ -60,9 +60,12 @@ def _a2a_moe_torch(
     Flow: expand (token, expert) pairs -> route each to dest_rank = global_expert // num_local ->
     all_to_all the tokens (+ local-expert id + weight) -> local grouped_mm (quantizable) -> weight ->
     all_to_all back -> scatter-sum to original tokens.
+
+    Tokens travel and the result returns in ``hidden_states``' dtype -- the model's, so its residual
+    stream keeps one dtype -- and only the per-token combine accumulates in fp32.
     """
     world = group.size()
-    x = hidden_states.contiguous().bfloat16()
+    x = hidden_states.contiguous()
     H = x.size(-1)  # noqa: N806
     T, top_k = topk_idx.shape  # noqa: N806
     dev = x.device

@@ -38,15 +38,16 @@ from modelopt.torch.utils.moe import a2a_moe
 
 # Small, fully-deterministic problem. E must be divisible by every world size under test.
 E, TOP_K, H, T = 4, 2, 8, 6
-COMPUTE_DTYPE = (
-    torch.bfloat16
-)  # a2a_moe computes in bf16 internally; mirror it so tolerances stay tight.
+# The experts' dtype in the jobs below: bf16, as in the models EP calibrates. a2a_moe computes in the
+# dtype it is given, and the dense reference mirrors it so tolerances stay tight.
+COMPUTE_DTYPE = torch.bfloat16
 
 
 def _dense_moe(x, gate_w, w, top_k):
     """Reference dense MoE: out[t] = sum_k softmax(x@gate)[t, e_k] * (x[t] @ w[e_k]).
 
-    Matmuls run in ``COMPUTE_DTYPE`` (like ``a2a_moe``); routing/softmax stay fp32 for a stable top-k.
+    Matmuls run in ``COMPUTE_DTYPE`` (as ``a2a_moe`` does on the hidden states it is handed);
+    routing/softmax stay fp32 for a stable top-k.
     Fully differentiable w.r.t. ``x`` (hidden), ``w`` (experts) and ``gate_w`` (router).
     """
     logits = x.float() @ gate_w.float()  # [N, E]
@@ -109,7 +110,7 @@ def _a2a_moe_fwd_bwd_job(rank, size, ep_size):
             start = end
         return torch.cat(segs, dim=0) if segs else sorted_tok.new_zeros((0, H))
 
-    out_a = a2a_moe(group, x_r, ti, tw, E, n_local, expert_fn)  # [T, H]
+    out_a = a2a_moe(group, x_r.to(COMPUTE_DTYPE), ti, tw, E, n_local, expert_fn)  # [T, H]
     out_a.pow(2).sum().backward()  # collective backward across ranks (a2a reverse all-to-all)
 
     atol, rtol = 3e-2, 3e-2
@@ -143,6 +144,42 @@ def test_a2a_moe_forward_backward(cpu_dist_workers, ep_size):
 
 def _identity_experts(sorted_tok, offsets):
     return sorted_tok
+
+
+def _keeps_dtype_job(rank, size, dtype, tol):
+    """Every rank its own one-rank group: what comes back is the dense result, in the input's dtype.
+
+    The model's residual stream adds it to the hidden states, so any other dtype breaks the next
+    layer (fp16 + bf16 promotes to fp32) or silently rounds the model (fp32 through bf16).
+    """
+    group, _ = dist.new_subgroups(1)
+    gen = torch.Generator().manual_seed(0)
+    x = torch.randn(T, H, generator=gen).to(dtype)
+    w = (torch.randn(E, H, H, generator=gen) / H**0.5).to(dtype)
+    ti = torch.randint(0, E, (T, TOP_K), generator=gen)
+    tw = torch.rand(T, TOP_K, generator=gen).to(dtype)
+
+    def experts(sorted_tok, offsets):
+        ends = offsets.tolist()
+        return torch.cat(
+            [sorted_tok[s:e] @ w[i] for i, (s, e) in enumerate(zip([0, *ends[:-1]], ends))]
+        )
+
+    with torch.no_grad():
+        out = a2a_moe(group, x, ti, tw, E, E, experts)
+    want = sum(
+        tw[:, k, None].float() * torch.einsum("th,thj->tj", x.float(), w[ti[:, k]].float())
+        for k in range(TOP_K)
+    )
+    assert out.dtype == dtype
+    torch.testing.assert_close(out.float(), want, atol=tol, rtol=tol)
+
+
+@pytest.mark.parametrize(
+    ("dtype", "tol"), [(torch.float32, 1e-5), (torch.float16, 1e-2)], ids=["fp32", "fp16"]
+)
+def test_a2a_moe_keeps_the_dtype_it_is_given(cpu_dist_workers, dtype, tol):
+    cpu_dist_workers.run(_keeps_dtype_job, dtype=dtype, tol=tol)
 
 
 def _chunked_hops_job(rank, size):
