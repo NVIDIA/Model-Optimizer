@@ -99,6 +99,11 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     :func:`_off_dtype_params`), since FSDP2 rejects a shard group that mixes dtypes. They stay
     replicated and are moved onto the shards' device, which ``fully_shard`` does not do for the
     params it ignores.
+
+    It records no distribution plan: :func:`load_pretrained` records the plan it loads by, and a
+    caller that wraps a model itself records one
+    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`) before calibrating or
+    exporting it.
     """
     # Importing the quantization package registers every mode and plugin; only a wrap needs it.
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector

@@ -29,10 +29,8 @@ from torch.distributed.tensor import DTensor
 
 from modelopt.torch.nas.traced_hp import TracedHp
 from modelopt.torch.utils.distributed import (
-    DistributionPlan,
     allgather,
     broadcast,
-    distribution_plan,
     fsdp2_wrap,
     gather_bytes,
     gather_state_dicts,
@@ -84,7 +82,6 @@ def _test_fsdp2_wrap_mixed_dtypes(rank, size):
     }
 
     fsdp2_wrap(model)
-    assert distribution_plan(model) == DistributionPlan(size, dense="fsdp")
 
     # Raised "FSDP expects uniform original parameter dtype" before the ignored-param fix.
     input_ids = torch.randint(0, VOCAB_SIZE, (1, 8), device=device)
