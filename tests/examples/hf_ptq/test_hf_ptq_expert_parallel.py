@@ -194,6 +194,25 @@ def test_dense_sharding_without_expert_parallelism_needs_use_fsdp2(hf_ptq, monke
         hf_ptq._resolve_distribution(_args(torchrun(world_size=2)))
 
 
+@pytest.mark.parametrize("ep_degree", [2, 4])
+def test_dense_fsdp2_within_expert_data_parallel_replicas_is_refused(
+    hf_ptq, monkeypatch, torchrun, ep_degree
+):
+    """Below the world size each expert-parallel group is a replica, and FSDP2 shards the dense part
+    within each: a layout the export cannot write, so it must fail before the load and the
+    calibration rather than at the end. Expert parallelism over the whole world can still shard it."""
+    monkeypatch.setenv("MODELOPT_EP_DEGREE", str(ep_degree))
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+    _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
+    args = _args(torchrun(world_size=4))
+
+    if ep_degree == 4:
+        assert hf_ptq._resolve_distribution(args)[0] == DistributionPlan(4, ep_size=4, dense="fsdp")
+    else:
+        with pytest.raises(NotImplementedError, match=r"MODELOPT_EP_DEGREE.*MODELOPT_FSDP_SIZE=1"):
+            hf_ptq._resolve_distribution(args)
+
+
 def test_a_dense_model_under_torchrun_runs_data_parallel(hf_ptq, monkeypatch, torchrun):
     """A dense model has no experts to shard, so it loads whole on every rank, through get_model."""
     _serve(monkeypatch, hf_ptq, LlamaConfig(**_TINY))

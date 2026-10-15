@@ -660,7 +660,7 @@ Two environment variables override the automatic distribution plan:
 | Variable | Default | Effect |
 | :--- | :--- | :--- |
 | `MODELOPT_EP_DEGREE` | `auto` | Expert-parallel degree. `auto` picks the largest degree that divides both the routed-expert count and the world size. Below the world size, each group of `MODELOPT_EP_DEGREE` ranks holds a full set of experts, and the groups calibrate on different data. |
-| `MODELOPT_FSDP_SIZE` | `auto` | Whether to FSDP2-shard the dense part. `auto` shards it when it would take more than 60% of one GPU's memory; `world` always shards it; `1` replicates it. |
+| `MODELOPT_FSDP_SIZE` | `auto` | Whether to FSDP2-shard the dense part. `auto` shards it when it would take more than 60% of one GPU's memory; `world` always shards it; `1` replicates it. With `MODELOPT_EP_DEGREE` below the world size the export cannot write a sharded dense part yet, so such a run fails before loading. |
 
 A run that cannot shard the model the way the plan asks fails before loading, rather than loading the whole model on every rank. `--use_fsdp2` skips expert parallelism and uses the [FSDP2 path](#multi-node-post-training-quantization-with-fsdp2) instead. That is also the way to quantize GPT-OSS and Llama-4 across GPUs: their experts are stored transposed, which the expert-parallel export cannot write yet, so expert parallelism refuses them.
 

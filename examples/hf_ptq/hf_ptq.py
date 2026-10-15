@@ -331,6 +331,14 @@ def _resolve_distribution(args: argparse.Namespace):
             "or set MODELOPT_FSDP_SIZE=1 if the model does fit one GPU; an MoE can instead shard its "
             "experts (MODELOPT_EP_DEGREE above 1)."
         )
+    if plan.is_expert_parallel and plan.is_fsdp_dense and plan.edp > 1:
+        # Refused before the load: the export, after the whole calibration, is what cannot do it.
+        raise NotImplementedError(
+            f"{plan!r} FSDP2-shards the dense part within each of {plan.edp} expert-data-parallel "
+            "replicas, a layout the export cannot write yet. Set MODELOPT_EP_DEGREE to the world "
+            "size if it divides the expert count, or MODELOPT_FSDP_SIZE=1 if the dense part fits "
+            "one GPU."
+        )
     return plan, hf_config
 
 
