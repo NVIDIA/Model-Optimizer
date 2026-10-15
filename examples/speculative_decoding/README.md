@@ -180,6 +180,10 @@ is not detected — only a stored row that does not sum to 1 draws a warning. Th
 also requires a TVD objective; `soft_ce` needs the full base distribution and is
 rejected against `sparse_data_path`.
 
+For the full workflow — dumping a teacher policy once and training several drafts
+against it, including a cross-tokenizer draft — see
+[doc/external_draft.md](doc/external_draft.md).
+
 `external.external_loss` selects the objective:
 
 | value | what it scores |
