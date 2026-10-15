@@ -16,7 +16,9 @@
 import copy
 import inspect
 import json
+from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -186,6 +188,31 @@ def test_export_diffusers_pipeline_config(tmp_path, tiny_pipeline, selection):
     reloaded = type(pipe).from_pretrained(export_dir, **omitted)
     for setting in settings:
         assert reloaded.config[setting] == pipe.config[setting]
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected"),
+    [
+        pytest.param(Path("settings") / "config.json", "settings/config.json", id="path"),
+        pytest.param(np.array([1, 2, 3]), [1, 2, 3], id="ndarray"),
+    ],
+)
+def test_export_diffusers_pipeline_config_serialization(tmp_path, setting, expected):
+    class ConfigPipeline(diffusers.DiffusionPipeline):
+        def __init__(self, unet, scheduler, setting=None):
+            super().__init__()
+            self.register_modules(unet=unet, scheduler=scheduler)
+            self.register_to_config(setting=setting)
+
+    pipe = ConfigPipeline(get_tiny_unet(), diffusers.DDIMScheduler(), setting=setting)
+    export_dir = tmp_path / "export_pipeline"
+
+    export_hf_checkpoint(pipe, export_dir=export_dir, components=["unet"])
+
+    model_index = _load_config(export_dir / "model_index.json")
+    assert model_index["setting"] == expected
+    assert set(model_index) & set(pipe.components) == {"unet"}
+    assert {path.name for path in export_dir.iterdir() if path.is_dir()} == {"unet"}
 
 
 def test_export_diffusers_unet_quantized_matches_llm_config(tmp_path, monkeypatch):

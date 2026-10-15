@@ -1452,7 +1452,7 @@ def _export_diffusers_checkpoint(
             pipeline_components = pipe.components
             model_index = {
                 key: value
-                for key, value in pipe.config.items()
+                for key, value in json.loads(pipe.to_json_string()).items()
                 if key not in pipeline_components and not key.startswith("_")
             }
             model_index.update(
