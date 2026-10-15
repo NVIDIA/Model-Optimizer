@@ -261,6 +261,30 @@ def test_load_fills_a_meta_model_keeps_its_buffers_and_reties_it(tmp_path):
     assert model.lm_head.weight is model.model.embed_tokens.weight
 
 
+@pytest.mark.parametrize("stored", ["model.embed_tokens.weight", "lm_head.weight"])
+def test_a_tie_keeps_the_checkpoint_values_whichever_alias_holds_them(
+    tmp_path, monkeypatch, stored
+):
+    """A tied checkpoint stores one alias; tying keeps the embedding's parameter. When the checkpoint
+    stored only ``lm_head.weight``, the kept parameter must take its values rather than keep the memory
+    ``to_empty`` gave it, as ``from_pretrained`` leaves it."""
+    src = get_tiny_llama(tie_word_embeddings=True)
+    tied = {"model.embed_tokens.weight", "lm_head.weight"}
+    ckpt = {k: v for k, v in src.state_dict().items() if k not in tied - {stored}}
+    ckpt_dir = _save(tmp_path, ckpt)
+    model = _meta_twin(get_tiny_llama, tie_word_embeddings=True)
+    # Fresh storage holds NaN, so a parameter nothing wrote to shows.
+    empty_like = torch.empty_like
+    monkeypatch.setattr(
+        torch, "empty_like", lambda t, **kw: empty_like(t, **kw).fill_(float("nan"))
+    )
+
+    _meta_dcp_load(model, ckpt_dir, "cpu")
+
+    assert model.lm_head.weight is model.model.embed_tokens.weight
+    assert torch.equal(model.lm_head.weight, ckpt[stored])
+
+
 def test_flat_vlm_checkpoint_names_reach_the_nested_params(tmp_path):
     """Qwen2.5-VL's checkpoint says ``model.layers.*`` / ``visual.*`` where the built model has
     ``model.language_model.*`` / ``model.visual.*``; a by-name load would fill none of them.
@@ -562,3 +586,27 @@ def test_fsdp2_sharded_params_are_filled_in_place(tmp_path, gloo_world_of_one):
         assert torch.equal(param.full_tensor(), ref[name]), name
     for name, buf in model.named_buffers():
         assert torch.equal(buf, buffers[name]), name
+
+
+def test_an_fsdp2_tie_keeps_the_values_of_the_alias_the_checkpoint_stored(
+    tmp_path, gloo_world_of_one, monkeypatch
+):
+    """The same tie under FSDP2, where the kept param and the filled one are sharded alike."""
+    src = get_tiny_llama(tie_word_embeddings=True)
+    ckpt = {k: v for k, v in src.state_dict().items() if k != "model.embed_tokens.weight"}
+    ckpt_dir = _save(tmp_path, ckpt)
+    model = _meta_twin(get_tiny_llama, tie_word_embeddings=True)
+    mesh = init_device_mesh("cpu", (1,))
+    for block in _fsdp2_wrap_modules(model):
+        fully_shard(block, mesh=mesh)
+    fully_shard(model, mesh=mesh)
+    empty_like = torch.empty_like
+    monkeypatch.setattr(
+        torch, "empty_like", lambda t, **kw: empty_like(t, **kw).fill_(float("nan"))
+    )
+
+    _meta_dcp_load(model, ckpt_dir, "cpu")
+
+    assert isinstance(model.lm_head.weight, DTensor)
+    assert torch.equal(model.lm_head.weight.full_tensor(), ckpt["lm_head.weight"])
+    assert torch.equal(model.model.embed_tokens.weight.full_tensor(), ckpt["lm_head.weight"])
