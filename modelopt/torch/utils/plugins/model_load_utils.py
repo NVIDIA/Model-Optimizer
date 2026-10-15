@@ -1242,8 +1242,8 @@ def resolve_distribution_plan(
     ``"auto"``. A single process reads neither and holds the whole model, unless ``dense="fsdp"``
     asks for FSDP2 on one rank.
 
-    Unless the run rules expert parallelism out (a single process, or an EP degree of 1), the
-    model's spec is applied to the config first
+    Unless rank 0's knobs rule expert parallelism out (a single process, or an EP degree of 1),
+    every rank applies the model's spec to the config first
     (:func:`~modelopt.torch.utils.moe.apply_distributed_support`): for several models it is what
     supplies the expert-parallel plan, and the returned config carries it. A plan that leaves an
     expert-parallel MoE whole on every rank raises.
@@ -1264,7 +1264,13 @@ def resolve_distribution_plan(
     dist.all_reduce("checkpoint read", checkpoint_read, all)
     ckpt_path, hf_config = read[0]
     world_size = dist.size()
-    if world_size > 1 and str(env.ep_degree() if ep_size is None else ep_size) != "1":
+    # Whether the run rules expert parallelism out is rank 0's call, as the plan is: a rank that
+    # skipped the spec while the others applied it would load without the expert-parallel plan
+    # they shard by, and fail once the mesh is up, leaving them waiting in a collective.
+    if dist.broadcast_from(
+        "spec",
+        lambda: world_size > 1 and str(env.ep_degree() if ep_size is None else ep_size) != "1",
+    ):
         # Before deciding: deciding without the spec would read an expert-parallel MoE as dense.
         hf_config = apply_distributed_support(
             hf_config.model_type,
