@@ -302,7 +302,7 @@ def build_quant_cfg(
         elif isinstance(quant_cfg["algorithm"], list) and all(
             isinstance(algorithm, dict) for algorithm in quant_cfg["algorithm"]
         ):
-            # e.g. [gptq, imatrix]: every calibration pass routes tokens to the same experts.
+            # e.g. [gptq, imatrix]: each algorithm runs its own calibration, so each gets the ratio.
             for algorithm in quant_cfg["algorithm"]:
                 algorithm["moe_calib_experts_ratio"] = moe_calib_experts_ratio
         else:
