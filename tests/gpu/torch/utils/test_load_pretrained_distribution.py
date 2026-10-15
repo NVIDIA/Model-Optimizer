@@ -87,8 +87,14 @@ def _load_and_check(rank, size, ckpt_dir, knobs, expected):
             torch.testing.assert_close(_full(param).cpu(), whole_params[name])
         assert model._modelopt_unplaced_source_keys == []
         assert model._modelopt_source_checkpoint == ckpt_dir
-        dense = "replicate" if expected == "replicated" else "fsdp"
-        assert distribution_plan(model) == DistributionPlan(size, dense=dense)
+        assert (
+            distribution_plan(model)
+            == {
+                "replicated": DistributionPlan(size),
+                "fsdp2": DistributionPlan(size, dense="fsdp"),
+                "expert-parallel": DistributionPlan(size, ep_size=size),
+            }[expected]
+        )
     finally:
         for knob in knobs:
             del os.environ[knob]

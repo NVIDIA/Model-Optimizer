@@ -404,7 +404,6 @@ _SHARDED_LOAD_OPTIONS = {
             "hf_config",
             "freeze",
             "require_lm_head",
-            "dense_strategy",
         }
     ),
     _FSDP2: frozenset(
@@ -429,11 +428,7 @@ def _route(plan: DistributionPlan) -> str | None:
             f"{plan!r} is for {plan.world_size} ranks, but this run has {dist.size()}."
         )
     if plan.is_expert_parallel:
-        raise NotImplementedError(
-            f"{plan!r} shards the routed experts, which load_pretrained has no load for. Plan "
-            "ep_size=1 (MODELOPT_EP_DEGREE=1) to give every rank the whole model, or shard it "
-            "with FSDP2."
-        )
+        return _EXPERT_PARALLEL
     return _FSDP2 if plan.is_fsdp_dense else None
 
 
@@ -469,12 +464,7 @@ def _load_sharded(route, plan, ckpt_path, auto_class, model_type, kwargs, hub_op
         from modelopt.torch.utils.moe import load_and_prepare_ep
 
         return load_and_prepare_ep(
-            ckpt_path,
-            plan.ep_size,
-            trust_remote_code=trust_remote_code,
-            hf_config=hf_config,
-            fsdp_dense=plan.is_fsdp_dense,
-            **kwargs,
+            ckpt_path, plan, trust_remote_code=trust_remote_code, hf_config=hf_config, **kwargs
         )
     if hf_config is None:
         hf_config = AutoConfig.from_pretrained(
@@ -513,18 +503,21 @@ def load_pretrained(
     ``distribution`` is the :class:`~modelopt.torch.utils.distributed.DistributionPlan` to spread
     the model over the run's ranks by, :func:`resolve_distribution_plan`'s by default. By the plan:
 
-    * ``dense="fsdp"``: a causal LM FSDP2-sharded over the whole process group, each rank reading its
-      own layers (:func:`parallel_load_and_prepare_fsdp2`, whose ``cpu_offload``, ``mp_policy`` and
-      ``broadcast_chunk_size`` ``kwargs`` may set). A single process has no group to shard through,
-      so the load sets up one of one rank, which
-      :func:`~modelopt.torch.utils.distributed.distributed_run` destroys with the run. It reads the
-      checkpoint's tensors as stored, so it refuses a quantized checkpoint.
+    * ``ep_size > 1``: the routed experts sharded as they load, the dense part replicated or
+      FSDP2-sharded as the plan says (:func:`~modelopt.torch.utils.moe.load_and_prepare_ep`, whose
+      ``freeze`` and ``require_lm_head`` ``kwargs`` may set);
+    * otherwise ``dense="fsdp"``: a causal LM FSDP2-sharded over the whole process group, each rank
+      reading its own layers (:func:`parallel_load_and_prepare_fsdp2`, whose ``cpu_offload``,
+      ``mp_policy`` and ``broadcast_chunk_size`` ``kwargs`` may set). A single process has no group
+      to shard through, so the load sets up one of one rank, which
+      :func:`~modelopt.torch.utils.distributed.distributed_run` destroys with the run. It reads
+      the checkpoint's tensors as stored, so it refuses a quantized checkpoint;
     * otherwise ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class`` defaults to
       ``AutoModelForCausalLM``), placed as ``kwargs`` say. Every rank of a distributed run gets the
       whole model, ``device_map`` defaulting to the rank's GPU.
 
-    A plan with ``ep_size > 1`` raises: no load here shards the routed experts. On a distributed run
-    every rank loads the plan rank 0 was handed. The plan is recorded on the model
+    On a distributed run every rank loads the plan rank 0 was handed. The plan is recorded on the
+    model
     (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), where calibration and export
     read it back.
 
@@ -623,7 +616,7 @@ def load_pretrained(
             ).model_type
         )
     if route is not None:
-        model = _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
+        model = _load_sharded(route, plan, ckpt_path, auto_class, model_type, kwargs, hub_options)
         # A sharded load finds the unplaced keys while it places the weights.
         keys = model._modelopt_unplaced_source_keys
     else:
@@ -1245,6 +1238,13 @@ def _decide_distribution(
             f"The dense part of a block-fp8 {hf_config.model_type} checkpoint cannot be sharded "
             "expert-parallel: Distributed Checkpoint cannot dequantize its F8_E8M0 scales."
         )
+    if experts and ep_size == 1 and dense == "replicate":
+        raise RuntimeError(
+            f"{hf_config.model_type} can be expert-parallel, but the plan resolved to ep_size=1 at "
+            f"world_size={world_size}, so every rank would hold the whole MoE. Shard its experts "
+            "(MODELOPT_EP_DEGREE above 1, dividing both the expert count and the world size), or "
+            "shard the whole model with FSDP2."
+        )
     return DistributionPlan(world_size, ep_size, dense)
 
 
@@ -1290,6 +1290,8 @@ def resolve_distribution_plan(
 
     ``config``, the config the load will use when the caller has one, is decided from instead of
     the checkpoint's, which is then not read: each rank takes a copy, as deciding may add to it.
+
+    A plan that leaves an expert-parallel MoE whole on every rank raises.
     """
     from modelopt.torch.utils import distributed as dist
 
