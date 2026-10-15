@@ -17,11 +17,16 @@
 
 #include <ATen/ATen.h>
 #include <c10/cuda/CUDAStream.h>
+#include <cfloat>
 #include <cuda_fp8.h>
 #include <optional>
 #include <torch/extension.h>
 
 #define BLOCK_SIZE 128
+
+// Only an amax whose FP8 scale (448 / amax) overflows is treated as zero. Any other positive amax
+// is valid, e.g. the tiny global_amax / 6 used to quantize NVFP4 block scales.
+#define ZERO_AMAX_THRESHOLD (448.f / FLT_MAX)
 
 #define AT_DISPATCH_CASE_FLOATING_TYPES(...)                                                       \
   AT_DISPATCH_CASE(at::ScalarType::Double, __VA_ARGS__)                                            \
@@ -71,8 +76,7 @@ at::Tensor fake_e4m3fy_with_axis(at::Tensor inputs, at::Tensor amax, int axis) {
   int axis_size = inputs.size(axis);
   int outer_size = inputs.stride(axis);
 
-  const float epsilon = 1.0f / (1 << 24);
-  auto zero_amax_mask = amax <= epsilon;
+  auto zero_amax_mask = amax <= ZERO_AMAX_THRESHOLD;
   auto safe_amax = at::where(zero_amax_mask, torch::ones_like(amax), amax);
   auto scale = 448.f / safe_amax;
   auto inv_scale = 1.f / scale;
@@ -91,8 +95,7 @@ at::Tensor fake_e4m3fy(at::Tensor inputs, at::Tensor amax) {
   inputs = inputs.contiguous();
   amax = amax.view(-1).to(at::kFloat);
   size_t numel = inputs.numel();
-  const float epsilon = 1.0f / (1 << 24);
-  auto zero_amax_mask = amax <= epsilon;
+  auto zero_amax_mask = amax <= ZERO_AMAX_THRESHOLD;
   auto safe_amax = at::where(zero_amax_mask, torch::ones_like(amax), amax);
   at::Tensor scale = 448.f / safe_amax;
   auto inv_scale = 1.f / scale;

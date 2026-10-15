@@ -309,7 +309,7 @@ The cached dataset is stored under `.dataset_cache/tokenized/` by default (confi
 
 ## Results
 
-\[Coming Soon\]
+See [Qwen3-8B evaluation results](evaluation/README.md) for the teacher, PTQ, and PTQ → QAD comparison.
 
 ## Native Fake-Quantized Evaluation
 
