@@ -2142,7 +2142,7 @@ def export_hf_checkpoint(
             _qlora = kwargs.get("is_modelopt_qlora", False)
             # Folds in place; the model is sharded here, so the MoE experts stay fused and each rank
             # folds only its LOCAL experts. The writer splits them after consolidation.
-            hf_quant_config = _process_hf_model_for_export(model, dtype, _qlora)
+            hf_quant_config = _process_together(model, dtype, _qlora)
             if getattr(model, "hf_quantizer", None) is not None:
                 model.hf_quantizer = None
             distributed_save_hf_checkpoint(
@@ -2273,6 +2273,25 @@ def export_hf_checkpoint(
         # first and the job hangs on the ones still writing.
         if is_fsdp2_sharded or is_ep_sharded:
             _finish_export_together(error)
+
+
+def _process_together(
+    model: nn.Module, dtype: torch.dtype | None, is_modelopt_qlora: bool
+) -> dict[str, Any]:
+    """:func:`_process_hf_model_for_export` on every rank, raising on all of them if any failed.
+
+    Each rank folds only its own shard, so processing can fail on one rank alone -- one rank's
+    experts mixing quantized and unquantized ones, say. That rank would leave for the closing
+    consensus while its peers start the writer's collectives, and the two would not match.
+    """
+    quant_config: list[dict[str, Any]] = []
+
+    def processed() -> bool:
+        quant_config.append(_process_hf_model_for_export(model, dtype, is_modelopt_qlora))
+        return True
+
+    all_reduce("export processed", processed, all)
+    return quant_config[0]
 
 
 def _finish_export_together(error: Exception | None) -> None:
