@@ -35,7 +35,7 @@ from unittest import mock
 import pytest
 import torch
 import torch.distributed as dist
-from _test_utils.torch.distributed.utils import bounded_collectives, spawn_multiprocess_job
+from _test_utils.torch.distributed.utils import bounded_collectives
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
@@ -657,15 +657,15 @@ def _two_rank_job(rank, world_size, tmp_dir):
         _write_even_shards(sd, tmp_dir / "collision", "1MB", rank, world_size)
 
 
-def test_two_ranks_write_one_checkpoint_and_reject_inconsistent_state(skip_on_windows, tmp_path):
+def test_two_ranks_write_one_checkpoint_and_reject_inconsistent_state(cpu_dist_workers, tmp_path):
     """Shards cross ranks point to point, each tensor gets one owner, files share one numbering.
 
-    Spawning ranks dominates the cost, so one job also checks the cross-rank consistency errors.
+    The same job also checks the cross-rank consistency errors.
     """
     src = _save(_mixtral_config(vocab_size=63, num_local_experts=3), tmp_path / "moe")
     _save(_llama_config(), tmp_path / "dense")
 
-    spawn_multiprocess_job(2, partial(_two_rank_job, tmp_dir=tmp_path), backend="gloo")
+    cpu_dist_workers.run(_two_rank_job, tmp_dir=tmp_path)
 
     shards = sorted(p.name for p in (tmp_path / "moe_export").glob("*.safetensors"))
     n = len(shards)
