@@ -1028,7 +1028,8 @@ def resolve_distribution_plan(
     * ``ep_size``: the expert-parallel degree, or ``"auto"``, the largest that divides both the
       world and the routed-expert count of a model whose config carries a ``base_model_ep_plan``.
     * ``dense``: ``"replicate"`` or ``"fsdp"`` for the rest of the model, or ``"auto"``, which
-      FSDP2-shards it when a whole copy would take more than 60% of one GPU's memory.
+      FSDP2-shards it when a whole copy would take more than 60% of one GPU's memory. That GPU is
+      rank 0's, by its total memory, so ``"auto"`` assumes the run's GPUs are alike.
 
     ``None`` reads ``MODELOPT_EP_DEGREE`` and ``MODELOPT_FSDP_SIZE`` (``1`` replicates; ``world``,
     or the world size as a number, shards) from rank 0's environment, both defaulting to
