@@ -67,6 +67,22 @@ def test_an_ep_degree_that_does_not_divide_the_world_is_rejected():
         DistributionPlan(world_size=8, ep_size=3)
 
 
+@pytest.mark.parametrize(
+    "degrees",
+    [
+        {"world_size": 0},
+        {"world_size": -4},
+        {"world_size": 4, "ep_size": 0},
+        {"world_size": 4, "ep_size": -2},
+    ],
+)
+def test_a_degree_below_one_is_rejected(degrees):
+    """ep_size=-2 divides a world of 4 and would read as no expert parallelism, replicating an MoE
+    an EP knob of -2 asked to shard; ep_size=0 would divide by zero."""
+    with pytest.raises(ValueError, match="must be at least 1"):
+        DistributionPlan(**degrees)
+
+
 def test_an_unknown_dense_layout_is_rejected():
     with pytest.raises(ValueError, match="expected 'replicate' or 'fsdp'"):
         DistributionPlan(world_size=8, dense="sharded")
