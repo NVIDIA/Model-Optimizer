@@ -326,6 +326,28 @@ def test_a_real_param_beside_a_meta_one_keeps_its_value(tmp_path):
     assert torch.equal(model.gate.e_score_correction_bias, torch.arange(4.0))
 
 
+def test_target_params_that_already_had_values_need_no_checkpoint_tensor(tmp_path):
+    """A target param that was real before the load -- beside a meta one, so restored after
+    ``to_empty``, or in a module the load never re-empties -- keeps its value when the checkpoint
+    lacks it, instead of failing as unfilled."""
+    model = nn.Module()
+    model.gate = _Router()
+    model.expert = nn.Linear(2, 2, bias=False)
+    expert = model.expert.weight.detach().clone()
+    ckpt = {"gate.weight": torch.randn(4, 4)}
+
+    _meta_dcp_load(
+        model,
+        _save(tmp_path, ckpt),
+        "cpu",
+        load_names={"gate.weight", "gate.e_score_correction_bias", "expert.weight"},
+    )
+
+    assert torch.equal(model.gate.weight, ckpt["gate.weight"])
+    assert torch.equal(model.gate.e_score_correction_bias, torch.arange(4.0))
+    assert torch.equal(model.expert.weight, expert)
+
+
 class _DenseAndExpert(nn.Module):
     """A dense param the EP-dense load fills and an expert one ``from_pretrained`` already placed."""
 
@@ -391,6 +413,19 @@ def test_persistent_buffers_load_from_the_checkpoint_and_others_survive(tmp_path
     assert torch.equal(model.proj.weight, ckpt["proj.weight"])
 
 
+def test_an_untied_param_the_checkpoint_lacks_fails_the_load(tmp_path):
+    """``proj.bias`` has no checkpoint tensor and tying fills nothing: it still holds the memory
+    ``to_empty`` gave it, so the load fails naming it instead of returning the model."""
+    ckpt = {"proj.weight": torch.randn(4, 4), "scale": torch.full((4,), 3.0)}
+    with init_empty_weights():
+        model = _WithBuffers()
+
+    with pytest.raises(
+        RuntimeError, match=r"1 param\(s\) have no checkpoint tensor.*\['proj.bias'\]"
+    ):
+        _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu")
+
+
 class _OneBigManySmall(nn.Module):
     """One param holding ~99% of the weight beside twelve tiny ones."""
 
@@ -411,17 +446,28 @@ def _guard_case(ckpt_dir, missing):
     return model, ckpt, _save(ckpt_dir, ckpt)
 
 
-def test_coverage_guard_weighs_unloaded_params_by_numel(tmp_path):
-    """Missing the one ~99% param fails loudly while missing the twelve tiny ones (~1%) loads. A
-    count-based guard gets both backwards, and the fused-expert miss it exists for is a few huge params.
+def test_coverage_guard_weighs_unloaded_params_by_numel(tmp_path, monkeypatch):
+    """Missing the one ~99% param fails before the load; missing the twelve tiny ones (~1%) gets past
+    that guard and fails after the load instead. A count-based guard gets both backwards, and the
+    fused-expert miss it exists for is a few huge params.
     """
+    loads = []
+    real_load = dcp.load
+
+    def counting_load(state_dict, **kwargs):
+        loads.append(len(state_dict))
+        return real_load(state_dict, **kwargs)
+
+    monkeypatch.setattr(dcp, "load", counting_load)
     model, _, ckpt_dir = _guard_case(tmp_path / "big_missing", missing={"big.weight"})
     with pytest.raises(RuntimeError, match="matched no checkpoint key"):
         _meta_dcp_load(model, ckpt_dir, "cpu")
+    assert not loads
 
-    model, ckpt, ckpt_dir = _guard_case(tmp_path / "small_missing", missing=_SMALL)
-    _meta_dcp_load(model, ckpt_dir, "cpu")
-    assert torch.equal(model.big.weight, ckpt["big.weight"])
+    model, _, ckpt_dir = _guard_case(tmp_path / "small_missing", missing=_SMALL)
+    with pytest.raises(RuntimeError, match="12 param\\(s\\) have no checkpoint tensor"):
+        _meta_dcp_load(model, ckpt_dir, "cpu")
+    assert loads == [1]
 
 
 def test_skip_names_exempt_params_filled_by_another_path(tmp_path):
@@ -434,7 +480,7 @@ def test_skip_names_exempt_params_filled_by_another_path(tmp_path):
 
 
 def test_max_unloaded_frac_sets_the_guard_threshold(tmp_path):
-    """The ~1% shortfall the default tolerates fails once the tolerance is zero."""
+    """The ~1% shortfall the default lets past the early guard fails it once the tolerance is zero."""
     model, _, ckpt_dir = _guard_case(tmp_path, missing=_SMALL)
 
     with pytest.raises(RuntimeError, match="matched no checkpoint key"):
@@ -484,20 +530,14 @@ def gloo_world_of_one(skip_on_windows, tmp_path_factory):
     torch.distributed.destroy_process_group()
 
 
-def test_rank0_reports_unloaded_params_and_loaded_buffers(tmp_path, gloo_world_of_one):
-    """In a distributed run rank 0 names the params the checkpoint left unfilled (below the guard's
-    bar) and the persistent buffers it filled.
-    """
-    ckpt = {"proj.weight": torch.randn(4, 4), "scale": torch.full((4,), 3.0)}
+def test_rank0_reports_the_persistent_buffers_it_loaded(tmp_path, gloo_world_of_one):
+    """In a distributed run rank 0 names the persistent buffers the checkpoint filled."""
+    ckpt = {"proj.weight": torch.randn(4, 4), "proj.bias": torch.randn(4), "scale": torch.ones(4)}
     with init_empty_weights():
         model = _WithBuffers()
 
-    with pytest.warns(UserWarning) as record:
+    with pytest.warns(UserWarning, match=r"1 persistent buffer\(s\).*'scale'"):
         _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu")
-
-    messages = [str(w.message) for w in record]
-    assert any("1 param(s) not loaded" in m and "'proj.bias'" in m for m in messages), messages
-    assert any("1 persistent buffer(s)" in m and "'scale'" in m for m in messages), messages
 
 
 def test_fsdp2_sharded_params_are_filled_in_place(tmp_path, gloo_world_of_one):
