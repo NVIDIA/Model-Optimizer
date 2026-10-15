@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 36 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 37 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -67,8 +67,8 @@ supported combinations.
 | `linear_attention_state_int8_dynamic` | GDN/KDA decode state INT8 + Hadamard; requires a private ReplaySSM fork | none | none (dynamic scales; requires a prefix/decode phase context) |
 | `linear_attention_state_int8_block32_dynamic` | GDN/KDA state INT8, 32 value channels per key row; weights unchanged | none | none (dynamic scales; requires vLLM and a prefix/decode phase context) |
 | `linear_attention_state_int8_block32_dynamic_kimi_k3` | Kimi-K3/Kimi-Linear KDA state INT8, 32 value channels per key row | none | none (dynamic scales; explicit Triton Kimi profile) |
-
 | `linear_attention_state_nvfp4_dynamic` | GDN/KDA state NVFP4, block16 and E4M3 scales; weights unchanged | none | none (dynamic global and block scales) |
+| `gdn_replayssm_fp8_read` | GDN ReplaySSM FP32 recurrence and FP8 block128 reads; floating storage | none | none (requires upstream ReplaySSM emulation) |
 
 </details>
 

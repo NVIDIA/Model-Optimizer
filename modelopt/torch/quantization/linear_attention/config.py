@@ -44,10 +44,12 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     the supported gate is unbounded softplus.
     ``replayssm`` targets the quantized-ReplaySSM fork's INT8/Hadamard kernels.
     One quantized checkpoint feeds both reads and recurrence updates; separate
-    read and recurrence precisions are not implemented.
-    ``replay_window=1`` refreshes the state every token; larger windows enable replay.
-    Fresh prefill has no internal state QDQ; incoming continuation state and
-    the handoff to a nonempty suffix use the selected checkpoint encoding.
+    read and recurrence precisions require the GDN-only ``replayssm_two_precision``
+    profile: an FP32 anchor, FP8 block128 read copy along K, and a fixed 16-token
+    window. It imports upstream ReplaySSM emulation; runtime caches use FP32 storage.
+    For the shared-checkpoint fork, ``replay_window=1`` refreshes every token.
+    Fresh prefill has no internal state QDQ. Two-precision replay reads the
+    unrounded prefill checkpoint for its first output, then encodes the read copy.
 
     TensorQuantizer enables QDQ and owns the public profiles' format and grouping;
     the ReplaySSM fork owns its checkpoint encoding.
@@ -55,7 +57,9 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     """
 
     backend: Literal["fla", "serving"] = ModeloptField(default="fla")
-    precision: Literal["vllm", "vllm_kimi_k3", "replayssm"] = ModeloptField(default="vllm")
+    precision: Literal["vllm", "vllm_kimi_k3", "replayssm", "replayssm_two_precision"] = (
+        ModeloptField(default="vllm")
+    )
     replay_window: int = Field(default=1, ge=1, le=64, strict=True)
     state_block_v: Literal[16, 32, 64, 128] = ModeloptField(default=64)
 
@@ -71,6 +75,11 @@ class LinearAttentionConfig(ModeloptBaseConfig):
                 raise ValueError("replayssm requires backend='serving'")
             if self.state_block_v < 32:
                 raise ValueError("int8_hadamard32 requires state_block_v >= 32")
+        elif self.precision == "replayssm_two_precision":
+            if self.backend != "serving" or self.replay_window != 16:
+                raise ValueError(
+                    "replayssm_two_precision requires backend='serving' and replay_window=16"
+                )
         elif self.replay_window != 1:
             raise ValueError("Replay requires precision='replayssm'")
         return self
