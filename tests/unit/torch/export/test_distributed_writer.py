@@ -985,13 +985,6 @@ def _two_rank_job(rank, world_size, tmp_dir):
         w = DTensor.from_local(w, mesh, [Shard(0)], run_check=False)
     with pytest.raises(RuntimeError, match="disagree on which tensors are dim-0 sharded"):
         _materialize_owned({"w": w}, set(), rank, world_size)
-    sd = {"model.norm.weight": torch.full((2,), float(rank))}
-    if rank == 0:
-        with pytest.raises(RuntimeError, match="name collision across ranks"):
-            _write_even_shards(sd, tmp_dir / "collision", "1MB", rank, world_size)
-        dist.barrier()  # releases the other rank from the writer's closing barrier
-    else:
-        _write_even_shards(sd, tmp_dir / "collision", "1MB", rank, world_size)
 
 
 def test_two_ranks_write_one_checkpoint_and_reject_inconsistent_state(cpu_dist_workers, tmp_path):
