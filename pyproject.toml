@@ -58,7 +58,7 @@ onnx = [
     "lief",
     "ml_dtypes",
     "onnx-graphsurgeon>=0.6.1",
-    "onnx~=1.21.0",
+    "onnx~=1.23.2",
     "onnxconverter-common~=1.16.0",
     # Python 3.10 support for ModelOpt ONNX is deprecated and will be removed in a future release.
     # Native Windows ARM64 does not support ModelOpt ONNX on Python 3.10.
