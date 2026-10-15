@@ -2,8 +2,9 @@
 
 This optional extension adds checkpoint-and-update replay to the
 [GDN/KDA QAT and QAD example](README.md). The existing INT8/Hadamard profile is
-implemented. The two-precision profile described below is a design plan only;
-it has no selectable configuration or training implementation yet.
+implemented as a comparison baseline. The two-precision GDN profile imports
+upstream native forward kernels and adds a window-wise training adjoint.
+Integration with vLLM's request cache manager remains a separate follow-up.
 
 ## Existing INT8/Hadamard profile
 
@@ -49,7 +50,7 @@ training emulation with floating tensors, not a claim of compressed training
 storage or serving speed. The fork's checkpoint codec also handles incoming
 continuation-prefill state; a fresh prefix has no internal checkpoint QDQ.
 
-## Proposed two-precision profile
+## Two-precision GDN profile
 
 The goal is to reduce read precision without feeding the low-precision read
 copy back into the recurrence checkpoint. This changes the state machine, not
@@ -57,9 +58,39 @@ just its quantizer setting.
 
 The reference is upstream ReplaySSM's
 [GDN emulation](https://github.com/Johnny-Liou/ReplaySSM/blob/73a9592e9d8a2268620e8883a82f5cec7442ed36/emulation/gdn_replay_unf_vf.py),
-pinned at `73a9592e9d8a2268620e8883a82f5cec7442ed36`. The proposed implementation
-will import a qualified upstream backend rather than copy its kernels. Its API
-and deployment integration must be qualified separately from the existing fork.
+pinned at `73a9592e9d8a2268620e8883a82f5cec7442ed36`. ModelOpt imports its
+`emulation.GDNReplay` wrapper with mode `tp8_hi32`; no upstream kernels are
+copied into ModelOpt. This backend stores quantized values in FP32 tensors.
+It qualifies numerical emulation, not compressed cache storage or speed.
+
+Select `--recipe general/ptq/gdn_replayssm_fp8_read` in the main QAT/QAD example.
+The recipe sets `precision="replayssm_two_precision"`, `replay_window=16`, and:
+
+| Quantizer | Setting | Checkpoint layout |
+| --- | --- | --- |
+| `gdn_state_quantizer` | Disabled: recurrence stays FP32 | `[H,V,K]` internally |
+| `gdn_read_quantizer` | Dynamic E4M3, `block_sizes={-1: 128}`, identity STE | One scale per 128 key channels of each value row |
+
+Disabling the read quantizer retains the same replay schedule with FP32 reads
+inside an explicit training phase. The initial profile requires GDN, normalized
+Q/K, K=128, and `scale=K**-0.5`. It accepts `output_final_state=False`
+(the default); exporting a dense state from an incomplete window is not supported.
+KDA, lower-precision recurrence anchors, NVFP4 reads and stochastic rounding
+remain follow-ups.
+
+Install the main example's public vLLM 0.30 and FLA dependencies for the chunked
+prefix. Expose only the pinned upstream checkout's `emulation` package, so its
+`vllm/` source does not shadow the installed vLLM:
+
+```bash
+mkdir -p /path/to/standalone-packages
+ln -s /path/to/ReplaySSM/emulation /path/to/standalone-packages/emulation
+export PYTHONPATH="/path/to/standalone-packages:${PYTHONPATH:-}"
+```
+
+The upstream checkout must be at the pinned revision above. Decode-only calls
+need the standalone package without vLLM; a nonempty prefix requires vLLM 0.30.
+The existing INT8/Hadamard fork uses a separate environment.
 
 Maintain two checkpoints formed from the same refreshed, unrounded state `S`:
 
@@ -69,11 +100,11 @@ read_copy = Q_read(S)
 ```
 
 Never form `read_copy` from the rounded anchor, or overwrite the anchor with the
-read copy. The first GDN milestone will use an FP32 anchor and FP8 read copy,
-then add a stochastic-rounded FP16 anchor and NVFP4 read copy only after matching
-the upstream format, scale grouping, and seeded rounding behavior.
+read copy. This implementation uses an FP32 anchor and FP8 read copy. Extending
+it to an FP16 anchor or NVFP4 reads requires matching the upstream grouping and
+rounding schedule independently.
 
-The planned forward schedule is:
+The forward schedule is:
 
 ```text
 S = native_chunked_prefill(prefix)
@@ -100,37 +131,77 @@ Initially use its fixed 16-token window. KDA channel-wise decay is a separate
 extension requiring its own reference and validation; upstream GDN evidence does
 not qualify KDA.
 
-## ModelOpt integration plan
+## Forward, backward and checkpoint ownership
 
-1. Introduce an explicit two-precision profile alongside the existing fork
-   profile. Keep precision, window, and rounding policy in the saved linear
-   attention policy; keep format/grouping and enablement in named quantizers.
-   Resolve proposed recurrence/read quantizer names before exposing a public API.
-2. Give the backend one owner for both checkpoints, raw-input rings, update
-   rings, and the flush cursor. Separate immutable values saved for backward
-   from mutable native caches. Allocate serving buffers once per request group.
-3. Reuse native forward values and add a differentiable window-solve adjoint.
-   Gradients must follow the anchor refresh and output paths, including the
-   prefix handoff. Use straight-through quantization where appropriate, with
-   reproducible stochastic-rounding counters during activation recomputation.
-   Do not reuse the current shared-checkpoint adjoint without this change.
-4. Save resolved policy and quantizer metadata through ModelOpt's existing
-   checkpoint lifecycle. Runtime cache contents remain batch state. Require
-   the serving adapter to select the same profile and rounding schedule.
+The chunked prefix runs once through the existing native vLLM adapter; FLA
+supplies its backward. For the suffix, `_two_precision.py` creates one native
+replay cache and calls `GDNReplay.step` once per token. It saves immutable
+anchor/read snapshots at window boundaries. Backward reconstructs one window
+at a time, differentiating both the read path and the raw-input triangular solve.
+It does not build a second Torch forward graph during the native forward.
+Quantization and BF16/FP16 rounding use identity straight-through gradients.
 
-## Validation required before enabling the new profile
+Policy and named quantizers use ModelOpt's existing save/restore lifecycle.
+The native backend owns rounding and runtime rings; these per-batch tensors are
+not model checkpoint metadata. HF weights alone do not describe replay policy.
 
-- Compare token outputs, both checkpoints, and ring contents against the pinned
-  native reference at the first token, inside a window, at flush, and across
-  two windows, including a nonzero incoming state.
-- Verify independently that changing read precision does not change the next
-  recurrence anchor when raw inputs and recurrence rounding are held fixed.
-- Compare surrogate gradients to an independent differentiable window solve;
-  test prefix gradients, padding, and recomputation with fixed rounding seeds.
-- Run a small GDN QAT and QAD optimizer step, save/reload, and serving comparison
-  with the same profile. Report quality and performance separately.
+## Planned vLLM serving integration
 
-The moved tests cover the existing Hadamard transform and invalid policy
-settings on CPU, plus fork-only native-cache/gradient tests on GPU. Public-vLLM
-CI skips the fork-only kernel cases. No two-precision parity, model-quality, or
-performance result is claimed by this design plan.
+Serving with state quantization and ReplaySSM enabled is a required follow-up.
+The current plain state-QDQ serving adapter rejects ReplaySSM. Keep that check
+until a compatible native backend and its cache lifecycle are validated.
+
+- Resolve the recipe or restored quantizer/policy metadata before engine cache
+  allocation. Select the replay window, checkpoint format, scale grouping,
+  Hadamard basis, and rounding behavior consistently with training. HF weights
+  alone do not supply this policy; require an explicit recipe when it is absent.
+- Let the native backend own checkpoint encoding, replay buffers, request-slot
+  reset, and window refresh. Skip the plain adapter's per-token state-QDQ hook:
+  the stored checkpoint represents the start of the current replay window.
+- Execute native prefill and replay decode for inference. The training-only
+  Torch gradient graph is not part of serving. Quantize at the selected
+  profile's checkpoint boundaries, including prefill handoff and window flush.
+- For the two-precision profile, retain separate recurrence/read checkpoints and
+  the raw-input solve. A backend implementing only the existing shared-checkpoint
+  profile cannot serve the two-precision policy.
+- Validate training/export/load/serve with identical token inputs over two replay
+  windows, checking outputs, checkpoints, and buffers at handoff and flush. Also
+  check continuation prefill, request-slot reuse, and tensor-parallel head shards.
+
+This integration belongs in a serving follow-up after the plain state-QDQ
+adapter. Public vLLM and the existing fork require separate qualification; no
+ReplaySSM serving support is claimed by this plan.
+
+## Validation and remaining work
+
+Focused CPU tests cover policy validation, recipe loading, read-only enablement,
+and ModelOpt checkpoint save/restore (40 tests passed). Two GPU tests passed on
+RTX A6000 with PyTorch 2.9.1 and Triton 3.5.1:
+
+- Native token outputs match bit-for-bit across 33 tokens, including handoff and
+  two flushes. Switching FP8 reads to FP32 leaves every recurrence anchor and
+  both flush outputs bit-identical.
+- A separate triangular-solve oracle checks the window adjoint; padded positions
+  have zero gradients, incoming state receives gradients, and disabled reads use
+  the same replay schedule.
+
+A single-layer smoke test also passed on H100 with PyTorch 2.13.0, Triton 3.7.1,
+vLLM 0.30.0 and FLA 0.5.1: 64 prefix tokens, 33 suffix tokens, three padded
+positions, and three optimizer steps each for QAT and QAD. Both runs changed
+weights, propagated suffix loss into prefix inputs, preserved zero padding
+gradients, and matched native inference bit-for-bit after ModelOpt save/reload.
+Activation recomputation also reproduced the forward and input gradients.
+QAT cross-entropy changed from 2.770705 to 2.770207; QAD KL (computed in FP64 to
+avoid cancellation near zero) changed from 1.99646e-7 to 1.98797e-7. These are
+synthetic smoke-test losses, not an accuracy-recovery result.
+
+An additional K=256 probe exceeded the reference tolerances (maximum output
+difference 4.54e-5, maximum query-gradient difference 3.65e-5). That shape is
+not enabled in this initial profile. Further qualification must resolve this reference discrepancy before expanding
+support.
+Full-model accuracy, Megatron/Bridge training with this new profile, HF export,
+and vLLM engine request-lifecycle validation remain separate qualification steps.
+The existing fork-only GPU tests continue to cover the INT8/Hadamard baseline.
+
+The new GPU tests require the optional upstream `emulation` package and skip
+when it is absent; they are run explicitly in the qualification environment.

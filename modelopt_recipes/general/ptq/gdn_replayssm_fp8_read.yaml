@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  read_fp8: configs/ptq/units/gdn_replayssm_fp8_read
+
+metadata:
+  description: >-
+    GDN ReplaySSM with an FP32 recurrence anchor and an FP8 block128 read copy.
+    Requires upstream ReplaySSM emulation and a fixed 16-token decode window.
+    This is floating-storage QAT emulation; the vLLM engine adapter is separate.
+quantize:
+  algorithm:
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: read_fp8
+  linear_attention:
+    - module_name: '*'
+      cfg:
+        backend: serving
+        precision: replayssm_two_precision
+        replay_window: 16

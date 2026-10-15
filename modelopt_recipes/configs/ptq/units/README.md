@@ -34,6 +34,7 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `mixer_mlp_nvfp4.yaml` | NVFP4 W4A4 on dense `*.mixer.{up,down}_proj` weight/input quantizers |
 | `attention_qkv_fp8.yaml` | FP8 E4M3 on attention q/k/v bmm and softmax quantizers |
 | `gdn_state_fp8_dynamic.yaml` | FP8 E4M3 dynamic fake quantization of the GatedDeltaNet recurrent state (per sequence, head and 64-column tile) at serving cache boundaries; requires an explicit serving execution policy |
+| `gdn_replayssm_fp8_read.yaml` | GDN two-precision replay: FP8 block128 read quantizer; recurrence anchor stays FP32 |
 | `linear_attention_state_int8_dynamic.yaml` | GDN/KDA INT8 state quantizer entries; the [complete recipe](../../../general/ptq/linear_attention_state_int8_dynamic.yaml) enables Hadamard during decode |
 | `linear_attention_state_int8_block32_dynamic.yaml` | Standard dynamic INT8 with one scale per key row and 32 value channels; the [complete training recipe](../../../general/ptq/linear_attention_state_int8_block32_dynamic.yaml) uses token QDQ and working-state readout |
 | `indexer_k_nvfp4.yaml` | NVFP4 fake quantization of the sparse-attention indexer key cache (`*indexer_k_quantizer`), global scale fixed to 1; Blackwell+ GPUs |

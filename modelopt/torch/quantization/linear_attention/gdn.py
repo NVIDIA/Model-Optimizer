@@ -31,6 +31,7 @@ def gdn_state_qat(
     *,
     policy: LinearAttentionConfig,
     state_quantizer=None,
+    read_quantizer=None,
     scale=None,
     initial_state=None,
     output_final_state=False,
@@ -58,11 +59,14 @@ def gdn_state_qat(
     QDQ; passing None or a disabled quantizer retains the unquantized native path.
     ``precision="vllm"`` requires ``gate_inputs=(raw_g, raw_beta, A_log, bias)``
     for native gate preparation; the prepared ``g`` and ``beta`` supply the adjoint.
+    ``replayssm_two_precision`` uses ``read_quantizer`` for FP8 block128 reads,
+    requires an unquantized recurrence anchor, and does not return partial-window
+    state. Its adjoint reconstructs one replay window at a time during backward.
     """
     if policy.precision == "vllm_kimi_k3":
         raise ValueError("vllm_kimi_k3 is a KDA-only precision profile")
-    if policy.precision == "vllm" and gate_inputs is None:
-        raise ValueError("vllm GDN requires raw gate_inputs=(raw_g, raw_beta, A_log, bias)")
+    if policy.precision in ("vllm", "replayssm_two_precision") and gate_inputs is None:
+        raise ValueError("Serving GDN requires raw gate_inputs=(raw_g, raw_beta, A_log, bias)")
     if cp_context is not None:
         raise NotImplementedError("GDN state QAT does not support context parallelism")
     _validate_gate_inputs(g, beta, gate_inputs)
@@ -87,6 +91,7 @@ def gdn_state_qat(
         beta,
         policy=policy,
         state_quantizer=state_quantizer,
+        read_quantizer=read_quantizer,
         scale=scale,
         initial_state=initial_state,
         output_final_state=output_final_state,

@@ -24,6 +24,7 @@ from numbers import Integral
 import torch
 from packaging.version import Version
 
+from ._two_precision import validate_two_precision
 from .decode import _recurrent_decode
 from .utils import _resolve_state_quantizer, _state_qdq, forward_value
 
@@ -78,7 +79,13 @@ def get_linear_attention_layers(model, *, enabled_only=False, unphased_only=Fals
             for module in root.modules()
             if isinstance(module, _LinearAttentionQuantMixin)
             and module.linear_attention_config.backend == "serving"
-            and (not enabled_only or module._linear_attn_state.is_enabled)
+            and (
+                not enabled_only
+                or any(
+                    getattr(module, name).is_enabled
+                    for name in module.linear_attention_quantizer_names
+                )
+            )
             and (not unphased_only or module._linear_attention_prefill_lengths is None)
         )
     )
@@ -183,6 +190,7 @@ def _prefill_decode_forward(
     beta_dtype,
     prefill_lengths,
     sequence_lengths=None,
+    read_quantizer=None,
     use_qk_l2norm_in_kernel=False,
     gate_inputs=None,
 ):
@@ -198,8 +206,24 @@ def _prefill_decode_forward(
         sequence_lengths: Valid token count per sequence, excluding right padding.
             Defaults to the dense row length or each packed storage segment length.
     """
+    two_precision = policy.precision == "replayssm_two_precision"
+    read_enabled = False
+    if two_precision:
+        read_enabled = validate_two_precision(state_quantizer, read_quantizer)
+        if g.ndim != 3 or q.shape[-1] != 128 or not use_qk_l2norm_in_kernel:
+            raise ValueError(
+                "Two-precision replay currently requires GDN, K=128 and Q/K normalization"
+            )
+        if scale is not None and scale != q.shape[-1] ** -0.5:
+            raise ValueError("Two-precision replay requires scale=K**-0.5")
+        if output_final_state:
+            raise NotImplementedError(
+                "Two-precision replay does not export a partial-window final state"
+            )
+    elif read_quantizer is not None and read_quantizer.is_enabled:
+        raise ValueError("gdn_read_quantizer requires precision='replayssm_two_precision'")
     state_quantizer = _resolve_state_quantizer(state_quantizer, state_codec=policy.state_codec)
-    if state_quantizer is not None and prefill_lengths is None:
+    if (state_quantizer is not None or read_enabled) and prefill_lengths is None:
         raise ValueError(
             "State quantization requires explicit prefill lengths through "
             "linear_attention_training_phase"
@@ -259,14 +283,15 @@ def _prefill_decode_forward(
             keys < 32 or keys & (keys - 1) or (g.ndim == 3 and gate_inputs is None)
         ):
             raise ValueError("ReplaySSM requires power-of-two K >= 32 and raw GDN gate inputs")
-    else:
-        # Validate the optional native backend before launching any prefix kernels.
+    elif not two_precision or any(prefixes):
+        # Decode-only two-precision replay needs the standalone backend, not vLLM.
+        # Validate native prefill before launching any prefix kernels.
         from ...kernels.quantization.linear_attention.serving.forward import validate_profile
 
         validate_profile(
             gate_inputs,
             use_qk_l2norm_in_kernel,
-            precision=policy.precision,
+            precision="vllm" if two_precision else policy.precision,
         )
     if initial_state is None:
         states = q.new_zeros(len(sequences), heads, keys, values)
@@ -308,7 +333,7 @@ def _prefill_decode_forward(
                     state=state,
                     scale=keys**-0.5 if scale is None else scale,
                     beta_dtype=beta_dtype,
-                    precision=policy.precision,
+                    precision="vllm" if two_precision else policy.precision,
                     normalize=use_qk_l2norm_in_kernel,
                     gate_inputs=(
                         (
@@ -325,6 +350,7 @@ def _prefill_decode_forward(
         suffix, final_state = _recurrent_decode(
             *(x[b, split:end] for x in (q, k, v, g, beta)),
             config=policy,
+            read_enabled=read_enabled,
             state_quantizer=state_quantizer,
             initial_state=state,
             output_final_state=output_final_state,

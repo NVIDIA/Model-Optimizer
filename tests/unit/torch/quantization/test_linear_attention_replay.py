@@ -49,3 +49,11 @@ def test_hadamard_matches_dense_oracle_and_backward():
 def test_replay_policy_rejects_invalid_settings(settings):
     with pytest.raises(ValueError):
         LinearAttentionConfig(**{"backend": "serving", "precision": "replayssm", **settings})
+
+
+@pytest.mark.parametrize("window", [1, 8, 32])
+def test_two_precision_requires_16_token_windows(window):
+    with pytest.raises(ValueError, match="replay_window=16"):
+        LinearAttentionConfig(
+            backend="serving", precision="replayssm_two_precision", replay_window=window
+        )
