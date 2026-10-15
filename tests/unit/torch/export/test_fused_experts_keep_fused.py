@@ -35,7 +35,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
@@ -508,9 +507,9 @@ def _two_rank_split_job(rank, world_size):
         _assert_byte_identical(_split_local_fused_module(PREFIX, plain_scales), mine)
 
 
-def test_two_ranks_fold_and_split_their_own_experts_under_global_indices(skip_on_windows):
+def test_two_ranks_fold_and_split_their_own_experts_under_global_indices(cpu_dist_workers):
     """Rank 1 holds experts 2-3: each must be folded with ITS quantizer and keep its index."""
-    spawn_multiprocess_job(2, _two_rank_split_job, backend="gloo")
+    cpu_dist_workers.run(_two_rank_split_job)
 
 
 # ------------------------------------------------------------------ NVFP4 on sharded weights
