@@ -264,6 +264,43 @@ def test_uncalibrated_expert_takes_the_same_weight_derived_amax_as_the_per_exper
         assert torch.equal(gate_ws2, got[f"{PREFIX}.1.up_proj.weight_scale_2"])
 
 
+def _disable_weight_quantizers(experts, proj, indices):
+    for i in indices:
+        getattr(experts, f"{proj}_weight_quantizers")[i].disable()
+
+
+@LAYOUTS
+@QUANT_CFGS
+@pytest.mark.parametrize("unquantized", ["first", "down_proj", "both"])
+def test_a_projection_with_no_quantized_expert_is_written_as_the_per_expert_export_writes_it(
+    experts_cls, quant_cfg, unquantized
+):
+    """A recipe can leave an MoE layer's experts unquantized: such a projection has nothing to fold."""
+    experts = _quantized_experts(experts_cls, quant_cfg)
+    first = experts._first_proj_attr
+    for proj in {"first": [first], "down_proj": ["down_proj"], "both": [first, "down_proj"]}[
+        unquantized
+    ]:
+        _disable_weight_quantizers(experts, proj, range(NUM_EXPERTS))
+    want = _per_expert_export(experts)
+
+    _assert_byte_identical(split_fused_experts_state_dict(_keep_fused_export(experts)), want)
+
+
+@LAYOUTS
+def test_a_projection_mixing_quantized_and_unquantized_experts_is_refused_untouched(experts_cls):
+    """One fused tensor cannot hold both, and the refusal comes before the other projection folds."""
+    experts = _quantized_experts(experts_cls, mtq.FP8_DEFAULT_CFG)
+    _disable_weight_quantizers(experts, "down_proj", [1])
+    before = {k: v.clone() for k, v in experts.state_dict().items()}
+
+    with pytest.raises(NotImplementedError, match=r"down_proj: weight quantizers \[1\] of 4"):
+        _export_fused_experts_keep_fused(experts, torch.bfloat16)
+
+    _assert_byte_identical(experts.state_dict(), before)
+    assert experts.down_proj_weight_quantizers[0].is_enabled
+
+
 # ------------------------------------------------------------------ split_fused_experts_state_dict
 
 
