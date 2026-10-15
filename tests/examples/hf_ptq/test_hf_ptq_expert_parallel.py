@@ -585,3 +585,45 @@ def test_the_vl_image_preview_generates_with_the_kwargs_it_is_handed(
 
     assert len(received) == 1
     assert received[0].get("synced_gpus", False) == (generation_kwargs is not None)
+
+
+# ------------------------------------------------------------------------------------- export
+
+
+@pytest.mark.parametrize(
+    ("plan", "rank", "exports"),
+    [
+        (DistributionPlan(4), 0, True),
+        (DistributionPlan(4), 1, False),
+        (DistributionPlan(4, dense="fsdp"), 1, True),
+        (DistributionPlan(4, ep_size=4), 1, True),
+    ],
+    ids=["replicated_rank0", "replicated_rank1", "fsdp2_rank1", "expert_parallel_rank1"],
+)
+def test_only_rank_0_writes_a_replicated_model(hf_ptq, monkeypatch, plan, rank, exports):
+    """A replicated model is whole on every rank, whose exports would write one checkpoint into the
+    same directory over each other; a sharded one needs every rank for its part. The source config
+    is rank 0's either way: another rank's, written after rank 0's export, would drop the
+    quantization config."""
+    written = []
+    monkeypatch.setattr(hf_ptq, "has_spec_opt", lambda model: False)
+    monkeypatch.setattr(hf_ptq, "is_multimodal_model", lambda model: True)
+    monkeypatch.setattr(hf_ptq, "save_source_config", lambda args, path: written.append("config"))
+    monkeypatch.setattr(
+        hf_ptq, "export_hf_checkpoint", lambda model, export_dir: written.append("checkpoint")
+    )
+    args = SimpleNamespace(
+        dist_state=_dist_state(plan.world_size, rank),
+        export_path="/export",
+        layerwise_export=False,
+        sparsity_fmt="dense",
+        qformat="fp8",
+        inference_tensor_parallel=1,
+        inference_pipeline_parallel=1,
+        vllm_fakequant_export=False,
+    )
+
+    model = _PreviewModel(plan)
+    hf_ptq.export_quantized(args, model, model, "qwen3_moe")
+
+    assert written == ["config"] * (rank == 0) + ["checkpoint"] * exports

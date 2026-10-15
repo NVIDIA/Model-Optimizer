@@ -702,6 +702,11 @@ def export_quantized(
     language_model: torch.nn.Module,
     model_type: str | None,
 ):
+    plan = distribution_plan(full_model)
+    if not (args.dist_state.is_main or plan.is_fsdp_dense or plan.is_expert_parallel):
+        # Replicated over the ranks, the model is whole on each: rank 0 writes it, and the rest
+        # would race it into the same directory. A sharded model needs every rank for its part.
+        return
     # Not inference_mode: the FSDP2 path gathers full params in this context and
     # inference tensors break the subsequent state_dict() -> param.detach().
     with torch.no_grad():
@@ -717,8 +722,9 @@ def export_quantized(
 
         if is_multimodal_model(full_model):
             # Per-layer export writes its own config.json with quantization_config, which
-            # the source config would replace; it never writes a processor config.
-            if not args.layerwise_export:
+            # the source config would replace; it never writes a processor config. Rank 0's
+            # export writes config.json, so no other rank may write the source config after it.
+            if not args.layerwise_export and args.dist_state.is_main:
                 save_source_config(args, export_path)
 
         start_time = time.time()
