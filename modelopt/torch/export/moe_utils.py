@@ -40,6 +40,10 @@ def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
         "down_proj",
         "down_proj_weight_quantizers",
         "down_proj_input_quantizer",
+        f"{first_proj_attr}_scale_inv",
+        "down_proj_scale_inv",
+        f"{first_proj_attr}_activation_scale",
+        "down_proj_activation_scale",
     ):
         if hasattr(module, attr):
             delattr(module, attr)
@@ -160,6 +164,8 @@ def _export_fused_experts(
 
     for idx in range(n):
         expert = nn.Module()
+        first_weight = module.get_expert_weight(first_proj_attr, idx, dtype)
+        down_weight = module.get_expert_weight("down_proj", idx, dtype)
 
         # If the gate_up source quantizer was never calibrated (rare expert
         # that received no calibration tokens), derive its amax once from the
@@ -181,7 +187,7 @@ def _export_fused_experts(
             else []
         )
         for q in uncalibrated_stages:
-            q.amax = _fallback_amax(first_proj[idx], q)
+            q.amax = _fallback_amax(first_weight, q)
         if uncalibrated_stages:
             warnings.warn(
                 f"Expert {idx} gate_up_proj weight quantizer was not calibrated "
@@ -193,16 +199,16 @@ def _export_fused_experts(
 
         if is_gated:
             projections = [
-                ("gate_proj", first_proj[idx, :expert_dim, :], 0, fused_dim0, True),
-                ("up_proj", first_proj[idx, expert_dim:, :], expert_dim, fused_dim0, True),
-                ("down_proj", down[idx], 0, down.shape[1], False),
+                ("gate_proj", first_weight[:expert_dim, :], 0, fused_dim0, True),
+                ("up_proj", first_weight[expert_dim:, :], expert_dim, fused_dim0, True),
+                ("down_proj", down_weight, 0, down.shape[1], False),
             ]
         else:
             # Non-gated: the single up_proj maps 1:1 to its weight quantizer, so it
             # is exported whole (no dim-0 split, no shared gate/up weight_scale_2).
             projections = [
-                ("up_proj", first_proj[idx], 0, fused_dim0, True),
-                ("down_proj", down[idx], 0, down.shape[1], False),
+                ("up_proj", first_weight, 0, fused_dim0, True),
+                ("down_proj", down_weight, 0, down.shape[1], False),
             ]
 
         for (

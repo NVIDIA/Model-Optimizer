@@ -15,6 +15,7 @@
 
 """Tests for _QuantFusedExperts: generic fused MoE quantization and export."""
 
+import copy
 import warnings
 
 import pytest
@@ -25,6 +26,8 @@ import torch.nn.functional as F
 pytest.importorskip("transformers")
 
 from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_params
+from transformers import PretrainedConfig
+from transformers.integrations.finegrained_fp8 import FP8Experts
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
@@ -1726,3 +1729,66 @@ class TestQwen3VLMoeTextExperts:
         finally:
             if registered_before is None and QuantModuleRegistry.get(experts_type) is not None:
                 QuantModuleRegistry.unregister(experts_type)
+
+
+@pytest.mark.parametrize("fold", [True, False])
+@pytest.mark.parametrize("has_gate", [True, False])
+@pytest.mark.parametrize("block_size", [(128, 128), (64, 128), None])
+def test_native_fp8_experts_scales(has_gate, block_size, fold):
+    torch.manual_seed(42)
+    config = PretrainedConfig(
+        hidden_size=256, intermediate_size=256, num_experts=2, hidden_act="silu"
+    )
+    experts = FP8Experts(config, block_size=block_size, has_gate=has_gate)
+    first = "gate_up_proj" if has_gate else "up_proj"
+    expected = {}
+    for name in (first, "down_proj"):
+        weight = getattr(experts, name)
+        scales = getattr(experts, f"{name}_scale_inv")
+        with torch.no_grad():
+            weight.copy_(torch.randn(weight.shape).to(weight.dtype))
+            scales.copy_(torch.linspace(0.01, 0.08, scales.numel()).reshape(scales.shape))
+        rows, cols = block_size or (weight.shape[1] // scales.shape[1], weight.shape[2])
+        expanded = scales.float().repeat_interleave(rows, 1).repeat_interleave(cols, 2)
+        expected[name] = weight.float() * expanded[:, : weight.shape[1], : weight.shape[2]]
+
+    reference = copy.deepcopy(experts)
+    for name, weight in expected.items():
+        setattr(reference, name, nn.Parameter(weight, requires_grad=False))
+    mtq.quantize(
+        experts, {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": None}
+    )
+    for (weight, _), expected_weight in zip(
+        experts.iter_weights_for_calibration(),
+        [w for name in (first, "down_proj") for w in expected[name]],
+        strict=True,
+    ):
+        torch.testing.assert_close(weight.float(), expected_weight)
+
+    inputs = torch.randn(2, 256)
+    indices = torch.tensor([[0], [1]])
+    routing = torch.ones(2, 1)
+    torch.testing.assert_close(
+        experts(inputs, indices, routing), reference(inputs, indices, routing)
+    )
+    for _, quantizer in experts.iter_weights_for_calibration():
+        quantizer.enable()
+    mtq.calibrate(experts, algorithm="max", forward_loop=None)
+    for weight, quantizer in experts.iter_weights_for_calibration():
+        torch.testing.assert_close(quantizer.amax, weight.abs().amax())
+        quantizer.disable()
+    if fold:
+        experts.fold_weight()
+    torch.testing.assert_close(
+        experts(inputs, indices, routing), reference(inputs, indices, routing)
+    )
+    _export_fused_experts(experts, torch.float32)
+    for idx in range(2):
+        exported = getattr(experts, str(idx))
+        if has_gate:
+            torch.testing.assert_close(exported.gate_proj.weight, expected[first][idx, :256])
+            torch.testing.assert_close(exported.up_proj.weight, expected[first][idx, 256:])
+        else:
+            torch.testing.assert_close(exported.up_proj.weight, expected[first][idx])
+        torch.testing.assert_close(exported.down_proj.weight, expected["down_proj"][idx])
+    assert not any("scale_inv" in key for key in experts.state_dict())

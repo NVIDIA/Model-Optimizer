@@ -28,7 +28,7 @@ import torch.nn as nn
 import transformers
 from torch import Tensor
 from torch.nn.functional import linear
-from transformers.integrations.finegrained_fp8 import FP8Linear
+from transformers.integrations.finegrained_fp8 import FP8Experts, FP8Linear
 from transformers.models.t5.modeling_t5 import T5Attention
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_FA_AVAILABLE
@@ -868,12 +868,16 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             if self._down_proj_linear:
                 idx = self._current_expert_idx
                 input = self.down_proj_input_quantizer(input)
-                weight = self.down_proj_weight_quantizers[idx](weight)
+                weight = self.down_proj_weight_quantizers[idx](
+                    self.get_expert_weight("down_proj", idx, input.dtype)
+                )
             else:
                 idx = self._get_expert_idx_from_first_proj(weight)
                 self._current_expert_idx = idx
                 input = getattr(self, self._first_proj_input_quantizer_attr)(input)
-                weight = getattr(self, self._first_proj_weight_quantizers_attr)[idx](weight)
+                weight = getattr(self, self._first_proj_weight_quantizers_attr)[idx](
+                    self.get_expert_weight(self._first_proj_attr, idx, input.dtype)
+                )
             self._down_proj_linear = not self._down_proj_linear
             return _orig_linear(input, weight, bias)
 
@@ -884,6 +888,10 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     def forward(self, *args, **kwargs):
         self._down_proj_linear = False
         return super().forward(*args, **kwargs)
+
+    def get_expert_weight(self, name, idx, dtype=None):
+        """Return one expert's projection in the calibration/export weight domain."""
+        return getattr(self, name)[idx]
 
     def iter_weights_for_calibration(self):
         """Yield ``(weight_slice, quantizer)`` per-expert pairs.
@@ -901,7 +909,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             if weight is None or quantizers is None:
                 continue
             for idx, q in enumerate(quantizers):
-                yield weight[idx], q
+                yield self.get_expert_weight(weight_name, idx), q
 
     def iter_weight_quantizers_for_calibration(self):
         """Yield the per-expert weight quantizers without slicing the fused 3-D weight.
@@ -945,6 +953,47 @@ class _QuantNonGatedFusedExperts(_QuantFusedExperts):
 
     _first_proj_attr = "up_proj"
     _is_gated = False
+
+
+class _QuantFP8Experts(_QuantFusedExperts):
+    """Scale-aware PTQ for native Transformers FP8 experts, dequantized per expert."""
+
+    @property
+    def _first_proj_attr(self):
+        return "gate_up_proj" if self.has_gate else "up_proj"
+
+    @property
+    def _is_gated(self):
+        return self.has_gate
+
+    def _setup(self):
+        if getattr(self.config, "expert_dtype", "fp8") != "fp8":
+            raise NotImplementedError("Only FP8 E4M3 native expert weights are supported")
+        super()._setup()
+
+    def get_expert_weight(self, name, idx, dtype=None):
+        weight = getattr(self, name)[idx]
+        if weight.element_size() > 1:
+            return weight
+        dtype = dtype or torch.get_default_dtype()
+        scales = getattr(self, f"{name}_scale_inv")[idx].to(dtype)
+        rows, cols = self.block_size or (weight.shape[0] // scales.shape[0], weight.shape[1])
+        scales = scales.repeat_interleave(rows, 0).repeat_interleave(cols, 1)
+        return weight.to(dtype) * scales[: weight.shape[0], : weight.shape[1]]
+
+    def linear(self, input, weight, weight_scale_inv, activation_scale=None):
+        # Preserve the FP8 view's storage offset for the per-expert quantizer lookup.
+        return torch.nn.functional.linear(input, weight)
+
+    def fold_weight(self, keep_attrs=False):
+        for name in (self._first_proj_attr, "down_proj"):
+            weight = getattr(self, name)
+            if weight.element_size() == 1:
+                unpacked = torch.empty_like(weight, dtype=torch.get_default_dtype())
+                for idx in range(self.num_experts):
+                    unpacked[idx].copy_(self.get_expert_weight(name, idx))
+                setattr(self, name, nn.Parameter(unpacked, requires_grad=False))
+        super().fold_weight(keep_attrs)
 
 
 def _get_fused_experts_quantizer_attr_names(module):
@@ -1198,6 +1247,9 @@ try:
         )
 except ImportError:
     pass
+
+if FP8Experts not in QuantModuleRegistry:
+    QuantModuleRegistry.register({FP8Experts: "hf.FP8Experts"})(_QuantFP8Experts)
 
 if FP8Linear not in QuantModuleRegistry:
     QuantModuleRegistry.register({FP8Linear: "hf.FP8Linear"})(_QuantFP8Linear)
