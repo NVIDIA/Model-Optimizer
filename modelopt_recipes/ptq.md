@@ -496,7 +496,10 @@ checkpoint's** quant config verbatim:
   and the KV cache use FP8. It uses max calibration.
 - **`models/MiniMaxAI/MiniMax-M2.7/ptq/nvfp4_experts_only-kv_fp8_cast`** reproduces
   `nvidia/MiniMax-M2.7-NVFP4` with max-calibrated NVFP4 W4A4 experts (block size
-  16) and FP8 KV-cache cast mode; attention projections, router, and LM head stay BF16.
+  16) and FP8 KV-cache cast mode, supporting both `block_sparse_moe.experts` and
+  `mlp.experts` layouts, including fused experts. Attention projections, router,
+  and LM head are excluded from additional quantization: the source checkpoint
+  stores attention weights in FP8, router weights in FP32, and LM-head weights in BF16.
 - **`models/Qwen/Qwen3.8-27B/ptq/nvfp4_w4a4_mlp_fp8_attn_local_hessian`**
   reproduces NVFP4 W4A4 mixed precision quantization recipe used for `nvidia/Qwen3.8-27B-NVFP4`:
   MLP projections and `lm_head` use NVFP4 W4A4, self-attention and
