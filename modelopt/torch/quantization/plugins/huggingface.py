@@ -879,9 +879,13 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
 
     @property
     def _running_grouped_mm(self) -> bool:
-        """Whether this module's forward dispatches to the ``grouped_mm`` backend."""
+        """Whether this module's forward runs its expert matmuls through ``_grouped_linear``.
+
+        The ``grouped_mm`` backend and the ``torch_a2a`` expert-parallel forward both do, handing each
+        projection one expert-sorted batch rather than one ``F.linear`` call per expert.
+        """
         cfg = getattr(self, "config", None)
-        return getattr(cfg, "_experts_implementation", None) == "grouped_mm"
+        return getattr(cfg, "_experts_implementation", None) in ("grouped_mm", "torch_a2a")
 
     @property
     def _is_transposed_experts(self) -> bool:

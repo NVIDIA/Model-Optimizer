@@ -302,6 +302,7 @@ class _ExpertsConfig:
     def __init__(self, impl="grouped_mm"):
         self._experts_implementation = impl
         self.hidden_act = "silu"
+        self.ep_group = None  # the expert-parallel group a torch_a2a forward dispatches over
 
 
 class _SyntheticGroupedExperts(nn.Module):
@@ -360,6 +361,12 @@ class _SyntheticGroupedExperts(nn.Module):
         if self.config._experts_implementation == "grouped_mm":
             return _moe_integration.grouped_mm_experts_forward(
                 self, hidden_states, top_k_index, top_k_weights
+            )
+        if self.config._experts_implementation == "torch_a2a":
+            from modelopt.torch.utils.moe import torch_a2a_experts_forward
+
+            return torch_a2a_experts_forward(
+                self, hidden_states, top_k_index, top_k_weights, self.config.ep_group
             )
         return self._eager_forward(hidden_states, top_k_index, top_k_weights)
 
@@ -1697,6 +1704,74 @@ class TestNormalizeFusedExpertsQuantizerName:
         )
 
 
+def _local_hessian_grouped_capture_job(rank, size, impl):
+    """Local-Hessian capture under a grouped dispatcher; torch_a2a gets a one-rank EP group."""
+    import torch.distributed as dist
+
+    ep_group = dist.new_subgroups(1)[0] if impl == "torch_a2a" else None
+    try:
+        torch.manual_seed(0)
+        model = _GroupedMoEModel(impl)
+        model.config.ep_group = ep_group
+
+        weight_quant = {"num_bits": 8, "axis": 0}
+        quant_cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*gate_up_proj_weight_quantizer", "cfg": weight_quant},
+                {"quantizer_name": "*down_proj_weight_quantizer", "cfg": weight_quant},
+            ],
+            "algorithm": "max",
+        }
+        batches = [torch.randn(1, 8, HIDDEN_DIM) for _ in range(3)]
+
+        def forward_loop(m):
+            for batch in batches:
+                m(batch)
+
+        mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
+        experts = model.moe.experts
+        assert experts._running_grouped_mm is True
+
+        expert_quantizers = list(experts.gate_up_proj_weight_quantizers) + list(
+            experts.down_proj_weight_quantizers
+        )
+        max_amax = {id(q): q.amax.clone() for q in expert_quantizers if q.amax is not None}
+        expected_shape = {}
+        for quantizers, weight in (
+            (experts.gate_up_proj_weight_quantizers, experts.gate_up_proj),
+            (experts.down_proj_weight_quantizers, experts.down_proj),
+        ):
+            for i, q in enumerate(quantizers):
+                expected_shape[id(q)] = (weight[i].shape[0], weight[i].shape[1])
+
+        local_hessian_calibrate(model, forward_loop, fp8_scale_sweep=False, debug=True)
+
+        # Each expert's Hessian, in both projections, holds exactly the rows routed to it.
+        routed = torch.cat([model.moe.gate(b.view(-1, HIDDEN_DIM))[2] for b in batches])
+        rows = torch.bincount(routed.flatten(), minlength=NUM_EXPERTS).tolist()
+        accumulators = model._local_hessian_accumulators
+        for quantizers in (
+            experts.gate_up_proj_weight_quantizers,
+            experts.down_proj_weight_quantizers,
+        ):
+            captured = [
+                accumulators[id(q)].num_samples if id(q) in accumulators else 0 for q in quantizers
+            ]
+            assert captured == rows, (captured, rows)
+        for qid, acc in accumulators.items():
+            if acc.num_samples:
+                assert (acc.cout, acc.cin) == expected_shape[qid]
+        assert all(q.amax is not None and torch.isfinite(q.amax).all() for q in expert_quantizers)
+        assert any(
+            id(q) in max_amax and not torch.allclose(q.amax, max_amax[id(q)])
+            for q in expert_quantizers
+        )
+    finally:
+        if QuantModuleRegistry.get(_SyntheticGroupedExperts) is not None:
+            QuantModuleRegistry.unregister(_SyntheticGroupedExperts)
+
+
 # ---------------------------------------------------------------------------
 # Tests for the grouped_mm backend: _QuantFusedExperts intercepts the real
 # transformers grouped_mm forward (via _grouped_linear), and grouped calibration
@@ -1844,55 +1919,12 @@ class TestGroupedMMExperts:
                 assert torch.allclose(eq, gq, atol=1e-5), f"{q_list}[{idx}] weight amax mismatch"
         self._cleanup_registry(_SyntheticGroupedExperts)
 
-    def test_local_hessian_captures_per_expert_in_grouped_mode(self):
+    @pytest.mark.parametrize("impl", ["grouped_mm", "torch_a2a"])
+    def test_local_hessian_captures_per_expert_in_grouped_mode(self, cpu_dist_workers, impl):
         """local_hessian splits the expert-sorted grouped batch by offsets and refines
-        each expert's weight amax — the grouped analogue of the eager per-expert hook."""
-        self._cleanup_registry(_SyntheticGroupedExperts)
-        model = _GroupedMoEModel("grouped_mm")
-
-        weight_quant = {"num_bits": 8, "axis": 0}
-        quant_cfg = {
-            "quant_cfg": [
-                {"quantizer_name": "*", "enable": False},
-                {"quantizer_name": "*gate_up_proj_weight_quantizer", "cfg": weight_quant},
-                {"quantizer_name": "*down_proj_weight_quantizer", "cfg": weight_quant},
-            ],
-            "algorithm": "max",
-        }
-
-        def forward_loop(m):
-            torch.manual_seed(0)
-            for _ in range(3):
-                m(torch.randn(1, 8, HIDDEN_DIM))
-
-        mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
-        experts = model.moe.experts
-        assert experts._running_grouped_mm is True
-
-        expert_quantizers = list(experts.gate_up_proj_weight_quantizers) + list(
-            experts.down_proj_weight_quantizers
-        )
-        max_amax = {id(q): q.amax.clone() for q in expert_quantizers if q.amax is not None}
-        expected_shape = {}
-        for quantizers, weight in (
-            (experts.gate_up_proj_weight_quantizers, experts.gate_up_proj),
-            (experts.down_proj_weight_quantizers, experts.down_proj),
-        ):
-            for i, q in enumerate(quantizers):
-                expected_shape[id(q)] = (weight[i].shape[0], weight[i].shape[1])
-
-        local_hessian_calibrate(model, forward_loop, fp8_scale_sweep=False, debug=True)
-
-        routed = {qid: a for qid, a in model._local_hessian_accumulators.items() if a.num_samples}
-        assert len(routed) >= 2, "expected multiple distinct experts to capture Hessians"
-        for qid, acc in routed.items():
-            assert (acc.cout, acc.cin) == expected_shape[qid]
-        assert all(q.amax is not None and torch.isfinite(q.amax).all() for q in expert_quantizers)
-        assert any(
-            id(q) in max_amax and not torch.allclose(q.amax, max_amax[id(q)])
-            for q in expert_quantizers
-        )
-        self._cleanup_registry(_SyntheticGroupedExperts)
+        each expert's weight amax — the grouped analogue of the eager per-expert hook.
+        The torch_a2a forward hands ``_grouped_linear`` the same batch, so it splits the same."""
+        cpu_dist_workers.run(_local_hessian_grouped_capture_job, impl=impl)
 
 
 class TestNonGatedFusedExperts:
