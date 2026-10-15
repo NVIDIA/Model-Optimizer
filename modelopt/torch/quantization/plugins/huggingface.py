@@ -976,10 +976,10 @@ class _QuantFP8Experts(_QuantFusedExperts):
         if weight.element_size() > 1:
             return weight if dtype is None else weight.to(dtype)
         dtype = dtype or torch.get_default_dtype()
-        scales = getattr(self, f"{name}_scale_inv")[idx].to(dtype)
+        scales = getattr(self, f"{name}_scale_inv")[idx].float()
         rows, cols = self.block_size or (weight.shape[0] // scales.shape[0], weight.shape[1])
         scales = scales.repeat_interleave(rows, 0).repeat_interleave(cols, 1)
-        return weight.to(dtype) * scales[: weight.shape[0], : weight.shape[1]]
+        return (weight.float() * scales[: weight.shape[0], : weight.shape[1]]).to(dtype)
 
     def linear(self, input, weight, weight_scale_inv, activation_scale=None):
         # Preserve the FP8 view's storage offset for the per-expert quantizer lookup.

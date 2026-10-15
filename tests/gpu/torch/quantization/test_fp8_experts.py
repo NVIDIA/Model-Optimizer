@@ -24,8 +24,9 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.moe_utils import _export_fused_experts
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("has_gate", [True, False])
-def test_fp8_experts_nvfp4_export(has_gate):
+def test_fp8_experts_nvfp4_export(has_gate, dtype):
     torch.manual_seed(42)
     config = PretrainedConfig(
         hidden_size=256, intermediate_size=256, num_experts=2, hidden_act="silu"
@@ -42,7 +43,7 @@ def test_fp8_experts_nvfp4_export(has_gate):
                 torch.linspace(0.01, 0.08, scales.numel(), device="cuda").reshape(scales.shape)
             )
         expected[name] = weight.float() * scales.repeat_interleave(128, 1).repeat_interleave(128, 2)
-    inputs = torch.randn(2, 256, device="cuda")
+    inputs = torch.randn(2, 256, device="cuda", dtype=dtype)
     indices = torch.tensor([[0], [1]], device="cuda")
     routing = torch.ones(2, 1, device="cuda")
     mtq.quantize(experts, mtq.NVFP4_DEFAULT_CFG, lambda m: m(inputs, indices, routing))

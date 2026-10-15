@@ -1750,7 +1750,7 @@ def test_native_fp8_experts_scales(has_gate, block_size, fold, activation_scheme
         scales = getattr(experts, f"{name}_scale_inv")
         with torch.no_grad():
             weight.copy_(torch.randn(weight.shape).to(weight.dtype))
-            scales.copy_(torch.linspace(0.01, 0.08, scales.numel()).reshape(scales.shape))
+            scales.copy_(torch.linspace(1e-8, 0.08, scales.numel()).reshape(scales.shape))
         rows, cols = block_size or (weight.shape[1] // scales.shape[1], weight.shape[2])
         expanded = scales.float().repeat_interleave(rows, 1).repeat_interleave(cols, 2)
         expected[name] = weight.float() * expanded[:, : weight.shape[1], : weight.shape[2]]
@@ -1767,6 +1767,16 @@ def test_native_fp8_experts_scales(has_gate, block_size, fold, activation_scheme
         strict=True,
     ):
         torch.testing.assert_close(weight.float(), expected_weight)
+
+    for name in (first, "down_proj"):
+        for idx in range(2):
+            for dtype in (torch.float16, torch.bfloat16):
+                torch.testing.assert_close(
+                    experts.get_expert_weight(name, idx, dtype),
+                    expected[name][idx].to(dtype),
+                    rtol=0,
+                    atol=0,
+                )
 
     inputs = torch.randn(2, 256)
     indices = torch.tensor([[0], [1]])
