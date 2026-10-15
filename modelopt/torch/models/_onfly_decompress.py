@@ -44,7 +44,8 @@ already ships a ``WeightConverter`` that fuses per-expert ``gate/up/down_proj.we
 each ``.weight`` source becomes the checkpoint's actual stored keys for that weight
 (``compression_param_names``), and PREPEND a ``DecompressExperts`` op that pairs those per expert and
 dequantizes -> bf16 BEFORE the merge/concat collapse the per-expert structure.
-``install_onfly_decompress()`` monkeypatches ``get_model_conversion_mapping``.
+``install_onfly_decompress()`` monkeypatches ``get_model_conversion_mapping``, for the model built from
+the config it is given: every other model ``from_pretrained`` loads keeps its stock converters.
 """
 
 import torch
@@ -314,6 +315,18 @@ def _install_keep_int_native():
     cml._materialize_copy = _materialize_copy
 
 
+# Marks a config whose model's converters the installed hooks rewrite (holds the checkpoint's format).
+_MARK = "_modelopt_onfly_decompress"
+
+
+def _mark(hf_config, fmt):
+    """Mark ``hf_config``'s load for the installed hooks; ``from_pretrained``'s copy of it keeps the mark."""
+    if isinstance(hf_config, dict):
+        hf_config[_MARK] = fmt
+    else:
+        setattr(hf_config, _MARK, fmt)
+
+
 def install_onfly_decompress(hf_config):
     """Monkeypatch get_model_conversion_mapping so the fused-MoE per-expert converters decompress the
     checkpoint's compressed-tensors weights on the fly, in whatever ``format`` the checkpoint declares.
@@ -322,7 +335,9 @@ def install_onfly_decompress(hf_config):
     bit-width, group size, strategy and stored param names are all read from it.
 
     The hooks are process-wide, so a process decompresses one compressed checkpoint: installing again
-    for it is a no-op, and installing for a checkpoint compressed differently raises."""
+    for it marks that config too, and installing for a checkpoint compressed differently raises. Only a
+    model built from a marked config has its converters rewritten; any other model ``from_pretrained``
+    loads in the process, an uncompressed MoE say, keeps its stock converters."""
     import transformers.modeling_utils as mu
     from transformers.core_model_loading import WeightConverter
 
@@ -333,8 +348,8 @@ def install_onfly_decompress(hf_config):
         try:
             compression = _read_compression(hf_config)
         except ValueError:
-            # The prepare that installed the hooks drops quantization_config from its config and may
-            # run again on that same config: nothing new to decompress.
+            # The prepare that installed the hooks drops quantization_config from its config, already
+            # marked, and may run again on that same config: nothing new to decompress.
             return
         if compression != installed:
             raise RuntimeError(
@@ -342,6 +357,8 @@ def install_onfly_decompress(hf_config):
                 f"checkpoint (stored params {installed[2]}); one compressed differently ('{compression[3]}', "
                 f"stored params {compression[2]}) needs a process of its own"
             )
+        # The same checkpoint through a config of its own, which its load must find marked too.
+        _mark(hf_config, installed[3])
         return
     # Raises ValueError for a config with nothing to decompress, before anything is patched.
     compression = _read_compression(hf_config)
@@ -353,6 +370,14 @@ def install_onfly_decompress(hf_config):
 
     def patched(model, key_mapping=None, hf_quantizer=None, *a, **k):
         convs = orig(model, key_mapping=key_mapping, hf_quantizer=hf_quantizer, *a, **k)
+        config = getattr(model, "config", None)
+        if getattr(config, _MARK, None) is None:
+            # Not the compressed checkpoint: rewritten, an uncompressed MoE's experts would match no
+            # stored key and load newly initialized without an error.
+            return convs
+        # from_pretrained loads from a copy of the marked config; the mark must not reach the config
+        # a later save writes.
+        delattr(config, _MARK)
         out = []
         for c in convs:
             # only the per-expert MoE converters (have `.weight` sources under `experts`)
@@ -366,6 +391,7 @@ def install_onfly_decompress(hf_config):
 
     setattr(patched, "_onfly_compression", compression)
     mu.get_model_conversion_mapping = patched
+    _mark(hf_config, fmt)
     print(
         f"[onfly_decompress] installed: compressed_tensors '{fmt}' fused-MoE experts decompress "
         f"(stored params={param_names}) -> bf16 during from_pretrained",
