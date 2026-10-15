@@ -184,6 +184,8 @@ def train():
     training_args = HfTrainingArguments(**recipe.training.model_dump())
     init_distributed_env(training_args)
 
+    if not dry_run and recipe.data.mode == "packed" and not recipe.data.packed_data_path:
+        raise ValueError("data.mode='packed' requires data.packed_data_path.")
     if not dry_run and recipe.data.mode in ("online", "streaming") and not recipe.data.data_path:
         raise ValueError(f"data.mode={recipe.data.mode!r} requires data.data_path.")
     if training_args.cp_size > 1:
@@ -208,7 +210,11 @@ def train():
 
     checkpoint = training_args.resume_from_checkpoint or last_checkpoint
 
-    use_offline_training = recipe.data.mode != "online"
+    # "packed" is an ONLINE path with a different data source: the base still runs forward
+    # on real inputs, only the batches come from pre-tokenized blocks instead of rendered
+    # conversations. Treating it as offline would load the fake base meant for pre-dumped
+    # hidden states and silently train against a model that is not there.
+    use_offline_training = recipe.data.mode not in ("online", "packed")
 
     # Resume path depends on the existing checkpoint's on-disk format: consolidated HF
     # weights load via from_pretrained; FSDP sharded checkpoints load the base model and

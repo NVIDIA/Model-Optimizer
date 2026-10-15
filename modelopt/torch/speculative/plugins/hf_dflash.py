@@ -71,6 +71,7 @@ Draft model components:
            off meta; ``_maybe_init_rotary_emb`` stays idempotent for the lazy pattern.
 """
 
+import contextlib
 import logging
 from pathlib import Path
 from typing import NamedTuple
@@ -391,6 +392,17 @@ class HFDFlashModel(DFlashModel):
         # mask_token_id: validated by DFlashConfig, auto-detected from tokenizer context
         self.mask_token_id = config.dflash_mask_token_id
         logger.info("DFlash mask_token_id: %s", self.mask_token_id)
+
+        self.dflash_base_lm_loss_alpha = float(
+            getattr(config, "dflash_base_lm_loss_alpha", 0.0) or 0.0
+        )
+        if self.dflash_base_lm_loss_alpha > 0.0 and self.dflash_freeze_base_model:
+            # The term would build no graph through a frozen base and silently contribute
+            # nothing -- the same class of quiet no-op as an unconditional no_grad.
+            raise ValueError(
+                "dflash_base_lm_loss_alpha > 0 requires dflash_freeze_base_model=False; "
+                "on a frozen base the term has no gradient and would do nothing."
+            )
 
         # Freeze base model
         if self.dflash_freeze_base_model:
@@ -898,7 +910,15 @@ class HFDFlashModel(DFlashModel):
             # long-standing narrow call for text-only models.
             base_forward_kwargs = _multimodal_forward_kwargs(kwargs)
             use_top_level_forward = bool(base_forward_kwargs)
-            with torch.no_grad():
+            # Only skip the graph when the base is actually frozen. Running this under
+            # no_grad unconditionally made dflash_freeze_base_model=False silently inert:
+            # convert() honors it on the parameters (requires_grad stays True), but with no
+            # graph built nothing ever reaches them, so the base is pinned at its initial
+            # weights while appearing trainable.
+            base_grad_ctx = (
+                torch.no_grad() if self.dflash_freeze_base_model else contextlib.nullcontext()
+            )
+            with base_grad_ctx:
                 if use_top_level_forward:
                     raw_outputs = super().forward(
                         input_ids=input_ids,
@@ -1000,6 +1020,27 @@ class HFDFlashModel(DFlashModel):
             draft_hidden=hidden,
             base_outputs=base_outputs,
         )
+
+        # Anchor a trainable base to language modelling. Without this the only gradient
+        # reaching an unfrozen base comes from the draft objective, so the base drifts
+        # toward whatever is easiest to draft rather than toward predicting text.
+        if self.dflash_base_lm_loss_alpha > 0.0:
+            if labels is None:
+                raise ValueError(
+                    "dflash_base_lm_loss_alpha > 0 needs labels in the batch; the data "
+                    "module must be built with return_labels=True."
+                )
+            base_logits = base_outputs.logits
+            # Standard causal shift: DFlash's collator leaves labels unshifted
+            # (shift_labels=not is_dflash), so it is done here rather than assumed.
+            shift_logits = base_logits[:, :-1].float()
+            shift_labels = labels[:, 1:]
+            base_lm_loss = F.cross_entropy(
+                shift_logits.reshape(-1, shift_logits.size(-1)),
+                shift_labels.reshape(-1),
+                ignore_index=-100,
+            )
+            loss = loss + self.dflash_base_lm_loss_alpha * base_lm_loss
 
         return ModelOutput(
             loss=loss,
