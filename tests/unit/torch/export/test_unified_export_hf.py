@@ -1150,6 +1150,70 @@ def test_every_rank_stops_before_the_write_when_one_ranks_processing_failed(
     cpu_dist_workers.run(_one_rank_fails_processing_job, tmp_dir=tmp_path)
 
 
+class _FusedExpertsQuantizers(torch.nn.Module):
+    """What the export reads of a fused-experts container: each projection's weight quantizers."""
+
+    def __init__(self, enabled):
+        super().__init__()
+        self.gate_up_proj_weight_quantizers = [SimpleNamespace(is_enabled=e) for e in enabled]
+        self.down_proj_weight_quantizers = [SimpleNamespace(is_enabled=e) for e in enabled]
+
+
+def _expert_quantization_job(rank, size, tmp_dir, enabled_per_rank, refused):
+    from unittest import mock
+
+    from modelopt.torch.export import distributed_writer, unified_export_hf
+    from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
+
+    model = torch.nn.Module()
+    model.experts = _FusedExpertsQuantizers(enabled_per_rank[rank])
+    set_distribution_plan(model, DistributionPlan(size, ep_size=size))
+    raised = None
+    with (
+        mock.patch.object(
+            unified_export_hf, "_process_hf_model_for_export", return_value={}
+        ) as fold,
+        mock.patch.object(distributed_writer, "distributed_save_hf_checkpoint") as write,
+        mock.patch.object(unified_export_hf, "_write_base_config"),
+        mock.patch.object(unified_export_hf, "_write_hf_export_config"),
+    ):
+        # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
+        # the shared worker down instead of failing this test alone.
+        try:
+            unified_export_hf.export_hf_checkpoint(model, export_dir=tmp_dir)
+        except NotImplementedError as e:
+            raised = str(e)
+    if refused is None:
+        assert raised is None, raised
+    else:
+        assert raised is not None and f"experts.gate_up_proj ({refused})" in raised, raised
+    # Refused before any rank folds or writes; agreed states export as usual.
+    assert fold.called == write.called == (refused is None)
+
+
+@pytest.mark.parametrize(
+    ("enabled_per_rank", "refused"),
+    [
+        (((False, False), (True, True)), "rank 0: unquantized, rank 1: quantized"),
+        (((True, True), (True, False)), "rank 0: quantized, rank 1: mixed"),
+        (((True, True), (True, True)), None),
+        (((False, False), (False, False)), None),
+    ],
+    ids=["ranks-disagree", "one-rank-mixed", "all-quantized", "all-unquantized"],
+)
+def test_expert_parallel_ranks_agree_on_their_experts_quantization_before_folding(
+    cpu_dist_workers, tmp_path, enabled_per_rank, refused
+):
+    """Each rank sees only its own experts' quantizers. Ranks that disagree would fold differently,
+    and only the quantized ones would join the writer's input-scale all-reduce."""
+    cpu_dist_workers.run(
+        _expert_quantization_job,
+        tmp_dir=tmp_path,
+        enabled_per_rank=enabled_per_rank,
+        refused=refused,
+    )
+
+
 def test_a_single_process_export_ends_on_its_own_outcome():
     """Nothing to wait for: the export's own error, if any, is all that is raised."""
     from modelopt.torch.export.unified_export_hf import _finish_export_together
