@@ -24,6 +24,7 @@ Changelog
 - Speed up NVFP4 QAT and QAD of Hugging Face fused MoE experts: all experts of a projection are now fake-quantized in one kernel launch instead of one per expert, about 2x faster per MoE layer on Qwen3-30B-A3B with FSDP2.
 - ``hf_ptq.py`` calibrates Qwen3.8 (``qwen4_exp``) without running its QSA indexer's per-query Python loop when every visible key fits the indexer's token budget, with bit-identical results. On Qwen3.8-Flash-Next this saves about two hours of layerwise calibration.
 - Speed up Hugging Face QAT and QAD with ``QATTrainer``, ``QADTrainer`` or ``--manual_gc``: the ``gc.collect()`` run before each training step now skips the model and optimizer state, saving about 1 s per step (30%) on Qwen3-30B-A3B.
+- Add an opt-in no-gather HuggingFace export for FSDP2-sharded models: with ``MODELOPT_FSDP2_EXPORT=nogather``, ``export_hf_checkpoint`` sends each tensor to a single owner rank and every rank writes its own shards in parallel, instead of gathering the full state dict on one host. MoE experts stay sharded through the export, so each rank only materializes its own experts.
 
 *Speculative Decoding*
 
@@ -59,6 +60,7 @@ Changelog
 - ``mtq.calibrate`` now raises an error, naming the modules, when a Hugging Face fused-experts forward reaches neither quantizer hook (a hand-written ``bmm`` forward that transformers cannot redirect, say), instead of exporting weight-derived input scales with a warning.
 
 - Layerwise-calibration resume (``checkpoint_dir``) now loads checkpoint files with ``weights_only=True``. A checkpoint directory written by an earlier release whose layer inputs hold objects other than tensors, plain containers or Hugging Face dynamic caches can no longer be resumed; recalibrate in a fresh directory, or disable checkpointing.
+- ``export_hf_checkpoint`` and ``modelopt.torch.utils.dataset_utils.get_max_batch_size`` now read how a model is distributed from the plan ``load_pretrained`` records on it, and raise for an FSDP2-sharded model, or one in a multi-rank run, that carries none. If you distribute a model yourself, for example with ``fsdp2_wrap``, which records no plan, record one with ``modelopt.torch.utils.distributed.set_distribution_plan`` before calibrating or exporting it.
 
 **Deprecations**
 
@@ -152,7 +154,6 @@ Changelog
 - ``KV_QUANT_CFG`` presets in vLLM fake-quant serving now quantize the MLA KV cache; on vLLM 0.16 and later they silently quantized nothing for MLA models.
 - vLLM fake-quant serving of NVFP4 and cast-mode KV-cache configs no longer needs ``--enforce-eager``. ``examples/vllm_serve/vllm_serve_fakequant.py`` now sets ``VLLM_DISABLE_COMPILE_CACHE=1`` for fake-quant serves by default, because a cached torch.compile graph of the same model without the fake quant would otherwise be reused.
 - ``examples/deepseek/deepseek_v4/ptq.py`` now supports DeepSeek-V4.1-Flash, whose reference implementation uses 32x32 FP8 blocks and a tokenizer-aware ``Transformer``; this is the setup used to produce ``nvidia/DeepSeek-V4.1-Flash-NVFP4``. DeepSeek-V4-Pro checkpoints work as before.
-- Add an opt-in no-gather HuggingFace export for FSDP2-sharded models: with ``MODELOPT_FSDP2_EXPORT=nogather``, ``export_hf_checkpoint`` sends each tensor to a single owner rank and every rank writes its own shards in parallel, instead of gathering the full state dict on one host. MoE experts stay sharded through the export, so each rank only materializes its own experts.
 
 *Speculative Decoding*
 
@@ -225,7 +226,6 @@ Changelog
 - ``get_te_hybrid_stack_spec`` was removed from ``modelopt.torch.nas.plugins.megatron``; it had no use outside tests. Use ``modelopt.torch.utils.plugins.megatron_layer_specs.te_hybrid_stack_spec_sequential_mlp`` for the SequentialMLP layout, or ``megatron.core.models.hybrid.hybrid_layer_specs.hybrid_stack_spec`` for grouped GEMM.
 - Unified HuggingFace export now fails with ``NotImplementedError`` when it meets an MoE block whose expert projection names it does not know, instead of assuming Mixtral's ``w1``/``w2``/``w3``. If you hit this, register a ``ModelSpec`` for the model under ``modelopt/torch/models/``. Every MoE architecture ModelOpt exported correctly before this change is registered, so no supported model regresses.
 - ``--recipe`` (and ``modelopt.recipe.load_recipe``) now resolve a recipe path **filesystem-first**: a recipe of the same relative path in the current working directory takes precedence over the shipped built-in of that name, matching how recipe ``$import`` paths already resolve. Previously the built-in won.
-- ``export_hf_checkpoint`` and ``modelopt.torch.utils.dataset_utils.get_max_batch_size`` now read how a model is distributed from the plan ``load_pretrained`` records on it, and raise for an FSDP2-sharded model, or one in a multi-rank run, that carries none. If you distribute a model yourself, for example with ``fsdp2_wrap``, which records no plan, record one with ``modelopt.torch.utils.distributed.set_distribution_plan`` before calibrating or exporting it.
 
 **Deprecations**
 
