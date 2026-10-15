@@ -354,15 +354,17 @@ def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> Non
     the whole model. ``load_pretrained`` records the plan it loads by; code that distributes a model
     itself records it here before calibrating or exporting the model.
 
-    A model is distributed once: a plan other than the one already recorded on the model, or on any
-    of its submodules, raises instead of replacing it, and leaves the model as it was.
+    A model is distributed once, and its plan recorded once: recording a plan on a model that, or
+    any of whose submodules, already records one raises, the same plan included, and leaves the
+    model as it was. No code reloads or re-distributes a model it loaded.
     """
     for module in model.modules():
         recorded = getattr(module, _PLAN_ATTR, None)
-        if recorded is not None and recorded != plan:
+        if recorded is not None:
             raise ValueError(
                 f"{type(module).__name__} is already recorded as distributed by {recorded!r}; a "
-                f"model is distributed once, so {plan!r} cannot replace it."
+                f"model is distributed and its plan recorded once, so {plan!r} cannot be recorded "
+                "over it."
             )
     for module in model.modules():
         setattr(module, _PLAN_ATTR, plan)
