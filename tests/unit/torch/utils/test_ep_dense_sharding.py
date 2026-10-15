@@ -32,6 +32,8 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 
+pytest.importorskip("transformers")
+
 import modelopt.torch.utils.distributed as mto_dist
 import modelopt.torch.utils.moe as moe
 import modelopt.torch.utils.plugins.model_load_utils as model_load_utils
