@@ -92,7 +92,7 @@ except ImportError:
     export_sparse_attention_config = None
 
 # Importing the built-in handlers installs their entries in the two registries.
-from . import hf_export_handlers as _hf_export_handlers  # noqa: F401
+from . import hf_export_handlers as _hf_export_handlers
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import get_experts_list, is_layernorm, is_quantlinear, sync_moe_gate_up_amax
 from .model_utils import TiedWeightMap, get_language_model_from_vl, is_multimodal_model
@@ -2024,6 +2024,9 @@ def export_hf_checkpoint(
                 f"MODELOPT_EP_DEGREE={plan.world_size} if that divides the expert count, or "
                 "MODELOPT_FSDP_SIZE=1 to replicate the dense part."
             )
+    if _ep_sharded:
+        # Each rank holds only its own experts' quantizers, so they are agreed on before any folds.
+        _agree_on_fused_expert_quantization(model)
     # Either form of sharding, including the hybrid where both hold: a model can be FSDP2-dense AND
     # expert-parallel, so these are tracked separately rather than as an either/or.
     _sharded_export = _ep_sharded or _fsdp2_sharded
@@ -2273,6 +2276,49 @@ def export_hf_checkpoint(
         # first and the job hangs on the ones still writing.
         if is_fsdp2_sharded or is_ep_sharded:
             _finish_export_together(error)
+
+
+def _agree_on_fused_expert_quantization(model: nn.Module) -> None:
+    """Refuse, on every rank, a fused-experts projection quantized for some experts and not others.
+
+    The no-gather export writes each projection's experts as one fused tensor, so they must be all
+    quantized or all not. Under expert parallelism a rank holds only its own experts' quantizers
+    and sees only its share: ranks that disagree would fold differently, and only the quantized
+    ones would join the writer's input-scale all-reduce. So every rank's view is gathered, and every
+    rank raises, before any of them folds. Collective.
+    """
+
+    def states() -> dict[str, str]:
+        found: dict[str, str] = {}
+        for name, module in model.named_modules():
+            if _hf_export_handlers._has_fused_experts_quantizers(module):
+                for proj in (getattr(module, "_first_proj_attr", "gate_up_proj"), "down_proj"):
+                    enabled = [q.is_enabled for q in getattr(module, f"{proj}_weight_quantizers")]
+                    found[f"{name}.{proj}"] = (
+                        "quantized" if all(enabled) else "mixed" if any(enabled) else "unquantized"
+                    )
+        return found
+
+    def agree(per_rank: list[dict[str, str]]) -> dict[str, str]:
+        # A projection's state where every rank reports the same one, else what each rank reported.
+        merged: dict[str, str] = {}
+        for key in sorted(set().union(*per_rank)):
+            seen = [found.get(key, "absent") for found in per_rank]
+            merged[key] = (
+                seen[0]
+                if len(set(seen)) == 1
+                else ", ".join(f"rank {r}: {state}" for r, state in enumerate(seen))
+            )
+        return merged
+
+    agreed = all_reduce("fused expert quantization", states, agree)
+    unsupported = {k: v for k, v in agreed.items() if v not in ("quantized", "unquantized")}
+    if unsupported:
+        raise NotImplementedError(
+            "The expert-parallel export writes each fused-experts projection as one tensor, so its "
+            "experts must be all quantized or all unquantized, on every rank: "
+            + "; ".join(f"{key} ({state})" for key, state in unsupported.items())
+        )
 
 
 def _process_together(
