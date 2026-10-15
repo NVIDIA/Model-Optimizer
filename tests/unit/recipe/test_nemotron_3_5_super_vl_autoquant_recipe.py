@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Resolve the fixed-MTP recipe on native modules without running GPU calibration."""
+"""Resolve the Super 3.5 VL AutoQuantize recipe without running GPU calibration."""
 
 import pytest
 import torch
@@ -69,7 +69,10 @@ def test_4p9_mse_recipe_resolves_search_and_fixed_mtp(wrapped, decoder_name, wit
         model.vision_model = torch.nn.Linear(32, 32)
         prefix = "language_model."
 
-    recipe = load_recipe("model_type/nemotron_h/auto_quantize/nvfp4_mse_fp8_mtp_fixed_at_4p9bits")
+    recipe = load_recipe(
+        "models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/auto_quantize/"
+        "nvfp4_mse_fp8_mtp_fixed_at_4p9bits"
+    )
     aq = recipe.auto_quantize
     fixed = QuantRecipe(recipe.quantize.model_dump(), name="fixed_mtp")
     assert fixed.config.algorithm == {"method": "mse", "fp8_scale_sweep": True}

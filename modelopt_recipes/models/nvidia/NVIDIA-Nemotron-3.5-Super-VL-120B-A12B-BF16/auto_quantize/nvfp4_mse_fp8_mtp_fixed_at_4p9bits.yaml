@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# AutoQuantize search for nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16.
+# This selects a mixed-precision candidate, not the released QAD-refined weights.
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:
   base_cost_excluded_layers: configs/auto_quantize/units/base_cost_excluded_layers
@@ -22,11 +24,12 @@ imports:
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: auto_quantize
   description: >-
-    Nemotron-H AutoQuantize at 4.9 effective bits over weight-MSE NVFP4, FP8, and BF16,
+    AutoQuantize for nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 at
+    4.9 effective bits over weight-MSE NVFP4, FP8, and BF16,
     with MSE-calibrated MTP routed/shared experts fixed at NVFP4 W4A4, calibrated MTP FP8 KV,
     and base-model FP8 KV casting. Other MTP modules and vision/audio remain in BF16.
+    This search does not reproduce the released QAD-refined weights.
 
 quantize:
   algorithm: &mse

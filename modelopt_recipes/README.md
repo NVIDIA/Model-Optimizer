@@ -92,6 +92,11 @@ Hugging Face Hub, ModelScope, etc.). Browse [`models/`](models/) for the
 available checkpoints; see [`models/README.md`](models/README.md) for the naming
 convention.
 
+For NVIDIA Nemotron 3.5 Super VL, the checkpoint-specific
+[AutoQuantize recipe](models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/auto_quantize/)
+searches NVFP4/FP8/BF16 placements with fixed MTP expert quantization. It produces
+a search candidate, not the released QAD-refined weights.
+
 ---
 
 ## Adding a recipe
