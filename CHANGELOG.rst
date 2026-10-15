@@ -6,6 +6,10 @@ Changelog
 
 **New Features**
 
+*Quantization*
+
+- Add deployable tied-LSQ support for static MXFP4 weights, including learnable E8M0 block scales and export that preserves the trained scales.
+
 **Backward Breaking Changes**
 
 **Deprecations**

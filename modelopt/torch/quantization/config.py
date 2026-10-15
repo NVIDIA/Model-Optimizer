@@ -1342,8 +1342,9 @@ class LSQConfig(QuantizeAlgorithmConfig):
     learnt. Dual-LSQ generally performs better than LSQ for learning NVFP4 per-block
     weight scales.
 
-    Currently, only NVFP4 per-block weight-scale learning is supported. Both LSQ and
-    Dual-LSQ use a reparameterization that learns ``amax`` instead of scale directly,
+    NVFP4 supports LSQ and Dual-LSQ per-block weight-scale learning. Static MXFP4
+    supports tied LSQ only because the deployed format stores one E8M0 scale per block.
+    Both formats use a reparameterization that learns ``amax`` instead of scale directly,
     where ``scale = amax / max_bound``.
 
     ``learnable_amax`` controls which amax parameters are learnable vs frozen:

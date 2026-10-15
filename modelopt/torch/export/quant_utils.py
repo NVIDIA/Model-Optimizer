@@ -184,6 +184,37 @@ def get_activation_scaling_factor(
     return get_scaling_factor(input_quantizer)
 
 
+def get_weight_amax_for_export(weight_quantizer: TensorQuantizer) -> torch.Tensor | None:
+    """Return the effective weight amax after LSQ reparameterization."""
+    if getattr(weight_quantizer, "_lsq", False):
+        return getattr(weight_quantizer, "_amax_post", None)
+    return getattr(weight_quantizer, "_amax", None)
+
+
+def set_weight_amax_for_export(weight_quantizer: TensorQuantizer, amax: torch.Tensor) -> None:
+    """Update the effective export amax, allowing fused-weight shape rewrites."""
+    if not getattr(weight_quantizer, "_lsq", False):
+        if hasattr(weight_quantizer, "_amax"):
+            delattr(weight_quantizer, "_amax")
+        weight_quantizer.amax = amax
+        return
+
+    current = getattr(weight_quantizer, "_amax_post", None)
+    if current is None:
+        raise RuntimeError("LSQ weight quantizer has no post-amax to export.")
+    value = amax.detach().to(device=current.device, dtype=current.dtype)
+    if current.shape == value.shape:
+        with torch.no_grad():
+            current.copy_(value)
+    elif isinstance(current, nn.Parameter):
+        weight_quantizer._amax_post = nn.Parameter(
+            value,
+            requires_grad=current.requires_grad,
+        )
+    else:
+        weight_quantizer._amax_post = value
+
+
 def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") -> torch.Tensor:
     """Returns the weight scaling factor."""
     # module.weight_quantizer could be a TensorQuantizer (for algorithms except W4A8) or
@@ -226,9 +257,16 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
         )[0]
 
     if quantization_format in [QUANTIZATION_W4A8_MXFP4_FP8, QUANTIZATION_MXFP4]:
-        return MXFP4QTensor.quantize(weight, block_size=weight_quantizer.block_sizes[-1])[
-            1
-        ].reshape(*weight.shape[:-1], -1)
+        if getattr(weight_quantizer, "is_mxfp4_static", False):
+            amax = get_weight_amax_for_export(weight_quantizer)
+            assert amax is not None, "Static MXFP4 weight quantizer has no export amax."
+            scale = weight_quantizer._block_scale_from_amax(amax, quantize=True)
+            e8m0_scale = MXFP4QTensor.encode_e8m0_scale(scale)
+        else:
+            e8m0_scale = MXFP4QTensor.quantize(weight, block_size=weight_quantizer.block_sizes[-1])[
+                1
+            ]
+        return e8m0_scale.reshape(*weight.shape[:-1], -1)
 
     if quantization_format == QUANTIZATION_MXFP8:
         return MXFP8QTensor.get_weights_scaling_factor_from_quantizer(weight, weight_quantizer)
@@ -962,7 +1000,12 @@ def to_quantized_weight(
         )[0]._quantized_data
 
     if quantization in [QUANTIZATION_W4A8_MXFP4_FP8, QUANTIZATION_MXFP4]:
-        return MXFP4QTensor.quantize(weight, block_size=block_size)[0]._quantized_data
+        assert weights_scaling_factor is not None, (
+            "Weights scaling factor not passed. Unable to quantize to MXFP4 format."
+        )
+        return MXFP4QTensor.quantize_with_scale(
+            weight, weights_scaling_factor, block_size=block_size
+        )._quantized_data
 
     raise NotImplementedError(f"quantization format {quantization} not supported")
 

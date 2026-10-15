@@ -56,6 +56,18 @@ def _make_int4_static_quantizer():
     return StaticBlockScaleQuantizer.from_tensor_quantizer(tq)
 
 
+def _make_mxfp4_static_quantizer():
+    tq = TensorQuantizer()
+    tq._num_bits = (2, 1)
+    tq._unsigned = False
+    tq._narrow_range = True
+    tq._disabled = False
+    tq._block_sizes = {-1: 32, "type": "static", "scale_bits": (8, 0)}
+    tq._pass_through_bwd = True
+    tq.register_buffer("_amax", torch.ones(4) * 6.0)
+    return StaticBlockScaleQuantizer.from_tensor_quantizer(tq)
+
+
 def _skip_scale_calibration(monkeypatch):
     monkeypatch.setattr(
         "modelopt.torch.quantization.model_calib._run_weight_scale_calibration",
@@ -257,6 +269,41 @@ class TestEnableLSQ:
 
         assert q._amax.device.type == "cpu"
         assert q.global_amax.device.type == "cpu"
+
+
+class TestMXFP4EnableLSQ:
+    """Tests for deployable tied MXFP4 LSQ configuration."""
+
+    def test_tied_scale_is_learnable_without_global_amax(self):
+        q = _make_mxfp4_static_quantizer()
+
+        q.enable_lsq(learnable_amax=["pre", "post"], tied_amax=True)
+
+        assert q.is_mxfp4_static
+        assert q.is_mxfp(4)
+        assert isinstance(q._amax_post, nn.Parameter)
+        assert q.amax_pre is q.amax_post
+
+    @pytest.mark.parametrize(
+        ("learnable_amax", "tied_amax"),
+        [(["pre", "post"], False), (["post"], True), (["pre"], True)],
+    )
+    def test_non_deployable_scale_configuration_raises(self, learnable_amax, tied_amax):
+        q = _make_mxfp4_static_quantizer()
+
+        with pytest.raises(ValueError, match="MXFP4 LSQ requires"):
+            q.enable_lsq(learnable_amax=learnable_amax, tied_amax=tied_amax)
+
+    def test_e8m0_scale_projection_preserves_gradient(self):
+        q = _make_mxfp4_static_quantizer()
+        q.enable_lsq(learnable_amax=["pre", "post"], tied_amax=True)
+
+        scale = q._block_scale_from_amax(q.amax_post, quantize=True)
+        scale.sum().backward()
+
+        assert torch.equal(scale, torch.ones_like(scale))
+        assert q._amax_post.grad is not None
+        assert torch.all(q._amax_post.grad > 0)
 
 
 class TestLSQWeightIteration:

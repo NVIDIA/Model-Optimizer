@@ -1109,15 +1109,14 @@ def update_quant_cfg_with_kv_cache_quant(
 def promote_static_block_weight_quantizers(model: nn.Module) -> int:
     """Convert eligible static-block weight TensorQuantizers in-place.
 
-    After max calibration sets per-block amax values, NVFP4 static quantizers
-    need to be promoted so they use the two-level scaling path (global amax +
-    per-block amax) instead of the generic E4M3 path.
+    After max calibration sets per-block amax values, static NVFP4 and MXFP4
+    quantizers need promotion to their format-specific block-scale paths.
 
     If the quantizer belongs to a shared state with a populated ``global_amax`` inside
     ``model``, the promoted quantizer's ``_global_amax`` buffer is tied to that canonical
     state buffer instead of receiving an independent copy.
 
-    Returns the number of NVFP4 quantizers converted.
+    Returns the number of floating-point block quantizers converted.
     """
     from modelopt.torch.quantization.nn import (
         QuantModule,
@@ -1186,6 +1185,11 @@ def promote_static_block_weight_quantizers(model: nn.Module) -> int:
                     StaticBlockScaleQuantizer.from_tensor_quantizer(
                         quantizer, global_amax=global_amax
                     )
+                if not already_promoted:
+                    converted += 1
+            elif quantizer.is_mxfp4_static:
+                already_promoted = isinstance(quantizer, StaticBlockScaleQuantizer)
+                StaticBlockScaleQuantizer.from_tensor_quantizer(quantizer)
                 if not already_promoted:
                     converted += 1
             elif isinstance(quantizer._num_bits, int):

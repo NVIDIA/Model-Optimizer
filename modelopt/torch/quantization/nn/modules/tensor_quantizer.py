@@ -316,7 +316,7 @@ class TensorQuantizer(nn.Module):
         """Return maxbound for quantization."""
         if self._num_bits == (4, 3):
             return 448.0
-        if self._num_bits == (2, 1) and self._block_sizes.get("scale_bits") == (4, 3):
+        if self._num_bits == (2, 1):
             return 6.0
         return (1 << (self._num_bits - 1 + int(self._unsigned))) - 1
 
@@ -580,11 +580,22 @@ class TensorQuantizer(nn.Module):
             and self._block_sizes.get("scale_bits") == (4, 3)
         )
 
+    @property
+    def is_mxfp4_static(self):
+        """True for static E2M1 weights with block-32 E8M0 scales."""
+        return (
+            self.is_static_block_quant
+            and self._num_bits == (2, 1)
+            and self._block_sizes is not None
+            and self._block_sizes.get(-1) == 32
+            and self._block_sizes.get("scale_bits") == (8, 0)
+        )
+
     def is_mxfp(self, bits):
         """Check if is MXFP4/MXFP6/MXFP8."""
         if bits == 4:
             return (
-                self.is_mx_format
+                (self.is_mx_format or self.is_mxfp4_static)
                 and self.num_bits == (2, 1)
                 and self.block_sizes.get(-1, None) == 32
             )
@@ -1634,8 +1645,11 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
 
     @property
     def has_quantized_block_scale(self):
-        """True when per-block scales are FP8 (E4M3) quantized (format-only check)."""
-        return self._block_sizes is not None and self._block_sizes.get("scale_bits") == (4, 3)
+        """True when per-block scales use a discrete floating-point format."""
+        return self._block_sizes is not None and self._block_sizes.get("scale_bits") in {
+            (4, 3),
+            (8, 0),
+        }
 
     def _apply(self, fn, recurse=True):
         """Apply module transforms without rounding static scale state."""
@@ -1690,7 +1704,13 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         assert hasattr(self, "_amax"), "enable_lsq requires a calibrated _amax."
         if quantize_scales is None:
             quantize_scales = self.has_quantized_block_scale
-        if quantize_scales:
+        learn = {learnable_amax} if isinstance(learnable_amax, str) else set(learnable_amax)
+        if self.is_mxfp4_static and (not tied_amax or learn not in (set(), {"pre", "post"})):
+            raise ValueError(
+                "MXFP4 LSQ requires tied_amax=True and learnable_amax=[] or ['pre', 'post'] "
+                "because the deployed format stores one E8M0 scale per block."
+            )
+        if quantize_scales and not self.is_mxfp4_static:
             assert self.global_amax is not None, (
                 "enable_lsq(quantize_scales=True) requires global_amax to be set."
             )
@@ -1701,7 +1721,6 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         if dtype is not None:
             amax = amax.to(dtype)
         delattr(self, "_amax")
-        learn = {learnable_amax} if isinstance(learnable_amax, str) else set(learnable_amax)
 
         if "post" in learn:
             self._amax_post = nn.Parameter(amax.clone(), requires_grad=True)
@@ -1729,6 +1748,13 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
     def _block_scale_from_amax(self, amax: torch.Tensor, quantize: bool) -> torch.Tensor:
         """Compute the per-block scale from a per-block amax, optionally FP8-quantizing it."""
         if quantize:
+            if self.is_mxfp4_static:
+                scale = _amax_to_scale(
+                    amax,
+                    self._quant_max_bound,
+                    min_value=2.0**MXFP4QTensor.E8M0_MIN_EXPONENT,
+                )
+                return MXFP4QTensor.project_e8m0_scale_ste(scale)
             per_tensor_scale = _amax_to_scale(self.global_amax, self._quant_max_bound)
             min_value = _FP8_E4M3_MIN_POSITIVE * per_tensor_scale.view(-1)
             scale = _amax_to_scale(amax, self._quant_max_bound, min_value=min_value)

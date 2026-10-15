@@ -28,11 +28,19 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.export.model_utils import _release_exported_tensors
 from modelopt.torch.export.moe_utils import _export_fused_experts
-from modelopt.torch.export.quant_utils import get_quant_config, get_quantization_format
+from modelopt.torch.export.quant_utils import (
+    get_quant_config,
+    get_quantization_format,
+    get_weight_amax_for_export,
+)
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
 from modelopt.torch.quantization.model_calib import local_hessian_calibrate
-from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    QuantModuleRegistry,
+    StaticBlockScaleQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.quantization.plugins.huggingface import (
     _fused_experts_wrapper_class,
     _is_fused_experts_module,
@@ -594,7 +602,8 @@ class TestExportFusedExperts:
             if QuantModuleRegistry.get(expert_type) is not None:
                 QuantModuleRegistry.unregister(expert_type)
 
-    def test_per_block_amax_reshape_for_fused_export(self, monkeypatch):
+    @pytest.mark.parametrize("lsq", [False, True])
+    def test_per_block_amax_reshape_for_fused_export(self, monkeypatch, lsq):
         """Per-block ``_amax`` (NVFP4 static, row axis collapsed) must be reshaped
         before dim-0 slicing so gate's blocks and up's blocks are split correctly.
 
@@ -633,6 +642,13 @@ class TestExportFusedExperts:
                 wq = converted.gate_up_proj_weight_quantizers[idx]
                 wq._disabled = False
                 wq.amax = flat
+                if lsq:
+                    StaticBlockScaleQuantizer.from_tensor_quantizer(wq)
+                    wq.enable_lsq(
+                        quantize_scales=False,
+                        learnable_amax=["pre", "post"],
+                        tied_amax=True,
+                    )
 
                 # down_proj quantizers also need to look calibrated (otherwise
                 # the export-time fallback would compute amax from each weight
@@ -649,7 +665,8 @@ class TestExportFusedExperts:
             def _spy_export(wrapper, dtype, **_kwargs):
                 w = wrapper.weight.data
                 wq = wrapper.weight_quantizer
-                amax = wq._amax.detach().clone() if hasattr(wq, "_amax") else None
+                export_amax = get_weight_amax_for_export(wq)
+                amax = export_amax.detach().clone() if export_amax is not None else None
                 for idx in range(NUM_EXPERTS):
                     g_slice = converted.gate_up_proj.data[idx, :INTERMEDIATE_DIM, :]
                     u_slice = converted.gate_up_proj.data[idx, INTERMEDIATE_DIM:, :]
