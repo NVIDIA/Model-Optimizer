@@ -78,6 +78,19 @@ def resolve_aux_layers(args: argparse.Namespace, num_hidden_layers: int) -> list
     return sorted(set(indices))
 
 
+def add_no_aux_hidden_states_args(parser: argparse.ArgumentParser) -> None:
+    """Register the ``--no-aux-hidden-states`` flag on ``parser``."""
+    parser.add_argument(
+        "--no-aux-hidden-states",
+        action="store_true",
+        help=(
+            "Skip dumping aux_hidden_states. External (standalone) draft training never "
+            "reads them, and they dominate the dump: one plane per selected layer against "
+            "a single plane for the base hidden state."
+        ),
+    )
+
+
 def add_answer_only_loss_args(parser: argparse.ArgumentParser) -> None:
     """Register ``--answer-only-loss`` and ``--chat-template`` flags on ``parser``."""
     parser.add_argument(

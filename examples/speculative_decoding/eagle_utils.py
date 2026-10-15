@@ -61,6 +61,7 @@ def make_speculative_data_module(
     answer_only_loss=False,
     shift_labels=True,
     final_aux_is_base_hidden=False,
+    aux_hidden_states_optional=False,
 ) -> dict:
     """Create data module for speculative decoding training.
 
@@ -70,6 +71,8 @@ def make_speculative_data_module(
         final_aux_is_base_hidden: Streaming only. True when the draft's top aux layer is the
             base's final layer, so the last captured plane is both the final aux feature and
             the base (KD-target) hidden instead of an extra dedicated plane.
+        aux_hidden_states_optional: accept dumps written with ``--no-aux-hidden-states``.
+            Only modes that never read the aux planes may set this.
     """
     # Load chat template from file if provided
     chat_template = None
@@ -167,7 +170,10 @@ def make_speculative_data_module(
         if data_args.sample_size > 0:
             dumped_files = dumped_files[: data_args.sample_size]
         train_dataset = OfflineSupervisedDataset(
-            dumped_files, answer_only_loss=answer_only_loss, tokenizer=tokenizer
+            dumped_files,
+            answer_only_loss=answer_only_loss,
+            tokenizer=tokenizer,
+            aux_hidden_states_optional=aux_hidden_states_optional,
         )
         data_collator = EagleOfflineDataCollator(train_len=train_len)
 
@@ -438,10 +444,21 @@ class EagleTrainingPlot(TrainerCallback):
         except Exception:
             print_rank_0(f"Step {state.global_step} Training Acc: {average_acc}")
         # Log accuracy to HF Trainer's logs dict (picked up by TensorBoard)
-        logs = kwargs.get("logs") or {}
-        for i, draft_acc in enumerate(average_acc):
-            for j, step_acc in enumerate(draft_acc):
-                logs[f"train_acc/parallel_{i}_step_{j}"] = float(step_acc)
+        logs = kwargs.get("logs")
+        if logs is None:
+            logs = {}
+        acc_logs = {
+            f"train_acc/parallel_{i}_step_{j}": float(step_acc)
+            for i, draft_acc in enumerate(average_acc)
+            for j, step_acc in enumerate(draft_acc)
+        }
+        logs.update(acc_logs)
+        # Trainer.log() appends a *copy* of logs to state.log_history before invoking
+        # callbacks, so mutating logs alone never reaches trainer_state.json -- which is
+        # the only file check_regression.py reads. Without this, MIN_FINAL_ACC is
+        # configured, printed to the console every log step, and silently never checked.
+        if state.log_history:
+            state.log_history[-1].update(acc_logs)
         if self.estimate_ar:
             # Calculate mean training AR since last log
             # NOTE: This is only an estimate of the real AR.

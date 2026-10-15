@@ -199,6 +199,24 @@ def test_lsq_fp4_fake_quantize_differentiable(tied_amax):
     )
 
 
+@pytest.mark.parametrize("tied_amax", [False, True])
+def test_lsq_fp4_small_global_amax(tied_amax):
+    """A block representable in NVFP4 survives LSQ fake quant even when global_amax < 6 * 2**-24."""
+    device = torch.device("cuda")
+    x = torch.full((1, 16), 2.0**-22, device=device)
+    tq = TensorQuantizer()
+    tq._num_bits = (2, 1)
+    tq._unsigned = False
+    tq._narrow_range = True
+    tq._disabled = False
+    tq._block_sizes = {-1: 16, "type": "static", "scale_bits": (4, 3)}
+    tq.register_buffer("_amax", x.abs().amax(-1))
+    sbsq = StaticBlockScaleQuantizer.from_tensor_quantizer(tq, global_amax=x.abs().amax())
+    sbsq.enable_lsq(quantize_scales=True, tied_amax=tied_amax)
+
+    assert torch.equal(sbsq._fake_quantize(x), x)
+
+
 def test_lsq_fp4_cast_ste():
     """Test fp4_cast_ste on GPU."""
     device = torch.device("cuda")

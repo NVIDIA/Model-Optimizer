@@ -423,6 +423,11 @@ recipes, for Step-3.7 checkpoints; Step-3.5 has its own recipe above.
   `static`. Use `--calib_with_images` on VL checkpoints: the vision tower must see image batches
   even though it stays BF16.
 
+  Rules list both Hugging Face and Megatron-Core spellings where they differ (attention
+  `linear_qkv`/`linear_proj`, `output_layer`, the MTP `mtp_model_layer.layers`), so the same
+  recipe applies under `examples/megatron_bridge/quantize.py`; there, static NVFP4 weights need
+  `--tp_size 1`.
+
 ### Algorithm overrides — `gemma`, `gemma4`, `mpt`
 
 These quantize the **same layers** as the general recipes; only the
