@@ -15,7 +15,7 @@ Changelog
 
 - Added experimental NVFP4 recurrent-state fake quantization using TensorQuantizer block16 E4M3 scales for linear-attention QAT.
 
-- Add optional ReplaySSM state QAT: GDN supports separate FP32 recurrence and FP8 read checkpoints through upstream ReplaySSM emulation, and the compatible INT8/Hadamard fork supports GDN/KDA shared checkpoints. These profiles require their respective optional backends.
+- Add optional ReplaySSM state QAT: GDN supports separate FP32 recurrence and FP8 read checkpoints through upstream ReplaySSM emulation, and the compatible INT8/Hadamard fork supports GDN/KDA shared checkpoints. These profiles require their respective optional backends; experimental single-GPU vLLM 0.30 serving supports the two-precision GDN profile with one active request.
 - Add Q8_0 weight-only quantization with 32-value GGML blocks, packed unified HF and Megatron export, and a built-in ``q8_0`` PTQ recipe.
 - Add Hugging Face PTQ calibration and export support for Nemotron-H MTP modules, preserving calibrated expert input scales.
 - Backfill checkpoint aliases for three more published NVFP4 releases: ``moonshotai/Kimi-K2.7-Code``, ``google/gemma-4-26B-A4B-it`` and ``google/diffusiongemma-26B-A4B-it``. Each imports an existing general recipe wholesale rather than copying its body.
