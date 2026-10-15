@@ -52,7 +52,12 @@ from safetensors.torch import load_file
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 from modelopt.torch.quantization.utils import patch_fsdp_mp_dtypes
-from modelopt.torch.utils.distributed import fsdp2_wrap, is_fsdp2_model
+from modelopt.torch.utils.distributed import (
+    DistributionPlan,
+    fsdp2_wrap,
+    is_fsdp2_model,
+    set_distribution_plan,
+)
 
 # Small enough to force the tiny model across several shards, so the multi-file layout -- and the
 # weight index that makes it loadable -- are exercised rather than collapsing to one model.safetensors.
@@ -155,6 +160,9 @@ def _ptq_and_export(rank, size, *, src_dir, export_dir, quant_cfg, **export_kwar
         model.eval()
 
         fsdp2_wrap(model)
+        set_distribution_plan(
+            model, DistributionPlan(size, dense="fsdp")
+        )  # wrapped by hand, so recorded here, as load_pretrained would
         # The no-gather writer is selected by this predicate plus the opt-in below, so assert it here:
         # without it the export would silently fall back to the rank-0 gather and the test would pass
         # while never touching the code under test.
@@ -275,6 +283,7 @@ def _export_with(rank, size, *, src_dir, export_dir, **export_kwargs):
         model = AutoModelForCausalLM.from_pretrained(src_dir, dtype=torch.bfloat16).to("cuda")
         model.eval()
         fsdp2_wrap(model)
+        set_distribution_plan(model, DistributionPlan(size, dense="fsdp"))
         assert is_fsdp2_model(model)
         torch.distributed.barrier()
         with _no_gather_export():
