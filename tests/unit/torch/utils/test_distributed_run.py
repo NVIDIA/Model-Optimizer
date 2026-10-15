@@ -85,6 +85,27 @@ def test_every_submodule_reads_the_recorded_plan():
     assert all(distribution_plan(module) is plan for module in model.modules())
 
 
+def test_a_recorded_plan_is_not_replaced_by_another():
+    """A model is distributed once; a second, different plan would leave readers disagreeing."""
+    model, plan = _model(), DistributionPlan(world_size=8, ep_size=8)
+    set_distribution_plan(model, plan)
+    set_distribution_plan(model, DistributionPlan(world_size=8, ep_size=8))  # the same plan again
+
+    with pytest.raises(ValueError, match="a model is distributed once"):
+        set_distribution_plan(model, DistributionPlan(world_size=8, dense="fsdp"))
+    assert all(distribution_plan(module) == plan for module in model.modules())
+
+
+def test_a_plan_recorded_on_a_submodule_is_not_replaced_either():
+    """Nothing is recorded when any submodule already carries another plan."""
+    model = _model()
+    set_distribution_plan(model[1], DistributionPlan(world_size=8, ep_size=8))
+
+    with pytest.raises(ValueError, match="a model is distributed once"):
+        set_distribution_plan(model, DistributionPlan(world_size=8))
+    assert distribution_plan(model) == DistributionPlan()
+
+
 def test_a_model_with_no_plan_is_a_single_process():
     assert distribution_plan(_model()) == DistributionPlan()
 

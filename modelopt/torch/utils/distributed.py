@@ -348,7 +348,17 @@ def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> Non
     Code handed a submodule, such as a VLM's language model, then reads the same plan as code handed
     the whole model. ``load_pretrained`` records the plan it loads by; code that distributes a model
     itself records it here before calibrating or exporting the model.
+
+    A model is distributed once: a plan other than the one already recorded on the model, or on any
+    of its submodules, raises instead of replacing it, and leaves the model as it was.
     """
+    for module in model.modules():
+        recorded = getattr(module, _PLAN_ATTR, None)
+        if recorded is not None and recorded != plan:
+            raise ValueError(
+                f"{type(module).__name__} is already recorded as distributed by {recorded!r}; a "
+                f"model is distributed once, so {plan!r} cannot replace it."
+            )
     for module in model.modules():
         setattr(module, _PLAN_ATTR, plan)
 
