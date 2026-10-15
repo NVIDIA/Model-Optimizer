@@ -344,8 +344,9 @@ def test_a_whole_model_load_refuses_a_sharded_loads_config(serve, auto_class, tm
 # --------------------------------------------------------------------------------- fsdp2_wrap
 
 
-def test_fsdp2_wrap_records_that_the_model_is_sharded_over_the_process_group(monkeypatch):
-    """Whatever wraps the model, the export and calibration read the plan rather than the wrap."""
+def test_fsdp2_wrap_leaves_the_plan_to_the_load(monkeypatch):
+    """load_pretrained records the plan once, at the end of the load; the wrap it calls records none,
+    so a caller that wraps a model itself must record one before anything reads it."""
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
     model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
@@ -353,9 +354,9 @@ def test_fsdp2_wrap_records_that_the_model_is_sharded_over_the_process_group(mon
         LayerActivationCollector, "get_decoder_layers", staticmethod(lambda model: list(model))
     )
     monkeypatch.setattr(model_load_utils, "fully_shard", lambda module, **kwargs: None)
-    monkeypatch.setattr(model_load_utils, "size", lambda group=None: 4)
+    monkeypatch.setattr(dist, "size", lambda group=None: 4)
 
     model_load_utils.fsdp2_wrap(model)
 
-    plan = DistributionPlan(4, dense="fsdp")
-    assert all(distribution_plan(module) == plan for module in model.modules())
+    with pytest.raises(RuntimeError, match="no distribution plan recorded"):
+        distribution_plan(model)

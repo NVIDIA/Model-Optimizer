@@ -26,7 +26,11 @@ from safetensors.torch import load_file
 from torch.distributed.tensor import DTensor
 
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
-from modelopt.torch.utils.distributed import broadcast_state_dict
+from modelopt.torch.utils.distributed import (
+    DistributionPlan,
+    broadcast_state_dict,
+    set_distribution_plan,
+)
 from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
 
 VOCAB_SIZE = 64
@@ -61,6 +65,7 @@ def _test_parallel_load_and_export(rank, size, ckpt_dir, export_dir, cpu_offload
         size,
         cpu_offload=cpu_offload,
     )
+    set_distribution_plan(model, DistributionPlan(size, dense="fsdp"))
 
     # Decoder layers AND root params (embed/lm_head) are sharded DTensors under shard_root=True.
     decoder_params = list(model.model.layers[0].parameters())
@@ -106,6 +111,7 @@ def _test_carry_over_unplaced_weights(rank, size, ckpt_dir, export_dir, orphan_p
     """Load, export, and require the weights the model could not place to survive."""
     device = torch.device(f"cuda:{rank}")
     model = parallel_load_and_prepare_fsdp2(ckpt_dir, device, rank, size)
+    set_distribution_plan(model, DistributionPlan(size, dense="fsdp"))
 
     unplaced = getattr(model, "_modelopt_unplaced_source_keys", None)
     assert unplaced, (
