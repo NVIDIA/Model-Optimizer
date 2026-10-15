@@ -1267,8 +1267,9 @@ def load_and_prepare_ep(
     """Load + shard a MoE causal LM for expert-parallel PTQ via the DP=EP all-to-all transport.
 
     ``plan`` is the expert-parallel :class:`~modelopt.torch.utils.distributed.DistributionPlan` to load
-    by (``ep_size > 1``), for the whole process group; the loaded model records it
-    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`).
+    by (``ep_size > 1``), for the whole process group. It records no plan on the model: the caller
+    does (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), as
+    :func:`load_pretrained` does for every load.
 
     Builds a ``(dp, ep)`` device mesh and loads experts EP-sharded over the ``ep`` submesh
     (``enable_expert_parallel=True`` -- each rank owns ``num_experts / ep`` experts as grouped-GEMM
@@ -1505,5 +1506,4 @@ def load_and_prepare_ep(
         torch.distributed.all_reduce(torch.ones(1, device=warm_device), group=_sub.get_group())
         torch.cuda.synchronize()
     torch.distributed.barrier()
-    set_distribution_plan(model, plan)
     return model
