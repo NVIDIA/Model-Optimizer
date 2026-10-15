@@ -2097,6 +2097,20 @@ def export_hf_checkpoint(
     # because the carry-over gate needs it and runs ahead of them (the layerwise and diffusers paths
     # return before those are reached).
     _fsdp2_sharded, _ep_sharded = _hf_shard_flags(model)
+    if _fsdp2_sharded and _ep_sharded:
+        plan = distribution_plan(model)
+        # With fewer expert-parallel ranks than the world, FSDP2 shards the dense part within each
+        # expert-parallel group and replicates it across them, and the no-gather writer every
+        # expert-parallel export takes assembles a dense tensor only from a dim-0 shard over the
+        # whole world. Refused here, before anything is folded, not after the export has begun.
+        if plan.edp > 1:
+            raise NotImplementedError(
+                f"The export cannot write this plan's dense part: with ep_size={plan.ep_size} of "
+                f"world_size={plan.world_size} and dense='fsdp', it is sharded within each of the "
+                f"{plan.edp} expert-parallel groups and replicated across them. Set "
+                f"MODELOPT_EP_DEGREE={plan.world_size} if that divides the expert count, or "
+                "MODELOPT_FSDP_SIZE=1 to replicate the dense part."
+            )
     # Either form of sharding, including the hybrid where both hold: a model can be FSDP2-dense AND
     # expert-parallel, so these are tracked separately rather than as an either/or.
     _sharded_export = _ep_sharded or _fsdp2_sharded

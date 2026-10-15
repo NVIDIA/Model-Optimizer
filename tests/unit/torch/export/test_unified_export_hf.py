@@ -1221,3 +1221,23 @@ def test_the_export_takes_how_the_model_is_sharded_from_its_plan(dense, ep_size,
     set_distribution_plan(model, DistributionPlan(2, ep_size, dense))
 
     assert _hf_shard_flags(model) == flags
+
+
+def test_an_expert_parallel_plan_with_replicated_dense_shards_is_refused_before_folding(tmp_path):
+    """Below the world size, EP leaves FSDP2's dense shards replicated across the expert-parallel
+    groups, which the no-gather writer cannot write: refused before the export folds anything."""
+    from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
+    from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
+
+    model = torch.nn.Sequential(torch.nn.Linear(16, 16))
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))
+    set_distribution_plan(model, DistributionPlan(4, ep_size=2, dense="fsdp"))
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+
+    with pytest.raises(NotImplementedError, match=r"MODELOPT_EP_DEGREE=4 .* MODELOPT_FSDP_SIZE=1"):
+        export_hf_checkpoint(model, export_dir=tmp_path / "export")
+
+    after = model.state_dict()
+    assert after.keys() == before.keys()
+    assert all(torch.equal(after[k], v) for k, v in before.items())
+    assert not (tmp_path / "export").exists()
