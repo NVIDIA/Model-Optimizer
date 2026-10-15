@@ -623,6 +623,7 @@ def enable_sparse_validation(model_runner, sparse_config: dict) -> int:
         impl.sparse_kw = sparse_kw
         impl._sparse_validation_stats = {}
     model_runner._modelopt_sparse_validation_impls = [impl for impl, _ in selected]
+    # The checkpoint loader gives every selected layer the same skip-softmax phase map.
     model_runner._modelopt_sparse_validation_phases = tuple(
         phase
         for phase in ("prefill", "decode")

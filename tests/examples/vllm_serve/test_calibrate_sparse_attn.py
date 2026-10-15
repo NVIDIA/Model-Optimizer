@@ -25,12 +25,6 @@ import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import LlamaConfig, PreTrainedTokenizerFast
 
-from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_calibration import (
-    build_sparse_attention_config,
-    refine_scales,
-    summarize_validation,
-)
-
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "vllm_serve"
 
 
@@ -234,28 +228,6 @@ def test_main_rejects_normalized_overlap_before_engine_or_output(
         assert "must not overlap" in error
 
 
-@pytest.mark.parametrize("update_checkpoint", [False, True])
-def test_write_config_emits_artifact_and_optionally_updates_checkpoint(
-    calibration_driver, tmp_path, monkeypatch, update_checkpoint
-):
-    checkpoint = tmp_path / "checkpoint"
-    checkpoint.mkdir()
-    config_path = checkpoint / "config.json"
-    config_path.write_text(json.dumps({"model_type": "test"}))
-    sparse_config = {"config_groups": {"group_0": {"algorithm": "skip_softmax"}}}
-    monkeypatch.chdir(tmp_path)
-
-    calibration_driver._write_config(str(checkpoint), sparse_config, update_checkpoint)
-
-    assert json.loads((tmp_path / "sparse_attention_config.json").read_text()) == sparse_config
-    checkpoint_config = json.loads(config_path.read_text())
-    assert checkpoint_config["model_type"] == "test"
-    if update_checkpoint:
-        assert checkpoint_config["sparse_attention_config"] == sparse_config
-    else:
-        assert "sparse_attention_config" not in checkpoint_config
-
-
 def test_ruler_preflight_tokenizer_matches_serving_configuration(
     calibration_driver, tmp_path, monkeypatch
 ):
@@ -308,9 +280,17 @@ def test_ruler_preflight_tokenizer_matches_serving_configuration(
     assert calibration_driver._load_ruler_prompts(args, kwargs) == ["test prompt"]
 
 
-@pytest.mark.parametrize("outcome", ["passed", "held_out_failed", "calibration_failed"])
+@pytest.mark.parametrize(
+    ("outcome", "decode_tokens", "update_checkpoint"),
+    [
+        ("passed", 32, True),
+        ("passed", 0, False),
+        ("held_out_failed", 32, True),
+        ("calibration_failed", 32, True),
+    ],
+)
 def test_main_freezes_candidate_before_held_out_and_gates_export(
-    calibration_driver, monkeypatch, tmp_path, outcome
+    calibration_driver, monkeypatch, tmp_path, outcome, decode_tokens, update_checkpoint
 ):
     prompts_file = tmp_path / "calibration.txt"
     prompts_file.write_text("calibration prompt")
@@ -318,6 +298,13 @@ def test_main_freezes_candidate_before_held_out_and_gates_export(
     held_out_file.write_text("held-out prompt")
     output_dir = tmp_path / "output"
     calls = []
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    config_path = checkpoint / "config.json"
+    original_config = '{"sentinel": true}'
+    config_path.write_text(original_config)
+    phases = ("prefill", "decode") if decode_tokens else ("prefill",)
+    token = "hf_test_token_not_a_real_secret"
     resolved_metadata = {
         "config_groups": {
             "group_0": {"algorithm": "skip_softmax", "ignore": ["ignored_attn"]},
@@ -327,6 +314,7 @@ def test_main_freezes_candidate_before_held_out_and_gates_export(
 
     class FakeLLM:
         def __init__(self, **kwargs):
+            assert kwargs["hf_token"] == token
             assert kwargs["max_num_seqs"] == 1
             assert not kwargs["enable_prefix_caching"]
             assert not kwargs["enable_chunked_prefill"]
@@ -334,7 +322,7 @@ def test_main_freezes_candidate_before_held_out_and_gates_export(
 
         def generate(self, prompts, sampling):
             assert sampling.ignore_eos
-            assert sampling.max_tokens == 33
+            assert sampling.max_tokens == decode_tokens + 1
             calls.append(prompts)
 
         def collective_rpc(self, name, args=()):
@@ -352,14 +340,16 @@ def test_main_freezes_candidate_before_held_out_and_gates_export(
                 assert groups["group_1"] == resolved_metadata["config_groups"]["group_1"]
                 return [1]
             assert name == "sparse_validation_collect"
-            passed = outcome == "passed" or (
-                outcome == "held_out_failed" and calls[-1] == ["calibration prompt"]
-            )
+            failed_phase = None
+            if outcome == "calibration_failed":
+                failed_phase = "prefill"
+            elif outcome == "held_out_failed" and calls[-1] == ["held-out prompt"]:
+                failed_phase = "decode"
             return [
                 {
                     phase: {
                         "total": 1000,
-                        "skipped": 500 if passed else 400,
+                        "skipped": 400 if phase == failed_phase else 500,
                         "launches": 1,
                         "unmeasured_launches": 0,
                         "min_seq_len": 1024,
@@ -382,7 +372,12 @@ def test_main_freezes_candidate_before_held_out_and_gates_export(
         "argv",
         [
             "calibrate_sparse_attn.py",
-            "model",
+            str(checkpoint),
+            "--engine_kwargs",
+            json.dumps({"hf_token": token}),
+            "--decode_tokens",
+            str(decode_tokens),
+            *(["--update_checkpoint_config"] if update_checkpoint else []),
             "--prompts_file",
             str(prompts_file),
             "--validation_prompts_file",
@@ -403,8 +398,15 @@ def test_main_freezes_candidate_before_held_out_and_gates_export(
     if outcome != "calibration_failed":
         expected_calls.append(["held-out prompt"])
     assert calls == expected_calls
-    report = json.loads((output_dir / "sparse_attention_validation.json").read_text())
+    report_text = (output_dir / "sparse_attention_validation.json").read_text()
+    assert token not in report_text
+    report = json.loads(report_text)
+    assert "hf_token" not in report["engine_args"]
+    assert report["engine_args"]["max_num_seqs"] == 1
+    assert report["phases"] == list(phases)
     assert report["passed"] is passed
+    if not (passed and update_checkpoint):
+        assert config_path.read_text() == original_config
     assert (output_dir / "sparse_attention_config.json").exists() is passed
     if outcome == "calibration_failed":
         assert report["held_out_status"] == "not_run_calibration_failed"
@@ -415,89 +417,18 @@ def test_main_freezes_candidate_before_held_out_and_gates_export(
         assert exported == report["candidate_config"] == report["history"][-1]["config"]
         assert exported["config_groups"]["group_0"]["ignore"] == ["ignored_attn"]
         assert exported["config_groups"]["group_1"] == resolved_metadata["config_groups"]["group_1"]
-        validation = exported["config_groups"]["group_0"]["validation"]
+        group = exported["config_groups"]["group_0"]
+        assert group["target_sparsity"] == dict.fromkeys(phases, 0.5)
+        assert set(group["threshold_scale_factor"]) == {*phases, "formula"}
+        if update_checkpoint:
+            assert json.loads(config_path.read_text()) == {
+                "sentinel": True,
+                "sparse_attention_config": exported,
+            }
+        validation = group["validation"]
         assert validation == {
-            "target_sparsity": {"prefill": 0.5, "decode": 0.5},
+            "target_sparsity": dict.fromkeys(phases, 0.5),
             "tolerance": 0.02,
             "metric": report["metric"],
             "scope": report["scope"],
         }
-
-
-def _candidate_config():
-    return build_sparse_attention_config(
-        {phase: {"a": 4.0, "b": 0.0} for phase in ("prefill", "decode")}, 0.5
-    )
-
-
-@pytest.mark.parametrize("split", ["calibration", "held_out"])
-@pytest.mark.parametrize("phase", ["prefill", "decode"])
-def test_failed_gate_writes_receipt_but_never_modifies_checkpoint(
-    calibration_driver, tmp_path, split, phase
-):
-    checkpoint = tmp_path / "config.json"
-    checkpoint.write_text('{"sentinel": true}')
-    report = {
-        s: {p: {"passed": True} for p in ("prefill", "decode")} for s in ("calibration", "held_out")
-    }
-    report[split][phase]["passed"] = False
-    with pytest.raises(RuntimeError, match="no config exported"):
-        calibration_driver._export_validated_config(
-            str(tmp_path), _candidate_config(), report, tmp_path, True
-        )
-    assert checkpoint.read_text() == '{"sentinel": true}'
-    assert not (tmp_path / "sparse_attention_config.json").exists()
-    assert (
-        json.loads((tmp_path / "sparse_attention_validation.json").read_text())["passed"] is False
-    )
-
-
-def test_passing_gate_exports_and_preserves_existing_checkpoint_fields(
-    calibration_driver, tmp_path
-):
-    checkpoint = tmp_path / "config.json"
-    checkpoint.write_text('{"sentinel": true}')
-    report = {
-        s: {p: {"passed": True} for p in ("prefill", "decode")} for s in ("calibration", "held_out")
-    }
-    calibration_driver._export_validated_config(
-        str(tmp_path), _candidate_config(), report, tmp_path, True
-    )
-    assert json.loads(checkpoint.read_text()) == {
-        "sentinel": True,
-        "sparse_attention_config": _candidate_config(),
-    }
-    assert (
-        json.loads((tmp_path / "sparse_attention_config.json").read_text()) == _candidate_config()
-    )
-
-
-def test_prefill_only_refinement_and_export(calibration_driver, tmp_path):
-    config = _candidate_config()
-    group = config["config_groups"]["group_0"]
-    del group["target_sparsity"]["decode"]
-    del group["threshold_scale_factor"]["decode"]
-
-    def measure(candidate):
-        return summarize_validation(
-            [
-                {
-                    "prefill": {
-                        "total": 1000,
-                        "skipped": 500,
-                        "launches": 1,
-                        "unmeasured_launches": 0,
-                        "min_seq_len": 1024,
-                    }
-                }
-            ],
-            0.5,
-            0.02,
-            ("prefill",),
-        )
-
-    candidate, stats = refine_scales(config, measure, 10)
-    report = {"phases": ["prefill"], "calibration": stats, "held_out": stats}
-    calibration_driver._export_validated_config("unused", candidate, report, tmp_path, False)
-    assert report["passed"]
-    assert candidate == config

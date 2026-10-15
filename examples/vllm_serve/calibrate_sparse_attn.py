@@ -480,7 +480,7 @@ def main():
     print(json.dumps(sparse_config["config_groups"]["group_0"]["threshold_scale_factor"], indent=2))
     report = {
         "model": args.model,
-        "engine_args": llm_kwargs,
+        "engine_args": {key: value for key, value in llm_kwargs.items() if key != "hf_token"},
         "decode_tokens": args.decode_tokens,
         "phases": requested_phases,
         "target": args.target_sparse_ratio,
