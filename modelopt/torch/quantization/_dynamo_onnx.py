@@ -330,7 +330,8 @@ def _translate_quantize_op(
         source_dtype = int(inputs.dtype)
         amax = _OPSET.Cast(amax, to=output_dtype)
         scale = _OPSET.Div(amax, _OPSET.CastLike(7.0, amax))
-        output = _int4_dq(inputs, scale, axis, block_size)
+        # INT4 carriers pass a calibration axis; ONNX blocks follow the last dimension.
+        output = _int4_dq(inputs, scale, -1, block_size)
         # The TRT carrier has no schema to infer metadata when input and scale dtypes differ.
         output.dtype = onnxscript.ir.DataType(output_dtype)
         output.shape = inputs.shape
