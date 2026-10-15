@@ -107,7 +107,15 @@ def _build_calibrated_softmax_skip_config(skip_group: dict) -> dict:
     target_sparse_ratio = _normalize_target_sparse_ratio(skip_group.get("target_sparsity"))
     validation = skip_group.get("validation")
     if isinstance(validation, dict):
-        for phase, validated_target in validation.get("target_sparsity", {}).items():
+        validated_targets = validation.get("target_sparsity", {})
+        if not isinstance(validated_targets, dict):
+            warnings.warn(
+                "Ignoring malformed skip-softmax validation.target_sparsity: expected a "
+                "phase-to-target mapping. Recalibrate to restore validation metadata.",
+                stacklevel=3,
+            )
+            validated_targets = {}
+        for phase, validated_target in validated_targets.items():
             if phase in target_sparse_ratio and target_sparse_ratio[phase] != validated_target:
                 warnings.warn(
                     f"Skip-softmax {phase} target {target_sparse_ratio[phase]} differs from "

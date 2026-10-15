@@ -61,6 +61,8 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_calibration 
     build_sparse_attention_config,
     fit_from_counts,
     merge_phase_counts,
+    refine_scales,
+    summarize_validation,
 )
 
 _LOCKED_ENGINE_KWARGS = frozenset(
@@ -152,18 +154,18 @@ def _prompts_overlap(prompts: list[str], held_out: list[str]) -> bool:
 def _load_ruler_prompts(args, llm_kwargs: dict) -> list[str]:
     """Build RULER with the serving tokenizer before loading model weights."""
     # Defer vLLM imports until prompt-file and output-directory checks pass.
-    try:
-        from vllm.tokenizers import get_tokenizer
-    except ImportError:
-        from vllm.transformers_utils.tokenizer import get_tokenizer
+    from vllm.engine.arg_utils import EngineArgs
 
-    tokenizer = get_tokenizer(
-        llm_kwargs.get("tokenizer") or args.model,
-        tokenizer_mode=llm_kwargs.get("tokenizer_mode", "auto"),
-        trust_remote_code=llm_kwargs.get("trust_remote_code", False),
-        revision=llm_kwargs.get("tokenizer_revision") or llm_kwargs.get("revision"),
-        download_dir=llm_kwargs.get("download_dir"),
-    )
+    try:
+        from vllm.tokenizers import cached_tokenizer_from_config
+    except ImportError:
+        from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+
+    # Use vLLM's resolved configuration so preflight and engine tokenization agree.
+    model_config = EngineArgs(**deepcopy(llm_kwargs)).create_model_config()
+    tokenizer = cached_tokenizer_from_config(model_config)
+    if tokenizer is None:
+        raise ValueError("RULER requires tokenizer initialization; disable skip_tokenizer_init")
     return _load_prompts(tokenizer, args)
 
 
@@ -191,15 +193,6 @@ def _preflight_prompt_inputs(args, parser: argparse.ArgumentParser) -> list[str]
     return None
 
 
-def _existing_sparse_config(ckpt: str) -> dict | None:
-    """Read the checkpoint's sparse_attention_config so non-skip groups survive."""
-    config_json = Path(ckpt) / "config.json"
-    if not config_json.is_file():
-        return None
-    existing = json.loads(config_json.read_text()).get("sparse_attention_config")
-    return existing if isinstance(existing, dict) else None
-
-
 def _write_config(
     ckpt: str, sparse_config: dict, update_checkpoint: bool, output_dir: Path = Path(".")
 ) -> None:
@@ -225,83 +218,6 @@ def _write_config(
     tmp_path.write_text(json.dumps(config, indent=2))
     os.replace(tmp_path, config_json)
     print(f"[ModelOpt] Merged sparse_attention_config into {config_json}")
-
-
-def _summarize_validation(
-    worker_stats: list[dict], target: float, tolerance: float, phases=("prefill", "decode")
-) -> dict:
-    """Combine integer counts, failing closed on missing ranks, phases, or counters."""
-    result = {}
-    for phase in phases:
-        records = [worker.get(phase, {}) for worker in worker_stats]
-        total = sum(r.get("total", 0) for r in records)
-        skipped = sum(r.get("skipped", 0) for r in records)
-        complete = bool(records) and all(
-            r.get("launches", 0) > 0
-            and r.get("total", 0) > 0
-            and r.get("unmeasured_launches", 0) == 0
-            and 0 <= r.get("skipped", -1) <= r["total"]
-            for r in records
-        )
-        achieved = skipped / total if complete else None
-        result[phase] = {
-            "target": target,
-            "total": total,
-            "skipped": skipped,
-            "achieved": achieved,
-            "error_pp": 100 * (achieved - target) if complete else None,
-            "min_seq_len": min((r.get("min_seq_len", 0) for r in records), default=0),
-            "complete": complete,
-            "passed": complete and target - tolerance <= achieved <= target + tolerance,
-        }
-    return result
-
-
-def _refine_scales(config: dict, measure, max_steps: int) -> tuple[dict, dict]:
-    """Refine prefill then decode, retaining the best measured calibration candidate."""
-    config = deepcopy(config)
-    group = config["config_groups"]["group_0"]
-    measured = measure(config)
-    for phase in ("prefill", "decode"):
-        if phase not in measured:
-            continue
-        params = group["threshold_scale_factor"][phase]
-        target = group["target_sparsity"][phase]
-        multiplier = math.exp(params["b"] * target)
-        best_a = params["a"]
-        best_error = float("inf")
-        lower = 0.0
-        # lambda >= 1 disables skipping in the serving resolver. Stay inside
-        # that domain for every request, including the shortest one.
-        upper = measured[phase]["min_seq_len"] * (1.0 - 1e-6)
-        bracketed = False
-        for step in range(max_steps + 1):
-            stats = measured[phase]
-            if not stats["complete"]:
-                if step < max_steps and upper > 0 and params["a"] * multiplier >= upper:
-                    params["a"] = upper / multiplier
-                    measured = measure(config)
-                    continue
-                break
-            error = abs(stats["error_pp"])
-            if error < best_error:
-                best_error, best_a = error, params["a"]
-            if stats["passed"] or step == max_steps:
-                break
-            scale = params["a"] * multiplier
-            if stats["achieved"] < target:
-                lower = scale
-            else:
-                upper, bracketed = scale, True
-            candidate = (lower + upper) / 2 if bracketed else min(scale * 4, upper)
-            if candidate <= 0 or math.isclose(candidate, scale, rel_tol=1e-6):
-                break
-            params["a"] = candidate / multiplier
-            measured = measure(config)
-        if params["a"] != best_a:
-            params["a"] = best_a
-            measured = measure(config)
-    return config, measured
 
 
 def _export_validated_config(
@@ -500,8 +416,8 @@ def main():
     if prompts is None:
         try:
             prompts = _load_ruler_prompts(args, llm_kwargs)
-        except (OSError, ValueError) as err:
-            parser.error(str(err))
+        except (ImportError, OSError, TypeError, ValueError) as err:
+            parser.error(f"Cannot build RULER prompts with the vLLM tokenizer: {err}")
         if _prompts_overlap(prompts, held_out):
             parser.error("Calibration and held-out prompts must not overlap")
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -549,7 +465,7 @@ def main():
     sparse_config = build_sparse_attention_config(
         calibration_params,
         {"prefill": args.target_sparse_ratio, "decode": args.target_sparse_ratio},
-        existing_config=_existing_sparse_config(args.model),
+        existing_config=status["sparse_attention_config"],
     )
     group = sparse_config["config_groups"]["group_0"]
     validation = {
@@ -589,7 +505,7 @@ def main():
             raise RuntimeError("No selected sparse attention layers on a worker; cannot validate")
         llm.generate(prompts if split == "calibration" else held_out, sampling)
         counters = llm.collective_rpc("sparse_validation_collect")
-        stats = _summarize_validation(
+        stats = summarize_validation(
             counters, args.target_sparse_ratio, args.sparsity_tolerance, requested_phases
         )
         report["history"].append(
@@ -608,7 +524,7 @@ def main():
         )
         return stats
 
-    sparse_config, report["calibration"] = _refine_scales(
+    sparse_config, report["calibration"] = refine_scales(
         sparse_config, measure, args.max_refinement_steps
     )
     # Do not consume held-out data until calibration passes, or feed its results

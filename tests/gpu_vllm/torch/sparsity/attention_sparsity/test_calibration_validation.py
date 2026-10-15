@@ -56,6 +56,7 @@ def test_serving_measurement_does_not_change_output(decode):
     baseline = _forward_modelopt(impl, output=torch.empty_like(q), **args)
     impl._sparse_validation_stats = {}
     measured = _forward_modelopt(impl, output=torch.empty_like(q), **args)
+    assert impl.sparse_kw == {"skip_softmax_threshold": 0.5}
     torch.testing.assert_close(measured, baseline, rtol=0, atol=0)
     phase = "decode" if decode else "prefill"
     record = impl._sparse_validation_stats[phase]
