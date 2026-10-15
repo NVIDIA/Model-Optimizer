@@ -393,9 +393,20 @@ class HFDFlashModel(DFlashModel):
         self.mask_token_id = config.dflash_mask_token_id
         logger.info("DFlash mask_token_id: %s", self.mask_token_id)
 
+        self.dflash_draft_loss_alpha = float(
+            getattr(config, "dflash_draft_loss_alpha", 1.0)
+            if getattr(config, "dflash_draft_loss_alpha", None) is not None
+            else 1.0
+        )
         self.dflash_base_lm_loss_alpha = float(
             getattr(config, "dflash_base_lm_loss_alpha", 0.0) or 0.0
         )
+        if self.dflash_draft_loss_alpha == 0.0 and self.dflash_base_lm_loss_alpha == 0.0:
+            raise ValueError(
+                "dflash_draft_loss_alpha and dflash_base_lm_loss_alpha are both 0: the "
+                "total loss would be identically zero and training would be a no-op."
+            )
+
         if self.dflash_base_lm_loss_alpha > 0.0 and self.dflash_freeze_base_model:
             # The term would build no graph through a frozen base and silently contribute
             # nothing -- the same class of quiet no-op as an unconditional no_grad.
@@ -1024,6 +1035,12 @@ class HFDFlashModel(DFlashModel):
         # Anchor a trainable base to language modelling. Without this the only gradient
         # reaching an unfrozen base comes from the draft objective, so the base drifts
         # toward whatever is easiest to draft rather than toward predicting text.
+        if self.dflash_draft_loss_alpha != 1.0:
+            # Scaling rather than skipping: the draft module still runs, so a control arm
+            # differs from its co-trained twin by the draft GRADIENT alone and not by which
+            # code executed.
+            loss = loss * self.dflash_draft_loss_alpha
+
         if self.dflash_base_lm_loss_alpha > 0.0:
             if labels is None:
                 raise ValueError(

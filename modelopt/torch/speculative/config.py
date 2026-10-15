@@ -249,6 +249,19 @@ class DFlashConfig(ModeloptBaseConfig):
         ),
     )
 
+    dflash_draft_loss_alpha: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "Weight of the draft objective in the total loss. Default 1.0 leaves training "
+            "unchanged. Setting it to 0.0 with dflash_base_lm_loss_alpha > 0 trains the "
+            "base on language modelling alone while keeping every other code path "
+            "identical, which is what makes a control arm expressible: an experiment "
+            "measuring what a drafter costs the base needs a run that differs by the draft "
+            "gradient and nothing else."
+        ),
+    )
+
     dflash_base_lm_loss_alpha: float = ModeloptField(
         default=0.0,
         ge=0.0,

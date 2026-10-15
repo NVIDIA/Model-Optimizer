@@ -1305,3 +1305,47 @@ def test_packed_mode_is_not_treated_as_offline():
     src = Path(__file__).parents[5] / "examples/speculative_decoding/main.py"
     line = next(ln for ln in src.read_text().splitlines() if "use_offline_training =" in ln)
     assert re.search(r'not in \(\s*"online",\s*"packed"\s*\)', line), line
+
+
+def test_draft_loss_alpha_defaults_to_one_and_changes_nothing():
+    model = get_tiny_llama(num_hidden_layers=4)
+    mtsp.convert(model, [("dflash", get_dflash_config())])
+    assert model.dflash_draft_loss_alpha == 1.0
+
+
+def test_draft_loss_alpha_zero_gives_a_control_arm():
+    """alpha 0 + a base LM anchor trains the base on language modelling alone.
+
+    This is what makes the control expressible in the same recipe: the drafter still runs,
+    so the control differs from its co-trained twin by the draft gradient and nothing else.
+    """
+    ids = torch.ones(1, SEQ_LEN, dtype=torch.long)
+
+    cfg = get_dflash_config()
+    cfg["dflash_freeze_base_model"] = False
+    cfg["dflash_base_lm_loss_alpha"] = 1.0
+    cfg["dflash_draft_loss_alpha"] = 0.0
+    torch.manual_seed(0)
+    control = get_tiny_llama(num_hidden_layers=4)
+    mtsp.convert(control, [("dflash", cfg)])
+    out = control(input_ids=ids, labels=ids.clone())
+    out.loss.backward()
+
+    # the base still learns
+    base = [p for n, p in control.named_parameters() if "dflash_module" not in n]
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in base)
+    # the drafter does not
+    draft = [p for n, p in control.named_parameters() if "dflash_module" in n]
+    assert all(p.grad is None or p.grad.abs().sum() == 0 for p in draft)
+
+
+def test_both_alphas_zero_is_refused():
+    """A total loss of identically zero would train nothing, silently."""
+    model = get_tiny_llama(num_hidden_layers=4)
+    cfg = get_dflash_config()
+    cfg["dflash_freeze_base_model"] = False
+    cfg["dflash_draft_loss_alpha"] = 0.0
+    cfg["dflash_base_lm_loss_alpha"] = 0.0
+
+    with pytest.raises(ValueError, match="both 0"):
+        mtsp.convert(model, [("dflash", cfg)])
