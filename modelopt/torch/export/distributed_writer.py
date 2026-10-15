@@ -369,20 +369,30 @@ def _revert_whole_sd(model: nn.Module, local_sd: dict) -> bool:
     return True
 
 
+def _in_rank_order(values: list[list]) -> list:
+    """``all_reduce``'s combine that keeps every rank's value: each rank's own is wrapped in a list."""
+    return [value for (value,) in values]
+
+
 def _write_even_shards(
     local_sd: dict, export_dir: "str | Path", max_shard_size: "str | int", rank: int, world: int
 ) -> None:
-    """Write this rank's whole tensors directly as final HF safetensors; rank 0 unions the index.
+    """Write this rank's whole tensors directly as final HF safetensors; rank 0 writes the index.
 
     Every tensor is whole on exactly one rank, so there is no consolidation step. This rank's set is
     split into even shards, numbered into a global range (prefix-sum of per-rank file counts), and
     written with ``safetensors.save_file``. Must run AFTER the reverse conversion -- the reverse
     renames keys and splits tensors, so the sizes and names bin-packed here have to be the final ones.
+
+    Each step a rank can fail alone runs inside :func:`~modelopt.torch.utils.distributed.all_reduce`,
+    which raises on every rank when one fails: a rank leaving early would otherwise meet its peers
+    in a different collective, and they would hang or raise something unrelated.
     """
     import math
 
-    import torch.distributed as dist
     from safetensors.torch import save_file
+
+    from modelopt.torch.utils.distributed import all_reduce
 
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -393,9 +403,7 @@ def _write_even_shards(
     # Tensors over the bound get files of their own, so only the rest decide how many to aim for.
     fits = sum(size for size in sizes.values() if size <= max_bytes)
     my_files = _even_bins(write_keys, sizes, max(1, math.ceil(fits / max_bytes)), max_bytes)
-    n_local = len(my_files)
-    counts: list = [None] * world
-    dist.all_gather_object(counts, n_local)
+    counts = all_reduce("shard counts", lambda: [len(my_files)], _in_rank_order)
     n_total = sum(counts)
     if n_total == 0:
         raise RuntimeError(
@@ -404,40 +412,46 @@ def _write_even_shards(
         )
     base = sum(counts[:rank])
 
-    weight_map: dict = {}
-    my_bytes = 0
-    for i, keys in enumerate(my_files):
-        fname = f"model-{base + i + 1:05d}-of-{n_total:05d}.safetensors"
-        tensors = {k: local_sd[k].detach().to("cpu").contiguous() for k in keys}
-        save_file(tensors, str(export_dir / fname), metadata={"format": "pt"})
-        for k in keys:
-            weight_map[k] = fname
-            # Once a tensor is on disk this rank has no further use for it. Dropping it here keeps
-            # peak memory at roughly one shard above the owned set instead of holding all of them.
-            del local_sd[k]
-        my_bytes += sum(_nbytes(t) for t in tensors.values())
-        del tensors
+    def write_mine() -> tuple[dict, int]:
+        weight_map: dict = {}
+        my_bytes = 0
+        for i, keys in enumerate(my_files):
+            fname = f"model-{base + i + 1:05d}-of-{n_total:05d}.safetensors"
+            tensors = {k: local_sd[k].detach().to("cpu").contiguous() for k in keys}
+            save_file(tensors, str(export_dir / fname), metadata={"format": "pt"})
+            for k in keys:
+                weight_map[k] = fname
+                # Once a tensor is on disk this rank has no further use for it. Dropping it here
+                # keeps peak memory at roughly one shard above the owned set instead of holding all.
+                del local_sd[k]
+            my_bytes += sum(_nbytes(t) for t in tensors.values())
+            del tensors
+        return weight_map, my_bytes
 
     # One collective, not two: at this point each rank has already finished writing, so the latency
     # of these round trips is pure overhead on the critical path.
-    gathered: list = [None] * world
-    dist.all_gather_object(gathered, (weight_map, my_bytes))
-    if rank == 0:
-        full_map: dict = {}
-        total_bytes = 0
-        for m, b in gathered:
-            full_map.update(m)
-            total_bytes += b
-        # The reverse conversion checks for rename collisions, but only within one rank's slice.
-        # A collision ACROSS ranks would otherwise be silently swallowed by this dict update and
-        # ship a checkpoint that is quietly missing a tensor.
-        n_written = sum(len(m) for m, _ in gathered)
-        if n_written != len(full_map):
-            raise RuntimeError(
-                f"tensor name collision across ranks: {n_written} tensors written but only "
-                f"{len(full_map)} distinct names in the index"
-            )
-        index = {"metadata": {"total_size": total_bytes}, "weight_map": full_map}
-        with open(export_dir / "model.safetensors.index.json", "w") as f:
-            json.dump(index, f, indent=2)
-    dist.barrier()
+    gathered = all_reduce("shards written", lambda: [write_mine()], _in_rank_order)
+    full_map: dict = {}
+    total_bytes = 0
+    for m, b in gathered:
+        full_map.update(m)
+        total_bytes += b
+    # The reverse conversion checks for rename collisions, but only within one rank's slice.
+    # A collision ACROSS ranks would otherwise be silently swallowed by this dict update and
+    # ship a checkpoint that is quietly missing a tensor. Every rank checks, so all of them raise.
+    n_written = sum(len(m) for m, _ in gathered)
+    if n_written != len(full_map):
+        raise RuntimeError(
+            f"tensor name collision across ranks: {n_written} tensors written but only "
+            f"{len(full_map)} distinct names in the index"
+        )
+
+    def write_index() -> bool:
+        if rank == 0:
+            index = {"metadata": {"total_size": total_bytes}, "weight_map": full_map}
+            with open(export_dir / "model.safetensors.index.json", "w") as f:
+                json.dump(index, f, indent=2)
+        return True
+
+    # Also the closing barrier: no rank returns before the index is on disk.
+    all_reduce("index written", write_index, all)
