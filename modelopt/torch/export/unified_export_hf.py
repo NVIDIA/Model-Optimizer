@@ -1888,7 +1888,7 @@ def export_hf_checkpoint(
         export_dir: The target export path.
         save_modelopt_state: Whether to save the modelopt state_dict.
         components: Only used for diffusers pipelines. Optional list of component names
-            to export. If None, all quantized components are exported.
+            to export. If None, all components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
         max_shard_size: Maximum size of each safetensors shard file. Defaults to "10GB".
         **kwargs: Runtime-specific post-processing options forwarded to
