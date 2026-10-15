@@ -594,6 +594,9 @@ def _meta_dcp_load(
     caller already loaded), so they are snapshotted and restored -- a params-only checkpoint load would
     otherwise leave them garbage and the calibration forward would drift (weights load fine but activation
     amax is wrong). Persistent buffers the checkpoint DOES carry are (re)loaded via DCP below.
+
+    Every target param ends up filled -- from the checkpoint, by ``tie_weights``, or with the value it
+    already had -- or the load fails: nothing is left as the uninitialized memory ``to_empty`` hands out.
     """
     import torch.distributed.checkpoint as dcp
     from torch.distributed.checkpoint import HuggingFaceStorageReader
@@ -609,8 +612,10 @@ def _meta_dcp_load(
     # outside ``load_names`` would refill it.
     saved_params: dict[str, torch.Tensor] = {}
     if load_names is None:
+        emptied = {n for n, _ in model.named_parameters(remove_duplicate=False)}
         model.to_empty(device=device)
     else:
+        emptied = set()
         for name, m in model.named_modules():
             direct = dict(m.named_parameters(recurse=False))
             if any(p.is_meta for p in direct.values()):
@@ -618,6 +623,7 @@ def _meta_dcp_load(
                 saved_params.update(
                     (prefix + n, p.detach().clone()) for n, p in direct.items() if not p.is_meta
                 )
+                emptied.update(prefix + n for n in direct)
                 m.to_empty(device=device, recurse=False)
     for n, b in model.named_buffers():
         src = saved_buffers.get(n)
@@ -662,11 +668,12 @@ def _meta_dcp_load(
     inv = {mk: ck for ck, mk in key_map.items()}  # model_key -> ckpt_key (1:1 on model keys)
     load_sd = {inv[mk]: full_sd[mk] for mk in full_sd if mk in inv}
     mapped_names = set(key_map.values())
-    # Fail LOUD if the mapping left too much of the TARGET WEIGHT unloaded -- a key scheme this path did not
-    # resolve; a silent partial load produces a garbage-weight model. Weight by NUMEL, not param COUNT: a
-    # fused-expert MoE (Qwen3-MoE: per-expert checkpoint -> grouped ``experts.gate_up_proj``/``down_proj``
-    # model params DCP can't fuse) leaves only ~2 params/layer unloaded but they are ~95% of the weight, so a
-    # count-based guard misses it. A small tail is normal (tied weights + a VLM's not-in-checkpoint embeds).
+    # Fail fast, BEFORE the load, if the mapping left too much of the TARGET WEIGHT unloaded -- a key scheme
+    # this path did not resolve. Weight by NUMEL, not param COUNT: a fused-expert MoE (Qwen3-MoE: per-expert
+    # checkpoint -> grouped ``experts.gate_up_proj``/``down_proj`` model params DCP can't fuse) leaves only
+    # ~2 params/layer unloaded but they are ~95% of the weight, so a count-based guard misses it. A smaller
+    # shortfall can be tied weights, which ``tie_weights`` fills after the load; whatever it does not fill
+    # fails there.
     # ``skip_names`` = params loaded by a SEPARATE path (e.g. Qwen3-MoE fused grouped experts, filled by
     # :func:`_load_fused_experts_sharded` which fuses per-expert checkpoint tensors DCP can't concat) --
     # exclude them from the coverage guard so it doesn't (correctly) flag them as unloaded here.
@@ -686,16 +693,11 @@ def _meta_dcp_load(
             f"of the target weight) matched no checkpoint key -- the checkpoint's key naming was not resolved "
             f"to this model's state_dict (exact + conversion-mapping + suffix match all missed), or it needs a "
             f"weight conversion DCP can't do (FUSED EXPERTS, split qkv, on-the-fly dequant). Unloaded e.g.: "
-            f"{sorted(unloaded)[:5]}. Use the from_pretrained load (MODELOPT_FSDP2_SHARDED_LOAD=0 / "
-            f"MODELOPT_EP_DENSE_DISTRIBUTED_LOAD=0)."
+            f"{sorted(unloaded)[:5]}. Replicating the dense part (MODELOPT_FSDP_SIZE=1) loads it through "
+            "from_pretrained instead."
         )
     if is_initialized() and rank() == 0:
         loaded_bufs = mapped_names - {n for n, _ in model.named_parameters()}
-        if unloaded:
-            warn(
-                f"meta+DCP load: {len(unloaded)} param(s) not loaded from checkpoint (tied? re-tied): "
-                f"{sorted(unloaded)[:5]}"
-            )
         if loaded_bufs:
             warn(
                 f"meta+DCP load: loaded {len(loaded_bufs)} persistent buffer(s) from checkpoint: "
@@ -704,6 +706,20 @@ def _meta_dcp_load(
     dcp.load(load_sd, storage_reader=reader)
     if hasattr(model, "tie_weights"):
         model.tie_weights()  # re-establish tied weights the checkpoint omitted
+    # A re-emptied target param no checkpoint tensor filled, and that tying did not make a loaded param,
+    # still holds ``to_empty``'s memory. from_pretrained would initialize it; this loader can't run the
+    # model's init on shards, so it fails rather than return the model. Every rank reaches the same verdict.
+    loaded = {id(model.get_parameter(n)) for n in want_params & mapped_names}
+    unfilled = sorted(
+        n
+        for n in (unloaded & emptied) - saved_params.keys()
+        if id(model.get_parameter(n)) not in loaded
+    )
+    if unfilled:
+        raise RuntimeError(
+            f"meta+DCP load: {len(unfilled)} param(s) have no checkpoint tensor and are tied to no loaded "
+            f"param, so they would stay uninitialized: {unfilled[:5]}"
+        )
 
 
 def parallel_load_and_prepare_fsdp2(
