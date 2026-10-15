@@ -10,6 +10,21 @@ TB 2.1 is the successor to TB 2.0 — **identical harbor flow; only the playbook
 name changes** (`terminal_bench_2_1` vs `terminal_bench_2`). The 2.1 task set is
 pinned via a vendored registry override shipped in the `nemo-evaluator` package.
 
+## Output-token policy
+
+ModelOpt's Terminal-Bench / Terminus-2 protocol uses **no configured per-response output-token cap**,
+overriding model-card budgets and generic fallbacks per [generation-policy precedence](../../../references/model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
+Keep `drop_params` stripping `max_tokens`/`max_completion_tokens`. In the merged config
+(fragments plus CLI overrides), don't reintroduce a numeric cap via `services.<svc>.generation`,
+`proxy.extra_body`, solver/agent/LLM kwargs, interceptors, or server flags
+(`--override-generation-config`, `--max-new-tokens`, or backend equivalents).
+Stripping request fields doesn't remove inherited caps (`generation_config.json`, backend defaults).
+Check effective defaults for the backend/version and neutralize any numeric `max_new_tokens`
+(vLLM: `--override-generation-config '{"max_new_tokens":null}'` where supported) without changing
+sampling or stop/EOS settings. Never substitute a numeric fallback.
+Continue model-card lookup for sampling/thinking. Keep context limits (e.g. `--max-model-len`),
+agent/task timeouts and sandbox/SLURM lifetimes separate; record them for baseline/candidate comparison.
+
 ## Task-specific values
 
 | Field | Value |

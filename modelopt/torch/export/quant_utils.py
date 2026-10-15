@@ -1003,6 +1003,8 @@ _BASE_SKIP_KEYS: tuple[str, ...] = (
     "_bias_value",
     "input_quantizer._pre_quant_scale",
     "weight_shape",
+    # The GGML payload GPTQ pins to a weight quantizer; the exported weight already holds it.
+    "_ggml_pinned_",
 )
 
 

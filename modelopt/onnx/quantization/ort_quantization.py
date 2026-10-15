@@ -74,6 +74,21 @@ from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.ort_calibration import _restore_histogram_calibration_dtypes
 from modelopt.onnx.quantization.ort_session import load_model_with_shape_infer
 
+_ort_make_scale_zp_initializers = QDQQuantizer._make_scale_zp_initializers
+
+
+def _make_scale_zp_initializers(quantizer, param_name, quant_params, init_name_suffix=""):
+    """Keep generated quantization parameters separate from existing graph tensors."""
+    graph = quantizer.model.model.graph
+    tensor_names = {tensor.name for tensor in (*graph.initializer, *graph.input, *graph.output)}
+    tensor_names.update(name for node in graph.node for name in node.output)
+    suffix = init_name_suffix
+    index = 0
+    while any(f"{param_name}_{kind}{suffix}" in tensor_names for kind in ("scale", "zero_point")):
+        index += 1
+        suffix = f"{init_name_suffix}_{index}"
+    return _ort_make_scale_zp_initializers(quantizer, param_name, quant_params, suffix)
+
 
 def _compute_scale_zp(rmin, rmax, qmin, qmax, symmetric=False, min_real_range=None):
     """Retry FP16 scale calculation in FP32 when range subtraction overflows."""

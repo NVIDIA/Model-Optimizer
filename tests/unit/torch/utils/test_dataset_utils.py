@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from torch.utils.data import DataLoader
 
 from modelopt.torch.utils import dataset_utils
@@ -57,6 +58,33 @@ def test_prepare_messages_for_chat_template():
         )
         is messages
     )
+
+
+@pytest.mark.parametrize("include_labels", [False, True])
+def test_calibration_padding_avoids_masked_gradient_rows(monkeypatch, include_labels):
+    tokenizer = get_tiny_tokenizer()
+    monkeypatch.setattr(
+        dataset_utils, "get_dataset_samples", lambda *args, **kwargs: ["a", "a b c"]
+    )
+    batch = next(
+        iter(
+            get_dataset_dataloader(
+                tokenizer=tokenizer,
+                batch_size=2,
+                num_samples=2,
+                include_labels=include_labels,
+                device="cpu",
+            )
+        )
+    )
+    mask = batch["attention_mask"].bool()
+    assert tokenizer.padding_side == "left"
+    if include_labels:
+        causal_mask = torch.ones(mask.shape[-1], mask.shape[-1], dtype=torch.bool).tril()
+        assert (causal_mask & mask[:, None, :]).any(dim=-1).all()
+        assert torch.equal(batch["labels"][~mask], torch.full_like(batch["labels"][~mask], -100))
+    else:
+        assert not mask[0, 0] and mask[0, -1]
 
 
 def setup_test_data():

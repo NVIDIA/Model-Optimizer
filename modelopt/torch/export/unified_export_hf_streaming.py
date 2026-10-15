@@ -346,9 +346,9 @@ def _export_transformers_checkpoint_streaming(
         NotImplementedError: if the model's conversion mapping regroups tensors.
         RuntimeError: if decoder layers cannot be discovered for layer-wise materialization.
     """
-    # Deferred: the huggingface plugin imports transformers at module scope, and transformers
-    # is an optional extra -- keep ``import modelopt.torch.export`` working without it.
-    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+    # Deferred: modelopt.torch.quantization imports modelopt.torch.export, so importing the
+    # per-model PTQ module at module scope here would risk an import cycle.
+    from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
 
     export_dir = Path(export_dir)
     # Materialization dispatch walks the module tree from the root; without these maps each
@@ -545,11 +545,20 @@ def collect_export_tensors(
     All the gathers finish before this returns, so the caller can write or postprocess without
     stalling anyone. Returning a list rather than a generator is what guarantees that.
     """
-    # Deferred: the huggingface plugin imports transformers at module scope, and transformers
-    # is an optional extra -- keep ``import modelopt.torch.export`` working without it.
-    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+    # Deferred: modelopt.torch.quantization imports modelopt.torch.export, so importing the
+    # per-model PTQ module at module scope here would risk an import cycle.
+    from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
 
     _assert_fsdp2_owns_every_mesh_dim(model)
+    # A forward leaves the root's parameters unsharded (FSDP2 skips the root's post-forward
+    # reshard), and FSDP2's state_dict() pre-hook reshards a module's whole parameter group. Only
+    # the owner calls state_dict() below, so it would reshard the root on its rank alone, and the
+    # next gather window would then gather parameters on that rank that the others see as plain
+    # tensors -- a collective they never join. Resharding locally on every rank first makes the
+    # pre-hook a no-op.
+    for module in model.modules():
+        if isinstance(module, FSDPModule):
+            module.reshard()
     my_rank, world = _dist.rank(), _dist.size()
     names = module_name_maps(model)
     ctx = ExportContext(

@@ -26,6 +26,8 @@ import torch
 
 GGML_BLOCK_SIZE = 256
 _SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
+# Columns hashed at a time, bounding _row_keys' int64 temporaries to this slice of the weight.
+_ROW_KEY_CHUNK = 256
 
 
 class _CacheKey(NamedTuple):
@@ -168,13 +170,18 @@ def _row_keys(x: torch.Tensor) -> torch.Tensor:
     """A 64-bit hash of each row's bits; equal rows always get equal keys.
 
     Integer sums wrap and are associative, so unlike a floating-point projection the key does not
-    depend on how the reduction is ordered, which differs between differently shaped products.
+    depend on how the reduction is ordered, which differs between differently shaped products. That
+    is also what lets the columns be summed a chunk at a time.
     """
     multipliers = torch.randint(
         -(2**62), 2**62, (x.shape[-1],), generator=torch.Generator().manual_seed(0)
-    )
-    bits = x.contiguous().view(_SIGNED_INT_OF_SIZE[x.element_size()]).to(torch.int64)
-    return (bits * multipliers.to(x.device)).sum(-1)
+    ).to(x.device)
+    bits = x.contiguous().view(_SIGNED_INT_OF_SIZE[x.element_size()])
+    keys = torch.zeros(x.shape[:-1], dtype=torch.int64, device=x.device)
+    for start in range(0, x.shape[-1], _ROW_KEY_CHUNK):
+        columns = slice(start, start + _ROW_KEY_CHUNK)
+        keys += (bits[..., columns].to(torch.int64) * multipliers[columns]).sum(-1)
+    return keys
 
 
 def fake_quantize_with_cache(
@@ -236,6 +243,8 @@ class GGMLFormat:
     # its search temporaries, decoding runs every forward and is bounded by kernel launches.
     block_chunk_size: int
     decode_chunk_size: int
+    # Whether ``quantize`` takes a per-input-column ``importance`` that weights its search.
+    weighted: bool = False
 
     @property
     def effective_bits(self) -> float:
@@ -303,8 +312,10 @@ class GGMLFormat:
         """The pinned payload of ``weight``, a view of the pinned weight or rows taken from it.
 
         Fake quant hands over the pinned weight itself in 256-value rows; export may hand over row
-        slices of it, such as the gate and up halves of a fused projection. The comparison syncs,
-        but it only runs for weights the identity cache has not seen.
+        slices of it, such as the gate and up halves of a fused projection. Folding hands over a
+        float32 copy of a narrower weight, which holds the decoding rounded to that narrower dtype,
+        so a float32 weight also matches the decoding rounded through BF16 or FP16. The comparison
+        syncs, but it only runs for weights the identity cache has not seen.
         """
         pinned = pinned_packed_weight(quantizer, self.name)
         width = weight.shape[-1] // self.block_size
@@ -315,17 +326,28 @@ class GGMLFormat:
         ):
             return None
         pinned = pinned.to(weight.device).reshape(-1, width, self.block_bytes)
-        table = self.dequantize(
-            pinned, torch.tensor((pinned.shape[0], weight.shape[-1])), dtype=torch.float32
-        ).to(weight.dtype)
+        shape = torch.tensor((pinned.shape[0], weight.shape[-1]))
         rows = weight.reshape(-1, weight.shape[-1])
-        if rows.shape == table.shape and torch.equal(rows, table):
-            index = slice(None)
-        else:
-            index = _matching_rows(table, rows)
-            if index is None:
-                return None
-        return pinned[index].reshape(*weight.shape[:-1], width, self.block_bytes)
+        storage_dtypes = [weight.dtype]
+        if weight.dtype == torch.float32:
+            storage_dtypes += [torch.bfloat16, torch.float16]
+
+        def decoding(storage_dtype):
+            # Decoding straight into the storage dtype rounds once, as GPTQ did writing the weight,
+            # and holds one table at a time rather than a float32 copy beside each rounding.
+            return self.dequantize(pinned, shape, dtype=storage_dtype).to(weight.dtype)
+
+        # Every whole-weight comparison first: matching rows builds int64 keys several times the
+        # weight's size, and only row slices need it.
+        if rows.shape[0] == pinned.shape[0]:
+            for storage_dtype in storage_dtypes:
+                if torch.equal(rows, decoding(storage_dtype)):
+                    return pinned.reshape(*weight.shape[:-1], width, self.block_bytes)
+        for storage_dtype in storage_dtypes:
+            index = _matching_rows(decoding(storage_dtype), rows)
+            if index is not None:
+                return pinned[index].reshape(*weight.shape[:-1], width, self.block_bytes)
+        return None
 
 
 def narrow_to_float32(blocks: torch.Tensor) -> torch.Tensor:
@@ -359,6 +381,62 @@ def validate_weight(
         )
     if not weight.is_floating_point():
         raise TypeError(f"{format_name} requires a floating-point weight, got {weight.dtype}")
+
+
+def importance_blocks(
+    importance: torch.Tensor | None, weight: torch.Tensor, format_name: str
+) -> torch.Tensor | None:
+    """A per-input-column ``importance`` as ``[weight.shape[-1] // 256, 256]`` float32 block rows.
+
+    Flattened block ``i`` of ``weight`` is weighted by row ``i % (weight.shape[-1] // 256)``.
+    """
+    if importance is None:
+        return None
+    if tuple(importance.shape) != (weight.shape[-1],) or not importance.is_floating_point():
+        raise ValueError(
+            f"{format_name} importance must be a floating-point [{weight.shape[-1]}] vector, got "
+            f"{importance.dtype} {tuple(importance.shape)}"
+        )
+    importance = importance.to(device=weight.device, dtype=torch.float32)
+    if not (torch.isfinite(importance) & (importance >= 0)).all():
+        raise ValueError(f"{format_name} importance must be finite and non-negative")
+    return importance.reshape(-1, GGML_BLOCK_SIZE)
+
+
+def chunk_importance(
+    blocks_importance: torch.Tensor | None, start: int, stop: int
+) -> torch.Tensor | None:
+    """The importance of flattened blocks ``start:stop``, as ``[stop - start, 32, 8]``."""
+    if blocks_importance is None:
+        return None
+    index = torch.arange(start, stop, device=blocks_importance.device) % len(blocks_importance)
+    return blocks_importance[index].reshape(-1, GGML_BLOCK_SIZE // 8, 8)
+
+
+def iq2_tile_terms(
+    magnitudes: torch.Tensor,
+    grid_tile: torch.Tensor,
+    tile_qnorm: torch.Tensor,
+    weights: torch.Tensor | None = None,
+    odd_parity: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The (weighted) ``|x| . q`` and ``|q|^2`` of every 8-value vector against a grid tile.
+
+    ``magnitudes`` and ``weights`` are ``[blocks, vectors, 8]``, ``grid_tile`` is ``[entries, 8]``
+    and ``tile_qnorm`` its unweighted norms; both results broadcast to ``[blocks, vectors,
+    entries]``. With ``odd_parity`` the dot takes the even-parity sign rule: the coordinate
+    contributing least is flipped.
+    """
+    products = magnitudes.unsqueeze(2) * grid_tile.reshape(1, 1, -1, 8)
+    if weights is None:
+        qnorm = tile_qnorm.reshape(1, 1, -1)
+    else:
+        products = products * weights.unsqueeze(2)
+        qnorm = (weights.unsqueeze(2) * grid_tile.square().reshape(1, 1, -1, 8)).sum(dim=-1)
+    dot = products.sum(dim=-1)
+    if odd_parity is not None:
+        dot = torch.where(odd_parity.unsqueeze(-1), dot - 2.0 * products.amin(dim=-1), dot)
+    return dot, qnorm
 
 
 def validate_block_chunk_size(block_chunk_size: int) -> None:

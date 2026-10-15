@@ -110,6 +110,8 @@ Currently we have 2 places where we mention pip dependencies: [pyproject.toml](.
 
 If adding a new PIP dependency to any of these, make sure to verify the LICENSE of the dependency. If its not a permissive license (e.g. MIT, Apache 2), you need to provide a justification for the use of the dependency in the PR and check with `@NVIDIA/modelopt-setup-codeowners` if its allowed or not.
 
+Do not regenerate or commit `uv.lock` in your PR, even when changing dependencies in `pyproject.toml`. A [weekly workflow](./.github/workflows/bump_uv_lock.yml) refreshes it automatically.
+
 ## 🔒 Security coding practices
 
 All contributors must follow the security coding practices documented in *Security Coding Practices for

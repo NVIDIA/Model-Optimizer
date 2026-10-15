@@ -15,8 +15,8 @@
 
 """Step-3.7 specs (HF model type ``step3p7``).
 
-Shares Step-3.5's architecture; its PTQ modeling (in the HF quantization plugin)
-matches every Step revision.
+Shares Step-3.5's architecture; its PTQ modeling lives in ``step3p5/modeling_ptq.py``,
+which matches every Step revision.
 """
 
 from ..specs import ModelSpec, register

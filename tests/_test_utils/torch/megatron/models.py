@@ -434,7 +434,7 @@ def get_mcore_hybrid_model(
     # runtime-slices). This matches how bridge-loaded models are pruned; ModelOpt's depth-pruning
     # slicer is not `|`-aware, so pipe stage separators would break pattern slicing -- reject them.
     assert "|" not in hybrid_layer_pattern, "Pipeline separators (`|`) are not supported"
-    assert len(hybrid_layer_pattern) == num_layers
+    assert len(hybrid_layer_pattern.split("/", 1)[0]) == num_layers
 
     common_kwargs = {
         "config": config,

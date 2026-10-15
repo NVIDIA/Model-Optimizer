@@ -201,6 +201,6 @@ Layers silently skipped because the quantization config patterns don't match the
 
 ## What to do when warnings appear
 
-- **Layers should have been quantized** (e.g., MoE experts with `nvfp4_mlp_only`): the quantization config patterns missed them. Fix by adding the missing pattern to the config and re-running PTQ. Check if ModelOpt already has a plugin for the model in `modelopt/torch/quantization/plugins/huggingface.py`.
+- **Layers should have been quantized** (e.g., MoE experts with `nvfp4_mlp_only`): the quantization config patterns missed them. Fix by adding the missing pattern to the config and re-running PTQ. Check if ModelOpt already has a plugin for the model in `modelopt/torch/models/<model_type>/modeling_ptq.py`.
 
 - **Layers are intentionally unquantized** (e.g., attention layers with `nvfp4_mlp_only`): they should be in the `exclude_modules` list but the export didn't add them. Add them manually to both `hf_quant_config.json` and `config.json` `quantization_config.ignore` in the checkpoint to prevent deployment failures.

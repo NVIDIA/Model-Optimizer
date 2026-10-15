@@ -23,6 +23,10 @@ from ..utils.calib_utils import GPTQHelper, register_gptq_helper
 from .common import pin_packed_weight
 from .registry import GGML_FORMAT_REGISTRY
 
+# Floor on the Hessian diagonal, relative to its mean, so a column calibration never activated
+# still has some weight in the search.
+_IMPORTANCE_FLOOR = 1e-4
+
 __all__ = ["GGMLGPTQHelper", "gptq_group_update"]
 
 
@@ -31,7 +35,7 @@ def gptq_group_update(
     h_inv: torch.Tensor,
     block_size: int,
     group_size: int,
-    quantize_group: Callable[[torch.Tensor], torch.Tensor],
+    quantize_group: Callable[[torch.Tensor, slice], torch.Tensor],
 ) -> None:
     """GPTQ update for formats that quantize ``group_size`` consecutive columns together.
 
@@ -43,7 +47,8 @@ def gptq_group_update(
         weight: ``[out_features, in_features]`` float weight, replaced in place by its
             fake-quantized values.
         h_inv: Upper-triangular Cholesky factor of the damped inverse Hessian.
-        quantize_group: Fake-quantizes one ``[out_features, group_size]`` column group.
+        quantize_group: Fake-quantizes one ``[out_features, group_size]`` column group, given the
+            group and the slice of columns it holds.
     """
     num_cols = weight.shape[1]
     if block_size % group_size or num_cols % group_size:
@@ -56,7 +61,7 @@ def gptq_group_update(
         errs = torch.empty_like(weight[:, block_start:block_end])
         for start in range(block_start, block_end, group_size):
             end = start + group_size
-            qdq = quantize_group(weight[:, start:end])
+            qdq = quantize_group(weight[:, start:end], slice(start, end))
             err = torch.linalg.solve_triangular(
                 h_inv[start:end, start:end], weight[:, start:end] - qdq, upper=True, left=False
             )
@@ -69,6 +74,10 @@ def gptq_group_update(
 class GGMLGPTQHelper(GPTQHelper):
     """GPTQ for ``ggml``-backend weight quantizers, one GGML block of columns at a time.
 
+    With ``importance_weighted``, formats whose search takes an importance get the square root of
+    the Hessian diagonal ``E[x_j^2]`` (llama.cpp's imatrix statistic), so each block's codes favour
+    the columns its outputs depend on most. The raw diagonal is heavy-tailed, so a few outlier columns would
+    dominate the search; its root keeps the column ranking at half the log-range.
     The payload GPTQ chose is pinned to the weight quantizer, so later forwards and export use
     those exact codes rather than encoding the GPTQ'd weight again, which would not return them.
     """
@@ -87,10 +96,20 @@ class GGMLGPTQHelper(GPTQHelper):
         block_chunk_size = extra_args.get("block_chunk_size", ggml_format.block_chunk_size)
         decode_chunk_size = extra_args.get("decode_chunk_size", ggml_format.decode_chunk_size)
         payloads = []
+        assert self.weight is not None, "_blockwise_update called before update_weights()"
+        importance = None
+        if self.importance_weighted and ggml_format.weighted:
+            diagonal = self.hessian.diagonal().to(self.weight.device, torch.float32)
+            mean = diagonal.mean()
+            # A module no calibration token reached (an idle MoE expert) has a zero Hessian, and
+            # weighting by it would make every code score zero error: keep the plain search.
+            if mean > 0:
+                importance = diagonal.clamp_min(_IMPORTANCE_FLOOR * mean).sqrt()
 
-        def quantize_group(group):
+        def quantize_group(group, columns):
+            kwargs = {} if importance is None else {"importance": importance[columns]}
             packed, shape = ggml_format.quantize(
-                group.contiguous(), block_chunk_size=block_chunk_size
+                group.contiguous(), block_chunk_size=block_chunk_size, **kwargs
             )
             payloads.append(packed)
             return ggml_format.dequantize(

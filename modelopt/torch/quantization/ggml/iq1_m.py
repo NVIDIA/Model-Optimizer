@@ -16,8 +16,9 @@
 """IQ1_M fake quantization and GGML-compatible block packing.
 
 The encoder performs a single-pass squared-error grid search at a fixed,
-empirically anchored super-block scale, mirroring :mod:`.iq1_s`. Every 256
-logical values become one 56-byte block_iq1_m payload:
+empirically anchored super-block scale, mirroring :mod:`.iq1_s`, including its
+optional per-input-column importance. Every 256 logical values become one
+56-byte block_iq1_m payload:
 
 * bytes 0..31: 32 low bytes of the grid index, four per sub-block
 * bytes 32..47: 16 bytes holding, per nibble, three grid-index high bits and
@@ -43,6 +44,8 @@ from ..extensions import get_cuda_ext_ggml
 from .common import (
     GGML_BLOCK_SIZE,
     GGMLFormat,
+    chunk_importance,
+    importance_blocks,
     narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
@@ -101,14 +104,16 @@ def _predict_iq1_m_scales(blocks: torch.Tensor) -> torch.Tensor:
     return ((amax / _IQ1_M_NATIVE_MAX) * anchor_ratio).clamp(max=65504.0).to(torch.float16)
 
 
-def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
+def _encode_blocks(
+    blocks: torch.Tensor, grid: torch.Tensor, weights: torch.Tensor | None = None
+) -> torch.Tensor:
     """Encode a moderate-size batch of flattened 256-value blocks."""
     x = narrow_to_float32(blocks)
     block_count = x.shape[0]
     d = _predict_iq1_m_scales(x)
     d_float = d.float()
     best_error, best_entry = _search_shifted_grid(
-        x.reshape(block_count, _IQ1_M_GROUPS, 8), d_float, grid
+        x.reshape(block_count, _IQ1_M_GROUPS, 8), d_float, grid, weights
     )
 
     # Each group picks its own shift; only the 3-bit local scale is shared, over two groups.
@@ -146,15 +151,20 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def quantize_iq1_m(
-    weight: torch.Tensor, *, block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE
+    weight: torch.Tensor,
+    *,
+    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
+    importance: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ1_M blocks.
 
     Returned shapes are ``[*weight.shape[:-1], weight.shape[-1] // 256, 56]``
-    and ``[weight.ndim]``.
+    and ``[weight.ndim]``. ``importance``, a non-negative per-input-column vector, weights each
+    value's squared error in the search, as llama.cpp's imatrix does.
     """
     validate_weight(weight, "IQ1_M")
     validate_block_chunk_size(block_chunk_size)
+    block_importance = importance_blocks(importance, weight, "IQ1_M")
 
     logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
     blocks = weight.contiguous().reshape(-1, IQ1_M_BLOCK_SIZE)
@@ -167,11 +177,17 @@ def quantize_iq1_m(
                 _predict_iq1_m_scales(blocks[start : start + _SCALE_BLOCK_CHUNK_SIZE])
                 for start in range(0, blocks.shape[0], _SCALE_BLOCK_CHUNK_SIZE)
             ]
-            packed = extension.iq1_m_pack(blocks, grid, torch.cat(scale_chunks))
+            packed = extension.iq1_m_pack(blocks, grid, torch.cat(scale_chunks), block_importance)
             return packed.reshape(packed_shape), logical_shape
 
     chunks = [
-        _encode_blocks(blocks[start : start + block_chunk_size], grid)
+        _encode_blocks(
+            blocks[start : start + block_chunk_size],
+            grid,
+            chunk_importance(
+                block_importance, start, min(start + block_chunk_size, blocks.shape[0])
+            ),
+        )
         for start in range(0, blocks.shape[0], block_chunk_size)
     ]
     return torch.cat(chunks).reshape(packed_shape), logical_shape
@@ -246,6 +262,7 @@ IQ1_M_FORMAT = GGMLFormat(
     dequantize=dequantize_iq1_m,
     block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
     decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+    weighted=True,
 )
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq1_m and
