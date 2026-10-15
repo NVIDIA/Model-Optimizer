@@ -28,6 +28,8 @@ import pytest
 import torch
 from torch import nn
 
+pytest.importorskip("transformers")
+
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 from modelopt.torch.utils.moe import expert_parallel_mesh
 from modelopt.torch.utils.plugins.model_load_utils import (
