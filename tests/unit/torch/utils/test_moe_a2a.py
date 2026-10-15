@@ -32,7 +32,6 @@ import warnings
 import pytest
 import torch
 import torch.distributed as dist
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 
 import modelopt.torch.utils.moe as moe
 from modelopt.torch.utils.moe import a2a_moe
@@ -69,9 +68,12 @@ def _router(x, gate_w, top_k):
     return ti.to(torch.int64), tw
 
 
-def _a2a_moe_fwd_bwd_job(rank, size):
+def _a2a_moe_fwd_bwd_job(rank, size, ep_size):
+    # Every ``ep_size`` consecutive ranks form one expert-parallel group.
+    group, _ = dist.new_subgroups(ep_size)
+    rank, size = dist.get_rank(group), ep_size
     device = torch.device("cpu")
-    assert E % size == 0, "E must be divisible by world size"
+    assert E % size == 0, "E must be divisible by the expert-parallel size"
     n_local = E // size
     n_total = size * T
 
@@ -107,7 +109,7 @@ def _a2a_moe_fwd_bwd_job(rank, size):
             start = end
         return torch.cat(segs, dim=0) if segs else sorted_tok.new_zeros((0, H))
 
-    out_a = a2a_moe(dist.group.WORLD, x_r, ti, tw, E, n_local, expert_fn)  # [T, H]
+    out_a = a2a_moe(group, x_r, ti, tw, E, n_local, expert_fn)  # [T, H]
     out_a.pow(2).sum().backward()  # collective backward across ranks (a2a reverse all-to-all)
 
     atol, rtol = 3e-2, 3e-2
@@ -129,16 +131,14 @@ def _a2a_moe_fwd_bwd_job(rank, size):
         "router/gate grad is ~0 -> routing-weight all-to-all is not autograd-aware (recv_w detached)."
     )
     gate_grad_sum = gate_a.grad.clone()
-    dist.all_reduce(gate_grad_sum, op=dist.ReduceOp.SUM)
+    dist.all_reduce(gate_grad_sum, op=dist.ReduceOp.SUM, group=group)
     torch.testing.assert_close(gate_grad_sum.float(), gate_ref.grad.float(), atol=atol, rtol=rtol)
 
-    dist.destroy_process_group()
 
-
-@pytest.mark.parametrize("world_size", [1, 2])
-def test_a2a_moe_forward_backward(world_size, skip_on_windows):
+@pytest.mark.parametrize("ep_size", [1, 2])
+def test_a2a_moe_forward_backward(cpu_dist_workers, ep_size):
     """a2a_moe forward + backward (hidden, expert, router grads) match a dense reference."""
-    spawn_multiprocess_job(world_size, _a2a_moe_fwd_bwd_job, backend="gloo")
+    cpu_dist_workers.run(_a2a_moe_fwd_bwd_job, ep_size=ep_size)
 
 
 def _identity_experts(sorted_tok, offsets):
@@ -173,11 +173,10 @@ def _chunked_hops_job(rank, size):
         moe._A2A_MAX_HOP_ELEMENTS = 2**31 - 1
     assert n_chunked > n_whole
     torch.testing.assert_close(chunked, whole, atol=0, rtol=0)
-    dist.destroy_process_group()
 
 
-def test_a2a_moe_chunks_hops_past_the_element_limit(skip_on_windows):
-    spawn_multiprocess_job(2, _chunked_hops_job, backend="gloo")
+def test_a2a_moe_chunks_hops_past_the_element_limit(cpu_dist_workers):
+    cpu_dist_workers.run(_chunked_hops_job)
 
 
 def _skewed_routing_job(rank, size):
@@ -193,11 +192,10 @@ def _skewed_routing_job(rank, size):
             a2a_moe(dist.group.WORLD, x, ti, tw, E, E // size, _identity_experts)
     imbalance = [w for w in caught if "imbalance" in str(w.message)]
     assert len(imbalance) == (1 if rank == 0 else 0), [str(w.message) for w in caught]
-    dist.destroy_process_group()
 
 
-def test_a2a_moe_warns_when_a_rank_receives_far_more_than_it_sent(skip_on_windows):
-    spawn_multiprocess_job(2, _skewed_routing_job, backend="gloo")
+def test_a2a_moe_warns_when_a_rank_receives_far_more_than_it_sent(cpu_dist_workers):
+    cpu_dist_workers.run(_skewed_routing_job)
 
 
 def _split_qwen3_moe_experts(rank, size):
@@ -279,10 +277,9 @@ def _real_experts_backward_job(rank, size):
     moe.register_torch_a2a()
     whole, local, owned = _split_qwen3_moe_experts(rank, size)
     _assert_experts_backward_matches(rank, whole, local, owned, size)
-    dist.destroy_process_group()
 
 
-def test_fused_experts_backward_through_torch_a2a_matches_the_whole_module(skip_on_windows):
+def test_fused_experts_backward_through_torch_a2a_matches_the_whole_module(cpu_dist_workers):
     """transformers' fused experts, split over two ranks, train through the torch_a2a forward exactly
     as the whole module does on one process: same output, and same gradients for the hidden states,
     the routing weights and each rank's experts."""
@@ -291,4 +288,4 @@ def test_fused_experts_backward_through_torch_a2a_matches_the_whole_module(skip_
 
     if Version(transformers.__version__) < Version("5.6"):
         pytest.skip("expert parallelism needs transformers >= 5.6")
-    spawn_multiprocess_job(2, _real_experts_backward_job, backend="gloo")
+    cpu_dist_workers.run(_real_experts_backward_job)
