@@ -39,3 +39,10 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `indexer_q_nvfp4.yaml` | NVFP4 fake quantization of the sparse-attention indexer query (`*indexer_q_quantizer`), global scale fixed to 1; Blackwell+ GPUs |
 | `moe_dispatch_nvfp4.yaml` | NVFP4 fake quantization of the MoE expert-parallel dispatch (`*dispatch_quantizer`, vLLM); Blackwell+ GPUs |
 | `moe_combine_nvfp4.yaml` | NVFP4 fake quantization of the MoE expert-parallel combine (`*combine_quantizer`, vLLM); Blackwell+ GPUs |
+
+## Linear-attention NVFP4 state
+
+`linear_attention_state_nvfp4_dynamic.yaml` enables NVFP4 E2M1 state QDQ with
+16-value blocks, E4M3 block scales, a dynamic global scale and identity backward.
+Use it with the serving phase policy in a state-QAT recipe. This is fake QDQ:
+state storage remains floating point, and vLLM engine support is separate.

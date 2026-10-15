@@ -315,3 +315,18 @@ def test_state_recipe_rejects_unconverted_layers(class_name, quantizer_name):
     config = load_recipe("general/ptq/linear_attention_state_int8_block32_dynamic").quantize
     with pytest.raises(RuntimeError, match=quantizer_name):
         mtq.quantize(model, config)
+
+
+def test_nvfp4_state_recipe_restore():
+    config = load_recipe("general/ptq/linear_attention_state_nvfp4_dynamic").quantize
+    model = mtq.quantize(TinyGatedDeltaNet(), config)
+    restored = mto.restore_from_modelopt_state(TinyGatedDeltaNet(), mto.modelopt_state(model))
+    assert (
+        restored.gdn_state_quantizer.get_modelopt_state()
+        == model.gdn_state_quantizer.get_modelopt_state()
+    )
+    assert restored.gdn_state_quantizer.block_sizes == {
+        -1: 16,
+        "type": "dynamic",
+        "scale_bits": (4, 3),
+    }

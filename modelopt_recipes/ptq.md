@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 34 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 35 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -66,6 +66,7 @@ supported combinations.
 | `q8_0` | Q8_0 W8A16 (8.5 bpw), eligible linears | none | none (no calibration) |
 | `linear_attention_state_int8_block32_dynamic` | GDN/KDA state INT8, 32 value channels per key row; weights unchanged | none | none (dynamic scales; requires vLLM and a prefix/decode phase context) |
 | `linear_attention_state_int8_block32_dynamic_kimi_k3` | Kimi-K3/Kimi-Linear KDA state INT8, 32 value channels per key row | none | none (dynamic scales; explicit Triton Kimi profile) |
+| `linear_attention_state_nvfp4_dynamic` | GDN/KDA state NVFP4, block16 and E4M3 scales; weights unchanged | none | none (dynamic global and block scales) |
 
 </details>
 
@@ -168,7 +169,9 @@ cfg["quant_cfg"].append({"quantizer_name": "*state_quantizer", "cfg": state_fp8}
 
 These blocks each have their own dynamic scale. The legacy `axis=(0, 1)` setting
 instead shares a scale across a full-key tile; `state_block_v` only controls that
-legacy tile's width. NVFP4 state support is a separate extension.
+legacy tile's width. The NVFP4 state recipe uses E2M1 values, block16 E4M3 scales and a dynamic
+global scale. It retains floating state storage and identity STE; it does not
+configure a vLLM server or enable packed NVFP4 cache storage.
 
 ---
 
