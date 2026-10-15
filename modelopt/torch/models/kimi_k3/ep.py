@@ -86,8 +86,6 @@ BASE_MODEL_EP_PLAN = {
     "layers.*.block_sparse_moe.experts": "moe_tp_experts",
 }
 
-_PATCHED = False
-
 
 def _install_output_recorder_shim() -> None:
     """Restore the generic-utils symbol the remote modeling imports.
@@ -120,8 +118,12 @@ def _install_output_recorder_shim() -> None:
     _g.OutputRecorder = found
 
 
-def _find_module_defining(class_name: str):
-    """Return the loaded module that DEFINES a class named ``class_name``, or None.
+def _find_module_defining(class_name: str, package: str):
+    """Return the loaded module of ``package`` that DEFINES a class named ``class_name``, or None.
+
+    ``package`` is where one checkpoint's remote code was imported (``transformers_modules.<repo>...``);
+    another revision loaded in the same process has a package of its own, whose classes are not this
+    checkpoint's to patch.
 
     Identify the remote module by the CLASS it defines, NOT by its file name -- the plugin depends only on
     the class names it patches, never on the remote code's file layout, so this survives remote-file
@@ -134,8 +136,8 @@ def _find_module_defining(class_name: str):
     ``__getattr__`` returns a namespace proxy for ANY name and raises on use (the proxy is not a ``type``,
     so it is rejected regardless).
     """
-    for _name, mod in list(sys.modules.items()):
-        if mod is None:
+    for name, mod in list(sys.modules.items()):
+        if mod is None or name.rpartition(".")[0] != package:
             continue
         try:
             obj = getattr(mod, class_name, None)
@@ -148,13 +150,13 @@ def _find_module_defining(class_name: str):
     return None
 
 
-def _find_remote_module():
+def _find_remote_module(package: str):
     """Return the loaded remote backbone module.
 
-    the one that DEFINES ``KimiSparseMoeBlock`` (the Kimi MoE block this plugin patches) -- or None. Name-independent;
-    see ``_find_module_defining``.
+    the one in ``package`` that DEFINES ``KimiSparseMoeBlock`` (the Kimi MoE block this plugin patches) -- or
+    None. Name-independent; see ``_find_module_defining``.
     """
-    return _find_module_defining("KimiSparseMoeBlock")
+    return _find_module_defining("KimiSparseMoeBlock", package)
 
 
 def _build_fused_experts_class(kmod):
@@ -443,7 +445,7 @@ def _patch_kimi_cache_get_mask_sizes(kmod) -> None:
     )
 
 
-def _shim_tie_weights_kwargs() -> None:
+def _shim_tie_weights_kwargs(package: str) -> None:
     """Absorb the ``recompute_mapping`` kwarg newer transformers passes to ``tie_weights``.
 
     Transformers 5.13's ``from_pretrained`` calls ``model.tie_weights(recompute_mapping=...)``, but
@@ -465,7 +467,7 @@ def _shim_tie_weights_kwargs() -> None:
         setattr(_tie, "_kimi_k3_kwargs_shim", True)
         return _tie
 
-    mod = _find_module_defining("KimiK3ForConditionalGeneration")
+    mod = _find_module_defining("KimiK3ForConditionalGeneration", package)
     if mod is None:
         return
     cls = getattr(mod, "KimiK3ForConditionalGeneration", None)
@@ -476,13 +478,13 @@ def _shim_tie_weights_kwargs() -> None:
         cls.tie_weights = _make_tie(tw)
 
 
-def _force_load_remote_modeling(hf_config, ckpt_path: str, trust_remote_code: bool) -> None:
+def _force_load_remote_modeling(hf_config, ckpt_path: str, trust_remote_code: bool) -> type:
     """Import the remote modeling now, so its classes can be patched before the model is built.
 
     Force the remote modeling into ``sys.modules`` (so we can monkey-patch its classes BEFORE
     ``from_pretrained`` instantiates the model) by resolving the model class the checkpoint's config
     declares in its ``auto_map`` -- no hardcoded remote file/module name. Runs the OutputRecorder + closure
-    shims first.
+    shims first. Returns that class, whose package holds this checkpoint's remote code.
     """
     _install_output_recorder_shim()
     stage_full_remote_closure()
@@ -495,7 +497,7 @@ def _force_load_remote_modeling(hf_config, ckpt_path: str, trust_remote_code: bo
             "kimi_k3: config.auto_map has no AutoModel/AutoModelForCausalLM entry to force-load the remote "
             "modeling"
         )
-    get_class_from_dynamic_module(class_ref, ckpt_path, trust_remote_code=trust_remote_code)
+    return get_class_from_dynamic_module(class_ref, ckpt_path, trust_remote_code=trust_remote_code)
 
 
 def _register_kimi_k3_conversions() -> None:
@@ -576,7 +578,6 @@ def prepare(
     inserts/calibrates/folds the fp8/nvfp4 quantizers on those bf16 params. That is ~4x the packed HBM
     (the memory bottleneck), but PTQ needs the bf16 weights.
     """
-    global _PATCHED
     from modelopt.torch.utils.moe import require_transformers
 
     require_transformers("5.8", "kimi_k3 expert-parallel PTQ")
@@ -586,9 +587,12 @@ def prepare(
     # Monkey-patch the remote modeling (needs ckpt_path to force-load it). If ckpt_path is missing we can
     # only set the config plan; the load would then fall back to the non-EP ModuleList layout -> callers
     # must thread ckpt_path through apply_distributed_support.
-    if ckpt_path is not None and not _PATCHED:
-        _force_load_remote_modeling(hf_config, ckpt_path, trust_remote_code)
-        kmod = _find_remote_module()
+    if ckpt_path is not None:
+        # This checkpoint's remote code, not whichever revision this process imported first. Every
+        # patch is idempotent, so a repeat prepare for the same checkpoint changes nothing.
+        package = _force_load_remote_modeling(hf_config, ckpt_path, trust_remote_code).__module__
+        package = package.rpartition(".")[0]
+        kmod = _find_remote_module(package)
         if kmod is None:
             raise RuntimeError(
                 "kimi_k3: could not locate the loaded remote module defining KimiSparseMoeBlock to patch"
@@ -598,8 +602,7 @@ def prepare(
         _patch_kda_beta_sigmoid(kmod)
         _shim_create_causal_mask(kmod)
         _patch_kimi_cache_get_mask_sizes(kmod)
-        _shim_tie_weights_kwargs()
-        _PATCHED = True
+        _shim_tie_weights_kwargs(package)
 
     if not getattr(text_cfg, "base_model_ep_plan", None):
         # grouped_gemm shards the bf16 fused params; the experts container goes through moe_tp_experts

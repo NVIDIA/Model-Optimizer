@@ -493,12 +493,12 @@ def test_kimi_cache_mask_sizes_accept_a_query_length_or_a_cache_position():
 def test_tie_weights_shim_drops_the_new_kwargs_once(monkeypatch):
     """transformers >= 5.13 calls ``tie_weights(recompute_mapping=...)``; the remote VLM's override
     takes no kwargs. The shim drops them, delegates once per call, and wraps only once."""
-    remote = _remote_module()
+    remote = _remote_module("transformers_modules.stub.modeling_kimi_k3")
     monkeypatch.setitem(sys.modules, remote.__name__, remote)
     vlm = remote.KimiK3ForConditionalGeneration
-    kimi_k3._shim_tie_weights_kwargs()
+    kimi_k3._shim_tie_weights_kwargs("transformers_modules.stub")
     shim = vlm.__dict__["tie_weights"]
-    kimi_k3._shim_tie_weights_kwargs()
+    kimi_k3._shim_tie_weights_kwargs("transformers_modules.stub")
     assert vlm.__dict__["tie_weights"] is shim
 
     model = vlm()
@@ -515,12 +515,12 @@ def test_tie_weights_shim_leaves_an_inherited_tie_weights_alone(monkeypatch):
         def tie_weights(self, **kwargs):
             return kwargs
 
-    remote = types.ModuleType("kimi_k3_remote_inheriting_stub")
+    remote = types.ModuleType("transformers_modules.inheriting_stub.modeling_kimi_k3")
     vlm = type("KimiK3ForConditionalGeneration", (PreTrainedStub,), {"__module__": remote.__name__})
     remote.KimiK3ForConditionalGeneration = vlm
     monkeypatch.setitem(sys.modules, remote.__name__, remote)
 
-    kimi_k3._shim_tie_weights_kwargs()
+    kimi_k3._shim_tie_weights_kwargs("transformers_modules.inheriting_stub")
 
     assert vlm().tie_weights(recompute_mapping=False) == {"recompute_mapping": False}
 
@@ -635,8 +635,8 @@ def test_prepare_keeps_a_plan_the_config_already_has(monkeypatch):
 def test_prepare_with_a_checkpoint_patches_the_loaded_remote_module_once(monkeypatch):
     """Given a checkpoint, prepare imports the remote modeling through the class the config's
     ``auto_map`` names, then patches the module that *defines* the MoE block (found by class, not
-    by file name, and not a VLM wrapper that merely imports it) -- once per process -- and leaves
-    the remote-code staging shim installed."""
+    by file name, and not a VLM wrapper that merely imports it) -- a repeat prepare patches nothing
+    twice -- and leaves the remote-code staging shim installed."""
     remote = _remote_module()
     wrapper = types.ModuleType("kimi_k3_remote_stub_vlm")  # imports the block, defines nothing
     wrapper.KimiSparseMoeBlock = remote.KimiSparseMoeBlock
@@ -646,12 +646,12 @@ def test_prepare_with_a_checkpoint_patches_the_loaded_remote_module_once(monkeyp
         loads.append((class_ref, ckpt_path, kwargs))
         for module in (wrapper, remote):  # what importing the remote code does
             monkeypatch.setitem(sys.modules, module.__name__, module)
+        return remote.KimiK3ForConditionalGeneration
 
     monkeypatch.setattr(dmu, "get_class_from_dynamic_module", import_remote_class)
     staging = dmu.get_cached_module_file
     monkeypatch.setattr(dmu, "get_cached_module_file", staging)
     _restore(monkeypatch, hf_generic, "OutputRecorder")
-    monkeypatch.setattr(kimi_k3, "_PATCHED", False)
     monkeypatch.setattr(_onfly_decompress, "install_onfly_decompress", lambda cfg: None)
     auto_map = {"AutoModelForCausalLM": "modeling_kimi_k3.KimiK3ForConditionalGeneration"}
 
@@ -659,7 +659,7 @@ def test_prepare_with_a_checkpoint_patches_the_loaded_remote_module_once(monkeyp
         config = SimpleNamespace(text_config=SimpleNamespace(), auto_map=auto_map)
         kimi_k3.prepare(config, ckpt_path="/ckpt", trust_remote_code=True)
 
-    assert loads == [(auto_map["AutoModelForCausalLM"], "/ckpt", {"trust_remote_code": True})]
+    assert loads == [(auto_map["AutoModelForCausalLM"], "/ckpt", {"trust_remote_code": True})] * 2
     assert dmu.get_cached_module_file is not staging
     assert hasattr(hf_generic, "OutputRecorder")  # the remote code imports it from there
     # every incompatibility is patched on the module the checkpoint's code defined
@@ -677,11 +677,70 @@ def test_prepare_with_a_checkpoint_patches_the_loaded_remote_module_once(monkeyp
 
 def test_prepare_fails_loudly_when_no_loaded_module_defines_the_moe_block(monkeypatch):
     """Skipping the patch silently would load the per-expert layout that EP cannot shard."""
-    monkeypatch.setattr(kimi_k3, "_PATCHED", False)
-    monkeypatch.setattr(kimi_k3, "_force_load_remote_modeling", lambda *args: None)
+
+    class KimiK3ForConditionalGeneration:
+        __module__ = "transformers_modules.no_moe_block.modeling_kimi_k3"
+
+    monkeypatch.setattr(
+        kimi_k3, "_force_load_remote_modeling", lambda *args: KimiK3ForConditionalGeneration
+    )
 
     with pytest.raises(RuntimeError, match="KimiSparseMoeBlock"):
         kimi_k3.prepare(SimpleNamespace(text_config=SimpleNamespace()), ckpt_path="/ckpt")
+
+
+@pytest.mark.usefixtures("private_conversion_registry")
+def test_each_checkpoint_revision_patches_its_own_remote_module(monkeypatch):
+    """Two revisions of the remote code import as two packages, each defining its own MoE block. Each
+    checkpoint's prepare patches its own revision's module, whichever was imported first, and a
+    repeat for the first checkpoint replaces nothing that is already patched."""
+    revisions = {
+        f"/ckpt/{rev}": _remote_module(f"transformers_modules.{rev}.modeling_kimi")
+        for rev in ("rev_a", "rev_b")
+    }
+
+    def import_remote_class(class_ref, ckpt_path, **kwargs):
+        remote = revisions[ckpt_path]
+        monkeypatch.setitem(sys.modules, remote.__name__, remote)
+        return remote.KimiK3ForConditionalGeneration
+
+    monkeypatch.setattr(dmu, "get_class_from_dynamic_module", import_remote_class)
+    monkeypatch.setattr(dmu, "get_cached_module_file", dmu.get_cached_module_file)
+    _restore(monkeypatch, hf_generic, "OutputRecorder")
+    monkeypatch.setattr(_onfly_decompress, "install_onfly_decompress", lambda cfg: None)
+    auto_map = {"AutoModelForCausalLM": "modeling_kimi_k3.KimiK3ForConditionalGeneration"}
+
+    def prepare(ckpt_path):
+        config = SimpleNamespace(text_config=SimpleNamespace(), auto_map=auto_map)
+        kimi_k3.prepare(config, ckpt_path=ckpt_path)
+
+    def patched_surface(remote):
+        return (
+            remote.KimiSparseMoeBlock.__init__,
+            remote.KimiSparseMoeBlock.forward,
+            remote.KimiDeltaAttention.__init__,
+            remote.chunk_kda,
+            remote.fused_recurrent_kda,
+            remote.create_causal_mask,
+            remote.KimiDynamicCache.get_mask_sizes,
+            remote.KimiK3ForConditionalGeneration.tie_weights,
+        )
+
+    rev_a, rev_b = revisions["/ckpt/rev_a"], revisions["/ckpt/rev_b"]
+    shipped_b = patched_surface(rev_b)
+    prepare("/ckpt/rev_a")
+    assert patched_surface(rev_b) == shipped_b
+    prepare("/ckpt/rev_b")
+    patched = patched_surface(rev_a), patched_surface(rev_b)
+    prepare("/ckpt/rev_a")
+
+    assert (patched_surface(rev_a), patched_surface(rev_b)) == patched
+    assert all(new is not old for new, old in zip(patched_surface(rev_b), shipped_b))
+    for remote in (rev_a, rev_b):
+        assert not isinstance(remote.KimiSparseMoeBlock(_config()).experts, nn.ModuleList)
+        assert (
+            remote.KimiK3ForConditionalGeneration().tie_weights(recompute_mapping=False) == "tied"
+        )
 
 
 def test_the_remote_modeling_is_imported_through_the_class_the_auto_map_declares(monkeypatch):
