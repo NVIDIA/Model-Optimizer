@@ -46,6 +46,7 @@ from example_utils import (
     is_nemotron_vl,
     is_trtllm_enc_dec_export,
     mlflow_run,
+    preview_generate_kwargs,
     recipe_layerwise_blocks,
     run_nemotron_vl_preview,
     save_source_config,
@@ -849,6 +850,7 @@ def pre_quantize(
             preview_input_ids,
             attention_mask=preview_attention_mask,
             max_new_tokens=100,
+            **preview_generate_kwargs(full_model),
         )
 
     return preview_input_ids, preview_attention_mask, generated_ids_before_ptq
@@ -907,6 +909,7 @@ def post_quantize(
                 preview_input_ids,
                 attention_mask=preview_attention_mask,
                 max_new_tokens=100,
+                **preview_generate_kwargs(full_model),
             )
         except Exception as e:
             warnings.warn(f"Post-quantization generation sanity check failed, skipping it: {e}")

@@ -29,6 +29,7 @@ and the loaders are replaced by stand-ins that record how they were called.
 import contextlib
 import importlib
 import inspect
+import sys
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -462,3 +463,93 @@ def test_fsdp2_calibration_keeps_the_plain_forward_loop(hf_ptq, monkeypatch):
     plan = DistributionPlan(2, dense="fsdp")
 
     assert _calibration_loop_choice(hf_ptq, monkeypatch, plan, ep_mesh=object()) == ["plain"]
+
+
+class _PreviewModel(torch.nn.Module):
+    """A model whose ``generate`` records the kwargs each preview passes it."""
+
+    def __init__(self, plan=None):
+        super().__init__()
+        self.config = SimpleNamespace(is_encoder_decoder=False, model_type="qwen3_moe")
+        self.calls = []
+        if plan is not None:
+            set_distribution_plan(self, plan)
+
+    def generate(self, input_ids, **kwargs):
+        self.calls.append(kwargs)
+        return torch.cat([input_ids, input_ids[:, :1]], dim=1)
+
+
+_PREVIEW_PLANS = pytest.mark.parametrize(
+    ("plan", "lockstep"),
+    [
+        (None, False),
+        (DistributionPlan(4), False),
+        (DistributionPlan(4, ep_size=4), True),
+        (DistributionPlan(4, dense="fsdp"), True),
+    ],
+    ids=["single_process", "replicated", "expert_parallel", "fsdp2"],
+)
+
+
+@_PREVIEW_PLANS
+def test_a_sharded_model_previews_in_lockstep(hf_ptq, monkeypatch, plan, lockstep):
+    """Each rank previews its own calibration shard's first sample, so the ranks finish decoding at
+    different steps. A sharded model runs a collective in every forward, and a rank that stopped
+    early left the others blocked in it: Qwen3-30B-A3B NVFP4 at EP4 hung in the post-PTQ preview.
+    Both previews keep every rank of a sharded model decoding until all have finished."""
+    model = _PreviewModel(plan)
+    loader = [{"input_ids": torch.tensor([[1, 2, 3]]), "attention_mask": torch.ones(1, 3)}]
+    args = SimpleNamespace(
+        specdec_offline_dataset=None,
+        skip_generate=False,
+        verbose=False,
+        local_checkpoint_path=_CKPT,
+        trust_remote_code=False,
+    )
+    monkeypatch.setattr(hf_ptq, "export_quantized", lambda *args, **kwargs: None)
+
+    ids, mask, before = hf_ptq.pre_quantize(args, model, "qwen3_moe", None, loader, False)
+    hf_ptq.post_quantize(
+        args,
+        model,
+        model,
+        "qwen3_moe",
+        get_tiny_tokenizer(),
+        None,
+        ids,
+        mask,
+        before,
+        False,
+        None,
+        loader,
+    )
+
+    synced = [call.get("synced_gpus", False) for call in model.calls]
+    assert synced == [lockstep, lockstep]  # before and after quantization
+
+
+@_PREVIEW_PLANS
+def test_a_sharded_nemotron_vl_model_previews_in_lockstep(monkeypatch, plan, lockstep):
+    """The Nemotron-VL preview's text, fallback and image generations keep a sharded model's ranks
+    decoding together too."""
+    recorded = {}
+    vlm_utils = SimpleNamespace(
+        run_text_only_generation=lambda model, tokenizer, question, config, *args: recorded.update(
+            text=config
+        ),
+        run_vl_preview_generation=lambda model, tokenizer, path, stage, trust, kwargs: (
+            recorded.update(image=kwargs)
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "vlm_utils", vlm_utils)
+    model = _PreviewModel(plan)
+
+    example_utils.run_nemotron_vl_preview(
+        model, get_tiny_tokenizer(), torch.tensor([[1, 2, 3]]), _CKPT, "stage", allow_fallback=True
+    )
+
+    expected = {"synced_gpus": True} if lockstep else {}
+    assert recorded["text"].get("synced_gpus", False) == lockstep
+    assert recorded["image"] == expected
+    assert model.calls[0].get("synced_gpus", False) == lockstep  # the fallback generate
