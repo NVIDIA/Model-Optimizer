@@ -12,7 +12,6 @@ Changelog
 
 **Bug Fixes**
 
-- Fix corrupted ONNX external tensor data when exporting models on Windows by upgrading ONNX. Regenerate affected models from clean weights.
 - Fix ONNX preprocessing with custom TensorRT plugin libraries on TensorRT 11.
 - Fix ``INT8_DEFAULT_CFG``, ``FP8_DEFAULT_CFG``, ``NVFP4_DEFAULT_CFG`` and the other presets and recipes that import ``configs/ptq/units/default_disabled_quantizers`` and enable ``*input_quantizer``: since 0.44 they also quantized ``nn.LayerNorm`` inputs, which adds quantization error to the residual stream of models built on ``nn.LayerNorm`` such as BERT-style encoders. Re-quantize affected models; a recipe that wants ``nn.LayerNorm`` quantizers must enable them after importing that unit.
 
@@ -149,6 +148,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix corrupted ONNX external tensor data when exporting models on Windows by upgrading ONNX. Regenerate affected models from clean weights.
 - Fix exports using the built-in Transformers NemotronH implementation retaining incompatible legacy remote-code config and model mappings. Re-export affected checkpoints before deployment.
 - Fix INT8 real quantization (``mtq.compress``) of FP16 weights zeroing or clipping channels with a small amax: their scales underflowed in FP16. Scales of newly compressed INT8 weights are now stored in FP32.
 - Fix Hugging Face exports classifying registered Qwen VLM parameters as unplaced source weights, which overwrote quantized tensors with original weights and incorrectly excluded their modules from quantization. Re-export affected checkpoints.
