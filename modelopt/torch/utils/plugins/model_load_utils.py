@@ -782,6 +782,34 @@ def _map_ckpt_keys_to_model(model: "torch.nn.Module", ckpt_keys, model_keys) -> 
     return key_map
 
 
+def _copy_tied_values(kept: torch.Tensor, src: torch.Tensor, name: str) -> None:
+    """Copy ``name``'s checkpoint values from ``src`` into ``kept``, the tied param that replaced it.
+
+    The copy is local: plain tensors, or DTensors laid out alike (one mesh, the same placements), as
+    FSDP2 shards tied params. Any other layout would need a redistribution and is refused instead.
+    """
+    from torch.distributed.tensor import DTensor
+
+    alike = kept.shape == src.shape and (
+        not (isinstance(kept, DTensor) or isinstance(src, DTensor))
+        or (
+            isinstance(kept, DTensor)
+            and isinstance(src, DTensor)
+            and kept.device_mesh == src.device_mesh
+            and kept.placements == src.placements
+        )
+    )
+    if not alike:
+        raise RuntimeError(
+            f"meta+DCP load: tie_weights replaced {name}, which the checkpoint filled, with a param "
+            "laid out differently, so its values cannot be carried over"
+        )
+    with torch.no_grad():
+        if isinstance(kept, DTensor):
+            kept, src = kept.to_local(), src.to_local()
+        kept.copy_(src)
+
+
 def _meta_dcp_load(
     model: "torch.nn.Module",
     local_dir: str,
@@ -921,12 +949,22 @@ def _meta_dcp_load(
                 f"{sorted(loaded_bufs)[:5]}"
             )
     dcp.load(load_sd, storage_reader=reader)
+    # Taken before tying, which can swap a filled param out of its module.
+    filled = {n: model.get_parameter(n) for n in want_params & mapped_names}
     if hasattr(model, "tie_weights"):
         model.tie_weights()  # re-establish tied weights the checkpoint omitted
+    # Tying keeps one param of each tied group, not necessarily the one the checkpoint filled: a tied
+    # checkpoint storing only ``lm_head.weight`` loses its values to the embedding's empty param. The kept
+    # param takes the filled one's values, as from_pretrained leaves it.
+    loaded = {id(p) for p in filled.values()}
+    for name, src in filled.items():
+        kept = model.get_parameter(name)
+        if id(kept) not in loaded:
+            _copy_tied_values(kept, src, name)
+            loaded.add(id(kept))
     # A re-emptied target param no checkpoint tensor filled, and that tying did not make a loaded param,
     # still holds ``to_empty``'s memory. from_pretrained would initialize it; this loader can't run the
     # model's init on shards, so it fails rather than return the model. Every rank reaches the same verdict.
-    loaded = {id(model.get_parameter(n)) for n in want_params & mapped_names}
     unfilled = sorted(
         n
         for n in (unloaded & emptied) - saved_params.keys()
