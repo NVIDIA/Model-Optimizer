@@ -51,6 +51,71 @@ from modelopt.torch.quantization.plugins.huggingface import (
 )
 from modelopt.torch.quantization.utils.core_utils import weight_attr_names
 
+
+def test_native_fp8_experts_dequantized_before_nvfp4_export():
+    """Calibrate and pack scaled FP8 gate/up and down weights, preserving their BF16 values."""
+    generator = torch.Generator().manual_seed(42)
+    experts = FP8Experts(
+        PretrainedConfig(hidden_size=256, intermediate_size=256, num_experts=2, hidden_act="silu"),
+        block_size=(128, 128),
+    )
+    reference = {}
+    for name, scale_range in (("gate_up_proj", (0.01, 0.08)), ("down_proj", (0.15, 0.3))):
+        weight = getattr(experts, name)
+        scales = getattr(experts, f"{name}_scale_inv")
+        assert weight.dtype == torch.float8_e4m3fn
+        with torch.no_grad():
+            weight.copy_(torch.randn(weight.shape, generator=generator).to(weight.dtype))
+            scales.copy_(torch.linspace(*scale_range, scales.numel()).reshape(scales.shape))
+        # Build only the reference here; ModelOpt must consume the untouched FP8 source.
+        blocks = weight.float().reshape(2, weight.shape[1] // 128, 128, 2, 128)
+        reference[name] = (blocks * scales[:, :, None, :, None]).reshape(weight.shape).bfloat16()
+
+    registered_before = QuantModuleRegistry.get(FP8Experts)
+    try:
+        mtq.quantize(experts, mtq.NVFP4_DEFAULT_CFG)
+        for name, expected in reference.items():
+            assert getattr(experts, name).dtype == torch.float8_e4m3fn
+            quantizers = getattr(experts, f"{name}_weight_quantizers")
+            for idx, quantizer in enumerate(quantizers):
+                assert quantizer.is_enabled and quantizer.num_bits == (2, 1)
+                torch.testing.assert_close(
+                    quantizer.amax.float(),
+                    expected[idx].float().abs().amax(),
+                    rtol=0.004,
+                    atol=0,
+                )
+
+        _export_fused_experts(experts, torch.bfloat16)
+        levels = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6])
+        for idx in range(2):
+            exported = getattr(experts, str(idx))
+            torch.testing.assert_close(
+                exported.gate_proj.weight_scale_2, exported.up_proj.weight_scale_2
+            )
+            for name, expected in (
+                ("gate_proj", reference["gate_up_proj"][idx, :256]),
+                ("up_proj", reference["gate_up_proj"][idx, 256:]),
+                ("down_proj", reference["down_proj"][idx]),
+            ):
+                projection = getattr(exported, name)
+                packed = projection.weight
+                assert packed.dtype == torch.uint8
+                codes = torch.stack((packed & 15, packed >> 4), dim=-1).reshape(expected.shape)
+                decoded = (
+                    levels[codes.long()]
+                    * projection.weight_scale.float().repeat_interleave(16, dim=-1)
+                    * projection.weight_scale_2.float()
+                )
+                relative_l2 = torch.linalg.vector_norm(
+                    decoded - expected.float()
+                ) / torch.linalg.vector_norm(expected.float())
+                assert relative_l2 < 0.15, f"Expert {idx} {name}: relative L2 {relative_l2}"
+    finally:
+        if registered_before is None and QuantModuleRegistry.get(FP8Experts) is not None:
+            QuantModuleRegistry.unregister(FP8Experts)
+
+
 # ---------------------------------------------------------------------------
 # Synthetic fused expert module matching the HF transformers 5.0+ pattern
 # ---------------------------------------------------------------------------
