@@ -35,6 +35,10 @@ from ..logging_config import logger
 from .dla_transforms.dla_cast_to_fp32 import _apply_cast_to_fp32
 from .dla_transforms.dla_constants_to_initializers import _constants_to_initializers_from_model
 from .dla_transforms.dla_decompose_lstm import _apply_decompose_lstm
+from .dla_transforms.dla_force_fp16_activations import (
+    _apply_force_fp16_activations,
+    _apply_fp16_lpnorm,
+)
 from .dla_transforms.dla_graph_cleanup import _remove_unused_initializers
 from .dla_transforms.dla_greater import _apply_greater
 from .dla_transforms.dla_indexing import (
@@ -242,6 +246,7 @@ def _transform_make_dla_compatible(
     verbose: bool = True,
     qdq_quantized_dtypes: Iterable[int | str] | None = None,
     remove_all_qdq: bool = False,
+    force_fp16_activations: bool = False,
 ) -> onnx.ModelProto:
     """Apply the logged DLA sequence in memory, then infer shapes and validate."""
     started = time.perf_counter()
@@ -311,12 +316,21 @@ def _transform_make_dla_compatible(
         options = _boundary_stage_options(
             name, quant_types, verbose, prepared_input_ops, prepared_output_ops
         )
+        if name == "Non4DLpNorm" and force_fp16_activations:
+            transform = _apply_fp16_lpnorm
         result = transform(model, **options)
         if result is not None:
             model = result
     model = infer_shapes(model)
     model = _apply_reorder_nodes(model)
     onnx.checker.check_model(model)
+    if force_fp16_activations:
+        if verbose:
+            logger.info("[DLA pipeline] Applying ForceFp16Activations")
+        model = _apply_force_fp16_activations(model)
+        # Match C++: symbolic inference stays before precision conversion.
+        model = onnx.shape_inference.infer_shapes(model)
+        onnx.checker.check_model(model)
     if verbose:
         logger.info("[DLA pipeline] Done (%.1fs).", time.perf_counter() - started)
     return model
@@ -331,6 +345,7 @@ def dla_make_dla_compatible(
     verbose: bool = True,
     qdq_quantized_dtypes: Iterable[int | str] | None = None,
     remove_all_qdq: bool = False,
+    force_fp16_activations: bool = False,
 ) -> onnx.ModelProto:
     """Load an ONNX model, apply the ordered DLA transforms, and save the result.
 
@@ -348,6 +363,7 @@ def dla_make_dla_compatible(
         qdq_quantized_dtypes: Zero-point dtypes whose QDQ pairs are removed.
             Defaults to UINT16 and INT16. Accepts ONNX dtype IDs or names.
         remove_all_qdq: Remove QDQ pairs for every dtype, matching the C++ flag.
+        force_fp16_activations: Use FP16 internals while preserving FP32 public boundaries.
             Cannot be combined with qdq_quantized_dtypes.
 
     Returns:
@@ -358,6 +374,7 @@ def dla_make_dla_compatible(
         verbose=verbose,
         qdq_quantized_dtypes=qdq_quantized_dtypes,
         remove_all_qdq=remove_all_qdq,
+        force_fp16_activations=force_fp16_activations,
     )
     output_dir = os.path.dirname(output_path)
     if output_dir:
