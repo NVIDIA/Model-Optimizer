@@ -308,7 +308,7 @@ that baseline. The deviations come in four kinds:
 
 | Kind | What changes vs. the general recipe | Examples |
 |------|-------------------------------------|----------|
-| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama`, `nemotron_h` |
+| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
 | **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma` |
 | **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/NVIDIA-Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
@@ -326,7 +326,7 @@ folder may carry a `README.md` spelling out that delta.
 > genuinely deviate and aliases the ones that don't; see
 > [`models/README.md`](models/README.md) for the alias format and when to write one.
 
-### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama`, `nemotron_h`
+### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama`
 
 **`minimax_m3_vl/ptq/mxfp8_nvfp4_experts`** applies MXFP8 to the language-model
 linear layers and MSE-calibrated NVFP4 to routed experts, with expert
@@ -406,27 +406,6 @@ recipes, for Step-3.7 checkpoints; Step-3.5 has its own recipe above.
   vLLM on the Marlin dequant fallback, which measured *slower* than BF16. The `_mcore` suffix is
   load-bearing: selectors are Megatron-Core leaf names (`mlp.experts.linear_fc1`,
   `self_attention.linear_qkv`), so under `hf_ptq.py` nothing matches and `mtq.quantize` raises.
-
-- **`nemotron_h/ptq/nvfp4-aggressive-mse`** is the **aggressive** tier for hybrid Mamba-MoE
-  NemotronH checkpoints, including the omni VL wrappers:
-  - MoE routed + shared experts → NVFP4 W4A4, `group_size 16`, **static** weight scales
-    (`nvfp4_static`) with dynamic NVFP4 activations (`nvfp4`)
-  - attention q/k/v/out, Mamba `in/out_proj`, `lm_head` → FP8
-  - MTP block-1 routed + shared experts → identical treatment to the main experts; the MTP rules
-    are inert on checkpoints without an MTP tail
-  - latent MoE, embeddings, router and the vision tower → **BF16**
-  - KV cache → FP8, **asymmetric**: the language-model backbone casts at a fixed FP8 range
-    (`use_constant_amax`, as in `configs/ptq/units/kv_fp8_cast`, so no `k_scale`/`v_scale` is
-    exported) while MTP attention stays data-calibrated and keeps its pair
-
-  Calibration is weight-MSE with an FP8-scale sweep, which is why the weight quantizers are
-  `static`. Use `--calib_with_images` on VL checkpoints: the vision tower must see image batches
-  even though it stays BF16.
-
-  Rules list both Hugging Face and Megatron-Core spellings where they differ (attention
-  `linear_qkv`/`linear_proj`, `output_layer`, the MTP `mtp_model_layer.layers`), so the same
-  recipe applies under `examples/megatron_bridge/quantize.py`; there, static NVFP4 weights need
-  `--tp_size 1`.
 
 ### Algorithm overrides — `gemma`, `gemma4`, `mpt`
 
@@ -523,6 +502,29 @@ checkpoint's** quant config verbatim:
   Four-over-Six NVFP4 W4A16 to routed experts, shared experts, and the language
   model head; Mamba `in/out_proj` weights and inputs plus the KV cache use FP8,
   while attention remains BF16.
+- **`models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/ptq/nvfp4-mse`** is the PTQ
+  stage for **NVIDIA Nemotron 3.5 Super VL**, keyed to the BF16 source checkpoint it runs on. It
+  reproduces the released **precision assignment**, not the released weights —
+  `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` adds quantization-aware distillation
+  after this stage. The model is a hybrid Mamba-MoE NemotronH omni checkpoint:
+  - MoE routed + shared experts → NVFP4 W4A4, `group_size 16`, **static** weight scales
+    (`nvfp4_static`) with dynamic NVFP4 activations (`nvfp4`)
+  - attention q/k/v/out, Mamba `in/out_proj`, `lm_head` → FP8
+  - MTP block-1 routed + shared experts → identical treatment to the main experts; the MTP rules
+    are inert on checkpoints without an MTP tail
+  - latent MoE, embeddings, router and the vision tower → **BF16**
+  - KV cache → FP8, **asymmetric**: the language-model backbone casts at a fixed FP8 range
+    (`use_constant_amax`, as in `configs/ptq/units/kv_fp8_cast`, so no `k_scale`/`v_scale` is
+    exported) while MTP attention stays data-calibrated and keeps its pair
+
+  Calibration is weight-MSE with an FP8-scale sweep, which is why the weight quantizers are
+  `static`. Use `--calib_with_images` on VL checkpoints: the vision tower must see image batches
+  even though it stays BF16.
+
+  Rules list both Hugging Face and Megatron-Core spellings where they differ (attention
+  `linear_qkv`/`linear_proj`, `output_layer`, the MTP `mtp_model_layer.layers`), so the same
+  recipe applies under `examples/megatron_bridge/quantize.py`; there, static NVFP4 weights need
+  `--tp_size 1`.
 - **`models/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16/ptq/nvfp4_w4a16`** mirrors the GGUF **Q4_K_M** bit
   allocation of the Nemotron-H hybrid, mapped onto NVFP4/FP8 **per layer**:
   Q4_K/Q5_0 linears → NVFP4 W4A4 (attention q/k/v/o kept uniform so export can
