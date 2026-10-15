@@ -23,6 +23,7 @@ after export. Common use cases include:
 - Converting model precision (e.g., FP16 to BF16)
 - Transposing DequantizeLinear weights for column-major storage optimization
 - Graph cleanup and optimization
+- Making models compatible with the NVIDIA DLA accelerator
 
 Example usage:
     >>> from modelopt.onnx.graph_surgery import (
@@ -30,6 +31,7 @@ Example usage:
     ...     convert_fp16_to_bf16,
     ...     transpose_dequantize_linear_weights,
     ...     add_cross_kv_to_encoder,
+    ...     make_dla_compatible,
     ... )
     >>> # Replace attention with GQA for LLMs (FP16 model)
     >>> replace_attention_with_gqa(
@@ -62,11 +64,17 @@ Example usage:
     ...     model_path="model_quantized.onnx",
     ...     output_path="model_quantized_transposed.onnx",
     ... )
+    >>> # Apply the ordered DLA compatibility pipeline
+    >>> make_dla_compatible(
+    ...     model_path="model.onnx",
+    ...     output_path="model_dla.onnx",
+    ... )
 """
 
 from .dq_transpose import transpose_dequantize_linear_weights
 from .encoder_cross_kv import add_cross_kv_to_encoder
 from .gqa_replacement import replace_attention_with_gqa
+from .make_dla_compatible import dla_make_dla_compatible as make_dla_compatible
 from .utils.dtype_conversion import convert_fp16_to_bf16
 
 _SURGERY_REGISTRY = {
@@ -74,6 +82,7 @@ _SURGERY_REGISTRY = {
     "add-cross-kv": add_cross_kv_to_encoder,
     "convert-bf16": convert_fp16_to_bf16,
     "transpose-dq": transpose_dequantize_linear_weights,
+    "make-dla-compatible": make_dla_compatible,
 }
 
 
@@ -132,6 +141,7 @@ __all__ = [
     "add_cross_kv_to_encoder",
     "convert_fp16_to_bf16",
     "get_available_surgeries",
+    "make_dla_compatible",
     "replace_attention_with_gqa",
     "run_graph_surgery",
     "transpose_dequantize_linear_weights",
