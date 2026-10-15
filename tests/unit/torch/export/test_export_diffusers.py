@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import copy
+import inspect
 import json
 
 import pytest
@@ -28,6 +29,7 @@ from _test_utils.torch.diffusers_models import (
 
 pytest.importorskip("diffusers")
 
+import diffusers
 from safetensors import safe_open
 from safetensors.torch import save_file
 
@@ -86,6 +88,30 @@ def test_export_diffusers_models_non_quantized(tmp_path, model_factory):
 
     config_data = _load_config(config_path)
     assert "quantization_config" not in config_data
+
+
+@pytest.mark.parametrize("selection", ["default", "all", "transformer_2"])
+@pytest.mark.skipif(
+    not hasattr(diffusers, "WanPipeline")
+    or "boundary_ratio" not in inspect.signature(diffusers.WanPipeline.__init__).parameters,
+    reason="Requires a Diffusers version with Wan 2.2 support",
+)
+def test_export_diffusers_pipeline_config(tmp_path, tiny_wan22_path, selection):
+    pipe = diffusers.WanPipeline.from_pretrained(tiny_wan22_path)
+    component_names = {name for name, component in pipe.components.items() if component is not None}
+    components = None if selection == "default" else sorted(component_names)
+    if selection == "transformer_2":
+        components = [selection]
+    expected_components = component_names if components is None else set(components)
+    export_dir = tmp_path / "export_pipeline"
+
+    export_hf_checkpoint(pipe, export_dir=export_dir, components=components)
+
+    model_index = _load_config(export_dir / "model_index.json")
+    assert model_index["boundary_ratio"] == pipe.config.boundary_ratio
+    assert model_index["expand_timesteps"] == pipe.config.expand_timesteps
+    assert set(model_index) & component_names == expected_components
+    assert {path.name for path in export_dir.iterdir() if path.is_dir()} == expected_components
 
 
 def test_export_diffusers_unet_quantized_matches_llm_config(tmp_path, monkeypatch):
