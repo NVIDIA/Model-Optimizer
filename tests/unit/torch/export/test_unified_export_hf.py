@@ -22,7 +22,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
     wrap_in_parent_with_tied_keys,
@@ -1109,9 +1108,9 @@ def _finish_export_job(failing_rank, rank, size):
 
 
 @pytest.mark.parametrize("failing_rank", [None, 0, 1])
-def test_every_rank_fails_an_export_that_any_rank_failed(failing_rank):
+def test_every_rank_fails_an_export_that_any_rank_failed(cpu_dist_workers, failing_rank):
     """A barrier alone lets the ranks that wrote their shards carry on as if the export succeeded."""
-    spawn_multiprocess_job(2, partial(_finish_export_job, failing_rank), backend="gloo")
+    cpu_dist_workers.run(partial(_finish_export_job, failing_rank))
 
 
 def test_a_single_process_export_ends_on_its_own_outcome():
