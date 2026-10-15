@@ -2819,10 +2819,9 @@ def _quantized_experts_backward_job(rank, size):
         torch.testing.assert_close(
             local_grad.float(), getattr(w_exp, name).grad[owned].float(), **close
         )
-    dist.destroy_process_group()
 
 
-def test_quantized_fused_experts_train_through_torch_a2a_like_the_whole_module(skip_on_windows):
+def test_quantized_fused_experts_train_through_torch_a2a_like_the_whole_module(cpu_dist_workers):
     """QAT under expert parallelism: with fake quantizers inserted, the experts split over two ranks
     train through the torch_a2a forward as the whole quantized module does on one process."""
     from packaging.version import Version
@@ -2830,9 +2829,7 @@ def test_quantized_fused_experts_train_through_torch_a2a_like_the_whole_module(s
 
     if Version(tf_version) < Version("5.6"):
         pytest.skip("expert parallelism needs transformers >= 5.6")
-    from _test_utils.torch.distributed.utils import spawn_multiprocess_job
-
-    spawn_multiprocess_job(2, _quantized_experts_backward_job, backend="gloo")
+    cpu_dist_workers.run(_quantized_experts_backward_job)
 
 
 _WEIGHT_ONLY_INT8_EXPERTS_CFG = {
@@ -2849,7 +2846,6 @@ def _ep_sharded_experts_use_their_own_weights_job(rank, size):
     DTensor ``Shard(0)`` over the experts, ``num_experts`` set to the local count): each rank's
     per-expert quantizers must calibrate on, and fold into, the rank's own experts, as in the whole
     module -- not on the global experts their local index names."""
-    import torch.distributed as dist
     from torch.distributed.device_mesh import init_device_mesh
     from torch.distributed.tensor import Shard, distribute_tensor
     from transformers import Qwen3MoeConfig
@@ -2900,15 +2896,12 @@ def _ep_sharded_experts_use_their_own_weights_job(rank, size):
             atol=0,
             rtol=0,
         )
-    dist.destroy_process_group()
 
 
-def test_ep_sharded_experts_calibrate_and_fold_their_own_weights(skip_on_windows):
+def test_ep_sharded_experts_calibrate_and_fold_their_own_weights(cpu_dist_workers):
     """Weight calibration and folding run outside the forward, where expert-parallel weights are still
     DTensors sharded over the experts: each rank must use its own experts, not the global ones."""
-    from _test_utils.torch.distributed.utils import spawn_multiprocess_job
-
-    spawn_multiprocess_job(2, _ep_sharded_experts_use_their_own_weights_job, backend="gloo")
+    cpu_dist_workers.run(_ep_sharded_experts_use_their_own_weights_job)
 
 
 def _fsdp_wrapped_ep_experts_calibrate_their_own_weights_job(rank, size):
@@ -2916,7 +2909,6 @@ def _fsdp_wrapped_ep_experts_calibrate_their_own_weights_job(rank, size):
     experts left out (``ignored_params``) and EP-sharded over ``ep``. Weight calibration opens FSDP2's
     weight-access window on the layer, which must leave the expert DTensors alone -- gathering them
     would hand every rank every expert, indexed by local position."""
-    import torch.distributed as dist
     from torch.distributed.device_mesh import init_device_mesh
     from torch.distributed.fsdp import fully_shard
     from torch.distributed.tensor import Shard, distribute_tensor
@@ -2969,14 +2961,9 @@ def _fsdp_wrapped_ep_experts_calibrate_their_own_weights_job(rank, size):
             )
     # The expert weights stay sharded: nothing gathered them for good.
     assert layer.experts.gate_up_proj.to_local().shape[0] == n_local
-    dist.destroy_process_group()
 
 
-def test_fsdp_wrapped_ep_experts_calibrate_their_own_weights(skip_on_windows):
+def test_fsdp_wrapped_ep_experts_calibrate_their_own_weights(cpu_dist_workers):
     """With the dense part FSDP2-sharded, the experts' weight calibration runs inside FSDP2's weight
     access window, which must not gather the expert-parallel weights FSDP2 does not own."""
-    from _test_utils.torch.distributed.utils import spawn_multiprocess_job
-
-    spawn_multiprocess_job(
-        2, _fsdp_wrapped_ep_experts_calibrate_their_own_weights_job, backend="gloo"
-    )
+    cpu_dist_workers.run(_fsdp_wrapped_ep_experts_calibrate_their_own_weights_job)
