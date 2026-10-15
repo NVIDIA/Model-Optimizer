@@ -2687,6 +2687,104 @@ class _ExpertsHolder(nn.Module):
         return self.experts(*args)
 
 
+def _quantized_experts_backward_job(rank, size):
+    """Each rank holds half of transformers' fused Qwen3-MoE experts with ModelOpt's fake quantizers,
+    set to the whole module's calibrated scales; trained through the torch_a2a forward, it must give
+    the gradients the whole quantized module gives on one process."""
+    import copy
+
+    import torch.distributed as dist
+    from transformers import Qwen3MoeConfig
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
+
+    from modelopt.torch.utils.moe import register_torch_a2a
+
+    register_torch_a2a()
+    dtype = torch.bfloat16  # the torch_a2a transport computes in bf16
+    config = Qwen3MoeConfig(
+        hidden_size=_EP_HIDDEN,
+        moe_intermediate_size=2 * _EP_HIDDEN,
+        intermediate_size=4 * _EP_HIDDEN,
+        num_experts=_EP_EXPERTS,
+        num_experts_per_tok=TOP_K,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+    )
+    torch.manual_seed(0)
+    whole = _ExpertsHolder(Qwen3MoeExperts(config).to(dtype))
+    with torch.no_grad():
+        whole.experts.gate_up_proj.normal_(std=0.3)
+        whole.experts.down_proj.normal_(std=0.3)
+    n_local = _EP_EXPERTS // size
+    owned = slice(rank * n_local, (rank + 1) * n_local)
+    local_config = copy.deepcopy(config)
+    local_config.num_experts = n_local
+    local = _ExpertsHolder(Qwen3MoeExperts(local_config).to(dtype))
+    with torch.no_grad():
+        local.experts.gate_up_proj.copy_(whole.experts.gate_up_proj[owned])
+        local.experts.down_proj.copy_(whole.experts.down_proj[owned])
+
+    gen = torch.Generator().manual_seed(1)
+    x = torch.randn(size * _EP_TOKENS, _EP_HIDDEN, generator=gen).to(dtype)
+    weights, index = (
+        torch.randn(size * _EP_TOKENS, _EP_EXPERTS, generator=gen).softmax(-1).topk(TOP_K)
+    )
+    weights = weights.to(dtype)
+    tok = slice(rank * _EP_TOKENS, (rank + 1) * _EP_TOKENS)
+
+    whole.experts.config._experts_implementation = "grouped_mm"
+    mtq.quantize(whole, _INT8_EXPERTS_CFG, lambda m: m(x, index, weights))
+    local.experts.config._experts_implementation = "torch_a2a"
+    # Calibrating through the torch_a2a forward sees only the tokens dispatched to this rank's experts;
+    # the scales are then set to the whole module's so the two compute the same quantized function.
+    mtq.quantize(
+        local, _INT8_EXPERTS_CFG, lambda m: m(x[tok], index[tok], weights[tok], dist.group.WORLD)
+    )
+    w_exp, l_exp = whole.experts, local.experts
+    for name in ("gate_up_proj_input_quantizer", "down_proj_input_quantizer"):
+        getattr(l_exp, name).amax = getattr(w_exp, name).amax
+    for name in ("gate_up_proj_weight_quantizers", "down_proj_weight_quantizers"):
+        for i, quantizer in enumerate(getattr(l_exp, name)):
+            quantizer.amax = getattr(w_exp, name)[owned.start + i].amax
+
+    x_ref = x.clone().requires_grad_(True)
+    w_ref = weights.clone().requires_grad_(True)
+    out_ref = whole(x_ref, index, w_ref)
+    out_ref.float().pow(2).sum().backward()
+
+    x_ep = x[tok].clone().requires_grad_(True)
+    w_ep = weights[tok].clone().requires_grad_(True)
+    out_ep = local(x_ep, index[tok], w_ep, dist.group.WORLD)
+    out_ep.float().pow(2).sum().backward()
+
+    close = {"atol": 3e-2, "rtol": 3e-2}
+    torch.testing.assert_close(out_ep.float(), out_ref[tok].detach().float(), **close)
+    torch.testing.assert_close(x_ep.grad.float(), x_ref.grad[tok].float(), **close)
+    torch.testing.assert_close(w_ep.grad.float(), w_ref.grad[tok].float(), **close)
+    for name in ("gate_up_proj", "down_proj"):
+        local_grad = getattr(l_exp, name).grad
+        assert local_grad is not None and local_grad.abs().max() > 0, name
+        torch.testing.assert_close(
+            local_grad.float(), getattr(w_exp, name).grad[owned].float(), **close
+        )
+    dist.destroy_process_group()
+
+
+def test_quantized_fused_experts_train_through_torch_a2a_like_the_whole_module(skip_on_windows):
+    """QAT under expert parallelism: with fake quantizers inserted, the experts split over two ranks
+    train through the torch_a2a forward as the whole quantized module does on one process."""
+    from packaging.version import Version
+    from transformers import __version__ as tf_version
+
+    if Version(tf_version) < Version("5.6"):
+        pytest.skip("expert parallelism needs transformers >= 5.6")
+    from _test_utils.torch.distributed.utils import spawn_multiprocess_job
+
+    spawn_multiprocess_job(2, _quantized_experts_backward_job, backend="gloo")
+
+
 _WEIGHT_ONLY_INT8_EXPERTS_CFG = {
     "quant_cfg": [
         {"quantizer_name": "*", "enable": False},
