@@ -535,6 +535,17 @@ class HFDFlashModel(DFlashModel):
         self.mask_token_id = config.dflash_mask_token_id
         logger.info("DFlash mask_token_id: %s", self.mask_token_id)
 
+        self.dflash_base_lm_loss_alpha = float(
+            getattr(config, "dflash_base_lm_loss_alpha", 0.0) or 0.0
+        )
+        if self.dflash_base_lm_loss_alpha > 0.0 and self.dflash_freeze_base_model:
+            # The term would build no graph through a frozen base and silently contribute
+            # nothing -- the same class of quiet no-op as an unconditional no_grad.
+            raise ValueError(
+                "dflash_base_lm_loss_alpha > 0 requires dflash_freeze_base_model=False; "
+                "on a frozen base the term has no gradient and would do nothing."
+            )
+
         # Freeze base model
         if self.dflash_freeze_base_model:
             for param in self.parameters():
@@ -1216,6 +1227,27 @@ class HFDFlashModel(DFlashModel):
             draft_hidden=hidden,
             base_outputs=base_outputs,
         )
+
+        # Anchor a trainable base to language modelling. Without this the only gradient
+        # reaching an unfrozen base comes from the draft objective, so the base drifts
+        # toward whatever is easiest to draft rather than toward predicting text.
+        if self.dflash_base_lm_loss_alpha > 0.0:
+            if labels is None:
+                raise ValueError(
+                    "dflash_base_lm_loss_alpha > 0 needs labels in the batch; the data "
+                    "module must be built with return_labels=True."
+                )
+            base_logits = base_outputs.logits
+            # Standard causal shift: DFlash's collator leaves labels unshifted
+            # (shift_labels=not is_dflash), so it is done here rather than assumed.
+            shift_logits = base_logits[:, :-1].float()
+            shift_labels = labels[:, 1:]
+            base_lm_loss = F.cross_entropy(
+                shift_logits.reshape(-1, shift_logits.size(-1)),
+                shift_labels.reshape(-1),
+                ignore_index=-100,
+            )
+            loss = loss + self.dflash_base_lm_loss_alpha * base_lm_loss
 
         return ModelOutput(
             loss=loss,
