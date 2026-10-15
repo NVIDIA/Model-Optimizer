@@ -293,12 +293,14 @@ def test_install_rewrites_only_the_per_expert_weight_converters(monkeypatch):
     compression = (_ScaledCompressor, None, PACKED, "stub-format")
     monkeypatch.setattr(mu, "get_model_conversion_mapping", stock_mapping)
     monkeypatch.setattr(onfly, "_read_compression", lambda cfg: compression)
-    onfly.install_onfly_decompress(SimpleNamespace())
+    config = SimpleNamespace()
+    onfly.install_onfly_decompress(config)
+    model = SimpleNamespace(config=config)
 
     # positionally, the way from_pretrained calls it
-    out = mu.get_model_conversion_mapping("model", {"old": "new"}, "quantizer")
+    out = mu.get_model_conversion_mapping(model, {"old": "new"}, "quantizer")
 
-    assert calls == [("model", {"old": "new"}, "quantizer")]
+    assert calls == [(model, {"old": "new"}, "quantizer")]
     assert len(out) == len(stock)
     assert all(kept is original for kept, original in zip(out[:3], stock[:3]))
     assert [conv.source_patterns[0] for conv in out[3:]] == [
@@ -335,11 +337,12 @@ def test_installing_twice_wraps_the_loader_once(monkeypatch):
 
     onfly.install_onfly_decompress(SimpleNamespace())
     installed = hooks()
-    onfly.install_onfly_decompress(SimpleNamespace())
+    again = SimpleNamespace()
+    onfly.install_onfly_decompress(again)
 
     assert hooks() == installed
     assert len(reads) == 2
-    [conv] = mu.get_model_conversion_mapping("model")
+    [conv] = mu.get_model_conversion_mapping(SimpleNamespace(config=again))
     assert len(conv.operations) == len(down.operations) + 1
 
 
@@ -372,6 +375,66 @@ def test_a_checkpoint_compressed_differently_needs_a_process_of_its_own(monkeypa
         onfly.install_onfly_decompress(SimpleNamespace(checkpoint="b"))
 
     assert mu.get_model_conversion_mapping is installed
+
+
+def _install_for_deepseek_v3(monkeypatch):
+    """Install for a compressed DeepSeek-V3 config; a config without quantization_config reads as none."""
+    compression = (_ScaledCompressor, None, PACKED, "stub-format")
+
+    def read(cfg):
+        if getattr(cfg, "quantization_config", None) is None:
+            raise ValueError("install_onfly_decompress: config has no quantization_config")
+        return compression
+
+    monkeypatch.setattr(
+        mu, "get_model_conversion_mapping", lambda model, **kw: list(_stock_expert_converters())
+    )
+    monkeypatch.setattr(onfly, "_read_compression", read)
+    config = DeepseekV3Config(num_hidden_layers=1)
+    config.quantization_config = {"format": "stub-format"}
+    onfly.install_onfly_decompress(config)
+    return config
+
+
+@pytest.mark.usefixtures("restore_loader_hooks")
+def test_another_model_loaded_in_the_process_keeps_its_stock_expert_converters(monkeypatch):
+    """The hooks outlive the compressed checkpoint's load. Rewritten, an uncompressed MoE's experts
+    would match no stored key, load newly initialized, and from_pretrained would not complain."""
+    _install_for_deepseek_v3(monkeypatch)
+    other = SimpleNamespace(config=DeepseekV3Config(num_hidden_layers=1))
+
+    out = mu.get_model_conversion_mapping(other)
+
+    stock = [conv.source_patterns for conv in _stock_expert_converters()]
+    assert [conv.source_patterns for conv in out] == stock
+    assert all(p.endswith(".weight") for patterns in stock for p in patterns)
+
+
+@pytest.mark.usefixtures("restore_loader_hooks")
+@pytest.mark.parametrize("repeat", ["stripped", "fresh"])
+def test_the_compressed_checkpoint_is_rewritten_through_the_copy_from_pretrained_loads(
+    monkeypatch, repeat
+):
+    """from_pretrained builds the model from a deep copy of the config ``prepare`` handed over. That
+    copy must still select the rewrite -- whether ``prepare`` ran again on the config it stripped of
+    its quantization_config (Kimi-K3) or on a fresh config of the same checkpoint -- and the mark
+    must not reach the config a later save writes."""
+    config = _install_for_deepseek_v3(monkeypatch)
+    if repeat == "stripped":
+        config.quantization_config = None
+    else:
+        config = DeepseekV3Config(num_hidden_layers=1)
+        config.quantization_config = {"format": "stub-format"}
+    onfly.install_onfly_decompress(config)
+    model = SimpleNamespace(config=copy.deepcopy(config))
+
+    out = mu.get_model_conversion_mapping(model)
+
+    assert [conv.source_patterns[0] for conv in out] == [
+        "mlp.experts.*.gate_proj.weight_packed$",
+        "mlp.experts.*.down_proj.weight_packed$",
+    ]
+    assert onfly._MARK not in model.config.to_dict()
 
 
 # ------------------------------------------------------------------------ reading the checkpoint
