@@ -127,6 +127,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix unified HF export writing a weight name the source checkpoint does not use when a model declares a backwards-compatibility *load* rename as a reversible ``WeightRenaming``. Reversing such a rule rewrote the canonical name to a legacy spelling, and a deployment runtime keyed on the canonical name then failed to load the quantized checkpoint. Each exported name is now resolved against the names the source checkpoint actually carries, for both the exported tensors and the quantization config's module references.
 - Fix exports using the built-in Transformers NemotronH implementation retaining incompatible legacy remote-code config and model mappings. Re-export affected checkpoints before deployment.
 - Fix INT8 real quantization (``mtq.compress``) of FP16 weights zeroing or clipping channels with a small amax: their scales underflowed in FP16. Scales of newly compressed INT8 weights are now stored in FP32.
 - Fix Hugging Face exports classifying registered Qwen VLM parameters as unplaced source weights, which overwrote quantized tensors with original weights and incorrectly excluded their modules from quantization. Re-export affected checkpoints.
