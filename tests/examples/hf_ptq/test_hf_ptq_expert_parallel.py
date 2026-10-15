@@ -38,6 +38,7 @@ import pytest
 import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
+from PIL import Image
 from torch.utils.data import DataLoader
 from transformers import AutoConfig, DeepseekV3Config, LlamaConfig
 
@@ -487,8 +488,9 @@ _PREVIEW_PLANS = pytest.mark.parametrize(
         (DistributionPlan(4), False),
         (DistributionPlan(4, ep_size=4), True),
         (DistributionPlan(4, dense="fsdp"), True),
+        (DistributionPlan(1, dense="fsdp"), False),
     ],
-    ids=["single_process", "replicated", "expert_parallel", "fsdp2"],
+    ids=["single_process", "replicated", "expert_parallel", "fsdp2", "one_rank_fsdp2"],
 )
 
 
@@ -553,3 +555,33 @@ def test_a_sharded_nemotron_vl_model_previews_in_lockstep(monkeypatch, plan, loc
     assert recorded["text"].get("synced_gpus", False) == lockstep
     assert recorded["image"] == expected
     assert model.calls[0].get("synced_gpus", False) == lockstep  # the fallback generate
+
+
+@pytest.mark.parametrize("generation_kwargs", [None, {"synced_gpus": True}])
+def test_the_vl_image_preview_generates_with_the_kwargs_it_is_handed(
+    monkeypatch, tmp_path, generation_kwargs
+):
+    """run_vl_preview_generation hands the kwargs it is given to the model's chat(), in its config."""
+    monkeypatch.syspath_prepend(str(_EXAMPLES_DIR))
+    vlm_utils = importlib.import_module("vlm_utils")
+    (tmp_path / "images").mkdir()
+    Image.new("RGB", (4, 4)).save(tmp_path / "images" / "example1a.jpeg")
+    monkeypatch.setattr(vlm_utils, "__file__", str(tmp_path / "vlm_utils.py"))
+    monkeypatch.setattr(
+        vlm_utils.AutoImageProcessor, "from_pretrained", lambda *args, **kwargs: lambda images: {}
+    )
+    received = []
+
+    class _ChatModel:
+        device = torch.device("cpu")
+
+        def chat(self, tokenizer, question, generation_config, **image_features):
+            received.append(generation_config)
+            return "a picture"
+
+    vlm_utils.run_vl_preview_generation(
+        _ChatModel(), SimpleNamespace(eos_token_id=0), _CKPT, "stage", False, generation_kwargs
+    )
+
+    assert len(received) == 1
+    assert received[0].get("synced_gpus", False) == (generation_kwargs is not None)
