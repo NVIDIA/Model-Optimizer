@@ -15,6 +15,10 @@ Changelog
 
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
 
+*Misc*
+
+- ``modelopt.torch.utils.plugins.model_load_utils.load_pretrained`` now also loads a model distributed. Under ``torchrun`` it FSDP2-shards the model or gives every rank a whole copy, by the plan the new ``resolve_distribution_plan`` decides from the model and the ``MODELOPT_FSDP_SIZE`` variable, or by a plan passed as its new ``distribution`` argument. The loaded model records the plan (``modelopt.torch.utils.distributed.distribution_plan``).
+
 **Backward Breaking Changes**
 
 - Hugging Face MoE calibration now runs fused experts on the ``grouped_mm`` backend Transformers selects by default instead of forcing ``eager``, so calibrated activation scales can differ from earlier releases: some of Qwen3-30B-A3B's moved by up to about 10%. Load the model with ``experts_implementation="eager"`` to calibrate exactly as earlier releases did.
@@ -99,7 +103,6 @@ Changelog
 - Add a ``kd_loss_alpha`` option to HuggingFace ``KDTrainer`` to blend cross-entropy and knowledge distillation losses during training.
 - A tracked ``examples/hf_ptq/hf_ptq.py`` run now writes ``.experiment.json`` into ``--export_path`` and uploads the same file with the run, so a checkpoint on disk names the experiment and MLflow run id that produced it. The pointer is written only once the export completes, and an export that is not tracked removes one it would otherwise inherit from a reused ``--export_path`` or from a quantized source checkpoint.
 - ``export_hf_checkpoint`` and the vLLM fake-quant export now copy the source checkpoint's non-model files (tokenizer, processor, remote code, chat templates, ...) into the export unchanged. They read the source from local disk only: get a local copy of a Hugging Face Hub model with ``modelopt.torch.export.ensure_local_checkpoint`` and load it from there.
-- ``modelopt.torch.utils.plugins.model_load_utils.load_pretrained`` now also loads a model distributed. Under ``torchrun`` it FSDP2-shards the model or gives every rank a whole copy, by the plan the new ``resolve_distribution_plan`` decides from the model and the ``MODELOPT_FSDP_SIZE`` variable, or by a plan passed as its new ``distribution`` argument. The loaded model records the plan (``modelopt.torch.utils.distributed.distribution_plan``).
 
 - Add Parallel Decoding Distillation (PDD) to ``modelopt.torch.fastgen`` with Qwen-Image training, distributed-checkpoint export, and PDD-2/4/8 inference. AutoModel remains an unmodified pinned runtime dependency.
 
