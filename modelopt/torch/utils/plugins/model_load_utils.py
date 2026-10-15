@@ -1979,8 +1979,8 @@ def load_and_prepare_ep(
         n_dense = _load_ep_dense_distributed(
             model, dense_fsdp_mesh, local_dir, is_expert_fn, expert_modules.values()
         )
-        # The keep-sharded writer reads each weight's own mesh/placements, so it dedups the ``edp``
-        # replicas at EDP>1.
+        # Nothing deduplicates the ``edp`` replicas on export: the no-gather HF export writes a dense
+        # part only as a 1-D full-world ``Shard(0)`` and refuses this EDP>1 layout.
         if is_master():
             _dims = tuple(dense_fsdp_mesh.shape)
             print(
