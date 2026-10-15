@@ -50,7 +50,11 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
     enabling WY operand quantization is no longer supported.
     """
 
-    linear_attention_quantizer_names = ("gdn_state_quantizer", "gdn_w_quantizer")
+    linear_attention_quantizer_names = (
+        "gdn_state_quantizer",
+        "gdn_w_quantizer",
+        "gdn_read_quantizer",
+    )
 
     def validate_linear_attention(self):
         """Reject retired W QAT and validate the state quantizer."""
@@ -61,6 +65,11 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
             )
         if self.linear_attention_config.precision == "vllm_kimi_k3":
             raise ValueError("vllm_kimi_k3 is a KDA-only precision profile")
+        if (
+            self.gdn_read_quantizer.is_enabled
+            and self.linear_attention_config.precision != "replayssm_two_precision"
+        ):
+            raise ValueError("gdn_read_quantizer requires precision='replayssm_two_precision'")
         super().validate_linear_attention()
 
     def _state_quantized_chunk_gated_delta_rule(
@@ -92,6 +101,7 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
             *args,
             policy=self.linear_attention_config,
             state_quantizer=self.gdn_state_quantizer,
+            read_quantizer=self.gdn_read_quantizer,
             chunk_size=chunk_size,
             prefill_lengths=self._linear_attention_prefill_lengths,
             sequence_lengths=self._linear_attention_sequence_lengths,

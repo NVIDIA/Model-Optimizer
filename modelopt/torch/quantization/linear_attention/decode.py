@@ -17,6 +17,7 @@
 
 import torch
 
+from ._two_precision import two_precision_decode
 from .utils import _state_qdq
 
 __all__ = []
@@ -33,6 +34,7 @@ def _recurrent_decode(
     state_quantizer,
     initial_state,
     output_final_state=False,
+    read_enabled=False,
     scale=None,
     use_qk_l2norm_in_kernel=False,
     gate_inputs=None,
@@ -47,6 +49,27 @@ def _recurrent_decode(
         zero = (q.sum() + k.sum() + v.sum() + g.sum() + beta.sum()) * 0
         return v + zero, initial_state if output_final_state else None
     scale = q.shape[-1] ** -0.5 if scale is None else scale
+    if config.precision == "replayssm_two_precision":
+        return two_precision_decode(
+            q, k, v, g, beta, initial_state, gate_inputs, read_enabled
+        ), None
+    if config.precision == "replayssm":
+        from .replay import _replay_decode
+
+        output, carry = _replay_decode(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state,
+            config.replay_window,
+            state_quantizer is not None,
+            scale,
+            use_qk_l2norm_in_kernel,
+            gate_inputs,
+        )
+        return output, carry.reconstruct() if output_final_state else None
     # Import the optional native backend only for the ordinary state-QDQ path.
     from ._vllm_autograd import step
 

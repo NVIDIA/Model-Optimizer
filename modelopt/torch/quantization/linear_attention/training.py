@@ -24,8 +24,9 @@ from numbers import Integral
 import torch
 from packaging.version import Version
 
+from ._two_precision import validate_two_precision
 from .decode import _recurrent_decode
-from .utils import _resolve_state_quantizer, _state_qdq
+from .utils import _resolve_state_quantizer, _state_qdq, forward_value
 
 __all__ = ["get_linear_attention_layers", "linear_attention_training_phase"]
 
@@ -78,7 +79,13 @@ def get_linear_attention_layers(model, *, enabled_only=False, unphased_only=Fals
             for module in root.modules()
             if isinstance(module, _LinearAttentionQuantMixin)
             and module.linear_attention_config.backend == "serving"
-            and (not enabled_only or module._linear_attn_state.is_enabled)
+            and (
+                not enabled_only
+                or any(
+                    getattr(module, name).is_enabled
+                    for name in module.linear_attention_quantizer_names
+                )
+            )
             and (not unphased_only or module._linear_attention_prefill_lengths is None)
         )
     )
@@ -158,6 +165,8 @@ def _prepare_prefill_inputs(q, k, v, g, beta, *, policy, chunk_size):
         raise ValueError("State training requires backend='serving' and chunk_size=64")
     if q.device.type != "cuda" or any(x.dtype != torch.bfloat16 for x in (q, k, v)):
         raise ValueError("Serving arithmetic requires CUDA BF16 Q/K/V inputs")
+    if policy.state_codec == "int8_hadamard32" and v.shape[-1] % 32:
+        raise ValueError("int8_hadamard32 requires Dv divisible by 32")
     _validate_training_device(q.device)
     return tuple(x.float() for x in (q, k, v, g, beta))
 
@@ -181,14 +190,15 @@ def _prefill_decode_forward(
     beta_dtype,
     prefill_lengths,
     sequence_lengths=None,
+    read_quantizer=None,
     use_qk_l2norm_in_kernel=False,
     gate_inputs=None,
 ):
     """Run both prefill and decode phases in one differentiable training forward.
 
-    Each sequence's chunked prefix produces the state for its recurrent suffix.
-    The suffix preserves its gradient connection to prefill and returns a dense
-    final state only when requested. Outputs are joined in token order.
+    Each sequence's chunked prefix produces the state for its token or ReplaySSM
+    suffix. The suffix preserves its gradient connection to prefill and returns
+    a dense final state only when requested. Outputs are joined in token order.
 
     Args:
         prefill_lengths: Prefix token count per sequence. For 128 tokens, a value
@@ -196,8 +206,24 @@ def _prefill_decode_forward(
         sequence_lengths: Valid token count per sequence, excluding right padding.
             Defaults to the dense row length or each packed storage segment length.
     """
-    state_quantizer = _resolve_state_quantizer(state_quantizer)
-    if state_quantizer is not None and prefill_lengths is None:
+    two_precision = policy.precision == "replayssm_two_precision"
+    read_enabled = False
+    if two_precision:
+        read_enabled = validate_two_precision(state_quantizer, read_quantizer)
+        if g.ndim != 3 or q.shape[-1] != 128 or not use_qk_l2norm_in_kernel:
+            raise ValueError(
+                "Two-precision replay currently requires GDN, K=128 and Q/K normalization"
+            )
+        if scale is not None and scale != q.shape[-1] ** -0.5:
+            raise ValueError("Two-precision replay requires scale=K**-0.5")
+        if output_final_state:
+            raise NotImplementedError(
+                "Two-precision replay does not export a partial-window final state"
+            )
+    elif read_quantizer is not None and read_quantizer.is_enabled:
+        raise ValueError("gdn_read_quantizer requires precision='replayssm_two_precision'")
+    state_quantizer = _resolve_state_quantizer(state_quantizer, state_codec=policy.state_codec)
+    if (state_quantizer is not None or read_enabled) and prefill_lengths is None:
         raise ValueError(
             "State quantization requires explicit prefill lengths through "
             "linear_attention_training_phase"
@@ -252,14 +278,21 @@ def _prefill_decode_forward(
         raise ValueError(
             "Serving arithmetic requires K <= 256, KDA V=K, and power-of-two K for normalization"
         )
-    # Validate the optional native backend before launching any prefix kernels.
-    from ...kernels.quantization.linear_attention.serving.forward import validate_profile
+    if policy.precision == "replayssm":
+        if any(prefix < length for prefix, length in zip(prefixes, valid_lengths)) and (
+            keys < 32 or keys & (keys - 1) or (g.ndim == 3 and gate_inputs is None)
+        ):
+            raise ValueError("ReplaySSM requires power-of-two K >= 32 and raw GDN gate inputs")
+    elif not two_precision or any(prefixes):
+        # Decode-only two-precision replay needs the standalone backend, not vLLM.
+        # Validate native prefill before launching any prefix kernels.
+        from ...kernels.quantization.linear_attention.serving.forward import validate_profile
 
-    validate_profile(
-        gate_inputs,
-        use_qk_l2norm_in_kernel,
-        precision=policy.precision,
-    )
+        validate_profile(
+            gate_inputs,
+            use_qk_l2norm_in_kernel,
+            precision="vllm" if two_precision else policy.precision,
+        )
     if initial_state is None:
         states = q.new_zeros(len(sequences), heads, keys, values)
     else:
@@ -279,7 +312,18 @@ def _prefill_decode_forward(
                 # A continuation prefill consumes a stored cache just as native serving
                 # does. A fresh zero-state prefix has no incoming cache to quantize.
                 if initial_state is not None and state_quantizer is not None:
-                    state = _state_qdq(state, state_quantizer, policy.state_block_v)
+                    if policy.precision == "replayssm":
+                        from ...kernels.quantization.linear_attention.serving.replay import (
+                            checkpoint,
+                            original_basis,
+                        )
+
+                        with torch.no_grad():
+                            decoded, _ = checkpoint(state, True)
+                            decoded = original_basis(decoded)
+                        state = forward_value(state, decoded)
+                    else:
+                        state = _state_qdq(state, state_quantizer, policy.state_block_v)
                 prefix, state = serving_prefix(
                     q=q[b, start:split],
                     k=k[b, start:split],
@@ -289,7 +333,7 @@ def _prefill_decode_forward(
                     state=state,
                     scale=keys**-0.5 if scale is None else scale,
                     beta_dtype=beta_dtype,
-                    precision=policy.precision,
+                    precision="vllm" if two_precision else policy.precision,
                     normalize=use_qk_l2norm_in_kernel,
                     gate_inputs=(
                         (
@@ -306,6 +350,7 @@ def _prefill_decode_forward(
         suffix, final_state = _recurrent_decode(
             *(x[b, split:end] for x in (q, k, v, g, beta)),
             config=policy,
+            read_enabled=read_enabled,
             state_quantizer=state_quantizer,
             initial_state=state,
             output_final_state=output_final_state,

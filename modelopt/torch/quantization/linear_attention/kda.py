@@ -92,7 +92,7 @@ def kda_state_qat(
         from ...kernels.quantization.linear_attention.serving.forward import _kernels
 
         with torch.no_grad():
-            _, native_kda = _kernels("vllm")
+            _, native_kda = _kernels("replayssm" if policy.precision == "replayssm" else "vllm")
             native_gate = native_kda.fused_kda_gate(
                 raw_gate.flatten(-2).contiguous(), A_log, raw_gate.shape[-1], g_bias=dt_bias
             )

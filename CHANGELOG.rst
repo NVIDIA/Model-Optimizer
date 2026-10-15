@@ -29,6 +29,7 @@ Changelog
 
 - Added experimental NVFP4 recurrent-state fake quantization using TensorQuantizer block16 E4M3 scales for linear-attention QAT.
 
+- Add optional ReplaySSM state QAT: GDN supports separate FP32 recurrence and FP8 read checkpoints through upstream ReplaySSM emulation, and the compatible INT8/Hadamard fork supports GDN/KDA shared checkpoints. These profiles require their respective optional backends.
 - Add Q8_0 weight-only quantization with 32-value GGML blocks, packed unified HF and Megatron export, and a built-in ``q8_0`` PTQ recipe.
 - Add Hugging Face PTQ calibration and export support for Nemotron-H MTP modules, preserving calibrated expert input scales.
 - Add the ``model_type/nemotron_h`` aggressive-MSE NVFP4 PTQ recipe: weight-MSE calibrated NVFP4 routed and shared MoE experts, FP8 attention projections, Mamba ``in_proj``/``out_proj`` and ``lm_head``, and an FP8 KV cache. The latent MoE, router, embeddings and the vision and audio encoders stay in BF16, and the MTP rules apply only to checkpoints that carry an MTP tail.

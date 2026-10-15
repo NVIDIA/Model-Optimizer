@@ -22,6 +22,7 @@ from modelopt.torch.opt.conversion import ApplyModeError
 from modelopt.torch.utils import get_unwrapped_name
 
 from ..config import QuantizerAttributeConfig
+from ..linear_attention._two_precision import validate_two_precision
 from ..linear_attention.config import LinearAttentionConfig
 from ..linear_attention.utils import state_quantizer_config
 from ..nn import QuantModule, TensorQuantizer
@@ -113,10 +114,18 @@ class _LinearAttentionQuantMixin(QuantModule):
 
     def validate_linear_attention(self):
         """Validate quantizer contracts shared by GDN and KDA."""
+        if self.linear_attention_config.precision == "replayssm_two_precision":
+            if "gdn_read_quantizer" not in self.linear_attention_quantizer_names:
+                raise ValueError(
+                    "Two-precision replay requires an adapter with a GDN read quantizer"
+                )
+            validate_two_precision(self._linear_attn_state, self.gdn_read_quantizer)
+            return
         if self._linear_attn_state.is_enabled:
             state_quantizer_config(
                 self._linear_attn_state,
                 name=self.linear_attention_quantizer_names[0],
+                state_codec=self.linear_attention_config.state_codec,
             )
             if self.linear_attention_config.backend != "serving":
                 raise ValueError(
