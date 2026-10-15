@@ -35,6 +35,12 @@ from .dla_transforms.dla_cast_to_fp32 import _apply_cast_to_fp32
 from .dla_transforms.dla_constants_to_initializers import _constants_to_initializers_from_model
 from .dla_transforms.dla_decompose_lstm import _apply_decompose_lstm
 from .dla_transforms.dla_graph_cleanup import _remove_unused_initializers
+from .dla_transforms.dla_indexing import (
+    _apply_gather,
+    _apply_gather_elements,
+    _apply_group_query_attention,
+    _apply_standalone_reduce_operations,
+)
 from .dla_transforms.dla_matmul_to_transpose_conv_transpose import (
     _apply_matmul_to_transpose_conv_transpose,
 )
@@ -93,6 +99,7 @@ DLA_TRANSFORMS = (
     ("ReshapeTransposeReshape", _apply_reshape_transpose_reshape),
     ("ReshapeQDQReduceSum", _apply_reshape_qdq_reduce_sum),
     ("ReshapeReduceSum", _apply_reshape_reduce_sum),
+    ("Gather", _apply_gather),
     ("DecomposeLstm", partial(_apply_decompose_lstm, defer_rank_conversion=True)),
     (
         "MatMulToTransposeConvTranspose",
@@ -100,10 +107,13 @@ DLA_TRANSFORMS = (
     ),
     ("Non4dModelInputs", _apply_non4d_model_inputs),
     ("Non4dModelOutputs", partial(_apply_non4d_model_outputs, defer_rank_conversion=True)),
+    ("StandaloneReduceOperations", _apply_standalone_reduce_operations),
     (
         "RemoveIntermediarySqueezeAndUnsqueeze",
         partial(_apply_remove_intermediary_squeeze_unsqueeze, rank_converted=True),
     ),
+    ("GroupQueryAttention", _apply_group_query_attention),
+    ("GatherElements", _apply_gather_elements),
     ("FixInstanceNormChannelMismatch", _apply_fix_instancenorm_channels),
     ("ShapeInference", infer_shapes),
     ("RemoveUnusedInitializers", _remove_unused_initializers),
