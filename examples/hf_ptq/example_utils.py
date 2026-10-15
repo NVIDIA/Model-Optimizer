@@ -46,7 +46,7 @@ from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
 from modelopt.torch.models import hf_model_type
 from modelopt.torch.models.hf import checkpoint_has_mtp, prepare_model_for_loading
-from modelopt.torch.utils.distributed import DistributionPlan
+from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
@@ -79,6 +79,19 @@ def validate_fsdp2_supported(args, config):
         )
 
 
+def preview_generate_kwargs(model) -> dict[str, Any]:
+    """Extra ``generate`` kwargs that keep every rank of a sharded model decoding a preview.
+
+    Each rank previews the first sample of its own calibration shard, so the ranks finish at
+    different steps. A model its plan shards runs a collective in every forward (the routed experts'
+    all-to-all, FSDP2's all-gathers): a rank that stopped decoding would leave the others blocked in
+    it. ``synced_gpus`` keeps every rank stepping until all of them have finished.
+    """
+    plan = distribution_plan(model)
+    sharded = plan.world_size > 1 and (plan.is_expert_parallel or plan.is_fsdp_dense)
+    return {"synced_gpus": True} if sharded else {}
+
+
 def run_nemotron_vl_preview(
     full_model,
     tokenizer,
@@ -105,10 +118,12 @@ def run_nemotron_vl_preview(
 
     print(f"Running text-only preview generation for Nemotron VL model ({stage_name})...")
     question = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+    lockstep = preview_generate_kwargs(full_model)
     generation_config = {
         "max_new_tokens": 100,
         "do_sample": False,
         "eos_token_id": tokenizer.eos_token_id,
+        **lockstep,
     }
 
     # Try text-only generation (may fail for encoder-decoder models like Nemotron-Parse)
@@ -122,11 +137,13 @@ def run_nemotron_vl_preview(
         generated_ids = text_response
     elif allow_fallback:
         print("Text-only generation failed, falling back to standard generate...")
-        generated_ids = full_model.generate(input_ids, max_new_tokens=100)
+        generated_ids = full_model.generate(input_ids, max_new_tokens=100, **lockstep)
 
     # Run additional VL test with images
     print(f"Running additional VL test with images ({stage_name})...")
-    run_vl_preview_generation(full_model, tokenizer, pyt_ckpt_path, stage_name, trust_remote_code)
+    run_vl_preview_generation(
+        full_model, tokenizer, pyt_ckpt_path, stage_name, trust_remote_code, lockstep
+    )
 
     return generated_ids
 
