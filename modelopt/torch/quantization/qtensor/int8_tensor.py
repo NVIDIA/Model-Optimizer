@@ -128,4 +128,7 @@ class INT8QTensor(BaseQuantizedTensor):
         scales = scales.to(self._quantized_data.device)
 
         # Multiply in FP32 and cast once: casting a small scale to FP16 first underflows it.
-        return (self._quantized_data.view(torch.int8) * scales.float()).to(dtype)[slices]
+        # Writing into a `dtype` output casts each product as it is stored, with no FP32 copy.
+        dequantized = torch.empty(shape, dtype=dtype, device=self._quantized_data.device)
+        torch.mul(self._quantized_data.view(torch.int8), scales.float(), out=dequantized)
+        return dequantized[slices]
