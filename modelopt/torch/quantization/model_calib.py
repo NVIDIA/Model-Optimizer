@@ -1059,12 +1059,11 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
         return _expert_hook
 
     def _make_grouped_expert_hook(expert_module, weight_name, quantizers, enabled):
-        """Per-expert capture for the grouped_mm backend.
+        """Per-expert capture for the grouped dispatchers (``grouped_mm``, ``torch_a2a``).
 
-        ``grouped_mm_experts_forward`` feeds the input quantizer a single
-        expert-sorted batch ``(S, cin)`` rather than one call per expert, so we
-        split it back into per-expert chunks using ``_grouped_offs`` (cumulative
-        tokens-per-expert, stashed by the _QuantFusedExperts grouped interceptor).
+        Both feed the input quantizer a single expert-sorted batch ``(S, cin)`` rather than
+        one call per expert, so we split it back into per-expert chunks using ``_grouped_offs``
+        (cumulative tokens-per-expert, stashed by the _QuantFusedExperts grouped interceptor).
         Rows beyond ``offs[-1]`` (EP sentinels) belong to no expert and are skipped.
         """
 
@@ -1075,7 +1074,9 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
             if offs is None:
                 return
             x = args[0]
-            weight = getattr(expert_module, weight_name)
+            # This rank's experts, in quantizer order: an expert-parallel weight is a DTensor whose
+            # index names a global expert (see ``_local_experts``).
+            weight = expert_module._local_experts(getattr(expert_module, weight_name))
             start = 0
             for idx, end in enumerate(offs.tolist()):
                 if end > start:
@@ -1113,8 +1114,8 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
                     enabled = {i for i, q in enumerate(quantizers) if q.is_enabled}
                     if not enabled:
                         continue
-                    # grouped_mm feeds one expert-sorted batch per projection; eager feeds one
-                    # call per expert keyed by _current_expert_idx.
+                    # grouped_mm and torch_a2a feed one expert-sorted batch per projection; eager
+                    # feeds one call per expert keyed by _current_expert_idx.
                     make_hook = (
                         _make_grouped_expert_hook
                         if getattr(module, "_running_grouped_mm", False)
