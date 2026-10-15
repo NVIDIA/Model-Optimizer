@@ -31,6 +31,7 @@ if Version(transformers.__version__) < Version("5.7"):
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM, Qwen3MoeConfig
 
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
     distribution_plan,
@@ -216,4 +217,82 @@ def test_expert_parallel_backward_matches_the_whole_model(
     _save_tiny_qwen3_moe(tmp_path)
     dist_workers.run(
         _sharded_model_backward_matches_the_whole_one, str(tmp_path), fsdp_dense, ep_degree
+    )
+
+
+def _calibrated_quantizers(model):
+    return {
+        name: module
+        for name, module in model.named_modules()
+        if isinstance(module, TensorQuantizer) and module.is_enabled and module.amax is not None
+    }
+
+
+def _quantized_sharded_model_trains_like_the_whole_one(
+    rank, size, ckpt_dir, fsdp_dense, fmt, ep_degree
+):
+    import modelopt.torch.quantization as mtq
+    from modelopt.torch.utils.distributed import distributed_forward_loop
+
+    cfg = {"fp8": mtq.FP8_DEFAULT_CFG, "nvfp4": mtq.NVFP4_DEFAULT_CFG}[fmt]
+    session, device = _init_session(rank, size)
+    config = AutoConfig.from_pretrained(ckpt_dir)
+    model = load_and_prepare_ep(
+        ckpt_dir, session, ep_degree, hf_config=config, fsdp_dense=fsdp_dense, freeze=False
+    )
+    whole = AutoModelForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16).to(device)
+
+    # Calibrate as hf_ptq does: each rank on its own batch, the reference on all of them.
+    batches = _batches(size)
+    mine = batches[rank].to(device)
+    mtq.quantize(model, cfg, distributed_forward_loop(model, [{"input_ids": mine}], session))
+    mtq.quantize(whole, cfg, lambda m: [m(b.to(device)) for b in batches])
+
+    # Expert-parallel calibration reaches the whole model's scales: weight scales from this rank's
+    # experts, activation scales synced over the ranks (equal to bf16 rounding of the activations).
+    per_rank = NUM_EXPERTS // ep_degree
+    ep_rank = rank % ep_degree
+    whole_quantizers = _calibrated_quantizers(whole)
+    sharded_quantizers = _calibrated_quantizers(model)
+    problems = [] if sharded_quantizers else ["no quantizer was calibrated"]
+    for name, quantizer in sharded_quantizers.items():
+        if "_weight_quantizers." in name:
+            prefix, index = name.rsplit(".", 1)
+            name = f"{prefix}.{ep_rank * per_rank + int(index)}"
+        reference = whole_quantizers.get(name)
+        if reference is None:
+            problems.append(f"{name} is calibrated here but not in the whole model")
+            continue
+        error = _relative_error(quantizer.amax, reference.amax)
+        if not error < 2e-2:
+            problems.append(f"{name}: amax off by {error:.3g} (relative)")
+        # Train on identical scales, so that the gradients compare the transport and not calibration.
+        quantizer.amax = reference.amax
+    _fail_together(problems)
+
+    model(mine, labels=mine).loss.backward()
+    _assert_grads_match_the_whole_model(
+        model, _whole_model_grads_per_batch(whole, batches, device), rank, size, ep_degree
+    )
+
+
+@pytest.mark.parametrize("ep_share", [1, 2], ids=["ep-world", "ep-half"])
+@pytest.mark.parametrize("fmt", ["fp8", "nvfp4"])
+@pytest.mark.parametrize("fsdp_dense", [False, True], ids=["dense-replicated", "dense-sharded"])
+def test_quantized_expert_parallel_model_trains_like_the_whole_model(
+    need_2_gpus, dist_workers, tmp_path, fsdp_dense, fmt, ep_share
+):
+    """QAT under expert parallelism: quantized and calibrated expert-parallel -- experts over every
+    rank or half of them, dense replicated or FSDP2-sharded -- the model's scales and its gradients
+    through the fake quantizers match the whole model calibrated on every rank's data."""
+    ep_degree = dist_workers.world_size // ep_share
+    if ep_degree < 2 or dist_workers.world_size % ep_share or NUM_EXPERTS % ep_degree:
+        pytest.skip(f"{NUM_EXPERTS} experts do not shard over EP {ep_degree} on these GPUs")
+    _save_tiny_qwen3_moe(tmp_path)
+    dist_workers.run(
+        _quantized_sharded_model_trains_like_the_whole_one,
+        str(tmp_path),
+        fsdp_dense,
+        fmt,
+        ep_degree,
     )
