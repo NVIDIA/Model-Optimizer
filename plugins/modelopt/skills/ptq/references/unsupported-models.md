@@ -66,7 +66,7 @@ Manual dequantization is only needed for **non-standard parameter names** (e.g.,
 
 Read the model source to identify how weights are stored. **If all linear layers are plain `nn.Linear`, no custom code is needed** — ModelOpt quantizes them automatically.
 
-**For HuggingFace models**, check `modelopt/torch/quantization/plugins/huggingface.py` first — it already registers patches for common non-standard modules (`Llama4TextExperts`, `FP8Linear`, `FalconLinear`, `Conv1D`, `Qwen3_5MoeExperts`, etc.). If your model's non-standard class is already registered there, no extra code is needed.
+**For HuggingFace models**, check `modelopt/torch/models/<model_type>/modeling_ptq.py` (model-specific patches, e.g. `Llama4TextExperts`, `FalconLinear`) and `modelopt/torch/quantization/plugins/huggingface.py` (generic ones: `FP8Linear`, `Conv1D`, auto-detected MoE such as `Qwen3_5MoeExperts`) first. If your model's non-standard class is already registered, no extra code is needed.
 
 Custom patches are required when:
 
@@ -94,7 +94,7 @@ Compare against the `enable`/`disable` patterns in the config. Add custom overri
 After Steps A-D:
 
 - **No patches needed** (all standard modules) → run `hf_ptq.py` with a smoke test (`--calib_size 4`). If it succeeds, proceed with full calibration. If it fails, read the error and revisit Steps C/D.
-- **Patches needed** → patch ModelOpt directly using the patterns below (add `QuantModule` in `modelopt/torch/quantization/plugins/huggingface.py`, update `modelopt/torch/export/` if needed), then run `hf_ptq.py` with a smoke test. This is preferred over writing a standalone script because it reuses all existing `hf_ptq.py` logic. Debug failures iteratively — quantization errors often reveal additional modules that need patching.
+- **Patches needed** → patch ModelOpt directly using the patterns below (add `QuantModule` in `modelopt/torch/models/<model_type>/modeling_ptq.py`, update `modelopt/torch/export/` if needed), then run `hf_ptq.py` with a smoke test. This is preferred over writing a standalone script because it reuses all existing `hf_ptq.py` logic. Debug failures iteratively — quantization errors often reveal additional modules that need patching.
 
 ---
 
@@ -138,7 +138,7 @@ class QuantCustomModule(OriginalModule):
 - **Fused experts** (`gate_up_proj` + `down_proj` 3D tensors, all native transformers MoEs) → auto-detected by `register_fused_experts_on_the_fly`, handled by `_QuantFusedExperts`. Covers Mixtral, Qwen, DeepSeek, Jamba, OlMoE, etc.
 - **Sequential per-expert `nn.Linear`** with `gate` + `experts` (e.g. remote-code models) → auto-detected by `register_sparse_moe_on_the_fly`.
 
-**Custom MoE** (non-standard layout not matching auto-detection) requires patching. Find the closest pattern in the plugin (`modelopt/torch/quantization/plugins/huggingface.py`):
+**Custom MoE** (non-standard layout not matching auto-detection) requires patching. Find the closest pattern in `modelopt/torch/models/*/modeling_ptq.py`:
 
 | MoE design | Strategy | Plugin example |
 | --- | --- | --- |
@@ -163,7 +163,7 @@ for name, module in model.named_modules():
 
 ## Pattern 3: Registering with ModelOpt
 
-**When patching the plugin directly** (preferred): Use `QuantModuleRegistry.register` in `modelopt/torch/quantization/plugins/huggingface.py`, following existing examples:
+**When patching ModelOpt directly** (preferred): Use `QuantModuleRegistry.register` in `modelopt/torch/models/<model_type>/modeling_ptq.py` and add `<model_type>` to the `modeling_ptq` import loop at the end of `modelopt/torch/quantization/plugins/huggingface.py`, following existing examples:
 
 ```python
 from modelopt.torch.quantization.nn import QuantModuleRegistry
@@ -179,6 +179,8 @@ def register_my_model_on_the_fly(model):
             if QuantModuleRegistry.get(mod_type) is None:
                 QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(QuantCustomModule)
             break
+
+CUSTOM_MODEL_PLUGINS.add(register_my_model_on_the_fly)  # from ...quantization.plugins.custom
 ```
 
 **When writing a standalone script** (fallback): Use `mtq.register()`:

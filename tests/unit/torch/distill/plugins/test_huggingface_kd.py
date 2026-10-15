@@ -88,7 +88,7 @@ def _make_batch():
     return default_data_collator([_ToyDataset()[0], _ToyDataset()[1]])
 
 
-def _make_trainer(tmp_path, student, teacher, use_liger_kernel=False, kd_loss_weight=1.0, **kwargs):
+def _make_trainer(tmp_path, student, teacher, use_liger_kernel=False, kd_loss_alpha=1.0, **kwargs):
     use_cpu = kwargs.pop("use_cpu", True)
     training_args = TrainingArguments(
         output_dir=str(tmp_path),
@@ -103,7 +103,7 @@ def _make_trainer(tmp_path, student, teacher, use_liger_kernel=False, kd_loss_we
         args=training_args,
         eval_dataset=_ToyDataset(),
         data_collator=default_data_collator,
-        distill_args={"teacher_model": teacher, "kd_loss_weight": kd_loss_weight},
+        distill_args={"teacher_model": teacher, "kd_loss_alpha": kd_loss_alpha},
     )
 
 
@@ -121,7 +121,7 @@ def _manual_kd_loss(student, teacher, batch):
 
 
 def test_training_loss_is_pure_kd_by_default(tmp_path):
-    """Default kd_loss_weight=1.0 produces pure KD loss; student is forwarded without labels."""
+    """Default kd_loss_alpha=1.0 produces pure KD loss; student is forwarded without labels."""
     events = []
     student, teacher = _make_models(events)
     batch = _make_batch()
@@ -137,12 +137,12 @@ def test_training_loss_is_pure_kd_by_default(tmp_path):
 
 
 def test_training_loss_combines_ce_and_kd_with_equal_weights(tmp_path):
-    """kd_loss_weight=0.5 blends CE and KD losses with equal weights."""
+    """kd_loss_alpha=0.5 blends CE and KD losses with equal weights."""
     student, teacher = _make_models()
     batch = _make_batch()
     expected_kd_loss = _manual_kd_loss(student, teacher, batch)
     expected_ce_loss = student(**batch).loss.detach()
-    trainer = _make_trainer(tmp_path, student, teacher, kd_loss_weight=0.5)
+    trainer = _make_trainer(tmp_path, student, teacher, kd_loss_alpha=0.5)
 
     trainer.model.train()
     loss = trainer.compute_loss(trainer.model, batch.copy())
@@ -152,12 +152,12 @@ def test_training_loss_combines_ce_and_kd_with_equal_weights(tmp_path):
 
 
 def test_training_loss_combines_ce_and_kd_with_custom_weights(tmp_path):
-    """kd_loss_weight=0.7 blends 70% KD + 30% CE — the config from issue #2488."""
+    """kd_loss_alpha=0.7 blends 70% KD + 30% CE — the config from issue #2488."""
     student, teacher = _make_models()
     batch = _make_batch()
     expected_kd_loss = _manual_kd_loss(student, teacher, batch)
     expected_ce_loss = student(**batch).loss.detach()
-    trainer = _make_trainer(tmp_path, student, teacher, kd_loss_weight=0.7)
+    trainer = _make_trainer(tmp_path, student, teacher, kd_loss_alpha=0.7)
 
     trainer.model.train()
     loss = trainer.compute_loss(trainer.model, batch.copy())
@@ -171,7 +171,7 @@ def test_training_loss_preserves_label_smoothing(tmp_path):
     student, teacher = _make_models()
     batch = _make_batch()
 
-    trainer = _make_trainer(tmp_path, student, teacher, kd_loss_weight=0.5)
+    trainer = _make_trainer(tmp_path, student, teacher, kd_loss_alpha=0.5)
     trainer.args.label_smoothing_factor = 0.1
 
     smoother = LabelSmoother(epsilon=0.1)
@@ -189,13 +189,13 @@ def test_training_loss_preserves_label_smoothing(tmp_path):
     assert loss.item() == pytest.approx(expected.item())
 
 
-def test_invalid_kd_loss_weight_raises(tmp_path):
-    """kd_loss_weight outside (0, 1] should raise ValueError at construction time."""
+def test_invalid_kd_loss_alpha_raises(tmp_path):
+    """kd_loss_alpha outside (0, 1] should raise ValueError at construction time."""
     student, teacher = _make_models()
-    with pytest.raises(ValueError, match="kd_loss_weight"):
-        _make_trainer(tmp_path, student, teacher, kd_loss_weight=0.0)
-    with pytest.raises(ValueError, match="kd_loss_weight"):
-        _make_trainer(tmp_path, student, teacher, kd_loss_weight=1.5)
+    with pytest.raises(ValueError, match="kd_loss_alpha"):
+        _make_trainer(tmp_path, student, teacher, kd_loss_alpha=0.0)
+    with pytest.raises(ValueError, match="kd_loss_alpha"):
+        _make_trainer(tmp_path, student, teacher, kd_loss_alpha=1.5)
 
 
 def test_eval_loss_is_kd_and_ce_is_secondary_metric(tmp_path):
@@ -236,7 +236,7 @@ def test_kd_loss_ddp_scaling(tmp_path):
     student, teacher = _make_models()
     batch = _make_batch()
 
-    trainer_single = _make_trainer(tmp_path / "single", student, teacher, kd_loss_weight=0.5)
+    trainer_single = _make_trainer(tmp_path / "single", student, teacher, kd_loss_alpha=0.5)
     trainer_single.model.train()
 
     mask = batch["labels"][..., 1:] != IGNORE_INDEX
@@ -251,7 +251,7 @@ def test_kd_loss_ddp_scaling(tmp_path):
     ) as mock_world_size:
         mock_world_size.return_value = 2
 
-        trainer_ddp = _make_trainer(tmp_path / "ddp", student, teacher, kd_loss_weight=0.5)
+        trainer_ddp = _make_trainer(tmp_path / "ddp", student, teacher, kd_loss_alpha=0.5)
         trainer_ddp.args.average_tokens_across_devices = True
         trainer_ddp.model.train()
 

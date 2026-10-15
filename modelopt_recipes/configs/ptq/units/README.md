@@ -37,3 +37,5 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `gdn_w_fp8_dynamic.yaml` | FP8 E4M3 dynamic (per token and head) fake quantization of the WY tensor `w` that multiplies the GatedDeltaNet state; requires identity STE, `fla-core==0.5.1`, and Triton |
 | `indexer_k_nvfp4.yaml` | NVFP4 fake quantization of the sparse-attention indexer key cache (`*indexer_k_quantizer`), global scale fixed to 1; Blackwell+ GPUs |
 | `indexer_q_nvfp4.yaml` | NVFP4 fake quantization of the sparse-attention indexer query (`*indexer_q_quantizer`), global scale fixed to 1; Blackwell+ GPUs |
+| `moe_dispatch_nvfp4.yaml` | NVFP4 fake quantization of the MoE expert-parallel dispatch (`*dispatch_quantizer`, vLLM); Blackwell+ GPUs |
+| `moe_combine_nvfp4.yaml` | NVFP4 fake quantization of the MoE expert-parallel combine (`*combine_quantizer`, vLLM); Blackwell+ GPUs |

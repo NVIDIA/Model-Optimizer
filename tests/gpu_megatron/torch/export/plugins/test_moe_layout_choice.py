@@ -24,6 +24,7 @@ from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mappi
     [
         # These map fused grouped-GEMM experts, so they keep the faster layout.
         ("NemotronHForCausalLM", True),
+        ("NemotronH_Omni_Reasoning_V3", True),
         ("Qwen3_5MoeForConditionalGeneration", True),
         ("Qwen3MoeForCausalLM", False),
         ("DeepseekV3ForCausalLM", False),

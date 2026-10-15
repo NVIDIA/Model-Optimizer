@@ -1375,6 +1375,53 @@ class TestQdqToDqValidation:
         with pytest.raises(ValueError, match="QuantizeLinear node bad_q has no inputs"):
             qdq_to_dq(model)
 
+    def test_preserves_floating_weight_graph_output(self):
+        """Keep an exposed floating weight unchanged when folding its Q into an initializer."""
+        weight = np.array([[0.3, -0.6], [0.9, 1.1]], dtype=np.float32)
+        data = np.array([[2.0, -1.0]], dtype=np.float32)
+        model = helper.make_model(
+            helper.make_graph(
+                [
+                    helper.make_node(
+                        "QuantizeLinear", ["weight", "scale", "zero"], ["quantized"], name="q"
+                    ),
+                    helper.make_node(
+                        "DequantizeLinear",
+                        ["quantized", "scale", "zero"],
+                        ["dequantized"],
+                        name="dq",
+                    ),
+                    helper.make_node("MatMul", ["input", "dequantized"], ["output"], name="matmul"),
+                ],
+                "exposed_weight",
+                [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 2])],
+                [
+                    helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 2]),
+                    helper.make_tensor_value_info("weight", TensorProto.FLOAT, [2, 2]),
+                ],
+                [
+                    numpy_helper.from_array(weight, "weight"),
+                    numpy_helper.from_array(np.array([0.25, 0.25], dtype=np.float32), "scale"),
+                    numpy_helper.from_array(np.array([0, 0], dtype=np.int8), "zero"),
+                ],
+            ),
+            opset_imports=[helper.make_opsetid("", 19)],
+            ir_version=10,
+        )
+
+        converted = qdq_to_dq(model)
+        onnx.checker.check_model(converted, full_check=True)
+        assert not any(node.op_type == "QuantizeLinear" for node in converted.graph.node)
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 2
+        options.inter_op_num_threads = 1
+        session = ort.InferenceSession(
+            converted.SerializeToString(), sess_options=options, providers=["CPUExecutionProvider"]
+        )
+        output, exposed_weight = session.run(None, {"input": data})
+        np.testing.assert_array_equal(output, np.array([[-0.5, -2.0]], dtype=np.float32))
+        np.testing.assert_array_equal(exposed_weight, weight)
+
 
 class TestLegacyEdgeLLMShims:
     """Smoke tests for the deprecated top-level shims kept for TensorRT-Edge-LLM 0.6.1.

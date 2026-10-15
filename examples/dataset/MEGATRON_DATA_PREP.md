@@ -5,6 +5,7 @@
 | From JSONL files | Tokenize local JSONL files | \[[Link](#from-jsonl-files)\] |
 | From Hugging Face Hub | Stream or download HF datasets and tokenize | \[[Link](#from-hugging-face-hub)\] |
 | Token-budgeted data blends | Prepare weighted subsets for fast experiments | \[[Link](#prepare-token-budgeted-data-blends)\] |
+| Chat JSONL blends | Weighted chat data for assistant-only loss | \[[Link](#chat-jsonl-blends-for-assistant-only-loss)\] |
 | `reasoning_content` for Post-Training v3 | Control how chain-of-thought traces are handled | \[[Link](#reasoning_content-for-post-training-v3-datasets)\] |
 | Nemotron Pre/Post-Training Datasets | Ready-to-run commands for all Nemotron datasets | \[[Link](#ready-to-run-tokenization-commands)\] |
 
@@ -171,6 +172,54 @@ python -m modelopt.torch.utils.plugins.prepare_megatron_data_blend --config blen
 The output contains tokenized Megatron `.bin`/`.idx` files, `data_blend.txt` with the weighted paths for training,
 and `config.yaml` recording how the blend was generated. The final token count can slightly exceed the target
 because the final document from each source is kept whole.
+
+### Chat JSONL blends for assistant-only loss
+
+Tokenized `.bin`/`.idx` data carries no loss mask, so `--data_paths` training computes the loss on every token.
+To compute it on assistant tokens only, set `output_format: chat_jsonl`. The same sources are then written,
+untokenized, as `train.jsonl` and `validation.jsonl` with one `{"messages": [...]}` conversation per line, for
+Megatron-Bridge's chat path (`examples/megatron_bridge/distill.py --sft --sft_hf_dataset <dir>/train.jsonl
+--sft_hf_validation <dir>/validation.jsonl --sft_loss_mode assistant`), which applies the model's chat template
+when it loads the data. Run it in an environment with Megatron-Bridge, whose text-only chat filter selects the rows.
+
+```yaml
+output_dir: /path/to/chat_blend
+output_format: chat_jsonl
+target_samples: 36_800  # Total conversations; required, since the selected rows are mixed in memory.
+shuffle: false          # Optional; take the first rows of each split in order (default: buffer shuffle).
+seed: 1234              # Optional; seeds the shuffle, the cross-source mix and the validation hold-out.
+reasoning_content: native  # Optional; native (default), inline or strip.
+sources:
+  - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
+    config: Nemotron-SFT-General
+    split: train
+    content_field: text
+    weight: 20
+  - hf_dataset: nvidia/Nemotron-SFT-Math-v3
+    config: default
+    split: train
+    content_field: messages
+    weight: 17
+```
+
+Each source contributes `round(target_samples * weight / sum(weights))` conversations that contain only text
+and have an assistant turn; a source that rounds to zero is skipped. `content_field` must be `messages` or `text`:
+
+- A `text` row becomes one assistant turn, or is split into turns if it uses the `<extra_id_1>User` /
+  `<extra_id_1>Assistant` / `System` chat markers. A row with a marker for any other role (such as a SteerLM
+  label line) or with an empty turn other than `System` is dropped.
+- `messages` and a row's `tools` are prepared as in the tokenizing mode (JSON-string `tool_calls` arguments
+  become dicts), and a top-level `system` prompt is kept for Megatron-Bridge to prepend. The one difference is
+  that `reasoning_content` stays on the message by default (`native`), because the chat template is applied
+  later, at training time. Use `inline` if your model's chat template ignores `reasoning_content`, so the
+  reasoning is kept as a `<think>` block in `content` (see [below](#reasoning_content-for-post-training-v3-datasets)),
+  or `strip` to drop it.
+
+`files` may be `.jsonl` or `.jsonl.gz`; malformed records in them are skipped with a warning. The conversations are
+mixed and `min(1000, n // 20)` of them are held out for validation. A source that fails to load, has no usable
+rows, or runs out of them stops the run. Each source's selection is cached under `<output_dir>/parts`, keyed by
+the settings that choose its rows, so an interrupted run resumes and a changed configuration selects afresh.
+Nothing prunes `parts`; delete it once `train.jsonl` is written to reclaim the space.
 
 ## `reasoning_content` for Post-Training v3 Datasets
 

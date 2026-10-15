@@ -187,10 +187,22 @@ def sanitize_hf_config_for_deployment(config_data: dict[str, Any], model: Any) -
 
     Fix conservative deployment-only config incompatibilities:
 
+    * remove legacy config/model auto mappings from native NemotronH exports;
     * add missing llama3 ``rope_theta`` metadata when available;
     * trim trailing MTP/next-token-prediction ``layer_types`` entries only when
       the mismatch is exactly explained by next-token-prediction metadata.
     """
+    model_config = getattr(model, "config", None)
+    auto_map = config_data.get("auto_map")
+    if isinstance(auto_map, dict) and type(model_config).__module__.startswith(
+        "transformers.models.nemotron_h."
+    ):
+        # The native schema cannot reload through the source's legacy read-only config.
+        for auto_class in ("AutoConfig", "AutoModel", "AutoModelForCausalLM"):
+            auto_map.pop(auto_class, None)
+        if not auto_map:
+            config_data.pop("auto_map")
+
     _sanitize_llama3_rope_config(config_data, model)
 
     num_hidden_layers = _as_nonnegative_int(config_data.get("num_hidden_layers"))

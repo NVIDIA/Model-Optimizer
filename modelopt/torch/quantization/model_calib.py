@@ -2274,6 +2274,7 @@ def gptq(
     perc_damp: float = 0.01,
     block_size: int = 128,
     fused: bool = False,
+    importance_weighted: bool = False,
 ):
     """GPTQ quantization.
 
@@ -2303,6 +2304,8 @@ def gptq(
         perc_damp: Percentage of avg Hessian diagonal for damping (default: 0.01).
         block_size: Block size for GPTQ weight update.
         fused: If True, use fused Triton kernel for NVFP4 static quantization.
+        importance_weighted: If True, formats whose codebook search takes a per-input-column
+            importance weight it by the square root of the Hessian diagonal.
     """
     total_start = time.time()
 
@@ -2324,7 +2327,9 @@ def gptq(
             cls = GPTQHelper
         else:
             cls = _GPTQ_HELPER_REGISTRY.get(backend, GPTQHelper)
-        return cls(m, name, offload_to_cpu=True, fused=fused)
+        return cls(
+            m, name, offload_to_cpu=True, fused=fused, importance_weighted=importance_weighted
+        )
 
     gptq_handles = {name: _make_gptq_handle(name, m) for name, m in quantized_layers}
     for handle in gptq_handles.values():
