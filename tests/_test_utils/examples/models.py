@@ -58,8 +58,3 @@ FLUX_SCHNELL_PATH = _select_path(
     remote_id="hf-internal-testing/tiny-flux-pipe",
     local_id="FLUX.1-schnell",
 )
-
-PIXART_PATH = _select_path(
-    remote_id="PixArt-alpha/PixArt-XL-2-1024-MS",
-    local_id="PixArt-XL-2-1024-MS",
-)

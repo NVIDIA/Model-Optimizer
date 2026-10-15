@@ -308,7 +308,7 @@ that baseline. The deviations come in four kinds:
 
 | Kind | What changes vs. the general recipe | Examples |
 |------|-------------------------------------|----------|
-| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama` |
+| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama`, `nemotron_h` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
 | **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma` |
 | **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/NVIDIA-Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
@@ -326,7 +326,7 @@ folder may carry a `README.md` spelling out that delta.
 > genuinely deviate and aliases the ones that don't; see
 > [`models/README.md`](models/README.md) for the alias format and when to write one.
 
-### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama`
+### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama`, `nemotron_h`
 
 **`minimax_m3_vl/ptq/mxfp8_nvfp4_experts`** applies MXFP8 to the language-model
 linear layers and MSE-calibrated NVFP4 to routed experts, with expert
@@ -406,6 +406,27 @@ recipes, for Step-3.7 checkpoints; Step-3.5 has its own recipe above.
   vLLM on the Marlin dequant fallback, which measured *slower* than BF16. The `_mcore` suffix is
   load-bearing: selectors are Megatron-Core leaf names (`mlp.experts.linear_fc1`,
   `self_attention.linear_qkv`), so under `hf_ptq.py` nothing matches and `mtq.quantize` raises.
+
+- **`nemotron_h/ptq/nvfp4-aggressive-mse`** is the **aggressive** tier for hybrid Mamba-MoE
+  NemotronH checkpoints, including the omni VL wrappers:
+  - MoE routed + shared experts → NVFP4 W4A4, `group_size 16`, **static** weight scales
+    (`nvfp4_static`) with dynamic NVFP4 activations (`nvfp4`)
+  - attention q/k/v/out, Mamba `in/out_proj`, `lm_head` → FP8
+  - MTP block-1 routed + shared experts → identical treatment to the main experts; the MTP rules
+    are inert on checkpoints without an MTP tail
+  - latent MoE, embeddings, router and the vision tower → **BF16**
+  - KV cache → FP8, **asymmetric**: the language-model backbone casts at a fixed FP8 range
+    (`use_constant_amax`, as in `configs/ptq/units/kv_fp8_cast`, so no `k_scale`/`v_scale` is
+    exported) while MTP attention stays data-calibrated and keeps its pair
+
+  Calibration is weight-MSE with an FP8-scale sweep, which is why the weight quantizers are
+  `static`. Use `--calib_with_images` on VL checkpoints: the vision tower must see image batches
+  even though it stays BF16.
+
+  Rules list both Hugging Face and Megatron-Core spellings where they differ (attention
+  `linear_qkv`/`linear_proj`, `output_layer`, the MTP `mtp_model_layer.layers`), so the same
+  recipe applies under `examples/megatron_bridge/quantize.py`; there, static NVFP4 weights need
+  `--tp_size 1`.
 
 ### Algorithm overrides — `gemma`, `gemma4`, `mpt`
 
@@ -572,11 +593,15 @@ entry is a thin **alias** that imports that recipe wholesale and overrides only
   `general/ptq/nvfp4_experts_only-kv_fp8_cast` — expert-only NVFP4 with max calibration and an
   FP8 KV cache in cast mode — as published in `nvidia/Gemma-4-26B-A4B-NVFP4` and
   `nvidia/diffusiongemma-26B-A4B-it-NVFP4`.
-- **`models/zai-org/GLM-5.1/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast`** and
-  **`models/zai-org/GLM-5.2/ptq/...`** alias
+- **`models/zai-org/GLM-5.2/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast`** aliases
   `general/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast` — expert-only NVFP4 with the
   expert `input_scale` pinned to 1.0 and an FP8 KV cache in cast mode — as published in
-  `nvidia/GLM-5.1-NVFP4` and `nvidia/GLM-5.2-NVFP4`.
+  `nvidia/GLM-5.2-NVFP4`.
+- **`models/zai-org/GLM-5.1/ptq/nvfp4_experts_only-kv_fp8_cast`** aliases
+  `general/ptq/nvfp4_experts_only-kv_fp8_cast` — expert-only NVFP4 with calibrated
+  activation scales and an FP8 KV cache in cast mode — as published in
+  `nvidia/GLM-5.1-NVFP4`. Unlike GLM-5.2, this release's exported expert `input_scale`
+  tensors are calibrated rather than pinned to 1.0.
 - **`models/MiniMaxAI/MiniMax-M2.5/ptq/nvfp4_experts_only-kv_fp8_cast`** aliases
   `general/ptq/nvfp4_experts_only-kv_fp8_cast` — expert-only NVFP4 with an FP8 KV cache in
   cast mode — as published in `nvidia/MiniMax-M2.5-NVFP4`.

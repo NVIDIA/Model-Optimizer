@@ -60,6 +60,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git commit -s -m "[chore]: bump uv.lock"
           git push origin "$BRANCH"
+          HEAD_SHA=$(git rev-parse HEAD)
           UV_OUTPUT=$(cat /tmp/uv_lock_output.txt)
           gh pr create \
             --title "[chore]: weekly bump of uv.lock on ${BASE} ($(date +%Y-%m-%d))" \
@@ -67,6 +68,13 @@ jobs:
           ## Summary
           Automated weekly update of uv.lock file for nSpect Scanning:
           - \`uv.lock\` — upgraded all transitive dependencies to latest compatible versions
+
+          Reviewer: copy-paste the comment below to trigger CI tests.
+          Auto-merge is enabled, so the PR merges once approved and CI passes.
+
+          \`\`\`
+          /ok to test ${HEAD_SHA}
+          \`\`\`
 
           <details>
           <summary>uv lock --upgrade output</summary>
@@ -79,6 +87,7 @@ jobs:
           EOF
           )" \
             --base "$BASE"
+          gh pr merge "$BRANCH" --auto --squash
           # Now that the replacement exists, close the bump PRs it supersedes and
           # delete their branches. Fork PRs are skipped: their heads live in another
           # repo and only branch name would match.

@@ -26,6 +26,8 @@ import torch
 
 GGML_BLOCK_SIZE = 256
 _SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
+# Columns hashed at a time, bounding _row_keys' int64 temporaries to this slice of the weight.
+_ROW_KEY_CHUNK = 256
 
 
 class _CacheKey(NamedTuple):
@@ -168,13 +170,18 @@ def _row_keys(x: torch.Tensor) -> torch.Tensor:
     """A 64-bit hash of each row's bits; equal rows always get equal keys.
 
     Integer sums wrap and are associative, so unlike a floating-point projection the key does not
-    depend on how the reduction is ordered, which differs between differently shaped products.
+    depend on how the reduction is ordered, which differs between differently shaped products. That
+    is also what lets the columns be summed a chunk at a time.
     """
     multipliers = torch.randint(
         -(2**62), 2**62, (x.shape[-1],), generator=torch.Generator().manual_seed(0)
-    )
-    bits = x.contiguous().view(_SIGNED_INT_OF_SIZE[x.element_size()]).to(torch.int64)
-    return (bits * multipliers.to(x.device)).sum(-1)
+    ).to(x.device)
+    bits = x.contiguous().view(_SIGNED_INT_OF_SIZE[x.element_size()])
+    keys = torch.zeros(x.shape[:-1], dtype=torch.int64, device=x.device)
+    for start in range(0, x.shape[-1], _ROW_KEY_CHUNK):
+        columns = slice(start, start + _ROW_KEY_CHUNK)
+        keys += (bits[..., columns].to(torch.int64) * multipliers[columns]).sum(-1)
+    return keys
 
 
 def fake_quantize_with_cache(
@@ -305,8 +312,10 @@ class GGMLFormat:
         """The pinned payload of ``weight``, a view of the pinned weight or rows taken from it.
 
         Fake quant hands over the pinned weight itself in 256-value rows; export may hand over row
-        slices of it, such as the gate and up halves of a fused projection. The comparison syncs,
-        but it only runs for weights the identity cache has not seen.
+        slices of it, such as the gate and up halves of a fused projection. Folding hands over a
+        float32 copy of a narrower weight, which holds the decoding rounded to that narrower dtype,
+        so a float32 weight also matches the decoding rounded through BF16 or FP16. The comparison
+        syncs, but it only runs for weights the identity cache has not seen.
         """
         pinned = pinned_packed_weight(quantizer, self.name)
         width = weight.shape[-1] // self.block_size
@@ -317,17 +326,28 @@ class GGMLFormat:
         ):
             return None
         pinned = pinned.to(weight.device).reshape(-1, width, self.block_bytes)
-        table = self.dequantize(
-            pinned, torch.tensor((pinned.shape[0], weight.shape[-1])), dtype=torch.float32
-        ).to(weight.dtype)
+        shape = torch.tensor((pinned.shape[0], weight.shape[-1]))
         rows = weight.reshape(-1, weight.shape[-1])
-        if rows.shape == table.shape and torch.equal(rows, table):
-            index = slice(None)
-        else:
-            index = _matching_rows(table, rows)
-            if index is None:
-                return None
-        return pinned[index].reshape(*weight.shape[:-1], width, self.block_bytes)
+        storage_dtypes = [weight.dtype]
+        if weight.dtype == torch.float32:
+            storage_dtypes += [torch.bfloat16, torch.float16]
+
+        def decoding(storage_dtype):
+            # Decoding straight into the storage dtype rounds once, as GPTQ did writing the weight,
+            # and holds one table at a time rather than a float32 copy beside each rounding.
+            return self.dequantize(pinned, shape, dtype=storage_dtype).to(weight.dtype)
+
+        # Every whole-weight comparison first: matching rows builds int64 keys several times the
+        # weight's size, and only row slices need it.
+        if rows.shape[0] == pinned.shape[0]:
+            for storage_dtype in storage_dtypes:
+                if torch.equal(rows, decoding(storage_dtype)):
+                    return pinned.reshape(*weight.shape[:-1], width, self.block_bytes)
+        for storage_dtype in storage_dtypes:
+            index = _matching_rows(decoding(storage_dtype), rows)
+            if index is not None:
+                return pinned[index].reshape(*weight.shape[:-1], width, self.block_bytes)
+        return None
 
 
 def narrow_to_float32(blocks: torch.Tensor) -> torch.Tensor:

@@ -34,6 +34,7 @@ from modelopt.torch.puzzletron.anymodel import convert_model
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "examples" / "megatron_bridge"))
 
+from distill import HAS_DIRECT_HF_SFT, _hf_source
 from export_distilled_megatron_to_hf import _get_checkpoint_export_paths
 
 
@@ -118,6 +119,75 @@ def test_distill_llm_sft(tmp_path, num_gpus):
     run_example_command(distill_cmd_parts, example_path="megatron_bridge")
 
     assert (distill_output_dir / f"checkpoints/iter_{train_iters:07d}").exists()
+
+
+@pytest.mark.skipif(not HAS_DIRECT_HF_SFT, reason="Megatron-Bridge lacks DirectHFSFTDatasetConfig")
+def test_distill_llm_sft_hf_chat(tmp_path, num_gpus):
+    """--sft_hf_dataset distills on chat jsonl rendered by the model's chat template."""
+    teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+    train_iters = 2
+    gbs = 4
+    # More records than train_iters * gbs so the sampler does not run dry; every 4th is multi-turn.
+    records = []
+    for i in range(64):
+        messages = [
+            {"role": "user", "content": f"what follows {i}?"},
+            {"role": "assistant", "content": f"{i + 1}"},
+        ]
+        if i % 4 == 0:
+            messages += [
+                {"role": "user", "content": "and then?"},
+                {"role": "assistant", "content": f"{i + 2}"},
+            ]
+        records.append({"messages": messages})
+    data_files = {}
+    for split in ("train", "validation"):
+        data_files[split] = tmp_path / f"chat_{split}.jsonl"
+        data_files[split].write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    distill_output_dir = tmp_path / "distill_output"
+    distill_cmd_parts = extend_cmd_parts(
+        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--sft"],
+        student_hf_path=teacher_hf_path,
+        teacher_hf_path=teacher_hf_path,
+        sft_hf_dataset=data_files["train"],
+        sft_hf_validation=data_files["validation"],
+        output_dir=distill_output_dir,
+        tp_size=num_gpus,
+        pp_size=1,
+        seq_length=64,
+        mbs=1,
+        gbs=gbs,
+        train_iters=train_iters,
+        lr_warmup_iters=1,
+        eval_interval=train_iters,
+        eval_iters=1,
+        log_interval=1,
+    )
+    run_example_command(distill_cmd_parts, example_path="megatron_bridge")
+
+    assert (distill_output_dir / f"checkpoints/iter_{train_iters:07d}").exists()
+
+
+@pytest.mark.skipif(not HAS_DIRECT_HF_SFT, reason="Megatron-Bridge lacks DirectHFSFTDatasetConfig")
+@pytest.mark.parametrize(
+    ("spec", "path_or_dataset", "split", "load_kwargs"),
+    [
+        ("data/foo.jsonl", "json", "train", {"data_files": "data/foo.jsonl"}),
+        ("data/foo.json", "json", "train", {"data_files": "data/foo.json"}),
+        ("org/ds", "org/ds", "train", None),
+        ("org/ds:test", "org/ds", "test", None),
+        # Only the first ':' separates the split, so slice syntax survives.
+        ("org/ds:train[:1000]", "org/ds", "train[:1000]", None),
+    ],
+)
+def test_hf_source_spec(spec, path_or_dataset, split, load_kwargs):
+    source = _hf_source(spec)
+    assert (source.path_or_dataset, source.split, source.load_kwargs) == (
+        path_or_dataset,
+        split,
+        load_kwargs,
+    )
 
 
 def test_distill_validate_only(tmp_path, num_gpus):

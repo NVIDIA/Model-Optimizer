@@ -89,6 +89,13 @@ The generated configuration records ``quant_method: modelopt``, ``packing: ggml`
 block size, and the payload byte count. GGML payloads are not represented as compressed-tensors
 integer ``weights`` groups because all scales and indices are embedded in each packed block.
 
+To evaluate a GGML-quantized model in a runtime without GGML kernels, such as vLLM, export it with
+``--vllm_fakequant_export`` in ``examples/hf_ptq/hf_ptq.py`` instead. Each GGML weight is folded into
+the values its blocks decode to, including the codes GPTQ chose, and the checkpoint carries no
+quantization configuration, so a stock vLLM image serves it as an ordinary model. The extra
+``vllm_fq_modelopt_state.pth`` is read only by the fake-quant launcher in ``examples/vllm_serve``, so
+activation or KV-cache quantization elsewhere in the model applies only when served through it.
+
 Each 74-byte IQ2_XS block represents 256 logical weights:
 
 * bytes 0--1 are the little-endian FP16 super-block scale ``d``;

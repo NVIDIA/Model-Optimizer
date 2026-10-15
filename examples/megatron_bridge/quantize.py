@@ -203,6 +203,16 @@ def get_args() -> argparse.Namespace:
         action="store_true",
         help="Compress weights to a real low-bit representation (instead of fake quantization).",
     )
+    parser.add_argument(
+        "--lora_rank", type=int, default=0, help="Enable LoRA-QAT/QAD; 0 disables it."
+    )
+    parser.add_argument("--lora_alpha", type=float, default=16.0)
+    parser.add_argument(
+        "--lora_target_modules",
+        nargs="+",
+        default=["*.linear_qkv", "*.linear_proj", "*.linear_fc1", "*.linear_fc2"],
+        help="Glob patterns of fake-quantized linear layers to adapt.",
+    )
     # Calibration dataset arguments (matched to hf_ptq.py)
     parser.add_argument(
         "--calib_dataset_name",
@@ -250,6 +260,11 @@ def get_args() -> argparse.Namespace:
 
     args = parser.parse_args()
     resolve_mlflow_args(args, parser, QUANTIZE)
+
+    if args.lora_rank < 0:
+        parser.error("--lora_rank must be non-negative")
+    if args.lora_rank and args.compress:
+        parser.error("--lora_rank requires fake quantization; cannot be combined with --compress")
 
     print_args(masked_args(args))
 
@@ -435,6 +450,16 @@ def main(args: argparse.Namespace):
         unwrapped_model.calibration_mode = False
     else:
         mtq.quantize(unwrapped_model, mtq_config, forward_loop)
+
+    if args.lora_rank:
+        mtq.enable_quant_lora(
+            unwrapped_model,
+            {
+                "rank": args.lora_rank,
+                "alpha": args.lora_alpha,
+                "target_modules": args.lora_target_modules,
+            },
+        )
 
     # Free calibration/quantization memory before generate
     gc.collect()

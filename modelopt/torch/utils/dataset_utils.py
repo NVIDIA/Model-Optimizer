@@ -888,6 +888,8 @@ def get_dataset_dataloader(
         all_samples,
         return_tensors="pt",
         padding=True,
+        # Left padding creates fully masked causal rows, which can yield NaNs in cuDNN backward.
+        padding_side="right" if include_labels else None,
         truncation=True,
         max_length=max_sample_length,
     )
