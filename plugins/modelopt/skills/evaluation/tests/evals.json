@@ -1,5 +1,18 @@
 [
   {
+    "name": "terminalbench-output-policy-precedence",
+    "skills": ["evaluation"],
+    "query": "Review my Terminal-Bench 2.1 Terminus-2 nel-next config without launching jobs. drop_params already removes max_tokens and max_completion_tokens. services.model.generation and proxy.extra_body each set max_tokens: 131072, copied from the model card's Claude Code run. extra_args has --override-generation-config={\"max_new_tokens\":65536}, because no Terminus-2 budget was published and I used the reasoning fallback. The checkpoint also has a native max_new_tokens: 16384. Keep temperature=1.0, top_p=0.95, top_k=20, enable_thinking=true, max-model-len=262144, request timeout=3600 and run_timeout=14400. What should change?",
+    "files": [],
+    "expected_behavior": [
+      "Follows generic generation-policy precedence to the Terminal-Bench task policy before selecting a published budget or fallback",
+      "Removes both request caps and the numeric server override; drop_params alone is insufficient, and a Claude Code budget does not apply to Terminus-2",
+      "Checks merged model fragments, CLI overrides, solver/agent/LLM kwargs and interceptors for reintroduced per-response caps",
+      "Checks effective backend/version generation defaults and neutralizes the inherited numeric cap, using a null max_new_tokens override where supported rather than a numeric fallback or a blanket reset of sampling/stop settings",
+      "Preserves sampling, thinking, context and timeout settings, and does not claim unlimited generation or verified runtime behavior from removing request fields"
+    ]
+  },
+  {
     "name": "tb21-health-before-score",
     "skills": ["evaluation"],
     "query": "Report pass@1=0.61 for my completed Terminal-Bench 2.1 run with 89 tasks x 8 repeats. The summary says 712/712 trials scored, mean/terminus2_completed=0.88, evaluation completion=1.0, shortest rollout=45 s, and no mid-run failure burst. I have not supplied the raw artifacts or their paths. Do not launch jobs.",
@@ -163,6 +176,17 @@
       "Confirms cache replay from run provenance rather than equal scores before excluding a run",
       "Requests parent/user approval to replace invalid runs until at least 8 valid independent runs exist; does not retry solely for bounded failures",
       "Reports SciCode as INDETERMINATE when fewer than 8 valid runs are available"
+    ]
+  },
+  {
+    "name": "livecodebench-judge-pin",
+    "skills": ["evaluation"],
+    "query": "Evaluate my NVFP4 checkpoint and its BF16 baseline on LiveCodeBench on SLURM",
+    "files": [],
+    "expected_behavior": [
+      "Keeps the ns_livecodebench task-level pre_cmd that force-reinstalls livecodebench at commit 7b16053 with --no-deps and asserts the installed commit",
+      "Sets NEMO_EVALUATOR_TRUST_PRE_CMD=1 before launching",
+      "Grades baseline and candidate with the same pinned judge rather than reusing an older LiveCodeBench score"
     ]
   }
 ]

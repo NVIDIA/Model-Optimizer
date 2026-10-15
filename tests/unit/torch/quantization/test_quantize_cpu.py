@@ -40,6 +40,8 @@ from modelopt.torch.quantization.conversion import set_quantizer_attributes_full
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     SequentialQuantizer,
     TensorQuantizer,
+    register_quant_backend,
+    unregister_quant_backend,
 )
 from modelopt.torch.utils.distributed import ParallelState
 
@@ -729,18 +731,69 @@ def test_indexer_k_check_covers_all_ranks(skip_on_windows):
     spawn_multiprocess_job(2, _test_indexer_check_covers_all_ranks, backend="gloo")
 
 
-def test_indexer_q_patterns_need_the_query_quantizer():
+@pytest.mark.parametrize(
+    ("quantizer_name", "supported"),
+    [
+        ("indexer_q_quantizer", r"configs/ptq/units/indexer_\*_nvfp4"),
+        ("indexer_scorer_kwargs_quantizer", r"scorer kernel arguments.*examples/vllm_serve"),
+    ],
+)
+def test_indexer_patterns_need_their_own_quantizer(quantizer_name, supported):
     """Each indexer quantizer is checked on its own: a converted key quantizer does not count."""
     config = copy.deepcopy(INDEXER_K_ONLY_CFG)
     config["quant_cfg"].append(
-        {"quantizer_name": "*indexer_q_quantizer", "cfg": {"num_bits": 8, "axis": None}}
+        {"quantizer_name": f"*{quantizer_name}", "cfg": {"num_bits": 8, "axis": None}}
     )
     mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
     try:
-        with pytest.raises(RuntimeError, match=r"enables indexer_q_quantizer, but no"):
+        with pytest.raises(RuntimeError, match=rf"enables {quantizer_name}, but no.*{supported}"):
             mtq.quantize(_ToyIndexerModel(), config, lambda m: m(torch.randn(2, 16)))
     finally:
         mtq.unregister(_ToyIndexer)
+
+
+class _QuantToyScorerIndexer(_QuantToyIndexer):
+    def _setup(self):
+        super()._setup()
+        # Like the vLLM indexers' scorer quantizers: it carries a config and never sees a tensor.
+        self.indexer_scorer_kwargs_quantizer = TensorQuantizer()
+
+
+def _never_on_a_tensor(inputs, quantizer):
+    raise AssertionError("a quantizer that only carries a config ran on a tensor")
+
+
+def test_config_only_quantizer_survives_calibration_fold_summary_and_restore():
+    """An enabled quantizer that never sees a tensor gets no amax and keeps its config."""
+    config = copy.deepcopy(INDEXER_K_ONLY_CFG)
+    config["quant_cfg"] += [
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {
+            "quantizer_name": "*indexer_scorer_kwargs_quantizer",
+            "cfg": {"backend": "config_only", "backend_extra_args": {"mma_accum": "fp16"}},
+        },
+    ]
+    register_quant_backend("config_only", _never_on_a_tensor)
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyScorerIndexer)
+    try:
+        model = mtq.quantize(_ToyIndexerModel(), config, lambda m: m(torch.randn(2, 16)))
+        state, weights = mto.modelopt_state(model), copy.deepcopy(model.state_dict())
+        # The steps of vLLM fake-quant serving after quantization.
+        mtq.print_quant_summary(model)
+        mtq.fold_weight(model)
+        restored = mto.restore_from_modelopt_state(_ToyIndexerModel(), state)
+        restored.load_state_dict(weights)
+    finally:
+        mtq.unregister(_ToyIndexer)
+        unregister_quant_backend("config_only")
+    for quantizer in (
+        model.indexer.indexer_scorer_kwargs_quantizer,
+        restored.indexer.indexer_scorer_kwargs_quantizer,
+    ):
+        assert quantizer.is_enabled and quantizer._if_quant
+        assert quantizer.backend == "config_only"
+        assert quantizer.backend_extra_args == {"mma_accum": "fp16"}
+        assert not hasattr(quantizer, "_amax")
 
 
 class _ToyMegaMoEExperts(torch.nn.Module):

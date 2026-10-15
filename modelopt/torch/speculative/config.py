@@ -30,6 +30,7 @@ __all__ = [
     "EAGLE_MTP_DEFAULT_CFG",
     "DFlashConfig",
     "EagleConfig",
+    "ExternalDraftConfig",
     "MedusaConfig",
     "eagle3_default_config",
     "eagle_mtp_default_config",
@@ -465,6 +466,50 @@ class MedusaConfig(ModeloptBaseConfig):
     medusa_num_layers: int = ModeloptField(
         default=1,
         description=("The number of ResBlocks used in medusa head."),
+    )
+
+
+class ExternalDraftConfig(ModeloptBaseConfig):
+    """External (standalone) draft model config.
+
+    The converted module is a pretrained causal LM used directly as the draft. It
+    keeps its own embeddings and lm_head; the base model contributes only cached
+    hidden states, projected by the base lm_head to obtain teacher logits.
+    """
+
+    external_loss: Literal["soft_ce", "tvd", "tvd_deploy"] = ModeloptField(
+        default="tvd",
+        description=(
+            "Training objective. ``soft_ce`` matches the Eagle offline objective. "
+            "``tvd`` is total-variation distance between the two untruncated "
+            "distributions. ``tvd_deploy`` puts both through the serving filter first "
+            "(``external_top_k`` then ``external_top_p``), making it the acceptance the "
+            "deployed pair will see: ``alpha = 1 - TVD``."
+        ),
+    )
+
+    external_top_k: int = ModeloptField(
+        default=20,
+        ge=0,
+        description=(
+            "Top-k of the serving filter, applied to *both* the base and the "
+            "draft by ``external_loss='tvd_deploy'``. 0 disables the top-k stage."
+        ),
+    )
+
+    external_top_p: float = ModeloptField(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Top-p of the serving filter, applied to *both* the base and the "
+            "draft by ``external_loss='tvd_deploy'``. 0 or 1.0 disables the nucleus stage."
+        ),
+    )
+
+    external_report_acc: bool = ModeloptField(
+        default=True,
+        description=("Whether to report top-1 agreement with the base model during training."),
     )
 
 

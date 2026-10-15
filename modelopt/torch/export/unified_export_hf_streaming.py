@@ -211,7 +211,7 @@ def _assert_no_split_rules(model: nn.Module) -> None:
     reversal cannot do.
     """
     try:
-        split_rules, merge_rules, _, _ = _build_reverse_rules(model)
+        split_rules, merge_rules, _, _, _ = _build_reverse_rules(model)
     except Exception:
         return  # build_reverse_name_mapper reports the failure with a warning
     if split_rules or merge_rules:
