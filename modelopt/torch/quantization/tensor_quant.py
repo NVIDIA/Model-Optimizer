@@ -43,7 +43,17 @@ mx_format_map = {
 DISABLE_TRITON_KERNEL = False
 
 
-def _fp8_eager(x, amax=None):
+def _round_to_integer(x, rounding):
+    """Round grid coordinates; the caller owns the format, scale and saturation."""
+    if rounding == "nearest":
+        return x.round_()
+    if rounding != "stochastic":
+        raise ValueError(f"Unsupported rounding policy: {rounding}")
+    lower = x.floor()
+    return lower.add_(torch.rand_like(x) < x.sub_(lower))
+
+
+def _fp8_eager(x, amax=None, rounding="nearest"):
     dtype = x.dtype
     if amax is not None:
         amax = amax.to(torch.float32)
@@ -53,7 +63,15 @@ def _fp8_eager(x, amax=None):
         scale = 448.0 / safe_amax
         scale_inv = 1 / scale
         x = (x.to(torch.float32) * scale).clamp(min=-448.0, max=448.0)
-    x = x.to(torch.float8_e4m3fn)
+    if rounding == "nearest":
+        x = x.to(torch.float8_e4m3fn)
+    else:
+        if amax is None:
+            x = x.float().clamp(-448.0, 448.0)
+        # E4M3 spacing is 2**(exponent-3), including its 2**-9 subnormal grid.
+        exponent = torch.frexp(x.abs())[1].clamp_(min=-5).sub_(4)
+        step = torch.ldexp(torch.ones_like(x), exponent)
+        x = _round_to_integer(x.div_(step), rounding).mul_(step)
     if amax is not None:
         x = x.to(torch.float32) * scale_inv
     return x.to(dtype)
@@ -333,7 +351,7 @@ class FakeTensorQuantFunction(Function):
     """Fake version of TensorQuantFunction use CUDA extension."""
 
     @staticmethod
-    @symbolic_helper.parse_args("v", "t", "t", "i", "b", "b", "s", "b", "i", "i")
+    @symbolic_helper.parse_args("v", "t", "t", "i", "b", "b", "s", "b", "i", "i", "s")
     def symbolic(
         g,
         inputs,
@@ -346,8 +364,11 @@ class FakeTensorQuantFunction(Function):
         pass_through_bwd=False,
         block_size=None,
         axis=None,
+        rounding="nearest",
     ):
         """ONNX symbolic function."""
+        if rounding != "nearest":
+            raise NotImplementedError("ONNX export does not support stochastic rounding")
         from .export_onnx import export_int4, export_int8
 
         if num_bits == 4:
@@ -372,6 +393,7 @@ class FakeTensorQuantFunction(Function):
         pass_through_bwd=False,
         block_size=None,
         axis=None,
+        rounding="nearest",
     ):
         """Forward method."""
         if bias is not None:
@@ -381,9 +403,9 @@ class FakeTensorQuantFunction(Function):
 
         def legacy_quant_func():
             # The LegacyFakeTensorQuantFunction support cpu and amax with any shape that can be broadcasted to inputs.
-            return _tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
+            return _tensor_quant(inputs, amax, num_bits, unsigned, narrow_range, rounding)
 
-        if not inputs.is_cuda:
+        if rounding != "nearest" or not inputs.is_cuda:
             outputs = legacy_quant_func()
         else:
             try:
@@ -411,14 +433,14 @@ class FakeTensorQuantFunction(Function):
     @staticmethod
     def backward(ctx, grad_outputs):
         """Implements straight through estimation with clipping."""
-        return _fake_quant_backward_function(ctx, grad_outputs, num_args=10)
+        return _fake_quant_backward_function(ctx, grad_outputs, num_args=11)
 
 
 class ScaledE4M3Function(Function):
     """E4M3fy input with scale."""
 
     @staticmethod
-    @symbolic_helper.parse_args("v", "t", "t", "i", "i", "s", "b")
+    @symbolic_helper.parse_args("v", "t", "t", "i", "i", "s", "b", "s")
     def symbolic(
         g,
         inputs,
@@ -428,8 +450,11 @@ class ScaledE4M3Function(Function):
         M=3,  # noqa: N803
         trt_high_precision_dtype=None,
         pass_through_bwd=False,
+        rounding="nearest",
     ):
         """ONNX symbolic function."""
+        if rounding != "nearest":
+            raise NotImplementedError("ONNX export does not support stochastic rounding")
         from .export_onnx import export_fp8
 
         return export_fp8(g, inputs, amax, trt_high_precision_dtype)
@@ -445,6 +470,7 @@ class ScaledE4M3Function(Function):
         M,  # noqa: N803
         trt_high_precision_dtype=None,
         pass_through_bwd=False,
+        rounding="nearest",
     ):
         """Forward method."""
         if E != 4 or M != 3:
@@ -455,15 +481,18 @@ class ScaledE4M3Function(Function):
 
         _save_for_backward_if_needed(ctx, pass_through_bwd, inputs, amax)
 
-        outputs = quantize_op(
-            inputs,
-            amax,
-            num_bits=8,
-            exponent_bits=4,
-            unsigned=False,
-            narrow_range=False,
-            trt_high_precision_dtype=trt_high_precision_dtype,
-        )
+        if rounding != "nearest":
+            outputs = _fp8_eager(inputs, amax, rounding)
+        else:
+            outputs = quantize_op(
+                inputs,
+                amax,
+                num_bits=8,
+                exponent_bits=4,
+                unsigned=False,
+                narrow_range=False,
+                trt_high_precision_dtype=trt_high_precision_dtype,
+            )
 
         if bias is not None:
             outputs = outputs + bias
@@ -473,7 +502,7 @@ class ScaledE4M3Function(Function):
     @staticmethod
     def backward(ctx, grad_outputs):
         """Implements straight through estimation with clipping."""
-        return _fake_quant_backward_function(ctx, grad_outputs, num_args=7)
+        return _fake_quant_backward_function(ctx, grad_outputs, num_args=8)
 
 
 def _dynamic_block_quantize_forward(
@@ -617,45 +646,28 @@ class StaticBlockwiseFP4FakeQuantFunction(Function):
         return _fake_quant_backward_function(ctx, grad_outputs, num_args=len(ctx.needs_input_grad))
 
 
-def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
-    """Shared function body between TensorQuantFunction and FakeTensorQuantFunction."""
-    # Fine scale, per channel scale will be handled by broadcasting, which could be tricky. Pop a warning.
-    if unsigned and inputs.min() < 0.0:
-        raise TypeError("Negative values encountered in unsigned quantization.")
-
-    # Computation can be done in FP32 to prevent potential over flow.
-    input_dtype = inputs.dtype
-    inputs = inputs.float()
-    amax = amax.float()
-
-    min_amax = amax.min()
-    if min_amax < 0:
-        raise ValueError("Negative values in amax")
-
-    max_bound = torch.tensor((2.0 ** (num_bits - 1 + int(unsigned))) - 1.0, device=amax.device)
-    if unsigned:
-        min_bound = 0
-    elif narrow_range:
-        min_bound = -max_bound
+def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True, rounding="nearest"):
+    """Shared integer grid and scaling for nearest and stochastic fake QDQ."""
+    if rounding == "stochastic" and inputs.is_cuda:
+        if unsigned:
+            torch._assert_async((inputs >= 0).all(), "Negative values in unsigned quantization")
+        torch._assert_async((amax >= 0).all(), "Negative values in amax")
     else:
-        min_bound = -max_bound - 1
-    scale = max_bound / amax
+        if unsigned and inputs.min() < 0.0:
+            raise TypeError("Negative values encountered in unsigned quantization.")
+        if amax.min() < 0:
+            raise ValueError("Negative values in amax")
 
-    epsilon = 1.0 / (1 << 24)
-    if min_amax <= epsilon:  # Treat amax smaller than minimum representable of fp16 0
-        zero_amax_mask = amax <= epsilon
-        scale[zero_amax_mask] = 0  # Value quantized with amax=0 should all be 0
-
-    outputs = torch.clamp((inputs * scale).round_(), min_bound, max_bound)
-
-    if min_amax <= epsilon:
-        scale[zero_amax_mask] = (
-            1.0  # Return 1 makes more sense for values quantized to 0 with amax=0
-        )
-    outputs = outputs / scale
-
-    outputs = outputs.to(input_dtype)
-    return outputs
+    input_dtype = inputs.dtype
+    inputs, amax = inputs.float(), amax.float()
+    max_bound = (2.0 ** (num_bits - 1 + int(unsigned))) - 1.0
+    min_bound = 0 if unsigned else -max_bound if narrow_range else -max_bound - 1
+    # Preserve the integer quantizer's zero-scale threshold without a host sync.
+    zero_amax = amax <= 1.0 / (1 << 24)
+    scale = max_bound / torch.where(zero_amax, torch.ones_like(amax), amax)
+    grid = (inputs * scale).clamp_(min_bound, max_bound)
+    outputs = _round_to_integer(grid, rounding).div_(scale)
+    return outputs.masked_fill_(zero_amax, 0.0).to(input_dtype)
 
 
 class FP4CastSTEFunction(Function):

@@ -99,6 +99,7 @@ with the default attributes of
         "num_bits":                 8,       # 8-bit integer quantization
         "axis":                     None,    # per-tensor scale (no per-channel axis)
         "fake_quant":               True,    # simulate quantization in forward pass (PTQ / QAT)
+        "rounding":                 "nearest",  # or "stochastic" for supported fake-quant formats
         "unsigned":                 False,   # signed integer range, e.g. [-128, 127] for INT8
         "narrow_range":             False,   # full range; True would restrict to [-127, 127] for INT8
         "type":                     "static",  # static calibration (not dynamic per-inference)
@@ -118,6 +119,20 @@ fake-quantization** with a max-calibrated scale. This is rarely the intended beh
 quantizer you want active should be explicitly configured with a ``cfg`` entry.
 
 ----------
+
+Rounding is independent of format and scale grouping. For example, an INT8 or
+FP8 E4M3 entry can set ``"rounding": "stochastic"`` while retaining its existing
+``num_bits``, ``axis`` or ``block_sizes``. The initial implementation supports
+built-in fake quantization with unquantized scales; custom backends, MX/NVFP4,
+learned scales, fused attention/GEMM kernels and inference export reject
+stochastic rounding.
+
+Stochastic rounding uses PyTorch's device RNG. Use ``torch.manual_seed`` for
+repeatable forwards with the same shapes and call order. ModelOpt checkpoints
+save the rounding policy; training checkpoints must also preserve RNG state to
+resume the random stream. Backward retains the selected STE and draws no new
+random numbers. Disable stochastic rounding explicitly before exporting to a
+runtime that implements only nearest rounding, and re-evaluate that policy.
 
 Ordering and Precedence
 =======================

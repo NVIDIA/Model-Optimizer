@@ -29,6 +29,7 @@ def validate_gdn_quantizer(quantizer: TensorQuantizer, *, name: str) -> None:
         and quantizer.num_bits == (4, 3)
         and quantizer.block_sizes is None
         and quantizer.fake_quant
+        and quantizer.rounding == "nearest"
         and quantizer._pass_through_bwd
         and not quantizer.rotate_is_enabled
         and quantizer.pre_quant_scale is None
@@ -38,6 +39,6 @@ def validate_gdn_quantizer(quantizer: TensorQuantizer, *, name: str) -> None:
     ):
         raise ValueError(
             f"{name} supports only dynamic E4M3 fake quantization with "
-            "pass_through_bwd=True, no block_sizes, rotation, pre-scaling, bias, constant "
+            "rounding=nearest, pass_through_bwd=True, no block_sizes, rotation, pre-scaling, bias, constant "
             "amax, or custom backend. Other gradient rules and formats are not implemented."
         )

@@ -8,6 +8,8 @@ Changelog
 
 *Quantization*
 
+- Add an independent ``rounding="stochastic"`` TensorQuantizer option for integer and FP8 E4M3 fake quantization with unquantized scales. Nearest rounding remains the default; stochastic rounding is preserved in ModelOpt checkpoints and is not supported by inference export.
+
 - Add imatrix calibration (``algorithm: {method: imatrix}``) for the GGML formats with a weighted search: each weight is encoded once, its search weighted by the square root of its inputs' per-column ``E[x^2]`` (llama.cpp's imatrix statistic), and HF fused-MoE experts get one statistic per expert. A weight that already holds final codes is left alone, so ``[{method: gptq}, {method: imatrix}]`` runs GPTQ on the dense linears and imatrix on the experts GPTQ skips; the built-in IQ1 and IQ2 recipes now do this, and new ``<format>_experts_only`` recipes apply imatrix to the routed MoE experts alone.
 
 **Backward Breaking Changes**
