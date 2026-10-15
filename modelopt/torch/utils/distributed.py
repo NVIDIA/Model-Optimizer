@@ -318,6 +318,11 @@ class DistributionPlan:
 
     def __post_init__(self) -> None:
         """Reject a plan no load could carry out, before any rank starts on it."""
+        for name in ("world_size", "ep_size"):
+            # Below 1 a degree is meaningless: ep_size=-2 would divide the world and read as no
+            # expert parallelism, ep_size=0 would divide by zero.
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name}={getattr(self, name)} must be at least 1.")
         if self.world_size % self.ep_size != 0:
             raise ValueError(f"ep_size={self.ep_size} must divide world_size={self.world_size}")
         if self.dense not in ("replicate", "fsdp"):
