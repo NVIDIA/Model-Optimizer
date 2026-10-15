@@ -574,7 +574,9 @@ def shard_dataloader(loader, rank: int, world_size: int):
     counts equal (else a rank exits calibration early and hangs the others on the per-step collectives),
     at the cost of the sampler repeating up to ``world_size - 1`` samples to pad the even split. For
     streaming ``IterableDataset`` datasets (which have no ``len()`` and so can't use a sampler) each rank
-    strides its own deterministic copy of the stream via :class:`_StridedIterableShard`.
+    strides its own deterministic copy of the stream via :class:`_StridedIterableShard`. Every DataLoader
+    worker must see that whole stream: a dataset that splits itself across workers by
+    ``get_worker_info()`` would be split twice and lose samples, so load one with ``num_workers=0``.
 
     Forwards all non-sampler DataLoader settings from ``loader`` (workers, pinning,
     prefetch, init fn, generator, ...).
