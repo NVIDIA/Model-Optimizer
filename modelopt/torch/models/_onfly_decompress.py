@@ -317,18 +317,35 @@ def _install_keep_int_native():
 def install_onfly_decompress(hf_config):
     """Monkeypatch get_model_conversion_mapping so the fused-MoE per-expert converters decompress the
     checkpoint's compressed-tensors weights on the fly, in whatever ``format`` the checkpoint declares.
-    Idempotent. Call once before from_pretrained of a compressed checkpoint. ``hf_config`` is the model
-    config carrying the compressed-tensors ``quantization_config`` (top-level or under ``text_config``);
-    the format, bit-width, group size, strategy and stored param names are all read from it."""
+    Call before from_pretrained of a compressed checkpoint. ``hf_config`` is the model config carrying
+    the compressed-tensors ``quantization_config`` (top-level or under ``text_config``); the format,
+    bit-width, group size, strategy and stored param names are all read from it.
+
+    The hooks are process-wide, so a process decompresses one compressed checkpoint: installing again
+    for it is a no-op, and installing for a checkpoint compressed differently raises."""
     import transformers.modeling_utils as mu
     from transformers.core_model_loading import WeightConverter
 
     from modelopt.torch.utils.moe import require_transformers
 
-    if getattr(mu.get_model_conversion_mapping, "_onfly_patched", False):
+    installed = getattr(mu.get_model_conversion_mapping, "_onfly_compression", None)
+    if installed is not None:
+        try:
+            compression = _read_compression(hf_config)
+        except ValueError:
+            # The prepare that installed the hooks drops quantization_config from its config and may
+            # run again on that same config: nothing new to decompress.
+            return
+        if compression != installed:
+            raise RuntimeError(
+                f"install_onfly_decompress: this process already decompresses a '{installed[3]}' "
+                f"checkpoint (stored params {installed[2]}); one compressed differently ('{compression[3]}', "
+                f"stored params {compression[2]}) needs a process of its own"
+            )
         return
     # Raises ValueError for a config with nothing to decompress, before anything is patched.
-    compressor, scheme, param_names, fmt = _read_compression(hf_config)
+    compression = _read_compression(hf_config)
+    compressor, scheme, param_names, fmt = compression
     require_transformers("5.8", "on-the-fly compressed-tensors decompression")
     _install_numeric_expert_ordering()
     _install_keep_int_native()
@@ -347,7 +364,7 @@ def install_onfly_decompress(hf_config):
                 out.append(c)
         return out
 
-    setattr(patched, "_onfly_patched", True)
+    setattr(patched, "_onfly_compression", compression)
     mu.get_model_conversion_mapping = patched
     print(
         f"[onfly_decompress] installed: compressed_tensors '{fmt}' fused-MoE experts decompress "

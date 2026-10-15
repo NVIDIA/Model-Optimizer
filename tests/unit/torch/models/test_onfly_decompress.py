@@ -309,8 +309,8 @@ def test_install_rewrites_only_the_per_expert_weight_converters(monkeypatch):
 
 @pytest.mark.usefixtures("restore_loader_hooks")
 def test_installing_twice_wraps_the_loader_once(monkeypatch):
-    """``prepare`` may run more than once per process. A second install must not re-read the config
-    or wrap the hooks again: with a ``weight`` anchor the outer wrap would rewrite the rewritten
+    """``prepare`` may run more than once per process. Installing again for the same checkpoint must
+    not wrap the hooks again: with a ``weight`` anchor the outer wrap would rewrite the rewritten
     converter and decompress twice."""
     _, down = _stock_expert_converters()
     reads = []
@@ -338,9 +338,40 @@ def test_installing_twice_wraps_the_loader_once(monkeypatch):
     onfly.install_onfly_decompress(SimpleNamespace())
 
     assert hooks() == installed
-    assert len(reads) == 1
+    assert len(reads) == 2
     [conv] = mu.get_model_conversion_mapping("model")
     assert len(conv.operations) == len(down.operations) + 1
+
+
+@pytest.mark.usefixtures("restore_loader_hooks")
+def test_a_checkpoint_compressed_differently_needs_a_process_of_its_own(monkeypatch):
+    """The hooks are process-wide: decompressing a second checkpoint with the first one's scheme and
+    stored params would load it wrong without a word, so its install is refused and the hooks stay as
+    they are. A config the installing prepare already stripped of its quantization_config is the
+    first checkpoint again."""
+    _, down = _stock_expert_converters()
+    compressions = {
+        "a": (_ScaledCompressor, None, PACKED, "stub-format"),
+        "b": (_ScaledCompressor, None, (*PACKED, "weight_zero_point"), "stub-format"),
+    }
+
+    def read(cfg):
+        if cfg.checkpoint is None:
+            raise ValueError("install_onfly_decompress: config has no quantization_config")
+        return compressions[cfg.checkpoint]
+
+    monkeypatch.setattr(
+        mu, "get_model_conversion_mapping", lambda model, **kw: [copy.deepcopy(down)]
+    )
+    monkeypatch.setattr(onfly, "_read_compression", read)
+
+    onfly.install_onfly_decompress(SimpleNamespace(checkpoint="a"))
+    installed = mu.get_model_conversion_mapping
+    onfly.install_onfly_decompress(SimpleNamespace(checkpoint=None))
+    with pytest.raises(RuntimeError, match="needs a process of its own"):
+        onfly.install_onfly_decompress(SimpleNamespace(checkpoint="b"))
+
+    assert mu.get_model_conversion_mapping is installed
 
 
 # ------------------------------------------------------------------------ reading the checkpoint
