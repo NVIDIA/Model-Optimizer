@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 32 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 34 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -64,8 +64,111 @@ supported combinations.
 | `iq2_xs` | IQ2_XS W2A16 (2.31 bpw), MLP + MoE weights only | none | GPTQ (layerwise) |
 | `iq2_s` | IQ2_S W2A16 (2.56 bpw), MLP + MoE weights only | none | GPTQ (layerwise) |
 | `q8_0` | Q8_0 W8A16 (8.5 bpw), eligible linears | none | none (no calibration) |
+| `linear_attention_state_int8_block32_dynamic` | GDN/KDA state INT8, 32 value channels per key row; weights unchanged | none | none (dynamic scales; requires vLLM and a prefix/decode phase context) |
+| `linear_attention_state_int8_block32_dynamic_kimi_k3` | Kimi-K3/Kimi-Linear KDA state INT8, 32 value channels per key row | none | none (dynamic scales; explicit Triton Kimi profile) |
 
 </details>
+
+The public linear-attention profiles require `vllm==0.30.0` and `fla-core==0.5.1`
+(the latter supplies the prefix backward). Install these in the training environment:
+
+```bash
+pip install vllm==0.30.0 fla-core==0.5.1
+```
+
+The block32 linear-attention recipe selects `precision="vllm"`
+and working-state readout. It applies fake QDQ with floating-point state storage.
+For GDN, select `gdn_prefill_backend="triton"` and
+`VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE=1` for packed decode.
+This profile covers pure, single-token, non-speculative decode. Mixed prefill/decode
+batches can select different native kernels, so arbitrary continuous batching is
+not numerically qualified by these tests.
+
+For KDA, `precision="vllm"` selects the standalone FLA/Triton API, without a
+model-level serving parity claim; conversion emits a diagnostic for this choice. Use the
+`linear_attention_state_int8_block32_dynamic_kimi_k3` recipe for Kimi-K3 and
+Kimi-Linear on vLLM 0.30, which share model kernels (`precision="vllm_kimi_k3"`). Set vLLM's `additional_config` to
+`{"kda_prefill_backend": "triton", "kda_decode_backend": "triton"}`. The profile
+requires raw projections, Q/K normalization, unbounded softplus gates, and the
+Kimi-K3 package dependencies (`gate_lower_bound=None` in the serving HF config).
+It never falls back to prepared-only arithmetic.
+The adapters use the fixed vLLM 0.30.0 value-first cache layout. Native-forward
+comparisons and independent recurrence checks validate it in GPU tests.
+
+The public profiles do not support vLLM 0.20 or arbitrary development builds.
+The tested GDN/KDA profiles pass bit-exact native forward comparisons on vLLM 0.30.0.
+
+Megatron state QAT requires native `_compute_gates` and either
+`forward_pre_attn_and_core_attn` or `_forward_compute` for raw gates and packed
+padding; Megatron-Core 0.19.2 lacks these hooks and is
+rejected before an active QAT forward. Loading checkpoints and running the original
+module with state quantizers disabled outside a phase remain supported.
+
+State QAT training requires explicit per-sequence prefix lengths. Megatron selective
+GDN recompute captures each microbatch's phase and packed metadata, allowing backward
+after its context exits. Full-layer recompute and CP remain unsupported while state
+QAT is active; disabled quantizers outside a phase retain the original module path.
+Framework training, evaluation and generation loops must establish this context;
+automatic Bridge and evaluation-helper integration is a separate change. Dynamic
+state quantizers need no calibration. `examples/megatron_bridge/quantize.py` rejects
+linear-attention recipes that require calibration before loading a model. To combine
+calibrated projection quantization with state QDQ, provide `mtq.quantize` with a
+calibration loop inside `linear_attention_training_phase`; a full-prefill phase
+calibrates projections but does not measure decode state-QDQ quality.
+To compare state QDQ, convert both models
+with the same serving policy, disable the baseline's state quantizers, and use
+identical prefix and valid-token lengths:
+
+```python
+for model in (baseline, candidate):
+    mtq.quantize(model, state_recipe)
+mtq.disable_quantizer(baseline, "*state_quantizer")
+for model in (baseline, candidate):
+    with linear_attention_training_phase(
+        model, prefill_lengths, sequence_lengths=valid_lengths
+    ):
+        logits = model(tokens, position_ids, attention_mask)
+    # Score only valid continuation tokens, identically for both models.
+```
+
+`sequence_lengths` excludes right padding in dense rows or padded THD segments.
+The recurrent suffix ends at that valid length; padding produces zero attention
+outputs and does not update the cache. Omit valid lengths only when all storage
+tokens are real. For Megatron THD input, omitted lengths are derived from the
+unpadded `packed_seq_params.cu_seqlens_q`. If only padded boundaries are available,
+pass `sequence_lengths` explicitly, even when every storage token is real.
+Full-prefill scoring alone does not exercise decode state QDQ.
+
+The selected precision profile is saved in ModelOpt/Megatron checkpoints.
+HF export currently does not carry this serving contract, and neither checkpoint
+format configures or validates a remote vLLM process. Apply the backend and gate
+settings above to the actual server; a matching trainer environment variable is no proof.
+Server configuration and mixed-batch dispatch enforcement belong to the vLLM plugin.
+The tests qualify the selected native kernels, not arbitrary server dispatch.
+
+Packed boundaries must match the layer's actual (including padding) boundaries.
+Validation reads their values rather than trusting tensor versions, so it can synchronize
+CUDA metadata. Forward runs one native vLLM prefix and one native decode per
+suffix token. Prefix backward reconstructs intermediates and calls upstream FLA
+backward; decode uses an explicit recurrence backward. QDQ uses an identity STE.
+The `linear_attention/serving` package is a training adapter for these kernels;
+it does not integrate with the vLLM engine or scheduler.
+
+State FP8 block size uses the existing TensorQuantizer settings in `quant_cfg`:
+
+```python
+state_fp8 = {
+    "num_bits": (4, 3),
+    "type": "dynamic",
+    "block_sizes": {-1: 32},  # 16, 32, 64 or 128 value channels per key row
+    "pass_through_bwd": True,
+}
+cfg["quant_cfg"].append({"quantizer_name": "*state_quantizer", "cfg": state_fp8})
+```
+
+These blocks each have their own dynamic scale. The legacy `axis=(0, 1)` setting
+instead shares a scale across a full-key tile; `state_block_v` only controls that
+legacy tile's width. NVFP4 state support is a separate extension.
 
 ---
 

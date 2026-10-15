@@ -60,6 +60,7 @@ def remove_per_module_state(
             _ = metadata.pop("subnet_config", None)
             _ = metadata.pop("real_quantizer_state", None)
             _ = metadata.pop("q_tensor_state", None)
+            _ = metadata.pop("linear_attention", None)
         else:
             config["metadata"] = {}
 

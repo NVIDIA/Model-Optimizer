@@ -17,6 +17,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.export.unified_checkpoint import assert_exported_checkpoint_matches
 from _test_utils.torch.megatron.modelopt_state import assert_has_modelopt_state
@@ -25,6 +26,8 @@ from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_moe_dir,
     create_tiny_qwen3vl_dir,
 )
+
+from modelopt.recipe import load_recipe
 
 # Per-architecture export *mappings* are covered in-process by
 # tests/gpu_megatron/torch/export/test_unified_export_megatron.py; these cases cover the script
@@ -38,6 +41,29 @@ _DENSE_KWARGS = {
     "intermediate_size": 256,
     "max_position_embeddings": 512,
 }
+
+
+def test_calibrated_state_recipe_rejected_before_model_load(tmp_path):
+    recipe = {
+        "metadata": {"recipe_type": "ptq"},
+        "quantize": load_recipe(
+            "general/ptq/linear_attention_state_int8_block32_dynamic"
+        ).quantize.model_dump(),
+    }
+    recipe["quantize"]["algorithm"] = "max"
+    recipe["quantize"]["quant_cfg"].append(
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": [4, 3], "axis": None}}
+    )
+    recipe_path = tmp_path / "calibrated_state.yaml"
+    recipe_path.write_text(yaml.safe_dump(recipe))
+    cmd = extend_cmd_parts(
+        ["torchrun", "--nproc_per_node=1", "quantize.py"],
+        hf_model_name_or_path=tmp_path / "no_model",
+        export_megatron_path=tmp_path / "output",
+        recipe=recipe_path,
+    )
+    with pytest.raises(ValueError, match="calibration loop inside linear_attention_training_phase"):
+        run_example_command(cmd, example_path="megatron_bridge")
 
 
 @pytest.mark.parametrize(

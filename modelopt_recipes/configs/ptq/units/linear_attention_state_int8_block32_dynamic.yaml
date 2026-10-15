@@ -13,16 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# FP8 E4M3 fake quantization of ``w``, the WY-transformed keys that multiply the GatedDeltaNet
-# recurrent state inside the chunked kernel, with a dynamic scale per token and head
-# (``w`` is ``[B, T, H, K]``; ``axis: [0, 1, 2]`` reduces over K). Pairs with
-# ``gdn_state_fp8_dynamic`` to emulate an FP8 x FP8 state matmul. Unlike the state quantizer this
-# one runs on the tensor itself. The initial integration supports dynamic E4M3 with identity
-# STE only. Needs fla-core==0.5.1 and Triton.
-
+# Dynamic INT8 with one scale per key row and 32 value channels for training and serving.
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
-  - quantizer_name: '*gdn_w_quantizer'
+  - quantizer_name: '*gdn_state_quantizer'
     cfg:
-      num_bits: e4m3
-      axis: [0, 1, 2]
+      num_bits: 8
+      unsigned: false
+      narrow_range: true
+      block_sizes: {-1: 32}
       type: dynamic
+      pass_through_bwd: true
+  - quantizer_name: '*kda_state_quantizer'
+    cfg:
+      num_bits: 8
+      unsigned: false
+      narrow_range: true
+      block_sizes: {-1: 32}
+      type: dynamic
+      pass_through_bwd: true
