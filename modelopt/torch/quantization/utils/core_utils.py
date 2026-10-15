@@ -985,11 +985,9 @@ def fsdp2_aware_weight_update(
     Returns:
         None
     """
-    # Bind before the try so the finally cannot raise UnboundLocalError and mask a real
-    # error (e.g. an OOM from the unshard below) that fires before these are set.
-    fsdp_param_mapping = {}
+    # Bound only once setup succeeds; the finally skips FSDP bookkeeping until then so an
+    # early error (e.g. an OOM from the unshard below) propagates and FSDP state stays intact.
     fsdp_param_group = None
-    root_module = None
     try:
         if isinstance(root_model, FSDPModule):
             # Get FSDP root module, if none is returned, then the update is not made to a submodule of an FSDPModule
@@ -1011,8 +1009,9 @@ def fsdp2_aware_weight_update(
                     root_module.unshard()
 
             # Get FSDPParam list
-            fsdp_param_group = fully_shard.state(root_module)._fsdp_param_group
-            fsdp_param_mapping = create_fsdp_param_mapping(fsdp_param_group.fsdp_params, root_model)
+            param_group = fully_shard.state(root_module)._fsdp_param_group
+            fsdp_param_mapping = create_fsdp_param_mapping(param_group.fsdp_params, root_model)
+            fsdp_param_group = param_group
 
             # Assert that all the modules in the module list are present in this fsdp_param_group
             if len(modules_to_update) > 1:
@@ -1032,7 +1031,7 @@ def fsdp2_aware_weight_update(
     finally:
         from modelopt.torch.quantization.qtensor.base_qtensor import QFSDPParam, QTensorWrapper
 
-        if isinstance(root_model, FSDPModule):
+        if fsdp_param_group is not None:
             # Update FSDPParam list
             for module in modules_to_update:
                 for param_name, param in module.named_parameters():
@@ -1074,16 +1073,13 @@ def fsdp2_aware_weight_update(
                         # Remove the post_load_hook_handle to allow gc to collect the old FSDPParam
                         old_fsdp_param._post_load_hook_handle.remove()
 
-            # Update FSDPParam list with new compressed weights. Guarded because an
-            # exception before the try-body bound these leaves them None; skipping here
-            # lets the original error propagate instead of an UnboundLocalError.
-            if fsdp_param_group is not None:
-                fsdp_param_group.fsdp_params = list(fsdp_param_mapping.values())
+            # Update FSDPParam list with new compressed weights
+            fsdp_param_group.fsdp_params = list(fsdp_param_mapping.values())
 
-                # Reshard FSDP root module
-                if reshard and root_module is not None:
-                    with enable_fake_quant(root_module):
-                        root_module.reshard()
+            # Reshard FSDP root module
+            if reshard:
+                with enable_fake_quant(root_module):
+                    root_module.reshard()
 
 
 def update_quant_cfg_with_kv_cache_quant(

@@ -16,6 +16,7 @@ import copy
 import json
 from functools import partial
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -40,6 +41,7 @@ from modelopt.torch.export.unified_export_hf import (
 )
 from modelopt.torch.export.unified_export_hf_streaming import _export_fsdp2_checkpoint_streaming
 from modelopt.torch.quantization.utils import (
+    core_utils,
     enable_weight_access_and_writeback,
     fsdp2_aware_weight_update,
     module_name_maps,
@@ -84,13 +86,7 @@ def _update_weight_test(rank, size):
 
 
 def _update_weight_error_propagates_test(rank, size):
-    """An error raised while the context manager is active must propagate unchanged.
-
-    Regression test: the finally block references locals (fsdp_param_mapping,
-    fsdp_param_group, root_module) that are only bound after the in-body unshard. If an
-    error fires before they are bound, the finally must not raise UnboundLocalError and
-    mask the real error.
-    """
+    """A setup error must propagate unchanged and leave the FSDP param group intact."""
     with patch_fsdp_mp_dtypes():
         model = ToyModel(dims=[4, 4], bias=False).to("cuda")
         fully_shard(model.linears)
@@ -101,19 +97,21 @@ def _update_weight_error_propagates_test(rank, size):
         class _SentinelError(RuntimeError):
             pass
 
-        # Force the in-body unshard to raise (stands in for an OOM) before the context
-        # manager binds its bookkeeping locals.
-        original_unshard = model.linears.unshard
+        def _raise(*args, **kwargs):
+            raise _SentinelError
 
-        def _raising_unshard(*args, **kwargs):
-            raise _SentinelError("boom during unshard")
+        param_group = fully_shard.state(model.linears)._fsdp_param_group
+        fsdp_params = list(param_group.fsdp_params)
 
-        model.linears.unshard = _raising_unshard
-        try:
-            with pytest.raises(_SentinelError), fsdp2_aware_weight_update(model, model.linears):
+        # The unshard failure stands in for an OOM.
+        for target, attr in [(model.linears, "unshard"), (core_utils, "create_fsdp_param_mapping")]:
+            with (
+                patch.object(target, attr, _raise),
+                pytest.raises(_SentinelError),
+                fsdp2_aware_weight_update(model, model.linears),
+            ):
                 pass
-        finally:
-            model.linears.unshard = original_unshard
+            assert param_group.fsdp_params == fsdp_params
 
 
 def _compress_weight_test(rank, size):
