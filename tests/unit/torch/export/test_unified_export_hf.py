@@ -1193,6 +1193,43 @@ def test_every_rank_fails_an_export_that_any_rank_failed(cpu_dist_workers, faili
     cpu_dist_workers.run(partial(_finish_export_job, failing_rank))
 
 
+def _one_rank_fails_processing_job(rank, size, tmp_dir):
+    from unittest import mock
+
+    from modelopt.torch.export import distributed_writer, unified_export_hf
+    from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
+
+    model = torch.nn.Linear(2, 2)
+    set_distribution_plan(model, DistributionPlan(size, ep_size=size))
+    failure = NotImplementedError("rank 1's experts mix quantized and unquantized ones")
+
+    def process(*args):
+        if rank == 1:
+            raise failure
+        return {}
+
+    expected = (
+        pytest.raises(NotImplementedError, match="rank 1's experts")
+        if rank == 1
+        else pytest.raises(RuntimeError, match="rank 1 failed to compute export processed")
+    )
+    with (
+        mock.patch.object(unified_export_hf, "_process_hf_model_for_export", process),
+        mock.patch.object(distributed_writer, "distributed_save_hf_checkpoint") as write,
+        expected,
+    ):
+        unified_export_hf.export_hf_checkpoint(model, export_dir=tmp_dir)
+    write.assert_not_called()
+
+
+def test_every_rank_stops_before_the_write_when_one_ranks_processing_failed(
+    cpu_dist_workers, tmp_path
+):
+    """Each rank folds only its own shard, so its processing can fail alone; the others must not
+    go on into the writer's collectives without it."""
+    cpu_dist_workers.run(_one_rank_fails_processing_job, tmp_dir=tmp_path)
+
+
 def test_a_single_process_export_ends_on_its_own_outcome():
     """Nothing to wait for: the export's own error, if any, is all that is raised."""
     from modelopt.torch.export.unified_export_hf import _finish_export_together
