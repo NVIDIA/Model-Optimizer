@@ -662,6 +662,45 @@ def test_every_rank_takes_the_plan_rank0_decided(cpu_dist_workers, tmp_path):
     )
 
 
+def _as_rank(monkeypatch, rank, **rank0_messages):
+    """Run as ``rank`` of a 4-rank run, answering its broadcasts; returns what this rank handed them.
+
+    A non-zero rank receives, for each broadcast, ``rank0_messages[label]``, as rank 0 would have
+    sent it. Every rank reads the checkpoint as this one does.
+    """
+    sent = []
+
+    def broadcast_object_list(message, group=None, group_src=None):
+        sent.append(message[0])
+        if rank != 0:
+            message[0] = rank0_messages[message[0][0]]
+
+    monkeypatch.setattr(dist, "is_distributed_run", lambda: True)
+    monkeypatch.setattr(dist, "size", lambda group=None: 4)
+    monkeypatch.setattr(dist, "is_master", lambda group=None: rank == 0)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: rank)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 4)
+    monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast_object_list)
+    monkeypatch.setattr(torch.distributed, "all_gather_object", _gathered_alike)
+    return sent
+
+
+@pytest.mark.parametrize("rank0_applies", [True, False])
+def test_other_ranks_apply_the_spec_as_rank0_decided(monkeypatch, serve, tmp_path, rank0_applies):
+    """A rank whose own EP knob says otherwise follows rank 0: had it skipped the spec rank 0
+    applied, it would load without the expert-parallel plan the others shard by."""
+    monkeypatch.setenv("MODELOPT_EP_DEGREE", "auto" if not rank0_applies else "1")
+    rank0_plan = DistributionPlan(4, 4) if rank0_applies else DistributionPlan(4)
+    _as_rank(monkeypatch, 1, spec=("spec", rank0_applies, None), plan=("plan", rank0_plan, None))
+    serve(_deepseek_v3(n_routed_experts=8))
+
+    plan, hf_config = resolve_distribution_plan(str(tmp_path))
+
+    assert plan == rank0_plan
+    spec_plan = get_spec("deepseek_v3").ep_spec.base_model_ep_plan
+    assert (getattr(hf_config, "base_model_ep_plan", None) == spec_plan) is rank0_applies
+
+
 def _one_rank_cannot_see_the_checkpoint_job(rank, size, ckpt):
     isdir = os.path.isdir
     with (
