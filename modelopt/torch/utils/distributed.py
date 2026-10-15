@@ -496,14 +496,14 @@ def distributed_run(timeout: timedelta | None = None, device: torch.device | str
     body set up, such as the one-rank group a single process's FSDP2 load shards through. A group
     that was already there when the run began is the caller's, and is left as it is.
     """
-    owns_group = is_distributed_launch()
+    launched = is_distributed_launch()
     group_was_there = is_initialized()
-    if owns_group:
+    if launched:
         setup(timeout=timeout)
     try:
         yield (
             DistributedState(rank(), size(), torch.device(f"cuda:{local_rank()}"))
-            if owns_group
+            if launched
             else DistributedState(0, 1, device)
         )
     finally:
@@ -520,7 +520,7 @@ def distributed_run(timeout: timedelta | None = None, device: torch.device | str
             )
             traceback.print_exc()
             sys.stderr.flush()
-        if owns_group or (not group_was_there and is_initialized()):
+        if not group_was_there and is_initialized():
             cleanup()
 
 

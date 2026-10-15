@@ -335,8 +335,17 @@ def test_the_run_destroys_a_group_its_body_set_up(monkeypatch):
     assert len(destroyed) == 1
 
 
-def test_the_run_leaves_a_group_it_found_alone(monkeypatch):
-    monkeypatch.delenv("WORLD_SIZE", raising=False)
+@pytest.mark.parametrize("world_size", [None, "2"], ids=["single-process", "launch"])
+def test_the_run_leaves_a_group_it_found_alone(monkeypatch, world_size):
+    """Under a launch too: a caller that set its group up before the run keeps it."""
+    if world_size is None:
+        monkeypatch.delenv("WORLD_SIZE", raising=False)
+    else:
+        monkeypatch.setenv("WORLD_SIZE", world_size)
+        monkeypatch.setattr(dist, "setup", lambda timeout=None: None)
+        monkeypatch.setattr(dist, "rank", lambda group=None: 0)
+        monkeypatch.setattr(dist, "size", lambda group=None: 2)
+        monkeypatch.setattr(dist, "local_rank", lambda: 0)
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(dist, "cleanup", lambda: pytest.fail("destroyed the caller's group"))
     with distributed_run(device="cpu"):
@@ -347,8 +356,17 @@ def test_a_distributed_launch_owns_the_group_even_when_the_body_raises(monkeypat
     """The group is torn down on the way out, and the body's error is printed first: a rank failing
     alone would otherwise wait in the cleanup barrier while the rest sit in a collective."""
     monkeypatch.setenv("WORLD_SIZE", "2")
-    calls = []
-    monkeypatch.setattr(dist, "setup", lambda timeout=None: calls.append(("setup", timeout)))
+    calls, live = [], []
+
+    def setup(timeout=None):
+        calls.append(("setup", timeout))
+        live.append("the launch's group")
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: bool(live))
+    monkeypatch.setattr(dist, "setup", setup)
+    monkeypatch.setattr(dist, "rank", lambda group=None: 0)
+    monkeypatch.setattr(dist, "size", lambda group=None: 2)
+    monkeypatch.setattr(dist, "local_rank", lambda: 0)
     monkeypatch.setattr(dist, "cleanup", lambda: calls.append(("cleanup", capsys.readouterr().out)))
 
     with (
