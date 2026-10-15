@@ -132,7 +132,7 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
     On a plain tensor (single process) it quantizes all ``num_experts`` -- identical to the in-model
     path. Quantizing the fused ``<proj>[i]`` slice with its per-expert quantizer is byte-identical to
     the split-then-quantize, so ``_export_fused_experts_keep_fused`` + :func:`split_fused_experts_state_dict`
-    reproduce :func:`_export_fused_experts`'s output exactly. Registers, per projection ``P``:
+    reproduce :func:`_export_fused_experts`'s output exactly. Registers, per quantized projection ``P``:
     ``module.<P>`` (quantized fused weight), ``module.<P>_weight_scale`` (stacked per-expert scales),
     ``module.<P>_weight_scale_2`` (NVFP4 per-expert scalar), ``module.<P>_input_scale`` (shared).
     """
@@ -149,7 +149,22 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
 
     first = getattr(module, "_first_proj_attr", "gate_up_proj")
     n = module.num_experts
+    # One fused tensor cannot hold quantized and unquantized experts side by side, so a projection
+    # is folded only when all its experts are quantized; one with none quantized stays as it is,
+    # which is what the per-expert export writes for it. Both are decided before either is folded,
+    # so a refusal leaves the module untouched.
+    folded = []
     for proj in (first, "down_proj"):
+        enabled = [q.is_enabled for q in getattr(module, f"{proj}_weight_quantizers")]
+        if all(enabled):
+            folded.append(proj)
+        elif any(enabled):
+            raise NotImplementedError(
+                f"{type(module).__name__}.{proj}: weight quantizers "
+                f"{[i for i, e in enumerate(enabled) if not e]} of {len(enabled)} are disabled and "
+                "the rest are not; a fused expert weight cannot mix quantized and unquantized experts."
+            )
+    for proj in folded:
         weight = getattr(module, proj)
         weight_quantizers = getattr(module, f"{proj}_weight_quantizers")
         input_quantizer = getattr(module, f"{proj}_input_quantizer", None)
