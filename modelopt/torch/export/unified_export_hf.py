@@ -1447,12 +1447,20 @@ def _export_diffusers_checkpoint(
         if not is_partial_export and not model_index_path.exists() and hasattr(pipe, "save_config"):
             pipe.save_config(export_dir)
 
-        # Last resort: synthesize a minimal model_index.json from exported components.
+        # Preserve pipeline settings while listing only the exported components.
         if not model_index_path.exists() and hasattr(pipe, "config") and pipe.config is not None:
+            pipeline_components = pipe.components
             model_index = {
-                "_class_name": type(pipe).__name__,
-                "_diffusers_version": diffusers.__version__,
+                key: value
+                for key, value in pipe.config.items()
+                if key not in pipeline_components and not key.startswith("_")
             }
+            model_index.update(
+                {
+                    "_class_name": type(pipe).__name__,
+                    "_diffusers_version": diffusers.__version__,
+                }
+            )
             for name, comp in all_components.items():
                 module = type(comp).__module__
                 library = module.split(".")[0]
