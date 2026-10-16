@@ -1692,20 +1692,6 @@ def _write_hf_export_config(
     with open(original_config, "w") as file:
         json.dump(config_data, file, indent=4)
 
-    # generation_config.json: on the plain path save_pretrained emits it next to config.json, but the
-    # distributed writer writes weight shards only and save_pretrained never runs -- so without this the
-    # exported checkpoint silently loses the model's generation defaults. Measured on GLM-5.3-BF16:
-    # byte-identical weight shards on both paths, yet only the non-distributed export carried
-    # generation_config.json (do_sample / eos_token_id). Silent, and it lands on exactly the knobs that
-    # decide sampling behaviour at serving time.
-    gen_cfg = getattr(model, "generation_config", None)
-    if gen_cfg is not None:
-        try:
-            _sanitize_generation_config_for_save(model)
-            gen_cfg.save_pretrained(str(export_dir))
-        except Exception as gen_err:  # never fail an otherwise-good export over metadata
-            warnings.warn(f"Could not save generation_config: {gen_err}")
-
 
 def _revert_hf_quant_config_names(
     hf_quant_config: dict,
@@ -1953,9 +1939,8 @@ def _write_base_config(model: nn.Module, export_dir: "Path | str") -> None:
     if model.can_generate() and getattr(model, "generation_config", None) is not None:
         try:
             # Same strict-validate trip as every other save site: a config carrying top_p/top_k
-            # with do_sample unset (e.g. GLM-5.3-BF16) makes save_pretrained raise, and without
-            # this the only trace is a "Could not save generation_config" warning that reads as
-            # data loss when the later _write_hf_export_config has in fact written the file.
+            # with do_sample unset (e.g. GLM-5.3-BF16) makes save_pretrained raise, and the
+            # export would then carry the source's generation_config.json instead of this one.
             _sanitize_generation_config_for_save(model)
             model.generation_config.save_pretrained(export_dir)
         except Exception as gen_err:
