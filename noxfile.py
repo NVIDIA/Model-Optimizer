@@ -100,7 +100,7 @@ def partial_unit(session, subset):
 # existing Python environment (e.g. /opt/venv in NeMo) instead of an isolated one.
 # Use `python -m pip/pytest` to ensure the container's active venv Python is used,
 # not a stale PATH entry (e.g. NeMo container has pip → /usr/local/bin/pip but python → /opt/venv/bin/python).
-# Container: nvcr.io/nvidia/pytorch:26.07-py3 (CUDA 13)
+# Container: nvcr.io/nvidia/pytorch:26.07-py3 or later with CUDA 13
 @nox.session(venv_backend="none")
 def gpu(session):
     # tests/gpu/_extensions/test_onnx_extensions.py fails for newer containers

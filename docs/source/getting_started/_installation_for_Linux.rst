@@ -20,7 +20,7 @@ Latest Model Optimizer (``nvidia-modelopt``) currently has the following system 
 +-------------------------+-----------------------------+
 | TensorRT-LLM (Optional) |  >=1.0                      |
 +-------------------------+-----------------------------+
-| ONNX Runtime (Optional) |  1.24                       |
+| ONNX Runtime (Optional) | See CUDA notes below        |
 +-------------------------+-----------------------------+
 | TensorRT (Optional)     |  >=10.0                     |
 +-------------------------+-----------------------------+
@@ -134,6 +134,8 @@ Additionally, we support installing dependencies for following 3rd-party package
 **CUDA specific dependencies**
 
 * On Linux x86-64 with Python 3.11 and later, ``nvidia-modelopt[onnx]`` installs ``cupy-cuda13x`` and ONNX Runtime GPU 1.30.x for CUDA 13. Python 3.10 retains the CUDA 12 packages and ONNX Runtime 1.22.x. See the CUDA 12 alternative below if you need CUDA 12 on Python 3.11 or later.
+
+On Linux aarch64, Python 3.11 and later retains ONNX Runtime 1.24.x.
 
 **CUDA 12.8 alternative for Python 3.11+ on Linux x86-64**
 
