@@ -69,9 +69,20 @@ def unit(session, torch_ver, tf_ver):
     tf_pins = TRANSFORMERS_VERSIONS[tf_ver]
     if tf_pins:
         session.install(*tf_pins)
+    run_manual = "--run-manual" in session.posargs
+    pytest_args = [arg for arg in session.posargs if arg != "--run-manual"]
     session.run(
-        "python", "-m", "pytest", "tests/unit", *_cov_args(), *session.posargs, env=_CPU_ONLY_ENV
+        "python", "-m", "pytest", "tests/unit", *_cov_args(), *pytest_args, env=_CPU_ONLY_ENV
     )
+    if run_manual:
+        # A separate process: some manual tests (e.g. multi-threaded from_pretrained) leak global
+        # state that breaks later tests. No coverage, so it cannot overwrite the main run's data.
+        session.run(
+            "python",
+            # Caller args first: the last ``-m`` wins, and it must be ours.
+            *("-m", "pytest", "tests/unit", *pytest_args, "--run-manual", "-m", "manual"),
+            env={**_CPU_ONLY_ENV, "COVERAGE_PROCESS_START": ""},
+        )
 
 
 @nox.session(python="3.12")

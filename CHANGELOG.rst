@@ -11,6 +11,10 @@ Changelog
 - Add imatrix calibration (``algorithm: {method: imatrix}``) for the GGML formats with a weighted search: each weight is encoded once, its search weighted by the square root of its inputs' per-column ``E[x^2]`` (llama.cpp's imatrix statistic), and HF fused-MoE experts get one statistic per expert. A weight that already holds final codes is left alone, so ``[{method: gptq}, {method: imatrix}]`` runs GPTQ on the dense linears and imatrix on the experts GPTQ skips; the built-in IQ1 and IQ2 recipes now do this, and new ``<format>_experts_only`` recipes apply imatrix to the routed MoE experts alone.
 - Add a checkpoint-specific NVIDIA Nemotron 3.5 Super VL AutoQuantize recipe with a 4.9-effective-bit NVFP4-MSE/FP8/BF16 search and fixed NVFP4 MTP experts. Select it under ``models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/auto_quantize/``.
 
+*Speculative Decoding*
+
+- Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
+
 **Backward Breaking Changes**
 
 **Deprecations**
@@ -32,6 +36,8 @@ Changelog
 
 *Quantization*
 
+- Add metadata-only export specifications and non-mutating per-weight quantizer-state capture.
+- HF export records canonical activation schemes, group/block sizes and weight-only MXFP4 metadata; mixed-format exports retain unquantized-layer exclusions, and non-square FP8 block layouts are rejected.
 - Add Q8_0 weight-only quantization with 32-value GGML blocks, packed unified HF and Megatron export, and a built-in ``q8_0`` PTQ recipe.
 - Add Hugging Face PTQ calibration and export support for Nemotron-H MTP modules, preserving calibrated expert input scales.
 - Add the ``models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/ptq/nvfp4-mse`` PTQ recipe, the PTQ stage for NVIDIA Nemotron 3.5 Super VL: weight-MSE calibrated NVFP4 routed and shared MoE experts, FP8 attention projections, Mamba ``in_proj``/``out_proj`` and ``lm_head``, and an FP8 KV cache. The latent MoE, router, embeddings and the vision and audio encoders stay in BF16, and the MTP rules apply only to checkpoints that carry an MTP tail. It reproduces the released precision assignment, not the released weights: the published NVFP4 checkpoint adds quantization-aware distillation after this stage.
@@ -155,8 +161,10 @@ Changelog
 **Bug Fixes**
 
 - Fix LSQ clamping small, representable FP8 block scales too aggressively, which could zero quantized values and suppress scale gradients.
+- Fix ONNX AutoTune benchmark initialization with TensorRT 11 while preserving strongly typed networks on TensorRT 10.
 - Fix unified HF export writing a weight name the source checkpoint does not use when a model declares a backwards-compatibility *load* rename as a reversible ``WeightRenaming``. Reversing such a rule rewrote the canonical name to a legacy spelling, and a deployment runtime keyed on the canonical name then failed to load the quantized checkpoint. Each exported name is now resolved against the names the source checkpoint actually carries, for both the exported tensors and the quantization config's module references.
 - Fix exports using the built-in Transformers NemotronH implementation retaining incompatible legacy remote-code config and model mappings. Re-export affected checkpoints before deployment.
+- Fix ``export_hf_checkpoint`` dropping Diffusers pipeline settings, such as Wan 2.2 ``boundary_ratio``, from ``model_index.json`` when ``components`` is given. Re-export affected checkpoints to a new directory, since component exports do not overwrite an existing ``model_index.json``.
 - Fix INT8 real quantization (``mtq.compress``) of FP16 weights zeroing or clipping channels with a small amax: their scales underflowed in FP16. Scales of newly compressed INT8 weights are now stored in FP32.
 - Fix Hugging Face exports classifying registered Qwen VLM parameters as unplaced source weights, which overwrote quantized tensors with original weights and incorrectly excluded their modules from quantization. Re-export affected checkpoints.
 - Right-pad labeled calibration samples to avoid fully masked causal rows that can produce non-finite cuDNN attention gradients during AutoQuantize. Generation previews remove padding before decoding.
@@ -203,6 +211,7 @@ Changelog
 - Hybrid (e.g. Nemotron-H) checkpoints saved by the ``examples/megatron_bridge`` scripts now record their layer spec in ``run_config.yaml`` in a form that reloads, so they can be converted to HuggingFace; a checkpoint saved by an earlier release still needs its ``model.hybrid_stack_spec`` block replaced by hand.
 - Fix ONNX export of quantized models failing with ``Unsupported op_type for real weight quantization: Transpose`` when a weight reaches its consumer transposed, as in MaxViT's attention blocks. The same export now also quantizes each weight along the axis its Q/DQ pair declares, correcting silently wrong ``dq_only`` output when that axis differed from the consumer's default.
 - Fix the ``evaluation`` agent skill's LiveCodeBench recipe scoring correct solutions that use binary standard I/O (``sys.stdin.buffer`` / ``sys.stdout.buffer``) as failures: the recipe now pins a fixed LiveCodeBench judge in the NeMo-Skills container. LiveCodeBench scores change as a result, so re-run earlier baselines before comparing.
+- Fix GPTQ with Megatron data parallelism: each data-parallel replica of a module now builds its Hessian from the whole calibration set instead of only its own shard, so all replicas reach the same quantized weights.
 
 0.47.0 (2026-09-23)
 ^^^^^^^^^^^^^^^^^^^

@@ -41,6 +41,7 @@
 import math
 
 import torch
+import torch.distributed as dist
 
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
@@ -170,6 +171,25 @@ class GPTQHelper:
     def cleanup(self):
         """Unpatch the module's forward method."""
         unpatch_forward_method(self.module, self.CACHE_NAME)
+
+    def sync_hessian_across_dp(self):
+        """Merge the Hessians of this module's data-parallel replicas, which saw different data."""
+        parallel_state = getattr(self.module, "parallel_state", None)
+        group = parallel_state.data_parallel_group if parallel_state is not None else None
+        if group is None or not group.is_initialized() or group.world_size() == 1:
+            return
+        on_cuda = "nccl" in dist.get_backend(group.group)
+        device = (
+            torch.device("cuda", torch.cuda.current_device()) if on_cuda else torch.device("cpu")
+        )
+        n_samples = torch.tensor(self.n_samples, dtype=torch.float64, device=device)
+        hessian = self.hessian.to(device).mul_(self.n_samples)
+        dist.all_reduce(n_samples, group=group.group)
+        dist.all_reduce(hessian, group=group.group)
+        self.n_samples = int(n_samples.item())
+        if self.n_samples:
+            hessian /= self.n_samples
+        self.hessian = hessian.to(self.hessian.device)
 
     def free(self):
         """Release Hessian and working tensors to reclaim memory."""

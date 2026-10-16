@@ -13,8 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
+import faulthandler
 import os
+import queue
+import signal
 import socket
+import time
 import traceback
 
 import torch
@@ -79,6 +84,18 @@ def spawn_multiprocess_job(size, job, backend="gloo"):
         assert not p.exitcode
 
 
+def get_live_pool(pools, key, make_pool):
+    """Return ``pools[key]``, building it with ``make_pool`` if it is missing or was killed.
+
+    Fixtures hand pools out through this, so a hang kills the pool for one test instead of
+    failing every later test that uses it.
+    """
+    pool = pools.get(key)
+    if pool is None or pool.broken:
+        pools[key] = pool = make_pool()
+    return pool
+
+
 def default_worker_teardown(rank, world_size):
     """Minimal cleanup between tests in persistent workers."""
     try:
@@ -117,6 +134,10 @@ class DistributedWorkerPool:
     def __init__(self, world_size, backend="nccl", teardown_fn=default_worker_teardown):
         assert world_size > 0, "World size must be greater than 0"
         self.world_size = world_size
+        # Set once a job was interrupted: the workers are then killed, see ``run``.
+        self.broken = False
+        self.job_timeout = 600
+        self.failure_grace = 30  # seconds the other ranks get to finish once one has failed
         ctx = mp.get_context("spawn")
         self._cmd_queues = [ctx.Queue() for _ in range(world_size)]
         self._result_queue = ctx.Queue()
@@ -145,6 +166,9 @@ class DistributedWorkerPool:
 
     @staticmethod
     def _worker_loop(rank, world_size, backend, port, cmd_queue, result_queue, teardown_fn):
+        if hasattr(signal, "SIGUSR1"):
+            # The parent signals this to get the stack of a hung job into the CI log.
+            faulthandler.register(signal.SIGUSR1, all_threads=True)
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = str(port)
         os.environ["LOCAL_RANK"] = str(rank)
@@ -186,18 +210,49 @@ class DistributedWorkerPool:
 
         ``fn`` is called as ``fn(rank, world_size, *args, **kwargs)`` and must be picklable
         (top-level function or ``functools.partial`` of one).
-        """
-        for q in self._cmd_queues:
-            q.put((fn, args, kwargs))
 
+        If the wait is interrupted (e.g. by ``pytest-timeout``), or a rank fails and its peers do
+        not finish within ``failure_grace`` (they are typically blocked in a collective waiting for
+        it), the workers are still inside the job and every later ``run`` would hang until its own
+        timeout. The workers are killed instead and the pool is marked ``broken``; callers that
+        want to continue need a new pool.
+        """
+        if self.broken:
+            raise RuntimeError("Worker pool was killed after an earlier job hung; create a new one")
         errors = []
-        for _ in range(self.world_size):
-            status, rank, tb = self._result_queue.get(timeout=600)
-            if status == "error":
-                errors.append(f"--- Rank {rank} ---\n{tb}")
+        deadline = None  # set when the first rank fails: its peers get ``failure_grace`` in total
+        try:
+            for q in self._cmd_queues:
+                q.put((fn, args, kwargs))
+            for _ in range(self.world_size):
+                timeout = self.job_timeout if deadline is None else deadline - time.monotonic()
+                status, rank, tb = self._result_queue.get(timeout=max(timeout, 0))
+                if status == "error":
+                    errors.append(f"--- Rank {rank} ---\n{tb}")
+                    deadline = deadline or time.monotonic() + self.failure_grace
+        except queue.Empty:
+            self._abort()
+            if not errors:
+                raise
+            errors.append("--- The other ranks did not finish after a rank failed; killed ---")
+        except BaseException:
+            self._abort()
+            raise
 
         if errors:
             raise RuntimeError("Worker(s) failed:\n" + "\n".join(errors))
+
+    def _abort(self):
+        """Print every worker's stack (to stderr, for the CI log), then kill the workers."""
+        self.broken = True
+        if hasattr(signal, "SIGUSR1"):
+            for p in self._processes:
+                with contextlib.suppress(OSError):
+                    os.kill(p.pid, signal.SIGUSR1)
+            time.sleep(3)  # let faulthandler write before the workers go away
+        for p in self._processes:
+            p.kill()
+            p.join(timeout=10)
 
     def shutdown(self):
         """Signal all workers to exit and wait for them to finish."""
