@@ -109,5 +109,5 @@ Measured on single-Slurm-segment runs on both sides, so neither figure includes 
 ### For the next QAD run
 
 - Track the **length-capped rate** as a first-class metric alongside accuracy: a benchmark score can stay flat while 3.6% of responses return nothing.
-- Changing the KD loss's vocabulary coverage (top-p, full-vocab KL) is unlikely to help: the top-4096 tokens already hold nearly all of the teacher's probability.
+- Changing the KD loss's vocabulary coverage (top-p, full-vocab KL) is unlikely to help: the top-4096 tokens already hold nearly all of the teacher's probability. We confirmed it with a 50-iteration rerun that adds a "ghost" token carrying the teacher's mass outside the top-4096: SciCode 39.35 ± 0.56 vs 40.13 ± 0.60, length-capped 5.0% vs 4.3%, all within noise.
 - The training-side lever this points to is **on-policy distillation**: KD on the student's own generations, so the loss sees the states where the student starts to loop.
