@@ -1562,9 +1562,16 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
         # transformers' original out_dtype logic would return F32 weights, which then run against bf16
         # activations -> "mat1 and mat2 have the same dtype" RuntimeError in the calibration matmuls.
         out_dtype = _FP8_DEQUANT_DTYPE or torch.bfloat16
-        # Degenerate/empty scale grid (sharded/merged expert artifact): emit unscaled rather than crash.
         if scale_rows == 0 or scale_cols == 0 or scales.numel() == 0:
-            return q.to(out_dtype)
+            # Only an empty weight has no scales. A non-empty one with an empty grid was sliced
+            # apart from its scales (as 5.9's expert tensor_idx bug did): emitting it unscaled would
+            # load wrong weights without a word.
+            if q.numel() == 0:
+                return q.to(out_dtype)
+            raise ValueError(
+                f"block-FP8 dequant: weight {tuple(q.shape)} has an empty scale grid "
+                f"{tuple(scales.shape)}; the weight and its scales were sliced apart."
+            )
         wbs = getattr(
             getattr(self.hf_quantizer, "quantization_config", None), "weight_block_size", None
         ) or (128, 128)
@@ -1576,7 +1583,13 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
             # never infer from exact divisibility alone (576 % 5 and 9 % 3 both mislead).
             if sgrid == -(-dim // cfg_blk):
                 return cfg_blk
-            return dim // sgrid if sgrid and dim % sgrid == 0 else cfg_blk
+            if dim % sgrid == 0:
+                return dim // sgrid
+            # Neither: no block is known to place it, and guessing would scale rows wrongly.
+            raise ValueError(
+                f"block-FP8 dequant: a scale grid of {sgrid} fits neither the configured block "
+                f"{cfg_blk} nor an even split of {dim}."
+            )
 
         block_m = _blk(rows, scale_rows, wbs[0])
         block_n = _blk(cols, scale_cols, wbs[1])
