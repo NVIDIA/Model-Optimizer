@@ -982,10 +982,12 @@ def add_unique_initializers(graph, unique_set: set[str], initializers_list) -> i
 
 
 def _attribute(node, name):
+    """Return a node attribute by name, or None when it is absent."""
     return next((attribute for attribute in node.attribute if attribute.name == name), None)
 
 
 def _shape_before_boundary_promotion(cache, name):
+    """Resolve the original shape behind a generated graph-input Unsqueeze."""
     producer = cache.get_producer(name)
     if producer is not None and producer.op_type == "Unsqueeze":
         original = producer.input[0]
@@ -1036,6 +1038,7 @@ def check_to_apply_transpose(conv_node, model, tensor_name_dim_map):
 
 
 def _captured_names(graph):
+    """Return names read by a graph but defined outside its scope."""
     bound = {v.name for v in [*graph.input, *graph.initializer]}
     bound.update(name for node in graph.node for name in node.output if name)
     used = {v.name for v in graph.output}
@@ -1045,6 +1048,7 @@ def _captured_names(graph):
 
 
 def _node_inputs(node):
+    """Return node inputs and outer-scope names captured by its subgraphs."""
     used = {name for name in node.input if name}
     for attribute in node.attribute:
         if attribute.type == onnx.AttributeProto.GRAPH:

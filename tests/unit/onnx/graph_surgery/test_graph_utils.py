@@ -43,6 +43,7 @@ from modelopt.onnx.graph_surgery.utils.graph_utils import (
     ],
 )
 def test_add_initializer_honors_requested_dtype(source_dtype, requested_dtype):
+    """Store and reuse initializers using the requested dtype and matching metadata."""
     dtype = TensorProto.FLOAT16 if requested_dtype is None else requested_dtype
     data = np.array([1, 2], dtype=source_dtype)
     graph = helper.make_graph([], "initializer_dtype", [], [])
@@ -60,6 +61,7 @@ def test_add_initializer_honors_requested_dtype(source_dtype, requested_dtype):
 
 
 def test_add_initializer_rejects_conflicting_requested_dtype():
+    """Reject initializer reuse when its type conflicts with the requested dtype."""
     data = np.array([1], dtype=np.float32)
     graph = helper.make_graph([], "dtype_collision", [], [], [numpy_helper.from_array(data, "w")])
     before = graph.SerializeToString()
@@ -69,6 +71,7 @@ def test_add_initializer_rejects_conflicting_requested_dtype():
 
 
 def test_add_initializer_preserves_bfloat16_raw_bits():
+    """Preserve BFLOAT16 raw bits when adding and reusing an initializer."""
     data = np.array([0x3F80, 0x8000, 0x7FC1], dtype=np.uint16).view(np.int16)
     graph = helper.make_graph([], "bfloat16_bits", [], [])
     add_initializer(graph, "w", data, TensorProto.BFLOAT16)
@@ -84,6 +87,7 @@ def test_add_initializer_preserves_bfloat16_raw_bits():
     [([3], np.int64, TensorProto.INT64), ([2], np.int32, TensorProto.INT32)],
 )
 def test_generated_initializer_collision_leaves_graph_unchanged(values, dtype, onnx_dtype):
+    """Reject conflicting initializer values or types without mutating the graph."""
     graph = helper.make_graph([], "collision", [], [])
     graph.initializer.append(numpy_helper.from_array(np.array([2], dtype=np.int64), "axes"))
     before = graph.SerializeToString()
@@ -95,6 +99,7 @@ def test_generated_initializer_collision_leaves_graph_unchanged(values, dtype, o
 
 
 def test_original_boundary_shape_survives_promotion():
+    """Recover original input shapes after the generated boundary Unsqueeze."""
     graph = helper.make_graph(
         [helper.make_node("Unsqueeze", ["x", "axes"], ["x_unsqueeze_input"])],
         "boundary",
@@ -109,6 +114,7 @@ def test_original_boundary_shape_survives_promotion():
 
 @pytest.mark.parametrize("target", [[-1, -1], [4, 2]])
 def test_invalid_reshape_does_not_change_requested_shape(target):
+    """Leave the requested shape array unchanged when reshape validation fails."""
     values = np.array(target, dtype=np.int64)
     with pytest.raises(ValueError):
         resolve_reshape_shape(values, [2, 3])
@@ -116,6 +122,7 @@ def test_invalid_reshape_does_not_change_requested_shape(target):
 
 
 def test_symbolic_shape_is_not_reported_as_a_concrete_prefix():
+    """Report symbolic dimensions as unknown rather than a concrete partial shape."""
     graph = helper.make_graph(
         [], "symbolic", [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, "N", 4])], []
     )
@@ -123,6 +130,7 @@ def test_symbolic_shape_is_not_reported_as_a_concrete_prefix():
 
 
 def test_cache_rebuild_refreshes_initializer_values():
+    """Reload initializer values after rebuilding the graph cache."""
     graph = helper.make_graph([], "cache", [], [], [numpy_helper.from_array(np.array([1]), "a")])
     cache = GraphCache(graph)
     np.testing.assert_array_equal(cache.get_init_array("a"), [1])
@@ -133,11 +141,13 @@ def test_cache_rebuild_refreshes_initializer_values():
 
 @pytest.mark.parametrize(("target", "source"), [([-1, 0], [0, 3]), ([-2, -3], [2, 3])])
 def test_invalid_reshape_dimensions_fail_clearly(target, source):
+    """Reject empty source dimensions and invalid negative reshape dimensions."""
     with pytest.raises(ValueError):
         resolve_reshape_shape(np.array(target), source)
 
 
 def test_generated_initializer_collision_preserves_signed_zero():
+    """Reject initializer reuse when zero values have different sign bits."""
     graph = helper.make_graph(
         [],
         "signed_zero",
@@ -157,6 +167,7 @@ def test_generated_initializer_collision_preserves_signed_zero():
 
 @pytest.mark.parametrize("replace", [False, True])
 def test_node_edits_preserve_topology_and_boundary_values(replace):
+    """Keep graph edits topologically valid and preserve boundary values."""
     original = helper.make_model(
         helper.make_graph(
             [helper.make_node("Identity", ["x"], ["y"])],
