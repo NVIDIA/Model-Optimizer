@@ -558,14 +558,9 @@ def test_the_routed_experts_state_is_found_by_its_expert_parallel_group():
     model = torch.nn.Module()
     model.attn = torch.nn.Linear(2, 2)
     model.experts = torch.nn.Module()
+    assert expert_parallel_state(model) is None
     for module in model.modules():
         module._parallel_state = _state(expert_parallel=False)
+    assert expert_parallel_state(model) is None
     model.experts._parallel_state = expert = _state(expert_parallel=True)
     assert expert_parallel_state(model) is expert
-
-
-def test_a_model_without_expert_parallel_experts_has_no_expert_state():
-    model = torch.nn.Sequential(torch.nn.Linear(2, 2))
-    assert expert_parallel_state(model) is None
-    model[0]._parallel_state = _state(expert_parallel=False)
-    assert expert_parallel_state(model) is None
