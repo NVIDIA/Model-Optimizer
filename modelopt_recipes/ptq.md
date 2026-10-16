@@ -344,8 +344,9 @@ linear layers and MSE-calibrated NVFP4 to routed experts, with expert
 remain unquantized.
 
 **`qwen3_vl/ptq`** and **`qwen3_5/ptq`** provide FP8 recipes for the `visual` branch of
-validated Qwen3-VL and dense Qwen3.5 checkpoints. `fp8_vision-kv_none` enables only Vision
-Encoder `nn.Linear` weights and inputs, including the primary merger and any deepstack mergers.
+validated Qwen3-VL and dense Qwen3.5 checkpoints. `fp8_vision-kv_none` enables FP8 only on the
+primary and any deepstack vision-merger `nn.Linear` weights and inputs. Vision blocks remain in
+high precision because vLLM's FP8 GEMM flattens their 3D attention inputs.
 `fp8_vision_lm-kv_fp8_cast` combines that visual configuration with the standard W8A8 FP8 model
 and FP8 KV-cache-cast units. Both keep patch embedding and vision-attention BMM operands in high
 precision. The shared visual snippet lives under `qwen3_vl`; thin wrappers remain discoverable
