@@ -387,7 +387,7 @@ class _WithBuffers(nn.Module):
 
 def test_persistent_buffers_load_from_the_checkpoint_and_others_survive(tmp_path):
     """``to_empty`` wipes buffers too: one the checkpoint carries is loaded from it, and one no
-    checkpoint can carry (non-persistent) gets its pre-load value back.
+    checkpoint can carry (non-persistent) gets its pre-load value back, even one that requires grad.
     """
     ckpt = {
         "proj.weight": torch.randn(4, 4),
@@ -396,6 +396,7 @@ def test_persistent_buffers_load_from_the_checkpoint_and_others_survive(tmp_path
     }
     with init_empty_weights():
         model = _WithBuffers()
+    model.table.requires_grad_(True)  # restoring it in place must not be recorded by autograd
 
     _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu", load_names=_every_name(model))
 
