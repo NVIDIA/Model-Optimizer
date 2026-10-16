@@ -41,6 +41,7 @@ from transformers import (
     Mxfp4Config,
 )
 
+from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.plugins import model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import (
     load_pretrained,
@@ -105,6 +106,7 @@ def test_records_the_stray_tensors_and_the_checkpoint(tmp_path, extra, subfolder
     assert model._modelopt_unplaced_source_keys == sorted(extra), "sorted, for a stable export"
     assert model._modelopt_source_checkpoint == str(checkpoint)
     assert model.dtype == torch.bfloat16, "from_pretrained kwargs must pass through"
+    assert distribution_plan(model) == DistributionPlan(), "a single process holds it whole"
 
 
 class _Recorder:
