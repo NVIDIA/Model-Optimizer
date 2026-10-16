@@ -22,6 +22,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from modelopt.torch.nas.hparams.container import DepthHparam
 from modelopt.torch.utils.distributed import _deserialize, _off_dtype_params, _serialize
 
 
@@ -78,3 +79,10 @@ def test_deserialize_rejects_pickle_gadget(monkeypatch, force_no_weights_only):
         monkeypatch.setenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
     with pytest.raises(pickle.UnpicklingError):
         _deserialize(_serialize(_Gadget()))
+
+
+def test_deserialize_traced_hp_subclass():
+    # The allowlist matches exact classes, so each TracedHp subclass must be registered too.
+    hp = _deserialize(_serialize(DepthHparam([1, 2])))
+    assert type(hp) is DepthHparam
+    assert hp.choices == [1, 2]

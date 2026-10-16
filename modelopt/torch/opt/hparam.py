@@ -85,13 +85,14 @@ class Hparam:
     def __getstate__(self):
         # A bound method pickles via ``getattr``, which ``weights_only`` loading rightly rejects.
         state = self.__dict__.copy()
-        if state["_importance_estimators"] == [self._default_get_importance]:
+        # Custom estimators stay as-is (deepcopy relies on this) and are rejected by weights_only loads.
+        if state.get("_importance_estimators") == [self._default_get_importance]:
             state["_importance_estimators"] = "default"
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
-        if state["_importance_estimators"] == "default":
+        if state.get("_importance_estimators") == "default":
             self._importance_estimators = [self._default_get_importance]
 
     def __iter__(self) -> Generator[HPType, None, None]:
