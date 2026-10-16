@@ -28,8 +28,6 @@ import copy
 import json
 import math
 import os
-from datetime import timedelta
-from functools import partial
 from unittest import mock
 
 import pytest
@@ -246,29 +244,6 @@ def test_is_full_world_shard0_answers_from_the_mesh_memo(gloo_world_of_one):
     assert _is_full_world_shard0(tensor, 1, {id(gloo_world_of_one): False}) is False
 
 
-def test_materialize_owned_leaves_every_tensor_whole_and_plain(gloo_world_of_one):
-    mesh = gloo_world_of_one
-    full = torch.arange(12.0).reshape(4, 3)
-    expert_key, expert = "model.layers.0.mlp.experts.0.up_proj.weight", torch.full((2,), 7.0)
-    sd = {
-        "plain": torch.ones(3),
-        "replicated": distribute_tensor(full, mesh, [Replicate()]),
-        "sharded": distribute_tensor(full, mesh, [Shard(0)]),
-        "empty": distribute_tensor(torch.zeros(0, 4, dtype=torch.bfloat16), mesh, [Shard(0)]),
-        expert_key: expert,
-    }
-
-    _materialize_owned(sd, {expert_key}, 0, 1)
-
-    assert set(sd) == {"plain", "replicated", "sharded", "empty", expert_key}
-    assert not any(isinstance(v, DTensor) for v in sd.values())
-    assert torch.equal(sd["plain"], torch.ones(3))
-    assert torch.equal(sd["replicated"], full)
-    assert torch.equal(sd["sharded"], full)
-    assert sd["empty"].shape == (0, 4) and sd["empty"].dtype == torch.bfloat16
-    assert sd[expert_key] is expert  # experts are already disjoint per rank: left alone
-
-
 def _padded_shard(mesh):
     """This rank's 2 rows of a 3-row tensor: a padded local chunk, which would concatenate wrong."""
     return DTensor.from_local(
@@ -340,42 +315,6 @@ def test_materialize_owned_refuses_on_every_rank(cpu_dist_workers, case):
     """Every rank refuses, the ranks whose own view looks fine included, instead of waiting in a
     collective the refusing rank never joins."""
     cpu_dist_workers.run(_refusing_materialize_job, case=case)
-
-
-def test_revert_whole_sd_keeps_a_state_dict_with_nothing_to_revert():
-    """A model without a conversion mapping gets its input dict back from the reverse pass."""
-    model = AutoModelForCausalLM.from_config(_llama_config())
-    sd = dict(model.state_dict())
-    before = dict(sd)
-
-    assert _revert_whole_sd(model, sd) is True
-
-    assert sd == before
-
-
-def test_revert_whole_sd_renames_to_hub_names_in_place():
-    model = AutoModelForCausalLM.from_config(_mixtral_config())
-    gate, w1, w3, w2 = (torch.full((2, 2), float(i)) for i in range(4))
-    sd = {
-        "model.layers.0.mlp.gate.weight": gate,
-        "model.layers.0.mlp.experts.0.gate_proj.weight": w1,
-        "model.layers.0.mlp.experts.0.up_proj.weight": w3,
-        "model.layers.0.mlp.experts.0.down_proj.weight": w2,
-    }
-    same_dict = sd
-
-    assert _revert_whole_sd(model, sd) is True
-
-    assert sd is same_dict
-    hub = "model.layers.0.block_sparse_moe"
-    assert set(sd) == {
-        f"{hub}.gate.weight",
-        f"{hub}.experts.0.w1.weight",
-        f"{hub}.experts.0.w3.weight",
-        f"{hub}.experts.0.w2.weight",
-    }
-    assert torch.equal(sd[f"{hub}.experts.0.w1.weight"], w1)
-    assert torch.equal(sd[f"{hub}.experts.0.w2.weight"], w2)
 
 
 def _one_rank_cannot_revert_job(rank, world_size):
@@ -491,56 +430,39 @@ def test_a_name_two_ranks_both_write_fails_the_write_on_every_rank(cpu_dist_work
 # ------------------------------------------------------------------ the writer, one rank
 
 
-@pytest.mark.parametrize("tie", [True, False], ids=["tied", "untied"])
+@pytest.mark.parametrize("case", ["tied", "untied", "inference-mode", "extra-state-dict"])
 def test_distributed_save_writes_the_hub_checkpoint_of_a_sharded_moe(
-    gloo_world_of_one, tmp_path, tie
+    gloo_world_of_one, tmp_path, case
 ):
-    """Fused experts are split, every name is reverse-converted, and a declared tie is dropped."""
-    src = _save(_mixtral_config(tie_word_embeddings=tie), tmp_path / "src")
-    model = _fsdp2_shard(_load(src), gloo_world_of_one)
+    """Fused experts are split, every name is reverse-converted, and a declared tie is dropped.
 
-    _write(model, tmp_path / "export")
-
-    assert len(list((tmp_path / "export").glob("*.safetensors"))) > 1
-    want = load_file(str(src / "model.safetensors"))
-    _assert_byte_identical(_load_checkpoint(tmp_path / "export"), want)
-
-
-def test_distributed_save_runs_from_inside_inference_mode(gloo_world_of_one, tmp_path):
-    """A caller in inference mode hands the writer inference tensors, which its writes reject."""
-    src = _save(_mixtral_config(), tmp_path / "src")
-    model = _fsdp2_shard(_load(src), gloo_world_of_one)
-
-    with torch.inference_mode():
-        # Made in inference mode, like the scales an inference-mode pack registers.
-        model.model.norm.register_buffer("weight_scale", torch.full((), 0.5))
-        _write(model, tmp_path / "export")
-
-    want = {
-        **load_file(str(src / "model.safetensors")),
-        "model.norm.weight_scale": torch.tensor(0.5),
-    }
-    _assert_byte_identical(_load_checkpoint(tmp_path / "export"), want)
-
-
-def test_distributed_save_writes_extra_state_dict_under_its_own_names(gloo_world_of_one, tmp_path):
-    """Extra tensors already carry hub names, so the reverse conversion must not rename them.
-
-    The first is named like an in-memory Mixtral expert weight, which the reverse would turn into
+    A caller in inference mode hands the writer inference tensors, which its writes reject. Extra
+    tensors already carry hub names, so the reverse conversion must not rename them: the first is
+    named like an in-memory Mixtral expert weight, which the reverse would turn into
     ``block_sparse_moe.experts.0.w1``.
     """
-    src = _save(_mixtral_config(), tmp_path / "src")
+    src = _save(_mixtral_config(tie_word_embeddings=case == "tied"), tmp_path / "src")
     model = _fsdp2_shard(_load(src), gloo_world_of_one)
-    extra = {
-        "model.layers.9.mlp.experts.0.gate_proj.weight": torch.arange(
-            64, dtype=torch.bfloat16
-        ).reshape(8, 8),
-        "model.mtp.norm.weight": torch.full((8,), 3.0, dtype=torch.bfloat16),
-    }
+    want = load_file(str(src / "model.safetensors"))
+    extra = None
+    if case == "extra-state-dict":
+        extra = {
+            "model.layers.9.mlp.experts.0.gate_proj.weight": torch.arange(
+                64, dtype=torch.bfloat16
+            ).reshape(8, 8),
+            "model.mtp.norm.weight": torch.full((8,), 3.0, dtype=torch.bfloat16),
+        }
+        want.update(extra)
+    elif case == "inference-mode":
+        want["model.norm.weight_scale"] = torch.tensor(0.5)
 
-    _write(model, tmp_path / "export", extra_state_dict=extra)
+    with torch.inference_mode(case == "inference-mode"):
+        if case == "inference-mode":
+            # Made in inference mode, like the scales an inference-mode pack registers.
+            model.model.norm.register_buffer("weight_scale", torch.full((), 0.5))
+        _write(model, tmp_path / "export", extra_state_dict=extra)
 
-    want = {**load_file(str(src / "model.safetensors")), **extra}
+    assert len(list((tmp_path / "export").glob("*.safetensors"))) > 1
     _assert_byte_identical(_load_checkpoint(tmp_path / "export"), want)
 
 
@@ -645,25 +567,40 @@ def _two_rank_job(rank, world_size, tmp_dir):
     if rank == 0:
         _assert_byte_identical(_load_checkpoint(tmp_dir / "dense_export"), want)
 
-    # Each dense tensor ends up whole on exactly one rank, and the owners are spread out.
-    full = {f"t{i}": torch.full((4, 2), float(i)) for i in range(8)}
-    sd = {k: distribute_tensor(v, mesh, [Shard(0)]) for k, v in full.items()}
+    # Each dense tensor ends up whole and plain on exactly one rank, whatever its layout, and the
+    # owners are spread out. A zero-row tensor has no rows to move: its owner writes it as it is.
+    full = {f"t{i}": torch.full((4, 2), float(i)) for i in range(9)}
+    full["t9"] = torch.zeros(0, 4, dtype=torch.bfloat16)
+    sd = {}
+    for i, (k, v) in enumerate(full.items()):
+        layout = ([Shard(0)], [Replicate()], None)[i % 3]
+        sd[k] = v if layout is None else distribute_tensor(v, mesh, layout)
     _materialize_owned(sd, set(), rank, world_size)
     owned = [None] * world_size
     dist.all_gather_object(owned, sorted(sd))
     assert all(owned), f"a rank owns nothing: {owned}"
     assert sorted(k for keys in owned for k in keys) == sorted(full)
-    assert all(torch.equal(v, full[k]) for k, v in sd.items())
+    for k, v in sd.items():
+        assert not isinstance(v, DTensor), k
+        assert v.dtype == full[k].dtype and torch.equal(v, full[k]), k
 
     # Ranks that disagree must fail with a diagnosis, not hang in a collective or drop a tensor.
-    sd = {"shared": torch.ones(2), f"rank{rank}": torch.ones(2)}
-    with pytest.raises(RuntimeError, match="dense key sets differ"):
-        _materialize_owned(sd, set(), rank, world_size)
     w = torch.ones(1, 2)
     if rank == 0:
         w = DTensor.from_local(w, mesh, [Shard(0)], run_check=False)
-    with pytest.raises(RuntimeError, match="disagree on which tensors are dim-0 sharded"):
-        _materialize_owned({"w": w}, set(), rank, world_size)
+    cases = [
+        ({"shared": torch.ones(2), f"rank{rank}": torch.ones(2)}, "dense key sets differ"),
+        ({"w": w}, "disagree on which tensors are dim-0 sharded"),
+    ]
+    for sd, diagnosis in cases:
+        try:
+            with bounded_collectives():
+                _materialize_owned(sd, set(), rank, world_size)
+        except RuntimeError as error:
+            raised = str(error)
+        else:
+            raised = "no error"
+        assert diagnosis in raised, raised
 
 
 def test_two_ranks_write_one_checkpoint_and_reject_inconsistent_state(cpu_dist_workers, tmp_path):
