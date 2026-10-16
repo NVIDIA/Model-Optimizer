@@ -1142,3 +1142,210 @@ class TestDFlashDraftActivationCheckpointing:
         assert grads[False] and grads[False].keys() == grads[True].keys()
         for name, grad in grads[False].items():
             assert torch.equal(grad, grads[True][name]), name
+
+
+def test_frozen_base_forward_builds_no_graph():
+    """The default frozen base should stay cheap: no autograd graph through it."""
+    model = get_tiny_llama(num_hidden_layers=4)
+    config = get_dflash_config()
+    config["dflash_freeze_base_model"] = True
+    mtsp.convert(model, [("dflash", config)])
+
+    out = model(input_ids=torch.ones(1, SEQ_LEN, dtype=torch.long))
+
+    assert out.logits.grad_fn is None, "frozen base should not build a graph"
+
+
+def test_trainable_base_forward_builds_a_graph():
+    """dflash_freeze_base_model=False has to actually let gradient reach the base.
+
+    Regression test: the base forward used to run under an unconditional no_grad, so the
+    flag was honored on the parameters (requires_grad stayed True) while no graph was
+    built. The base then sat at its initial weights for the whole run and looked trainable
+    the entire time -- visible only as a loss that never moved.
+    """
+    model = get_tiny_llama(num_hidden_layers=4)
+    config = get_dflash_config()
+    config["dflash_freeze_base_model"] = False
+    mtsp.convert(model, [("dflash", config)])
+
+    base_params = [p for n, p in model.named_parameters() if "dflash_module" not in n]
+    assert any(p.requires_grad for p in base_params), "base params should be trainable"
+
+    out = model(input_ids=torch.ones(1, SEQ_LEN, dtype=torch.long))
+
+    assert out.logits.grad_fn is not None, "trainable base must build a graph"
+
+    # And the gradient must actually arrive, not merely be possible.
+    out.logits.sum().backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in base_params), (
+        "no gradient reached the base despite dflash_freeze_base_model=False"
+    )
+
+
+def test_base_lm_loss_requires_a_trainable_base():
+    """On a frozen base the term builds no graph, so it would silently do nothing."""
+    model = get_tiny_llama(num_hidden_layers=4)
+    config = get_dflash_config()
+    config["dflash_freeze_base_model"] = True
+    config["dflash_base_lm_loss_alpha"] = 0.5
+
+    with pytest.raises(ValueError, match="dflash_freeze_base_model=False"):
+        mtsp.convert(model, [("dflash", config)])
+
+
+def test_base_lm_loss_defaults_off_and_changes_nothing():
+    """Default 0.0 must leave the existing objective untouched."""
+    model = get_tiny_llama(num_hidden_layers=4)
+    config = get_dflash_config()
+    mtsp.convert(model, [("dflash", config)])
+    assert model.dflash_base_lm_loss_alpha == 0.0
+
+    ids = torch.ones(1, SEQ_LEN, dtype=torch.long)
+    out = model(input_ids=ids, labels=ids.clone())
+    assert torch.isfinite(out.loss)
+
+
+def test_base_lm_loss_adds_to_the_objective_and_reaches_the_base():
+    """The anchor term must change the loss AND deliver gradient to base parameters.
+
+    Without it the only gradient an unfrozen base receives comes from the draft
+    objective, so the base drifts toward whatever is easiest to draft rather than toward
+    predicting text.
+    """
+    ids = torch.ones(1, SEQ_LEN, dtype=torch.long)
+
+    torch.manual_seed(0)
+    plain = get_tiny_llama(num_hidden_layers=4)
+    cfg_plain = get_dflash_config()
+    cfg_plain["dflash_freeze_base_model"] = False
+    mtsp.convert(plain, [("dflash", cfg_plain)])
+    loss_plain = plain(input_ids=ids, labels=ids.clone()).loss
+
+    torch.manual_seed(0)
+    anchored = get_tiny_llama(num_hidden_layers=4)
+    cfg_anchored = get_dflash_config()
+    cfg_anchored["dflash_freeze_base_model"] = False
+    cfg_anchored["dflash_base_lm_loss_alpha"] = 1.0
+    mtsp.convert(anchored, [("dflash", cfg_anchored)])
+    out = anchored(input_ids=ids, labels=ids.clone())
+
+    assert out.loss.item() != pytest.approx(loss_plain.item())
+
+    out.loss.backward()
+    base_params = [p for n, p in anchored.named_parameters() if "dflash_module" not in n]
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in base_params)
+
+
+def test_base_lm_loss_needs_labels():
+    """Silently skipping the anchor when labels are absent would be the worst outcome."""
+    model = get_tiny_llama(num_hidden_layers=4)
+    config = get_dflash_config()
+    config["dflash_freeze_base_model"] = False
+    config["dflash_base_lm_loss_alpha"] = 1.0
+    mtsp.convert(model, [("dflash", config)])
+
+    with pytest.raises(ValueError, match="needs labels"):
+        model(input_ids=torch.ones(1, SEQ_LEN, dtype=torch.long))
+
+
+def test_packed_data_path_selects_the_packed_mode():
+    """mode is derived from which data-source field is set, never taken on trust."""
+    from modelopt.torch.speculative.plugins.hf_training_args import DataArguments
+
+    assert DataArguments(packed_data_path="/tmp/blocks").mode == "packed"
+    assert DataArguments(data_path="/tmp/chat.jsonl").mode == "online"
+    with pytest.raises(ValueError, match="ambiguous"):
+        DataArguments(packed_data_path="/tmp/blocks", offline_data_path="/tmp/dump")
+
+
+def test_packed_collator_stacks_blocks_and_defaults_labels():
+    """Blocks are already fixed-length and tokenized, so collation is a stack.
+
+    labels defaults to input_ids: for causal LM the shift belongs to the loss, and the
+    DFlash path shifts there.
+    """
+    from modelopt.torch.utils.plugins.transformers_dataset import PackedBlockDataCollator
+
+    rows = [{"input_ids": torch.arange(8)}, {"input_ids": torch.arange(8, 16)}]
+    batch = PackedBlockDataCollator()(rows)
+
+    assert batch["input_ids"].shape == (2, 8)
+    assert torch.equal(batch["labels"], batch["input_ids"])
+    assert torch.equal(batch["attention_mask"], torch.ones(2, 8, dtype=batch["input_ids"].dtype))
+
+
+def test_packed_collator_keeps_explicit_labels_and_truncates_to_train_len():
+    from modelopt.torch.utils.plugins.transformers_dataset import PackedBlockDataCollator
+
+    rows = [{"input_ids": torch.arange(8), "labels": torch.full((8,), -100)}]
+    batch = PackedBlockDataCollator(train_len=4)(rows)
+
+    assert batch["input_ids"].shape == (1, 4)
+    assert torch.equal(batch["labels"], torch.full((1, 4), -100))
+
+
+def test_packed_collator_rejects_rows_without_input_ids():
+    from modelopt.torch.utils.plugins.transformers_dataset import PackedBlockDataCollator
+
+    with pytest.raises(ValueError, match="input_ids"):
+        PackedBlockDataCollator()([{"text": "not tokenised"}])
+
+
+def test_packed_mode_is_not_treated_as_offline():
+    """packed is an online path with a different data source, not an offline one.
+
+    Offline training loads a fake base because hidden states were pre-dumped. Packed
+    batches are plain tokens, so the real base must run forward over them; classifying
+    packed as offline would silently train against a model that is not there.
+    """
+    import re
+    from pathlib import Path
+
+    src = Path(__file__).parents[5] / "examples/speculative_decoding/main.py"
+    line = next(ln for ln in src.read_text().splitlines() if "use_offline_training =" in ln)
+    assert re.search(r'not in \(\s*"online",\s*"packed"\s*\)', line), line
+
+
+def test_draft_loss_alpha_defaults_to_one_and_changes_nothing():
+    model = get_tiny_llama(num_hidden_layers=4)
+    mtsp.convert(model, [("dflash", get_dflash_config())])
+    assert model.dflash_draft_loss_alpha == 1.0
+
+
+def test_draft_loss_alpha_zero_gives_a_control_arm():
+    """alpha 0 + a base LM anchor trains the base on language modelling alone.
+
+    This is what makes the control expressible in the same recipe: the drafter still runs,
+    so the control differs from its co-trained twin by the draft gradient and nothing else.
+    """
+    ids = torch.ones(1, SEQ_LEN, dtype=torch.long)
+
+    cfg = get_dflash_config()
+    cfg["dflash_freeze_base_model"] = False
+    cfg["dflash_base_lm_loss_alpha"] = 1.0
+    cfg["dflash_draft_loss_alpha"] = 0.0
+    torch.manual_seed(0)
+    control = get_tiny_llama(num_hidden_layers=4)
+    mtsp.convert(control, [("dflash", cfg)])
+    out = control(input_ids=ids, labels=ids.clone())
+    out.loss.backward()
+
+    # the base still learns
+    base = [p for n, p in control.named_parameters() if "dflash_module" not in n]
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in base)
+    # the drafter does not
+    draft = [p for n, p in control.named_parameters() if "dflash_module" in n]
+    assert all(p.grad is None or p.grad.abs().sum() == 0 for p in draft)
+
+
+def test_both_alphas_zero_is_refused():
+    """A total loss of identically zero would train nothing, silently."""
+    model = get_tiny_llama(num_hidden_layers=4)
+    cfg = get_dflash_config()
+    cfg["dflash_freeze_base_model"] = False
+    cfg["dflash_draft_loss_alpha"] = 0.0
+    cfg["dflash_base_lm_loss_alpha"] = 0.0
+
+    with pytest.raises(ValueError, match="both 0"):
+        mtsp.convert(model, [("dflash", cfg)])

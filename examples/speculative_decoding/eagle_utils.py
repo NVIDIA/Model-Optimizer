@@ -39,6 +39,7 @@ from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import is_master
 from modelopt.torch.utils.plugins.transformers_dataset import (
     LanguageDataCollator,
+    PackedBlockDataCollator,
     ShardedDataset,
     VisionLanguageDataCollator,
 )
@@ -131,6 +132,18 @@ def make_speculative_data_module(
             config=streaming_cfg,
         )
         data_collator = EagleOfflineDataCollator(train_len=train_len)
+
+    elif mode == "packed":
+        # Pretraining-style: a save_to_disk directory of fixed-length tokenized blocks.
+        # No tokenizer and no chat template are involved -- the packing already happened,
+        # deliberately outside this library so it can be done once and shared byte-identically
+        # by runs that are being compared.
+        from datasets import load_from_disk
+
+        train_dataset = load_from_disk(data_args.packed_data_path)
+        train_dataset.set_format(type="torch")
+        print_rank_0(f"Loaded {len(train_dataset)} packed blocks from {data_args.packed_data_path}")
+        data_collator = PackedBlockDataCollator(train_len=train_len)
 
     elif mode == "online":
         train_dataset = ShardedDataset("json", data_files=data_args.data_path)

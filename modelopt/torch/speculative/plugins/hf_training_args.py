@@ -58,9 +58,16 @@ class DataArguments(BaseModel):
 
     # Derived in ``_check_mode_requirements`` from the data-source fields; accepted as input
     # only for backward compatibility (existing ``mode:`` keys / overrides), then overwritten.
-    mode: Literal["online", "offline", "streaming"] | None = None
+    mode: Literal["online", "offline", "streaming", "packed"] | None = None
     data_path: str | None = None
     offline_data_path: str | None = None
+    # A ``datasets.save_to_disk`` directory of FIXED-LENGTH blocks with an ``input_ids``
+    # column (``labels`` optional; defaults to ``input_ids``). This is the pretraining-style
+    # path: raw corpus text has no conversation structure, so the chat-template collator the
+    # online path uses cannot express it. Packing stays the caller's job on purpose -- it is
+    # expensive, it must be byte-identical across compared runs, and tokenizer policy does
+    # not belong to this library.
+    packed_data_path: str | None = None
     lazy_preprocess: bool = True
     draft_vocab_cache: str | None = None
     chat_template: str | None = None
@@ -89,11 +96,21 @@ class DataArguments(BaseModel):
         # override round-trip and silently select the wrong training path.
         has_offline = self.offline_data_path is not None
         has_streaming = self.streaming_server_url is not None
-        if has_offline and has_streaming:
+        has_packed = self.packed_data_path is not None
+        if sum((has_offline, has_streaming, has_packed)) > 1:
             raise ValueError(
-                "ambiguous: set only one of data.offline_data_path / data.streaming_server_url"
+                "ambiguous: set only one of data.offline_data_path / "
+                "data.streaming_server_url / data.packed_data_path"
             )
-        self.mode = "offline" if has_offline else "streaming" if has_streaming else "online"
+        self.mode = (
+            "offline"
+            if has_offline
+            else "streaming"
+            if has_streaming
+            else "packed"
+            if has_packed
+            else "online"
+        )
         if self.mode == "streaming" and not self.streaming_model_name:
             raise ValueError(
                 "data.mode='streaming' requires data.streaming_server_url and "
