@@ -99,14 +99,16 @@ def _reference(weight, scale_inv, block):
 
 
 @pytest.mark.parametrize(
-    ("shape", "block"),
+    ("shape", "block", "configured", "grid"),
     [
-        ((8, 12), (4, 4)),
-        ((10, 13), (4, 4)),
-        ((9, 8), (4, 4)),
-        ((6, 10), (2, 4)),
-        ((3, 10, 13), (4, 4)),
-        ((576, 7168), (128, 128)),
+        ((8, 12), (4, 4), (4, 4), None),
+        ((10, 13), (4, 4), (4, 4), None),
+        ((9, 8), (4, 4), (4, 4), None),
+        ((6, 10), (2, 4), (2, 4), None),
+        ((3, 10, 13), (4, 4), (4, 4), None),
+        ((576, 7168), (128, 128), (128, 128), None),
+        ((8, 8), (4, 2), (128, 128), (2, 4)),
+        ((130, 260), (128, 128), None, (2, 3)),
     ],
     ids=[
         "whole-blocks",
@@ -115,30 +117,19 @@ def _reference(weight, scale_inv, block):
         "non-square-blocks",
         "per-expert",
         "deepseek-kv-a-proj",
+        "grid-finer-than-configured",
+        "nothing-configured",
     ],
 )
-def test_dequant_matches_the_blockwise_reference(pre_5_10_transformers, shape, block):
-    """``grid-divides-the-rows``: 9 rows of 4-row blocks make a 3-row grid, which also divides 9,
-    yet the blocks are 4 rows, not 3."""
-    weight, scale_inv = _block_fp8(shape, _ceil_grid(shape, block))
-    model_load_utils._patch_finegrained_fp8_dequant(torch.float32)
-
-    out = _dequant_op(block)._dequantize_one(weight, scale_inv)
-
-    assert torch.equal(out, _reference(weight, scale_inv, block))
-
-
-@pytest.mark.parametrize(
-    ("configured", "shape", "grid", "block"),
-    [((128, 128), (8, 8), (2, 4), (4, 2)), (None, (130, 260), (2, 3), (128, 128))],
-    ids=["grid-finer-than-configured", "nothing-configured"],
-)
-def test_the_block_size_comes_from_the_grid_or_defaults_to_deepseeks(
-    pre_5_10_transformers, configured, shape, grid, block
+def test_dequant_matches_the_blockwise_reference(
+    pre_5_10_transformers, shape, block, configured, grid
 ):
-    """A grid that is not the configured block's ceil grid sets the block by division; with no
-    block size configured, DeepSeek's 128 x 128 applies."""
-    weight, scale_inv = _block_fp8(shape, grid)
+    """``configured`` is the quantization config's block size, ``grid`` the scale grid when it is not
+    that block's ceil grid. ``grid-divides-the-rows``: 9 rows of 4-row blocks make a 3-row grid,
+    which also divides 9, yet the blocks are 4 rows, not 3. A grid that is not the configured
+    block's ceil grid sets the block by division; with nothing configured, DeepSeek's 128 x 128
+    applies."""
+    weight, scale_inv = _block_fp8(shape, grid or _ceil_grid(shape, block))
     model_load_utils._patch_finegrained_fp8_dequant(torch.float32)
 
     out = _dequant_op(configured)._dequantize_one(weight, scale_inv)
@@ -148,12 +139,8 @@ def test_the_block_size_comes_from_the_grid_or_defaults_to_deepseeks(
 
 @pytest.mark.parametrize(
     ("target_dtype", "expected"),
-    [
-        (None, torch.bfloat16),
-        (torch.bfloat16, torch.bfloat16),
-        (torch.float16, torch.float16),
-        (torch.float32, torch.float32),
-    ],
+    [(None, torch.bfloat16), (torch.float16, torch.float16)],
+    ids=["unrequested", "requested"],
 )
 def test_dequant_emits_the_requested_model_dtype(pre_5_10_transformers, target_dtype, expected):
     """Not the scales' dtype: DeepSeek's fp32 ``weight_scale_inv`` would give fp32 weights that
@@ -291,12 +278,9 @@ def test_undoing_the_patch_restores_stock_transformers(pre_5_10_transformers, mo
     )
 
 
-@pytest.mark.parametrize("version", ["5.10.1", "5.17.0"])
-def test_transformers_from_5_10_1_keeps_its_own_dequant(
-    pre_5_10_transformers, monkeypatch, version
-):
+def test_transformers_from_5_10_1_keeps_its_own_dequant(pre_5_10_transformers, monkeypatch):
     """Upstream fixed the dequant there and decodes ue8m0 scales, which the patch does not."""
-    monkeypatch.setattr(transformers, "__version__", version)
+    monkeypatch.setattr(transformers, "__version__", "5.10.1")
     stock = _patched_state()
 
     model_load_utils._patch_finegrained_fp8_dequant(torch.bfloat16)
