@@ -5,7 +5,12 @@ This is a simple example to demonstrate calibrating and serving ModelOpt fakequa
 Compared with realquant, fakequant is 2-5x slower, but doesn't require dedicated kernel support and facilitates research.
 
 The general fakequant example is tested with vLLM 0.19.1, 0.26.0, 0.28.0, 0.29.0 and 0.30.0. The
-compact NVFP4 attention worker documented below requires vLLM 0.15.0 or newer.
+compact NVFP4 attention worker documented below requires vLLM 0.15.0 or newer. The Kimi K3
+low-latency fakequant path needs `KimiK3LowLatencyLinearMethod`, which is present in stock vLLM
+0.28.0, 0.29.0 and 0.30.0 but absent from some older releases. For BF16 Kimi K3 weights, it
+supports dense and shared-expert MLP projections; attention projections need separate support.
+On vLLM 0.28.0, ModelOpt bypasses Kimi's fused GEMM-RS MLP path when down-projection
+fake quantizers are enabled and retains it when they are disabled.
 
 The fakequant launcher does not support vLLM 0.9.0. Use one of the tested releases above.
 
@@ -332,6 +337,51 @@ Notes:
   (`indexer_kv_dtype="mxfp4"`) is rejected.
 - vLLM quantizes the DeepSeek-V4 indexer key and query without a Hadamard rotation and the
   GLM-5.3-Flash ones after one, so the fake quantization applies in that basis.
+
+### Indexer scorer kernel arguments
+
+GLM-5.3-Flash's indexer scores each key as `k_scale * sum_h W[h] * ReLU(q_h . k)` in DeepGEMM, from
+the FP8 query and key and the effective head weights `W` (with the query scale folded in).
+`indexer_scorer_kwargs_quantizer` passes keyword arguments to that scorer kernel, per layer, e.g. the
+numerics options of a DeepGEMM build. It stays disabled unless a recipe enables it with
+`backend: scorer_kwargs`; its `backend_extra_args` are the arguments. For example, this recipe sums
+the heads in BF16:
+
+```yaml
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+
+metadata:
+  description: BF16 head sum in the indexer scorer.
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*indexer_scorer_kwargs_quantizer'
+      cfg:
+        backend: scorer_kwargs
+        backend_extra_args: {logits_dtype: bfloat16}
+```
+
+Plugins can add quantizers that turn their own configs into such arguments with
+`register_indexer_scorer_kwargs_quantizer` of `modelopt.torch.quantization.plugins.vllm_indexer`.
+Stock DeepGEMM takes `logits_dtype` (on SM100 GPUs); other arguments need a DeepGEMM build that takes
+them and declares them, with their values, in `deep_gemm.MQA_LOGITS_NUMERICS`, such as a DeepGEMM
+fork. ModelOpt ships none. vLLM imports an installed `deep_gemm` before its own copy, so install
+such a build into the serving environment and serve:
+
+```bash
+pip install --no-deps --no-build-isolation <DeepGEMM source directory or git URL>
+RECIPE_PATH=<recipe>.yaml \
+  python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
+```
+
+Notes:
+
+- Scores that come out NaN, e.g. from overflowing reduced-precision arithmetic in the scorer, are set
+  to `-inf` before top-k, as vLLM's prefill top-k mishandles NaN.
+- DeepSeek-V4 rejects the scorer quantizers.
 
 ## Fake-quantize MoE expert-parallel communication
 

@@ -14,6 +14,9 @@ QAD improves both metrics over PTQ but remains below the BF16 teacher. The quant
 
 ## Run evaluations
 
+- `nel_config.yaml`: entry point containing the MMLU and WikiText recipes.
+- `nel_configs/`: shared Slurm execution and vLLM deployment settings.
+
 From `examples/llm_qat/evaluation/`, configure access to your Slurm cluster:
 
 ```bash
@@ -45,8 +48,10 @@ export MODEL_CHECKPOINT="/shared/path/to/qwen3-8b-teacher"
 
 Add `--dry-run` to preview, or `-t lm-evaluation-harness.mmlu` / `-t lm-evaluation-harness.wikitext` to select one benchmark. NEL 0.2.6 launches one Slurm job per benchmark; results are saved under `NEL_OUTPUT_DIR`.
 
+## MMLU accuracy by subject
+
 <details>
-<summary>MMLU accuracy by subject</summary>
+<summary>Show per-subject results</summary>
 
 | Subject | Questions | Teacher (BF16) | PTQ (NVFP4) | PTQ → QAD (NVFP4) |
 |---|---:|---:|---:|---:|
@@ -109,8 +114,3 @@ Add `--dry-run` to preview, or `-t lm-evaluation-harness.mmlu` / `-t lm-evaluati
 | World religions | 171 | 87.13% | 85.38% | 84.21% |
 
 </details>
-
-## File structure
-
-- `nel_config.yaml`: entry point containing the MMLU and WikiText recipes.
-- `nel_configs/`: shared Slurm execution and vLLM deployment settings.

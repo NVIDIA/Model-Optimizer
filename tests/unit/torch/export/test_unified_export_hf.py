@@ -38,7 +38,11 @@ from modelopt.torch.export.quant_utils import (
     postprocess_state_dict,
     sync_tied_input_amax,
 )
-from modelopt.torch.export.unified_export_hf import _resolve_export_dtype, read_unplaced_weights
+from modelopt.torch.export.unified_export_hf import (
+    _resolve_export_dtype,
+    _source_checkpoint,
+    read_unplaced_weights,
+)
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
@@ -1075,3 +1079,9 @@ def test_union_degrades_to_the_recorded_set_without_the_loader(tmp_path, monkeyp
 
     carried = read_unplaced_weights(model)
     assert key in carried, "recorded keys must still carry when the structural pass is unavailable"
+
+
+def test_source_checkpoint_is_none_for_a_model_built_from_config():
+    """``from_config`` leaves ``_name_or_path`` empty; it must not resolve to the working directory,
+    or every export would copy the cwd as the "source checkpoint"."""
+    assert _source_checkpoint(SimpleNamespace(config=SimpleNamespace(_name_or_path=""))) is None

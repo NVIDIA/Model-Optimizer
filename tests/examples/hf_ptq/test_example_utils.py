@@ -115,6 +115,25 @@ def test_get_model_preserves_preparation_error(monkeypatch, tmp_path, failure_at
 # them dequantized to BF16 GptOssExperts (so ModelOpt can quantize/export the experts).
 
 
+@pytest.mark.parametrize(
+    ("algorithm", "expected"),
+    [
+        ("max", {"method": "max", "moe_calib_experts_ratio": 0.5}),
+        ({"method": "gptq"}, {"method": "gptq", "moe_calib_experts_ratio": 0.5}),
+        (
+            [{"method": "gptq"}, {"method": "imatrix"}],
+            [
+                {"method": "gptq", "moe_calib_experts_ratio": 0.5},
+                {"method": "imatrix", "moe_calib_experts_ratio": 0.5},
+            ],
+        ),
+    ],
+)
+def test_build_quant_cfg_sets_moe_calib_experts_ratio_on_every_algorithm(algorithm, expected):
+    quant_cfg = example_utils.build_quant_cfg({"quant_cfg": [], "algorithm": algorithm}, None, 0.5)
+    assert quant_cfg["algorithm"] == expected
+
+
 def test_get_original_hf_quant_method_mxfp4_dict():
     # gpt-oss layout: quantization_config is a plain dict carrying quant_method.
     cfg = SimpleNamespace(
