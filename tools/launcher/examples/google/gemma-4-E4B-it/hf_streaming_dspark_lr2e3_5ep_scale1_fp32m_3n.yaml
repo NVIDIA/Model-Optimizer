@@ -1,0 +1,85 @@
+# Gemma-4-E4B DSpark: lr 2e-3, theta 1e6, attention scale 1.0, 5 epochs, fp32 master weights.
+#
+# Scale 1.0 matches Gemma 4 and vLLM, which put no 1/sqrt(head_dim) in attention, so the
+# draft must learn that factor in q_norm.weight -- which a bf16 weight at 1.0 cannot do at
+# this lr. Hence the fp32 master weights.
+#
+# TOPOLOGY: 3 nodes = 1 serve + 2 trainer -> 16 DP ranks x batch 4 = global batch 64;
+# 1,130,852 rows -> ~17,670 steps per epoch, 88,350 for 5.
+#
+# CORPUS: must be the cleaned copy (g4_corpus_train). The raw output's user-only
+# `messages` column gives an all-zero loss mask, and streaming silently hangs.
+#
+# EAGLE_CAPTURE_IDS are 1-based post-layer ids (42 is the true final layer); Gemma 4's
+# full-attention layers sit at multiples of 6.
+#
+# save_steps 2000: each checkpoint is 6.9 GB, and 1000 would spend ~5% of the run on I/O.
+
+job_name: Gemma-4-E4B_DSpark_lr2e3_5ep_scale1_fp32m_3n
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/gemma-4-E4B-it
+
+  task_0:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dspark_gemma4_e4b.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.use_fake_base_for_offline=true
+      - data.mode=streaming
+      # Gemma 4's stock template has no generation markers, so answer_only_loss would
+      # reject every row; this copy adds them.
+      - data.chat_template=examples/google/gemma-4-E4B-it/chat_template_train.jinja
+      - data.data_path=/traindata
+      - training.output_dir=/scratchspace/dspark_lr2e3_5ep_scale1_fp32m_3n
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=0
+      - training.num_train_epochs=5
+      - training.per_device_train_batch_size=4
+      - training.gradient_accumulation_steps=1
+      - training.learning_rate=2.0e-3
+      # The default since #2483; spelled out because this run exists for it.
+      - dflash.dflash_fp32_master_weights=true
+      # Plain default rope at theta 1e6 -- all 256 freq pairs rotated. Set here rather
+      # than in the shared recipe so the other arms keep the recipe's theta 1e4.
+      - dflash.dflash_architecture_config.rope_override_rope_theta=1000000.0
+      - dflash.dflash_architecture_config.rope_override_rope_type=default
+      - training.warmup_steps=500
+      - training.logging_steps=20
+      - training.save_steps=2000
+      # All checkpoints are kept: save_total_limit defaults to None.
+      - training.answer_only_loss=true
+      - training.report_to=none
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      # MUST be exactly num_draft_layers + 1 (5 draft layers -> 6 ids).
+      - EAGLE_CAPTURE_IDS: "[6,12,18,24,36,42]"
+      - SERVE_NODES: "1"
+      - SERVE_GPU_MEM_UTIL: "0.9"
+      - SERVE_MAX_MODEL_LEN: "4352"
+      - SERVE_MAX_NUM_SEQS: "256"
+      - SERVE_READY_TIMEOUT: "2400"
+      - STREAMING_NUM_WORKERS: "4"
+      - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
+      # NIXL hidden-state transport over EFA; the UCX fallback has no CUDA support here.
+      - NIXL_BACKENDS: LIBFABRIC
+      - FI_PROVIDER: efa
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 3
+      # Without this the launcher asks for its 4h default. Keep the quotes: unquoted,
+      # 72:00:00 is YAML sexagesimal, an int that sbatch reads as minutes.
+      time: "72:00:00"
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      # The auxfix image carries the AWS libfabric stack that NIXL needs.
+      container: /home/haoguo/lustre/containers/vllm-nightly-efa-x86_64-auxfix.sqsh
+      container_mounts:
+        - /home/haoguo/lustre/hf-local:/hf-local
+        - /home/haoguo/lustre/g4_corpus_train:/traindata

@@ -414,11 +414,46 @@ class DFlashExporter(SpeculativeDecodingExporter):
             "num_target_layers": base_config.num_hidden_layers,
         }
 
+        # Carry the DRAFT's non-default RoPE type. rope_theta alone is not enough for
+        # Gemma 4: its full_attention kind uses rope_type "proportional" with
+        # partial_rotary_factor, which rotates only a fraction of the head dim and leaves
+        # the rest as NoPE. Emitting just the theta makes any consumer (vLLM, the AL
+        # harness) rebuild plain default rope and rotate every channel, silently
+        # disagreeing with how the draft was trained.
+        _draft_rope = getattr(draft_config, "rope_parameters", None)
+        if isinstance(_draft_rope, dict):
+            if any(isinstance(v, dict) for v in _draft_rope.values()):
+                # Nested per-attention-kind form; a draft is single-kind by construction.
+                _draft_rope = next(v for v in _draft_rope.values() if isinstance(v, dict))
+            # The DRAFT's theta always wins. `rope_theta` above is resolved from the BASE
+            # config, which is only right when the draft inherited the base's value
+            # verbatim. A recipe can now sweep theta independently of the base (see
+            # hf_dflash's rope_override_* fields), and exporting the base's theta then
+            # silently ships a drafter whose served RoPE disagrees with how it trained --
+            # the served AL collapses with no error anywhere.
+            if _draft_rope.get("rope_theta") is not None:
+                config["rope_theta"] = _draft_rope["rope_theta"]
+            _rope_type = _draft_rope.get("rope_type")
+            if _rope_type and _rope_type != "default":
+                config["rope_type"] = _rope_type
+                if "partial_rotary_factor" in _draft_rope:
+                    config["partial_rotary_factor"] = _draft_rope["partial_rotary_factor"]
+
         # Add layer_types if present (Qwen3-style)
         if hasattr(draft_config, "layer_types"):
             config["layer_types"] = draft_config.layer_types
         else:
             config["layer_types"] = ["full_attention"] * draft_config.num_hidden_layers
+
+        # Gemma4 sizes attention PER LAYER, so the serving side cannot reconstruct the
+        # draft's shapes from head_dim / num_key_value_heads alone: full-attention layers
+        # use ``global_head_dim`` and, under ``attention_k_eq_v``, ``num_global_key_value_heads``
+        # (see gemma4_layer_config in vLLM). Omitting these makes vLLM rebuild the draft with
+        # the sliding-layer dims and fail with a shape mismatch on q/k/o and the q/k norms.
+        for _attr in ("global_head_dim", "num_global_key_value_heads", "attention_k_eq_v"):
+            _val = getattr(draft_config, _attr, None)
+            if _val is not None:
+                config[_attr] = _val
 
         # Sliding-window attention: all draft layers use SWA. vLLM's
         # _resolve_layer_attention reads dflash_config.use_swa + swa_window_size; with
