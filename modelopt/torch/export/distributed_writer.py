@@ -871,12 +871,23 @@ def _distributed_save_hf_checkpoint_impl(
     # to agree on the split. They go in AFTER the reverse conversion because they carry their
     # original hub names and were never converted -- reverting them would rename them wrongly. This
     # mirrors the gather path, which merges extra_state_dict into the already-reverted dict.
-    if extra_state_dict and rank == 0:
-        collisions = sorted(set(extra_state_dict) & set(local_sd))
-        if collisions:
-            raise RuntimeError(
-                f"extra_state_dict overlaps the exported model weights on {len(collisions)} key(s), "
-                f"so the checkpoint would be ambiguous; first few: {collisions[:5]}"
-            )
-        local_sd.update(extra_state_dict)
+    if extra_state_dict:
+        from modelopt.torch.utils.distributed import all_reduce
+
+        def check_no_overlap() -> None:
+            if rank != 0:
+                return
+            collisions = sorted(set(extra_state_dict) & set(local_sd))
+            if collisions:
+                raise RuntimeError(
+                    f"extra_state_dict overlaps the exported model weights on {len(collisions)} "
+                    f"key(s), so the checkpoint would be ambiguous; first few: {collisions[:5]}"
+                )
+
+        # Every rank is handed the same tensors, so every rank checks here: a collision rank 0
+        # finds then raises on all of them, instead of leaving the others in the write's first
+        # collective.
+        all_reduce("extra_state_dict overlap", check_no_overlap, lambda _: None)
+        if rank == 0:
+            local_sd.update(extra_state_dict)
     _write_even_shards(local_sd, export_dir, max_shard_size, rank, world)
