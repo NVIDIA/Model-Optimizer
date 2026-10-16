@@ -173,10 +173,15 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
             _check_unsupported_states(
                 quantizer if isinstance(quantizer, TensorQuantizer) else quantizer[0]
             )
+        # Grouped linears validate each expert against its corresponding weight in their
+        # override. Resetting the container here would clear every expert amax before this
+        # single-weight compatibility path recalibrates only the representative quantizer.
         # Skip max_calibrate when saved static NVFP4 state is intact; else MSE scales get overwritten.
-        if _has_state(
-            self.weight_quantizer, "_amax"
-        ) and not _has_complete_static_nvfp4_weight_state(self.weight_quantizer, self.weight):
+        if (
+            not isinstance(self.weight_quantizer, GroupedQuantizer)
+            and _has_state(self.weight_quantizer, "_amax")
+            and not _has_complete_static_nvfp4_weight_state(self.weight_quantizer, self.weight)
+        ):
             self.weight_quantizer.reset_amax()
             max_calibrate(self.weight_quantizer, lambda wq: wq(self.weight), distributed_sync=False)
         if _has_state(self.input_quantizer, "_pre_quant_scale"):

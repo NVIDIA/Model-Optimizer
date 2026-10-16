@@ -6,6 +6,11 @@ Changelog
 
 **New Features**
 
+*Quantization*
+
+- Add imatrix calibration (``algorithm: {method: imatrix}``) for the GGML formats with a weighted search: each weight is encoded once, its search weighted by the square root of its inputs' per-column ``E[x^2]`` (llama.cpp's imatrix statistic), and HF fused-MoE experts get one statistic per expert. A weight that already holds final codes is left alone, so ``[{method: gptq}, {method: imatrix}]`` runs GPTQ on the dense linears and imatrix on the experts GPTQ skips; the built-in IQ1 and IQ2 recipes now do this, and new ``<format>_experts_only`` recipes apply imatrix to the routed MoE experts alone.
+- Add a checkpoint-specific NVIDIA Nemotron 3.5 Super VL AutoQuantize recipe with a 4.9-effective-bit NVFP4-MSE/FP8/BF16 search and fixed NVFP4 MTP experts. Select it under ``models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/auto_quantize/``.
+
 **Backward Breaking Changes**
 
 **Deprecations**
@@ -27,9 +32,11 @@ Changelog
 
 *Quantization*
 
+- Add metadata-only export specifications and non-mutating per-weight quantizer-state capture.
+- HF export records canonical activation schemes, group/block sizes and weight-only MXFP4 metadata; mixed-format exports retain unquantized-layer exclusions, and non-square FP8 block layouts are rejected.
 - Add Q8_0 weight-only quantization with 32-value GGML blocks, packed unified HF and Megatron export, and a built-in ``q8_0`` PTQ recipe.
 - Add Hugging Face PTQ calibration and export support for Nemotron-H MTP modules, preserving calibrated expert input scales.
-- Add the ``model_type/nemotron_h`` aggressive-MSE NVFP4 PTQ recipe: weight-MSE calibrated NVFP4 routed and shared MoE experts, FP8 attention projections, Mamba ``in_proj``/``out_proj`` and ``lm_head``, and an FP8 KV cache. The latent MoE, router, embeddings and the vision and audio encoders stay in BF16, and the MTP rules apply only to checkpoints that carry an MTP tail.
+- Add the ``models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/ptq/nvfp4-mse`` PTQ recipe, the PTQ stage for NVIDIA Nemotron 3.5 Super VL: weight-MSE calibrated NVFP4 routed and shared MoE experts, FP8 attention projections, Mamba ``in_proj``/``out_proj`` and ``lm_head``, and an FP8 KV cache. The latent MoE, router, embeddings and the vision and audio encoders stay in BF16, and the MTP rules apply only to checkpoints that carry an MTP tail. It reproduces the released precision assignment, not the released weights: the published NVFP4 checkpoint adds quantization-aware distillation after this stage.
 - Backfill checkpoint aliases for three more published NVFP4 releases: ``moonshotai/Kimi-K2.7-Code``, ``google/gemma-4-26B-A4B-it`` and ``google/diffusiongemma-26B-A4B-it``. Each imports an existing general recipe wholesale rather than copying its body.
 - Backfill checkpoint aliases for nine more published NVFP4 releases, so each is reachable from its source model's hub path: ``zai-org/GLM-5.1`` and ``GLM-5.2``, ``MiniMaxAI/MiniMax-M2.5`` and ``MiniMax-M3``, ``deepseek-ai/DeepSeek-V3.1`` and ``DeepSeek-V3.2``, ``Qwen/Qwen3-235B-A22B-Instruct-2507`` and ``-Thinking-2507``, and ``Qwen/Qwen3.6-27B``. Each imports an existing general or architecture recipe wholesale rather than copying its body.
 - Add composed Hugging Face AutoQuantize recipes that run fixed PTQ or weight AutoQuantize before
