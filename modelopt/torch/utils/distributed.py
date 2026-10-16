@@ -38,6 +38,7 @@ __all__ = [
     "backend",
     "barrier",
     "fsdp2_wrap",
+    "gather_bytes",
     "is_available",
     "is_fsdp2_model",
     "is_initialized",
@@ -108,9 +109,9 @@ def _deserialize(tensor: torch.Tensor, size: int | None = None) -> Any:
     buffer = tensor.numpy().tobytes()
     if size is not None:
         buffer = buffer[:size]
-    # Relies on torch's weights_only=True default; custom classes sent through broadcast/allgather
-    # must be registered with torch.serialization.add_safe_globals.
-    return torch.load(io.BytesIO(buffer))
+    # Explicit so TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD cannot re-enable pickle for peer payloads. Custom
+    # classes sent through broadcast/allgather must be registered with add_safe_globals.
+    return torch.load(io.BytesIO(buffer), weights_only=True)
 
 
 def _broadcast(tensor: torch.Tensor, src: int = 0, group=None) -> None:
@@ -142,6 +143,41 @@ def broadcast(obj: Any, src: int = 0, group=None) -> Any:
     if rank() != src:
         obj = _deserialize(tensor.cpu())
     return obj
+
+
+def gather_bytes(
+    data: bytes, dst: int, group=None, chunk_bytes: int = 1 << 28
+) -> list[bytearray] | None:
+    """Gathers byte strings to global rank ``dst`` only, without unpickling anything on the way.
+
+    Unlike ``torch.distributed.gather_object`` it never runs pickle, and it moves ``chunk_bytes`` per
+    rank at a time to bound device memory. Returns the per-rank bytes on ``dst`` and ``None`` elsewhere.
+    """
+    n = size(group)
+    device = torch.device("cuda" if torch.distributed.get_backend(group) == "nccl" else "cpu")
+    local = (
+        torch.frombuffer(bytearray(data), dtype=torch.uint8)
+        if data
+        else torch.empty(0, dtype=torch.uint8)
+    )
+    sizes_t = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(n)]
+    torch.distributed.all_gather(sizes_t, torch.tensor([len(data)], device=device), group=group)
+    sizes = [int(t.item()) for t in sizes_t]
+
+    is_dst = torch.distributed.get_rank() == dst
+    out = [bytearray(s) for s in sizes] if is_dst else None
+    for off in range(0, max(sizes), chunk_bytes):
+        length = min(chunk_bytes, max(sizes) - off)
+        buf = torch.zeros(length, dtype=torch.uint8, device=device)
+        piece = local[off : off + length]
+        buf[: piece.numel()] = piece.to(device)
+        bufs = [torch.empty_like(buf) for _ in range(n)] if is_dst else None
+        torch.distributed.gather(buf, bufs, dst=dst, group=group)
+        if bufs is not None and out is not None:
+            for i, b in enumerate(bufs):
+                k = min(length, max(0, sizes[i] - off))
+                out[i][off : off + k] = b[:k].cpu().numpy().tobytes()
+    return out
 
 
 def _allgather(tensors: list[torch.Tensor], tensor: torch.Tensor, group=None) -> None:

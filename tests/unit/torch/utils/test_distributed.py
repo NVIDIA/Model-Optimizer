@@ -80,6 +80,10 @@ def test_deserialize_roundtrips_collective_payloads():
     assert out[2].choices == [1, 2, 4]
 
 
-def test_deserialize_rejects_pickle_gadget():
+@pytest.mark.parametrize("force_no_weights_only", [False, True])
+def test_deserialize_rejects_pickle_gadget(monkeypatch, force_no_weights_only):
+    # The override that trusts local checkpoints must not also trust peer payloads.
+    if force_no_weights_only:
+        monkeypatch.setenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
     with pytest.raises(pickle.UnpicklingError):
         _deserialize(_serialize(_Gadget()))

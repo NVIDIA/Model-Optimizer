@@ -26,7 +26,7 @@ from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_
 from torch.distributed.tensor import DTensor
 
 from modelopt.torch.nas.traced_hp import TracedHp
-from modelopt.torch.utils.distributed import allgather, broadcast, fsdp2_wrap
+from modelopt.torch.utils.distributed import allgather, broadcast, fsdp2_wrap, gather_bytes
 
 VOCAB_SIZE = 32
 N_EXPERTS = 4
@@ -143,3 +143,18 @@ def _test_broadcast_allgather_objects(rank, size):
 
 def test_broadcast_allgather_objects(dist_workers):
     dist_workers.run(_test_broadcast_allgather_objects)
+
+
+def _test_gather_bytes(rank, size):
+    data = bytes([rank + 1]) * (5 + 3 * rank) if rank else b""
+    out = gather_bytes(data, dst=1, group=None, chunk_bytes=4)
+    if rank == 1:
+        assert out == [
+            bytearray(b"" if r == 0 else bytes([r + 1]) * (5 + 3 * r)) for r in range(size)
+        ]
+    else:
+        assert out is None
+
+
+def test_gather_bytes(dist_workers):
+    dist_workers.run(_test_gather_bytes)

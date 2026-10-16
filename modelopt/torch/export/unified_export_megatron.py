@@ -38,6 +38,7 @@ from modelopt import __version__
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 from modelopt.torch.utils import import_plugin, warn_rank_0
+from modelopt.torch.utils.distributed import gather_bytes
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_hf_ckpt_remote_code,
     copy_non_safetensor_files_from_ckpt,
@@ -1721,17 +1722,14 @@ class GPTModelExporter:
             del _buf
             # Gather to EP rank 0 only, which writes the shards: holding every expert on every EP
             # rank multiplies host memory by EP (a full GLM-5.3-Flash export OOMs at EP4).
+            # gather_bytes, not gather_object, so no peer-controlled pickle runs outside torch.load.
             ep_group = get_expert_model_parallel_group()
-            gathered_bytes: list | None = [None] * ep_size if ep_rank == 0 else None
-            torch.distributed.gather_object(
-                local_bytes,
-                gathered_bytes,
-                dst=torch.distributed.get_global_rank(ep_group, 0),
-                group=ep_group,
+            gathered_bytes = gather_bytes(
+                local_bytes, torch.distributed.get_global_rank(ep_group, 0), ep_group
             )
             del local_bytes
             for b in gathered_bytes or ():
-                s_loaded = torch.load(io.BytesIO(b), map_location="cpu")
+                s_loaded = torch.load(io.BytesIO(b), map_location="cpu", weights_only=True)
                 self._state_dict.update(s_loaded)
             del gathered_bytes
         else:

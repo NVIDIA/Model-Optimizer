@@ -99,6 +99,7 @@ Changelog
 
 **Backward Breaking Changes**
 
+- ``modelopt.torch.utils.distributed.broadcast``/``allgather`` now reject objects of unregistered custom classes. Register them with ``torch.serialization.add_safe_globals``.
 - Bump minimum transformers version to ``5.5`` instead of ``4.57``; transformers 4.x is no longer supported. Upgrade with ``pip install -U "nvidia-modelopt[hf]"``.
 - ``modelopt.torch.distill.plugins.megatron.TopKLogitsKLLoss`` (``logit_kl_topk`` in ``DistillationConfig``) is renamed to ``TopLogitsKLLoss``, keeping the old name as a deprecated alias. It now normalizes both distributions over the full vocabulary instead of re-normalizing over the Top-K entries, and always appends a "ghost" token holding the probability mass outside the Top-K to both student and teacher (matching Megatron-LM's offline cached-logits KD loss). Loss values change for existing ``logit_kl_topk`` runs.
 - ``LogitsAndIntermediatesLossBalancer`` (Megatron distillation plugin) no longer rescales the distillation loss to the magnitude of the LM loss when the LM loss is included. The total is now the fixed convex combination ``(1 - alpha) * lm_loss + alpha * kd_loss`` with ``DistillationConfig.kd_loss_alpha`` (in [0, 1]), matching Megatron-LM's offline cached-logits KD. The default ``kd_loss_alpha=1.0`` skips the LM loss, as before. ``DistillationConfig.skip_lm_loss`` and ``kd_loss_scale`` are removed and raise ``ValueError`` if passed; set ``kd_loss_alpha`` instead. In ``examples/megatron_bridge/distill.py``, ``--kd_loss_alpha`` replaces ``--no_skip_lm_loss`` and ``--kd_loss_scale``.
@@ -160,7 +161,7 @@ Changelog
 
 **Bug Fixes**
 
-- Harden the distributed object broadcast/allgather helpers and the Megatron expert-parallel export gather to deserialize with ``weights_only`` loading, so a compromised peer rank can no longer execute code through a crafted pickle payload.
+- Harden the distributed object broadcast/allgather helpers and the Megatron expert-parallel export gather so a compromised peer rank can no longer execute code through a crafted pickle payload: payloads load with ``weights_only=True`` and the export gathers raw bytes instead of pickled objects.
 - Fix unified HF export writing a weight name the source checkpoint does not use when a model declares a backwards-compatibility *load* rename as a reversible ``WeightRenaming``. Reversing such a rule rewrote the canonical name to a legacy spelling, and a deployment runtime keyed on the canonical name then failed to load the quantized checkpoint. Each exported name is now resolved against the names the source checkpoint actually carries, for both the exported tensors and the quantization config's module references.
 - Fix exports using the built-in Transformers NemotronH implementation retaining incompatible legacy remote-code config and model mappings. Re-export affected checkpoints before deployment.
 - Fix ``export_hf_checkpoint`` dropping Diffusers pipeline settings, such as Wan 2.2 ``boundary_ratio``, from ``model_index.json`` when ``components`` is given. Re-export affected checkpoints to a new directory, since component exports do not overwrite an existing ``model_index.json``.
