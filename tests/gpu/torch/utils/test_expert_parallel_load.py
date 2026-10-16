@@ -31,9 +31,11 @@ if Version(transformers.__version__) < Version("5.7"):
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM, Qwen3MoeConfig
 
+import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
+    distributed_forward_loop,
     distribution_plan,
     set_distribution_plan,
 )
@@ -231,9 +233,6 @@ def _calibrated_quantizers(model):
 def _quantized_sharded_model_trains_like_the_whole_one(
     rank, size, ckpt_dir, fsdp_dense, fmt, ep_degree
 ):
-    import modelopt.torch.quantization as mtq
-    from modelopt.torch.utils.distributed import distributed_forward_loop
-
     cfg = {"fp8": mtq.FP8_DEFAULT_CFG, "nvfp4": mtq.NVFP4_DEFAULT_CFG}[fmt]
     device = torch.device(f"cuda:{rank}")
     config = AutoConfig.from_pretrained(ckpt_dir)
