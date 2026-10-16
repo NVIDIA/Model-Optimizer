@@ -244,6 +244,13 @@ def test_fsdp2_distributed_export_is_complete(dist_workers, tmp_path, moe, quant
                 want_shape = (*want_shape[:-1], want_shape[-1] // 2)
         assert got_shape == want_shape, f"{name}: shape {got_shape}, expected {want_shape}"
     assert quantized > 0, f"nothing was quantized -- {algo} config did not take effect"
+    if moe:
+        # Every expert, not just some weight: the experts are folded on their sharded weights, and a
+        # fold FSDP2 does not track is undone by its next reshard, leaving bf16 experts beside their
+        # scales.
+        experts = [k for k in expected if ".experts." in k and k.endswith(".weight")]
+        unquantized = [k for k in experts if exported[k][0] not in _QUANTIZED_DTYPES]
+        assert experts and not unquantized, f"experts exported unquantized: {unquantized[:5]}"
 
     # ---- 4. the non-weight files came along ----
     exported_files = {p.name for p in export_dir.iterdir() if p.is_file()}
