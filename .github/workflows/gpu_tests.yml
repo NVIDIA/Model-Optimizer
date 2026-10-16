@@ -81,10 +81,11 @@ jobs:
       - uses: ./.github/actions/cache-extensions
         with:
           cache-key: rtxpro6000-${{ matrix.container_image }}
-      - name: Cache wheels built from source
+      - name: Restore wheels built from source
         # mamba_ssm and fast-hadamard-transform take ~10 min to compile (see noxfile.py `gpu`)
+        id: wheelhouse
         if: matrix.example == 'gpu'
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: /root/.cache/wheelhouse
           key: wheelhouse-${{ matrix.container_image }}-${{ hashFiles('noxfile.py') }}
@@ -98,6 +99,13 @@ jobs:
         run: |
           # Use `python3` (the vllm image has no `python` on PATH)
           python3 -m pip install nox && nox -s ${{ matrix.example }}
+      - name: Save wheels built from source
+        # Not tied to the tests passing: the wheels are valid even if a test fails or the job times out.
+        if: always() && matrix.example == 'gpu' && steps.wheelhouse.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: /root/.cache/wheelhouse
+          key: wheelhouse-${{ matrix.container_image }}-${{ hashFiles('noxfile.py') }}
       - name: Upload GPU coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
