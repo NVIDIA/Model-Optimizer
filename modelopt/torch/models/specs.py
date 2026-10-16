@@ -209,6 +209,16 @@ class EPSpec(SpecSection):
     patching classes or installing on-the-fly weight decompression. Runs after the declarative
     fields above have been applied."""
 
+    prepared_ep_plan: dict[str, str] | None = None
+    """The ``base_model_ep_plan`` ``prepare`` attaches, for a model whose plan only ``prepare``
+    supplies.
+
+    Stated, not applied: ``prepare`` still attaches it. A run that rules expert parallelism out
+    skips ``prepare``, which patches the model's code, yet must still tell an expert-parallel MoE
+    it would hold whole on every rank from a dense model. It finds the routed experts through this
+    plan, in the model as the checkpoint's own code builds it: ``prepare`` replaces the experts in
+    place, so the plan names their containers there too."""
+
     unsupported: str | None = None
     """Why this model cannot be quantized expert-parallel yet, when its config would route it there.
 

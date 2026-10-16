@@ -46,7 +46,7 @@ from transformers import (
 )
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.models import get_spec
+from modelopt.torch.models import EPSpec, get_spec
 from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.moe import (
     _routed_expert_modules,
@@ -443,20 +443,30 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
 
 
 def test_the_plan_a_spec_would_supply(monkeypatch):
-    """What that guard reads at an EP degree of 1: the spec's plan, nothing for a model with no
-    spec or no expert-parallel section, and nothing for a spec that refuses expert parallelism even
-    when it names a plan."""
+    """What that guard reads at an EP degree of 1: the spec's plan, or the plan it states its
+    ``prepare`` attaches, read without running ``prepare``; nothing for a model with no spec or no
+    expert-parallel section, and nothing for a spec that refuses expert parallelism even when it
+    names a plan."""
     from modelopt.torch import models
     from modelopt.torch.utils import moe
 
     assert moe._spec_ep_plan("deepseek_v3") == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
     assert moe._spec_ep_plan("llama") == {}
     assert moe._spec_ep_plan("no_such_model_type") == {}
-    refusing = SimpleNamespace(
-        ep_spec=SimpleNamespace(unsupported="not yet", base_model_ep_plan={"layers.*.mlp": "x"})
-    )
-    monkeypatch.setattr(models, "get_spec", lambda model_type: refusing)
-    assert moe._spec_ep_plan("anything") == {}
+    prepared = {"layers.*.mlp.experts": "moe_tp_experts"}
+    specs = {
+        "preparing": SimpleNamespace(
+            ep_spec=EPSpec(
+                prepare=lambda *a, **k: pytest.fail("ran prepare"), prepared_ep_plan=prepared
+            )
+        ),
+        "refusing": SimpleNamespace(
+            ep_spec=SimpleNamespace(unsupported="not yet", base_model_ep_plan={"layers.*.mlp": "x"})
+        ),
+    }
+    monkeypatch.setattr(models, "get_spec", specs.get)
+    assert moe._spec_ep_plan("preparing") == prepared
+    assert moe._spec_ep_plan("refusing") == {}
 
 
 def test_an_ep_capable_moe_may_be_fsdp2_sharded_instead(run_as, serve, monkeypatch, tmp_path):
