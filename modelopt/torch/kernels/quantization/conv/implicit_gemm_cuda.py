@@ -59,7 +59,8 @@ def _get_cuda_module():
                 "--use_fast_math",
                 "-lineinfo",
                 "--ptxas-options=-v",
-                "-std=c++17",
+                # No -std flag: torch's load() adds the C++ standard its headers need (C++20 in
+                # recent releases), and a hardcoded -std=c++17 fails to build there.
             ],
         )
     return _cuda_module
