@@ -25,7 +25,8 @@ from _test_utils.torch.transformers_models import get_tiny_llama
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.tensor import DTensor
 
-from modelopt.torch.utils.distributed import fsdp2_wrap
+from modelopt.torch.nas.traced_hp import TracedHp
+from modelopt.torch.utils.distributed import allgather, broadcast, fsdp2_wrap
 
 VOCAB_SIZE = 32
 N_EXPERTS = 4
@@ -129,3 +130,16 @@ def test_fsdp2_wrap_moves_ignored_params_to_device(dist_workers, cpu_offload):
     dist_workers.run(
         partial(_test_fsdp2_wrap_moves_ignored_params_to_device, cpu_offload=cpu_offload)
     )
+
+
+def _test_broadcast_allgather_objects(rank, size):
+    hp = TracedHp([1, 2, 4]) if rank == 0 else None
+    out = broadcast([True, {"latency": 1.5}, hp], src=0)
+    assert out[0] is True
+    assert out[1] == {"latency": 1.5}
+    assert out[2].choices == [1, 2, 4]
+    assert allgather({"rank": rank}) == [{"rank": r} for r in range(size)]
+
+
+def test_broadcast_allgather_objects(dist_workers):
+    dist_workers.run(_test_broadcast_allgather_objects)

@@ -1731,9 +1731,7 @@ class GPTModelExporter:
             )
             del local_bytes
             for b in gathered_bytes or ():
-                # weights_only=False: our own torch.save output from a sibling EP rank
-                # in this job's collective, not user-supplied.
-                s_loaded = torch.load(io.BytesIO(b), map_location="cpu", weights_only=False)
+                s_loaded = torch.load(io.BytesIO(b), map_location="cpu")
                 self._state_dict.update(s_loaded)
             del gathered_bytes
         else:

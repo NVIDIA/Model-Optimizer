@@ -108,9 +108,9 @@ def _deserialize(tensor: torch.Tensor, size: int | None = None) -> Any:
     buffer = tensor.numpy().tobytes()
     if size is not None:
         buffer = buffer[:size]
-    # Security NOTE: weights_only=False is used here on internally-generated buffer, not on untrusted user input
-    obj = torch.load(io.BytesIO(buffer), weights_only=False)
-    return obj
+    # Relies on torch's weights_only=True default; custom classes sent through broadcast/allgather
+    # must be registered with torch.serialization.add_safe_globals.
+    return torch.load(io.BytesIO(buffer))
 
 
 def _broadcast(tensor: torch.Tensor, src: int = 0, group=None) -> None:

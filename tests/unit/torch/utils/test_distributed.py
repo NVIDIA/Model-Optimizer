@@ -15,11 +15,15 @@
 
 """Pure-function tests for ``modelopt.torch.utils.distributed``."""
 
+import os
+import pickle
+
 import pytest
 import torch
 import torch.nn as nn
 
-from modelopt.torch.utils.distributed import _off_dtype_params
+from modelopt.torch.nas.traced_hp import TracedHp
+from modelopt.torch.utils.distributed import _deserialize, _off_dtype_params, _serialize
 
 
 def _model(*sizes_and_dtypes) -> nn.Module:
@@ -61,3 +65,21 @@ def test_off_dtype_params_dominant_is_by_numel(params, expected):
         off = _off_dtype_params(model)
     kept = {n for n, p in model.named_parameters() if p not in off}
     assert kept == {expected}
+
+
+class _Gadget:
+    def __reduce__(self):
+        return (os.system, ("exit 1",))
+
+
+def test_deserialize_roundtrips_collective_payloads():
+    payload = [True, {"latency": 1.5, "idx": torch.arange(3)}, TracedHp([1, 2, 4])]
+    out = _deserialize(_serialize(payload))
+    assert out[0] is True
+    assert torch.equal(out[1]["idx"], payload[1]["idx"])
+    assert out[2].choices == [1, 2, 4]
+
+
+def test_deserialize_rejects_pickle_gadget():
+    with pytest.raises(pickle.UnpicklingError):
+        _deserialize(_serialize(_Gadget()))
