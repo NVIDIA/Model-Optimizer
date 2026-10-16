@@ -164,7 +164,7 @@ def _test_gather_bytes(rank, size):
         assert out is None
 
 
-def test_gather_bytes(dist_workers):
+def test_gather_bytes(need_2_gpus, dist_workers):
     dist_workers.run(_test_gather_bytes)
 
 
@@ -185,7 +185,7 @@ def _test_gather_state_dicts(rank, size):
         assert out == []
 
 
-def test_gather_state_dicts(dist_workers):
+def test_gather_state_dicts(need_2_gpus, dist_workers):
     dist_workers.run(_test_gather_state_dicts)
 
 
@@ -204,7 +204,9 @@ def _test_gather_state_dicts_rejects_gadget(rank, size, marker, force_no_weights
 
 
 @pytest.mark.parametrize("force_no_weights_only", [False, True])
-def test_gather_state_dicts_rejects_gadget(dist_workers, tmp_path, force_no_weights_only):
+def test_gather_state_dicts_rejects_gadget(
+    need_2_gpus, dist_workers, tmp_path, force_no_weights_only
+):
     marker = str(tmp_path / "gadget_ran")
     dist_workers.run(
         partial(
