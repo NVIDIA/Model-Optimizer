@@ -250,6 +250,53 @@ def test_capture_requires_calibration_only_for_static_scales(quantization_format
             capture_quantized_weight_export_state(module)
 
 
+@pytest.mark.parametrize(
+    ("weight_format", "input_bits", "quant_algo"),
+    [
+        ("fp8", (4, 3), "FP8"),
+        ("nvfp4", (2, 1), "NVFP4"),
+        ("nvfp4", (4, 3), "W4A8_NVFP4_FP8"),
+        ("mxfp4", (4, 3), "W4A8_MXFP4_FP8"),
+    ],
+)
+@pytest.mark.parametrize("input_mode", ["uncalibrated", "dynamic"])
+def test_static_input_export_requires_calibrated_scale(
+    weight_format, input_bits, quant_algo, input_mode
+):
+    module = nn.Linear(32, 32, bias=False)
+    weight_cfg = (
+        {"num_bits": (4, 3)} if weight_format == "fp8" else _CAPTURE_FORMAT_CONFIGS[weight_format]
+    )
+    module.weight_quantizer = TensorQuantizer(QuantizerAttributeConfig(**weight_cfg))
+    module.weight_quantizer.amax = 2688.0
+    input_cfg = (
+        _CAPTURE_FORMAT_CONFIGS["nvfp4"] if input_bits == (2, 1) else {"num_bits": input_bits}
+    )
+    module.input_quantizer = TensorQuantizer(QuantizerAttributeConfig(**input_cfg))
+
+    if input_mode == "dynamic":
+        module.input_quantizer.set_from_attribute_config({"type": "dynamic"})
+        for resolve in (get_quantized_weight_export_spec, capture_quantized_weight_export_state):
+            with pytest.raises(NotImplementedError, match="static input"):
+                resolve(module)
+    else:
+        spec = get_quantized_weight_export_spec(module)
+        assert build_hf_quantization_config({"proj.weight": spec})["quant_algo"] == quant_algo
+        with pytest.raises(RuntimeError, match=r"Missing calibrated.*input scale"):
+            capture_quantized_weight_export_state(module)
+
+    module.input_quantizer.set_from_attribute_config({"type": "static"})
+    module.input_quantizer.amax = 2688.0
+    state = capture_quantized_weight_export_state(module)
+    input_scale = next(record.value for record in state.tensors if record.name == "input_scale")
+    torch.testing.assert_close(
+        input_scale.squeeze(), torch.tensor(1.0 if input_bits == (2, 1) else 6.0)
+    )
+    assert build_hf_quantization_config({"proj.weight": state}) == build_hf_quantization_config(
+        {"proj.weight": get_quantized_weight_export_spec(module)}
+    )
+
+
 def test_capture_resolves_numbered_grouped_weights_by_storage():
     module = _GroupedWeights()
 

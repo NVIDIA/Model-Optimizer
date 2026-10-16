@@ -83,6 +83,12 @@ _FUNCTIONAL_WEIGHT_EXPORT_FORMATS = (
         QUANTIZATION_MXFP8,
     }
 )
+_STATIC_INPUT_SCALE_FORMATS = {
+    QUANTIZATION_FP8,
+    QUANTIZATION_NVFP4,
+    QUANTIZATION_W4A8_NVFP4_FP8,
+    QUANTIZATION_W4A8_MXFP4_FP8,
+}
 
 
 class _UnsupportedQuantizedWeightExportFormatError(NotImplementedError):
@@ -353,6 +359,16 @@ def _resolve_quantized_weight_export_inputs(
         raise _UnsupportedQuantizedWeightExportFormatError(
             f"Functional export does not support {quantization_format!r}"
         )
+    # NVFP4 dynamic block scales still require a fixed global input scale.
+    if (
+        quantization_format in _STATIC_INPUT_SCALE_FORMATS
+        and input_quantizer is not None
+        and input_quantizer.is_enabled
+        and (input_quantizer._dynamic or input_quantizer.is_mx_format)
+    ):
+        raise NotImplementedError(
+            f"{quantization_format!r} requires a static input scale for {weight_name!r}"
+        )
     return weight, quantized_view, weight_quantizer, input_quantizer, quantization_format
 
 
@@ -441,6 +457,8 @@ def capture_quantized_weight_export_state(
 
     if input_quantizer is not None and input_quantizer.is_enabled:
         input_amax = input_quantizer.export_amax()
+        if input_amax is None and quantization_format in _STATIC_INPUT_SCALE_FORMATS:
+            raise RuntimeError(f"Missing calibrated static input scale for {weight_name!r}")
         if input_amax is not None:
             input_scale = (
                 NVFP4QTensor.get_activation_scaling_factor(input_quantizer)
