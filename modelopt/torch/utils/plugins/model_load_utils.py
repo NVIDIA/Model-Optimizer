@@ -1705,10 +1705,8 @@ def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, expert_mo
     the number of dense layers sharded, like :func:`_fsdp2_shard_dense`.
 
     Requires the dense ``.weight``/``.bias`` params to be on ``meta`` on entry (see
-    :func:`_ep_dense_meta_load`). Delegates the materialize + DCP load to the SHARED
-    :func:`_meta_dcp_load` (``load_names`` restricted to the dense params),
-    the same loader that backs the DP and FSDP2-full paths -- here just fed a partially-meta model (dense
-    meta, experts already real) and a dense-only name set.
+    :func:`_ep_dense_meta_load`). Delegates the materialize + DCP load to :func:`_meta_dcp_load`, fed the
+    partially-meta model (dense meta, experts already real) and the dense param names.
     """
     from modelopt.torch.utils.distributed import is_master, local_rank
 
