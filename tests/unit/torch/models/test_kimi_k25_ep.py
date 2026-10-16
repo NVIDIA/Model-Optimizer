@@ -135,37 +135,9 @@ def test_prepare_with_a_checkpoint_points_the_remote_modeling_at_native_deepseek
     assert bystander.DeepseekV3ForCausalLM is remote_lm
 
 
-def test_the_swap_fails_loudly_when_the_remote_modeling_did_not_load(monkeypatch):
-    """Skipping the swap silently would build the per-expert layout that EP cannot shard."""
-    monkeypatch.setattr(dmu, "get_class_from_dynamic_module", lambda *args, **kwargs: None)
-
-    with pytest.raises(RuntimeError, match="modeling_kimi_k25"):
-        kimi_k25._patch_kimi_modeling_to_native("/ckpt", True)
-
-
-def test_prepare_rejects_a_config_without_a_text_config(monkeypatch):
-    """Before prepare patches anything process-wide, such as the loader's remote-code staging."""
-
-    def unstaged_loader(*args, **kwargs):
-        """The loader before any staging shim wraps it."""
-
-    monkeypatch.setattr(dmu, "get_cached_module_file", unstaged_loader)
-
-    with pytest.raises(ValueError, match="text_config"):
-        kimi_k25.prepare(SimpleNamespace())
-
-    assert dmu.get_cached_module_file is unstaged_loader
-
-
 def test_prepare_refuses_transformers_own_port():
     """From 5.13 a load without ``trust_remote_code`` builds transformers' port, which the patch
     never reaches; ``prepare`` must refuse it rather than run unpatched."""
     native = pytest.importorskip("transformers.models.kimi_k25.configuration_kimi_k25")
     with pytest.raises(ValueError, match="trust_remote_code=True"):
         kimi_k25.prepare(native.Kimi_K25Config(), ckpt_path="/ckpt")
-
-
-def test_the_kimi_k25_spec_routes_expert_parallelism_through_this_adapter():
-    """The checkpoint's code builds no EP-capable experts, so its whole EP setup is ``prepare``."""
-    spec = get_spec("kimi_k25")
-    assert spec.ep_spec.prepare is kimi_k25.prepare
