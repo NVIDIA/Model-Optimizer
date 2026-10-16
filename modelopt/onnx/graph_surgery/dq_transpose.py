@@ -301,17 +301,23 @@ def transpose_dequantize_linear_weights(
                         break
                 stats["zero_points_transposed"] += 1
 
-        # Update axis attribute (0 -> 1 after transpose)
+        # Update axis attribute (0 -> 1 after transpose). The weight is 2D here and ONNX
+        # allows a negative axis, so normalize before swapping. The "axis" attribute is
+        # optional and defaults to 1 per the ONNX spec, so a DQ node that never set it
+        # explicitly needs the same correction, not a silent no-op.
+        axis_attr_found = False
         for attr in dq_node.attribute:
             if attr.name == "axis":
                 old_axis = attr.i
-                if old_axis == 0:
-                    attr.i = 1
-                elif old_axis == 1:
-                    attr.i = 0
+                attr.i = 1 - (old_axis % 2)
+                axis_attr_found = True
                 if verbose:
                     logger.debug(f"  Updated axis: {old_axis} -> {attr.i}")
                 break
+        if not axis_attr_found:
+            dq_node.attribute.append(helper.make_attribute("axis", 0))
+            if verbose:
+                logger.debug("  Added axis: 1 (default) -> 0")
 
         # Create intermediate output for DQ (transposed shape)
         dq_output_name = dq_node.output[0]
