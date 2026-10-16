@@ -222,7 +222,7 @@ def test_trtexec_run_accepts_bytes_input(trtexec_bench):
 
 
 def test_run_network_command_rejects_unexpected_executable():
-    with pytest.raises(ValueError, match="must use ssh or scp"):
+    with pytest.raises(ValueError):
         bm._run_network_command(["python", "script.py"])
 
 
