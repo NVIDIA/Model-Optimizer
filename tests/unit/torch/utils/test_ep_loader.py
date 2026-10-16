@@ -111,11 +111,8 @@ def test_the_loader_refuses_a_plan_it_cannot_load_by(plan, error, match):
         load_and_prepare_ep("unused", plan)
 
 
-def test_the_loader_refuses_a_plan_for_another_world(monkeypatch):
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 4)
-
-    with pytest.raises(ValueError, match="is for 2 ranks, but this run has 4"):
+def test_the_loader_refuses_a_plan_for_another_world(gloo_world_of_one):
+    with pytest.raises(ValueError, match="is for 2 ranks, but this run has 1"):
         load_and_prepare_ep("unused", DistributionPlan(2, ep_size=2))
 
 
