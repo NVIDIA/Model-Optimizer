@@ -52,19 +52,27 @@ def _no_distribution_knobs(monkeypatch):
     monkeypatch.delenv("MODELOPT_FSDP_SIZE", raising=False)
 
 
+def _gathered_alike(gathered, mine, group=None):
+    """Answer a gather as if every rank handed it what this rank did."""
+    gathered[:] = [mine] * len(gathered)
+
+
 @pytest.fixture
 def run_as(monkeypatch):
     """Run as rank ``rank`` of a ``world_size``-rank launch.
 
-    Every rank acts as its group's first, deciding for itself: these tests are about how a plan
-    loads, and test_resolve_distribution_plan.py about how the ranks agree on it.
+    Every rank acts as its group's first, deciding for itself, and reads the checkpoint as this one
+    does: these tests are about how a plan loads, and test_resolve_distribution_plan.py about how
+    the ranks agree on it.
     """
     monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
     monkeypatch.setattr(torch.distributed, "broadcast_object_list", lambda *a, **k: None)
+    monkeypatch.setattr(torch.distributed, "all_gather_object", _gathered_alike)
 
     def enter(world_size, rank=0):
         monkeypatch.setattr(dist, "is_distributed_run", lambda: world_size > 1)
         monkeypatch.setattr(dist, "size", lambda group=None: world_size)
+        monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: world_size)
         monkeypatch.setattr(dist, "is_master", lambda group=None: rank == 0)
         monkeypatch.setattr(dist, "local_rank", lambda: rank)
 
