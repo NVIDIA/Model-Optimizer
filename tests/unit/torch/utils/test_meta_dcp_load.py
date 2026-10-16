@@ -17,10 +17,9 @@
 
 ``_meta_dcp_load`` materializes a model built on ``meta`` and fills it from HF safetensors through
 ``torch.distributed.checkpoint``; ``_map_ckpt_keys_to_model`` bridges checkpoint names to the built
-model's ``state_dict`` names; ``_fsdp2_wrap_modules`` picks the blocks FSDP2 shards. The loads run
-for real on CPU, from tiny transformers models into hand-written safetensors files. DCP loads in a
-single process without a process group; the tests that need the distributed path start a one-rank
-gloo group.
+model's ``state_dict`` names. The loads run for real on CPU, from tiny transformers models into
+hand-written safetensors files. DCP loads in a single process without a process group; the tests that
+need the distributed path start a one-rank gloo group.
 """
 
 import pytest
@@ -41,7 +40,6 @@ from transformers import AutoModelForImageTextToText, Qwen2_5_VLConfig
 
 from modelopt.torch.utils.plugins.model_load_utils import (
     _copy_tied_values,
-    _fsdp2_wrap_modules,
     _map_ckpt_keys_to_model,
     _meta_dcp_load,
 )
@@ -204,43 +202,6 @@ def test_two_keys_claiming_one_model_key_map_neither():
         _map_ckpt_keys_to_model(nn.Module(), {"model.norm.weight", "mtp.norm.weight"}, model_keys)
         == {}
     )
-
-
-# -------------------------------------------------------------------------- FSDP2 wrap boundaries
-
-
-def test_wrap_modules_are_the_decoder_layers():
-    """A causal LM is wrapped at its ``_no_split_modules`` blocks: the decoder layers, in order."""
-    model = _meta_twin(get_tiny_llama)
-
-    assert _fsdp2_wrap_modules(model) == list(model.model.layers)
-
-
-def test_vlm_wraps_only_its_language_layers():
-    """Qwen2.5-VL's wrapper also lists the vision block in ``_no_split_modules``, but only the language
-    layers may be sharded: sharded vision weights deadlock calibration, so the tower stays replicated.
-    """
-    model = _meta_twin(_tiny_qwen2_5_vl)
-    assert type(model.model.visual.blocks[0]).__name__ in model._no_split_modules
-
-    assert _fsdp2_wrap_modules(model) == list(model.model.language_model.layers)
-
-
-@pytest.mark.parametrize("no_split_modules", [None, ["NoSuchBlock"]])
-def test_wrap_modules_fall_back_to_decoder_layer_detection(no_split_modules):
-    """Without usable ``_no_split_modules`` (absent, or naming no module present), modelopt's
-    decoder-layer auto-detection still finds the blocks.
-    """
-    model = _meta_twin(get_tiny_llama)
-    model._no_split_modules = no_split_modules
-
-    assert _fsdp2_wrap_modules(model) == list(model.model.layers)
-
-
-def test_wrap_modules_refuse_a_model_without_blocks():
-    """With neither source of boundaries matching, fail loudly instead of guessing a layout."""
-    with pytest.raises(RuntimeError, match="Could not determine FSDP2 wrap boundaries"):
-        _fsdp2_wrap_modules(nn.Sequential(nn.Linear(2, 2), nn.Linear(2, 2)))
 
 
 # --------------------------------------------------------------------------------- meta + DCP load
