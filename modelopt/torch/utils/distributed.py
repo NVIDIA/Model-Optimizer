@@ -595,6 +595,7 @@ def shard_dataloader(loader, rank: int, world_size: int):
         return DataLoader(
             _StridedIterableShard(loader.dataset, rank, world_size),
             batch_size=loader.batch_size,
+            drop_last=loader.drop_last,
             collate_fn=loader.collate_fn,
             num_workers=loader.num_workers,
             pin_memory=loader.pin_memory,
@@ -616,6 +617,7 @@ def shard_dataloader(loader, rank: int, world_size: int):
     return DataLoader(
         loader.dataset,
         batch_size=loader.batch_size,
+        drop_last=loader.drop_last,
         sampler=sampler,
         collate_fn=loader.collate_fn,
         num_workers=loader.num_workers,
