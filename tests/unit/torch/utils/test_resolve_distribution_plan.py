@@ -285,7 +285,7 @@ def _tiny_qwen2_5_vl():
     ("config", "require_lm_head", "expected"),
     [
         (SimpleNamespace(architectures=["LlamaForCausalLM"]), True, AutoModelForCausalLM),
-        (_vlm_config(), False, AutoModel),
+        (_tiny_qwen2_5_vl(), False, AutoModel),
         (
             _vlm_config(auto_map={"AutoModelForCausalLM": "m.KimiK25ForConditionalGeneration"}),
             True,
