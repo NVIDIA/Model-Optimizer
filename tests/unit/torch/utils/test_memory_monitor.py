@@ -70,20 +70,16 @@ def launched():
         monitor.stop()
 
 
-def test_the_monitor_starts_when_nvml_can_report_memory(monkeypatch, launched):
+@pytest.mark.parametrize("supported", [True, False], ids=["reports_memory", "cannot"])
+def test_the_monitor_starts_only_where_nvml_can_report_memory(monkeypatch, launched, supported):
     """The probe used to run before NVML was initialized, so it always failed and the monitor
-    never started on any host."""
-    nvml = _FakeNVML()
+    never started on any host. Hosts where NVML cannot report memory still skip the monitor, and
+    leave NVML shut down; elsewhere the probe's own init is balanced and the monitor holds one."""
+    nvml = _FakeNVML(memory_info_supported=supported)
     nvml.install(monkeypatch)
     monitor = mm.launch_memory_monitor(monitor_interval=0.01)
-    assert monitor is not None
-    launched.append(monitor)
-    assert nvml.inits == 1  # the probe's own init is balanced; the monitor holds one
+    if monitor is not None:
+        launched.append(monitor)
 
-
-def test_the_monitor_is_skipped_where_nvml_cannot_report_memory(monkeypatch):
-    """Hosts where NVML cannot report memory still skip the monitor, and leave NVML shut down."""
-    nvml = _FakeNVML(memory_info_supported=False)
-    nvml.install(monkeypatch)
-    assert mm.launch_memory_monitor() is None
-    assert nvml.inits == 0
+    assert (monitor is not None) is supported
+    assert nvml.inits == (1 if supported else 0)

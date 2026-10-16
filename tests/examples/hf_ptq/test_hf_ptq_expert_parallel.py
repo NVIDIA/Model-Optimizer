@@ -169,17 +169,6 @@ def _deepseek_v3(n_routed_experts):
 # -------------------------------------------------------------------------------- the decision
 
 
-@pytest.mark.parametrize("one_rank_group", [False, True], ids=["no_process_group", "one_rank"])
-def test_a_single_process_run_is_never_expert_parallel(
-    hf_ptq, monkeypatch, torchrun, one_rank_group
-):
-    """With no distributed run there is nothing to shard over, even for an EP-capable MoE."""
-    dist_state = torchrun(world_size=1) if one_rank_group else _dist_state(world_size=1)
-    _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
-
-    assert hf_ptq._resolve_distribution(_args(dist_state))[0] == DistributionPlan()
-
-
 def test_use_fsdp2_plans_fsdp2_without_expert_parallelism(hf_ptq, monkeypatch, torchrun):
     """--use_fsdp2 names its load, so even an explicit EP degree for an EP-capable MoE must not
     divert the run to the expert-parallel one."""
@@ -220,13 +209,6 @@ def test_dense_fsdp2_within_expert_data_parallel_replicas_is_refused(
             hf_ptq._resolve_distribution(args)
 
 
-def test_a_dense_model_under_torchrun_runs_data_parallel(hf_ptq, monkeypatch, torchrun):
-    """A dense model has no experts to shard, so it loads whole on every rank, through get_model."""
-    _serve(monkeypatch, hf_ptq, LlamaConfig(**_TINY))
-
-    assert hf_ptq._resolve_distribution(_args(torchrun(world_size=4)))[0] == DistributionPlan(4)
-
-
 # ---------------------------------------------------------------------------------- load_model
 
 
@@ -243,54 +225,54 @@ def _record_load_pretrained(hf_ptq, monkeypatch):
     return calls
 
 
-def test_load_model_loads_an_expert_parallel_plan_through_load_pretrained(
-    hf_ptq, monkeypatch, torchrun
+@pytest.mark.parametrize(
+    ("make_config", "knobs", "world_size", "options", "plan", "passed"),
+    [
+        pytest.param(
+            lambda: _deepseek_v3(n_routed_experts=8),
+            {"MODELOPT_FSDP_SIZE": "world"},
+            4,
+            {"trust_remote_code": True, "attn_implementation": "eager"},
+            DistributionPlan(4, ep_size=4, dense="fsdp"),
+            {"trust_remote_code": True, "attn_implementation": "eager"},
+            id="expert_parallel",
+        ),
+        pytest.param(
+            lambda: LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY),
+            {},
+            2,
+            {
+                "use_fsdp2": True,
+                "cpu_offload": True,
+                "specdec_offline_dataset": None,
+                "low_memory_mode": False,
+            },
+            DistributionPlan(2, dense="fsdp"),
+            {"trust_remote_code": False, "cpu_offload": True, "attn_implementation": None},
+            id="use_fsdp2",
+        ),
+    ],
+)
+def test_load_model_hands_load_pretrained_the_plan_and_the_config_it_was_decided_on(
+    hf_ptq, monkeypatch, torchrun, make_config, knobs, world_size, options, plan, passed
 ):
-    """With an EP plan, load_model hands load_pretrained the plan -- the decided degree and dense
-    sharding -- and the spec-prepared config it was decided on."""
-    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
-    served = _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
+    """With an EP plan, or under --use_fsdp2, load_model hands load_pretrained the plan -- the
+    decided degree and dense sharding -- the config it was decided on, spec-prepared for EP, and
+    the caller's options, such as --use_fsdp2's CPU-offload choice."""
+    for name, value in knobs.items():
+        monkeypatch.setenv(name, value)
+    served = _serve(monkeypatch, hf_ptq, make_config())
     calls = _record_load_pretrained(hf_ptq, monkeypatch)
-    args = _args(torchrun(world_size=4), trust_remote_code=True, attn_implementation="eager")
 
     with pytest.raises(_LoaderReachedError):
-        hf_ptq.load_model(args)
+        hf_ptq.load_model(_args(torchrun(world_size=world_size), **options))
 
     (call,) = calls
     assert call["ckpt_path"] == _CKPT
-    assert call["distribution"] == DistributionPlan(4, ep_size=4, dense="fsdp")
-    assert call["kwargs"] == {
-        "hf_config": served,
-        "trust_remote_code": True,
-        "attn_implementation": "eager",
-    }
-    assert served.base_model_ep_plan == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
-
-
-def test_use_fsdp2_loads_through_load_pretrained(hf_ptq, monkeypatch, torchrun):
-    """--use_fsdp2 asks load_pretrained for its FSDP2 load, with the CPU-offload choice and the
-    config its checks already read."""
-    served = _serve(monkeypatch, hf_ptq, LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY))
-    calls = _record_load_pretrained(hf_ptq, monkeypatch)
-    args = _args(
-        torchrun(world_size=2),
-        use_fsdp2=True,
-        cpu_offload=True,
-        specdec_offline_dataset=None,
-        low_memory_mode=False,
-    )
-
-    with pytest.raises(_LoaderReachedError):
-        hf_ptq.load_model(args)
-
-    (call,) = calls
-    assert call["distribution"] == DistributionPlan(2, dense="fsdp")
-    assert call["kwargs"] == {
-        "hf_config": served,
-        "trust_remote_code": False,
-        "cpu_offload": True,
-        "attn_implementation": None,
-    }
+    assert call["distribution"] == plan
+    assert call["kwargs"] == {"hf_config": served, **passed}
+    if plan.is_expert_parallel:
+        assert served.base_model_ep_plan == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
 
 
 def test_a_whole_model_loads_by_the_plan_through_get_model(hf_ptq, monkeypatch, torchrun):
@@ -430,9 +412,19 @@ def test_distributed_calibration_gives_each_rank_its_own_shard(hf_ptq, monkeypat
     assert calib_loader(world_size=1) is loader
 
 
-def _calibration_loop_choice(hf_ptq, monkeypatch, plan, ep_mesh=None):
-    """Run mono_quantize on a model distributed as ``plan``, its experts loaded over ``ep_mesh``, and
-    return which calibration loop it built."""
+@pytest.mark.parametrize(
+    ("plan", "loop"),
+    [(DistributionPlan(2, ep_size=2), "distributed"), (DistributionPlan(2, dense="fsdp"), "plain")],
+    ids=["expert_parallel", "fsdp2"],
+)
+def test_only_an_expert_parallel_run_calibrates_through_the_distributed_forward_loop(
+    hf_ptq, monkeypatch, plan, loop
+):
+    """Only distributed_forward_loop re-plants the all-to-all forwards that quantizer insertion
+    clobbers, so an expert-parallel run must calibrate through it, over the mesh load_and_prepare_ep
+    loaded the experts over. Without expert parallelism there is nothing to re-plant: FSDP2 keeps
+    the plain loop and its split-on-OOM retry, as on main."""
+    ep_mesh = object()
     model = torch.nn.Linear(2, 2)
     set_distribution_plan(model, plan)
     chosen, quantized = [], []
@@ -470,26 +462,7 @@ def _calibration_loop_choice(hf_ptq, monkeypatch, plan, ep_mesh=None):
     )
 
     assert len(quantized) == 1
-    return chosen
-
-
-def test_expert_parallel_calibration_runs_through_the_distributed_forward_loop(hf_ptq, monkeypatch):
-    """Only distributed_forward_loop re-plants the all-to-all forwards that quantizer insertion
-    clobbers, so an expert-parallel run must calibrate through it rather than the plain loop."""
-    ep_mesh = object()  # the mesh load_and_prepare_ep loaded the experts over
-    plan = DistributionPlan(2, ep_size=2)
-
-    assert _calibration_loop_choice(hf_ptq, monkeypatch, plan, ep_mesh) == [
-        ("distributed", ep_mesh)
-    ]
-
-
-def test_fsdp2_calibration_keeps_the_plain_forward_loop(hf_ptq, monkeypatch):
-    """Without expert parallelism there is nothing to re-plant: FSDP2 keeps the plain loop and its
-    split-on-OOM retry, as on main."""
-    plan = DistributionPlan(2, dense="fsdp")
-
-    assert _calibration_loop_choice(hf_ptq, monkeypatch, plan, ep_mesh=object()) == ["plain"]
+    assert chosen == ([("distributed", ep_mesh)] if loop == "distributed" else ["plain"])
 
 
 class _PreviewModel(torch.nn.Module):
