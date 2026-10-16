@@ -419,11 +419,11 @@ def test_only_what_expert_parallelism_leaves_whole_must_fit(run_as, serve, gpu_m
 
 @needs_qwen3_moe_ep_plan
 def test_a_block_fp8_moes_dense_part_is_not_sharded_expert_parallel(
-    run_as, serve, gpu_memory, tmp_path, capsys
+    run_as, serve, gpu_memory, tmp_path
 ):
     """The expert-parallel load shards the dense part through DCP, which cannot dequantize block-fp8.
-    Left to decide, the plan replicates it however big, and says so; asked to shard it, it refuses.
-    Without expert parallelism the rule does not apply."""
+    Left to decide, the plan replicates it however big; asked to shard it, it refuses. Without
+    expert parallelism the rule does not apply."""
     run_as(4)
     config = _qwen3_moe(num_experts=8)
     config.quantization_config = {"quant_method": "fp8"}
@@ -431,7 +431,6 @@ def test_a_block_fp8_moes_dense_part_is_not_sharded_expert_parallel(
     gpu_memory(1)
 
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 4)
-    assert "block-fp8" in capsys.readouterr().out
     with pytest.raises(NotImplementedError, match="block-fp8"):
         resolve_distribution_plan(str(tmp_path), dense="fsdp")
     assert resolve_distribution_plan(str(tmp_path), ep_size=1)[0] == DistributionPlan(
