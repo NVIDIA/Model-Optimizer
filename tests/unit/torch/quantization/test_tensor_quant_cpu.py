@@ -21,8 +21,10 @@ import torch
 from _test_utils.torch.quantization.models import SimpleLinear
 from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTester
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
+from modelopt.torch.export.quant_utils import get_quantization_format
 from modelopt.torch.quantization import QuantModuleRegistry, tensor_quant
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, RotateConfig
 from modelopt.torch.quantization.nn import (
@@ -119,6 +121,7 @@ class TestQuantizerAttributeConfig:
             num_bits=2,
             fake_quant=True,
             axis=(1, 2),
+            rounding="stochastic",
         )
         quant_attr_cfg_2 = QuantizerAttributeConfig(**quant_attr_cfg_1.dict())
         assert quant_attr_cfg_1 == quant_attr_cfg_2
@@ -623,3 +626,67 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         quantizer.get_modelopt_state(properties_only=True) for quantizer in model.weight_quantizer
     ]
     assert restored_states == original_states
+
+
+@pytest.mark.parametrize("bits", [8, (4, 3)])
+@pytest.mark.parametrize("pass_through", [True, False])
+def test_stochastic_rounding_clipping_and_ste(bits, pass_through):
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=bits, rounding="stochastic", pass_through_bwd=pass_through, narrow_range=True
+        ),
+        amax=torch.tensor(1.0),
+    )
+    inputs = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0], requires_grad=True)
+    actual = quantizer(inputs)
+    torch.testing.assert_close(actual, inputs.clamp(-1, 1), rtol=0, atol=0)
+    actual.sum().backward()
+    expected = torch.ones_like(inputs) if pass_through else (inputs.abs() <= 1).float()
+    torch.testing.assert_close(inputs.grad, expected)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"fake_quant": False},
+        {"backend": "custom"},
+        {"num_bits": (2, 1), "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)}},
+    ],
+)
+def test_stochastic_rounding_rejects_unsupported_backends(options):
+    with pytest.raises(ValueError):
+        QuantizerAttributeConfig(rounding="stochastic", **options)
+
+
+def test_stochastic_rounding_checkpoint_and_export(tmp_path):
+    model = mtq.quantize(
+        torch.nn.Linear(4, 4),
+        {
+            "quant_cfg": [
+                {
+                    "quantizer_name": "*",
+                    "cfg": {"num_bits": 8, "type": "dynamic", "rounding": "stochastic"},
+                }
+            ],
+            "algorithm": None,
+        },
+    )
+    path = tmp_path / "model.pth"
+    mto.save(model, path)
+    restored = mto.restore(torch.nn.Linear(4, 4), path)
+    assert restored.weight_quantizer.rounding == "stochastic"
+    with torch.random.fork_rng(devices=[]):
+        inputs = torch.randn(2, 4)
+        torch.manual_seed(41)
+        expected = model(inputs)
+        torch.manual_seed(41)
+        torch.testing.assert_close(restored(inputs), expected, rtol=0, atol=0)
+    with pytest.raises(NotImplementedError):
+        get_quantization_format(restored)
+    with pytest.raises(NotImplementedError):
+        torch.export.export(restored.weight_quantizer, (torch.randn(4, 4),), strict=False)
+    legacy = TensorQuantizer()
+    state = legacy.get_modelopt_state()
+    state.pop("_rounding")
+    legacy.set_from_modelopt_state(state)
+    assert legacy.rounding == "nearest"

@@ -53,6 +53,9 @@ def _fp8_gemm_impl(input, weight_fp8, scale_a, scale_b, bias=None):
 
 def fp8_per_tensor_gemm(quant_module, input, bias=None):
     """GEMM function for fp8 per tensor quantization."""
+    for quantizer in (quant_module.input_quantizer, quant_module.weight_quantizer):
+        if quantizer.rounding != "nearest":
+            raise NotImplementedError("FP8 GEMM does not support stochastic rounding")
     cached_scale_a = (
         hasattr(quant_module, "_scale_a") and quant_module.input_quantizer.amax is not None
     )

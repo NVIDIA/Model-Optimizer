@@ -82,6 +82,7 @@ def quant_cfg(state=True, w=False):
 @pytest.mark.parametrize(
     "attributes",
     [
+        {**GDN_STATE_FP8_DYNAMIC, "rounding": "stochastic"},
         {"num_bits": (4, 3), "axis": (0, 1)},  # static
         {"num_bits": (4, 3), "type": "dynamic"},  # per tensor
         {"num_bits": 8, "axis": (0, 1), "type": "dynamic"},  # int8

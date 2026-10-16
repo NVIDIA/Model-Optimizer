@@ -450,6 +450,30 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         description="""If True, enable fake quantization.""",
     )
 
+    rounding: Literal["nearest", "stochastic"] = ModeloptField(
+        default="nearest",
+        description="""Rounding policy, independent of format and scale grouping. ``nearest``
+        preserves the backend's existing nearest rounding. ``stochastic`` chooses adjacent
+        representable values with probabilities proportional to distance, using PyTorch's
+        device RNG. Initially supported for built-in integer and E4M3 fake quantization
+        with unquantized scales. Other backends and inference export are unsupported.""",
+    )
+
+    @model_validator(mode="after")
+    def validate_rounding(self):
+        """Reject backends that cannot honor the requested rounding policy."""
+        if self.rounding == "stochastic" and (
+            not self.fake_quant
+            or self.backend is not None
+            or not (isinstance(self.num_bits, int) or self.num_bits == (4, 3))
+            or (self.block_sizes is not None and self.block_sizes.get("type") == "dynamic")
+        ):
+            raise ValueError(
+                "Stochastic rounding requires built-in integer or E4M3 fake quantization "
+                "with unquantized scales"
+            )
+        return self
+
     unsigned: bool = ModeloptField(
         default=False,
         title="Enable unsigned quantization.",

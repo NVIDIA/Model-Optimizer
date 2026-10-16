@@ -188,13 +188,15 @@ def test_p_qdq_mode_detection():
 
 
 @pytest.mark.parametrize("quantization_active", [True, False])
-def test_causal_p_qdq_dispatch_respects_quant_state(monkeypatch, quantization_active):
+@pytest.mark.parametrize("rounding", ["nearest", "stochastic"])
+def test_causal_p_qdq_dispatch_respects_quant_state(monkeypatch, quantization_active, rounding):
     """Causal attention must dispatch according to the P quantizer runtime state."""
     quant_attention = make_quant_attention()
     for name in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
         getattr(quant_attention, name).disable()
 
     pq = quant_attention.p_bmm_quantizer
+    pq.set_from_attribute_config({"rounding": rounding})
     pq.num_bits = (4, 3)
     pq.block_sizes = None
     if quantization_active:
@@ -228,6 +230,12 @@ def test_causal_p_qdq_dispatch_respects_quant_state(monkeypatch, quantization_ac
         return expected
 
     states = torch.zeros(1, 4, 2, 32)
+    if quantization_active and rounding == "stochastic":
+        with pytest.raises(NotImplementedError, match="stochastic"):
+            quant_attention._quantized_attention(
+                original_attention, quant_attention, states, states, states, expected_attention_mask
+            )
+        return
     output = quant_attention._quantized_attention(
         original_attention,
         quant_attention,
