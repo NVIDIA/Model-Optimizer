@@ -440,21 +440,33 @@ def test_a_run_without_expert_parallelism_needs_no_spec(run_as, serve, monkeypat
     assert resolve_distribution_plan(str(tmp_path), dense="fsdp")[0] == plan
 
 
+# The refusals of an MoE left whole on every rank, by whether its spec allows expert parallelism.
+_CAN_BE_EP = "can be expert-parallel, but the plan resolved"
+_NO_EP_YET = "cannot be quantized expert-parallel yet, and the plan replicates"
+
+
 @pytest.mark.parametrize(
-    ("config", "ep_degree"),
+    ("config", "ep_degree", "refusal"),
     [
-        pytest.param(_deepseek_v3(n_routed_experts=3), None, id="auto_finds_no_degree"),
-        pytest.param(_qwen3_moe(num_experts=8), "1", id="explicit_degree_one"),
-        pytest.param(_deepseek_v3(n_routed_experts=8), "1", id="explicit_degree_one_spec_plan"),
+        pytest.param(_deepseek_v3(n_routed_experts=3), None, _CAN_BE_EP, id="auto_finds_no_degree"),
+        pytest.param(_qwen3_moe(num_experts=8), "1", _CAN_BE_EP, id="explicit_degree_one"),
+        pytest.param(
+            _deepseek_v3(n_routed_experts=8), "1", _CAN_BE_EP, id="explicit_degree_one_spec_plan"
+        ),
+        pytest.param(
+            GptOssConfig(num_local_experts=4, **_TINY), "1", _NO_EP_YET, id="spec_refuses_ep"
+        ),
     ],
 )
 def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
-    run_as, serve, monkeypatch, tmp_path, config, ep_degree
+    run_as, serve, monkeypatch, tmp_path, config, ep_degree, refusal
 ):
     """No EP degree above 1 divides 3 experts over 2 ranks, and an explicit 1 asks for none,
     whether the plan comes with the config (Qwen3-MoE) or only from the model's spec, which an EP
     degree of 1 skips (DeepSeek-V3). With nothing sharded either, every rank would hold the whole
-    MoE: that must fail, not run."""
+    MoE: that must fail, not run. GPT-OSS carries a plan too, but its spec refuses expert
+    parallelism, so this check refuses it as an MoE that cannot be expert-parallel yet; the spec's
+    own refusal, a NotImplementedError and so a RuntimeError too, words it differently."""
     if ep_degree is not None:
         if config.model_type == "qwen3_moe" and Version(transformers.__version__) < Version("5.7"):
             pytest.skip("qwen3_moe's base_model_ep_plan ships in transformers 5.7")
@@ -462,7 +474,7 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
     run_as(2)
     serve(config)
 
-    with pytest.raises(RuntimeError, match="can be expert-parallel, but the plan resolved"):
+    with pytest.raises(RuntimeError, match=refusal):
         resolve_distribution_plan(str(tmp_path))
 
 
