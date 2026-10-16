@@ -46,7 +46,9 @@ from transformers import (
 )
 
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch import models
 from modelopt.torch.models import EPSpec, get_spec
+from modelopt.torch.utils import moe
 from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.moe import (
     _routed_expert_modules,
@@ -483,9 +485,6 @@ def test_the_plan_a_spec_would_supply(monkeypatch):
     ``prepare`` attaches, read without running ``prepare``; nothing for a model with no spec or no
     expert-parallel section, and nothing for a spec that refuses expert parallelism even when it
     names a plan."""
-    from modelopt.torch import models
-    from modelopt.torch.utils import moe
-
     assert moe._spec_ep_plan("deepseek_v3") == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
     assert moe._spec_ep_plan("llama") == {}
     assert moe._spec_ep_plan("no_such_model_type") == {}
