@@ -15,6 +15,7 @@
 
 import contextlib
 import faulthandler
+import gc
 import os
 import queue
 import signal
@@ -96,6 +97,53 @@ def get_live_pool(pools, key, make_pool):
     return pool
 
 
+def destroy_extra_process_groups():
+    """Destroy every process group except the default one.
+
+    Libraries that create groups per model (e.g. Megatron's ``initialize_model_parallel``, ~20 NCCL
+    groups) drop their references on teardown but not the groups themselves. In a worker that
+    lives through hundreds of jobs they pile up (communicators, one watchdog thread each).
+    """
+    from torch.distributed.distributed_c10d import _get_default_group, _world
+
+    default = _get_default_group()
+    for group in [g for g in _world.pg_map if g is not default]:
+        try:
+            dist.destroy_process_group(group)
+        except Exception as e:  # noqa: PERF203
+            print(f"Error destroying process group: {e}")
+
+
+_BASELINE_TORCH_FLAGS = {}
+
+
+def _capture_baseline_torch_flags():
+    """Remember the torch settings a freshly spawned worker starts with."""
+    _BASELINE_TORCH_FLAGS.update(
+        cudnn_deterministic=torch.backends.cudnn.deterministic,
+        cudnn_benchmark=torch.backends.cudnn.benchmark,
+        cudnn_tf32=torch.backends.cudnn.allow_tf32,
+        matmul_tf32=torch.backends.cuda.matmul.allow_tf32,
+        deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
+    )
+
+
+def reset_worker_state(rank, world_size):
+    """Return a persistent worker to the state it had right after spawning.
+
+    ``set_seed`` and similar helpers change process-global torch settings; run this job at the
+    boundary between test modules that share workers.
+    """
+    torch.backends.cudnn.deterministic = _BASELINE_TORCH_FLAGS["cudnn_deterministic"]
+    torch.backends.cudnn.benchmark = _BASELINE_TORCH_FLAGS["cudnn_benchmark"]
+    torch.backends.cudnn.allow_tf32 = _BASELINE_TORCH_FLAGS["cudnn_tf32"]
+    torch.backends.cuda.matmul.allow_tf32 = _BASELINE_TORCH_FLAGS["matmul_tf32"]
+    torch.use_deterministic_algorithms(_BASELINE_TORCH_FLAGS["deterministic_algorithms"])
+    torch.manual_seed(1234)
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
 def default_worker_teardown(rank, world_size):
     """Minimal cleanup between tests in persistent workers."""
     try:
@@ -131,7 +179,9 @@ class DistributedWorkerPool:
         pool.shutdown()
     """
 
-    def __init__(self, world_size, backend="nccl", teardown_fn=default_worker_teardown):
+    def __init__(
+        self, world_size, backend="nccl", teardown_fn=default_worker_teardown, ready_timeout=300
+    ):
         assert world_size > 0, "World size must be greater than 0"
         self.world_size = world_size
         # Set once a job was interrupted: the workers are then killed, see ``run``.
@@ -160,10 +210,37 @@ class DistributedWorkerPool:
             p.start()
             self._processes.append(p)
 
-        for _ in range(world_size):
-            # Cold imports of the Megatron/TE/modelopt stack take 75-100 s under coverage in CI
-            msg = self._result_queue.get(timeout=300)
-            assert msg == "ready", f"Worker failed to initialize: {msg}"
+        try:
+            for _ in range(world_size):
+                # Cold imports of the Megatron/TE/modelopt stack take 75-100 s under coverage in CI
+                msg = self._get(ready_timeout)
+                assert msg == "ready", f"Worker failed to initialize: {msg}"
+        except BaseException:
+            self._abort()  # do not leave workers behind when the start fails
+            raise
+
+    def _get(self, timeout):
+        """Return the next message from the workers; fail within a second if a worker died.
+
+        A worker that exits (an illegal memory access aborts the process, an OOM kill) would
+        otherwise only be noticed when ``timeout`` runs out.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                return self._result_queue.get(
+                    timeout=max(0.01, min(1.0, deadline - time.monotonic()))
+                )
+            except queue.Empty:  # noqa: PERF203
+                dead = [
+                    (rank, p.exitcode) for rank, p in enumerate(self._processes) if not p.is_alive()
+                ]
+                if dead:
+                    raise RuntimeError(
+                        f"Worker process(es) died (rank, exit code): {dead}"
+                    ) from None
+                if time.monotonic() >= deadline:
+                    raise
 
     @staticmethod
     def _worker_loop(rank, world_size, backend, port, cmd_queue, result_queue, teardown_fn):
@@ -179,6 +256,7 @@ class DistributedWorkerPool:
         if backend == "nccl" and torch.cuda.is_available():
             torch.cuda.set_device(rank)
         torch.manual_seed(1234)
+        _capture_baseline_torch_flags()
         result_queue.put("ready")
 
         while True:
@@ -227,7 +305,7 @@ class DistributedWorkerPool:
                 q.put((fn, args, kwargs))
             for _ in range(self.world_size):
                 timeout = self.job_timeout if deadline is None else deadline - time.monotonic()
-                status, rank, tb = self._result_queue.get(timeout=max(timeout, 0))
+                status, rank, tb = self._get(max(timeout, 0))
                 if status == "error":
                     errors.append(f"--- Rank {rank} ---\n{tb}")
                     deadline = deadline or time.monotonic() + self.failure_grace
