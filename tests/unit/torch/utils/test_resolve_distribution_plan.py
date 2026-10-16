@@ -15,12 +15,16 @@
 
 """How ``resolve_distribution_plan`` decides a model's distribution, and the MoE helpers it uses.
 
-Nothing here needs a process group or a GPU: the process group's rank and size are answered the way
-a torchrun launch would, and the configs are tiny real transformers configs served from memory, so
-the decision builds their real models on the meta device.
+Nothing here needs a GPU, and only the last test a process group: elsewhere the process group's
+rank and size are answered the way a torchrun launch would, and the configs are tiny real
+transformers configs served from memory, so the decision builds their real models on the meta device.
 """
 
+import os
+from datetime import timedelta
+from functools import partial
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import torch
@@ -85,19 +89,27 @@ def _no_distribution_knobs(monkeypatch):
     monkeypatch.delenv("MODELOPT_FSDP_SIZE", raising=False)
 
 
+def _gathered_alike(gathered, mine, group=None):
+    """Answer a gather as if every rank handed it what this rank did."""
+    gathered[:] = [mine] * len(gathered)
+
+
 @pytest.fixture
 def run_as(monkeypatch):
     """Run as rank ``rank`` of a ``world_size``-rank launch, deciding for itself.
 
-    How the ranks agree on one plan is tested at the end of this file.
+    Every rank reads the checkpoint as this one does. How the ranks agree on one plan is tested at
+    the end of this file.
     """
     monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
     monkeypatch.setattr(torch.distributed, "broadcast_object_list", lambda *a, **k: None)
+    monkeypatch.setattr(torch.distributed, "all_gather_object", _gathered_alike)
 
     def enter(world_size, rank=0):
         monkeypatch.setattr(dist, "is_distributed_run", lambda: world_size > 1)
         monkeypatch.setattr(dist, "size", lambda group=None: world_size)
         monkeypatch.setattr(dist, "is_master", lambda group=None: rank == 0)
+        monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: world_size)
 
     return enter
 
@@ -514,7 +526,8 @@ def test_a_model_that_cannot_be_built_on_meta_names_itself(run_as, serve, monkey
 def _as_rank(monkeypatch, rank, rank0_message=None):
     """Run as ``rank`` of a 4-rank run, answering its broadcast; returns what this rank handed it.
 
-    A non-zero rank receives ``rank0_message``, as rank 0 would have sent it.
+    A non-zero rank receives ``rank0_message``, as rank 0 would have sent it. Every rank reads the
+    checkpoint as this one does.
     """
     sent = []
 
@@ -527,7 +540,9 @@ def _as_rank(monkeypatch, rank, rank0_message=None):
     monkeypatch.setattr(dist, "size", lambda group=None: 4)
     monkeypatch.setattr(dist, "is_master", lambda group=None: rank == 0)
     monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: rank)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 4)
     monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast_object_list)
+    monkeypatch.setattr(torch.distributed, "all_gather_object", _gathered_alike)
     return sent
 
 
@@ -571,3 +586,36 @@ def test_other_ranks_raise_when_rank0_failed(monkeypatch, serve, tmp_path):
 
     with pytest.raises(RuntimeError, match=r"rank 0 failed to compute plan.*bad degrees"):
         resolve_distribution_plan(str(tmp_path))
+
+
+def _one_rank_cannot_see_the_checkpoint_job(rank, size, ckpt):
+    # A rank left waiting in a collective its peer never joins gives up in seconds on this group.
+    group = torch.distributed.new_group(timeout=timedelta(seconds=10))
+    isdir = os.path.isdir
+    with (
+        mock.patch.object(
+            torch.distributed,
+            "broadcast_object_list",
+            partial(torch.distributed.broadcast_object_list, group=group),
+        ),
+        mock.patch.object(
+            torch.distributed,
+            "all_gather_object",
+            partial(torch.distributed.all_gather_object, group=group),
+        ),
+        mock.patch("os.path.isdir", lambda path: (rank == 0 or path != ckpt) and isdir(path)),
+    ):
+        try:
+            resolve_distribution_plan(ckpt)
+        except RuntimeError as error:
+            raised = str(error)
+        else:
+            raised = "no error"
+    # Rank 1's own error, carried to rank 0, rather than rank 0 timing out in the plan's broadcast.
+    assert "which this rank cannot see" in raised, raised
+
+
+def test_a_rank_that_cannot_see_the_checkpoint_fails_every_rank(cpu_dist_workers, tmp_path):
+    """Before the plan's broadcast, which rank 0 would otherwise wait in for a rank that raised."""
+    LlamaConfig(**_TINY).save_pretrained(tmp_path)
+    cpu_dist_workers.run(_one_rank_cannot_see_the_checkpoint_job, ckpt=str(tmp_path))
