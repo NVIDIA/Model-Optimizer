@@ -72,6 +72,13 @@ def prepare(hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool 
         )
     if not hasattr(hf_config, "text_config"):
         raise ValueError("kimi_k25.apply: hf_config has no .text_config (expected a VLM config)")
+    if ckpt_path is not None and not trust_remote_code:
+        # Patching below imports the checkpoint's own modeling code, and transformers'
+        # get_class_from_dynamic_module runs it without checking trust_remote_code itself.
+        raise ValueError(
+            "kimi_k25: expert parallelism imports the checkpoint's own modeling code; "
+            "load it with trust_remote_code=True."
+        )
 
     # transformers stages only 1-hop relative imports; Kimi's remote code is 2 hops deep. Install the
     # full-closure staging shim BEFORE any remote-code load (this plugin's get_class_from_dynamic_module
