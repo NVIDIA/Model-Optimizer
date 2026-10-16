@@ -17,6 +17,7 @@
 
 import importlib.util
 import json
+from datetime import timedelta
 from functools import partial
 from types import SimpleNamespace
 
@@ -1094,23 +1095,46 @@ def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_pat
     assert config.text_config.base_model_ep_plan is swapped_plan
 
 
-def _finish_export_job(failing_rank, rank, size):
-    from modelopt.torch.export.unified_export_hf import _finish_export_together
+def _one_rank_fails_after_the_write_job(rank, size, tmp_dir):
+    from unittest import mock
 
-    if failing_rank is None:
-        _finish_export_together(None)
-    elif rank == failing_rank:
-        with pytest.raises(OSError, match="disk full"):
-            _finish_export_together(OSError("disk full"))
-    else:
-        with pytest.raises(RuntimeError, match=rf"rank {failing_rank} failed.*disk full"):
-            _finish_export_together(None)
+    from modelopt.torch.export import distributed_writer, unified_export_hf
+    from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
+
+    model = torch.nn.Linear(2, 2)
+    set_distribution_plan(model, DistributionPlan(size, ep_size=size))
+    # A rank left waiting in a collective its peer never joins gives up in seconds on this group.
+    group = torch.distributed.new_group(timeout=timedelta(seconds=10))
+    gather = partial(torch.distributed.all_gather_object, group=group)
+    raised = None
+    with (
+        mock.patch.object(torch.distributed, "all_gather_object", gather),
+        mock.patch.object(
+            torch.distributed, "barrier", partial(torch.distributed.barrier, group=group)
+        ),
+        mock.patch.object(unified_export_hf, "_process_hf_model_for_export", return_value={}),
+        mock.patch.object(distributed_writer, "distributed_save_hf_checkpoint") as write,
+        # Rank 0 alone writes config.json, once every rank has written its shards.
+        mock.patch.object(
+            unified_export_hf, "_write_base_config", side_effect=OSError("disk full")
+        ),
+    ):
+        # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
+        # the shared worker down instead of failing this test alone.
+        try:
+            unified_export_hf.export_hf_checkpoint(model, export_dir=tmp_dir)
+        except (OSError, RuntimeError) as e:
+            raised = e
+    assert write.called
+    assert raised is not None and "disk full" in str(raised), raised
 
 
-@pytest.mark.parametrize("failing_rank", [None, 0, 1])
-def test_every_rank_fails_an_export_that_any_rank_failed(cpu_dist_workers, failing_rank):
-    """A barrier alone lets the ranks that wrote their shards carry on as if the export succeeded."""
-    cpu_dist_workers.run(partial(_finish_export_job, failing_rank))
+def test_every_rank_fails_an_export_that_one_rank_failed_after_the_write(
+    cpu_dist_workers, tmp_path
+):
+    """The ranks that wrote their shards must not return as if the checkpoint were whole while rank 0
+    failed to finish it: a barrier alone would let them."""
+    cpu_dist_workers.run(_one_rank_fails_after_the_write_job, tmp_dir=tmp_path)
 
 
 def _one_rank_fails_processing_job(rank, size, tmp_dir):
@@ -1236,15 +1260,6 @@ def test_expert_parallel_ranks_agree_on_their_experts_quantization_before_foldin
         down_enabled_per_rank=down_enabled_per_rank,
         refused=refused,
     )
-
-
-def test_a_single_process_export_ends_on_its_own_outcome():
-    """Nothing to wait for: the export's own error, if any, is all that is raised."""
-    from modelopt.torch.export.unified_export_hf import _finish_export_together
-
-    _finish_export_together(None)
-    with pytest.raises(OSError, match="disk full"):
-        _finish_export_together(OSError("disk full"))
 
 
 @pytest.mark.parametrize(
