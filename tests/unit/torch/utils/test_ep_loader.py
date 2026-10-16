@@ -30,6 +30,8 @@ from torch import nn
 
 pytest.importorskip("transformers")
 
+from transformers import FineGrainedFP8Config
+
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 from modelopt.torch.utils.moe import expert_parallel_mesh
 from modelopt.torch.utils.plugins.model_load_utils import (
@@ -155,8 +157,11 @@ def test_the_experts_class_loses_its_quant_wrapper_and_other_classes_keep_theirs
 
 
 def test_expert_containers_and_their_children_get_the_expert_state():
-    """Everything else, the root and the containers' own parents included, gets the dense state."""
+    """Everything else, the root and the containers' own parents included, gets the dense state; so
+    does a sibling whose name merely starts with a container's (Qwen2-MoE keeps
+    ``shared_expert_gate`` beside ``shared_expert``)."""
     model = _model_with_decoder_at("model.")
+    model.model.layers[0].mlp.experts_gate = nn.Linear(2, 1)
     experts = {f"model.layers.{i}.mlp.experts": model.model.layers[i].mlp.experts for i in (0, 1)}
     dense, expert = object(), object()
 
@@ -172,41 +177,23 @@ def test_expert_containers_and_their_children_get_the_expert_state():
     assert all(state is dense for state in states.values() if state is not expert)
 
 
-def test_a_sibling_whose_name_extends_an_expert_container_stays_dense():
-    """Qwen2-MoE keeps ``shared_expert_gate`` beside ``shared_expert``: a name that merely starts
-    with an expert container's name is not under it."""
-    mlp = nn.Module()
-    mlp.experts = _Experts()
-    mlp.experts_gate = nn.Linear(2, 1)
-    dense, expert = object(), object()
-
-    _seed_parallel_states(mlp, ["experts"], dense_state=dense, expert_state=expert)
-
-    assert mlp.experts._parallel_state is expert
-    assert mlp.experts_gate._parallel_state is dense
-
-
 # ------------------------------------------------------------------------ expert_parallel_mesh
 
 
-def test_the_expert_parallel_mesh_is_the_one_the_model_was_loaded_over():
-    """An expert-parallel plan: the mesh transformers kept on the model."""
-    model = _model_with_decoder_at("model.")
-    set_distribution_plan(model, DistributionPlan(2, ep_size=2))
-    model._device_mesh = mesh = object()
-
-    assert expert_parallel_mesh(model) is mesh
-
-
-@pytest.mark.parametrize("plan", [None, DistributionPlan(2)], ids=["no-plan", "replicated"])
-def test_a_model_whose_plan_shards_no_experts_has_no_expert_parallel_mesh(plan):
-    """Even with a device mesh on it, as a load through from_pretrained's own TP can leave."""
+@pytest.mark.parametrize(
+    ("plan", "is_expert_parallel"),
+    [(DistributionPlan(2, ep_size=2), True), (None, False), (DistributionPlan(2), False)],
+    ids=["expert-parallel", "no-plan", "replicated"],
+)
+def test_the_expert_parallel_mesh_comes_with_an_expert_parallel_plan_only(plan, is_expert_parallel):
+    """An expert-parallel plan: the mesh transformers kept on the model. Any other model has none,
+    even with a device mesh on it, as a load through from_pretrained's own TP can leave."""
     model = _model_with_decoder_at("model.")
     if plan is not None:
         set_distribution_plan(model, plan)
-    model._device_mesh = object()
+    model._device_mesh = mesh = object()
 
-    assert expert_parallel_mesh(model) is None
+    assert expert_parallel_mesh(model) is (mesh if is_expert_parallel else None)
 
 
 # --------------------------------------------------------------------------- _ckpt_quant_method
@@ -223,31 +210,32 @@ def test_a_model_whose_plan_shards_no_experts_has_no_expert_parallel_mesh(plan):
             ),
             "fp8",
         ),
+        (
+            SimpleNamespace(
+                quantization_config={"quant_method": "mxfp4"},
+                text_config=SimpleNamespace(quantization_config={"quant_method": "fp8"}),
+            ),
+            "mxfp4",
+        ),
+        (SimpleNamespace(quantization_config=FineGrainedFP8Config()), "fp8"),
         (SimpleNamespace(quantization_config={"weight_block_size": [128, 128]}), None),
         (SimpleNamespace(text_config=None), None),
     ],
-    ids=["dict", "object", "vlm-text-config", "no-method", "unquantized"],
+    ids=[
+        "dict",
+        "object",
+        "vlm-text-config",
+        "top-level-wins",
+        "transformers-config-object",
+        "no-method",
+        "unquantized",
+    ],
 )
 def test_quant_method_comes_from_the_config_or_a_vlms_text_config(config, expected):
+    """The top-level config first, else a VLM's text config. A loaded model's config holds
+    transformers' config object, not the JSON dict, and callers compare against ``"fp8"`` /
+    ``"mxfp4"``: it reports the plain method name, not its enum."""
     assert _ckpt_quant_method(config) == expected
-
-
-def test_the_top_level_quant_method_wins_over_the_text_configs():
-    config = SimpleNamespace(
-        quantization_config={"quant_method": "mxfp4"},
-        text_config=SimpleNamespace(quantization_config={"quant_method": "fp8"}),
-    )
-
-    assert _ckpt_quant_method(config) == "mxfp4"
-
-
-def test_a_transformers_quantization_config_object_reports_the_plain_method_name():
-    """A loaded model's config holds transformers' config object, not the JSON dict, and callers
-    compare against ``"fp8"`` / ``"mxfp4"``."""
-    transformers = pytest.importorskip("transformers")
-    config = SimpleNamespace(quantization_config=transformers.FineGrainedFP8Config())
-
-    assert _ckpt_quant_method(config) == "fp8"
 
 
 def test_from_pretrained_builds_its_mesh_from_the_ep_mesh_it_is_given():
