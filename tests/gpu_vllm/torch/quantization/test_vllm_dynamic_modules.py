@@ -1083,7 +1083,13 @@ def _quantize_and_summarize(self, recipe_path=None, quantizer_path=None):
     }
 
 
-def _boot_llm(model_dir, max_model_len=64, max_num_seqs=1, **extra):
+_MAX_MODEL_LEN = 64
+# One 64-token request needs a handful of KV blocks. The defaults size the KV pool from the memory
+# fraction (about 17 GB, millions of Python block objects) and the token budget to thousands.
+_SMALL_ENGINE = {"num_gpu_blocks_override": 32, "max_num_batched_tokens": _MAX_MODEL_LEN}
+
+
+def _boot_llm(model_dir, max_model_len=_MAX_MODEL_LEN, max_num_seqs=1, **extra):
     """Construct a vLLM engine on a tiny model.
 
     MoE fixtures override with ``moe_backend="triton"`` (pins the Triton
@@ -1154,7 +1160,9 @@ def _tiny_moe_llm(tmp_path_factory, model_type):
         num_experts_per_tok=2,
         **expert_config,
     )
-    llm = _boot_llm(model_dir, moe_backend="triton", enable_expert_parallel=True)
+    # GPT-OSS has sliding-window layers; the KV pool override is not verified on them.
+    small = _SMALL_ENGINE if model_type == "qwen3_moe" else {}
+    llm = _boot_llm(model_dir, moe_backend="triton", enable_expert_parallel=True, **small)
     try:
         yield llm
     finally:
@@ -1184,7 +1192,7 @@ def tiny_deepseek_llm(tmp_path_factory):
     model_dir = create_tiny_deepseek_v3_dir(
         tmp, kv_lora_rank=512, qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128
     )
-    llm = _boot_llm(model_dir, moe_backend="triton", enable_expert_parallel=True)
+    llm = _boot_llm(model_dir, moe_backend="triton", enable_expert_parallel=True, **_SMALL_ENGINE)
     try:
         yield llm
     finally:
@@ -1782,7 +1790,11 @@ def tiny_deepseek_fp8_llm(tmp_path):
         tmp_path, kv_lora_rank=512, qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128
     )
     llm = _boot_llm(
-        model_dir, quantization="fp8", moe_backend="triton", enable_expert_parallel=True
+        model_dir,
+        quantization="fp8",
+        moe_backend="triton",
+        enable_expert_parallel=True,
+        **_SMALL_ENGINE,
     )
     try:
         yield llm
