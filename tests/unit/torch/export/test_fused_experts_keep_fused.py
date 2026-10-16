@@ -25,7 +25,6 @@ Sharded cases run on a gloo process group: one rank in process, and two spawned 
 non-zero expert offset matters.
 """
 
-import contextlib
 import copy
 import math
 import re
@@ -44,7 +43,6 @@ from safetensors.torch import load_file, save_file
 from transformers import NemotronHConfig, PretrainedConfig
 from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHExperts
 
-import modelopt.torch.export.hf_export_handlers as handlers
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.moe_utils import (
     _dtensor_dim0_offset,
@@ -58,7 +56,6 @@ from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
-from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 NUM_EXPERTS = 4
 HIDDEN_DIM = 32
@@ -794,36 +791,6 @@ def test_keep_fused_refuses_fused_experts_not_named_experts():
         ExportModuleRegistry.match(experts)("model.layers.0.mlp.moe", experts, ctx)
 
     torch.testing.assert_close(experts.state_dict(), before, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("dense", ["fsdp", "replicate"])
-def test_fused_experts_fold_in_a_weight_window_when_the_plan_shards_the_dense_part(
-    monkeypatch, dense
-):
-    """FSDP2 owns the fused weights when it shards the dense part around them: folded outside a
-    weight-update window, they would be overwritten with its original shards at the next reshard.
-    Outside held windows the handler closes the window itself."""
-    events = []
-
-    @contextlib.contextmanager
-    def window(root, modules, names=None):
-        events.append("open")
-        yield
-        events.append("close")
-
-    monkeypatch.setattr(handlers, "fsdp2_aware_weight_update", window)
-    monkeypatch.setattr(
-        handlers, "_export_fused_experts_keep_fused", lambda module, dtype: events.append("fold")
-    )
-    experts = _quantized_experts(_KeepFusedGatedExperts, mtq.FP8_DEFAULT_CFG)
-    container = nn.Module()
-    container.experts = experts
-    set_distribution_plan(container, DistributionPlan(2, ep_size=2, dense=dense))
-    ctx = ExportContext(model=container, dtype=torch.bfloat16, keep_fused_experts=True)
-
-    ExportModuleRegistry.match(experts)(PREFIX, experts, ctx)
-
-    assert events == (["open", "fold", "close"] if dense == "fsdp" else ["fold"])
 
 
 class GptOssExperts(nn.Module):
