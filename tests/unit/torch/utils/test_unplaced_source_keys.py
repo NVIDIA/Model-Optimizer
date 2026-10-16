@@ -110,6 +110,16 @@ def test_the_hub_options_pick_the_snapshot_the_model_loads_from(tmp_path, monkey
     assert model._modelopt_source_checkpoint == str(tmp_path)
 
 
+def test_output_loading_info_is_refused_before_anything_loads():
+    """``from_pretrained`` would return ``(model, loading_info)``, where a model is expected.
+
+    Resolving this path, neither a directory nor a valid Hub ID, raises too, so the refusal must
+    come before anything runs.
+    """
+    with pytest.raises(ValueError, match="output_loading_info"):
+        load_pretrained("no/such/checkpoint", output_loading_info=True)
+
+
 def test_records_an_empty_list_when_every_tensor_was_placed(tmp_path):
     """An empty record is an answer, so the export does not derive the list again."""
     config = _tiny_llama_config()

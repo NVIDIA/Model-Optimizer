@@ -385,8 +385,15 @@ def load_pretrained(
       Nemotron-H checkpoint carries. ``model_type`` selects it, read from the checkpoint's config
       when omitted.
     * The checkpoint tensors the model has no parameter for are recorded
-      (:func:`record_unplaced_source_keys`), so the export carries them over unchanged.
+      (:func:`record_unplaced_source_keys`), so the export carries them over unchanged. The model
+      is returned alone: ``output_loading_info=True`` is refused.
     """
+    if kwargs.pop("output_loading_info", False):
+        raise ValueError(
+            "load_pretrained returns the model alone and does not take output_loading_info=True; "
+            "the checkpoint tensors the model has no parameter for are recorded on it instead "
+            "(see record_unplaced_source_keys)."
+        )
     # Importing modelopt.torch.models registers every model spec; only callers of this need them.
     from modelopt.torch.models.hf import prepare_model_for_loading
 
