@@ -17,10 +17,10 @@
 
 Tests the full round-trip:
   tiny LLaMA (CPU-offloaded via accelerate)
-  → FP8 layerwise calibration (calib_mutates_weights=False)
+  → FP8 (incl. layerwise, calib_mutates_weights=False) or NVFP4 calibration
   → export_hf_checkpoint
   → assert no meta tensors in output safetensors
-  → assert hf_quant_config.json present with fp8 format
+  → assert hf_quant_config.json present with the matching format
 """
 
 import copy
@@ -46,10 +46,11 @@ def _make_cpu_offloaded_model(tmp_path, num_hidden_layers=3, tiny_llama_dir=None
     with init_empty_weights():
         model = AutoModelForCausalLM.from_config(config)
 
-    # First layer on CPU to exercise the offload path; lm_head / embed on GPU.
+    # First layer on CPU to exercise the offload path; lm_head / embed on GPU. Parents ("",
+    # "model") stay unmapped, else accelerate first loads layer 0 to GPU, unlike from_pretrained.
     device_map = {}
     for n, _m in model.named_modules():
-        if "layers" not in n or n.split("layers.")[-1].isdigit():
+        if n not in ("", "model") and ("layers" not in n or n.split("layers.")[-1].isdigit()):
             device_map[n] = 0
     device_map["model.layers.0"] = "cpu"
 
@@ -66,8 +67,17 @@ def _layerwise_fp8_cfg():
     return cfg
 
 
-@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, _layerwise_fp8_cfg()])
-def test_export_hf_checkpoint_cpu_offloaded(tmp_path, quant_cfg):
+@pytest.mark.parametrize(
+    ("quant_cfg", "quant_algo"),
+    [
+        (mtq.FP8_DEFAULT_CFG, "FP8"),
+        (_layerwise_fp8_cfg(), "FP8"),
+        # NVFP4 combines per-block scales from the weight with the global scale from the
+        # calibrated amax, so it breaks if the offloaded weight and its amax change devices.
+        (mtq.NVFP4_DEFAULT_CFG, "NVFP4"),
+    ],
+)
+def test_export_hf_checkpoint_cpu_offloaded(tmp_path, quant_cfg, quant_algo):
     """export_hf_checkpoint must succeed on a CPU-offloaded model and produce valid weights.
 
     Regression guard against the pre-fix bug where remove_hook_from_module was called
@@ -92,13 +102,13 @@ def test_export_hf_checkpoint_cpu_offloaded(tmp_path, quant_cfg):
 
     # --- Assertions ---
 
-    # 1. hf_quant_config.json must exist and declare fp8
+    # 1. hf_quant_config.json must exist and declare the quantization format
     quant_config_path = export_dir / "hf_quant_config.json"
     assert quant_config_path.exists(), "hf_quant_config.json not written"
     with open(quant_config_path) as f:
         quant_config = json.load(f)
-    assert quant_config["quantization"]["quant_algo"] == "FP8", (
-        f"Expected FP8, got {quant_config['quantization'].get('quant_algo')}"
+    assert quant_config["quantization"]["quant_algo"] == quant_algo, (
+        f"Expected {quant_algo}, got {quant_config['quantization'].get('quant_algo')}"
     )
 
     # 2. All tensors in safetensors shards must be non-empty (no meta serialized as zeros)
