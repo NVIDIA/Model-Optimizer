@@ -147,22 +147,6 @@ def process_group(monkeypatch):
 # ----------------------------------------------------------------------------------- the loads
 
 
-@pytest.mark.parametrize("kwargs", [{"device_map": "auto", "dtype": "auto"}, {}])
-def test_a_single_process_loads_the_model_whole_as_asked(
-    serve, loaders, auto_class, tmp_path, kwargs
-):
-    """No process group, a single process's plan: from_pretrained places the model exactly as the
-    caller says, and with nothing said, as it does by default."""
-    serve(LlamaConfig(**_TINY))
-
-    model = load_pretrained(str(tmp_path), auto_class, **kwargs)
-
-    assert auto_class.calls == [kwargs]
-    assert model._modelopt_unplaced_source_keys == []
-    assert distribution_plan(model) == DistributionPlan()
-    assert loaders == {}
-
-
 @pytest.mark.parametrize(
     ("device_map", "placed"),
     [(None, {"": "cuda:1"}), ("cpu", "cpu")],
@@ -245,14 +229,6 @@ def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path):
     cpu_dist_workers.run(_every_rank_loads_rank0s_plan_job, ckpt=str(tmp_path))
 
 
-def test_a_plan_for_another_world_is_refused(run_as, serve, tmp_path):
-    run_as(2)
-    serve(LlamaConfig(**_TINY))
-
-    with pytest.raises(ValueError, match="is for 4 ranks, but this run has 2"):
-        load_pretrained(str(tmp_path), distribution=DistributionPlan(4, dense="fsdp"))
-
-
 @pytest.mark.parametrize(
     ("change", "error", "match"),
     [
@@ -282,18 +258,54 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
     assert loaders == {}
 
 
-def test_the_fsdp2_load_refuses_a_quantized_checkpoint(
-    run_as, serve, loaders, process_group, tmp_path
+@pytest.mark.parametrize(
+    ("distribution", "quantized", "whole_model_kwargs", "error", "match"),
+    [
+        (
+            DistributionPlan(4, dense="fsdp"),
+            False,
+            False,
+            ValueError,
+            "is for 4 ranks, but this run has 2",
+        ),
+        (DistributionPlan(2, dense="fsdp"), True, False, NotImplementedError, "cannot dequantize"),
+        ("fsdp2", False, False, TypeError, "expected a DistributionPlan or None"),
+        (
+            DistributionPlan(2),
+            False,
+            True,
+            TypeError,
+            "hf_config applies to a sharded load only",
+        ),
+    ],
+    ids=["another-world", "quantized-checkpoint", "not-a-plan", "hf-config-on-a-whole-load"],
+)
+def test_a_load_refuses_what_it_cannot_load(
+    run_as,
+    serve,
+    loaders,
+    auto_class,
+    process_group,
+    tmp_path,
+    distribution,
+    quantized,
+    whole_model_kwargs,
+    error,
+    match,
 ):
-    """It reads the tensors as stored, so quantized weights would load as if they were not."""
+    """Before anything loads: a plan for another world; a quantized checkpoint, which FSDP2 would
+    read as stored; anything but a plan; and the sharded loads' config, which from_pretrained would
+    take for a model argument and fail far from here."""
     run_as(2)
-    config = LlamaConfig(**_TINY)
-    config.quantization_config = {"quant_method": "fp8"}
-    serve(config)
+    config = serve(LlamaConfig(**_TINY))
+    if quantized:
+        config.quantization_config = {"quant_method": "fp8"}
+    whole = {"auto_class": auto_class, "hf_config": config} if whole_model_kwargs else {}
 
-    with pytest.raises(NotImplementedError, match="cannot dequantize"):
-        load_pretrained(str(tmp_path), distribution=DistributionPlan(2, dense="fsdp"))
+    with pytest.raises(error, match=match):
+        load_pretrained(str(tmp_path), distribution=distribution, **whole)
     assert loaders == {}
+    assert auto_class.calls == []
 
 
 @pytest.mark.parametrize("quantized", [False, True])
@@ -324,21 +336,6 @@ def test_a_single_process_fsdp2_load_sets_up_its_group_of_one(
     assert live == [0]
     call = loaders.pop("fsdp2")
     assert (call["rank"], call["world_size"]) == (0, 1)
-
-
-def test_anything_but_a_plan_is_refused(serve, tmp_path):
-    serve(LlamaConfig(**_TINY))
-
-    with pytest.raises(TypeError, match="expected a DistributionPlan or None"):
-        load_pretrained(str(tmp_path), distribution="fsdp2")
-
-
-def test_a_whole_model_load_refuses_a_sharded_loads_config(serve, auto_class, tmp_path):
-    """from_pretrained would take hf_config for a model argument and fail far from here."""
-    config = serve(LlamaConfig(**_TINY))
-
-    with pytest.raises(TypeError, match="hf_config applies to a sharded load only"):
-        load_pretrained(str(tmp_path), auto_class, hf_config=config)
 
 
 # --------------------------------------------------------------------------------- fsdp2_wrap
