@@ -598,30 +598,25 @@ def _meta_dcp_load(
     local_dir: str,
     device,
     *,
-    load_names: "set | None" = None,
-    skip_names: "set | None" = None,
-    max_unloaded_frac: float = 0.5,
+    load_names: set,
 ) -> None:
-    """The single meta + torch-DCP loader shared by every distributed dense path.
+    """Materialize a meta-built model's ``load_names`` params and fill them through torch DCP.
 
-    materialize each rank's params on ``device`` and fill them from the HF safetensors via DCP's
+    Each rank materializes the params on ``device`` and fills them from the HF safetensors via DCP's
     ``HuggingFaceStorageReader``.
 
     PLACEMENT is decided entirely by the CALLER, not here: ``dcp.load`` reads a FULL tensor into a plain
-    (replicated) param and only the LOCAL SLICE into a ``Shard`` ``DTensor``. So the caller picks the layout
-    by what it does before calling this -- nothing (-> Replicate, full per rank),
-    ``fully_shard`` the whole model (``load_and_prepare_fsdp2`` -> Shard), or ``fully_shard`` only the dense
-    modules (the EP hybrid -> dense Shard, experts left as loaded). No full-model copy for the sharded cases.
+    (replicated) param and only the LOCAL SLICE into a ``Shard`` ``DTensor``. The EP hybrid ``fully_shard``-s
+    its dense modules first, so each rank loads only its dense shard, and no full copy is made.
 
-    ``load_names`` (optional) restricts the checkpoint load to a subset of model param names -- the EP-dense
-    case, where the experts are ALREADY materialized by ``from_pretrained`` and must not be touched. ``None``
-    loads the whole model (DP / FSDP2-full).
+    ``load_names`` restricts the checkpoint load to those ``state_dict`` names -- the dense params in the EP
+    hybrid, whose experts are ALREADY materialized by ``from_pretrained`` and must not be touched.
 
     Materialization is SELECTIVE (module-by-module, only where params are meta) so already-real params (EP
     experts) are never re-emptied. ``to_empty`` also re-empties BUFFERS (rotary ``inv_freq`` etc., + any the
     caller already loaded), so they are snapshotted and restored -- a params-only checkpoint load would
     otherwise leave them garbage and the calibration forward would drift (weights load fine but activation
-    amax is wrong). Persistent buffers the checkpoint DOES carry are (re)loaded via DCP below.
+    amax is wrong). Persistent buffers ``load_names`` names are (re)loaded from the checkpoint via DCP below.
 
     Every target param ends up filled -- from the checkpoint, by ``tie_weights``, or with the value it
     already had -- or the load fails: nothing is left as the uninitialized memory ``to_empty`` hands out.
@@ -629,30 +624,25 @@ def _meta_dcp_load(
     import torch.distributed.checkpoint as dcp
     from torch.distributed.checkpoint import HuggingFaceStorageReader
 
-    # Snapshot real buffers (to_empty re-empties them), materialize params, restore buffers. Whole-model
-    # meta (DP / FSDP2-full, ``load_names is None``) uses ``model.to_empty`` -- the FSDP2-aware root
-    # materialization; a per-module selective loop corrupts the ROOT-sharded FSDP state (its state_dict then
-    # returns wrong keys). The PARTIAL case (EP-dense: dense meta, experts already real) MUST be selective so
-    # the real experts are not re-emptied -- there no root is fully_shard'd, so per-module to_empty is safe.
+    # Snapshot real buffers (to_empty re-empties them), materialize params, restore buffers. Materialize
+    # selectively, module by module, so the real experts are not re-emptied. That is safe only because no
+    # root is fully_shard-ed: a per-module loop corrupts a ROOT-sharded FSDP state (its state_dict then
+    # returns wrong keys).
     saved_buffers = {n: b.detach().clone() for n, b in model.named_buffers() if not b.is_meta}
     # A module's ``to_empty`` re-empties every direct param, so a param already real beside a meta one
     # (a router's ``e_score_correction_bias`` next to its meta ``weight``) is kept here too: nothing
     # outside ``load_names`` would refill it.
     saved_params: dict[str, torch.Tensor] = {}
-    if load_names is None:
-        emptied = {n for n, _ in model.named_parameters(remove_duplicate=False)}
-        model.to_empty(device=device)
-    else:
-        emptied = set()
-        for name, m in model.named_modules():
-            direct = dict(m.named_parameters(recurse=False))
-            if any(p.is_meta for p in direct.values()):
-                prefix = f"{name}." if name else ""
-                saved_params.update(
-                    (prefix + n, p.detach().clone()) for n, p in direct.items() if not p.is_meta
-                )
-                emptied.update(prefix + n for n in direct)
-                m.to_empty(device=device, recurse=False)
+    emptied: set[str] = set()
+    for name, m in model.named_modules():
+        direct = dict(m.named_parameters(recurse=False))
+        if any(p.is_meta for p in direct.values()):
+            prefix = f"{name}." if name else ""
+            saved_params.update(
+                (prefix + n, p.detach().clone()) for n, p in direct.items() if not p.is_meta
+            )
+            emptied.update(prefix + n for n in direct)
+            m.to_empty(device=device, recurse=False)
     for n, b in model.named_buffers():
         src = saved_buffers.get(n)
         if src is not None:
@@ -681,7 +671,7 @@ def _meta_dcp_load(
     full_sd = (
         model.state_dict()
     )  # (sharded ``DTensor`` or plain) params + replicated persistent buffers
-    target_names = set(full_sd) if load_names is None else (set(load_names) & set(full_sd))
+    target_names = set(load_names) & set(full_sd)
     # {ckpt_key: model_key}, mapped against the WHOLE model and then cut to what this load fills: a suffix
     # unique among the targets alone can still belong to a key outside them (an expert's, when only the
     # dense part loads here).
@@ -696,26 +686,18 @@ def _meta_dcp_load(
     inv = {mk: ck for ck, mk in key_map.items()}  # model_key -> ckpt_key (1:1 on model keys)
     load_sd = {inv[mk]: full_sd[mk] for mk in full_sd if mk in inv}
     mapped_names = set(key_map.values())
-    # Fail fast, BEFORE the load, if the mapping left too much of the TARGET WEIGHT unloaded -- a key scheme
+    # Fail fast, BEFORE the load, if the mapping left over half of the TARGET WEIGHT unloaded -- a key scheme
     # this path did not resolve. Weight by NUMEL, not param COUNT: a fused-expert MoE (Qwen3-MoE: per-expert
     # checkpoint -> grouped ``experts.gate_up_proj``/``down_proj`` model params DCP can't fuse) leaves only
     # ~2 params/layer unloaded but they are ~95% of the weight, so a count-based guard misses it. A smaller
     # shortfall can be tied weights, which ``tie_weights`` fills after the load; whatever it does not fill
     # fails there.
-    # ``skip_names`` = params loaded by a SEPARATE path (e.g. Qwen3-MoE fused grouped experts, filled by
-    # :func:`_load_fused_experts_sharded` which fuses per-expert checkpoint tensors DCP can't concat) --
-    # exclude them from the coverage guard so it doesn't (correctly) flag them as unloaded here.
-    skip_names = skip_names or set()
-    numel = {
-        n: p.numel()
-        for n, p in model.named_parameters()
-        if n in target_names and n not in skip_names
-    }
+    numel = {n: p.numel() for n, p in model.named_parameters() if n in target_names}
     want_params = set(numel)
     unloaded = want_params - mapped_names
     total_nel = max(1, sum(numel.values()))
     unloaded_nel = sum(numel[n] for n in unloaded)
-    if unloaded_nel > max_unloaded_frac * total_nel:
+    if 2 * unloaded_nel > total_nel:
         raise RuntimeError(
             f"meta+DCP load: {len(unloaded)}/{len(want_params)} params ({100 * unloaded_nel / total_nel:.0f}% "
             f"of the target weight) matched no checkpoint key -- the checkpoint's key naming was not resolved "
