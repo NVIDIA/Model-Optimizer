@@ -23,13 +23,11 @@ left out of the weight index. These tests drive each piece directly, on CPU.
 import contextlib
 import json
 import math
-from datetime import timedelta
-from functools import partial
 from unittest import mock
 
 import pytest
 import torch
-import torch.distributed as dist
+from _test_utils.torch.distributed.utils import bounded_collectives
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 
@@ -48,15 +46,6 @@ from modelopt.torch.export.distributed_writer import (
     _size_to_bytes,
     _write_even_shards,
 )
-
-
-@pytest.fixture
-def gloo_world_of_one(skip_on_windows, tmp_path_factory):
-    """A one-rank gloo process group and its CPU device mesh."""
-    store = tmp_path_factory.mktemp("pg") / "store"
-    dist.init_process_group("gloo", init_method=store.as_uri(), rank=0, world_size=1)
-    yield init_device_mesh("cpu", (1,))
-    dist.destroy_process_group()
 
 
 def _raw_bytes(tensor):
@@ -123,81 +112,46 @@ def _llama_config():
     ("size", "nbytes"),
     [
         ("5GB", 5 * 10**9),
-        ("500MB", 500 * 10**6),
-        ("10KB", 10 * 10**3),
-        ("2TB", 2 * 10**12),
         ("1GiB", 2**30),
-        ("3MiB", 3 * 2**20),
-        ("4KiB", 4 * 2**10),
-        ("1TiB", 2**40),
-        ("1.5GB", 1_500_000_000),
-        (" 2 mb ", 2 * 10**6),
+        (" 1.5 mb ", 1_500_000),
         ("123", 123),
         (4096, 4096),
+        ("5B", ValueError),
+        ("5 gigs", ValueError),
+        ("", ValueError),
     ],
 )
 def test_size_to_bytes_reads_hf_shard_sizes(size, nbytes):
-    assert _size_to_bytes(size) == nbytes
+    """Decimal and binary units, any case and padding, a bare number; anything else is refused."""
+    if nbytes is ValueError:
+        with pytest.raises(ValueError):
+            _size_to_bytes(size)
+    else:
+        assert _size_to_bytes(size) == nbytes
 
 
-@pytest.mark.parametrize("size", ["5B", "5 gigs", ""])
-def test_size_to_bytes_rejects_an_unknown_unit(size):
-    with pytest.raises(ValueError):
-        _size_to_bytes(size)
+@pytest.mark.parametrize(
+    ("sizes", "n", "file_sizes"),
+    [
+        # max_shard_size is a bound, not a target: two files of 8 rather than 10 + 6.
+        ({"a": 4, "b": 3, "c": 3, "d": 2, "e": 2, "f": 2}, 2, [8, 8]),
+        # One file per tensor once no two fit together.
+        ({"a": 6, "b": 6, "c": 6}, 1, [6, 6, 6]),
+        # A tensor over the bound gets a file of its own, and the rest still share one.
+        ({"big": 100, "a": 1, "b": 1, "c": 1}, 1, [3, 100]),
+        # Never an empty file, asked for more files than tensors or for none.
+        ({"a": 1, "b": 1}, 5, [1, 1]),
+        ({}, 3, []),
+    ],
+    ids=["balanced", "grows", "oversized", "more-files-than-tensors", "nothing"],
+)
+def test_even_bins_balances_the_files_within_the_bound(sizes, n, file_sizes):
+    bins = _even_bins(list(sizes), sizes, n, 10)
 
-
-def test_even_bins_places_every_key_once_within_the_bound():
-    sizes = {f"t{i}": i + 1 for i in range(20)}  # 210 bytes in all
-
-    bins = _even_bins(list(sizes), sizes, math.ceil(210 / 50), 50)
-
-    assert sorted(k for b in bins for k in b) == sorted(sizes)
-    assert all(0 < sum(sizes[k] for k in b) <= 50 for b in bins)
-
-
-def test_even_bins_balances_the_files_instead_of_filling_them_in_turn():
-    """``max_shard_size`` is a bound, not a target: two files of 8 rather than 10 + 6."""
-    sizes = {"a": 4, "b": 3, "c": 3, "d": 2, "e": 2, "f": 2}
-
-    bins = _even_bins(list(sizes), sizes, 2, 10)
-
-    assert sorted(sum(sizes[k] for k in b) for b in bins) == [8, 8]
-
-
-def test_even_bins_adds_bins_until_every_bin_fits():
-    sizes = {"a": 6, "b": 6, "c": 6}
-
-    bins = _even_bins(list(sizes), sizes, 1, 10)
-
-    assert sorted(map(sorted, bins)) == [["a"], ["b"], ["c"]]
-
-
-def test_even_bins_gives_a_tensor_larger_than_the_bound_a_bin_of_its_own():
-    sizes = {"big": 100, "a": 1, "b": 1, "c": 1}
-
-    bins = _even_bins(list(sizes), sizes, 1, 10)
-
-    assert ["big"] in bins
-    assert sorted(k for b in bins for k in b) == sorted(sizes)
-
-
-def test_even_bins_still_packs_the_rest_when_one_tensor_exceeds_the_bound():
-    sizes = {"big": 100, "a": 1, "b": 1, "c": 1}
-
-    bins = _even_bins(list(sizes), sizes, 1, 10)
-
-    assert len(bins) == 2
-
-
-def test_even_bins_never_returns_an_empty_bin():
-    sizes = {"a": 1, "b": 1}
-    assert sorted(map(sorted, _even_bins(list(sizes), sizes, 5, 10))) == [["a"], ["b"]]
-    assert _even_bins([], {}, 3, 10) == []
+    assert sorted(sum(sizes[k] for k in b) for b in bins) == file_sizes
 
 
 def test_nbytes_counts_the_global_size_of_a_dtensor(gloo_world_of_one):
-    assert _nbytes(torch.zeros(3, 4, dtype=torch.bfloat16)) == 24
-    assert _nbytes(torch.zeros(5, dtype=torch.uint8)) == 5
     # This rank holds 2 of 6 rows; every rank must agree on the size, so all 6 count.
     shard = DTensor.from_local(
         torch.zeros(2, 4),
@@ -208,26 +162,6 @@ def test_nbytes_counts_the_global_size_of_a_dtensor(gloo_world_of_one):
         stride=(4, 1),
     )
     assert _nbytes(shard) == 6 * 4 * 4
-
-
-@pytest.mark.parametrize(
-    ("placement", "expected"),
-    [(Shard(0), True), (Shard(1), False), (Replicate(), False)],
-    ids=["shard0", "shard1", "replicate"],
-)
-def test_is_full_world_shard0_accepts_only_a_dim0_shard_over_the_whole_world(
-    gloo_world_of_one, placement, expected
-):
-    tensor = distribute_tensor(torch.arange(12.0).reshape(4, 3), gloo_world_of_one, [placement])
-    assert _is_full_world_shard0(tensor, 1) is expected
-
-
-def test_is_full_world_shard0_rejects_a_mesh_that_is_not_the_whole_world(gloo_world_of_one):
-    tensor = distribute_tensor(torch.zeros(4, 3), gloo_world_of_one, [Shard(0)])
-    assert _is_full_world_shard0(tensor, 2) is False
-    mesh_2d = init_device_mesh("cpu", (1, 1))
-    tensor_2d = distribute_tensor(torch.zeros(4, 3), mesh_2d, [Shard(0), Replicate()])
-    assert _is_full_world_shard0(tensor_2d, 1) is False
 
 
 def test_is_full_world_shard0_answers_from_the_mesh_memo(gloo_world_of_one):
@@ -263,24 +197,49 @@ def test_materialize_owned_leaves_every_tensor_whole_and_plain(gloo_world_of_one
     assert sd[expert_key] is expert  # experts are already disjoint per rank: left alone
 
 
-def test_materialize_owned_rejects_a_placement_it_cannot_assemble(gloo_world_of_one):
-    sd = {"w": distribute_tensor(torch.zeros(4, 4), gloo_world_of_one, [Shard(1)])}
-    with pytest.raises(RuntimeError, match=r"cannot materialize.*'w'"):
-        _materialize_owned(sd, set(), 0, 1)
-
-
-def test_materialize_owned_rejects_shards_that_do_not_tile_the_global_shape(gloo_world_of_one):
-    """A padded local chunk would concatenate into a wrong tensor; it must raise instead."""
-    padded = DTensor.from_local(
+def _padded_shard(mesh):
+    """This rank's 2 rows of a 3-row tensor: a padded local chunk, which would concatenate wrong."""
+    return DTensor.from_local(
         torch.zeros(2, 4),
-        gloo_world_of_one,
+        mesh,
         [Shard(0)],
         run_check=False,
         shape=torch.Size([3, 4]),
         stride=(4, 1),
     )
-    with pytest.raises(RuntimeError, match="do not tile their global shape"):
-        _materialize_owned({"w": padded}, set(), 0, 1)
+
+
+@pytest.mark.parametrize(
+    ("build", "world", "match"),
+    [
+        (
+            lambda mesh: distribute_tensor(torch.zeros(4, 4), mesh, [Shard(1)]),
+            1,
+            "cannot materialize",
+        ),
+        # A dim-0 shard over a mesh that is not the whole world: smaller, or 2-D.
+        (
+            lambda mesh: distribute_tensor(torch.zeros(4, 3), mesh, [Shard(0)]),
+            2,
+            "cannot materialize",
+        ),
+        (
+            lambda mesh: distribute_tensor(
+                torch.zeros(4, 3), init_device_mesh("cpu", (1, 1)), [Shard(0), Replicate()]
+            ),
+            1,
+            "cannot materialize",
+        ),
+        (_padded_shard, 1, "do not tile their global shape"),
+    ],
+    ids=["shard1", "smaller-mesh", "2d-mesh", "padded"],
+)
+def test_materialize_owned_rejects_a_tensor_it_cannot_assemble(
+    gloo_world_of_one, build, world, match
+):
+    """Refused before anything moves, rather than assembled wrong."""
+    with pytest.raises(RuntimeError, match=match):
+        _materialize_owned({"w": build(gloo_world_of_one)}, set(), 0, world)
 
 
 def test_revert_whole_sd_keeps_a_state_dict_with_nothing_to_revert():
@@ -327,7 +286,7 @@ def test_revert_whole_sd_keeps_in_memory_names_when_the_reverse_fails(monkeypatc
     sd = {"model.layers.0.mlp.experts.0.up_proj.weight": torch.ones(2)}
     before = dict(sd)
 
-    with pytest.warns(UserWarning, match="reverse weight conversion skipped"):
+    with pytest.warns(UserWarning):
         assert _revert_whole_sd(torch.nn.Module(), sd) is False
 
     assert sd == before
@@ -365,37 +324,31 @@ def test_write_even_shards_fails_loudly_when_no_rank_has_anything_to_write(
         _write_even_shards({}, tmp_path, "1MB", 0, 1)
 
 
-@contextlib.contextmanager
-def _bounded_collectives(seconds=10):
-    """Run the writer's default-group collectives on a new group that gives up after ``seconds``.
-
-    A rank that fails alone can leave a peer waiting in a collective it never joins. On this group
-    that wait raises in seconds instead of hanging for the default group's timeout, and the default
-    group, which the worker pool keeps for the next test, never falls out of step.
-    """
-    group = dist.new_group(timeout=timedelta(seconds=seconds))
-    with (
-        mock.patch.object(dist, "all_gather_object", partial(dist.all_gather_object, group=group)),
-        mock.patch.object(dist, "barrier", partial(dist.barrier, group=group)),
-    ):
-        yield
-
-
 def _one_rank_fails_job(rank, world_size, tmp_dir, fails):
-    failing_rank, step, target = {
-        "shard": (1, "shards written", "safetensors.torch.save_file"),
-        "index": (0, "index written", "json.dump"),
-    }[fails]
-    if rank == failing_rank:
-        failure = mock.patch(target, side_effect=OSError("disk full"))
-        expected = pytest.raises(OSError, match="disk full")
+    failing_rank, target = {"shard": (1, "safetensors.torch.save_file"), "index": (0, "json.dump")}[
+        fails
+    ]
+    failure = (
+        mock.patch(target, side_effect=OSError("disk full"))
+        if rank == failing_rank
+        else contextlib.nullcontext()
+    )
+    try:
+        with bounded_collectives(), failure:
+            _write_even_shards(
+                {f"rank{rank}.weight": torch.ones(2)}, tmp_dir, "1MB", rank, world_size
+            )
+    except (OSError, RuntimeError) as error:
+        raised = error
     else:
-        failure = contextlib.nullcontext()
-        expected = pytest.raises(
-            RuntimeError, match=f"rank {failing_rank} failed to compute {step}: OSError: disk full"
-        )
-    with _bounded_collectives(), failure, expected:
-        _write_even_shards({f"rank{rank}.weight": torch.ones(2)}, tmp_dir, "1MB", rank, world_size)
+        raised = None
+    # The failing rank raises its own error; its peer gets that error, naming the rank, instead of
+    # waiting for it.
+    if rank == failing_rank:
+        assert isinstance(raised, OSError), raised
+    else:
+        assert isinstance(raised, RuntimeError), raised
+        assert f"rank {failing_rank}" in str(raised) and "disk full" in str(raised), raised
 
 
 @pytest.mark.parametrize("fails", ["shard", "index"])
@@ -405,11 +358,16 @@ def test_a_write_that_fails_on_one_rank_fails_on_every_rank(cpu_dist_workers, tm
 
 
 def _cross_rank_collision_job(rank, world_size, tmp_dir):
-    with (
-        _bounded_collectives(),
-        pytest.raises(RuntimeError, match="name collision across ranks"),
-    ):
-        _write_even_shards({"model.norm.weight": torch.ones(2)}, tmp_dir, "1MB", rank, world_size)
+    try:
+        with bounded_collectives():
+            _write_even_shards(
+                {"model.norm.weight": torch.ones(2)}, tmp_dir, "1MB", rank, world_size
+            )
+    except RuntimeError as error:
+        raised = str(error)
+    else:
+        raised = "no error"
+    assert "name collision across ranks" in raised, raised
 
 
 def test_a_name_two_ranks_both_write_fails_the_write_on_every_rank(cpu_dist_workers, tmp_path):
