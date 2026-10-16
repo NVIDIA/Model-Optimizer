@@ -148,15 +148,37 @@ dominate the dump size. Streaming feeds the same hidden states from a live
 mode. Online training is rejected: it produces no cached base outputs for the
 draft to be scored against.
 
+The TVD objectives only ever need the base's *truncated* next-token distribution,
+not a full hidden state, so they can instead read a much smaller dump of the
+base's top-k deployment policy. Produce one with:
+
+```bash
+python collect_hidden_states/compute_sparse_policy_hf.py \
+  --model $BASE_MODEL --input-data $CONVERSATIONS --output-dir $POLICY_DIR \
+  --top-k 20 --top-p 0.95 --answer-only-loss
+```
+
+and train against it with `data.sparse_data_path=$POLICY_DIR` in place of
+`data.offline_data_path` — the two are alternatives, not a pair:
+
 ```bash
 torchrun --nproc_per_node 8 main.py \
   --config ../../modelopt_recipes/general/speculative_decoding/external_draft.yaml \
   model.model_name_or_path=$BASE_MODEL \
   draft_model_name_or_path=$DRAFT_MODEL \
-  data.offline_data_path=$HIDDEN_STATES_DIR \
+  data.sparse_data_path=$POLICY_DIR \
   external.external_loss=tvd \
+  external.external_top_k=20 external.external_top_p=0.95 \
   training.output_dir=$OUTPUT_DIR
 ```
+
+Keep `--top-k` / `--top-p` equal to `external.external_top_k` /
+`external.external_top_p`: the stored policy *is* the teacher distribution, so a dump
+narrower than the objective expects charges the draft for mass on tokens the teacher
+actually supported. The dump carries no record of how it was truncated, so a mismatch
+is not detected — only a stored row that does not sum to 1 draws a warning. This dump
+also requires a TVD objective; `soft_ce` needs the full base distribution and is
+rejected against `sparse_data_path`.
 
 `external.external_loss` selects the objective:
 
