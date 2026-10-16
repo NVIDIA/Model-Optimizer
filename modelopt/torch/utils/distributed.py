@@ -548,6 +548,8 @@ class _StridedIterableShard(IterableDataset):
     exactly the same count -- preserving the equal-per-rank-batch invariant that keeps per-step EP
     collectives from hanging when one rank runs short. Each DataLoader worker process iterates its own
     copy of the stream, so the workers split the groups between them rather than each yielding them all.
+    ``vlm_dataset_utils._ShardedIterable`` cannot stand in: it pads every rank to a count its own loader
+    knows, while this wraps any loader's stream, which may know none, and splits across its workers.
     """
 
     def __init__(self, base: IterableDataset, rank: int, world_size: int):
