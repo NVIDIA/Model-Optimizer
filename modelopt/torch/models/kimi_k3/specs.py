@@ -20,7 +20,7 @@ decompressed at load.
 """
 
 from ..specs import EPSpec, ModelSpec, register
-from .ep import prepare
+from .ep import BASE_MODEL_EP_PLAN, prepare
 
 __all__: list[str] = []
 
@@ -28,6 +28,6 @@ register(
     ModelSpec(
         model_type="kimi_k3",
         modeling_source="remote_code",
-        ep_spec=EPSpec(prepare=prepare),
+        ep_spec=EPSpec(prepare=prepare, prepared_ep_plan=BASE_MODEL_EP_PLAN),
     )
 )

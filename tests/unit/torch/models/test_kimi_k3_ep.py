@@ -593,10 +593,10 @@ def test_the_plan_the_conversions_and_the_fused_params_name_the_same_tensors():
 def test_prepare_sets_the_plan_and_a2a_experts_and_hands_the_quant_config_to_the_decompressor(
     monkeypatch,
 ):
-    """The plan goes on the text config (its globs are written against the language model), the
-    experts forward is ``torch_a2a``, the kimi_linear fusion is registered, and the decompressor
-    sees the compressed-tensors config before it is dropped (so transformers builds no competing
-    quantizer)."""
+    """The plan goes on the text config (its globs are written against the language model) and is
+    the one the spec states for a run that skips prepare, the experts forward is ``torch_a2a``, the
+    kimi_linear fusion is registered, and the decompressor sees the compressed-tensors config before
+    it is dropped (so transformers builds no competing quantizer)."""
     seen = []
     monkeypatch.setattr(
         _onfly_decompress,
@@ -611,6 +611,7 @@ def test_prepare_sets_the_plan_and_a2a_experts_and_hands_the_quant_config_to_the
 
     assert text.base_model_ep_plan == kimi_k3.BASE_MODEL_EP_PLAN
     assert text.base_model_ep_plan is not kimi_k3.BASE_MODEL_EP_PLAN
+    assert text.base_model_ep_plan == get_spec("kimi_k3").ep_spec.prepared_ep_plan
     assert not hasattr(config, "base_model_ep_plan")
     assert text._experts_implementation == "torch_a2a"
     registered = cm.get_checkpoint_conversion_mapping("kimi_linear")
