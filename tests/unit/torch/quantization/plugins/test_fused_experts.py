@@ -2886,6 +2886,68 @@ def test_ep_sharded_experts_calibrate_and_fold_their_own_weights(cpu_dist_worker
     cpu_dist_workers.run(_ep_sharded_experts_use_their_own_weights_job)
 
 
+def _ep_weight_input_hooks_read_local_experts_job(rank, size):
+    """Registering the weight-input hooks (local Hessian, imatrix) hands ``on_weight`` each
+    projection's first LOCAL expert, the one its first quantizer quantizes, and runs no collective:
+    indexing the expert-parallel DTensor would name a global expert and all-gather every expert."""
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.tensor import Shard, distribute_tensor
+    from torch.distributed.tensor.debug import CommDebugMode
+    from transformers import Qwen3MoeConfig
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
+
+    from modelopt.torch.quantization.model_calib import _register_weight_input_hooks
+    from modelopt.torch.quantization.utils.core_utils import module_name_maps
+
+    config = Qwen3MoeConfig(
+        hidden_size=_EP_HIDDEN,
+        moe_intermediate_size=2 * _EP_HIDDEN,
+        intermediate_size=4 * _EP_HIDDEN,
+        num_experts=_EP_EXPERTS,
+        num_experts_per_tok=TOP_K,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+    )
+    torch.manual_seed(0)
+    whole = Qwen3MoeExperts(config)
+    with torch.no_grad():
+        for e in range(_EP_EXPERTS):  # a distinct scale per expert, so a mix-up cannot pass
+            whole.gate_up_proj[e].normal_(std=0.1 * (e + 1))
+            whole.down_proj[e].normal_(std=0.1 * (e + 1))
+    model = _ExpertsHolder(Qwen3MoeExperts(config))
+    n_local = _EP_EXPERTS // size
+    mesh = init_device_mesh("cpu", (size,))
+    model.experts.num_experts = n_local
+    for name in ("gate_up_proj", "down_proj"):
+        full = getattr(whole, name).detach().clone()
+        model.experts._parameters[name] = nn.Parameter(distribute_tensor(full, mesh, [Shard(0)]))
+    mtq.quantize(model, _WEIGHT_ONLY_INT8_EXPERTS_CFG)
+
+    seen = {}
+    with CommDebugMode() as comms:
+        handles = _register_weight_input_hooks(
+            model,
+            module_name_maps(model),
+            lambda *args: None,
+            on_weight=lambda name, weight, quantizer: seen.__setitem__(name, (weight, quantizer)),
+        )
+    for handle in handles:
+        handle.remove()
+    assert comms.get_total_counts() == 0, dict(comms.get_comm_counts())
+    for name in ("gate_up_proj", "down_proj"):
+        weight, quantizer = seen[f"experts.{name}"]
+        assert quantizer is getattr(model.experts, f"{name}_weight_quantizers")[0]
+        local_first = getattr(whole, name)[rank * n_local].detach()
+        torch.testing.assert_close(weight, local_first, atol=0, rtol=0, msg=name)
+
+
+def test_ep_weight_input_hooks_read_this_ranks_experts_without_a_collective(cpu_dist_workers):
+    """Hook registration only needs one expert's shape, so it must not gather other ranks' experts."""
+    cpu_dist_workers.run(_ep_weight_input_hooks_read_local_experts_job)
+
+
 def _fsdp_wrapped_ep_experts_calibrate_their_own_weights_job(rank, size):
     """The dense-sharded expert-parallel layout: the decoder layer FSDP2-sharded over ``dp`` with its
     experts left out (``ignored_params``) and EP-sharded over ``ep``. Weight calibration opens FSDP2's
