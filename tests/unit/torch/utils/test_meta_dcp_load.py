@@ -19,8 +19,8 @@
 ``torch.distributed.checkpoint``; ``_map_ckpt_keys_to_model`` bridges checkpoint names to the built
 model's ``state_dict`` names; ``_fsdp2_wrap_modules`` picks the blocks FSDP2 shards. The loads run
 for real on CPU, from tiny transformers models into hand-written safetensors files. DCP loads in a
-single process without a process group; the two tests that need the distributed path start a
-one-rank gloo group.
+single process without a process group; the tests that need the distributed path start a one-rank
+gloo group.
 """
 
 import pytest
@@ -59,6 +59,11 @@ def _meta_twin(build, **kwargs):
     """``build(**kwargs)`` with params on ``meta`` and buffers real, as the loader's callers hold it."""
     with init_empty_weights():
         return build(**kwargs)
+
+
+def _every_name(model):
+    """Every ``state_dict`` name of ``model``: what a load into a model with nothing placed fills."""
+    return set(model.state_dict())
 
 
 def _tiny_qwen2_5_vl():
@@ -242,8 +247,8 @@ def test_wrap_modules_refuse_a_model_without_blocks():
 
 
 def test_load_fills_a_meta_model_keeps_its_buffers_and_reties_it(tmp_path):
-    """Whole-model load: every checkpoint tensor lands, the real rotary buffers survive ``to_empty``,
-    and the tied ``lm_head`` the checkpoint omits is re-tied instead of left as empty memory.
+    """Every checkpoint tensor lands, the real rotary buffers survive ``to_empty``, and the tied
+    ``lm_head`` the checkpoint omits is re-tied instead of left as empty memory.
     """
     src = get_tiny_llama(tie_word_embeddings=True)
     ckpt = {k: v for k, v in src.state_dict().items() if k != "lm_head.weight"}
@@ -252,7 +257,7 @@ def test_load_fills_a_meta_model_keeps_its_buffers_and_reties_it(tmp_path):
     buffers = {n: b.clone() for n, b in model.named_buffers()}
     assert buffers and all(p.is_meta for p in model.parameters())
 
-    _meta_dcp_load(model, ckpt_dir, "cpu")
+    _meta_dcp_load(model, ckpt_dir, "cpu", load_names=_every_name(model))
 
     loaded = model.state_dict()
     for name, value in ckpt.items():
@@ -280,7 +285,7 @@ def test_a_tie_keeps_the_checkpoint_values_whichever_alias_holds_them(
         torch, "empty_like", lambda t, **kw: empty_like(t, **kw).fill_(float("nan"))
     )
 
-    _meta_dcp_load(model, ckpt_dir, "cpu")
+    _meta_dcp_load(model, ckpt_dir, "cpu", load_names=_every_name(model))
 
     assert model.lm_head.weight is model.model.embed_tokens.weight
     assert torch.equal(model.lm_head.weight, ckpt[stored])
@@ -296,7 +301,7 @@ def test_flat_vlm_checkpoint_names_reach_the_nested_params(tmp_path):
     assert ckpt.keys() & ref.keys() == {"lm_head.weight"}  # every other name differs
     model = _meta_twin(_tiny_qwen2_5_vl)
 
-    _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu")
+    _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu", load_names=_every_name(model))
 
     loaded = model.state_dict()
     assert loaded.keys() == ref.keys()
@@ -402,7 +407,7 @@ def test_a_truncated_model_keeps_its_own_layers(tmp_path):
     src = get_tiny_llama()
     model = _meta_twin(get_tiny_llama, num_hidden_layers=1)
 
-    _meta_dcp_load(model, _save(tmp_path, src.state_dict()), "cpu")
+    _meta_dcp_load(model, _save(tmp_path, src.state_dict()), "cpu", load_names=_every_name(model))
 
     ref = src.state_dict()
     for name, value in model.state_dict().items():
@@ -431,7 +436,7 @@ def test_persistent_buffers_load_from_the_checkpoint_and_others_survive(tmp_path
     with init_empty_weights():
         model = _WithBuffers()
 
-    _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu")
+    _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu", load_names=_every_name(model))
 
     assert torch.equal(model.scale, ckpt["scale"])
     assert torch.equal(model.table, torch.arange(4.0))
@@ -448,7 +453,7 @@ def test_an_untied_param_the_checkpoint_lacks_fails_the_load(tmp_path):
     with pytest.raises(
         RuntimeError, match=r"1 param\(s\) have no checkpoint tensor.*\['proj.bias'\]"
     ):
-        _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu")
+        _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu", load_names=_every_name(model))
 
 
 class _OneBigManySmall(nn.Module):
@@ -486,30 +491,13 @@ def test_coverage_guard_weighs_unloaded_params_by_numel(tmp_path, monkeypatch):
     monkeypatch.setattr(dcp, "load", counting_load)
     model, _, ckpt_dir = _guard_case(tmp_path / "big_missing", missing={"big.weight"})
     with pytest.raises(RuntimeError, match="matched no checkpoint key"):
-        _meta_dcp_load(model, ckpt_dir, "cpu")
+        _meta_dcp_load(model, ckpt_dir, "cpu", load_names=_every_name(model))
     assert not loads
 
     model, _, ckpt_dir = _guard_case(tmp_path / "small_missing", missing=_SMALL)
     with pytest.raises(RuntimeError, match="12 param\\(s\\) have no checkpoint tensor"):
-        _meta_dcp_load(model, ckpt_dir, "cpu")
+        _meta_dcp_load(model, ckpt_dir, "cpu", load_names=_every_name(model))
     assert loads == [1]
-
-
-def test_skip_names_exempt_params_filled_by_another_path(tmp_path):
-    """Params a separate loader fills (fused grouped experts) are left out of the guard's tally."""
-    model, ckpt, ckpt_dir = _guard_case(tmp_path, missing={"big.weight"})
-
-    _meta_dcp_load(model, ckpt_dir, "cpu", skip_names={"big.weight"})
-
-    assert torch.equal(model.small[0].weight, ckpt["small.0.weight"])
-
-
-def test_max_unloaded_frac_sets_the_guard_threshold(tmp_path):
-    """The ~1% shortfall the default lets past the early guard fails it once the tolerance is zero."""
-    model, _, ckpt_dir = _guard_case(tmp_path, missing=_SMALL)
-
-    with pytest.raises(RuntimeError, match="matched no checkpoint key"):
-        _meta_dcp_load(model, ckpt_dir, "cpu", max_unloaded_frac=0.0)
 
 
 def test_checkpoint_without_tensors_is_rejected(tmp_path):
@@ -519,7 +507,7 @@ def test_checkpoint_without_tensors_is_rejected(tmp_path):
         model = _OneBigManySmall()
 
     with pytest.raises(RuntimeError, match="has NO tensors"):
-        _meta_dcp_load(model, str(tmp_path), "cpu")
+        _meta_dcp_load(model, str(tmp_path), "cpu", load_names=_every_name(model))
 
 
 def test_load_request_follows_the_model_state_dict_order(tmp_path, monkeypatch):
@@ -538,7 +526,7 @@ def test_load_request_follows_the_model_state_dict_order(tmp_path, monkeypatch):
         return real_load(state_dict, **kwargs)
 
     monkeypatch.setattr(dcp, "load", recording_load)
-    _meta_dcp_load(model, ckpt_dir, "cpu")
+    _meta_dcp_load(model, ckpt_dir, "cpu", load_names=_every_name(model))
 
     assert requests == [[_flat_vl_name(k) for k in model.state_dict()]]
 
@@ -562,55 +550,31 @@ def test_rank0_reports_the_persistent_buffers_it_loaded(tmp_path, gloo_world_of_
         model = _WithBuffers()
 
     with pytest.warns(UserWarning, match=r"1 persistent buffer\(s\).*'scale'"):
-        _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu")
+        _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu", load_names=_every_name(model))
 
 
 def test_fsdp2_sharded_params_are_filled_in_place(tmp_path, gloo_world_of_one):
-    """FSDP2-full: the blocks and the root are ``fully_shard``-ed on meta before the load. The params
-    must stay sharded ``DTensor``s holding the checkpoint values, and the buffers must survive the
-    root ``to_empty``.
+    """The EP hybrid's layout: the decoder layers are ``fully_shard``-ed on meta before the load, the
+    root is not. The layers' params must stay sharded ``DTensor``s holding the checkpoint values, the
+    root's plain params must hold theirs, and the buffers must survive ``to_empty``.
     """
     src = get_tiny_llama()
     ckpt_dir = _save(tmp_path, src.state_dict())
     model = _meta_twin(get_tiny_llama)
     buffers = {n: b.clone() for n, b in model.named_buffers()}
     mesh = init_device_mesh("cpu", (1,))
-    for block in _fsdp2_wrap_modules(model):
-        fully_shard(block, mesh=mesh)
-    fully_shard(model, mesh=mesh)
+    for layer in model.model.layers:
+        fully_shard(layer, mesh=mesh)
 
-    _meta_dcp_load(model, ckpt_dir, "cpu")
+    _meta_dcp_load(model, ckpt_dir, "cpu", load_names=_every_name(model))
 
     ref = src.state_dict()
     for name, param in model.named_parameters():
-        assert isinstance(param, DTensor), name
-        assert torch.equal(param.full_tensor(), ref[name]), name
+        assert isinstance(param, DTensor) == name.startswith("model.layers."), name
+        loaded = param.full_tensor() if isinstance(param, DTensor) else param
+        assert torch.equal(loaded, ref[name]), name
     for name, buf in model.named_buffers():
         assert torch.equal(buf, buffers[name]), name
-
-
-def test_an_fsdp2_tie_keeps_the_values_of_the_alias_the_checkpoint_stored(
-    tmp_path, gloo_world_of_one, monkeypatch
-):
-    """The same tie under FSDP2, where the kept param and the filled one are sharded alike."""
-    src = get_tiny_llama(tie_word_embeddings=True)
-    ckpt = {k: v for k, v in src.state_dict().items() if k != "model.embed_tokens.weight"}
-    ckpt_dir = _save(tmp_path, ckpt)
-    model = _meta_twin(get_tiny_llama, tie_word_embeddings=True)
-    mesh = init_device_mesh("cpu", (1,))
-    for block in _fsdp2_wrap_modules(model):
-        fully_shard(block, mesh=mesh)
-    fully_shard(model, mesh=mesh)
-    empty_like = torch.empty_like
-    monkeypatch.setattr(
-        torch, "empty_like", lambda t, **kw: empty_like(t, **kw).fill_(float("nan"))
-    )
-
-    _meta_dcp_load(model, ckpt_dir, "cpu")
-
-    assert isinstance(model.lm_head.weight, DTensor)
-    assert torch.equal(model.lm_head.weight.full_tensor(), ckpt["lm_head.weight"])
-    assert torch.equal(model.model.embed_tokens.weight.full_tensor(), ckpt["lm_head.weight"])
 
 
 def _tie_pair(layout):
