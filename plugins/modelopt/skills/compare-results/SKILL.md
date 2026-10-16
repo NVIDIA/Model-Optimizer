@@ -54,8 +54,8 @@ the validated runs are comparable:
 2. Task name, benchmark version, dataset split, container, harness, and task
    fragment match.
 3. Generation settings match, including temperature, top_p, top_k, max tokens,
-   stop strings, chat-template kwargs, reasoning mode/budget, and task-specific
-   overrides.
+   stop strings, repetition detection, chat-template kwargs, reasoning
+   mode/budget, and task-specific overrides.
 4. Reasoning traces are enabled, disabled, parsed, stripped, or ignored
    consistently between runs.
 5. The number of evaluated and scored samples/repeats matches for each task and

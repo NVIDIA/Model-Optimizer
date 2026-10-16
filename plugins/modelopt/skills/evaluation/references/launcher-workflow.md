@@ -444,7 +444,7 @@ Fix unresolved `???`, bad Hydra overrides, missing env vars, invalid mounts, ima
 nel run --config <path> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10
 ```
 
-Catches judge auth/rate-limits, container failures, sandbox issues, OOM, bad request formatting, low evaluated counts. Always inspect logs:
+Catches judge auth/rate-limits, container failures, sandbox issues, OOM, bad request formatting, low evaluated counts. A canary that runs far longer than its sample count implies may be doom-looping — see `references/doom_loops.md`. Always inspect logs:
 
 ```bash
 nel status <id>

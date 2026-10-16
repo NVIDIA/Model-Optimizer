@@ -15,6 +15,10 @@ Changelog
 
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
 
+*Misc*
+
+- The ``evaluation`` agent skill can stop looping ("doom loop") reasoning early: ask it to avoid doom loops and it adds vLLM's ``repetition_detection`` request field (vLLM 0.17.0 or later) to every task, ending a request once its output repeats. Use the same setting for baseline and candidate runs.
+
 **Backward Breaking Changes**
 
 **Deprecations**
