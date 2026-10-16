@@ -21,9 +21,10 @@ is grafted onto it: it contributes only per-token hidden states, which are
 projected by the base lm_head to obtain teacher logits.
 
 ``external_loss`` selects the objective: ``soft_ce`` matches the Eagle offline
-objective, ``tvd`` is total-variation distance between the two distributions, and
+objective, ``tvd`` is total-variation distance between the two distributions,
 ``tvd_deploy`` applies the serving filter to both sides first so the loss is the
-acceptance the deployed pair sees.
+acceptance the deployed pair sees, and ``tvd_ce`` adds a cross-entropy ranking
+term to ``tvd``.
 """
 
 import copy
@@ -44,7 +45,7 @@ from .modeling_final_norm import _maybe_apply_base_final_norm
 # On the sparse path the base's truncation is baked into the dump, so both TVD
 # variants are computable there; they differ only in whether the *draft* is put
 # through the serving filter too. soft_ce needs full base logits and is dense-only.
-SPARSE_CAPABLE_LOSSES = ("tvd", "tvd_deploy")
+SPARSE_CAPABLE_LOSSES = ("tvd", "tvd_deploy", "tvd_ce")
 
 __all__ = ["SPARSE_CAPABLE_LOSSES", "HFExternalDraftModel"]
 
@@ -347,10 +348,32 @@ class HFExternalDraftModel(ExternalDraftModel):
         denom = mask.sum() + 1e-5
         tvd = self._tvd_sparse(draft, tok, prob)
         loss = (tvd * mask).sum() / denom
+        if self.external_loss == "tvd_ce":
+            # TVD is bounded, so it is weak on which token inside the base's
+            # support should win; cross-entropy's log penalty is not.
+            # A row the dump left empty has no meaningful argmax: it would read as
+            # slot 0, i.e. a hard CE target on token id 0. TVD absorbs that into its
+            # bounded out-of-support term, CE does not, so score only rows with mass
+            # and give them their own denominator rather than diluting them.
+            ce_mask = mask * (prob.sum(-1) > 0).to(mask.dtype)
+            target = tok.gather(-1, prob.argmax(-1, keepdim=True)).squeeze(-1)
+            ce = torch.nn.functional.cross_entropy(
+                draft.reshape(-1, draft.shape[-1]).float(),
+                target.reshape(-1),
+                reduction="none",
+            ).reshape(mask.shape)
+            loss = self.external_tvd_alpha * loss + self.external_ce_alpha * (
+                (ce * ce_mask).sum() / (ce_mask.sum() + 1e-5)
+            )
+
         accuracy = None
         if self.external_report_acc:
             teacher_top1 = tok.gather(-1, prob.argmax(-1, keepdim=True)).squeeze(-1)
-            accuracy = self._top1_accuracy(teacher_top1, draft, mask)
+            # A row the dump left empty has no teacher top-1 -- its argmax is slot 0,
+            # i.e. whatever the zero-fill holds. Counting those would quietly move the
+            # reported accuracy toward agreement with padding, so fold the emptiness
+            # test into the mask the shared helper scores against.
+            accuracy = self._top1_accuracy(teacher_top1, draft, mask * (prob.sum(-1) > 0))
         return loss, accuracy
 
     def compute_loss(self, draft_logits, base_logits, loss_mask, base_predict_tok=None):
@@ -372,7 +395,7 @@ class HFExternalDraftModel(ExternalDraftModel):
         mask = loss_mask[:, :seq_len].to(draft_logits.dtype)
         denom = mask.sum() + 1e-5
 
-        if self.external_loss in ("tvd", "tvd_deploy"):
+        if self.external_loss in ("tvd", "tvd_deploy", "tvd_ce"):
             if self.external_loss == "tvd_deploy":
                 # Both sides through the serving filter, so the loss is the
                 # acceptance the deployed pair will actually see.
@@ -381,6 +404,15 @@ class HFExternalDraftModel(ExternalDraftModel):
                 p = torch.softmax(base_logits.float(), dim=-1)
             q = self._draft_probs(draft_logits)
             loss = (0.5 * (p - q).abs().sum(-1) * mask).sum() / denom
+            if self.external_loss == "tvd_ce":
+                ce = torch.nn.functional.cross_entropy(
+                    draft_logits.reshape(-1, draft_logits.shape[-1]).float(),
+                    base_logits.reshape(-1, base_logits.shape[-1]).argmax(-1),
+                    reduction="none",
+                ).reshape(mask.shape)
+                loss = self.external_tvd_alpha * loss + self.external_ce_alpha * (
+                    (ce * mask).sum() / denom
+                )
         else:
             # Identical in form to hf_eagle._eagle_loss so switching modes does not
             # silently change the objective.
