@@ -614,14 +614,11 @@ class _ProvenanceModel(torch.nn.Module):
 
 
 @requires_accelerate
-def test_carry_over_returns_nothing_when_the_loader_placed_everything(tmp_path, monkeypatch):
-    """A recorded empty list means the question was asked and answered -- do not re-derive."""
-    from modelopt.torch.utils.plugins import model_load_utils
+def test_carry_over_returns_nothing_when_the_loader_placed_everything(tmp_path):
+    """A recorded empty list means the question was asked and answered -- do not re-derive.
 
-    def _rederived(*args, **kwargs):
-        raise AssertionError("a recorded list must not be derived again")
-
-    monkeypatch.setattr(model_load_utils, "unplaced_source_keys", _rederived)
+    Deriving again would find the stray tensor, which the model has no parameter for, and carry it.
+    """
     save_file({"stray.weight": torch.zeros(2)}, str(tmp_path / "model.safetensors"))
     model = _ProvenanceModel(keys=[], ckpt=tmp_path)
     assert read_unplaced_weights(model) == {}
