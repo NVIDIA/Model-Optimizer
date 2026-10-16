@@ -211,16 +211,11 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
             w_slice = local_w[local_idx]
             # Uncalibrated-expert fallback: derive amax from this expert's local weight slice
             # (matches _export_fused_experts), so a never-routed expert still exports sane scales.
-            if (
-                hasattr(w_quantizer, "is_enabled")
-                and w_quantizer.is_enabled
-                and (
-                    not hasattr(w_quantizer, "_amax")
-                    or w_quantizer._amax is None
-                    or torch.all(w_quantizer._amax == 0)
-                )
-            ):
-                w_quantizer.amax = w_slice.abs().amax().to(torch.float32)
+            # Per stage, in the shape each expects (W4A8's SequentialQuantizer, block-wise INT4).
+            uncalibrated = [q for q in _tensor_quantizers(w_quantizer) if _is_uncalibrated(q)]
+            for q in uncalibrated:
+                q.amax = _fallback_amax(w_slice, q)
+            if uncalibrated:
                 warnings.warn(
                     f"Expert {global_idx} {proj} weight quantizer was not calibrated (amax missing "
                     f"or zero); using weight-derived amax. Increase calibration size to activate all "
