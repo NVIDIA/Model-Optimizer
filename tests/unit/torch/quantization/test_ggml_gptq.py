@@ -21,6 +21,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.nn.functional as F
+from _test_utils.torch.quantization.models import TOY_MOE_EXPERTS, TOY_MOE_HIDDEN
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -203,6 +205,30 @@ def test_a_module_calibration_never_reached_gets_the_plain_search():
     packed, shape = IQ2_XXS.quantize(original)
     plain = IQ2_XXS.dequantize(packed, shape, dtype=original.dtype)
     torch.testing.assert_close(model["unused"].weight.detach(), plain, rtol=0, atol=0)
+
+
+def test_gptq_quantizes_each_fused_expert_as_a_linear_fed_only_its_tokens(moe):
+    # The expert no token reaches is compared against a linear calibration never reaches.
+    experts = moe.mlp.experts
+    original = copy.deepcopy(experts)
+    inputs = _inputs()[:96, :TOY_MOE_HIDDEN]
+    config = _iq_config(GPTQ, "iq2_xxs")
+    mtq.quantize(moe, config, forward_loop=lambda m: m(inputs))
+
+    for idx in range(TOY_MOE_EXPERTS):
+        tokens = inputs[idx::3] if idx < 3 else inputs[:0]
+        gate, up = F.linear(tokens, original.gate_up_proj[idx]).chunk(2, dim=-1)
+        for name, expert_inputs in (("gate_up_proj", tokens), ("down_proj", F.silu(gate) * up)):
+            reference = torch.nn.Linear(*getattr(original, name)[idx].shape[::-1], bias=False)
+            reference.weight.data.copy_(getattr(original, name)[idx])
+            mtq.quantize(reference, config, forward_loop=lambda m, x=expert_inputs: m(x))
+
+            assert torch.equal(getattr(experts, name)[idx], reference.weight)
+            quantizer = getattr(experts, f"{name}_weight_quantizers")[idx]
+            assert torch.equal(
+                pinned_packed_weight(quantizer, "iq2_xxs"),
+                pinned_packed_weight(reference.weight_quantizer, "iq2_xxs"),
+            )
 
 
 def test_pin_outlives_the_weight_tensor():

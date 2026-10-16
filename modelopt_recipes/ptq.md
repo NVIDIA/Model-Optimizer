@@ -58,15 +58,15 @@ supported combinations.
 | `int4_blockwise_weight_only` | INT4 W4A16, block 128, weights only | none | max |
 | `nvfp4_mlp_weight_only` | NVFP4 W4A16 (block 32), MLP + MoE weights only | none | max |
 | `mxfp4_mlp_weight_only` | MXFP4 W4A16, MLP + MoE weights only | none | none (no calibration) |
-| `iq1_s` | IQ1_S W1A16, MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for fused MoE experts |
+| `iq1_s` | IQ1_S W1A16, MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for weights GPTQ left |
 | `iq1_s_experts_only` | IQ1_S W1A16, MoE routed experts only | none | imatrix |
-| `iq1_m` | IQ1_M W1A16 (1.75 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for fused MoE experts |
+| `iq1_m` | IQ1_M W1A16 (1.75 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for weights GPTQ left |
 | `iq1_m_experts_only` | IQ1_M W1A16 (1.75 bpw), MoE routed experts only | none | imatrix |
-| `iq2_xxs` | IQ2_XXS W2A16 (2.06 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for fused MoE experts |
+| `iq2_xxs` | IQ2_XXS W2A16 (2.06 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for weights GPTQ left |
 | `iq2_xxs_experts_only` | IQ2_XXS W2A16 (2.06 bpw), MoE routed experts only | none | imatrix |
-| `iq2_xs` | IQ2_XS W2A16 (2.31 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for fused MoE experts |
+| `iq2_xs` | IQ2_XS W2A16 (2.31 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for weights GPTQ left |
 | `iq2_xs_experts_only` | IQ2_XS W2A16 (2.31 bpw), MoE routed experts only | none | imatrix |
-| `iq2_s` | IQ2_S W2A16 (2.56 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for fused MoE experts |
+| `iq2_s` | IQ2_S W2A16 (2.56 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for weights GPTQ left |
 | `iq2_s_experts_only` | IQ2_S W2A16 (2.56 bpw), MoE routed experts only | none | imatrix |
 | `q8_0` | Q8_0 W8A16 (8.5 bpw), eligible linears | none | none (no calibration) |
 
@@ -153,8 +153,8 @@ activations and tensor-core math are what deliver the throughput.
   `conv1d` and the vision branch stay in BF16. The formats trade size against
   accuracy in order: 1.56, 1.75, 2.06, 2.31 and 2.56 bits per weight. Weights are
   calibrated with layerwise GPTQ (`block_size: 256`, `perc_damp: 0.3`), so calibration
-  data is required. GPTQ does not reach fused-MoE experts, so imatrix follows it and
-  weights each expert's search by the tokens routed to it. Quantized weights must have a
+  data is required. GPTQ covers fused-MoE experts too, one Hessian per expert over the tokens
+  routed to it; imatrix follows it for any weight GPTQ leaves. Quantized weights must have a
   final dimension divisible by 256.
   Unified HF export writes the packed GGML blocks; Megatron export additionally
   requires tensor and pipeline parallel sizes of 1, and does not support

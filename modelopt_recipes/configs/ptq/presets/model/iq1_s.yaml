@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # QuantizeConfig preset for IQ1_S weight-only quantization of MLP/MoE layers with GPTQ,
-# and imatrix for the fused MoE experts GPTQ does not reach.
+# and imatrix for any weight GPTQ leaves.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:
@@ -32,8 +32,8 @@ algorithm:
     importance_weighted: true
     layerwise:
       enable: true
-  # GPTQ only reaches 2-D linears; imatrix encodes the fused MoE experts it leaves, and skips the
-  # weights GPTQ already encoded. It collects its statistics in a single forward pass.
+  # imatrix encodes any weight GPTQ leaves and skips the weights GPTQ already encoded. It collects
+  # its statistics in a single forward pass.
   - method: imatrix
 quant_cfg:
   - $import: base_disable_all

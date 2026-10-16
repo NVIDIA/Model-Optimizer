@@ -78,15 +78,15 @@ class GGMLGPTQHelper(GPTQHelper):
     those exact codes rather than encoding the GPTQ'd weight again, which would not return them.
     """
 
-    def update_weights(self, block_size, perc_damp):
+    def update_weights(self, block_size, perc_damp, weight=None):
         """Run the GPTQ update, then pin the chosen payload to the weight quantizer."""
-        super().update_weights(block_size, perc_damp)
-        quantizer = self.module.weight_quantizer
+        super().update_weights(block_size, perc_damp, weight)
+        quantizer = self.weight_quantizer
         pin_packed_weight(quantizer, quantizer.num_bits, self._packed)
         self._packed = None
 
     def _blockwise_update(self, block_size):
-        quantizer = self.module.weight_quantizer
+        quantizer = self.weight_quantizer
         ggml_format = GGML_FORMAT_REGISTRY[quantizer.num_bits]
         extra_args = quantizer.backend_extra_args or {}
         block_chunk_size = extra_args.get("block_chunk_size", ggml_format.block_chunk_size)
