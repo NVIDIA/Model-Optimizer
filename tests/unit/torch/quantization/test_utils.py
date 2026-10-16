@@ -15,12 +15,15 @@
 
 import pytest
 import torch
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
 
 from modelopt.torch.quantization.utils import (
     convert_quantization_axis_to_reduce_axis,
     reduce_amax,
     reduce_block_amax,
 )
+from modelopt.torch.quantization.utils.core_utils import persistent_materialization
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 
@@ -333,3 +336,22 @@ def test_layer_activation_collector_run_uses_cached_inputs_not_parent(monkeypatc
     assert "L1" not in call_log_for_layer1
 
     assert torch.allclose(inp2[0][0][0], torch.tensor([[10.0 + 1.0 + 2.0]]))
+
+
+def _forward_through_other_layers_while_one_is_materialized(rank, size):
+    mesh = init_device_mesh("cpu", (size,))
+    torch.manual_seed(0)
+    model = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8))
+    for layer in model:
+        fully_shard(layer, mesh=mesh)
+    fully_shard(model, mesh=mesh)
+    x = torch.randn(2, 8)
+    expected = model(x)
+    # Layerwise calibration runs the whole model to collect the next layer's inputs while one layer
+    # is materialized; the other FSDP modules must still unshard.
+    with persistent_materialization(model[0]):
+        torch.testing.assert_close(model(x), expected)
+
+
+def test_persistent_materialization_only_skips_unshard_for_its_layer(cpu_dist_workers):
+    cpu_dist_workers.run(_forward_through_other_layers_while_one_is_materialized)

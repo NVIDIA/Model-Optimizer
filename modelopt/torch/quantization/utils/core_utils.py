@@ -828,20 +828,25 @@ def patch_fsdp_mp_dtypes():
 
 @contextmanager
 def _disable_fsdp_unshard_reshard(layer):
-    """Disable FSDP2 unshard/reshard if *layer* is FSDP-wrapped."""
-    if isinstance(layer, FSDPModule):
-        _pg_cls = torch.distributed.fsdp._fully_shard._fsdp_param_group.FSDPParamGroup
-        orig_unshard = _pg_cls.unshard
-        orig_reshard = _pg_cls.reshard
-        _pg_cls.unshard = lambda self, async_op=False: None
-        _pg_cls.reshard = lambda self: None
-        try:
-            yield
-        finally:
-            _pg_cls.unshard = orig_unshard
-            _pg_cls.reshard = orig_reshard
-    else:
+    """Make the FSDP2 param groups inside *layer* skip unshard/reshard (already gathered).
+
+    Patched per group instance, not on ``FSDPParamGroup``: the rest of the model still runs forward
+    (e.g. while collecting the next layer's inputs) and must unshard as usual.
+    """
+    groups = [
+        group
+        for module in layer.modules()
+        if isinstance(module, FSDPModule)
+        and (group := fully_shard.state(module)._fsdp_param_group) is not None
+    ]
+    for group in groups:
+        group.unshard = lambda async_op=False: None
+        group.reshard = lambda: None
+    try:
         yield
+    finally:
+        for group in groups:
+            del group.unshard, group.reshard
 
 
 def build_param_index(model):
