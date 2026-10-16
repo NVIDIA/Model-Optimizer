@@ -395,7 +395,6 @@ def _write_even_shards(
     from modelopt.torch.utils.distributed import all_reduce
 
     export_dir = Path(export_dir)
-    export_dir.mkdir(parents=True, exist_ok=True)
     max_bytes = _size_to_bytes(max_shard_size)
 
     write_keys = sorted(local_sd)
@@ -403,7 +402,14 @@ def _write_even_shards(
     # Tensors over the bound get files of their own, so only the rest decide how many to aim for.
     fits = sum(size for size in sizes.values() if size <= max_bytes)
     my_files = _even_bins(write_keys, sizes, max(1, math.ceil(fits / max_bytes)), max_bytes)
-    counts = all_reduce("shard counts", lambda: [len(my_files)], _in_rank_order)
+
+    def count_mine() -> list[int]:
+        # The directory can fail to appear on one rank alone (its node's filesystem), so it is
+        # created inside the first collective, which carries that failure to every rank.
+        export_dir.mkdir(parents=True, exist_ok=True)
+        return [len(my_files)]
+
+    counts = all_reduce("shard counts", count_mine, _in_rank_order)
     n_total = sum(counts)
     if n_total == 0:
         raise RuntimeError(
