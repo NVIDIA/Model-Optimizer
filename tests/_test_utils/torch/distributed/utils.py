@@ -133,11 +133,16 @@ def bounded_collectives(seconds: float = 10):
     workers keep for the next job, stays in step. Every rank of the job must enter it.
     """
     group = dist.new_group(timeout=timedelta(seconds=seconds))
-    with ExitStack() as stack:
-        for name in ("broadcast_object_list", "all_gather_object", "barrier"):
-            collective = partial(getattr(dist, name), group=group)
-            stack.enter_context(mock.patch.object(dist, name, collective))
-        yield
+    try:
+        with ExitStack() as stack:
+            for name in ("broadcast_object_list", "all_gather_object", "barrier"):
+                collective = partial(getattr(dist, name), group=group)
+                stack.enter_context(mock.patch.object(dist, name, collective))
+            yield
+    finally:
+        # The workers outlive the job, and would keep the group and its connections. Destroying it
+        # also fails a peer still waiting in it at once, instead of at the timeout.
+        dist.destroy_process_group(group)
 
 
 class DistributedWorkerPool:
