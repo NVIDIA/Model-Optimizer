@@ -30,7 +30,16 @@ from safetensors.torch import load_file, save_file
 pytest.importorskip("accelerate")
 pytest.importorskip("transformers")
 
-from transformers import LlamaConfig, LlamaForCausalLM
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    FineGrainedFP8Config,
+    GptOssConfig,
+    GptOssForCausalLM,
+    LlamaConfig,
+    LlamaForCausalLM,
+    Mxfp4Config,
+)
 
 from modelopt.torch.utils.plugins import model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
@@ -172,8 +181,6 @@ def test_experts_of_a_missing_layer_are_recorded_by_their_source_names(tmp_path)
     Per-expert tensors of a layer the model does not build (an MTP layer, say) convert to one fused
     ``...experts.gate_up_proj``, which no shard holds; the export can only carry the sources.
     """
-    from transformers import AutoConfig, AutoModelForCausalLM
-
     config = AutoConfig.for_model(
         "qwen3_moe",
         vocab_size=64,
@@ -206,8 +213,6 @@ def test_experts_of_a_missing_layer_are_recorded_by_their_source_names(tmp_path)
 
 def test_fp8_block_scales_folded_in_at_load_are_placed(tmp_path):
     """DeepSeek-V3 style FP8: dequantizing folds every ``weight_scale_inv`` into its weight."""
-    from transformers import FineGrainedFP8Config
-
     # Every projection a whole number of 128x128 blocks: transformers before 5.10.1 cannot
     # dequantize a partial block (a 2-head k_proj would be 64x128).
     config = _tiny_llama_config(hidden_size=128, intermediate_size=256, num_key_value_heads=4)
@@ -233,8 +238,6 @@ def test_fp8_block_scales_folded_in_at_load_are_placed(tmp_path):
 def test_mxfp4_expert_blocks_folded_in_at_load_are_placed(tmp_path):
     """gpt-oss, loaded as examples/hf_ptq loads it: ``Mxfp4Config(dequantize=True)`` folds each
     expert's ``*_blocks`` and ``*_scales`` into a bf16 ``gate_up_proj`` / ``down_proj``."""
-    from transformers import GptOssConfig, GptOssForCausalLM, Mxfp4Config
-
     hidden, inter, experts = 64, 64, 4
     config = GptOssConfig(
         vocab_size=64,
