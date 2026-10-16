@@ -870,6 +870,10 @@ def get_concat_eliminated_tensors(
                 # Find quantized inputs to concat
                 quantized_inputs = []
                 for input_tensor in node.inputs:
+                    # A constant (initializer) input is not an activation: the calibrator collects no range
+                    # for it, so it cannot share a scaling factor with the other tensors of the group.
+                    if isinstance(input_tensor, gs.Constant):
+                        continue
                     input_name = input_tensor.name
                     input_consumers = input_name_to_nodes[input_name]
                     if any(consumer.name in nodes_to_quantize for consumer in input_consumers):
