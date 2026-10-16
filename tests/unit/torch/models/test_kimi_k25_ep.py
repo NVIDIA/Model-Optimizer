@@ -42,6 +42,7 @@ from transformers import DeepseekV3Config, DeepseekV3ForCausalLM, PretrainedConf
 
 from modelopt.torch.models import _onfly_decompress, get_spec
 from modelopt.torch.models.kimi_k25 import ep as kimi_k25
+from modelopt.torch.utils.moe import _routed_expert_keys
 
 QUANT = {"quant_method": "compressed-tensors", "format": "pack-quantized"}
 REMOTE = "transformers_modules.Kimi_hyphen_K2_dot_7.0123abcd"  # how the loader names remote code
@@ -84,9 +85,10 @@ def remote(monkeypatch):
 
 def test_prepare_rebuilds_the_language_model_config_as_native_deepseek_v3(monkeypatch, remote):
     """The text config becomes transformers' own ``DeepseekV3Config`` (no remote ``auto_map``, no
-    stale ``quantization_config``) with an EP plan for the fused experts; the decompressor is
-    installed while the VLM config still carries the compressed-tensors scheme; the remote-code
-    staging shim is left installed; without a checkpoint nothing remote is imported."""
+    stale ``quantization_config``) with an EP plan for the fused experts, naming the experts the
+    spec states for a run that skips prepare; the decompressor is installed while the VLM config
+    still carries the compressed-tensors scheme; the remote-code staging shim is left installed;
+    without a checkpoint nothing remote is imported."""
     installs = []
     monkeypatch.setattr(
         _onfly_decompress,
@@ -105,6 +107,9 @@ def test_prepare_rebuilds_the_language_model_config_as_native_deepseek_v3(monkey
     assert (text.hidden_size, text.n_routed_experts, text.moe_intermediate_size) == (64, 8, 16)
     assert text.base_model_ep_plan["layers.*.mlp.experts.gate_up_proj"] == "grouped_gemm"
     assert text.base_model_ep_plan["layers.*.mlp.experts.down_proj"] == "grouped_gemm"
+    assert _routed_expert_keys(text.base_model_ep_plan) == _routed_expert_keys(
+        get_spec("kimi_k25").ep_spec.prepared_ep_plan
+    )
     assert installs == [QUANT]
     assert dmu.get_cached_module_file is not staging
     assert remote.loads == []

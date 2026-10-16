@@ -23,6 +23,15 @@ from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, register
 
 __all__: list[str] = []
 
+# No gate entry on purpose, whatever transformers' own plan has: the router is logits-only and the
+# MoE block computes GLOBAL top-k ids, so the experts already receive unmasked global ids -- what
+# the all-to-all dispatch wants.
+BASE_MODEL_EP_PLAN = {
+    "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+    "layers.*.mlp.experts.down_proj": "grouped_gemm",
+    "layers.*.mlp.experts": "moe_tp_experts",
+}
+
 # DeepseekV3MoE is invisible to the generic MoE detection: its class name does not end
 # in "SparseMoeBlock" and it calls its router ``gate``, so neither the name test nor the
 # structural router+experts test in is_moe matches. block_names below is what puts it on
@@ -37,16 +46,7 @@ register(
         model_type="deepseek_v3",
         min_transformers_version="5.5",
         export_spec=ExportSpec(grouped_expert_export=True),
-        ep_spec=EPSpec(
-            # Stock transformers ships no plan for deepseek_v3. No gate entry on purpose: the
-            # router is logits-only and the MoE block computes GLOBAL top-k ids, so the experts
-            # already receive unmasked global ids -- what the all-to-all dispatch wants.
-            base_model_ep_plan={
-                "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
-                "layers.*.mlp.experts.down_proj": "grouped_gemm",
-                "layers.*.mlp.experts": "moe_tp_experts",
-            },
-        ),
+        ep_spec=EPSpec(base_model_ep_plan=BASE_MODEL_EP_PLAN),
         moe_spec=MoESpec(
             block_names=("DeepseekV3MoE",),
             expert_linear_names=("gate_proj", "down_proj", "up_proj"),
