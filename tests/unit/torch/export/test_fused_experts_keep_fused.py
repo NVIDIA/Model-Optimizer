@@ -42,6 +42,7 @@ pytest.importorskip("transformers")
 pytest.importorskip("safetensors")
 from safetensors.torch import load_file, save_file
 
+import modelopt.torch.export.hf_export_handlers as handlers
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.moe_utils import (
     _dtensor_dim0_offset,
@@ -473,8 +474,6 @@ def test_fused_experts_fold_in_a_weight_window_when_the_plan_shards_the_dense_pa
 ):
     """FSDP2 owns the fused weights when it shards the dense part around them: folded outside a
     weight-update window, they would be overwritten with its original shards at the next reshard."""
-    import modelopt.torch.export.hf_export_handlers as handlers
-
     events = []
 
     @contextlib.contextmanager
