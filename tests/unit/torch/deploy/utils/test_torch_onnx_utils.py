@@ -25,6 +25,7 @@ import pytest
 import torch
 import torch.nn as nn
 from _test_utils.torch.deploy.lib_test_models import BaseDeployModel, get_deploy_models
+from onnx.reference import ReferenceEvaluator
 
 import modelopt.torch.quantization as mtq
 from modelopt.onnx.utils import get_batch_size_from_bytes, validate_batch_size
@@ -185,7 +186,8 @@ def test_onnx_export_explicit_python_scalars(model, args, input_names):
     )
     inputs = generate_onnx_input(metadata, inference_args)
     assert list(inputs) == input_names
-    session = ort.InferenceSession(exported.SerializeToString(), providers=["CPUExecutionProvider"])
+    # Older supported ORT builds reject Dynamo's opset 23.
+    session = ReferenceEvaluator(exported)
     actual = session.run(None, {name: value.numpy() for name, value in inputs.items()})[0]
     torch.testing.assert_close(torch.from_numpy(actual), model(*inference_args))
 
