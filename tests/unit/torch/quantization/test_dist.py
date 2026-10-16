@@ -59,34 +59,8 @@ def test_data_parallel(cpu_dist_workers):
     cpu_dist_workers.run(_test_data_parallel_helper)
 
 
-def _test_uneven_amax_sync_helper(rank, size):
-    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
-    if rank == 0:
-        quantizer._set_buffer("_amax", torch.tensor(7.0))
-    quantizer.sync_amax_across_distributed_group(DistributedProcessGroup(dist.group.WORLD))
-    assert quantizer.amax.item() == 7.0
-
-
-def test_amax_sync_with_a_rank_that_never_calibrated(cpu_dist_workers):
-    """The rank without an amax still joins the sync, contributing a zero on the group's device."""
-    cpu_dist_workers.run(_test_uneven_amax_sync_helper)
-
-
 def _sync(quantizer):
     quantizer.sync_amax_across_distributed_group(DistributedProcessGroup(dist.group.WORLD))
-
-
-def _calibrated_zero_amax_helper(rank, size):
-    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
-    quantizer._set_buffer("_amax", torch.tensor(0.0))
-    _sync(quantizer)
-    assert quantizer.amax is not None
-    assert quantizer.amax.item() == 0.0
-
-
-def test_a_calibrated_zero_amax_survives_the_sync(cpu_dist_workers):
-    """An all-zero weight calibrates to amax 0, which is not "never calibrated"."""
-    cpu_dist_workers.run(_calibrated_zero_amax_helper)
 
 
 # An NVFP4 activation quantizer's block sizes drive its runtime scales: it stores only a per-tensor
@@ -124,16 +98,25 @@ def test_the_sync_leaves_every_rank_the_calibrators_dtype(cpu_dist_workers, per_
     cpu_dist_workers.run(_calibrators_dtype_helper, per_tensor_cfg=per_tensor_cfg)
 
 
-def _never_calibrated_helper(rank, size, axis):
-    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=axis))
+def _zero_or_uncalibrated_helper(rank, size, case):
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=8, axis=0 if "channel" in case else None)
+    )
+    if case == "calibrated-zero":
+        quantizer._set_buffer("_amax", torch.tensor(0.0))
     _sync(quantizer)
-    assert getattr(quantizer, "_amax", None) is None
+    if case == "calibrated-zero":
+        assert quantizer.amax is not None
+        assert quantizer.amax.item() == 0.0
+    else:
+        assert getattr(quantizer, "_amax", None) is None
 
 
-@pytest.mark.parametrize("axis", [None, 0], ids=["per-tensor", "per-channel"])
-def test_a_quantizer_no_rank_calibrated_stays_uncalibrated(cpu_dist_workers, axis):
-    """A module no rank's calibration data reached, which is expected rather than an error."""
-    cpu_dist_workers.run(_never_calibrated_helper, axis=axis)
+@pytest.mark.parametrize("case", ["calibrated-zero", "uncalibrated", "uncalibrated-per-channel"])
+def test_the_sync_keeps_a_calibrated_zero_apart_from_uncalibrated(cpu_dist_workers, case):
+    """An all-zero weight calibrates to amax 0, which is not "never calibrated"; a quantizer no
+    rank's calibration data reached, which is expected rather than an error, stays uncalibrated."""
+    cpu_dist_workers.run(_zero_or_uncalibrated_helper, case=case)
 
 
 def _uneven_per_channel_helper(rank, size):
