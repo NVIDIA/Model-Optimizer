@@ -63,23 +63,14 @@ from modelopt.torch.export.unified_export_hf import (
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
-def _cpu_device_query():
-    """The writer asks CUDA which device to all-reduce MoE expert input scales on.
-
-    Nothing written in this file has expert input scales, so on a CPU-only host any answer works.
-    """
-    return mock.patch.object(torch.cuda, "current_device", return_value=0)
-
-
 def _write(model, export_dir, **kwargs):
-    with _cpu_device_query():
-        distributed_save_hf_checkpoint(
-            model, export_dir, maxbound=448, kv_cache_format=None, max_shard_size="8KB", **kwargs
-        )
+    distributed_save_hf_checkpoint(
+        model, export_dir, maxbound=448, kv_cache_format=None, max_shard_size="8KB", **kwargs
+    )
 
 
 def _nogather_export(model, export_dir, **kwargs):
-    with _cpu_device_query(), mock.patch.dict(os.environ, {"MODELOPT_FSDP2_EXPORT": "nogather"}):
+    with mock.patch.dict(os.environ, {"MODELOPT_FSDP2_EXPORT": "nogather"}):
         export_hf_checkpoint(
             model, dtype=torch.bfloat16, export_dir=export_dir, max_shard_size="16KB", **kwargs
         )
