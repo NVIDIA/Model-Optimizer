@@ -1653,8 +1653,12 @@ def _source_checkpoint(model: nn.Module) -> str | None:
     tensors never reach ``exclude_modules`` because the two halves disagreed about where the
     checkpoint was.
     """
-    return getattr(model, "_modelopt_source_checkpoint", None) or getattr(
-        getattr(model, "config", None), "_name_or_path", None
+    # ``or None``: a model built with ``from_config`` has ``_name_or_path == ""``, which would
+    # otherwise name the current directory.
+    return (
+        getattr(model, "_modelopt_source_checkpoint", None)
+        or getattr(getattr(model, "config", None), "_name_or_path", None)
+        or None
     )
 
 
