@@ -681,8 +681,10 @@ class _StridedIterableShard(IterableDataset):
     own identical stream (deterministic seed) and takes slot ``rank`` from every complete group of
     ``world_size`` consecutive samples. Any trailing incomplete group is dropped so every rank yields
     exactly the same count -- preserving the equal-per-rank-batch invariant that keeps per-step EP
-    collectives from hanging when one rank runs short. Each DataLoader worker process iterates its own
-    copy of the stream, so the workers split the groups between them rather than each yielding them all.
+    collectives from hanging when one rank runs short. A stream shorter than ``world_size`` has no
+    complete group, so it is refused rather than leaving every rank with nothing to calibrate on. Each
+    DataLoader worker process iterates its own copy of the stream, so the workers split the groups
+    between them rather than each yielding them all.
     ``vlm_dataset_utils._ShardedIterable`` cannot stand in: it pads every rank to a count its own loader
     knows, while this wraps any loader's stream, which may know none, and splits across its workers.
     """
@@ -699,6 +701,12 @@ class _StridedIterableShard(IterableDataset):
         for index in itertools.count():
             group = list(itertools.islice(it, self.world_size))
             if len(group) < self.world_size:
+                if index == 0:
+                    # Every rank and worker sees the same stream, so all of them refuse it together.
+                    raise ValueError(
+                        f"The calibration stream has {len(group)} sample(s), fewer than the "
+                        f"{self.world_size} ranks: no rank would get a sample to calibrate on."
+                    )
                 return  # drop incomplete trailing group -> equal counts across ranks
             if index % num_workers == worker:
                 yield group[self.rank]
