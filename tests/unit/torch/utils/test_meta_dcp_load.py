@@ -30,7 +30,7 @@ from safetensors.torch import save_file
 from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 
 pytest.importorskip("accelerate")
 pytest.importorskip("transformers")
@@ -40,6 +40,7 @@ from accelerate import init_empty_weights
 from transformers import AutoModelForImageTextToText, Qwen2_5_VLConfig
 
 from modelopt.torch.utils.plugins.model_load_utils import (
+    _copy_tied_values,
     _fsdp2_wrap_modules,
     _map_ckpt_keys_to_model,
     _meta_dcp_load,
@@ -610,3 +611,40 @@ def test_an_fsdp2_tie_keeps_the_values_of_the_alias_the_checkpoint_stored(
     assert isinstance(model.lm_head.weight, DTensor)
     assert torch.equal(model.lm_head.weight.full_tensor(), ckpt["lm_head.weight"])
     assert torch.equal(model.model.embed_tokens.weight.full_tensor(), ckpt["lm_head.weight"])
+
+
+def _tie_pair(layout):
+    """A kept param and the filled one it replaced, laid out as ``layout`` names."""
+    mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("dp",))
+    kept, values = torch.zeros(4, 4), torch.arange(16.0).reshape(4, 4)
+    if layout == "dtensor-vs-plain":
+        return distribute_tensor(kept, mesh, [Shard(0)]), values
+    if layout == "plain-vs-dtensor":
+        return kept, distribute_tensor(values, mesh, [Shard(0)])
+    if layout == "other-placements":
+        return distribute_tensor(kept, mesh, [Shard(0)]), distribute_tensor(
+            values, mesh, [Replicate()]
+        )
+    if layout == "other-mesh":
+        other = init_device_mesh("cpu", (1,), mesh_dim_names=("ep",))
+        return distribute_tensor(kept, mesh, [Shard(0)]), distribute_tensor(
+            values, other, [Shard(0)]
+        )
+    return kept, values.reshape(2, 8)  # other-shape
+
+
+@pytest.mark.parametrize(
+    "layout",
+    ["dtensor-vs-plain", "plain-vs-dtensor", "other-placements", "other-mesh", "other-shape"],
+)
+def test_a_tie_laid_out_differently_is_refused_and_left_as_it_was(gloo_world_of_one, layout):
+    """Carrying a tied param's values over is a local copy. A pair it would have to redistribute is
+    refused rather than counted as loaded, and the kept param keeps what it held."""
+    kept, src = _tie_pair(layout)
+    local = kept.to_local() if isinstance(kept, DTensor) else kept
+    before = local.clone()
+
+    with pytest.raises(RuntimeError, match="laid out differently"):
+        _copy_tied_values(kept, src, "lm_head.weight")
+
+    assert torch.equal(local, before)
