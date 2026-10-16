@@ -14,6 +14,9 @@
 # limitations under the License.
 
 import json
+from datetime import timedelta
+from functools import partial
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -34,7 +37,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     prepare_messages_for_chat_template,
 )
-from modelopt.torch.utils.distributed import DistributionPlan
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
 def test_prepare_messages_for_chat_template():
@@ -438,51 +441,54 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
     assert result == 4
 
 
-def test_get_max_batch_size_takes_the_smallest_ranks_in_a_distributed_run(monkeypatch):
-    """Every rank must run the same number of calibration steps, so ranks agree on one batch size
-    for a model whose plan distributes it over them.
+class _BatchSizeProbe(torch.nn.Module):
+    """Records the batch size of every forward."""
 
-    Rank 1 of two, on cuda:1, measures its own GPU only, probes with one forward (an OOM retry
-    would run a different number of collective-bearing forwards per rank), and takes rank 0's
-    smaller size.
-    """
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
-    monkeypatch.setenv("LOCAL_RANK", "1")
-    sent = []
+    def __init__(self):
+        super().__init__()
+        self.batch_sizes = []
 
-    def all_gather_object(gathered, mine, group=None):
-        sent.append(mine)
-        gathered[:] = [("calib_batch_size", 4, None), mine]
+    def forward(self, x):
+        self.batch_sizes.append(x.shape[0])
 
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 2)
-    monkeypatch.setattr(torch.distributed, "all_gather_object", all_gather_object)
-    seen_batch_sizes: list[int] = []
-    model = Mock(spec=torch.nn.Module, side_effect=lambda x: seen_batch_sizes.append(x.shape[0]))
-    model.__class__.__name__ = "DummyModel"
-    model._modelopt_distribution_plan = DistributionPlan(2)
-    device_props = Mock()
-    device_props.total_memory = 10**12
+
+def _smallest_batch_size_job(rank, world_size):
+    model = _BatchSizeProbe()
+    set_distribution_plan(model, DistributionPlan(world_size))
+    # A sample takes 100 bytes: rank 0's GPU has room for 4 of them, rank 1's for 10 (regulated to 8).
+    free = [400, 1000][rank]
     measured = []
 
     def mem_get_info(device):
         measured.append(device)
-        return (1000, 0) if len(measured) == 1 else (900, 0)  # 100 bytes a sample -> 10
+        return (free if len(measured) == 1 else free - 100, 0)
 
+    # A rank left waiting in the reduction gives up in seconds on this group.
+    group = torch.distributed.new_group(timeout=timedelta(seconds=10))
+    gather = partial(torch.distributed.all_gather_object, group=group)
     with (
+        patch.object(torch.distributed, "all_gather_object", gather),
         patch("torch.cuda.empty_cache"),
-        patch("torch.cuda.get_device_properties", return_value=device_props),
+        patch(
+            "torch.cuda.get_device_properties", return_value=SimpleNamespace(total_memory=10**12)
+        ),
         patch("torch.cuda.device_count", return_value=4),
         patch("torch.cuda.mem_get_info", side_effect=mem_get_info),
         patch("torch.cuda.max_memory_allocated", return_value=0),
     ):
-        result = get_max_batch_size(
+        batch_size = get_max_batch_size(
             model, max_sample_length=8, sample_input_single_batch=torch.ones((1, 8))
         )
 
-    assert measured == [torch.device("cuda:1")] * 2
-    assert seen_batch_sizes == [1]
-    assert sent == [("calib_batch_size", 8, None)]  # this rank's own 10, regulated to 8
-    assert result == 4
+    assert measured == [torch.device("cuda", rank)] * 2  # its own GPU (LOCAL_RANK) only
+    assert model.batch_sizes == [1]  # one probe: an OOM retry would run more forwards on some ranks
+    assert batch_size == 4  # rank 0's
+
+
+def test_get_max_batch_size_takes_the_smallest_ranks_in_a_distributed_run(cpu_dist_workers):
+    """Every rank must run the same number of calibration steps, so ranks agree on one batch size
+    for a model whose plan distributes it over them: the smallest any rank's GPU allows."""
+    cpu_dist_workers.run(_smallest_batch_size_job)
 
 
 def test_get_dataset_samples_with_unsupported_dataset(make_toy_hf_dataset):
