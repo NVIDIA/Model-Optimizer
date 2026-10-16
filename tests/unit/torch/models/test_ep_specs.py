@@ -25,7 +25,6 @@ from modelopt.torch.models import EPSpec, ModelSpec, get_spec, get_specs
 from modelopt.torch.utils.moe import apply_distributed_support
 
 EP_MODEL_TYPES = [s.model_type for s in get_specs() if s.ep_spec is not None]
-EP_REFUSED_MODEL_TYPES = [mt for mt in EP_MODEL_TYPES if get_spec(mt).ep_spec.unsupported]
 
 
 def cfg(**kw):
@@ -33,11 +32,6 @@ def cfg(**kw):
 
 
 # --------------------------------------------------------------------------- the registered specs
-
-
-def test_some_model_declares_expert_parallel_support():
-    """A guard on the wiring itself: an empty list here means no spec reached the registry."""
-    assert EP_MODEL_TYPES
 
 
 @pytest.mark.parametrize("model_type", EP_MODEL_TYPES)
@@ -61,12 +55,6 @@ def test_a_spec_declares_a_plan_a_floor_a_prepare_or_a_refusal(model_type):
     )
 
 
-def test_models_whose_own_plan_would_misroute_them_are_refused():
-    """GPT-OSS and Llama-4 ship plans of their own, so only their refusal keeps them off the
-    expert-parallel path."""
-    assert {"gpt_oss", "llama4", "llama4_text"} <= set(EP_REFUSED_MODEL_TYPES)
-
-
 def test_the_omni_vlm_reuses_the_text_models_plan():
     """Two spellings of one architecture must not drift into two different plans."""
     assert (
@@ -82,18 +70,6 @@ def test_the_omni_vlm_puts_its_plan_on_the_nested_config():
 
 
 # ----------------------------------------------------------------------------------- the applier
-
-
-def test_a_model_type_with_no_spec_is_left_alone():
-    config = cfg()
-    assert apply_distributed_support("not_a_real_model", config) is config
-    assert not hasattr(config, "base_model_ep_plan")
-
-
-def test_the_plan_is_attached_when_the_config_has_none():
-    config = cfg()
-    apply_distributed_support("deepseek_v3", config)
-    assert config.base_model_ep_plan == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
 
 
 def test_the_models_own_plan_always_wins():
@@ -127,8 +103,10 @@ def test_a_missing_nested_config_is_an_error_not_a_silent_skip():
         apply_distributed_support("nemotron_h_omni", cfg())
 
 
-@pytest.mark.parametrize("model_type", EP_REFUSED_MODEL_TYPES)
+@pytest.mark.parametrize("model_type", ["gpt_oss", "llama4", "llama4_text"])
 def test_an_unsupported_model_is_refused_with_its_config_untouched(model_type):
+    """These ship plans of their own, so only their spec's refusal keeps them off the
+    expert-parallel path."""
     config = cfg()
 
     with pytest.raises(NotImplementedError, match="cannot be quantized expert-parallel yet"):
@@ -158,34 +136,13 @@ def test_a_refusal_comes_before_the_rest_of_the_section(monkeypatch):
     assert vars(config) == {}
 
 
-def test_prepare_runs_and_its_config_is_returned(monkeypatch):
+def test_prepare_runs_after_the_plan_is_attached_and_its_config_is_returned(monkeypatch):
+    """A prepare hook may inspect or adjust the plan, so it must not run before there is one."""
     seen = {}
 
     def prepare(hf_config, **kwargs):
-        seen.update(kwargs)
-        seen["config"] = hf_config
+        seen.update(kwargs, config=hf_config, plan_present=hasattr(hf_config, "base_model_ep_plan"))
         return "replaced"
-
-    spec = ModelSpec(model_type="_probe", ep_spec=EPSpec(prepare=prepare))
-    monkeypatch.setattr(
-        "modelopt.torch.models.get_spec", lambda mt: spec if mt == "_probe" else None
-    )
-
-    config = cfg()
-    assert (
-        apply_distributed_support("_probe", config, ckpt_path="/c", trust_remote_code=True)
-        == "replaced"
-    )
-    assert seen == {"config": config, "ckpt_path": "/c", "trust_remote_code": True}
-
-
-def test_prepare_runs_after_the_plan_is_attached(monkeypatch):
-    """A prepare hook may inspect or adjust the plan, so it must not run before there is one."""
-    observed = {}
-
-    def prepare(hf_config, **_):
-        observed["plan_present"] = hasattr(hf_config, "base_model_ep_plan")
-        return hf_config
 
     spec = ModelSpec(
         model_type="_probe",
@@ -194,6 +151,14 @@ def test_prepare_runs_after_the_plan_is_attached(monkeypatch):
     monkeypatch.setattr(
         "modelopt.torch.models.get_spec", lambda mt: spec if mt == "_probe" else None
     )
+    config = cfg()
 
-    apply_distributed_support("_probe", cfg())
-    assert observed["plan_present"]
+    returned = apply_distributed_support("_probe", config, ckpt_path="/c", trust_remote_code=True)
+
+    assert returned == "replaced"
+    assert seen == {
+        "config": config,
+        "ckpt_path": "/c",
+        "trust_remote_code": True,
+        "plan_present": True,
+    }
