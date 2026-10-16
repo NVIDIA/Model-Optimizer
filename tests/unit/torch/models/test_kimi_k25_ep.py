@@ -143,9 +143,18 @@ def test_the_swap_fails_loudly_when_the_remote_modeling_did_not_load(monkeypatch
         kimi_k25._patch_kimi_modeling_to_native("/ckpt", True)
 
 
-def test_prepare_rejects_a_config_without_a_text_config():
+def test_prepare_rejects_a_config_without_a_text_config(monkeypatch):
+    """Before prepare patches anything process-wide, such as the loader's remote-code staging."""
+
+    def unstaged_loader(*args, **kwargs):
+        """The loader before any staging shim wraps it."""
+
+    monkeypatch.setattr(dmu, "get_cached_module_file", unstaged_loader)
+
     with pytest.raises(ValueError, match="text_config"):
         kimi_k25.prepare(SimpleNamespace())
+
+    assert dmu.get_cached_module_file is unstaged_loader
 
 
 def test_prepare_refuses_transformers_own_port():
