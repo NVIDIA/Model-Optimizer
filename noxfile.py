@@ -26,6 +26,8 @@ Usage:
 import glob
 import os
 import shutil
+import tarfile
+import tempfile
 
 import nox
 
@@ -123,6 +125,34 @@ _SOURCE_BUILT_WHEELS = {
 }
 
 
+# Their setup.py files hardcode -std=c++17, but the torch headers of recent containers need C++20.
+_BUILD_AS_CXX20 = ("mamba_ssm", "causal_conv1d")
+
+
+def _build_wheel(session, name, wheelhouse):
+    pip_wheel = ("python", "-m", "pip", "wheel", "--no-build-isolation", "--no-deps")
+    pip_wheel += ("--wheel-dir", wheelhouse)
+    requirement = _SOURCE_BUILT_WHEELS[name]
+    if name not in _BUILD_AS_CXX20:
+        session.run(*pip_wheel, requirement)
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        session.run(
+            *("python", "-m", "pip", "download", "--no-deps", "--no-binary", ":all:"),
+            *("--no-build-isolation", "--dest", tmp, requirement),
+        )
+        sdist = glob.glob(os.path.join(tmp, "*.tar.gz"))[0]
+        with tarfile.open(sdist) as tar:
+            tar.extractall(tmp, filter="data")
+        source = sdist.removesuffix(".tar.gz")
+        setup_py = os.path.join(source, "setup.py")
+        with open(setup_py) as f:
+            patched = f.read().replace("-std=c++17", "-std=c++20")
+        with open(setup_py, "w") as f:
+            f.write(patched)
+        session.run(*pip_wheel, source)
+
+
 def _install_built_from_source(session, *names):
     """Install the named ``_SOURCE_BUILT_WHEELS``, building a wheel only if the wheelhouse lacks it.
 
@@ -131,10 +161,7 @@ def _install_built_from_source(session, *names):
     wheelhouse = os.environ.get("MODELOPT_WHEELHOUSE", os.path.expanduser("~/.cache/wheelhouse"))
     for name in names:
         if not glob.glob(os.path.join(wheelhouse, f"{name}-*.whl")):
-            session.run(
-                *("python", "-m", "pip", "wheel", "--no-build-isolation", "--no-deps"),
-                *("--wheel-dir", wheelhouse, _SOURCE_BUILT_WHEELS[name]),
-            )
+            _build_wheel(session, name, wheelhouse)
     wheels = [glob.glob(os.path.join(wheelhouse, f"{name}-*.whl"))[0] for name in names]
     session.run("python", "-m", "pip", "install", *wheels)
 
