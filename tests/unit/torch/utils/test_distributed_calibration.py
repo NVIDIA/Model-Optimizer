@@ -154,10 +154,12 @@ def test_iterable_shards_split_their_groups_across_worker_processes(monkeypatch)
 
 @pytest.mark.parametrize("dataset", [list(range(8)), _Stream(8)], ids=["map-style", "iterable"])
 def test_sharded_loader_keeps_the_original_loader_settings(dataset):
-    """Workers, pinning, timeout, worker init, RNG and prefetching carry over to the shard."""
+    """Batching, workers, pinning, timeout, worker init, RNG and prefetching carry over to the
+    shard."""
     loader = DataLoader(
         dataset,
         batch_size=4,
+        drop_last=True,
         collate_fn=_collate,
         num_workers=2,
         pin_memory=True,
@@ -172,6 +174,7 @@ def test_sharded_loader_keeps_the_original_loader_settings(dataset):
 
     for setting in (
         "batch_size",
+        "drop_last",
         "collate_fn",
         "num_workers",
         "pin_memory",
