@@ -79,7 +79,8 @@ def unit(session, torch_ver, tf_ver):
         # state that breaks later tests. No coverage, so it cannot overwrite the main run's data.
         session.run(
             "python",
-            *("-m", "pytest", "tests/unit", "--run-manual", "-m", "manual", *pytest_args),
+            # Caller args first: the last ``-m`` wins, and it must be ours.
+            *("-m", "pytest", "tests/unit", *pytest_args, "--run-manual", "-m", "manual"),
             env={**_CPU_ONLY_ENV, "COVERAGE_PROCESS_START": ""},
         )
 
