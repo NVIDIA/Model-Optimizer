@@ -221,7 +221,8 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
 
     # Classify FIRST: placements are local DTensor metadata, so this needs no communication, and
     # doing it up front means the shard shapes can ride along in the single metadata collective
-    # below. Every rank sees the same placements and so agrees on the buckets.
+    # below. Every rank should see the same placements; one that does not is caught below, from the
+    # gathered metadata, so the refusal happens on every rank.
     replicated, shard0, unsupported, plain, empty0 = [], [], [], [], []
     for k in dense_keys:
         v = local_sd[k]
@@ -241,24 +242,18 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
         else:
             unsupported.append((k, str(v.placements), v.device_mesh.ndim))
 
-    # Reject rather than silently taking a slower, untested route. The point-to-point transport
-    # covers replicated, plain, and dim-0 shards on a 1-D full-world mesh; anything else (2-D mesh,
-    # non-dim-0 shard, partial placement) has no correct handling here. Raising names the offending
-    # keys, which is recoverable; emitting a mis-assembled tensor would not be.
-    if unsupported:
-        raise RuntimeError(
-            f"rank {rank}: {len(unsupported)} tensor(s) have a placement the no-gather export "
-            f"cannot materialize; first few: "
-            f"{[(k, pl, f'mesh.ndim={nd}') for k, pl, nd in unsupported[:3]]}"
-        )
-
     # ONE collective for all the metadata: the key list (to catch divergence), this rank's expert
-    # byte count (to seed load balancing), and its local dim-0 extents (to size receive buffers).
-    # These were three separate all_gather_object round trips, each pickling a ~900-entry payload.
+    # byte count (to seed load balancing), its local dim-0 extents (to size receive buffers), its view
+    # of each dim-0 shard's global shape, and the placements it cannot materialize. The first three
+    # were separate all_gather_object round trips, each pickling a ~900-entry payload. Every refusal below
+    # is decided from this gathered data, so it is the same on every rank: a rank that raised alone
+    # would leave its peers waiting in a collective it never joins.
     my_meta = (
         dense_keys,
         sum(_nbytes(local_sd[k]) for k in expert_keys),
         {k: tuple(local_sd[k].to_local().shape) for k in shard0},
+        {k: tuple(local_sd[k].shape) for k in shard0},
+        [(k, pl, f"mesh.ndim={nd}") for k, pl, nd in unsupported[:3]],
     )
     meta: list = [None] * world
     dist.all_gather_object(meta, my_meta)
@@ -271,8 +266,61 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
             f"rank {rank}: dense key sets differ across ranks, so the export would deadlock; "
             f"sample divergences per rank: {diff}"
         )
+    # Reject rather than silently taking a slower, untested route. The point-to-point transport
+    # covers replicated, plain, and dim-0 shards on a 1-D full-world mesh; anything else (2-D mesh,
+    # non-dim-0 shard, partial placement) has no correct handling here. Raising names the offending
+    # keys, which is recoverable; emitting a mis-assembled tensor would not be.
+    unsupported_by_rank = {r: m[4] for r, m in enumerate(meta) if m[4]}
+    if unsupported_by_rank:
+        raise RuntimeError(
+            f"rank {rank}: tensor(s) have a placement the no-gather export cannot materialize; "
+            f"first few per rank: {unsupported_by_rank}"
+        )
     expert_bytes = [m[1] for m in meta]
     all_shapes = [m[2] for m in meta]
+    global_shapes = [m[3] for m in meta]
+
+    # all_shapes[r] is keyed by rank r's shard0 bucket, so its key SET is that rank's classification.
+    # Those buckets come from per-rank DTensor metadata, and a rank that disagrees makes the loop
+    # below raise a bare KeyError from deep inside the writer -- which says nothing about the real
+    # mistake. (Seen for real: a packed-weight rewrap re-inferred the global shape as local x world,
+    # so under uneven sharding each rank computed a different global shape and classified
+    # differently.) Name the divergence instead.
+    _mine = set(all_shapes[rank])
+    _bad = {
+        r: sorted(set(all_shapes[r]) ^ _mine)[:3]
+        for r in range(world)
+        if set(all_shapes[r]) != _mine
+    }
+    if _bad:
+        raise RuntimeError(
+            f"rank {rank}: ranks disagree on which tensors are dim-0 sharded, so the export cannot "
+            f"assemble them; per-rank symmetric differences (first few): {dict(list(_bad.items())[:3])}"
+        )
+
+    # Concatenating local shards reproduces the global tensor only if they tile it exactly: dim-0
+    # extents summing to the global dim 0, every other dim equal. Uneven sharding can leave
+    # to_local() returning a PADDED chunk, which would concatenate into a wrong (too large,
+    # misaligned) tensor rather than failing -- so verify instead of assuming. The global shape is
+    # the gathered one too: ranks that inferred different global shapes (the rewrap above) make the
+    # tensor untiled on every rank, not only on the rank whose own view does not add up.
+    untiled = []
+    for k in shard0:
+        gshapes = {global_shapes[r][k] for r in range(world)}
+        gshape = next(iter(gshapes))
+        shard_shapes = [all_shapes[r][k] for r in range(world)]
+        if len(gshapes) != 1 or not (
+            sum(s[0] for s in shard_shapes) == gshape[0]
+            and all(tuple(s[1:]) == gshape[1:] for s in shard_shapes)
+        ):
+            untiled.append((k, sorted(gshapes), shard_shapes[:3]))
+    if untiled:
+        raise RuntimeError(
+            f"rank {rank}: {len(untiled)} dim-0 sharded tensor(s) do not tile their global shape, "
+            f"so concatenating the local shards would not reconstruct them (to_local() may be "
+            f"returning padded chunks, or the ranks disagree on the global shape); first few: "
+            f"{untiled[:2]}"
+        )
 
     dense_sizes = {k: _nbytes(local_sd[k]) for k in dense_keys}
     # Deterministic on every rank: the sort and the argmin both break ties explicitly.
@@ -300,44 +348,6 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
         if owner[k] != rank:
             del local_sd[k]
 
-    # Concatenating local shards reproduces the global tensor only if they tile it exactly: dim-0
-    # extents summing to the global dim 0, every other dim equal. Uneven sharding can leave
-    # to_local() returning a PADDED chunk, which would concatenate into a wrong (too large,
-    # misaligned) tensor rather than failing -- so verify instead of assuming. Derived from the
-    # same gathered shapes on every rank, so the split is agreed.
-    # all_shapes[r] is keyed by rank r's shard0 bucket, so its key SET is that rank's classification.
-    # Those buckets come from per-rank DTensor metadata, and a rank that disagrees makes the loop
-    # below raise a bare KeyError from deep inside the writer -- which says nothing about the real
-    # mistake. (Seen for real: a packed-weight rewrap re-inferred the global shape as local x world,
-    # so under uneven sharding each rank computed a different global shape and classified
-    # differently.) Name the divergence instead.
-    _mine = set(all_shapes[rank])
-    _bad = {
-        r: sorted(set(all_shapes[r]) ^ _mine)[:3]
-        for r in range(world)
-        if set(all_shapes[r]) != _mine
-    }
-    if _bad:
-        raise RuntimeError(
-            f"rank {rank}: ranks disagree on which tensors are dim-0 sharded, so the export cannot "
-            f"assemble them; per-rank symmetric differences (first few): {dict(list(_bad.items())[:3])}"
-        )
-
-    untiled = []
-    for k in shard0:
-        gshape = tuple(local_sd[k].shape)
-        shard_shapes = [all_shapes[r][k] for r in range(world)]
-        if not (
-            sum(s[0] for s in shard_shapes) == gshape[0]
-            and all(tuple(s[1:]) == gshape[1:] for s in shard_shapes)
-        ):
-            untiled.append((k, gshape, shard_shapes[:3]))
-    if untiled:
-        raise RuntimeError(
-            f"rank {rank}: {len(untiled)} dim-0 sharded tensor(s) do not tile their global shape, "
-            f"so concatenating the local shards would not reconstruct them (to_local() may be "
-            f"returning padded chunks); first few: {untiled[:2]}"
-        )
     if shard0:
         _gather_shard0_to_owners(local_sd, shard0, owner, all_shapes, rank, world)
 

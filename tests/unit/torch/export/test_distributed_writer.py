@@ -210,36 +210,64 @@ def _padded_shard(mesh):
 
 
 @pytest.mark.parametrize(
-    ("build", "world", "match"),
+    ("build", "match"),
     [
         (
             lambda mesh: distribute_tensor(torch.zeros(4, 4), mesh, [Shard(1)]),
-            1,
             "cannot materialize",
         ),
-        # A dim-0 shard over a mesh that is not the whole world: smaller, or 2-D.
-        (
-            lambda mesh: distribute_tensor(torch.zeros(4, 3), mesh, [Shard(0)]),
-            2,
-            "cannot materialize",
-        ),
+        # A dim-0 shard over a 2-D mesh; a smaller mesh is a two-rank case below.
         (
             lambda mesh: distribute_tensor(
                 torch.zeros(4, 3), init_device_mesh("cpu", (1, 1)), [Shard(0), Replicate()]
             ),
-            1,
             "cannot materialize",
         ),
-        (_padded_shard, 1, "do not tile their global shape"),
+        (_padded_shard, "do not tile their global shape"),
     ],
-    ids=["shard1", "smaller-mesh", "2d-mesh", "padded"],
+    ids=["shard1", "2d-mesh", "padded"],
 )
-def test_materialize_owned_rejects_a_tensor_it_cannot_assemble(
-    gloo_world_of_one, build, world, match
-):
+def test_materialize_owned_rejects_a_tensor_it_cannot_assemble(gloo_world_of_one, build, match):
     """Refused before anything moves, rather than assembled wrong."""
     with pytest.raises(RuntimeError, match=match):
-        _materialize_owned({"w": build(gloo_world_of_one)}, set(), 0, world)
+        _materialize_owned({"w": build(gloo_world_of_one)}, set(), 0, 1)
+
+
+def _refusing_materialize_job(rank, world_size, case):
+    if case == "smaller-mesh":
+        # A dim-0 shard over a mesh smaller than the world: each rank's own 1-rank sub-mesh.
+        sub = init_device_mesh("cpu", (world_size, 1), mesh_dim_names=("dp", "sub"))["sub"]
+        w = distribute_tensor(torch.zeros(4, 3), sub, [Shard(0)])
+    else:
+        mesh = init_device_mesh("cpu", (world_size,))
+        if case == "placement":
+            # Only rank 1 holds a placement the export cannot materialize.
+            local, placement = (
+                (torch.zeros(2, 4), Shard(0)) if rank == 0 else (torch.zeros(4, 2), Shard(1))
+            )
+            gshape = (4, 4)
+        else:
+            # A rewrap that re-inferred the global shape per rank: rank 0's own view tiles, rank 1's not.
+            local, placement, gshape = torch.zeros(2, 4), Shard(0), (4 if rank == 0 else 3, 4)
+        w = DTensor.from_local(
+            local, mesh, [placement], run_check=False, shape=torch.Size(gshape), stride=(4, 1)
+        )
+    try:
+        with bounded_collectives():
+            _materialize_owned({"w": w}, set(), rank, world_size)
+    except RuntimeError as error:
+        raised = str(error)
+    else:
+        raised = "no error"
+    match = "do not tile their global shape" if case == "global-shape" else "cannot materialize"
+    assert match in raised, raised
+
+
+@pytest.mark.parametrize("case", ["smaller-mesh", "placement", "global-shape"])
+def test_materialize_owned_refuses_on_every_rank(cpu_dist_workers, case):
+    """Every rank refuses, the ranks whose own view looks fine included, instead of waiting in a
+    collective the refusing rank never joins."""
+    cpu_dist_workers.run(_refusing_materialize_job, case=case)
 
 
 def test_revert_whole_sd_keeps_a_state_dict_with_nothing_to_revert():
