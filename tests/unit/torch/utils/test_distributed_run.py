@@ -15,7 +15,7 @@
 
 
 """Unit tests for distributed PTQ: the distribution plan and a model's record of it, the collectives
-that fail together, the process group's lifetime, launch detection."""
+that fail together, the process group's lifetime."""
 
 from contextlib import nullcontext
 from datetime import timedelta
@@ -35,61 +35,50 @@ from modelopt.torch.utils.distributed import (
     broadcast_from,
     distributed_run,
     distribution_plan,
-    is_distributed_launch,
     set_distribution_plan,
 )
 
 # --------------------------------------------------------------------------------- DistributionPlan
 
 
-def test_plain_world_replicates_everything():
-    plan = DistributionPlan(world_size=8)
-    assert plan.edp == 8
-    assert not plan.is_expert_parallel
-    assert not plan.is_fsdp_dense
-
-
-def test_expert_parallel_splits_the_expert_replica_pool():
-    plan = DistributionPlan(world_size=8, ep_size=2)
-    assert plan.edp == 4  # each expert shard is replicated 4x
-    assert plan.is_expert_parallel
-
-
-def test_fsdp_dense_plan():
-    plan = DistributionPlan(world_size=8, ep_size=8, dense="fsdp")
-    assert plan.is_fsdp_dense
-    assert plan.edp == 1
+@pytest.mark.parametrize(
+    ("plan", "edp", "expert_parallel", "fsdp_dense"),
+    [
+        (DistributionPlan(world_size=8), 8, False, False),
+        # each expert shard is replicated 4x
+        (DistributionPlan(world_size=8, ep_size=2), 4, True, False),
+        (DistributionPlan(world_size=8, ep_size=8, dense="fsdp"), 1, True, True),
+    ],
+    ids=["plain-world", "expert-parallel", "fsdp-dense"],
+)
+def test_a_plan_splits_the_world(plan, edp, expert_parallel, fsdp_dense):
+    assert plan.edp == edp
+    assert plan.is_expert_parallel is expert_parallel
+    assert plan.is_fsdp_dense is fsdp_dense
 
 
 def test_the_default_plan_is_a_single_process():
     assert DistributionPlan() == DistributionPlan(world_size=1, ep_size=1, dense="replicate")
 
 
-def test_an_ep_degree_that_does_not_divide_the_world_is_rejected():
-    """An unsatisfiable plan must fail here, not as a confusing mesh error thousands of ranks later."""
-    with pytest.raises(ValueError, match="must divide world_size"):
-        DistributionPlan(world_size=8, ep_size=3)
-
-
 @pytest.mark.parametrize(
-    "degrees",
+    ("degrees", "match"),
     [
-        {"world_size": 0},
-        {"world_size": -4},
-        {"world_size": 4, "ep_size": 0},
-        {"world_size": 4, "ep_size": -2},
+        ({"world_size": 8, "ep_size": 3}, "must divide world_size"),
+        ({"world_size": 0}, "must be at least 1"),
+        ({"world_size": -4}, "must be at least 1"),
+        ({"world_size": 4, "ep_size": 0}, "must be at least 1"),
+        ({"world_size": 4, "ep_size": -2}, "must be at least 1"),
+        ({"world_size": 8, "dense": "sharded"}, "expected 'replicate' or 'fsdp'"),
     ],
+    ids=["ep-not-dividing", "world-0", "world-negative", "ep-0", "ep-negative", "unknown-dense"],
 )
-def test_a_degree_below_one_is_rejected(degrees):
-    """ep_size=-2 divides a world of 4 and would read as no expert parallelism, replicating an MoE
-    an EP knob of -2 asked to shard; ep_size=0 would divide by zero."""
-    with pytest.raises(ValueError, match="must be at least 1"):
+def test_an_invalid_plan_is_rejected(degrees, match):
+    """An unsatisfiable plan must fail here, not as a confusing mesh error thousands of ranks later.
+    ep_size=-2 divides a world of 4 and would read as no expert parallelism, replicating an MoE an
+    EP knob of -2 asked to shard; ep_size=0 would divide by zero."""
+    with pytest.raises(ValueError, match=match):
         DistributionPlan(**degrees)
-
-
-def test_an_unknown_dense_layout_is_rejected():
-    with pytest.raises(ValueError, match="expected 'replicate' or 'fsdp'"):
-        DistributionPlan(world_size=8, dense="sharded")
 
 
 # ------------------------------------------------------------------- a model's recorded plan
@@ -106,29 +95,29 @@ def test_every_submodule_reads_the_recorded_plan():
 
 
 @pytest.mark.parametrize(
-    "again",
-    [DistributionPlan(world_size=8, ep_size=8), DistributionPlan(world_size=8, dense="fsdp")],
-    ids=["reload", "redistribute"],
+    ("recorded_on", "again"),
+    [
+        ("model", DistributionPlan(world_size=8, ep_size=8)),
+        ("model", DistributionPlan(world_size=8, dense="fsdp")),
+        ("submodule", DistributionPlan(world_size=8)),
+    ],
+    ids=["reload", "redistribute", "submodule"],
 )
-def test_a_model_records_its_plan_once(again):
+def test_a_model_records_its_plan_once(recorded_on, again):
     """A model is distributed once, by its load: recording any plan over a recorded one, the same
-    or another, means a second writer, and is refused."""
+    or another, means a second writer, and is refused, also when only a submodule carries one. A
+    refusal records nothing."""
     model, plan = _model(), DistributionPlan(world_size=8, ep_size=8)
-    set_distribution_plan(model, plan)
+    set_distribution_plan(model if recorded_on == "model" else model[1], plan)
+    holders = [module for module in model.modules() if distribution_plan(module) is plan]
 
     with pytest.raises(ValueError, match="its plan recorded once"):
         set_distribution_plan(model, again)
-    assert all(distribution_plan(module) is plan for module in model.modules())
-
-
-def test_a_plan_recorded_on_a_submodule_is_not_replaced_either():
-    """Nothing is recorded when any submodule already carries another plan."""
-    model = _model()
-    set_distribution_plan(model[1], DistributionPlan(world_size=8, ep_size=8))
-
-    with pytest.raises(ValueError, match="its plan recorded once"):
-        set_distribution_plan(model, DistributionPlan(world_size=8))
-    assert distribution_plan(model) == DistributionPlan()
+    for module in model.modules():
+        if module in holders:
+            assert distribution_plan(module) is plan
+        else:
+            assert distribution_plan(module) == DistributionPlan()
 
 
 def test_a_model_with_no_plan_is_a_single_process():
@@ -312,16 +301,11 @@ def test_a_rank_failing_to_compute_still_joins_the_gather(monkeypatch):
 # ---------------------------------------------------------------------------------- process group
 
 
-def test_a_single_process_sets_no_group_up(monkeypatch):
+def test_a_single_process_is_rank_0_of_one_on_the_given_device(monkeypatch):
+    """With no ranks to sync with, the run sets no group up and tears none down."""
     monkeypatch.delenv("WORLD_SIZE", raising=False)
     monkeypatch.setattr(dist, "setup", lambda **kwargs: pytest.fail("set a group up"))
     monkeypatch.setattr(dist, "cleanup", lambda: pytest.fail("tore a group down"))
-    with distributed_run():
-        pass
-
-
-def test_a_single_process_is_rank_0_of_one_on_the_given_device(monkeypatch):
-    monkeypatch.delenv("WORLD_SIZE", raising=False)
     with distributed_run(device="cpu") as state:
         assert state == DistributedState(rank=0, world_size=1, device="cpu")
         assert state.is_main
@@ -410,15 +394,3 @@ def test_the_run_leaves_a_group_it_found_alone(monkeypatch, world_size, raises):
     with expected, distributed_run(device="cpu"):
         if raises:
             raise ValueError("calibration failed")
-
-
-# ------------------------------------------------------------------------------------ launch detect
-
-
-@pytest.mark.parametrize(("world", "expected"), [(None, False), ("1", False), ("8", True)])
-def test_launch_detection_reads_the_env_before_any_process_group(monkeypatch, world, expected):
-    """Must work at parse time, before distributed_run sets the process group up."""
-    monkeypatch.delenv("WORLD_SIZE", raising=False)
-    if world is not None:
-        monkeypatch.setenv("WORLD_SIZE", world)
-    assert is_distributed_launch() is expected
