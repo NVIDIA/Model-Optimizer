@@ -833,11 +833,16 @@ def _disable_fsdp_unshard_reshard(layer):
     Patched per group instance, not on ``FSDPParamGroup``: the rest of the model still runs forward
     (e.g. while collecting the next layer's inputs) and must unshard as usual.
     """
-    groups = [
-        group
+    groups = {
+        id(group): group  # ``fully_shard([a, b])`` gives several modules one group
         for module in layer.modules()
         if isinstance(module, FSDPModule)
         and (group := fully_shard.state(module)._fsdp_param_group) is not None
+    }.values()
+    # Contexts nest (``persistent_materialization(writeback=False)`` enters this twice), so restore
+    # whatever instance attributes were there before instead of deleting them.
+    saved = [
+        (group, {k: group.__dict__.get(k) for k in ("unshard", "reshard")}) for group in groups
     ]
     for group in groups:
         group.unshard = lambda async_op=False: None
@@ -845,8 +850,12 @@ def _disable_fsdp_unshard_reshard(layer):
     try:
         yield
     finally:
-        for group in groups:
-            del group.unshard, group.reshard
+        for group, prior in saved:
+            for name, value in prior.items():
+                if value is None:
+                    del group.__dict__[name]
+                else:
+                    setattr(group, name, value)
 
 
 def build_param_index(model):

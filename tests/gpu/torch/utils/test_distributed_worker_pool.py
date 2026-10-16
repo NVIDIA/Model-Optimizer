@@ -33,6 +33,10 @@ def _rank_0_fails_and_rank_1_hangs(rank, size):
     time.sleep(600)
 
 
+def _fail(rank, size):
+    raise ValueError("job failed")
+
+
 def _teardown_barrier(rank, size):
     dist.barrier()  # like megatron_worker_teardown: blocks while a peer is still in the job
 
@@ -65,6 +69,17 @@ def test_a_failed_rank_is_reported_even_when_its_teardown_blocks_on_a_hung_peer(
             pool.run(_rank_0_fails_and_rank_1_hangs)
 
         assert time.monotonic() - start < 25
+        assert pool.broken
+    finally:
+        pool.shutdown()
+
+
+def test_a_failed_job_retires_the_pool_even_when_every_rank_replied():
+    """A failed rank reports before its teardown, which may still be blocked; never reuse it."""
+    pool = DistributedWorkerPool(world_size=1, backend="gloo", teardown_fn=None)
+    try:
+        with pytest.raises(RuntimeError, match="job failed"):
+            pool.run(_fail)
         assert pool.broken
     finally:
         pool.shutdown()

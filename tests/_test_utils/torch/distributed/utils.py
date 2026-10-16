@@ -217,11 +217,11 @@ class DistributedWorkerPool:
         ``fn`` is called as ``fn(rank, world_size, *args, **kwargs)`` and must be picklable
         (top-level function or ``functools.partial`` of one).
 
-        If the wait is interrupted (e.g. by ``pytest-timeout``), or a rank fails and its peers do
-        not finish within ``failure_grace`` (they are typically blocked in a collective waiting for
-        it), the workers are still inside the job and every later ``run`` would hang until its own
-        timeout. The workers are killed instead and the pool is marked ``broken``; callers that
-        want to continue need a new pool.
+        If the job fails or the wait is interrupted (e.g. by ``pytest-timeout``), the workers may
+        still be inside the job or its teardown, typically blocked in a collective, and every later
+        ``run`` would hang until its own timeout. The workers are killed instead and the pool is
+        marked ``broken``; callers that want to continue need a new pool (``get_live_pool``). After
+        a rank fails, its peers get ``failure_grace`` seconds to report before the kill.
         """
         if self.broken:
             raise RuntimeError("Worker pool was killed after an earlier job hung; create a new one")
@@ -246,12 +246,16 @@ class DistributedWorkerPool:
             raise
 
         if errors:
+            if not self.broken:
+                # Every rank replied, but a failed rank reports before its teardown, which can still
+                # be blocked; never hand these workers to another job.
+                self._abort(dump_stacks=False)
             raise RuntimeError("Worker(s) failed:\n" + "\n".join(errors))
 
-    def _abort(self):
-        """Print every worker's stack (to stderr, for the CI log), then kill the workers."""
+    def _abort(self, dump_stacks=True):
+        """Kill the workers, first printing their stacks (to stderr, for the CI log) if asked."""
         self.broken = True
-        if hasattr(signal, "SIGUSR1"):
+        if dump_stacks and hasattr(signal, "SIGUSR1"):
             for p in self._processes:
                 with contextlib.suppress(OSError):
                     os.kill(p.pid, signal.SIGUSR1)

@@ -338,7 +338,7 @@ def test_layer_activation_collector_run_uses_cached_inputs_not_parent(monkeypatc
     assert torch.allclose(inp2[0][0][0], torch.tensor([[10.0 + 1.0 + 2.0]]))
 
 
-def _forward_through_other_layers_while_one_is_materialized(rank, size):
+def _forward_through_other_layers_while_one_is_materialized(rank, size, writeback):
     mesh = init_device_mesh("cpu", (size,))
     torch.manual_seed(0)
     model = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8))
@@ -349,9 +349,12 @@ def _forward_through_other_layers_while_one_is_materialized(rank, size):
     expected = model(x)
     # Layerwise calibration runs the whole model to collect the next layer's inputs while one layer
     # is materialized; the other FSDP modules must still unshard.
-    with persistent_materialization(model[0]):
+    with persistent_materialization(model[0], writeback=writeback):
         torch.testing.assert_close(model(x), expected)
+    torch.testing.assert_close(model(x), expected)  # FSDP unshard/reshard restored on exit
 
 
-def test_persistent_materialization_only_skips_unshard_for_its_layer(cpu_dist_workers):
-    cpu_dist_workers.run(_forward_through_other_layers_while_one_is_materialized)
+# writeback=False nests the unshard/reshard override (via _fsdp2_unshard_context).
+@pytest.mark.parametrize("writeback", [True, False])
+def test_persistent_materialization_only_skips_unshard_for_its_layer(cpu_dist_workers, writeback):
+    cpu_dist_workers.run(_forward_through_other_layers_while_one_is_materialized, writeback)
