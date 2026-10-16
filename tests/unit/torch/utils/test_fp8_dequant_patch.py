@@ -109,6 +109,7 @@ def _reference(weight, scale_inv, block):
         ((576, 7168), (128, 128), (128, 128), None),
         ((8, 8), (4, 2), (128, 128), (2, 4)),
         ((130, 260), (128, 128), None, (2, 3)),
+        ((0, 13), (4, 4), (4, 4), None),
     ],
     ids=[
         "whole-blocks",
@@ -119,6 +120,7 @@ def _reference(weight, scale_inv, block):
         "deepseek-kv-a-proj",
         "grid-finer-than-configured",
         "nothing-configured",
+        "empty-weight",
     ],
 )
 def test_dequant_matches_the_blockwise_reference(
@@ -154,15 +156,20 @@ def test_dequant_emits_the_requested_model_dtype(pre_5_10_transformers, target_d
     assert torch.equal(out, _reference(weight, scale_inv, (4, 4)).to(expected))
 
 
-@pytest.mark.parametrize("grid", [(0, 4), (3, 0)])
-def test_an_empty_scale_grid_passes_the_weight_through_unscaled(pre_5_10_transformers, grid):
-    """Sharded or merged expert loads can hand over an empty grid; it must not crash the load."""
+@pytest.mark.parametrize(
+    ("grid", "match"),
+    [((0, 4), "empty scale grid"), ((3, 0), "empty scale grid"), ((4, 4), "fits neither")],
+    ids=["no-row-scales", "no-col-scales", "grid-no-block-places"],
+)
+def test_dequant_refuses_a_scale_grid_it_cannot_place(pre_5_10_transformers, grid, match):
+    """Rather than load wrong weights: an empty grid for a non-empty weight (the weight and its
+    scales were sliced apart, as 5.9's expert ``tensor_idx`` bug did), or a 4-row grid over 10 rows,
+    which no 4-row block (the configured one) or even split gives."""
     weight, scale_inv = _block_fp8((10, 13), grid)
     model_load_utils._patch_finegrained_fp8_dequant(torch.float32)
 
-    out = _dequant_op((4, 4))._dequantize_one(weight, scale_inv)
-
-    assert torch.equal(out, weight.float())
+    with pytest.raises(ValueError, match=match):
+        _dequant_op((4, 4))._dequantize_one(weight, scale_inv)
 
 
 def test_the_expert_converter_leads_with_a_merge_that_dequantizes_each_expert(
