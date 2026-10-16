@@ -221,6 +221,25 @@ def test_trtexec_run_accepts_bytes_input(trtexec_bench):
         assert trtexec_bench.run(b"fake onnx bytes") == pytest.approx(5.0)
 
 
+def test_run_network_command_rejects_unexpected_executable():
+    with pytest.raises(ValueError, match="must use ssh or scp"):
+        bm._run_network_command(["python", "script.py"])
+
+
+def test_trtexec_remote_config_is_validated_before_version_fallback(tmp_path):
+    with patch.object(bm, "_check_for_trtexec") as check_mock:
+        benchmark = TrtExecBenchmark(
+            timing_cache_file=str(tmp_path / "cache.bin"),
+            trtexec_args=["--remoteAutoTuningConfig", "--safe", "--skipInference"],
+        )
+
+    with patch("subprocess.run") as run_mock:
+        assert benchmark.run(str(tmp_path / "model.onnx")) == float("inf")
+
+    check_mock.assert_not_called()
+    run_mock.assert_not_called()
+
+
 def test_trtexec_run_returns_remote_safety_latency(tmp_path):
     """Remote safety autotuning benchmarks the built engine on the target."""
     remote_url = (

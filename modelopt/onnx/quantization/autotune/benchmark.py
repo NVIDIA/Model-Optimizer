@@ -33,6 +33,7 @@ import posixpath
 import re
 import shlex
 import shutil
+import subprocess  # nosec B404
 import tempfile
 import time
 from abc import ABC, abstractmethod
@@ -45,7 +46,7 @@ import numpy as np
 import torch
 
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.ort_utils import _check_for_trtexec, _run_command, _run_trtexec
+from modelopt.onnx.quantization.ort_utils import _check_for_trtexec, _run_trtexec_command
 
 TRT_AVAILABLE = importlib.util.find_spec("tensorrt") is not None
 if TRT_AVAILABLE:
@@ -163,11 +164,19 @@ def _remove_remote_autotuning_config(trtexec_args: list[str]) -> list[str]:
     return filtered_args
 
 
-def _run_network_command(command: list[str]) -> Any:
+def _run_network_command(command: list[str]) -> subprocess.CompletedProcess:
     """Run an SSH or SCP command using the system's key-based configuration."""
+    if not command or command[0] not in {"ssh", "scp"}:
+        raise ValueError("Remote benchmark commands must use ssh or scp")
+
     # System SSH/SCP is required because TensorRT's remote build does not report target latency.
-    # List-form argv and validated destinations avoid invoking a local shell with external input.
-    return _run_command(command[0], command[1:], timeout=600)
+    # The executable is allowlisted and argv remains list-form, so no local shell interprets input.
+    return subprocess.run(  # nosec B603
+        command,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
 
 
 class Benchmark(ABC):
@@ -307,31 +316,24 @@ class TrtExecBenchmark(Benchmark):
             self.logger.debug(f"Added plugin library: {plugin_path}")
 
         trtexec_args = self.trtexec_args or []
-        has_remote_config = any(
-            arg == "--remoteAutoTuningConfig" or arg.startswith("--remoteAutoTuningConfig=")
-            for arg in trtexec_args
-        )
-
-        if has_remote_config:
-            try:
-                _check_for_trtexec(min_version="10.15")
-            except ImportError:
-                self.logger.warning(
-                    "Remote autotuning is not supported with TensorRT version < 10.15. "
-                    "Removing --remoteAutoTuningConfig from trtexec arguments"
-                )
-                trtexec_args = _remove_remote_autotuning_config(trtexec_args)
-            else:
-                self.logger.debug("TensorRT Python API version >= 10.15 detected")
+        try:
+            remote_config = _parse_remote_benchmark_config(trtexec_args)
+        except ValueError as error:
+            self._remote_config_error = str(error)
+            self.trtexec_args = []
+            trtexec_args = []
+        else:
+            if remote_config is not None:
                 try:
-                    remote_config = _parse_remote_benchmark_config(trtexec_args)
-                    if remote_config is None:
-                        raise ValueError("Could not parse --remoteAutoTuningConfig")
-                except ValueError as error:
-                    self._remote_config_error = str(error)
-                    self.trtexec_args = []
-                    trtexec_args = []
+                    _check_for_trtexec(min_version="10.15")
+                except ImportError:
+                    self.logger.warning(
+                        "Remote autotuning is not supported with TensorRT version < 10.15. "
+                        "Removing --remoteAutoTuningConfig from trtexec arguments"
+                    )
+                    trtexec_args = _remove_remote_autotuning_config(trtexec_args)
                 else:
+                    self.logger.debug("TensorRT Python API version >= 10.15 detected")
                     self._remote_benchmark_config = remote_config
                     for index, arg in enumerate(trtexec_args):
                         if arg.startswith("--remoteAutoTuningConfig="):
@@ -340,12 +342,14 @@ class TrtExecBenchmark(Benchmark):
                             trtexec_args[index + 1] = remote_config.url
                     if "--safe" not in trtexec_args:
                         self.logger.warning(
-                            "Remote autotuning requires '--safe' to be set. Adding it to trtexec arguments."
+                            "Remote autotuning requires '--safe' to be set. "
+                            "Adding it to trtexec arguments."
                         )
                         self.trtexec_args.append("--safe")
                     if "--skipInference" not in trtexec_args:
                         self.logger.warning(
-                            "Remote autotuning requires '--skipInference' to be set. Adding it to trtexec arguments."
+                            "Remote autotuning requires '--skipInference' to be set. "
+                            "Adding it to trtexec arguments."
                         )
                         self.trtexec_args.append("--skipInference")
         self._base_cmd.extend(trtexec_args)
@@ -366,7 +370,7 @@ class TrtExecBenchmark(Benchmark):
         config: _RemoteBenchmarkConfig,
         log_file: str | None,
         local_log_content: str,
-    ) -> Any | None:
+    ) -> subprocess.CompletedProcess | None:
         """Upload, benchmark, and clean up a generated engine on the remote target."""
         remote_engine_path = f".modelopt_{Path(self.temp_dir).name}.engine.trt"
         remote_log = []
@@ -489,7 +493,7 @@ class TrtExecBenchmark(Benchmark):
             cmd = [*self._base_cmd, f"--onnx={model_path}"]
             full_cmd = ["trtexec", *cmd]
             self.logger.debug(f"Running: {' '.join(full_cmd)}")
-            result = _run_trtexec(cmd)
+            result = _run_trtexec_command(cmd)
             log_content = "\n".join(
                 [
                     f"Command: {' '.join(full_cmd)}",
