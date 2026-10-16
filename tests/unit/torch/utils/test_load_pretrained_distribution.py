@@ -15,19 +15,21 @@
 
 """Which load ``load_pretrained`` routes a distribution plan to, and the plan it records.
 
-Nothing here needs a process group or a GPU: the process group's rank and size are answered the way
-a torchrun launch would, the configs are tiny real transformers configs served from memory, and the
-loaders are replaced by stand-ins that record how they were called.
+Nothing here needs a GPU, and only one test a process group, two gloo ranks: elsewhere the process
+group's rank and size are answered the way a torchrun launch would, the configs are tiny real
+transformers configs served from memory, and the loaders are replaced by stand-ins that record how
+they were called.
 """
 
 import inspect
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import bounded_collectives
 
 transformers = pytest.importorskip("transformers")
 
-from transformers import AutoModel, LlamaConfig, Qwen3MoeConfig
+from transformers import AutoModel, LlamaConfig, LlamaForCausalLM, Qwen3MoeConfig
 
 import modelopt.torch.models.hf as models_hf
 import modelopt.torch.utils.distributed as dist
@@ -229,28 +231,18 @@ def test_an_expert_parallel_plan_is_refused(run_as, serve, loaders, auto_class, 
     assert auto_class.calls == []
 
 
-def test_every_rank_loads_the_plan_rank0_was_handed(
-    run_as, serve, loaders, process_group, auto_class, monkeypatch, tmp_path
-):
-    """Ranks loading different plans would build mismatched meshes and hang: rank 1, handed a plan
-    of its own, loads the one rank 0 was handed."""
-    run_as(2, rank=1)
-    serve(LlamaConfig(**_TINY))
-    rank0_plan = DistributionPlan(2, dense="fsdp")
+def _every_rank_loads_rank0s_plan_job(rank, size, ckpt):
+    handed = DistributionPlan(size) if rank == 0 else DistributionPlan(size, dense="fsdp")
+    with bounded_collectives():
+        model = load_pretrained(ckpt, distribution=handed, device_map="cpu")
+    assert distribution_plan(model) == DistributionPlan(size), rank
 
-    def broadcast_object_list(message, group=None, group_src=None):
-        label = message[0][0]
-        message[0] = (label, rank0_plan if label == "plan" else [], None)
 
-    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 1)
-    monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast_object_list)
-    monkeypatch.setattr(model_load_utils, "AutoModelForCausalLM", auto_class)
-
-    model = load_pretrained(str(tmp_path), distribution=DistributionPlan(2))
-
-    assert auto_class.calls == [], "rank 1 loaded the whole model, as its own plan says"
-    assert "fsdp2" in loaders, "rank 0's plan shards the model"
-    assert distribution_plan(model) == rank0_plan
+def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path):
+    """Over a real broadcast. Ranks loading different plans would build mismatched meshes and hang:
+    rank 1, handed an FSDP2 plan of its own, loads the whole model by the plan rank 0 was handed."""
+    LlamaForCausalLM(LlamaConfig(**_TINY)).save_pretrained(tmp_path)
+    cpu_dist_workers.run(_every_rank_loads_rank0s_plan_job, ckpt=str(tmp_path))
 
 
 def test_a_plan_for_another_world_is_refused(run_as, serve, tmp_path):
