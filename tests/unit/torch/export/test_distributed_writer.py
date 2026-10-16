@@ -325,9 +325,11 @@ def test_write_even_shards_fails_loudly_when_no_rank_has_anything_to_write(
 
 
 def _one_rank_fails_job(rank, world_size, tmp_dir, fails):
-    failing_rank, target = {"shard": (1, "safetensors.torch.save_file"), "index": (0, "json.dump")}[
-        fails
-    ]
+    failing_rank, target = {
+        "dir": (1, "pathlib.Path.mkdir"),
+        "shard": (1, "safetensors.torch.save_file"),
+        "index": (0, "json.dump"),
+    }[fails]
     failure = (
         mock.patch(target, side_effect=OSError("disk full"))
         if rank == failing_rank
@@ -351,7 +353,7 @@ def _one_rank_fails_job(rank, world_size, tmp_dir, fails):
         assert f"rank {failing_rank}" in str(raised) and "disk full" in str(raised), raised
 
 
-@pytest.mark.parametrize("fails", ["shard", "index"])
+@pytest.mark.parametrize("fails", ["dir", "shard", "index"])
 def test_a_write_that_fails_on_one_rank_fails_on_every_rank(cpu_dist_workers, tmp_path, fails):
     """Not just on the rank that failed, while its peers wait in a collective it never joins."""
     cpu_dist_workers.run(_one_rank_fails_job, tmp_dir=tmp_path, fails=fails)
