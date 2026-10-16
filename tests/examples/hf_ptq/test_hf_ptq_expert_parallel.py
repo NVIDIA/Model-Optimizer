@@ -93,20 +93,27 @@ def _checkpoint_is_local(monkeypatch):
     )
 
 
+def _gathered_alike(gathered, mine, group=None):
+    """Answer a gather as if every rank handed it what this rank did."""
+    gathered[:] = [mine] * len(gathered)
+
+
 @pytest.fixture
 def torchrun(monkeypatch):
     """Run as rank ``rank`` of a ``world_size``-rank torchrun launch; returns its ``dist_state``.
 
-    Every rank acts as its group's first, deciding for itself; how the ranks agree on what they
-    decide is tested with the collectives.
+    Every rank acts as its group's first, deciding for itself, and reads the checkpoint as this one
+    does; how the ranks agree on what they decide is tested with the collectives.
     """
     monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
     monkeypatch.setattr(torch.distributed, "broadcast_object_list", lambda *a, **k: None)
+    monkeypatch.setattr(torch.distributed, "all_gather_object", _gathered_alike)
 
     def enter(world_size, rank=0):
         monkeypatch.setattr(dist, "is_initialized", lambda: world_size > 1)
         monkeypatch.setattr(dist, "is_distributed_run", lambda: world_size > 1)
         monkeypatch.setattr(dist, "size", lambda group=None: world_size)
+        monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: world_size)
         monkeypatch.setattr(dist, "is_master", lambda group=None: rank == 0)
         monkeypatch.setattr(dist, "local_rank", lambda: rank)
         return _dist_state(world_size, rank)
