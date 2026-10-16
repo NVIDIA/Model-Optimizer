@@ -33,6 +33,7 @@ from transformers import AutoModel, LlamaConfig, LlamaForCausalLM, Qwen3MoeConfi
 
 import modelopt.torch.models.hf as models_hf
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.plugins import model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
@@ -344,8 +345,6 @@ def test_a_single_process_fsdp2_load_sets_up_its_group_of_one(
 def test_fsdp2_wrap_leaves_the_plan_to_the_load(monkeypatch):
     """load_pretrained records the plan once, at the end of the load; the wrap it calls records none,
     so a caller that wraps a model itself must record one before anything reads it."""
-    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
-
     model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
     monkeypatch.setattr(
         LayerActivationCollector, "get_decoder_layers", staticmethod(lambda model: list(model))
