@@ -80,26 +80,31 @@ def _vlm_config():
 
 
 @pytest.fixture
-def remote(monkeypatch):
-    """Stand in for the checkpoint's remote code: importing it registers ``modeling_kimi_vl``, with
-    the inline per-expert ``DeepseekV3ForCausalLM`` and a VLM class whose ``tie_weights`` has the
-    old no-kwarg signature. Also restores the compat symbols and loader hooks prepare installs."""
+def remote(monkeypatch, request):
+    """Stand in for the checkpoint's remote code: importing it registers its modeling module
+    (Kimi-VL's ``modeling_kimi_vl`` unless a test names another), with the inline per-expert
+    ``DeepseekV3ForCausalLM`` and a VLM class whose ``tie_weights`` has the old no-kwarg signature,
+    as both Kimi checkpoints ship it. Also restores the compat symbols and loader hooks prepare
+    installs."""
+    modeling, vlm_name = getattr(
+        request, "param", ("modeling_kimi_vl", "KimiVLForConditionalGeneration")
+    )
     for module_name, name in COMPAT_SYMBOLS:
         try:
             owner = importlib.import_module(module_name)
         except ImportError:
             continue
         _restore(monkeypatch, owner, name)
-    module = types.ModuleType("transformers_modules.Kimi_hyphen_VL.0123abcd.modeling_kimi_vl")
+    module = types.ModuleType(f"transformers_modules.Kimi.0123abcd.{modeling}")
     module.DeepseekV3ForCausalLM = type("DeepseekV3ForCausalLM", (), {})
     module.loads, module.tied = [], []
 
-    class KimiVLForConditionalGeneration:
-        def tie_weights(self):
-            module.tied.append(self)
-            return "tied"
+    def tie_weights(self):
+        module.tied.append(self)
+        return "tied"
 
-    module.KimiVLForConditionalGeneration = KimiVLForConditionalGeneration
+    module.vlm = type(vlm_name, (), {"tie_weights": tie_weights})
+    setattr(module, vlm_name, module.vlm)
 
     def import_remote_class(class_ref, ckpt_path, **kwargs):
         module.loads.append((class_ref, ckpt_path, kwargs))
@@ -140,20 +145,35 @@ def test_prepare_rebuilds_the_language_model_config_without_a_decompressor(monke
     assert remote.loads == []
 
 
-def test_prepare_with_a_checkpoint_swaps_in_native_deepseek_v3_and_shims_tie_weights(remote):
-    """``KimiVLForConditionalGeneration`` builds its language model from the module-level
-    ``DeepseekV3ForCausalLM``, which must now be transformers' native class; its old no-kwarg
-    ``tie_weights`` must accept the ``recompute_mapping`` newer transformers passes. Running
-    prepare again does not wrap ``tie_weights`` twice."""
-    kimi_vl.prepare(_vlm_config(), ckpt_path="/ckpt")
-    shim = remote.KimiVLForConditionalGeneration.tie_weights
-    kimi_vl.prepare(_vlm_config(), ckpt_path="/ckpt")
+@pytest.mark.parametrize(
+    ("adapter", "remote", "trust_remote_code"),
+    [
+        (kimi_vl, ("modeling_kimi_vl", "KimiVLForConditionalGeneration"), False),
+        (kimi_k25, ("modeling_kimi_k25", "KimiK25ForConditionalGeneration"), True),
+    ],
+    ids=["vl", "k25"],
+    indirect=["remote"],
+)
+def test_prepare_with_a_checkpoint_swaps_in_native_deepseek_v3_and_shims_tie_weights(
+    monkeypatch, adapter, remote, trust_remote_code
+):
+    """The VLM class builds its language model from the module-level ``DeepseekV3ForCausalLM``,
+    which must now be transformers' native class. Both checkpoints' remote modeling imports a
+    symbol newer transformers dropped, and has an old no-kwarg ``tie_weights`` that must accept the
+    ``recompute_mapping`` newer transformers passes. Running prepare again does not wrap
+    ``tie_weights`` twice."""
+    monkeypatch.delattr(import_utils, "is_torch_fx_available", raising=False)
+    monkeypatch.setattr(_onfly_decompress, "install_onfly_decompress", lambda cfg: None)
+    adapter.prepare(_vlm_config(), ckpt_path="/ckpt", trust_remote_code=trust_remote_code)
+    shim = remote.vlm.tie_weights
+    adapter.prepare(_vlm_config(), ckpt_path="/ckpt", trust_remote_code=trust_remote_code)
 
-    vlm_class = "modeling_kimi_vl.KimiVLForConditionalGeneration"
-    assert remote.loads == [(vlm_class, "/ckpt", {"trust_remote_code": False})] * 2
+    vlm_class = f"{remote.__name__.rsplit('.', 1)[-1]}.{remote.vlm.__name__}"
+    assert remote.loads == [(vlm_class, "/ckpt", {"trust_remote_code": trust_remote_code})] * 2
     assert remote.DeepseekV3ForCausalLM is DeepseekV3ForCausalLM
-    assert remote.KimiVLForConditionalGeneration.tie_weights is shim
-    model = remote.KimiVLForConditionalGeneration()
+    assert import_utils.is_torch_fx_available() is False
+    assert remote.vlm.tie_weights is shim
+    model = remote.vlm()
     assert model.tie_weights(missing_keys=set(), recompute_mapping=False) == "tied"
     assert remote.tied == [model]
 
