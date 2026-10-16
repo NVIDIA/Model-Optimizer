@@ -192,8 +192,6 @@ def _install_built_from_source(session, *names):
 def gpu(session):
     _install_built_from_source(session, "fast_hadamard_transform")
     session.run("python", "-m", "pip", "install", "-e", ".[all,dev-test,dev-fla]")
-    # tests/gpu/_extensions/test_onnx_extensions.py fails for newer containers
-    # until https://github.com/tbenthompson/cppimport/pull/98
     session.run("python", "-m", "pip", "uninstall", "-y", "cupy-cuda12x")
     session.run("python", "-m", "pip", "install", "cupy-cuda13x")
     _install_built_from_source(session, "mamba_ssm", "causal_conv1d")
