@@ -21,6 +21,7 @@ import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 import modelopt.onnx.autocast.graphsanitizer as graphsanitizer
+import modelopt.onnx.trt_utils as trt_utils
 from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
 
 
@@ -471,3 +472,19 @@ def test_find_custom_nodes_uses_source_model_path(tmp_path, monkeypatch):
 
     get_custom_layers.assert_called_once_with(str(model_path.resolve()), [])
     infer_types_shapes.assert_called_once_with(model, [], all_tensor_info=tensor_info)
+
+
+def test_find_custom_nodes_without_tensorrt_says_so(monkeypatch):
+    """The `onnx` extra does not install tensorrt, so this has to be readable."""
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
+    custom_node = helper.make_node("CustomOp", [x.name], [y.name], name="custom")
+    graph = helper.make_graph([custom_node], "custom_graph", [x], [y])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 22)])
+
+    monkeypatch.setattr(trt_utils, "TRT_PYTHON_AVAILABLE", False)
+    monkeypatch.setattr(graphsanitizer, "set_trt_plugin_domain", Mock(return_value=model))
+
+    sanitizer = GraphSanitizer(model, min_opset=22)
+    with pytest.raises(ImportError, match="TensorRT Python package"):
+        sanitizer.find_custom_nodes()
