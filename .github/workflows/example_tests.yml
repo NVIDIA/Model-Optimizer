@@ -148,7 +148,7 @@ jobs:
       contents: read
     secrets: inherit
     with:
-      docker_image: "vllm/vllm-openai:v0.31.0"
+      docker_image: "vllm/vllm-openai:v0.30.0"
       container_options: "--shm-size=2gb --user 0"
       example: ${{ matrix.example }}
       timeout_minutes: 30
