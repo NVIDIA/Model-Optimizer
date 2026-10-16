@@ -44,7 +44,6 @@ from transformers import (
 )
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.utils import env
 from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.moe import (
     _routed_expert_modules,
@@ -136,83 +135,56 @@ def gpu_memory(monkeypatch):
     return give
 
 
-# ----------------------------------------------------------------------------------- env knobs
-
-
-@pytest.mark.parametrize(
-    ("knob", "name"),
-    [(env.ep_degree, "MODELOPT_EP_DEGREE"), (env.fsdp_size, "MODELOPT_FSDP_SIZE")],
-)
-def test_distribution_knobs_default_to_auto(monkeypatch, knob, name):
-    """Unset and exported-but-empty both mean "let the plan decide"."""
-    assert knob() == "auto"
-    monkeypatch.setenv(name, "")
-    assert knob() == "auto"
-
-
-@pytest.mark.parametrize(
-    ("knob", "name", "other"),
-    [
-        (env.ep_degree, "MODELOPT_EP_DEGREE", env.fsdp_size),
-        (env.fsdp_size, "MODELOPT_FSDP_SIZE", env.ep_degree),
-    ],
-)
-def test_distribution_knobs_are_read_when_called(monkeypatch, knob, name, other):
-    """A value snapshotted at import would miss what the launcher sets later; and each knob reads
-    only its own variable."""
-    monkeypatch.setenv(name, "2")
-    assert knob() == "2"
-    monkeypatch.setenv(name, "8")
-    assert knob() == "8"
-    assert other() == "auto"
-
-
 # ------------------------------------------------------------------------------- expert counting
 
 
-def test_dense_config_reports_no_experts():
-    assert num_experts_from_config(SimpleNamespace(hidden_size=128)) == 0
-
-
 @pytest.mark.parametrize(
-    "attr", ["num_experts", "num_local_experts", "n_routed_experts", "num_routed_experts"]
+    ("config", "experts"),
+    [
+        (SimpleNamespace(hidden_size=128), 0),
+        (SimpleNamespace(num_experts=16), 16),
+        (SimpleNamespace(num_local_experts=16), 16),
+        (SimpleNamespace(n_routed_experts=16), 16),
+        (SimpleNamespace(num_routed_experts=16), 16),
+        (SimpleNamespace(text_config=SimpleNamespace(n_routed_experts=32)), 32),
+        (SimpleNamespace(llm_config=SimpleNamespace(n_routed_experts=32)), 32),
+    ],
+    ids=[
+        "dense",
+        "num_experts",
+        "num_local_experts",
+        "n_routed_experts",
+        "num_routed_experts",
+        "vlm-text_config",
+        "vlm-llm_config",
+    ],
 )
-def test_every_spelling_of_the_expert_count_is_understood(attr):
-    """Architectures disagree on the field name; missing one would silently disable EP."""
-    assert num_experts_from_config(SimpleNamespace(**{attr: 16})) == 16
-
-
-@pytest.mark.parametrize("nest", ["text_config", "llm_config"])
-def test_expert_count_is_found_on_a_vlms_nested_text_model(nest):
-    """For a VLM the MoE is the nested LM, so the root config has no expert count of its own."""
-    nested = SimpleNamespace(n_routed_experts=32)
-    assert num_experts_from_config(SimpleNamespace(**{nest: nested})) == 32
+def test_the_expert_count_is_read_under_every_spelling(config, experts):
+    """Architectures disagree on the field name, and a VLM's MoE is its nested LM, whose root
+    config has no expert count of its own: missing either would silently disable EP."""
+    assert num_experts_from_config(config) == experts
 
 
 # ------------------------------------------------------------------------------- degree selection
 
 
-def test_largest_valid_ep_degree_is_chosen():
-    assert choose_ep_dp_degrees(8, 64) == (8, 1)
-
-
-def test_ep_must_divide_the_expert_count_so_ranks_hold_whole_experts():
-    assert choose_ep_dp_degrees(8, 6) == (2, 4)
-
-
-def test_ep_falls_back_to_one_when_nothing_divides():
-    assert choose_ep_dp_degrees(8, 5) == (1, 8)
-
-
-@pytest.mark.parametrize(("world", "experts"), [(8, 0), (1, 64)])
-def test_no_expert_parallelism_for_dense_or_single_rank(world, experts):
-    assert choose_ep_dp_degrees(world, experts) == (1, world)
-
-
-@pytest.mark.parametrize("world", [2, 4, 8, 16])
-def test_degrees_always_factor_the_world(world):
-    ep, dp = choose_ep_dp_degrees(world, 64)
-    assert ep * dp == world
+@pytest.mark.parametrize(
+    ("world", "experts", "degrees"),
+    [
+        (8, 64, (8, 1)),
+        (8, 6, (2, 4)),
+        (8, 5, (1, 8)),
+        (8, 0, (1, 8)),
+        (1, 64, (1, 1)),
+    ],
+    ids=["largest-valid", "divides-the-experts", "nothing-divides", "dense", "single-rank"],
+)
+def test_the_largest_ep_degree_dividing_the_world_and_the_experts_is_chosen(
+    world, experts, degrees
+):
+    """EP must divide the expert count, so every rank holds whole experts; with nothing dividing, a
+    dense model, or a single rank, there is no expert parallelism."""
+    assert choose_ep_dp_degrees(world, experts) == degrees
 
 
 # ---------------------------------------------------------------------------- routed experts
@@ -283,10 +255,6 @@ def test_routed_experts_are_the_plans_containers_under_any_prefix(plan, prefix):
     assert found == {
         name: modules[name] for name in [f"{prefix}layers.{i}.mlp.experts" for i in (0, 1)]
     }
-
-
-def test_a_model_without_an_ep_plan_has_no_routed_experts():
-    assert _routed_expert_modules(_model_with_decoder_at("model."), {}) == {}
 
 
 # ------------------------------------------------------------------------------ model class
@@ -401,29 +369,28 @@ def test_an_moe_without_an_ep_plan_is_not_expert_parallel(run_as, serve, tmp_pat
 
 
 @needs_qwen3_moe_ep_plan
-def test_an_ep_degree_of_0_is_auto(run_as, serve, monkeypatch, tmp_path):
-    monkeypatch.setenv("MODELOPT_EP_DEGREE", "0")
+@pytest.mark.parametrize("value", ["0", ""], ids=["zero", "exported-empty"])
+def test_an_ep_degree_of_0_is_auto(run_as, serve, monkeypatch, tmp_path, value):
+    """And so is one exported empty: unset, the plan decides too."""
+    monkeypatch.setenv("MODELOPT_EP_DEGREE", value)
     run_as(4)
     serve(_qwen3_moe(num_experts=8))
 
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 4)
 
 
-def test_a_dense_model_that_fits_one_gpu_is_replicated(run_as, serve, gpu_memory, tmp_path):
+@pytest.mark.parametrize(
+    ("gpus_worth", "dense"), [(2, "replicate"), (1, "fsdp")], ids=["fits", "too-big"]
+)
+def test_a_dense_model_is_fsdp_sharded_only_when_too_big_for_one_gpu(
+    run_as, serve, gpu_memory, tmp_path, gpus_worth, dense
+):
+    """On a GPU only its own size, the whole model would leave less than 40% of it to calibration."""
     run_as(4)
     config = serve(LlamaConfig(**_TINY))
-    gpu_memory(2 * _bytes(_meta(config)))
+    gpu_memory(gpus_worth * _bytes(_meta(config)))
 
-    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4)
-
-
-def test_a_dense_model_too_big_for_one_gpu_is_fsdp_sharded(run_as, serve, gpu_memory, tmp_path):
-    """Whole, it would leave less than 40% of the GPU to calibration."""
-    run_as(4)
-    config = serve(LlamaConfig(**_TINY))
-    gpu_memory(_bytes(_meta(config)))
-
-    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, dense="fsdp")
+    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, dense=dense)
 
 
 @needs_qwen3_moe_ep_plan
@@ -465,27 +432,32 @@ def test_arguments_override_the_env_knobs(run_as, serve, monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("value", "dense"), [("1", "replicate"), ("4", "fsdp"), ("full", "fsdp"), ("WORLD", "fsdp")]
+    ("value", "dense"),
+    [
+        ("1", "replicate"),
+        ("4", "fsdp"),
+        ("full", "fsdp"),
+        ("WORLD", "fsdp"),
+        ("", "fsdp"),
+        ("2", None),
+    ],
+    ids=["1", "4", "full", "WORLD", "exported-empty", "part-of-the-world"],
 )
 def test_the_dense_knob_replicates_or_shards_over_the_whole_world(
-    run_as, serve, monkeypatch, tmp_path, value, dense
+    run_as, serve, gpu_memory, monkeypatch, tmp_path, value, dense
 ):
+    """Exported empty, the knob is auto, which shards a model too big for one GPU. Sharding over
+    part of the world is refused: no layout does that."""
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", value)
     run_as(4)
     serve(LlamaConfig(**_TINY))
+    gpu_memory(1)  # too small for the whole model, so only auto tells "" from "1"
 
-    assert resolve_distribution_plan(str(tmp_path))[0].dense == dense
-
-
-def test_a_dense_knob_sharding_over_part_of_the_world_is_refused(
-    run_as, serve, monkeypatch, tmp_path
-):
-    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "2")
-    run_as(4)
-    serve(LlamaConfig(**_TINY))
-
-    with pytest.raises(ValueError, match=r"expected auto, 1 .* or world"):
-        resolve_distribution_plan(str(tmp_path))
+    if dense is None:
+        with pytest.raises(ValueError, match=r"expected auto, 1 .* or world"):
+            resolve_distribution_plan(str(tmp_path))
+    else:
+        assert resolve_distribution_plan(str(tmp_path))[0].dense == dense
 
 
 @pytest.mark.parametrize(
