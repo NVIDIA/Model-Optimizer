@@ -140,6 +140,13 @@ def _routed_expert_modules(model: "nn.Module", ep_plan: dict[str, str]) -> "dict
     }
 
 
+def _ep_spec(model_type: str):
+    """``model_type``'s :class:`~modelopt.torch.models.EPSpec`, or ``None``."""
+    from modelopt.torch.models import get_spec
+
+    return getattr(get_spec(model_type), "ep_spec", None)
+
+
 def apply_distributed_support(
     model_type: str,
     hf_config,
@@ -164,10 +171,7 @@ def apply_distributed_support(
     :func:`~modelopt.torch.utils.plugins.model_load_utils.load_and_prepare_ep`, so nothing about it
     is per-model.
     """
-    from modelopt.torch.models import get_spec
-
-    spec = get_spec(model_type)
-    ep = getattr(spec, "ep_spec", None) if spec is not None else None
+    ep = _ep_spec(model_type)
     if ep is None:
         return hf_config
 
@@ -203,10 +207,7 @@ def _spec_ep_plan(model_type: str) -> dict[str, str]:
     expert-parallel section, or one that refuses expert parallelism. Only reads the spec: nothing
     is applied, checked or patched, and ``prepare`` does not run.
     """
-    from modelopt.torch.models import get_spec
-
-    spec = get_spec(model_type)
-    ep = getattr(spec, "ep_spec", None) if spec is not None else None
+    ep = _ep_spec(model_type)
     if ep is None or ep.unsupported:
         return {}
     return dict(ep.base_model_ep_plan or ep.prepared_ep_plan or {})
