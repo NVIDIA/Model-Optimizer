@@ -18,6 +18,7 @@ import asyncio
 
 import yaml
 from specdec_bench import datasets, metrics, models, runners
+from specdec_bench.speculation_profile import checkpoint_id
 from specdec_bench.utils import (
     decode_chat,
     dump_env,
@@ -56,6 +57,56 @@ datasets_available = {
     "specbench": datasets.SpecBench,
     "speed": datasets.SPEEDBench,
 }
+
+
+# Methods the engine wrappers configure via ``--block_size`` rather than
+# ``--draft_length``; reading K off the wrong flag mislabels the vectors.
+_BLOCK_CONFIGURED_METHODS = frozenset({"dflash", "dspark"})
+
+
+def _speculation_profile_metadata(args):
+    """Describe the measurement for speculation_profile.json, or None if there is none.
+
+    Only the fields needed to interpret the acceptance vectors standalone live here;
+    the exhaustive run record is already written to configuration.json by dump_env().
+
+    ``max_supported_k`` is left to default to the measured K: a block-parallel draft
+    has an architectural ceiling, but ``--block_size`` here is the value handed to the
+    engine, not the trained ``dflash_block_size`` in the checkpoint config, so the
+    ceiling cannot be verified from this side.
+    """
+    method = (args.speculative_algorithm or "").lower() or None
+    # A non-speculative baseline still produces steps -- every one emitting exactly
+    # one token -- so build_profile would mark it measured with all-zero acceptance,
+    # indistinguishable from a genuinely terrible draft. There is no draft to
+    # describe, so emit nothing and let the caller skip the write.
+    if method in (None, "none"):
+        return None
+    block_size = getattr(args, "block_size", None)
+    if method in _BLOCK_CONFIGURED_METHODS and block_size:
+        num_speculative_tokens = block_size
+    else:
+        num_speculative_tokens = args.draft_length
+    return {
+        "num_speculative_tokens": num_speculative_tokens,
+        "method": method,
+        "block_size": block_size,
+        # Identifiers, not paths: this artifact is meant to be published alongside a
+        # checkpoint, so it must not carry internal cluster layout. configuration.json
+        # keeps the full paths for local debugging.
+        "draft_checkpoint": (
+            {"id": checkpoint_id(args.draft_model_dir)} if args.draft_model_dir else None
+        ),
+        "target_model": {"id": checkpoint_id(args.model_dir)},
+        "measurement_conditions": {
+            "dataset": args.dataset or ("mtbench" if args.mtbench else None),
+            "concurrency": args.concurrency,
+            "temperature": args.temperature,
+            "engine": args.engine,
+            "tp_size": args.tp_size,
+            "full_run_record": "configuration.json",
+        },
+    }
 
 
 async def tqdm_gather(*fs, return_exceptions=False, **kwargs):
@@ -210,10 +261,15 @@ def run_simple(args):
     if args.save_dir is not None:
         for metric in metrics_list:
             metric.update_directory(args.save_dir)
+        metrics.AcceptanceRate.set_profile_metadata(_speculation_profile_metadata(args))
         # Stamp configuration.json BEFORE the run loop so the file lands even
         # when the run crashes mid-way. Engine init is already done, so the
         # live serving_config from the model is available.
         dump_env(args, args.save_dir, overrides={"serving_config": model.get_serving_config()})
+    else:
+        # Class-level state, so clear it: a second in-process run (e.g. an AR-vs-K
+        # sweep) without --save_dir must not inherit the previous run's metadata.
+        metrics.AcceptanceRate.set_profile_metadata(None)
 
     runner = runners.SimpleRunner(model, metrics=metrics_list)
 
