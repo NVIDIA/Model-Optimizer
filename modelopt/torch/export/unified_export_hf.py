@@ -72,7 +72,10 @@ from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
-from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import (
+    _cast_per_block_scale_to_fp8,
+    cutlass_fp4_scale_to_modelopt_fp4_scale,
+)
 from modelopt.torch.quantization.utils import (
     fsdp2_aware_weight_update,
     module_name_maps,
@@ -591,15 +594,6 @@ def _compressed_per_block_scale(
     scale = getattr(weight_quantizer, "_scale", None)
     if scale is None or not (scale.dtype == torch.uint8 and scale.ndim == 1):
         return scale
-    try:
-        from tensorrt_llm._torch.auto_deploy.utils.quantization_utils import (
-            cutlass_fp4_scale_to_modelopt_fp4_scale,
-        )
-    except ImportError as e:
-        raise ImportError(
-            "This weight was compressed by TensorRT-LLM, so its NVFP4 block scale is "
-            "cutlass-swizzled, but tensorrt_llm cannot be imported to convert it for export."
-        ) from e
     return cutlass_fp4_scale_to_modelopt_fp4_scale(scale, weight.metadata["shape"][-2:])
 
 
