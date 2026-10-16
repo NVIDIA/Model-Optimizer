@@ -27,12 +27,10 @@ rank in process, and two spawned ranks where a non-zero expert offset matters.
 import contextlib
 import copy
 import math
-import types
 import warnings
 
 import pytest
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
@@ -65,12 +63,6 @@ PREFIX = "model.layers.0.mlp.experts"
 
 FP8_WEIGHT_ONLY_CFG = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
 FP8_WEIGHT_ONLY_CFG["quant_cfg"].append({"quantizer_name": "*input_quantizer", "enable": False})
-
-QUANT_CFGS = pytest.mark.parametrize(
-    "quant_cfg",
-    [mtq.FP8_DEFAULT_CFG, FP8_WEIGHT_ONLY_CFG, mtq.NVFP4_DEFAULT_CFG],
-    ids=["fp8", "fp8_weight_only", "nvfp4"],
-)
 
 
 class _KeepFusedGatedExperts(nn.Module):
@@ -135,15 +127,6 @@ def _unregister_synthetic_experts():
             QuantModuleRegistry.unregister(cls)
 
 
-@pytest.fixture
-def gloo_world_of_one(skip_on_windows, tmp_path_factory):
-    """A one-rank gloo process group and its CPU device mesh."""
-    store = tmp_path_factory.mktemp("pg") / "store"
-    dist.init_process_group("gloo", init_method=store.as_uri(), rank=0, world_size=1)
-    yield init_device_mesh("cpu", (1,))
-    dist.destroy_process_group()
-
-
 def _quantized_experts(experts_cls, quant_cfg, num_experts=NUM_EXPERTS):
     """Build, quantize and calibrate a fused-experts module; every expert sees one token."""
     torch.manual_seed(0)
@@ -200,98 +183,85 @@ def _assert_quantized(state_dict):
 # ------------------------------------------------------------------ keep-fused + split
 
 
-@LAYOUTS
-@QUANT_CFGS
-def test_keep_fused_then_split_writes_exactly_the_per_expert_export(experts_cls, quant_cfg):
-    experts = _quantized_experts(experts_cls, quant_cfg)
-    want = _per_expert_export(experts)
-    _assert_quantized(want)
-
-    _assert_byte_identical(split_fused_experts_state_dict(_keep_fused_export(experts)), want)
+def _uncalibrated(experts, projections):
+    """Expert 1's calibration never ran: zero its weight amax."""
+    for proj in projections:
+        getattr(experts, f"{proj}_weight_quantizers")[1]._amax.zero_()
 
 
-@LAYOUTS
-@QUANT_CFGS
-def test_keep_fused_leaves_one_fused_weight_and_stacked_scales_per_projection(
-    experts_cls, quant_cfg
+def _unquantized(experts, projections):
+    """A recipe left these projections' experts unquantized."""
+    for proj in projections:
+        for quantizer in getattr(experts, f"{proj}_weight_quantizers"):
+            quantizer.disable()
+
+
+def _export_cases():
+    layouts = [(_KeepFusedGatedExperts, "gated"), (_KeepFusedUngatedExperts, "ungated")]
+    cfgs = [
+        (mtq.FP8_DEFAULT_CFG, "fp8"),
+        (FP8_WEIGHT_ONLY_CFG, "fp8_weight_only"),
+        (mtq.NVFP4_DEFAULT_CFG, "nvfp4"),
+    ]
+    cases = [
+        pytest.param(cls, cfg, None, (), id=f"{name}-{cfg_name}")
+        for cls, name in layouts
+        for cfg, cfg_name in cfgs
+    ]
+    cases += [
+        pytest.param(
+            cls,
+            mtq.NVFP4_DEFAULT_CFG,
+            _uncalibrated,
+            ("first", "down_proj"),
+            id=f"{name}-uncalibrated",
+        )
+        for cls, name in layouts
+    ]
+    cases += [
+        pytest.param(
+            cls, mtq.FP8_DEFAULT_CFG, _unquantized, projs, id=f"{name}-unquantized-{which}"
+        )
+        for cls, name in layouts
+        for which, projs in (
+            ("first", ("first",)),
+            ("down", ("down_proj",)),
+            ("both", ("first", "down_proj")),
+        )
+    ]
+    return cases
+
+
+@pytest.mark.parametrize(("experts_cls", "quant_cfg", "change", "projections"), _export_cases())
+def test_keep_fused_then_split_writes_exactly_the_per_expert_export(
+    experts_cls, quant_cfg, change, projections
 ):
-    experts = _quantized_experts(experts_cls, quant_cfg)
-    first = experts._first_proj_attr
-    nvfp4 = quant_cfg is mtq.NVFP4_DEFAULT_CFG
-    has_input_scale = quant_cfg is not FP8_WEIGHT_ONLY_CFG
-
-    _export_fused_experts_keep_fused(experts, torch.bfloat16)
-
-    suffixes = {"", "_weight_scale"}
-    suffixes |= {"_weight_scale_2"} if nvfp4 else set()
-    suffixes |= {"_input_scale"} if has_input_scale else set()
-    assert set(experts.state_dict()) == {f"{p}{s}" for p in (first, "down_proj") for s in suffixes}
-    for proj in (first, "down_proj"):
-        weight = getattr(experts, proj)
-        assert weight.dim() == 3 and weight.shape[0] == NUM_EXPERTS
-        assert weight.dtype == (torch.uint8 if nvfp4 else torch.float8_e4m3fn)
-        assert getattr(experts, f"{proj}_weight_scale").shape[0] == NUM_EXPERTS
-        if nvfp4:
-            assert getattr(experts, f"{proj}_weight_scale_2").shape == (NUM_EXPERTS,)
-        if has_input_scale:
-            assert getattr(experts, f"{proj}_input_scale").dim() == 0
-    # The quantizers' information now lives in the buffers above.
-    assert not [n for n, _ in experts.named_children() if "quantizer" in n]
-
-
-@LAYOUTS
-def test_uncalibrated_expert_takes_the_same_weight_derived_amax_as_the_per_expert_export(
-    experts_cls,
-):
-    """An expert calibration never reached falls back to an amax read off its own weight.
+    """Also when an expert calibration never reached falls back to an amax read off its own weight.
 
     For the gated layout that amax must come from the whole fused ``gate_up`` slice, so gate and up
-    keep one shared ``weight_scale_2`` -- the per-expert export guarantees that, and vLLM's W1/W3
-    fusion depends on it.
+    keep one shared ``weight_scale_2``, as the per-expert export guarantees and vLLM's W1/W3 fusion
+    needs. And when a recipe leaves a projection's experts unquantized: it has nothing to fold.
     """
-    experts = _quantized_experts(experts_cls, mtq.NVFP4_DEFAULT_CFG)
-    first = experts._first_proj_attr
-    for proj in (first, "down_proj"):
-        getattr(experts, f"{proj}_weight_quantizers")[1]._amax.zero_()
+    experts = _quantized_experts(experts_cls, quant_cfg)
+    if change is not None:
+        first = experts._first_proj_attr
+        change(experts, [first if proj == "first" else proj for proj in projections])
     want = _per_expert_export(experts)
+    if change is None:
+        _assert_quantized(want)
 
-    with pytest.warns(UserWarning, match=r"Expert 1 .* not calibrated"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # an uncalibrated expert warns
         got = split_fused_experts_state_dict(_keep_fused_export(experts))
 
     _assert_byte_identical(got, want)
-    if first == "gate_up_proj":
-        gate_ws2 = got[f"{PREFIX}.1.gate_proj.weight_scale_2"]
-        assert torch.equal(gate_ws2, got[f"{PREFIX}.1.up_proj.weight_scale_2"])
-
-
-def _disable_weight_quantizers(experts, proj, indices):
-    for i in indices:
-        getattr(experts, f"{proj}_weight_quantizers")[i].disable()
-
-
-@LAYOUTS
-@QUANT_CFGS
-@pytest.mark.parametrize("unquantized", ["first", "down_proj", "both"])
-def test_a_projection_with_no_quantized_expert_is_written_as_the_per_expert_export_writes_it(
-    experts_cls, quant_cfg, unquantized
-):
-    """A recipe can leave an MoE layer's experts unquantized: such a projection has nothing to fold."""
-    experts = _quantized_experts(experts_cls, quant_cfg)
-    first = experts._first_proj_attr
-    for proj in {"first": [first], "down_proj": ["down_proj"], "both": [first, "down_proj"]}[
-        unquantized
-    ]:
-        _disable_weight_quantizers(experts, proj, range(NUM_EXPERTS))
-    want = _per_expert_export(experts)
-
-    _assert_byte_identical(split_fused_experts_state_dict(_keep_fused_export(experts)), want)
 
 
 @LAYOUTS
 def test_a_projection_mixing_quantized_and_unquantized_experts_is_refused_untouched(experts_cls):
     """One fused tensor cannot hold both, and the refusal comes before the other projection folds."""
     experts = _quantized_experts(experts_cls, mtq.FP8_DEFAULT_CFG)
-    _disable_weight_quantizers(experts, "down_proj", [1])
+    experts.down_proj_weight_quantizers[1].disable()
     before = {k: v.clone() for k, v in experts.state_dict().items()}
 
     with pytest.raises(NotImplementedError, match=r"down_proj: weight quantizers \[1\] of 4"):
@@ -327,48 +297,6 @@ def _fused_state_dict(*, gated, rows=4, cols=6):
         f"{PREFIX}.down_proj_weight_scale": torch.arange(n) + 3.0,
         f"{PREFIX}.down_proj_input_scale": torch.tensor(0.25),
     }
-
-
-def test_split_cuts_gate_and_up_rows_with_their_scales():
-    sd = _fused_state_dict(gated=True)
-    fused = dict(sd)
-    untouched = torch.ones(3)
-    sd["model.layers.0.mlp.gate.weight"] = untouched
-
-    out = split_fused_experts_state_dict(sd)
-
-    gate_up, ws = fused[f"{PREFIX}.gate_up_proj"], fused[f"{PREFIX}.gate_up_proj_weight_scale"]
-    for e in range(LOCAL_EXPERTS):
-        base = f"{PREFIX}.{e}"
-        assert torch.equal(_raw_bytes(out[f"{base}.gate_proj.weight"]), _raw_bytes(gate_up[e, :4]))
-        assert torch.equal(_raw_bytes(out[f"{base}.up_proj.weight"]), _raw_bytes(gate_up[e, 4:]))
-        assert torch.equal(out[f"{base}.gate_proj.weight_scale"], ws[e, :4])
-        assert torch.equal(out[f"{base}.up_proj.weight_scale"], ws[e, 4:])
-        # gate and up are halves of one projection: they share its per-tensor second scale.
-        for proj in ("gate_proj", "up_proj"):
-            assert out[f"{base}.{proj}.weight_scale_2"].item() == 7.0 + e
-            assert out[f"{base}.{proj}.input_scale"].item() == 0.5
-        down = fused[f"{PREFIX}.down_proj"][e]
-        assert torch.equal(_raw_bytes(out[f"{base}.down_proj.weight"]), _raw_bytes(down))
-        assert out[f"{base}.down_proj.weight_scale"].item() == 3.0 + e
-        assert out[f"{base}.down_proj.input_scale"].item() == 0.25
-    assert not any(k in out for k in fused), "fused entries must be consumed"
-    assert out["model.layers.0.mlp.gate.weight"] is untouched
-
-
-def test_split_keeps_an_ungated_up_proj_whole():
-    sd = _fused_state_dict(gated=False)
-    up = sd[f"{PREFIX}.up_proj"]
-
-    out = split_fused_experts_state_dict(sd)
-
-    assert not any(".gate_proj." in k for k in out)
-    for e in range(LOCAL_EXPERTS):
-        assert torch.equal(_raw_bytes(out[f"{PREFIX}.{e}.up_proj.weight"]), _raw_bytes(up[e]))
-        assert torch.equal(
-            out[f"{PREFIX}.{e}.up_proj.weight_scale"], sd[f"{PREFIX}.up_proj_weight_scale"][e]
-        )
-    assert f"{PREFIX}.up_proj" not in out
 
 
 def test_split_gives_every_tensor_its_own_storage(tmp_path):
@@ -458,73 +386,39 @@ def _shard_fused_weights(experts, mesh):
     return experts
 
 
-@LAYOUTS
-@QUANT_CFGS
-def test_keep_fused_on_a_sharded_weight_stays_sharded_and_splits_like_the_per_expert_export(
-    gloo_world_of_one, experts_cls, quant_cfg
-):
-    experts = _quantized_experts(experts_cls, quant_cfg)
-    plain = _keep_fused_export(experts)
-    sharded = _shard_fused_weights(copy.deepcopy(experts), gloo_world_of_one)
-
-    _export_fused_experts_keep_fused(sharded, torch.bfloat16)
-
-    fused = _prefixed(sharded.state_dict())
-    assert set(fused) == set(plain)
-    for key, value in fused.items():
-        if key.endswith("_input_scale"):  # one scalar shared by every expert
-            assert not isinstance(value, DTensor), key
-        else:  # weights and per-expert scales stay sharded on the expert axis
-            assert isinstance(value, DTensor), key
-            assert value.placements == (Shard(0),), key
-            assert value.shape == plain[key].shape, key
-            value = value.to_local()
-        assert torch.equal(_raw_bytes(value), _raw_bytes(plain[key])), key
-    assert _dtensor_dim0_offset(fused[f"{PREFIX}.{sharded._first_proj_attr}"]) == 0
-
-    split = _split_local_fused_module(PREFIX, fused)
-
-    assert not any(isinstance(v, DTensor) for v in split.values())
-    _assert_byte_identical(split, _per_expert_export(experts))
-
-
-def test_keep_fused_keeps_the_expert_count_of_an_uneven_shard(gloo_world_of_one):
-    """Two experts held of three is what rank 0 holds when three experts split over two ranks."""
-    experts = _quantized_experts(_KeepFusedGatedExperts, mtq.FP8_DEFAULT_CFG, num_experts=3)
-    for proj in ("gate_up_proj", "down_proj"):
-        full = getattr(experts, proj).data
-        held = DTensor.from_local(
-            full[:2].clone(),
-            gloo_world_of_one,
-            [Shard(0)],
-            run_check=False,
-            shape=full.shape,
-            stride=full.stride(),
-        )
-        setattr(experts, proj, nn.Parameter(held, requires_grad=False))
-
-    _export_fused_experts_keep_fused(experts, torch.bfloat16)
-
-    assert experts.gate_up_proj.shape[0] == 3
-    assert experts.gate_up_proj_weight_scale.shape[0] == 3
-
-
 def _two_rank_split_job(rank, world_size):
     mesh = init_device_mesh("cpu", (world_size,))
-    for experts_cls, quant_cfg in [
-        (_KeepFusedGatedExperts, mtq.FP8_DEFAULT_CFG),
-        (_KeepFusedUngatedExperts, mtq.NVFP4_DEFAULT_CFG),
-    ]:
+    cases = [
+        (experts_cls, quant_cfg, NUM_EXPERTS)
+        for experts_cls in (_KeepFusedGatedExperts, _KeepFusedUngatedExperts)
+        for quant_cfg in (mtq.FP8_DEFAULT_CFG, FP8_WEIGHT_ONLY_CFG, mtq.NVFP4_DEFAULT_CFG)
+    ]
+    # Three experts over two ranks: rank 0 holds two, rank 1 one. The folded tensors must keep the
+    # global expert count, not infer local x world rows.
+    cases.append((_KeepFusedGatedExperts, mtq.NVFP4_DEFAULT_CFG, 3))
+    for experts_cls, quant_cfg, num_experts in cases:
         # Every rank calibrates the same seeded module, so all ranks hold identical quantizers.
-        experts = _quantized_experts(experts_cls, quant_cfg)
+        experts = _quantized_experts(experts_cls, quant_cfg, num_experts)
         want = _per_expert_export(experts)
+        plain = _keep_fused_export(experts)
         sharded = _shard_fused_weights(copy.deepcopy(experts), mesh)
         _export_fused_experts_keep_fused(sharded, torch.bfloat16)
         fused = _prefixed(sharded.state_dict())
+        assert set(fused) == set(plain)
         first = fused[f"{PREFIX}.{sharded._first_proj_attr}"]
         n_local = first.to_local().shape[0]
-        offset = rank * math.ceil(NUM_EXPERTS / world_size)
+        offset = rank * math.ceil(num_experts / world_size)
         assert _dtensor_dim0_offset(first) == offset
+        for key, value in fused.items():
+            if key.endswith("_input_scale"):  # one scalar shared by every expert
+                assert not isinstance(value, DTensor), key
+                assert torch.equal(_raw_bytes(value), _raw_bytes(plain[key])), key
+            else:  # weights and per-expert scales stay sharded on the expert axis
+                assert isinstance(value, DTensor), key
+                assert value.placements == (Shard(0),), key
+                assert value.shape == plain[key].shape, key
+                local = plain[key][offset : offset + n_local]
+                assert torch.equal(_raw_bytes(value.to_local()), _raw_bytes(local)), key
         mine = {
             k: v
             for k, v in want.items()
@@ -536,81 +430,17 @@ def _two_rank_split_job(rank, world_size):
 
         # A per-expert scale held as a plain tensor over ALL experts (as keep-fused emits it for an
         # unsharded weight) must be cut to this rank's experts before pairing.
-        unsharded = _keep_fused_export(experts)
         plain_scales = {
-            k: unsharded[k] if k.endswith(("_weight_scale", "_weight_scale_2")) else v
+            k: plain[k] if k.endswith(("_weight_scale", "_weight_scale_2")) else v
             for k, v in fused.items()
         }
         _assert_byte_identical(_split_local_fused_module(PREFIX, plain_scales), mine)
 
 
 def test_two_ranks_fold_and_split_their_own_experts_under_global_indices(cpu_dist_workers):
-    """Rank 1 holds experts 2-3: each must be folded with ITS quantizer and keep its index."""
+    """Rank 1 holds experts 2-3: each must be folded with ITS quantizer and keep its index, and the
+    fused tensors stay sharded on the expert axis at their global shape, an uneven shard included."""
     cpu_dist_workers.run(_two_rank_split_job)
-
-
-# ------------------------------------------------------------------ NVFP4 on sharded weights
-
-
-def test_nvfp4_block_scale_maps_an_all_zero_block_to_one():
-    weight = torch.randn(2, 32)
-    weight[0, :16] = 0.0  # an all-zero block
-    weight[1, :16] = 0.0
-    weight[1, 0] = 6.0  # amax 6 at a second-level scale of 1 -> block scale exactly 1
-
-    scale, _ = NVFP4QTensor.get_weights_scaling_factor(weight, 16, torch.tensor(1.0))
-
-    assert scale.float()[0, 0].item() == 1.0
-    assert scale.float()[1, 0].item() == 1.0
-
-
-def test_nvfp4_static_block_scale_maps_a_zero_amax_block_to_one():
-    # Two rows of two blocks: a zero-amax block next to ones whose amax maps to a scale of 1.
-    quantizer = types.SimpleNamespace(
-        block_sizes={-1: 16},
-        global_amax=torch.tensor(6.0 * 448.0),
-        _amax=torch.tensor([0.0, 6.0, 6.0, 3.0]),
-    )
-
-    scale, _ = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(quantizer, torch.randn(2, 32))
-
-    assert scale.float()[0, 0] == scale.float()[0, 1] == scale.float()[1, 0]
-    assert scale.float()[1, 1] != scale.float()[1, 0]
-
-
-def test_nvfp4_block_scale_accepts_a_sharded_weight(gloo_world_of_one):
-    weight = torch.randn(4, 32)
-    weight[1, :16] = 0.0
-    sharded = distribute_tensor(weight, gloo_world_of_one, [Shard(0)])
-
-    want, want_2 = NVFP4QTensor.get_weights_scaling_factor(weight, 16)
-    got, got_2 = NVFP4QTensor.get_weights_scaling_factor(sharded, 16)
-
-    assert isinstance(got, DTensor) and got.placements == (Shard(0),)
-    assert torch.equal(_raw_bytes(got.to_local()), _raw_bytes(want))
-    assert torch.equal(got_2, want_2)
-
-
-def test_nvfp4_cast_keeps_the_global_shape_of_an_uneven_shard(gloo_world_of_one):
-    """``from_local`` would infer local x world rows; an uneven shard must keep the real total.
-
-    Two rows held of a three-row tensor is what one rank holds when three rows split over two.
-    """
-    local = torch.randn(2, 32) * 4
-    sharded = DTensor.from_local(
-        local.clone(),
-        gloo_world_of_one,
-        [Shard(0)],
-        run_check=False,
-        shape=torch.Size([3, 32]),
-        stride=(32, 1),
-    )
-
-    packed = NVFP4QTensor._cast_fp4(sharded)
-
-    assert isinstance(packed, DTensor) and packed.placements == (Shard(0),)
-    assert packed.shape == (3, 32)
-    assert torch.equal(packed.to_local(), NVFP4QTensor._cast_fp4(local.clone()))
 
 
 # ------------------------------------------------------------------ export handlers
@@ -697,9 +527,14 @@ def test_quant_linear_handler_packs_an_fsdp2_sharded_nvfp4_weight(gloo_world_of_
 
 
 def test_nvfp4_packs_a_sharded_weight_into_the_same_codes(gloo_world_of_one):
-    """``DTensor << int`` is a silent no-op, so the nibble pack must not rely on the operator."""
+    """``DTensor << int`` is a silent no-op, so the nibble pack must not rely on the operator.
+
+    The block scales come out sharded like the weight, an all-zero block included: filling it by
+    boolean-mask assignment lowers to ``index_put_``, which DTensor cannot dispatch.
+    """
     torch.manual_seed(0)
     weight = torch.randn(4, 32, dtype=torch.bfloat16)
+    weight[1, :16] = 0.0  # an all-zero block
     scale_2 = (weight.abs().amax().float() / (6.0 * 448.0)).reshape(())
     scale = NVFP4QTensor.get_weights_scaling_factor(weight, 16, scale_2)[0]
     want = NVFP4QTensor.quantize(weight, 16, scale, scale_2)[0]._quantized_data
@@ -708,4 +543,33 @@ def test_nvfp4_packs_a_sharded_weight_into_the_same_codes(gloo_world_of_one):
     sharded_scale = NVFP4QTensor.get_weights_scaling_factor(sharded, 16, scale_2)[0]
     packed = NVFP4QTensor.quantize(sharded, 16, sharded_scale, scale_2)[0]._quantized_data
 
+    assert isinstance(sharded_scale, DTensor) and sharded_scale.placements == (Shard(0),)
+    assert torch.equal(_raw_bytes(sharded_scale.to_local()), _raw_bytes(scale))
     assert torch.equal(packed.full_tensor(), want)
+    # The second-level scale read off the sharded weight itself, as without one handed in.
+    assert torch.equal(
+        NVFP4QTensor.get_weights_scaling_factor(sharded, 16)[1],
+        NVFP4QTensor.get_weights_scaling_factor(weight, 16)[1],
+    )
+
+
+def test_nvfp4_cast_keeps_the_global_shape_of_an_uneven_shard(gloo_world_of_one):
+    """``from_local`` would infer local x world rows; an uneven shard must keep the real total.
+
+    Two rows held of a three-row tensor is what one rank holds when three rows split over two.
+    """
+    local = torch.randn(2, 32) * 4
+    sharded = DTensor.from_local(
+        local.clone(),
+        gloo_world_of_one,
+        [Shard(0)],
+        run_check=False,
+        shape=torch.Size([3, 32]),
+        stride=(32, 1),
+    )
+
+    packed = NVFP4QTensor._cast_fp4(sharded)
+
+    assert isinstance(packed, DTensor) and packed.placements == (Shard(0),)
+    assert packed.shape == (3, 32)
+    assert torch.equal(packed.to_local(), NVFP4QTensor._cast_fp4(local.clone()))
