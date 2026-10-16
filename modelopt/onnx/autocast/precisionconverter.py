@@ -100,6 +100,8 @@ class PrecisionConverter:
         use_standalone_type_inference: bool = False,
         original_network_io_metadata: dict[str, list[onnx.ValueInfoProto]] | None = None,
         sanitize_model: bool = True,
+        *,
+        defer_nvfp4_trt_inference: bool = False,
     ) -> None:
         """Initialize PrecisionConverter.
 
@@ -120,9 +122,11 @@ class PrecisionConverter:
             use_standalone_type_inference: Use standalone type inference instead of ONNX's infer_shapes.
             original_network_io_metadata: Original public input/output metadata captured at the API boundary.
             sanitize_model: Whether to sanitize the model before precision conversion.
+            defer_nvfp4_trt_inference: Defer annotated NVFP4 plugin inference during sanitization.
         """
         self.model = deepcopy(model)
         self.sanitize_model = sanitize_model
+        self.defer_nvfp4_trt_inference = defer_nvfp4_trt_inference
         if sanitize_model:
             self.value_info_map = value_info_map
             self.initializer_map = initializer_map
@@ -218,7 +222,7 @@ class PrecisionConverter:
         # Convert inputs to reduced precision type
         if not self.keep_io_types:
             for input in self.model.graph.input:
-                if input.type.tensor_type.elem_type == self.high_precision_type.onnx_type:
+                if input.type.tensor_type.elem_type in ONNX_TYPES:
                     input.type.tensor_type.elem_type = self.low_precision_type.onnx_type
 
         cast_down_tensors, cast_up_tensors, fp32_input_to_low_precision_node = (
@@ -416,6 +420,8 @@ class PrecisionConverter:
             return [max(end - start, 0)]
 
         def _infer_standard_op_shape(node):
+            if node.op == "Cast" and node.inputs:
+                return _get_shape(node.inputs[0])
             for infer_shape in (
                 _infer_gathernd_op_shape,
                 _infer_gather_op_shape,
@@ -429,6 +435,10 @@ class PrecisionConverter:
 
         graph = gs.import_onnx(model)
         traversed_tensors = []
+
+        def _get_onnx_dtype(dtype):
+            # GraphSurgeon preserves BF16/FP8/FP4 as ONNX enums when NumPy has no native type.
+            return dtype if isinstance(dtype, int) else helper.np_dtype_to_tensor_dtype(dtype)
 
         def _get_np_type(node, inp, opset=onnx.defs.onnx_opset_version()):
             if node.op == "Cast":
@@ -444,7 +454,9 @@ class PrecisionConverter:
             elif node.op not in self.custom_ops:
                 op_schema = onnx.defs.get_schema(node.op, opset)
                 out_types = list(op_schema.outputs[0].types)
-                inp_type = f"tensor({'float' if inp.dtype == 'float32' else inp.dtype})"
+                inp_type = (
+                    f"tensor({TensorProto.DataType.Name(_get_onnx_dtype(inp.dtype)).lower()})"
+                )
                 return (
                     inp.dtype
                     if inp_type in out_types
@@ -456,8 +468,8 @@ class PrecisionConverter:
 
         def _can_propagate_type(from_type, to_type):
             try:
-                from_type_onnx = helper.np_dtype_to_tensor_dtype(from_type)
-                to_type_onnx = helper.np_dtype_to_tensor_dtype(to_type)
+                from_type_onnx = _get_onnx_dtype(from_type)
+                to_type_onnx = _get_onnx_dtype(to_type)
                 return (
                     from_type_onnx in [*ONNX_TYPES, onnx.TensorProto.UNDEFINED]
                     and to_type_onnx in ONNX_TYPES
@@ -509,7 +521,7 @@ class PrecisionConverter:
                             logger.debug(
                                 f"{indent}Updated type in {child_out.name} from {child_out.dtype} to {np_type}."
                             )
-                    elif helper.np_dtype_to_tensor_dtype(np_type) in ONNX_TYPES:
+                    elif _get_onnx_dtype(np_type) in ONNX_TYPES:
                         child_out.dtype = np_type
                         logger.debug(
                             f"{indent}Updated type in {child_out.name} from 'None' to {np_type}."
@@ -1240,7 +1252,7 @@ class PrecisionConverter:
                     self._warned_values_clamp_min = True
                 np_array = np.where(
                     (np_array != 0.0) & (np.abs(np_array) < data_lowest),
-                    data_lowest,
+                    np.copysign(data_lowest, np_array),
                     np_array,
                 )
             new_array = np_array.astype(to_type.numpy_type)
@@ -1844,7 +1856,7 @@ class PrecisionConverter:
             trt_plugins=self.trt_plugins,
             max_ir_version=self.max_ir_version,
         )
-        graph_sanitizer.sanitize()
+        graph_sanitizer.sanitize(defer_nvfp4_trt_inference=self.defer_nvfp4_trt_inference)
         self.model = graph_sanitizer.model
 
         # Update value_info_map and initializer_map after sanitizing model

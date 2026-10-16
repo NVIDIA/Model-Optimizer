@@ -26,6 +26,7 @@ import torch
 import torch.nn as nn
 from _test_utils.torch.deploy.lib_test_models import BaseDeployModel, get_deploy_models
 
+import modelopt.torch._deploy.utils.torch_onnx as torch_onnx
 import modelopt.torch.quantization as mtq
 from modelopt.onnx.utils import get_batch_size_from_bytes, validate_batch_size
 from modelopt.torch._deploy.utils import (
@@ -297,6 +298,73 @@ def test_fp8_export_rejects_unsupported_dtype_conversion(
             onnx_opset=23,
         )
     assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("source_dtype", "weights_dtype", "quantizers", "expected_calls"),
+    [
+        (torch.float32, "fp16", ("fp4",), ["autocast"]),
+        (torch.float32, "bf16", ("fp4",), ["autocast"]),
+        (torch.bfloat16, "fp16", ("fp4",), ["autocast"]),
+        (torch.bfloat16, "bf16", ("fp4",), []),
+        (torch.float32, "fp16", ("fp4", "fp8"), ["autocast"]),
+        (torch.bfloat16, "bf16", ("fp4", "fp8"), []),
+        (torch.float32, "fp16", ("fp8",), ["onnxconverter"]),
+        (torch.float32, "fp16", ("fp4", "int4"), ["onnxconverter"]),
+        (torch.float32, "fp16", ("fp4", "int8"), ["onnxconverter"]),
+        (torch.float32, "fp16", ("fp4", "mxfp8"), ["onnxconverter"]),
+        (torch.float32, "fp16", (), ["autocast"]),
+    ],
+    ids=[
+        "fp32-to-fp16",
+        "fp32-to-bf16",
+        "bf16-to-fp16",
+        "bf16-noop",
+        "fp4-fp8-to-fp16",
+        "fp4-fp8-bf16-noop",
+        "fp8-legacy",
+        "fp4-int4-legacy",
+        "fp4-int8-legacy",
+        "fp4-mxfp8-legacy",
+        "unquantized-autocast",
+    ],
+)
+def test_quantized_export_selects_precision_converter(
+    source_dtype, weights_dtype, quantizers, expected_calls, monkeypatch
+):
+    calls = []
+
+    def record_onnxconverter(model, **kwargs):
+        calls.append("onnxconverter")
+        return model
+
+    def record_autocast(model, **kwargs):
+        calls.append("autocast")
+        assert kwargs["defer_nvfp4_trt_inference"] == ("fp4" in quantizers)
+        return model
+
+    for quantizer in ("fp4", "fp8", "int4", "int8", "mxfp8"):
+        monkeypatch.setattr(
+            torch_onnx,
+            f"is_{quantizer}_quantized",
+            lambda _, enabled=quantizer in quantizers: enabled,
+        )
+    monkeypatch.setattr(
+        torch_onnx, "configure_linear_module_onnx_quantizers", lambda _: nullcontext()
+    )
+    monkeypatch.setattr(torch_onnx, "quantize_weights", lambda _, graph: graph)
+    monkeypatch.setattr(torch_onnx, "convert_float_to_float16", record_onnxconverter)
+    monkeypatch.setattr(torch_onnx, "convert_to_f16", record_autocast)
+
+    model = nn.Linear(4, 4).eval().to(source_dtype)
+    get_onnx_bytes_and_metadata(
+        model,
+        (torch.ones(1, 4, dtype=source_dtype),),
+        weights_dtype=weights_dtype,
+        onnx_opset=23,
+    )
+
+    assert calls == expected_calls
 
 
 class SingleArgModel(nn.Module):
