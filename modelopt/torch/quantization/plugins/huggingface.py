@@ -1013,8 +1013,12 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         return super().forward(*args, **kwargs)
 
     def get_expert_weight(self, name, idx, dtype=None):
-        """Return one expert's projection in the calibration/export weight domain."""
-        return getattr(self, name)[idx]
+        """Return one expert's projection in the calibration/export weight domain.
+
+        Indexed by this module's own experts, as the per-expert quantizers are (see
+        :meth:`_local_experts`).
+        """
+        return self._local_experts(getattr(self, name))[idx]
 
     def iter_weights_for_calibration(self):
         """Yield ``(weight_slice, quantizer)`` per-expert pairs.
@@ -1032,7 +1036,6 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             quantizers = getattr(self, quantizers_name, None)
             if weight is None or quantizers is None:
                 continue
-            weight = self._local_experts(weight)
             for idx, q in enumerate(quantizers):
                 # Calibrate the same (transposed) view the forward quantizes, so block NVFP4 locks
                 # _original_shape / _amax with the contraction dim last (and the export reads it that way).
@@ -1129,11 +1132,11 @@ class _QuantFP8Experts(_QuantFusedExperts):
         super()._setup()
 
     def get_expert_weight(self, name, idx, dtype=None):
-        weight = getattr(self, name)[idx]
+        weight = self._local_experts(getattr(self, name))[idx]
         if weight.element_size() > 1:
             return weight if dtype is None else weight.to(dtype)
         dtype = dtype or torch.get_default_dtype()
-        scales = getattr(self, f"{name}_scale_inv")[idx].float()
+        scales = self._local_experts(getattr(self, f"{name}_scale_inv"))[idx].float()
         rows, cols = self.block_size or (weight.shape[0] // scales.shape[0], weight.shape[1])
         scales = scales.repeat_interleave(rows, 0).repeat_interleave(cols, 1)
         return (weight.float() * scales[: weight.shape[0], : weight.shape[1]]).to(dtype)
