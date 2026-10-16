@@ -1233,20 +1233,22 @@ def test_every_rank_stops_before_the_write_when_one_ranks_processing_failed(
 class _FusedExpertsQuantizers(torch.nn.Module):
     """What the export reads of a fused-experts container: each projection's weight quantizers."""
 
-    def __init__(self, enabled):
+    def __init__(self, enabled, down_enabled=None):
         super().__init__()
+        down_enabled = enabled if down_enabled is None else down_enabled
         self.gate_up_proj_weight_quantizers = [SimpleNamespace(is_enabled=e) for e in enabled]
-        self.down_proj_weight_quantizers = [SimpleNamespace(is_enabled=e) for e in enabled]
+        self.down_proj_weight_quantizers = [SimpleNamespace(is_enabled=e) for e in down_enabled]
 
 
-def _expert_quantization_job(rank, size, tmp_dir, enabled_per_rank, refused):
+def _expert_quantization_job(rank, size, tmp_dir, enabled_per_rank, down_enabled_per_rank, refused):
     from unittest import mock
 
     from modelopt.torch.export import distributed_writer, unified_export_hf
     from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
     model = torch.nn.Module()
-    model.experts = _FusedExpertsQuantizers(enabled_per_rank[rank])
+    down_enabled = None if down_enabled_per_rank is None else down_enabled_per_rank[rank]
+    model.experts = _FusedExpertsQuantizers(enabled_per_rank[rank], down_enabled)
     set_distribution_plan(model, DistributionPlan(size, ep_size=size))
     raised = None
     with (
@@ -1266,23 +1268,44 @@ def _expert_quantization_job(rank, size, tmp_dir, enabled_per_rank, refused):
     if refused is None:
         assert raised is None, raised
     else:
-        assert raised is not None and f"experts.gate_up_proj ({refused})" in raised, raised
+        assert raised is not None and refused in raised, raised
     # Refused before any rank folds or writes; agreed states export as usual.
     assert fold.called == write.called == (refused is None)
 
 
 @pytest.mark.parametrize(
-    ("enabled_per_rank", "refused"),
+    ("enabled_per_rank", "down_enabled_per_rank", "refused"),
     [
-        (((False, False), (True, True)), "rank 0: unquantized, rank 1: quantized"),
-        (((True, True), (True, False)), "rank 0: quantized, rank 1: mixed"),
-        (((True, True), (True, True)), None),
-        (((False, False), (False, False)), None),
+        (
+            ((False, False), (True, True)),
+            None,
+            "experts.gate_up_proj (rank 0: unquantized, rank 1: quantized)",
+        ),
+        (
+            ((True, True), (True, False)),
+            None,
+            "experts.gate_up_proj (rank 0: quantized, rank 1: mixed)",
+        ),
+        (((True, False), (False, True)), None, "experts.gate_up_proj (mixed)"),
+        (
+            ((True, True), (True, True)),
+            ((False, False), (True, True)),
+            "experts.down_proj (rank 0: unquantized, rank 1: quantized)",
+        ),
+        (((True, True), (True, True)), None, None),
+        (((False, False), (False, False)), None, None),
     ],
-    ids=["ranks-disagree", "one-rank-mixed", "all-quantized", "all-unquantized"],
+    ids=[
+        "ranks-disagree",
+        "one-rank-mixed",
+        "every-rank-mixed",
+        "down-proj-disagrees",
+        "all-quantized",
+        "all-unquantized",
+    ],
 )
 def test_expert_parallel_ranks_agree_on_their_experts_quantization_before_folding(
-    cpu_dist_workers, tmp_path, enabled_per_rank, refused
+    cpu_dist_workers, tmp_path, enabled_per_rank, down_enabled_per_rank, refused
 ):
     """Each rank sees only its own experts' quantizers. Ranks that disagree would fold differently,
     and only the quantized ones would join the writer's input-scale all-reduce."""
@@ -1290,6 +1313,7 @@ def test_expert_parallel_ranks_agree_on_their_experts_quantization_before_foldin
         _expert_quantization_job,
         tmp_dir=tmp_path,
         enabled_per_rank=enabled_per_rank,
+        down_enabled_per_rank=down_enabled_per_rank,
         refused=refused,
     )
 
