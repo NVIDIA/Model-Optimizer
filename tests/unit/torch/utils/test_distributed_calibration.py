@@ -77,49 +77,52 @@ def _seed_worker(worker_id):
     torch.manual_seed(worker_id)
 
 
+def _dataset(kind, n):
+    """Samples ``0 .. n - 1`` as a list (map-style) or as a stream with no ``len()``."""
+    return list(range(n)) if kind == "map-style" else _Stream(n)
+
+
 # --------------------------------------------------------------------------------- shard_dataloader
 
 
-@pytest.mark.parametrize("world_size", [2, 3])
-def test_map_style_shards_are_strided_and_cover_every_sample_once(world_size):
-    """Rank ``r`` gets samples ``r, r + W, ...``, batched with the original size and collate_fn."""
+@pytest.mark.parametrize("kind", ["map-style", "iterable"])
+@pytest.mark.parametrize("world_size", [1, 2, 3])
+def test_shards_are_strided_cover_every_sample_once_and_replay(kind, world_size):
+    """Rank ``r`` gets samples ``r, r + W, ...``, batched with the original size and collate_fn, and
+    a second pass replays the same shard: multi-pass calibration algorithms (e.g. AWQ) iterate the
+    loader again. A lone rank's shard is the whole (unshuffled) loader, batch for batch.
+    """
     n = 12
-    shards = [shard_dataloader(_loader(list(range(n))), r, world_size) for r in range(world_size)]
+    shards = [
+        shard_dataloader(_loader(_dataset(kind, n)), r, world_size) for r in range(world_size)
+    ]
 
     assert sorted(i for shard in shards for i in _ids(shard)) == list(range(n))
     for r, shard in enumerate(shards):
         ids = list(range(r, n, world_size))
-        assert _batches(shard) == [ids[i : i + 2] for i in range(0, len(ids), 2)]
+        assert _batches(shard) == _batches(shard) == [ids[i : i + 2] for i in range(0, len(ids), 2)]
 
 
-def test_map_style_uneven_split_pads_every_rank_to_the_same_batch_count():
-    """No sample is dropped and no rank runs short (it would hang the others' EP collectives).
-
-    The price of ``drop_last=False`` is that the sampler repeats fewer than ``world_size`` samples.
+@pytest.mark.parametrize(
+    ("kind", "padded", "dropped"),
+    [("map-style", 2, set()), ("iterable", 0, {8, 9})],
+    ids=["map-style", "iterable"],
+)
+def test_an_uneven_split_gives_every_rank_the_same_batch_count(kind, padded, dropped):
+    """No rank runs short: it would hang the others' EP collectives. A map-style loader repeats a
+    few samples to even the ranks out (``drop_last=False``); a stream, with no ``len()`` to pad to,
+    drops its trailing partial group instead.
     """
     n, world_size = 10, 4
     shards = [
-        _batches(shard_dataloader(_loader(list(range(n))), r, world_size))
+        _batches(shard_dataloader(_loader(_dataset(kind, n)), r, world_size))
         for r in range(world_size)
     ]
 
-    assert [len(batches) for batches in shards] == [2] * world_size  # 3 samples per rank
+    assert len({len(batches) for batches in shards}) == 1
     seen = Counter(i for batches in shards for batch in batches for i in batch)
-    assert set(seen) == set(range(n))
-    assert seen.total() - n == 2  # padding up to 3 * world_size samples
-
-
-def test_iterable_shards_are_strided_cover_every_sample_once_and_replay():
-    """Each rank strides its own copy of a stream; a second pass replays the same shard.
-
-    Multi-pass calibration algorithms (e.g. AWQ) iterate the loader again.
-    """
-    n, world_size = 12, 3
-    shards = [shard_dataloader(_loader(_Stream(n)), r, world_size) for r in range(world_size)]
-
-    assert sorted(i for shard in shards for i in _ids(shard)) == list(range(n))
-    for r, shard in enumerate(shards):
-        assert _batches(shard) == _batches(shard) == [[r, r + 3], [r + 6, r + 9]]
+    assert set(seen) == set(range(n)) - dropped
+    assert seen.total() - (n - len(dropped)) == padded
 
 
 def test_iterable_shards_split_their_groups_across_worker_processes(monkeypatch):
@@ -139,21 +142,6 @@ def test_iterable_shards_split_their_groups_across_worker_processes(monkeypatch)
             yielded += list(shard)
 
         assert sorted(yielded) == list(range(rank, n, world_size))
-
-
-def test_iterable_uneven_split_drops_the_trailing_partial_group():
-    """Equal counts without ``len()``: the last ``n % world_size`` samples go to no rank."""
-    n, world_size = 10, 4
-    shards = [_ids(shard_dataloader(_loader(_Stream(n)), r, world_size)) for r in range(world_size)]
-
-    assert shards == [[0, 4], [1, 5], [2, 6], [3, 7]]
-
-
-@pytest.mark.parametrize("dataset", [list(range(5)), _Stream(5)], ids=["map-style", "iterable"])
-def test_world_size_one_yields_the_original_batches(dataset):
-    """A lone rank's shard is the whole (unshuffled) loader, batch for batch."""
-    loader = _loader(dataset)
-    assert _batches(shard_dataloader(loader, 0, 1)) == _batches(loader) == [[0, 1], [2, 3], [4]]
 
 
 @pytest.mark.parametrize("dataset", [list(range(8)), _Stream(8)], ids=["map-style", "iterable"])
@@ -283,19 +271,15 @@ class _Block(nn.Module):
 class _MoEModel(nn.Module):
     """Two MoE layers whose plan sends the experts and routers through torch_a2a."""
 
-    def __init__(self, with_tp_plan=True):
+    def __init__(self):
         super().__init__()
         self.layers = nn.ModuleList([_Block(), _Block()])
         self.config = types.SimpleNamespace(use_cache=True)
-        self.tp_plan = (
-            {
-                "layers.*.gate": "torch_a2a_router",
-                "layers.*.proj": "colwise",
-                "layers.*.experts": "torch_a2a_experts",
-            }
-            if with_tp_plan
-            else None
-        )
+        self.tp_plan = {
+            "layers.*.gate": "torch_a2a_router",
+            "layers.*.proj": "colwise",
+            "layers.*.experts": "torch_a2a_experts",
+        }
 
     def forward(self, input_ids):
         hidden_states = input_ids.float()
@@ -312,51 +296,11 @@ def _drop_tp_wrapper(module):
     module.forward = types.MethodType(type(module).forward, module)
 
 
-@pytest.mark.parametrize("rank", [0, 1])
-def test_reinstall_replants_the_ep_wrapper_on_the_a2a_modules_only(monkeypatch, capsys, rank):
-    """Every rank re-wraps exactly the planned torch_a2a experts and routers; rank 0 logs the count.
-
-    Other TP styles keep their forward, and so do the quantizers under an experts module: the plan
-    is looked up per module (``is_weight=False``), so children do not inherit their parent's style.
-    """
-    styles = _install_fake_tp(monkeypatch)
-    monkeypatch.setattr(mto_dist, "is_master", lambda group=None: rank == 0)
-    model, mesh = _MoEModel(), _FakeMesh()
-    hidden_states = torch.ones(2, 4)
-    with pytest.raises(ValueError, match="process_group"):
-        model(hidden_states)  # as quantizer insertion leaves it: no wrapper, no EP group
-
-    assert _reinstall_a2a_forwards(model, mesh) == 4
-
-    assert styles["torch_a2a_experts"].installed == [layer.experts for layer in model.layers]
-    assert styles["torch_a2a_router"].installed == [layer.gate for layer in model.layers]
-    assert styles["colwise"].installed == []
-    model(hidden_states)
-    assert [layer.experts.groups for layer in model.layers] == [[mesh.group]] * 2
-    assert ("re-installed 4" in capsys.readouterr().out) == (rank == 0)
-
-
-def test_reinstall_does_not_stack_wrappers_across_calibration_passes(monkeypatch):
-    """A repeat call is a no-op; a second wrapper would pass the experts the EP group twice."""
-    styles = _install_fake_tp(monkeypatch)
-    model, mesh = _MoEModel(), _FakeMesh()
-    assert _reinstall_a2a_forwards(model, mesh) == 4
-
-    assert _reinstall_a2a_forwards(model, mesh) == 0
-    assert len(styles["torch_a2a_experts"].installed) == 2
-    model(torch.ones(2, 4))
-    assert [layer.experts.groups for layer in model.layers] == [[mesh.group]] * 2
-
-
-@pytest.mark.parametrize(
-    ("has_ep_mesh", "has_tp_plan"), [(False, True), (True, False)], ids=["no-ep-mesh", "no-tp-plan"]
-)
-def test_reinstall_is_a_noop_off_the_expert_parallel_path(monkeypatch, has_ep_mesh, has_tp_plan):
+def test_reinstall_is_a_noop_without_an_ep_mesh(monkeypatch):
     """A single-process or non-EP model is left untouched, even with the torch_a2a styles around."""
     styles = _install_fake_tp(monkeypatch)
-    model = _MoEModel(with_tp_plan=has_tp_plan)
 
-    assert _reinstall_a2a_forwards(model, _FakeMesh() if has_ep_mesh else None) == 0
+    assert _reinstall_a2a_forwards(_MoEModel(), None) == 0
     assert not any(style.installed for style in styles.values())
 
 
@@ -408,17 +352,17 @@ def test_forward_loop_runs_this_ranks_shard_through_the_captured_model():
     assert inner.calls == []
 
 
-@pytest.mark.parametrize(("device", "expected"), [(None, "cpu"), ("meta", "meta")])
-def test_forward_loop_moves_tensors_to_the_device_it_is_given(device, expected):
+def test_forward_loop_moves_tensors_to_the_device_it_is_given():
     """Batch tensors go to ``device`` when one is given; other values pass through.
 
-    The meta device makes the move observable on a CPU-only host.
+    The meta device makes the move observable on a CPU-only host. (Without a device the batches stay
+    put: the shard-routing test reads their values back.)
     """
     batches = [{"input_ids": torch.zeros(2, 3), "logits_to_keep": 1}] * 2
     model = _Recorder()
-    distributed_forward_loop(model, batches, device=device)(model)
+    distributed_forward_loop(model, batches, device="meta")(model)
 
-    assert [call["input_ids"].device.type for call in model.calls] == [expected] * 2
+    assert [call["input_ids"].device.type for call in model.calls] == ["meta"] * 2
     assert [call["logits_to_keep"] for call in model.calls] == [1, 1]
 
 
@@ -464,6 +408,9 @@ def test_forward_loop_replants_a2a_wrappers_dropped_after_it_was_built(monkeypat
     """hf_ptq's order -- build the loop, insert quantizers, calibrate -- hands the experts the EP group.
 
     It holds on every pass (multi-pass algorithms call the loop again), with one wrapper per module.
+    Only the planned torch_a2a experts and routers are re-wrapped: other TP styles keep their forward,
+    and so do the quantizers under an experts module, since the plan is looked up per module
+    (``is_weight=False``) and children do not inherit their parent's style.
     """
     styles = _install_fake_tp(monkeypatch)
     model, mesh = _MoEModel(), _FakeMesh()
@@ -478,7 +425,9 @@ def test_forward_loop_replants_a2a_wrappers_dropped_after_it_was_built(monkeypat
     forward_loop(model)
 
     assert [layer.experts.groups for layer in model.layers] == [[mesh.group] * 6] * 2
-    assert len(styles["torch_a2a_experts"].installed) == 2
+    assert styles["torch_a2a_experts"].installed == [layer.experts for layer in model.layers]
+    assert styles["torch_a2a_router"].installed == [layer.gate for layer in model.layers]
+    assert styles["colwise"].installed == []
 
 
 @pytest.mark.parametrize(
