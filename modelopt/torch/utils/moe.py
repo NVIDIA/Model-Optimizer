@@ -200,8 +200,9 @@ def apply_distributed_support(
 def _spec_ep_plan(model_type: str) -> dict[str, str]:
     """The ``base_model_ep_plan`` :func:`apply_distributed_support` would attach for ``model_type``.
 
-    Empty for a model type with no spec, no expert-parallel section, or one that refuses expert
-    parallelism. Only reads the spec: nothing is applied, checked or patched.
+    Itself, or through the spec's ``prepare``. Empty for a model type with no spec, no
+    expert-parallel section, or one that refuses expert parallelism. Only reads the spec: nothing
+    is applied, checked or patched, and ``prepare`` does not run.
     """
     from modelopt.torch.models import get_spec
 
@@ -209,7 +210,7 @@ def _spec_ep_plan(model_type: str) -> dict[str, str]:
     ep = getattr(spec, "ep_spec", None) if spec is not None else None
     if ep is None or ep.unsupported:
         return {}
-    return dict(ep.base_model_ep_plan or {})
+    return dict(ep.base_model_ep_plan or ep.prepared_ep_plan or {})
 
 
 # ---------------------------------------------------------------------------------------------------
