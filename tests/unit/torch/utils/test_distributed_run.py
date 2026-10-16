@@ -22,7 +22,10 @@ from datetime import timedelta
 
 import pytest
 import torch.distributed
+from _test_utils.torch.distributed.utils import bounded_collectives
 from torch import nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils.distributed import (
@@ -132,19 +135,36 @@ def test_a_model_with_no_plan_is_a_single_process():
     assert distribution_plan(_model()) == DistributionPlan()
 
 
-def test_an_fsdp2_model_with_no_plan_raises(monkeypatch):
-    monkeypatch.setattr(dist, "is_fsdp2_model", lambda model: True)
-    with pytest.raises(RuntimeError, match="is FSDP2-sharded, but has no distribution plan"):
-        distribution_plan(_model())
+def _outcome(call):
+    """``(value, None)``, or ``(None, error)`` if ``call()`` raises.
+
+    For pooled jobs, which cannot use ``pytest.raises``: its failure is a ``BaseException``, which
+    ends the worker instead of failing the job.
+    """
+    try:
+        return call(), None
+    except Exception as error:
+        return None, error
 
 
-def test_a_model_with_no_plan_raises_in_a_run_of_several_ranks(monkeypatch):
-    monkeypatch.setattr(dist, "size", lambda group=None: 2)
-    with pytest.raises(RuntimeError, match="held in a run of 2 ranks"):
-        distribution_plan(_model())
-    model, plan = _model(), DistributionPlan(world_size=2)
+def _no_plan_on_several_ranks_job(rank, size):
+    _, error = _outcome(lambda: distribution_plan(_model()))
+    assert isinstance(error, RuntimeError), error
+    assert f"is held in a run of {size} ranks" in str(error), error
+    model = _model()
+    fully_shard(model, mesh=init_device_mesh("cpu", (size,)))
+    _, error = _outcome(lambda: distribution_plan(model))
+    assert isinstance(error, RuntimeError), error
+    assert "is FSDP2-sharded" in str(error), error
+    plan = DistributionPlan(world_size=size, dense="fsdp")
     set_distribution_plan(model, plan)
     assert distribution_plan(model) is plan
+
+
+def test_a_model_with_no_plan_raises_in_a_run_of_several_ranks(cpu_dist_workers):
+    """Held whole or FSDP2-sharded, rather than be taken for a single process's; once a plan is
+    recorded, that plan is what it reads."""
+    cpu_dist_workers.run(_no_plan_on_several_ranks_job)
 
 
 # ------------------------------------------------------------------------------------ collectives
@@ -156,18 +176,13 @@ def _run_with_ranks(monkeypatch, world_size):
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: world_size)
 
 
-def _as_rank(monkeypatch, rank, received=None):
-    """Answer the broadcasts of a two-rank run as ``rank``; returns ``(message, sending rank)`` for each.
-
-    A rank that is not the sending one receives ``received``, as the sending rank would have sent it.
-    """
+def _as_rank(monkeypatch, rank):
+    """Record the broadcasts of a two-rank run as ``rank``; returns ``(message, sending rank)`` for each."""
     _run_with_ranks(monkeypatch, 2)
     sent = []
 
     def broadcast_object_list(message, group=None, group_src=None):
         sent.append((message[0], group_src))
-        if rank != group_src:
-            message[0] = received
 
     monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: rank)
     monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast_object_list)
@@ -203,41 +218,47 @@ def test_a_single_process_computes_alone(monkeypatch):
     assert all_reduce("smallest", lambda: 4, min) == 4
 
 
-def test_the_sending_rank_sends_its_value(monkeypatch):
-    sent = _as_rank(monkeypatch, 0)
-    plan = DistributionPlan(world_size=2, ep_size=2)
+def _broadcast_from_job(rank, size):
+    ran = []
 
-    assert broadcast_from("plan", lambda: plan) is plan
-    assert sent == [(("plan", plan, None), 0)]
+    def compute():
+        ran.append(rank)
+        return f"rank {rank}'s"
+
+    def fail():
+        raise ValueError("bad degrees")
+
+    with bounded_collectives():
+        for sender in range(size):
+            ran.clear()
+            assert broadcast_from("x", compute, rank=sender) == f"rank {sender}'s"
+            assert ran == ([rank] if rank == sender else []), "a rank that does not send ran fn"
+        _, error = _outcome(lambda: broadcast_from("x", compute, rank=size))
+        assert isinstance(error, ValueError), error
+        assert f"rank={size} is not a rank of this {size}-rank run" in str(error), error
+        _, error = _outcome(lambda: broadcast_from("x", fail))
+        if rank == 0:
+            assert isinstance(error, ValueError), error
+        else:
+            assert isinstance(error, RuntimeError), error
+            assert "rank 0 failed to compute x" in str(error), error
+        sent, error = _outcome(lambda: broadcast_from("plan" if rank == 0 else "other", lambda: 7))
+        if rank == 0:
+            assert (sent, error) == (7, None)
+        else:
+            assert isinstance(error, RuntimeError), error
+            assert "out of step" in str(error), error
 
 
-def test_other_ranks_take_the_sending_ranks_value_without_running_fn(monkeypatch):
-    rank0_plan = DistributionPlan(world_size=2, ep_size=2)
-    _as_rank(monkeypatch, 1, received=("plan", rank0_plan, None))
-
-    plan = broadcast_from("plan", lambda: pytest.fail("a rank that does not send ran fn"))
-
-    assert plan.ep_size == 2
-
-
-def test_any_rank_can_broadcast(monkeypatch):
-    """With rank=1, rank 1 runs fn and sends it; rank 0 takes rank 1's value."""
-    sent = _as_rank(monkeypatch, 1)
-    assert broadcast_from("x", lambda: "rank 1's", rank=1) == "rank 1's"
-    assert sent == [(("x", "rank 1's", None), 1)]
-
-    _as_rank(monkeypatch, 0, received=("x", "rank 1's", None))
-    assert broadcast_from("x", lambda: pytest.fail("rank 0 ran fn"), rank=1) == "rank 1's"
-
-
-def test_a_rank_outside_the_run_cannot_broadcast(monkeypatch):
-    _run_with_ranks(monkeypatch, 2)
-    with pytest.raises(ValueError, match="rank=2 is not a rank of this 2-rank run"):
-        broadcast_from("x", lambda: 0, rank=2)
+def test_broadcast_from_gives_every_rank_the_sending_ranks_value(cpu_dist_workers):
+    """Over a real broadcast: any rank can send, and only it runs fn. A rank outside the run is
+    refused, the sending rank's failure stops every rank, and ranks out of step fail."""
+    cpu_dist_workers.run(_broadcast_from_job)
 
 
 def test_the_sending_rank_failing_still_reaches_the_broadcast(monkeypatch):
-    """The sending rank must still send on failure, or every other rank hangs in the broadcast."""
+    """The sending rank must still send on failure, or every other rank hangs in the broadcast. A
+    stand-in broadcast catches that at once, where a real one would wait out its timeout."""
     sent = _as_rank(monkeypatch, 0)
 
     def fail():
@@ -248,29 +269,36 @@ def test_the_sending_rank_failing_still_reaches_the_broadcast(monkeypatch):
     assert sent == [(("x", None, "ValueError: bad degrees"), 0)]
 
 
-def test_other_ranks_raise_when_the_sending_rank_failed(monkeypatch):
-    _as_rank(monkeypatch, 1, received=("x", None, "ValueError: bad degrees"))
-    with pytest.raises(RuntimeError, match=r"rank 0 failed to compute x.*bad degrees"):
-        broadcast_from("x", lambda: 0)
+def _all_reduce_job(rank, size):
+    def fail_on_rank_1():
+        if rank == 1:
+            raise ValueError("no memory reading")
+        return 4
+
+    with bounded_collectives():
+        assert all_reduce("smallest", lambda: [8, 2][rank], min) == 2
+        _, error = _outcome(lambda: all_reduce("smallest", fail_on_rank_1, min))
+        if rank == 1:
+            assert isinstance(error, ValueError), error
+        else:
+            assert isinstance(error, RuntimeError), error
+            assert "rank 1 failed to compute smallest" in str(error), error
+        _, error = _outcome(
+            lambda: all_reduce("smallest" if rank == 0 else "other", lambda: 4, min)
+        )
+        assert isinstance(error, RuntimeError), error
+        assert "out of step" in str(error), error
 
 
-def test_ranks_broadcasting_out_of_step_fail(monkeypatch):
-    """Rank 0 sending one value while rank 1 expects another would cross the two."""
-    _as_rank(monkeypatch, 1, received=("other", 7, None))
-    with pytest.raises(RuntimeError, match="out of step"):
-        broadcast_from("plan", lambda: DistributionPlan(world_size=2))
-
-
-def test_all_reduce_gives_every_rank_the_combined_value(monkeypatch):
-    """Every rank's value counts, and every rank gets the same result."""
-    sent = _gather_as_rank(monkeypatch, 1, others=[("smallest", 8, None), ("smallest", 2, None)])
-
-    assert all_reduce("smallest", lambda: 4, min) == 2
-    assert sent == [("smallest", 4, None)]
+def test_all_reduce_gives_every_rank_the_combined_value(cpu_dist_workers):
+    """Over a real gather: every rank's value counts and every rank gets the same result. One rank's
+    failure stops every rank, and ranks out of step fail."""
+    cpu_dist_workers.run(_all_reduce_job)
 
 
 def test_a_rank_failing_to_compute_still_joins_the_gather(monkeypatch):
-    """A failing rank must still reach the gather, or every other rank waits in it."""
+    """A failing rank must still reach the gather, or every other rank waits in it. A stand-in
+    gather catches that at once, where a real one would wait out its timeout."""
     sent = _gather_as_rank(monkeypatch, 1, others=[("smallest", 8, None)])
 
     def fail():
@@ -279,18 +307,6 @@ def test_a_rank_failing_to_compute_still_joins_the_gather(monkeypatch):
     with pytest.raises(ValueError, match="no memory reading"):
         all_reduce("smallest", fail, min)
     assert sent == [("smallest", None, "ValueError: no memory reading")]
-
-
-def test_the_other_ranks_raise_when_one_failed_to_compute(monkeypatch):
-    _gather_as_rank(monkeypatch, 0, others=[("smallest", None, "ValueError: no memory reading")])
-    with pytest.raises(RuntimeError, match=r"rank 1 failed to compute smallest.*memory"):
-        all_reduce("smallest", lambda: 4, min)
-
-
-def test_ranks_reducing_out_of_step_fail(monkeypatch):
-    _gather_as_rank(monkeypatch, 0, others=[("other", 8, None)])
-    with pytest.raises(RuntimeError, match="out of step"):
-        all_reduce("smallest", lambda: 4, min)
 
 
 # ---------------------------------------------------------------------------------- process group
