@@ -21,14 +21,22 @@ from contextlib import nullcontext
 
 import pytest
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from packaging.version import Version
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
+from torch.distributed.tensor import Shard, distribute_tensor
+from torch.distributed.tensor.debug import CommDebugMode
 
 pytest.importorskip("transformers")
 
 from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_params
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, Qwen3MoeConfig
+from transformers import __version__ as tf_version
 from transformers.integrations.finegrained_fp8 import FP8Experts
+from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
@@ -37,7 +45,10 @@ from modelopt.torch.export.moe_utils import _export_fused_experts, _fallback_ama
 from modelopt.torch.export.quant_utils import get_quant_config, get_quantization_format
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
-from modelopt.torch.quantization.model_calib import local_hessian_calibrate
+from modelopt.torch.quantization.model_calib import (
+    _register_weight_input_hooks,
+    local_hessian_calibrate,
+)
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
     _fused_experts_wrapper,
@@ -49,7 +60,8 @@ from modelopt.torch.quantization.plugins.huggingface import (
     register_fused_experts_on_the_fly,
     register_sparse_moe_on_the_fly,
 )
-from modelopt.torch.quantization.utils.core_utils import weight_attr_names
+from modelopt.torch.quantization.utils.core_utils import module_name_maps, weight_attr_names
+from modelopt.torch.utils.moe import register_torch_a2a, torch_a2a_experts_forward
 
 
 def test_native_fp8_experts_dequantized_before_nvfp4_export():
@@ -363,8 +375,6 @@ class _SyntheticGroupedExperts(nn.Module):
                 self, hidden_states, top_k_index, top_k_weights
             )
         if self.config._experts_implementation == "torch_a2a":
-            from modelopt.torch.utils.moe import torch_a2a_experts_forward
-
             return torch_a2a_experts_forward(
                 self, hidden_states, top_k_index, top_k_weights, self.config.ep_group
             )
@@ -1706,8 +1716,6 @@ class TestNormalizeFusedExpertsQuantizerName:
 
 def _local_hessian_grouped_capture_job(rank, size, impl):
     """Local-Hessian capture under a grouped dispatcher; torch_a2a gets a one-rank EP group."""
-    import torch.distributed as dist
-
     ep_group = dist.new_subgroups(1)[0] if impl == "torch_a2a" else None
     try:
         torch.manual_seed(0)
@@ -2150,53 +2158,6 @@ class TestNonGatedFusedExperts:
             assert quant.get("quant_algo") is not None
         finally:
             self._cleanup_registry(expert_type)
-
-
-# ---------------------------------------------------------------------------
-# Regression tests for the real transformers Qwen3-VL MoE text experts
-# ---------------------------------------------------------------------------
-QWEN_HIDDEN_DIM = 32
-QWEN_INTERMEDIATE_DIM = 12
-QWEN_NUM_EXPERTS = 4
-QWEN_TOP_K = 2
-
-
-def _make_qwen3_vl_moe_experts():
-    """Build a tiny real ``Qwen3VLMoeTextExperts`` with initialized weights."""
-    from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import Qwen3VLMoeTextConfig
-    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextExperts
-
-    config = Qwen3VLMoeTextConfig(
-        hidden_size=QWEN_HIDDEN_DIM,
-        intermediate_size=QWEN_HIDDEN_DIM,
-        moe_intermediate_size=QWEN_INTERMEDIATE_DIM,
-        num_experts=QWEN_NUM_EXPERTS,
-        num_experts_per_tok=QWEN_TOP_K,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        vocab_size=128,
-    )
-    # The fused forward dispatches on this; ``eager`` is the only backend that routes
-    # through ``F.linear`` and therefore through the quantizer hooks.
-    config._experts_implementation = "eager"
-    experts = Qwen3VLMoeTextExperts(config)
-    # Weights are created with ``torch.empty``; fill them so comparisons are meaningful.
-    torch.manual_seed(0)
-    with torch.no_grad():
-        for param in experts.parameters():
-            param.normal_(std=0.02)
-    return experts
-
-
-def _qwen3_vl_moe_forward_args():
-    """Routing inputs sized so every expert is hit."""
-    seq_len = QWEN_NUM_EXPERTS // QWEN_TOP_K
-    torch.manual_seed(0)
-    hidden_states = torch.randn(seq_len, QWEN_HIDDEN_DIM)
-    router_indices = torch.arange(QWEN_NUM_EXPERTS, dtype=torch.long).reshape(seq_len, QWEN_TOP_K)
-    top_k_weights = torch.softmax(torch.randn(seq_len, QWEN_TOP_K), dim=-1)
-    return hidden_states, router_indices, top_k_weights
 
 
 class TestNemotronHUngatedExperts:
@@ -2773,14 +2734,6 @@ def _quantized_experts_backward_job(rank, size):
     """Each rank holds half of transformers' fused Qwen3-MoE experts with ModelOpt's fake quantizers,
     set to the whole module's calibrated scales; trained through the torch_a2a forward, it must give
     the gradients the whole quantized module gives on one process."""
-    import copy
-
-    import torch.distributed as dist
-    from transformers import Qwen3MoeConfig
-    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
-
-    from modelopt.torch.utils.moe import register_torch_a2a
-
     register_torch_a2a()
     dtype = torch.bfloat16  # the torch_a2a transport computes in bf16
     config = Qwen3MoeConfig(
@@ -2856,9 +2809,6 @@ def _quantized_experts_backward_job(rank, size):
 def test_quantized_fused_experts_train_through_torch_a2a_like_the_whole_module(cpu_dist_workers):
     """QAT under expert parallelism: with fake quantizers inserted, the experts split over two ranks
     train through the torch_a2a forward as the whole quantized module does on one process."""
-    from packaging.version import Version
-    from transformers import __version__ as tf_version
-
     if Version(tf_version) < Version("5.6"):
         pytest.skip("expert parallelism needs transformers >= 5.6")
     cpu_dist_workers.run(_quantized_experts_backward_job)
@@ -2878,11 +2828,6 @@ def _ep_sharded_experts_use_their_own_weights_job(rank, size):
     DTensor ``Shard(0)`` over the experts, ``num_experts`` set to the local count): each rank's
     per-expert quantizers must calibrate on, and fold into, the rank's own experts, as in the whole
     module -- not on the global experts their local index names."""
-    from torch.distributed.device_mesh import init_device_mesh
-    from torch.distributed.tensor import Shard, distribute_tensor
-    from transformers import Qwen3MoeConfig
-    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
-
     config = Qwen3MoeConfig(
         hidden_size=_EP_HIDDEN,
         moe_intermediate_size=2 * _EP_HIDDEN,
@@ -2940,15 +2885,6 @@ def _ep_weight_input_hooks_read_local_experts_job(rank, size):
     """Registering the weight-input hooks (local Hessian, imatrix) hands ``on_weight`` each
     projection's first LOCAL expert, the one its first quantizer quantizes, and runs no collective:
     indexing the expert-parallel DTensor would name a global expert and all-gather every expert."""
-    from torch.distributed.device_mesh import init_device_mesh
-    from torch.distributed.tensor import Shard, distribute_tensor
-    from torch.distributed.tensor.debug import CommDebugMode
-    from transformers import Qwen3MoeConfig
-    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
-
-    from modelopt.torch.quantization.model_calib import _register_weight_input_hooks
-    from modelopt.torch.quantization.utils.core_utils import module_name_maps
-
     config = Qwen3MoeConfig(
         hidden_size=_EP_HIDDEN,
         moe_intermediate_size=2 * _EP_HIDDEN,
@@ -3003,12 +2939,6 @@ def _fsdp_wrapped_ep_experts_calibrate_their_own_weights_job(rank, size):
     experts left out (``ignored_params``) and EP-sharded over ``ep``. Weight calibration opens FSDP2's
     weight-access window on the layer, which must leave the expert DTensors alone -- gathering them
     would hand every rank every expert, indexed by local position."""
-    from torch.distributed.device_mesh import init_device_mesh
-    from torch.distributed.fsdp import fully_shard
-    from torch.distributed.tensor import Shard, distribute_tensor
-    from transformers import Qwen3MoeConfig
-    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
-
     config = Qwen3MoeConfig(
         hidden_size=_EP_HIDDEN,
         moe_intermediate_size=2 * _EP_HIDDEN,
