@@ -15,19 +15,20 @@
 
 """How ``resolve_distribution_plan`` decides a model's distribution, and the MoE helpers it uses.
 
-Nothing here needs a GPU, and only the last test a process group: elsewhere the process group's
-rank and size are answered the way a torchrun launch would, and the configs are tiny real
-transformers configs served from memory, so the decision builds their real models on the meta device.
+Nothing here needs a GPU, and only the tests at the end a process group, two gloo ranks: elsewhere
+the process group's rank and size are answered the way a torchrun launch would, and the configs are
+tiny real transformers configs served from memory, so the decision builds their real models on the
+meta device.
 """
 
 import os
-from datetime import timedelta
-from functools import partial
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import bounded_collectives
 from torch import nn
 
 transformers = pytest.importorskip("transformers")
@@ -538,86 +539,42 @@ def test_a_model_that_cannot_be_built_on_meta_names_itself(run_as, serve, monkey
 # ------------------------------------------------------------------------------ rank 0 decides
 
 
-def _as_rank(monkeypatch, rank, rank0_message=None):
-    """Run as ``rank`` of a 4-rank run, answering its broadcast; returns what this rank handed it.
+@contextmanager
+def _knobs(**values):
+    """This rank's distribution knobs, exactly ``values``, within the block.
 
-    A non-zero rank receives ``rank0_message``, as rank 0 would have sent it. Every rank reads the
-    checkpoint as this one does.
+    A pooled worker keeps the environment it was spawned with, so the knobs are cleared first. The
+    environment is restored on the way out.
     """
-    sent = []
-
-    def broadcast_object_list(message, group=None, group_src=None):
-        sent.append(message[0])
-        if rank != 0:
-            message[0] = rank0_message
-
-    monkeypatch.setattr(dist, "is_distributed_run", lambda: True)
-    monkeypatch.setattr(dist, "size", lambda group=None: 4)
-    monkeypatch.setattr(dist, "is_master", lambda group=None: rank == 0)
-    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: rank)
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 4)
-    monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast_object_list)
-    monkeypatch.setattr(torch.distributed, "all_gather_object", _gathered_alike)
-    return sent
+    with mock.patch.dict(os.environ):
+        for name in ("MODELOPT_EP_DEGREE", "MODELOPT_FSDP_SIZE"):
+            os.environ.pop(name, None)
+        os.environ.update(values)
+        yield
 
 
-def test_rank0_decides_and_sends_its_plan(monkeypatch, serve, tmp_path):
-    sent = _as_rank(monkeypatch, 0)
-    serve(LlamaConfig(**_TINY))
-
-    plan, _ = resolve_distribution_plan(str(tmp_path), dense="fsdp")
-
-    assert sent == [("plan", DistributionPlan(4, dense="fsdp"), None)]
-    assert plan == DistributionPlan(4, dense="fsdp")
+def _every_rank_takes_rank0s_plan_job(rank, size, ckpt, knobs, expected):
+    with bounded_collectives(), _knobs(**knobs[rank]):
+        plan, _ = resolve_distribution_plan(ckpt)
+    assert plan == expected, (rank, plan)
 
 
-def test_other_ranks_adopt_rank0s_plan_without_deciding(monkeypatch, serve, tmp_path):
-    """A non-zero rank's own knobs, here a dense layout of its own, must not leak into the plan."""
-    rank0_plan = DistributionPlan(4, dense="fsdp")
-    _as_rank(monkeypatch, 1, rank0_message=("plan", rank0_plan, None))
-    serve(LlamaConfig(**_TINY))
-    monkeypatch.setattr(
-        model_load_utils, "_decide_distribution", lambda *a: pytest.fail("rank 1 decided")
+def test_every_rank_takes_the_plan_rank0_decided(cpu_dist_workers, tmp_path):
+    """Over a real broadcast. Rank 1's own knobs, FSDP2 over the world, would decide another plan,
+    and ranks loading different plans would build mismatched meshes and hang."""
+    LlamaConfig(**_TINY).save_pretrained(tmp_path)
+    cpu_dist_workers.run(
+        _every_rank_takes_rank0s_plan_job,
+        ckpt=str(tmp_path),
+        knobs=[{}, {"MODELOPT_FSDP_SIZE": "world"}],
+        expected=DistributionPlan(2),
     )
-
-    assert resolve_distribution_plan(str(tmp_path), dense="replicate")[0] == rank0_plan
-
-
-def test_rank0s_failure_reaches_the_broadcast_before_it_raises(monkeypatch, serve, tmp_path):
-    """Rank 0 must still reach the broadcast on failure, or every other rank hangs in it."""
-    sent = _as_rank(monkeypatch, 0)
-    serve(LlamaConfig(**_TINY))
-
-    with pytest.raises(ValueError, match="must divide"):
-        resolve_distribution_plan(str(tmp_path), ep_size=2)
-    ((_, plan, error),) = sent
-    assert plan is None
-    assert "ValueError" in error
-
-
-def test_other_ranks_raise_when_rank0_failed(monkeypatch, serve, tmp_path):
-    _as_rank(monkeypatch, 1, rank0_message=("plan", None, "ValueError: bad degrees"))
-    serve(LlamaConfig(**_TINY))
-
-    with pytest.raises(RuntimeError, match=r"rank 0 failed to compute plan.*bad degrees"):
-        resolve_distribution_plan(str(tmp_path))
 
 
 def _one_rank_cannot_see_the_checkpoint_job(rank, size, ckpt):
-    # A rank left waiting in a collective its peer never joins gives up in seconds on this group.
-    group = torch.distributed.new_group(timeout=timedelta(seconds=10))
     isdir = os.path.isdir
     with (
-        mock.patch.object(
-            torch.distributed,
-            "broadcast_object_list",
-            partial(torch.distributed.broadcast_object_list, group=group),
-        ),
-        mock.patch.object(
-            torch.distributed,
-            "all_gather_object",
-            partial(torch.distributed.all_gather_object, group=group),
-        ),
+        bounded_collectives(),
         mock.patch("os.path.isdir", lambda path: (rank == 0 or path != ckpt) and isdir(path)),
     ):
         try:
