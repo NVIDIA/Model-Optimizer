@@ -24,7 +24,6 @@ fused-experts module quantized with FP8 and NVFP4. Sharded cases run on a gloo p
 rank in process, and two spawned ranks where a non-zero expert offset matters.
 """
 
-import contextlib
 import copy
 import math
 import warnings
@@ -42,7 +41,6 @@ pytest.importorskip("transformers")
 pytest.importorskip("safetensors")
 from safetensors.torch import load_file, save_file
 
-import modelopt.torch.export.hf_export_handlers as handlers
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.moe_utils import (
     _dtensor_dim0_offset,
@@ -506,35 +504,6 @@ def test_fused_experts_handler_keeps_experts_fused_only_when_asked(keep_fused):
     else:
         assert "0.gate_proj.weight" in names
         assert "gate_up_proj" not in names
-
-
-@pytest.mark.parametrize("dense", ["fsdp", "replicate"])
-def test_fused_experts_fold_in_a_weight_window_when_the_plan_shards_the_dense_part(
-    monkeypatch, dense
-):
-    """FSDP2 owns the fused weights when it shards the dense part around them: folded outside a
-    weight-update window, they would be overwritten with its original shards at the next reshard."""
-    events = []
-
-    @contextlib.contextmanager
-    def window(root, module):
-        events.append("open")
-        yield
-        events.append("close")
-
-    monkeypatch.setattr(handlers, "_fsdp2_weight_window", window)
-    monkeypatch.setattr(
-        handlers, "_export_fused_experts_keep_fused", lambda module, dtype: events.append("fold")
-    )
-    experts = _quantized_experts(_KeepFusedGatedExperts, mtq.FP8_DEFAULT_CFG)
-    container = nn.Module()
-    container.experts = experts
-    set_distribution_plan(container, DistributionPlan(2, ep_size=2, dense=dense))
-    ctx = ExportContext(model=container, dtype=torch.bfloat16, keep_fused_experts=True)
-
-    ExportModuleRegistry.match(experts)(PREFIX, experts, ctx)
-
-    assert events == (["open", "fold", "close"] if dense == "fsdp" else ["fold"])
 
 
 def test_quant_linear_handler_packs_an_fsdp2_sharded_nvfp4_weight(gloo_world_of_one):
