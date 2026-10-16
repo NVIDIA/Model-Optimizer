@@ -84,6 +84,18 @@ def spawn_multiprocess_job(size, job, backend="gloo"):
         assert not p.exitcode
 
 
+def get_live_pool(pools, key, make_pool):
+    """Return ``pools[key]``, building it with ``make_pool`` if it is missing or was killed.
+
+    Fixtures hand pools out through this, so a hang kills the pool for one test instead of
+    failing every later test that uses it.
+    """
+    pool = pools.get(key)
+    if pool is None or pool.broken:
+        pools[key] = pool = make_pool()
+    return pool
+
+
 def default_worker_teardown(rank, world_size):
     """Minimal cleanup between tests in persistent workers."""
     try:
@@ -207,16 +219,17 @@ class DistributedWorkerPool:
         """
         if self.broken:
             raise RuntimeError("Worker pool was killed after an earlier job hung; create a new one")
-        for q in self._cmd_queues:
-            q.put((fn, args, kwargs))
-
         errors = []
+        deadline = None  # set when the first rank fails: its peers get ``failure_grace`` in total
         try:
+            for q in self._cmd_queues:
+                q.put((fn, args, kwargs))
             for _ in range(self.world_size):
-                timeout = self.failure_grace if errors else self.job_timeout
-                status, rank, tb = self._result_queue.get(timeout=timeout)
+                timeout = self.job_timeout if deadline is None else deadline - time.monotonic()
+                status, rank, tb = self._result_queue.get(timeout=max(timeout, 0))
                 if status == "error":
                     errors.append(f"--- Rank {rank} ---\n{tb}")
+                    deadline = deadline or time.monotonic() + self.failure_grace
         except queue.Empty:
             self._abort()
             if not errors:

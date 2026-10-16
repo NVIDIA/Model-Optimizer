@@ -17,7 +17,7 @@ import contextlib
 import pytest
 import torch
 from _test_utils.fs_utils import assert_unmodified_tree
-from _test_utils.torch.distributed.utils import DistributedWorkerPool
+from _test_utils.torch.distributed.utils import DistributedWorkerPool, get_live_pool
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from megatron.core.parallel_state import destroy_model_parallel
 
@@ -108,12 +108,9 @@ def _pool_cache():
 
 
 def _get_pool(cache, world_size):
-    pool = cache.get(world_size)
-    if pool is None or pool.broken:
-        # A hung test kills its pool; start a clean one so a single hang does not time out every
-        # later test in the module (that cascade cost the nightly 20+ min).
-        cache[world_size] = pool = _make_pool(world_size)
-    return pool
+    # A hung test kills its pool; a fresh one keeps a single hang from timing out every later
+    # test in the module (that cascade cost the nightly 20+ min).
+    return get_live_pool(cache, world_size, lambda: _make_pool(world_size))
 
 
 @pytest.fixture

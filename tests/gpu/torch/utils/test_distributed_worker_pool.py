@@ -17,10 +17,11 @@
 
 import queue
 import time
+from types import SimpleNamespace
 
 import pytest
 import torch.distributed as dist
-from _test_utils.torch.distributed.utils import DistributedWorkerPool
+from _test_utils.torch.distributed.utils import DistributedWorkerPool, get_live_pool
 
 
 def _hang(rank, size):
@@ -63,3 +64,18 @@ def test_a_failed_rank_does_not_make_its_peers_wait_out_the_job_timeout():
         assert pool.broken
     finally:
         pool.shutdown()
+
+
+def test_a_killed_pool_is_replaced_and_a_live_one_is_reused():
+    pools = {}
+    made = []
+
+    def make():
+        made.append(SimpleNamespace(broken=False))
+        return made[-1]
+
+    first = get_live_pool(pools, 2, make)
+    assert get_live_pool(pools, 2, make) is first
+    first.broken = True
+    second = get_live_pool(pools, 2, make)
+    assert second is not first and len(made) == 2
