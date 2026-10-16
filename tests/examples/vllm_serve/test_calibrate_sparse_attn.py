@@ -304,22 +304,15 @@ def test_main_freezes_candidate_before_held_out_and_gates_export(
     original_config = '{"sentinel": true}'
     config_path.write_text(original_config)
     phases = ("prefill", "decode") if decode_tokens else ("prefill",)
-    token = "hf_test_token_not_a_real_secret"
-    engine_kwargs = {
-        "hf_token": token,
-        "tokenizer": "local-tokenizer",
-        "max_num_batched_tokens": 4096,
-        "hf_overrides": {
-            "token": token,
-            "num_key_value_heads": 2,
-            "connections": [{"API-Key": token, "password": token, "cache_key": "keep"}],
-        },
-    }
     resolved_metadata = {
         "config_groups": {
             "group_0": {"algorithm": "skip_softmax", "ignore": ["ignored_attn"]},
             "group_1": {"algorithm": "sparse_softmax", "sparsity_n": 1, "sparsity_m": 4},
         }
+    }
+    engine_kwargs = {
+        "dtype": "bfloat16",
+        "hf_overrides": {"sparse_attention_config": resolved_metadata},
     }
 
     class FakeLLM:
@@ -408,18 +401,7 @@ def test_main_freezes_candidate_before_held_out_and_gates_export(
     if outcome != "calibration_failed":
         expected_calls.append(["held-out prompt"])
     assert calls == expected_calls
-    report_text = (output_dir / "sparse_attention_validation.json").read_text()
-    assert token not in report_text
-    report = json.loads(report_text)
-    assert "hf_token" not in report["engine_args"]
-    assert report["engine_args"]["max_num_seqs"] == 1
-    assert report["engine_args"]["tokenizer"] == "local-tokenizer"
-    assert report["engine_args"]["max_num_batched_tokens"] == 4096
-    assert report["engine_args"]["hf_overrides"] == {
-        "num_key_value_heads": 2,
-        "connections": [{"cache_key": "keep"}],
-    }
-    assert engine_kwargs["hf_overrides"]["token"] == token
+    report = json.loads((output_dir / "sparse_attention_validation.json").read_text())
     assert report["phases"] == list(phases)
     assert report["passed"] is passed
     if not (passed and update_checkpoint):

@@ -51,7 +51,6 @@ import hashlib
 import json
 import math
 import os
-import re
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -76,10 +75,6 @@ _LOCKED_ENGINE_KWARGS = frozenset(
         "max_num_seqs",
         "seed",
     }
-)
-_SENSITIVE_ENGINE_KEY = re.compile(
-    r"(?:.*_)?(?:token|api_?key|access_?key|secret|password|passwd|authorization|credentials?)",
-    re.IGNORECASE,
 )
 
 
@@ -149,19 +144,6 @@ def _load_prompts(tokenizer, args) -> list[str]:
         f"(token lengths {lengths[0]}..{lengths[-1]})"
     )
     return prompts
-
-
-def _redact_engine_args(value):
-    """Copy JSON engine settings without credential fields, including nested containers."""
-    if isinstance(value, dict):
-        return {
-            key: _redact_engine_args(item)
-            for key, item in value.items()
-            if not _SENSITIVE_ENGINE_KEY.fullmatch(key.replace("-", "_"))
-        }
-    if isinstance(value, list):
-        return [_redact_engine_args(item) for item in value]
-    return value
 
 
 def _prompts_overlap(prompts: list[str], held_out: list[str]) -> bool:
@@ -498,7 +480,6 @@ def main():
     print(json.dumps(sparse_config["config_groups"]["group_0"]["threshold_scale_factor"], indent=2))
     report = {
         "model": args.model,
-        "engine_args": _redact_engine_args(llm_kwargs),
         "decode_tokens": args.decode_tokens,
         "phases": requested_phases,
         "target": args.target_sparse_ratio,
