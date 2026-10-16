@@ -20,6 +20,7 @@ modeling builds the language model from per-expert Linears, which the EP machine
 ``ep.py`` swaps in the transformers-native deepseek_v3 language model.
 """
 
+from ..deepseek_v3.specs import BASE_MODEL_EP_PLAN
 from ..specs import EPSpec, ModelSpec, register
 from .ep import prepare
 
@@ -29,6 +30,7 @@ register(
     ModelSpec(
         model_type="kimi_vl",
         modeling_source="remote_code",
-        ep_spec=EPSpec(prepare=prepare),
+        # prepare swaps a native deepseek_v3 in as the language model, with deepseek_v3's plan.
+        ep_spec=EPSpec(prepare=prepare, prepared_ep_plan=BASE_MODEL_EP_PLAN),
     )
 )

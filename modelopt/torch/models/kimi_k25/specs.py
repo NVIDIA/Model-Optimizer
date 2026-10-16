@@ -19,6 +19,7 @@ Kimi-K2.7: the compressed-expert sibling of ``kimi_vl`` -- same swap to a native
 deepseek_v3 language model, plus on-the-fly decompression of its packed experts at load.
 """
 
+from ..deepseek_v3.specs import BASE_MODEL_EP_PLAN
 from ..specs import EPSpec, ModelSpec, register
 from .ep import prepare
 
@@ -30,6 +31,7 @@ register(
         # transformers ships Kimi-K2.5 itself from 5.13. Expert parallelism still runs on the
         # checkpoint's own code (``trust_remote_code=True``), which ``prepare`` patches.
         min_transformers_version="5.13",
-        ep_spec=EPSpec(prepare=prepare),
+        # prepare swaps a native deepseek_v3 in as the language model, with deepseek_v3's plan.
+        ep_spec=EPSpec(prepare=prepare, prepared_ep_plan=BASE_MODEL_EP_PLAN),
     )
 )

@@ -40,6 +40,7 @@ from transformers import DeepseekV3Config, DeepseekV3ForCausalLM, PretrainedConf
 
 from modelopt.torch.models import _onfly_decompress, get_spec
 from modelopt.torch.models.kimi_vl import ep as kimi_vl
+from modelopt.torch.utils.moe import _routed_expert_keys
 
 # Symbols the remote modeling imports that newer transformers dropped.
 COMPAT_SYMBOLS = (
@@ -109,8 +110,9 @@ def remote(monkeypatch):
 
 def test_prepare_rebuilds_the_language_model_config_without_a_decompressor(monkeypatch, remote):
     """The text config becomes transformers' own ``DeepseekV3Config`` (no remote ``auto_map``) with
-    an EP plan for the fused experts; the experts are bf16, so no decompressor is installed; the
-    symbols the remote modeling imports exist; the remote-code staging shim is left installed."""
+    an EP plan for the fused experts, naming the experts the spec states for a run that skips
+    prepare; the experts are bf16, so no decompressor is installed; the symbols the remote modeling
+    imports exist; the remote-code staging shim is left installed."""
     import transformers.utils.import_utils as import_utils
 
     monkeypatch.delattr(import_utils, "is_torch_fx_available", raising=False)
@@ -130,6 +132,9 @@ def test_prepare_rebuilds_the_language_model_config_without_a_decompressor(monke
     assert (text.hidden_size, text.n_routed_experts, text.moe_intermediate_size) == (64, 8, 16)
     assert text.base_model_ep_plan["layers.*.mlp.experts.gate_up_proj"] == "grouped_gemm"
     assert text.base_model_ep_plan["layers.*.mlp.experts.down_proj"] == "grouped_gemm"
+    assert _routed_expert_keys(text.base_model_ep_plan) == _routed_expert_keys(
+        get_spec("kimi_vl").ep_spec.prepared_ep_plan
+    )
     assert import_utils.is_torch_fx_available() is False
     assert dmu.get_cached_module_file is not staging
     assert remote.loads == []
