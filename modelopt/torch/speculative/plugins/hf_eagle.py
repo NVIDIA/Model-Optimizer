@@ -154,7 +154,9 @@ class HFEagleModel(EagleModel):
 
         compile_targets: list[tuple[str, dict[str, Any]]] = [
             ("_prepare_eagle_inputs", {}),
-            ("_eagle_forward", {"mode": "max-autotune"}),
+            # No CUDA graphs: "max-autotune" enables them, and recording them intermittently fails
+            # in training (cudaStreamCaptureStatusInvalidated / "graph recording observed ...").
+            ("_eagle_forward", {"mode": "max-autotune-no-cudagraphs"}),
             ("_eagle_loss", {"fullgraph": True}),
         ]
         for name, kwargs in compile_targets:
