@@ -493,7 +493,9 @@ def max_calibrate(
             if getattr(quantizer.block_sizes, "type", None) == "dynamic":
                 return
 
-        if quantizer.axis in axes_for_sync and quantizer.amax is not None:
+        # As in the DP/EP sync above: an enabled quantizer is synced on every rank, with or without
+        # a local amax, and a disabled one on none, which the config makes the same on every rank.
+        if quantizer.axis in axes_for_sync and quantizer.is_enabled:
             quantizer.sync_amax_across_distributed_group(parallel_state.tensor_parallel_group)
 
     # Step 2: Sync amax across relevant parallelism (such as TP / EP)
@@ -539,7 +541,7 @@ def max_calibrate(
             # We only support KVCache quantization with scalar per-tensor states for now (NVFP4 & FP8 KV cache)
             # So we should sync amax across DP and TP for these quantizers (DP is already synced from above)
             for quantizer in [module.k_bmm_quantizer, module.v_bmm_quantizer]:
-                if isinstance(quantizer, TensorQuantizer) and quantizer.amax is not None:
+                if isinstance(quantizer, TensorQuantizer) and quantizer.is_enabled:  # as above
                     quantizer.sync_amax_across_distributed_group(
                         module.parallel_state.tensor_parallel_group
                     )
