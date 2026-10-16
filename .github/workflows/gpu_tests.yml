@@ -97,6 +97,8 @@ jobs:
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
+          # Explicit: HOME is /github/home in container jobs, not the /root the cache steps use
+          MODELOPT_WHEELHOUSE: /root/.cache/wheelhouse
         run: |
           # Use `python3` (the vllm image has no `python` on PATH)
           python3 -m pip install nox && nox -s ${{ matrix.example }}
@@ -106,9 +108,15 @@ jobs:
         uses: ./.github/actions/save-extensions
         with:
           cache-key: ${{ steps.ext-cache.outputs.cache-key }}
+      - name: Check the wheelhouse is complete
+        id: wheelhouse-complete
+        if: always() && matrix.example == 'gpu'
+        run: test -f /root/.cache/wheelhouse/.complete && echo "complete=true" >> "$GITHUB_OUTPUT" || true
       - name: Save wheels built from source
-        # Not tied to the tests passing: the wheels are valid even if a test fails or the job times out.
-        if: always() && matrix.example == 'gpu' && steps.wheelhouse.outputs.cache-hit != 'true'
+        # Not tied to the tests passing, but only once every wheel is built (see noxfile.py `gpu`).
+        if: >-
+          always() && matrix.example == 'gpu' && steps.wheelhouse.outputs.cache-hit != 'true'
+          && steps.wheelhouse-complete.outputs.complete == 'true'
         uses: actions/cache/save@v6
         with:
           path: /root/.cache/wheelhouse

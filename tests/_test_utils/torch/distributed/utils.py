@@ -202,10 +202,10 @@ class DistributedWorkerPool:
                     try:
                         teardown_fn(rank, world_size)
                     except Exception as e:
-                        print(f"Error tearing down worker: {e}")
-                        status = "error"
-                        teardown_tb = traceback.format_exc()
-                        tb = (tb + "\n" if tb else "") + f"[teardown] {teardown_tb}"
+                        print(f"Error tearing down worker: {e}\n{traceback.format_exc()}")
+                        if not reported:  # else the job failure is already sent; the teardown error is printed above
+                            status = "error"
+                            tb = f"[teardown] {traceback.format_exc()}"
             if not reported:
                 result_queue.put((status, rank, tb))
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -59,7 +59,7 @@ def test_a_failed_rank_is_reported_even_when_its_teardown_blocks_on_a_hung_peer(
     pool = DistributedWorkerPool(world_size=2, backend="gloo", teardown_fn=_teardown_barrier)
     try:
         pool.failure_grace = 2
-        pool.job_timeout = 30  # without the early report the parent would wait this long
+        pool.job_timeout = 120  # without the early report the parent would wait this long
         start = time.monotonic()
         with pytest.raises(RuntimeError, match="rank 0 failed"):
             pool.run(_rank_0_fails_and_rank_1_hangs)

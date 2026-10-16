@@ -127,6 +127,15 @@ _SOURCE_BUILT_WHEELS = {
 
 # Their setup.py files hardcode -std=c++17, but the torch headers of recent containers need C++20.
 _BUILD_AS_CXX20 = ("mamba_ssm", "causal_conv1d")
+# Without these, setup.py may download a matching prebuilt wheel instead of compiling the patched source.
+_FORCE_BUILD = {
+    "mamba_ssm": {"MAMBA_FORCE_BUILD": "TRUE"},
+    "causal_conv1d": {"CAUSAL_CONV1D_FORCE_BUILD": "TRUE"},
+}
+
+
+def _wheelhouse():
+    return os.environ.get("MODELOPT_WHEELHOUSE", os.path.expanduser("~/.cache/wheelhouse"))
 
 
 def _build_wheel(session, name, wheelhouse):
@@ -150,19 +159,31 @@ def _build_wheel(session, name, wheelhouse):
             patched = f.read().replace("-std=c++17", "-std=c++20")
         with open(setup_py, "w") as f:
             f.write(patched)
-        session.run(*pip_wheel, source)
+        session.run(*pip_wheel, source, env=_FORCE_BUILD[name])
+
+
+def _find_wheel(wheelhouse, name):
+    # ``-[0-9]`` so ``causal_conv1d`` does not also match a ``causal_conv1d_cuda-*`` wheel.
+    found = sorted(glob.glob(os.path.join(wheelhouse, f"{name}-[0-9]*.whl")))
+    return found[-1] if found else None
 
 
 def _install_built_from_source(session, *names):
     """Install the named ``_SOURCE_BUILT_WHEELS``, building a wheel only if the wheelhouse lacks it.
 
-    CI caches ``MODELOPT_WHEELHOUSE`` per container image, so only the first run on an image builds.
+    CI caches the wheelhouse (``MODELOPT_WHEELHOUSE``) per container image, so only the first run on
+    an image builds.
     """
-    wheelhouse = os.environ.get("MODELOPT_WHEELHOUSE", os.path.expanduser("~/.cache/wheelhouse"))
+    wheelhouse = _wheelhouse()
+    wheels = []
     for name in names:
-        if not glob.glob(os.path.join(wheelhouse, f"{name}-*.whl")):
+        wheel = _find_wheel(wheelhouse, name)
+        if wheel is None:
             _build_wheel(session, name, wheelhouse)
-    wheels = [glob.glob(os.path.join(wheelhouse, f"{name}-*.whl"))[0] for name in names]
+            wheel = _find_wheel(wheelhouse, name)
+        if wheel is None:
+            raise RuntimeError(f"No wheel for {name!r} in {wheelhouse} after building it")
+        wheels.append(wheel)
     session.run("python", "-m", "pip", "install", *wheels)
 
 
@@ -176,6 +197,10 @@ def gpu(session):
     session.run("python", "-m", "pip", "uninstall", "-y", "cupy-cuda12x")
     session.run("python", "-m", "pip", "install", "cupy-cuda13x")
     _install_built_from_source(session, "mamba_ssm", "causal_conv1d")
+    # Every wheel is built: CI saves the wheelhouse only then, so a run that stopped halfway cannot
+    # freeze a partial wheelhouse under the cache key.
+    with open(os.path.join(_wheelhouse(), ".complete"), "w"):
+        pass
     session.run("python", "-m", "pytest", "tests/gpu", *_cov_args())
 
 
