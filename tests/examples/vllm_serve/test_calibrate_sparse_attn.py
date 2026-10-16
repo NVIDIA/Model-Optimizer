@@ -305,6 +305,16 @@ def test_main_freezes_candidate_before_held_out_and_gates_export(
     config_path.write_text(original_config)
     phases = ("prefill", "decode") if decode_tokens else ("prefill",)
     token = "hf_test_token_not_a_real_secret"
+    engine_kwargs = {
+        "hf_token": token,
+        "tokenizer": "local-tokenizer",
+        "max_num_batched_tokens": 4096,
+        "hf_overrides": {
+            "token": token,
+            "num_key_value_heads": 2,
+            "connections": [{"API-Key": token, "password": token, "cache_key": "keep"}],
+        },
+    }
     resolved_metadata = {
         "config_groups": {
             "group_0": {"algorithm": "skip_softmax", "ignore": ["ignored_attn"]},
@@ -314,7 +324,7 @@ def test_main_freezes_candidate_before_held_out_and_gates_export(
 
     class FakeLLM:
         def __init__(self, **kwargs):
-            assert kwargs["hf_token"] == token
+            assert all(kwargs[key] == value for key, value in engine_kwargs.items())
             assert kwargs["max_num_seqs"] == 1
             assert not kwargs["enable_prefix_caching"]
             assert not kwargs["enable_chunked_prefill"]
@@ -374,7 +384,7 @@ def test_main_freezes_candidate_before_held_out_and_gates_export(
             "calibrate_sparse_attn.py",
             str(checkpoint),
             "--engine_kwargs",
-            json.dumps({"hf_token": token}),
+            json.dumps(engine_kwargs),
             "--decode_tokens",
             str(decode_tokens),
             *(["--update_checkpoint_config"] if update_checkpoint else []),
@@ -403,6 +413,13 @@ def test_main_freezes_candidate_before_held_out_and_gates_export(
     report = json.loads(report_text)
     assert "hf_token" not in report["engine_args"]
     assert report["engine_args"]["max_num_seqs"] == 1
+    assert report["engine_args"]["tokenizer"] == "local-tokenizer"
+    assert report["engine_args"]["max_num_batched_tokens"] == 4096
+    assert report["engine_args"]["hf_overrides"] == {
+        "num_key_value_heads": 2,
+        "connections": [{"cache_key": "keep"}],
+    }
+    assert engine_kwargs["hf_overrides"]["token"] == token
     assert report["phases"] == list(phases)
     assert report["passed"] is passed
     if not (passed and update_checkpoint):

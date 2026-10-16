@@ -353,7 +353,10 @@ def refine_scales(
             stats = measured[phase]
             if not stats["complete"]:
                 if step < max_steps and upper > 0 and params["a"] * multiplier >= upper:
-                    params["a"] = upper / multiplier
+                    candidate_a = upper / multiplier
+                    if candidate_a == params["a"]:
+                        break
+                    params["a"] = candidate_a
                     measured = measure(config)
                     continue
                 break

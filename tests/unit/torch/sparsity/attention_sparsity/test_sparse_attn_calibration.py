@@ -395,14 +395,17 @@ def test_unreachable_target_is_bounded_and_remains_failed():
     )
 
 
-def test_out_of_domain_fit_is_remeasured_below_lambda_one():
+@pytest.mark.parametrize("missing_counters", [False, True])
+def test_out_of_domain_fit_is_remeasured_once_below_lambda_one(missing_counters):
     initial = _config()
     initial["config_groups"]["group_0"]["threshold_scale_factor"]["prefill"]["a"] = 2048
+    calls = []
 
     def measure(config):
         scale = config["config_groups"]["group_0"]["threshold_scale_factor"]["prefill"]["a"]
+        calls.append(scale)
         prefill = _counts(500)
-        if scale >= 1024:
+        if scale >= 1024 or missing_counters:
             prefill["unmeasured_launches"] = 1
         return summarize_validation(
             [
@@ -412,6 +415,7 @@ def test_out_of_domain_fit_is_remeasured_below_lambda_one():
             0.02,
         )
 
-    result, stats = refine_scales(initial, measure, 2)
-    assert result["config_groups"]["group_0"]["threshold_scale_factor"]["prefill"]["a"] < 1024
-    assert stats["prefill"]["passed"]
+    _, stats = refine_scales(initial, measure, 10)
+    assert len([scale for scale in calls if scale < 1024]) == 1
+    assert len(calls) <= 3  # Initial fit, clamped candidate, and optional best-candidate restore.
+    assert stats["prefill"]["passed"] is not missing_counters
