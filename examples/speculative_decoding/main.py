@@ -53,15 +53,19 @@ from modelopt.recipe import load_recipe
 from modelopt.recipe.config import (
     ModelOptDFlashRecipe,
     ModelOptEagleRecipe,
+    ModelOptExternalDraftRecipe,
     ModelOptMedusaRecipe,
     ModelOptSpeculativeRecipeBase,
 )
+from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
+from modelopt.torch.speculative.config import ExternalDraftConfig
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_domino import DominoLambdaCallback
 from modelopt.torch.speculative.plugins.hf_training_args import (
     TrainingArguments as SpecTrainingArgs,
 )
 from modelopt.torch.speculative.plugins.master_weight_adamw import VerifyMasterWeightsCallback
+from modelopt.torch.speculative.plugins.modeling_fakebase import find_final_norm_path
 from modelopt.torch.speculative.utils import load_vlm_or_llm, patch_transformers5_params_loading
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import is_master, local_rank
@@ -170,12 +174,120 @@ def _is_hf_format_checkpoint(checkpoint: str | None) -> bool:
     return any(os.path.isfile(os.path.join(checkpoint, f)) for f in hf_files)
 
 
+def setup_external_draft(
+    recipe, training_args, base_model, draft=None, dry_run=False, base_tokenizer=None
+):
+    """Convert an external draft and wire it to the base model.
+
+    Runs on both the fresh-load and the HF-resume path. The base lm_head is never part
+    of the draft's own state, so a resumed draft must be re-attached to it either way;
+    doing this only on the fresh path leaves a resumed run to fail at the first step
+    with no lm_head attached.
+
+    A checkpoint written by this mode does carry ``modelopt_state.pth``, so the patched
+    ``from_pretrained`` already restored the ``external`` mode and handed back a
+    converted draft. Converting it a second time raises ``TypeError: Cannot create a
+    consistent method resolution order``, so the conversion is skipped when the draft is
+    already converted -- the validations and the head attachment below still run.
+
+    Args:
+        base_model: the target, kept only for its lm_head and vocabulary.
+        draft: the already-loaded draft on the resume path; loaded here when None.
+        dry_run: recipe validation only; skips the data-source requirement, as the
+            ``data.data_path`` check in :func:`train` does.
+        base_tokenizer: the base's tokenizer when the caller already loaded it; the fresh
+            path has it, the resume path does not and leaves this None.
+    """
+    if recipe.draft_model_name_or_path is None:
+        raise ValueError(
+            "draft_model_name_or_path must be set in the recipe YAML or via a dotlist override."
+        )
+    # Checked here, not on the recipe schema: the loader validates the recipe file once
+    # before splicing CLI overrides, so a schema-level raise would make it impossible to
+    # pass the data path on the command line -- the shipped recipe carries none.
+    # Only "online" is rejected: it is the one mode that produces no cached base
+    # outputs at all. "streaming" feeds the same pre-computed hidden states offline
+    # does, so it is permitted but untested for this mode -- if its batches ever lack
+    # base_model_outputs the forward raises rather than training on nothing.
+    if not dry_run and recipe.data.mode == "online":
+        raise ValueError(
+            "external draft training has no online path: the draft is scored against "
+            "cached base outputs, which an online run does not produce. Set "
+            "data.offline_data_path."
+        )
+    if training_args.cp_size > 1:
+        raise ValueError(
+            "external draft training does not support context parallelism: the draft is a "
+            "standalone model scored against cached base outputs, and nothing in this mode "
+            f"shards the sequence. Got cp_size={training_args.cp_size}; set it to 1."
+        )
+    base_vocab_size = base_model.config.vocab_size
+    if draft is None:
+        draft = transformers.AutoModelForCausalLM.from_pretrained(
+            recipe.draft_model_name_or_path,
+            dtype="auto",
+            device_map="cpu",
+            trust_remote_code=recipe.model.trust_remote_code,
+        )
+    external_cfg: dict = recipe.external.model_dump()
+    # The draft's own tokenizer; the base's is used only for its lm_head.
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        recipe.draft_model_name_or_path,
+        model_max_length=training_args.training_seq_len,
+        trust_remote_code=recipe.model.trust_remote_code,
+    )
+    restored_modes = {m for m, _ in modelopt_state(draft)["modelopt_state_dict"]}
+    if "external" in restored_modes:
+        # The restore replayed the config stored in the checkpoint, so modify() has already
+        # run with the values this draft was last trained under. Re-apply the recipe's:
+        # otherwise an edited external_loss / top_k / top_p is dropped while the banner and
+        # the recipe saved beside the checkpoint report the new one. The manager's config is
+        # updated alongside it because modify() writes only the live attributes -- without
+        # this the next save_pretrained records the objective the draft was never trained
+        # under, and a restore outside this script hands back that stale objective.
+        external_config = ExternalDraftConfig(**external_cfg)
+        draft.modify(external_config)
+        ModeloptStateManager(draft)._last_config = external_config
+    elif ModeloptStateManager.has_state_for_mode_type("speculative", model=draft):
+        raise ValueError(
+            f"the draft checkpoint carries speculative mode(s) {sorted(restored_modes)}, not "
+            "'external'. Skipping the convert would leave it as that mode's model type and "
+            "fail later with an unrelated error, so refuse here."
+        )
+    else:
+        mtsp.convert(draft, [("external", external_cfg)])
+    # Fail before training: a vocab mismatch yields a plausible loss curve and a draft
+    # with no acceptance. Equal sizes are not enough -- different tokenizers are
+    # routinely padded to the same width -- so also check that the two agree on the ids.
+    draft.validate_against_base(base_vocab_size)
+    if base_tokenizer is None:
+        base_tokenizer = transformers.AutoTokenizer.from_pretrained(
+            recipe.model.model_name_or_path,
+            trust_remote_code=recipe.model.trust_remote_code,
+        )
+    draft.validate_tokenizer_against_base(tokenizer, base_tokenizer)
+    # The norm is not always at base_model.model.norm -- FakeBaseModel keeps it at .norm
+    # -- so search the same paths the other offline modes use. It stays optional;
+    # _teacher_logits raises only if the dump declares a pre-norm hidden.
+    norm_path = find_final_norm_path(base_model)
+    base_final_norm = base_model.get_submodule(norm_path) if norm_path else None
+    # Attach on the device training will run on: the draft is loaded with
+    # device_map="cpu", so otherwise the first forward moves the copies mid-step on
+    # every rank. training_args.device is the device accelerate assigned this process,
+    # which is correct both when every rank sees all GPUs and when CUDA_VISIBLE_DEVICES
+    # pins one GPU per rank -- local_rank arithmetic gets the second case wrong.
+    draft.attach_base_lm_head(
+        base_model.get_output_embeddings(), base_final_norm, device=training_args.device
+    )
+    return draft, tokenizer
+
+
 def train():
     config_path, dry_run, overrides = _parse_cli()
     recipe = load_recipe(config_path, overrides=overrides)
     if not isinstance(recipe, ModelOptSpeculativeRecipeBase):
         raise ValueError(
-            f"main.py expects a speculative-decoding recipe (eagle / dflash / medusa); "
+            f"main.py expects a speculative-decoding recipe (eagle / dflash / medusa / external); "
             f"got {type(recipe).__name__} from {config_path!r}."
         )
 
@@ -209,6 +321,14 @@ def train():
     checkpoint = training_args.resume_from_checkpoint or last_checkpoint
 
     use_offline_training = recipe.data.mode != "online"
+    if isinstance(recipe, ModelOptExternalDraftRecipe):
+        # This mode has no online path (see setup_external_draft), and the shipped recipe
+        # carries no data-source field, so mode resolves to "online" under --dry_run.
+        # Deriving the flag from it there would make load_vlm_or_llm ignore
+        # use_fake_base_for_offline and materialise every base decoder layer on every
+        # rank, and would route a VLM base to the real multimodal model, whose parent
+        # config has no vocab_size for validate_against_base to read.
+        use_offline_training = True
 
     # Resume path depends on the existing checkpoint's on-disk format: consolidated HF
     # weights load via from_pretrained; FSDP sharded checkpoints load the base model and
@@ -227,6 +347,30 @@ def train():
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             checkpoint, trust_remote_code=recipe.model.trust_remote_code
         )
+        if isinstance(recipe, ModelOptExternalDraftRecipe):
+            # The restored draft is already converted (the checkpoint carries
+            # modelopt_state.pth), but the base lm_head it is scored against is not part
+            # of its state, so it still has to be re-attached. The base is not on this
+            # path at all, so load it here; use_fake_base_for_offline keeps that cheap.
+            if recipe.model.model_name_or_path is None:
+                raise ValueError(
+                    "model.model_name_or_path must be set to resume an external-draft run: "
+                    "the base model supplies the lm_head the draft is scored against."
+                )
+            # Same arguments as the fresh path below; use_offline_training is pinned
+            # True for this recipe above.
+            base_model = load_vlm_or_llm(
+                recipe.model.model_name_or_path,
+                use_fake_base=recipe.model.use_fake_base_for_offline,
+                use_offline_training=use_offline_training,
+                dtype="auto",
+                device_map="cpu",
+                trust_remote_code=recipe.model.trust_remote_code,
+                config_overrides=recipe.model.config_overrides,
+            )
+            model, tokenizer = setup_external_draft(
+                recipe, training_args, base_model=base_model, draft=model, dry_run=dry_run
+            )
     else:
         if checkpoint:
             print_rank_0(
@@ -273,6 +417,16 @@ def train():
                 )
             dflash_cfg: dict = recipe.dflash.model_dump()
             mtsp.convert(model, [("dflash", dflash_cfg)])
+        elif isinstance(recipe, ModelOptExternalDraftRecipe):
+            # This mode inverts the usual relationship: we train a pretrained draft, and
+            # `model` loaded above is the base, kept only for its lm_head and vocabulary.
+            model, tokenizer = setup_external_draft(
+                recipe,
+                training_args,
+                base_model=model,
+                dry_run=dry_run,
+                base_tokenizer=tokenizer,
+            )
         else:
             raise ValueError(f"Unsupported speculative recipe type: {type(recipe).__name__}")
 
@@ -306,6 +460,10 @@ def train():
         answer_only_loss=training_args.answer_only_loss,
         shift_labels=not is_dflash,
         final_aux_is_base_hidden=recipe.data.final_aux_is_base_hidden,
+        # The external draft never reads the aux planes, so it can consume dumps
+        # written with --no-aux-hidden-states. Every other mode must still fail
+        # loudly on a dump that omits them.
+        aux_hidden_states_optional=isinstance(recipe, ModelOptExternalDraftRecipe),
     )
 
     callbacks = [EagleTrainingPlot(training_args.ar_validate_steps, training_args.estimate_ar)]
