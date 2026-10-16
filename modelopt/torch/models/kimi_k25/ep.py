@@ -54,6 +54,7 @@ from modelopt.torch.utils.moe import apply_distributed_support
 
 from .. import _onfly_decompress
 from .._remote_code import stage_full_remote_closure
+from ..kimi_vl.ep import _drop_tie_weights_kwargs, _install_compat_import_shims
 
 
 def prepare(hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool = False, **_):
@@ -75,6 +76,7 @@ def prepare(hf_config, *, ckpt_path: str | None = None, trust_remote_code: bool 
     # transformers stages only 1-hop relative imports; Kimi's remote code is 2 hops deep. Install the
     # full-closure staging shim BEFORE any remote-code load (this plugin's get_class_from_dynamic_module
     # below, and from_pretrained later in load_and_prepare_ep).
+    _install_compat_import_shims()
     stage_full_remote_closure()
 
     # 1. Replace text_config with a transformers-native DeepseekV3Config built from the same fields.
@@ -129,6 +131,13 @@ def _patch_kimi_modeling_to_native(ckpt_path: str, trust_remote_code: bool) -> N
         # ``transformers_modules.<short-repo>.<hash>.modeling_kimi_k25``.
         if mod_name.endswith(".modeling_kimi_k25") and hasattr(mod, "DeepseekV3ForCausalLM"):
             setattr(mod, "DeepseekV3ForCausalLM", NativeDeepseekV3ForCausalLM)
+            # Like Kimi-VL's: the remote tie_weights() takes no kwargs, but transformers' post_init and
+            # load call tie_weights(recompute_mapping=False) -> TypeError.
+            kimi_cls = getattr(mod, "KimiK25ForConditionalGeneration", None)
+            if kimi_cls is not None:
+                own_tie = vars(kimi_cls).get("tie_weights")
+                if own_tie is not None and not getattr(own_tie, "_kimi_vl_kwargs_shim", False):
+                    kimi_cls.tie_weights = _drop_tie_weights_kwargs(own_tie)
             patched.append(mod_name)
     if not patched:
         raise RuntimeError(
