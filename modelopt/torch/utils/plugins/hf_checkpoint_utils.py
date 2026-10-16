@@ -791,21 +791,22 @@ def copy_non_safetensor_files_from_ckpt(
     return copied_files
 
 
-def _snapshot_download(hub_model_id: str, **hub_kwargs) -> str:
+def _snapshot_download(hub_model_id: str, local_files_only: bool = False, **hub_kwargs) -> str:
     """``snapshot_download``, but warn when it unexpectedly falls back to the cache.
 
     ``snapshot_download`` silently returns whatever snapshot is cached when the Hub cannot be
     reached; ask the Hub first so that case is visible. A missing repo or revision still raises.
-    With ``HF_HUB_OFFLINE`` set the cache is the user's choice, so it is used without a warning.
-    ``hub_kwargs`` (``revision``, ``token``, ``cache_dir``) go to every Hub call that takes them.
+    With ``HF_HUB_OFFLINE`` set, or ``local_files_only``, the cache is the user's choice, so the Hub
+    is not asked and the cache is used without a warning. ``hub_kwargs`` (``revision``, ``token``,
+    ``cache_dir``) go to every Hub call that takes them.
     """
-    if _is_hf_hub_offline():
+    offline = _is_hf_hub_offline()
+    if offline or local_files_only:
         try:
             return snapshot_download(hub_model_id, local_files_only=True, **hub_kwargs)
         except LocalEntryNotFoundError as error:
-            raise RuntimeError(
-                f"HF_HUB_OFFLINE is set and {hub_model_id!r} is not in the local cache."
-            ) from error
+            why = "HF_HUB_OFFLINE is set" if offline else "local_files_only=True"
+            raise RuntimeError(f"{why} and {hub_model_id!r} is not in the local cache.") from error
     try:
         HfApi().repo_info(hub_model_id, **{k: v for k, v in hub_kwargs.items() if k != "cache_dir"})
     except (RepositoryNotFoundError, RevisionNotFoundError):
@@ -830,7 +831,9 @@ def _snapshot_download(hub_model_id: str, **hub_kwargs) -> str:
     return snapshot_download(hub_model_id, **hub_kwargs)
 
 
-def _make_local(model_name_or_path: str | os.PathLike, **hub_kwargs) -> tuple[str | None, str]:
+def _make_local(
+    model_name_or_path: str | os.PathLike, local_files_only: bool = False, **hub_kwargs
+) -> tuple[str | None, str]:
     """``(hub_model_id, local_checkpoint_path)`` on this rank alone.
 
     See :func:`ensure_local_checkpoint`.
@@ -839,7 +842,7 @@ def _make_local(model_name_or_path: str | os.PathLike, **hub_kwargs) -> tuple[st
         return None, str(model_name_or_path)
     hub_model_id = str(model_name_or_path)
     try:
-        return hub_model_id, _snapshot_download(hub_model_id, **hub_kwargs)
+        return hub_model_id, _snapshot_download(hub_model_id, local_files_only, **hub_kwargs)
     except GatedRepoError:
         raise
     except (HFValidationError, RepositoryNotFoundError) as error:
@@ -857,6 +860,7 @@ def ensure_local_checkpoint(
     revision: str | None = None,
     token: str | bool | None = None,
     cache_dir: str | os.PathLike | None = None,
+    local_files_only: bool = False,
 ) -> tuple[str | None, str]:
     """Ensure the whole checkpoint is on local storage.
 
@@ -872,7 +876,8 @@ def ensure_local_checkpoint(
     Exporters read the source checkpoint only from local disk (see :func:`copy_non_model_files`),
     so call this before loading a Hub model that will be exported.
 
-    With ``HF_HUB_OFFLINE`` set, the cached snapshot is used as it is. With the Hub unexpectedly
+    With ``HF_HUB_OFFLINE`` set, or ``local_files_only``, the cached snapshot is used as it is,
+    without asking the Hub, and one that is not cached raises. With the Hub unexpectedly
     unreachable it is too, but with a warning: nothing can tell whether it is complete, and one
     filled by an earlier ``from_pretrained`` holds only the files loading needed, so non-model files
     may be missing. A path that is neither a local directory nor a model ID the Hub can access (a
@@ -893,6 +898,8 @@ def ensure_local_checkpoint(
         token: For a Hub model ID, the token to fetch it with; the logged-in one if ``None``.
         cache_dir: For a Hub model ID, the Hugging Face cache to fetch it into; the default one if
             ``None``.
+        local_files_only: For a Hub model ID, use only its cached snapshot, as with
+            ``HF_HUB_OFFLINE``: no Hub call is made.
 
     Returns:
         ``(hub_model_id, local_checkpoint_path)``.
@@ -905,7 +912,7 @@ def ensure_local_checkpoint(
     if group is None and not (
         torch.distributed.is_available() and torch.distributed.is_initialized()
     ):
-        return _make_local(model_name_or_path, **hub_kwargs)
+        return _make_local(model_name_or_path, local_files_only, **hub_kwargs)
 
     # Rank 0 decides even for a local path: ranks that each checked for themselves could disagree
     # (a directory on one node's local disk) and part of them would wait here forever. Without a
@@ -920,7 +927,7 @@ def ensure_local_checkpoint(
         result: list[tuple[str | None, str | None, str | None]] = [(None, None, None)]
         if torch.distributed.get_rank(group) == 0:
             try:
-                result = [(*_make_local(model_name_or_path, **hub_kwargs), None)]
+                result = [(*_make_local(model_name_or_path, local_files_only, **hub_kwargs), None)]
             except Exception as error:
                 result = [(None, None, f"{type(error).__name__}: {error}")]
         torch.distributed.broadcast_object_list(result, group=group, group_src=0)

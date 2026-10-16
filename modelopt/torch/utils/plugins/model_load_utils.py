@@ -378,8 +378,8 @@ def load_pretrained(
     ``AutoModelForCausalLM``), plus what ModelOpt needs around the load:
 
     * A Hub model ID is made local first (:func:`ensure_local_checkpoint`, which takes the
-      ``revision``, ``token`` and ``cache_dir`` ``kwargs``): the export reads the source checkpoint
-      from disk. Under ``torch.distributed`` every rank must call this.
+      ``revision``, ``token``, ``cache_dir`` and ``local_files_only`` ``kwargs``): the export reads
+      the source checkpoint from disk. Under ``torch.distributed`` every rank must call this.
     * The model type's loading hook runs
       (:func:`~modelopt.torch.models.hf.prepare_model_for_loading`), e.g. to keep the MTP head a
       Nemotron-H checkpoint carries. ``model_type`` selects it, read from the checkpoint's config
@@ -392,7 +392,12 @@ def load_pretrained(
 
     auto_class = auto_class or AutoModelForCausalLM
     _, ckpt_path = ensure_local_checkpoint(
-        ckpt_path, **{k: kwargs.pop(k) for k in ("revision", "token", "cache_dir") if k in kwargs}
+        ckpt_path,
+        **{
+            k: kwargs.pop(k)
+            for k in ("revision", "token", "cache_dir", "local_files_only")
+            if k in kwargs
+        },
     )
     trust_remote_code = kwargs.get("trust_remote_code", False)
     if model_type is None:

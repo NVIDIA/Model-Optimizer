@@ -886,29 +886,41 @@ def test_ensure_local_checkpoint_warns_when_only_the_cache_is_left(monkeypatch, 
     assert calls == [(("org/model",), {"local_files_only": True})]
 
 
-def test_ensure_local_checkpoint_uses_the_cache_quietly_when_offline(monkeypatch, tmp_path):
-    """HF_HUB_OFFLINE is the user's choice: do not ask the Hub, and do not warn on every run."""
+@pytest.mark.parametrize("cache_only", ["HF_HUB_OFFLINE", "local_files_only"])
+def test_ensure_local_checkpoint_uses_the_cache_quietly_when_offline(
+    monkeypatch, tmp_path, cache_only
+):
+    """HF_HUB_OFFLINE or local_files_only=True is the user's choice: do not ask the Hub, and do not
+    warn on every run."""
     calls = _fake_hub(monkeypatch, tmp_path, error=AssertionError("the Hub must not be asked"))
-    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    if cache_only == "HF_HUB_OFFLINE":
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        result = hf_checkpoint_utils.ensure_local_checkpoint("org/model")
+        result = hf_checkpoint_utils.ensure_local_checkpoint(
+            "org/model", local_files_only=cache_only == "local_files_only"
+        )
 
     assert result == ("org/model", str(tmp_path))
     assert calls == [(("org/model",), {"local_files_only": True})]
 
 
-def test_ensure_local_checkpoint_offline_and_uncached_raises(monkeypatch, tmp_path):
-    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+@pytest.mark.parametrize("cache_only", ["HF_HUB_OFFLINE", "local_files_only"])
+def test_ensure_local_checkpoint_offline_and_uncached_raises(monkeypatch, tmp_path, cache_only):
+    _fake_hub(monkeypatch, tmp_path, error=AssertionError("the Hub must not be asked"))
+    if cache_only == "HF_HUB_OFFLINE":
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
     def not_cached(*args, **kwargs):
         raise hf_hub_errors.LocalEntryNotFoundError("not in cache")
 
     monkeypatch.setattr(hf_checkpoint_utils, "snapshot_download", not_cached)
 
-    with pytest.raises(RuntimeError, match="HF_HUB_OFFLINE is set"):
-        hf_checkpoint_utils.ensure_local_checkpoint("org/model")
+    with pytest.raises(RuntimeError, match=cache_only):
+        hf_checkpoint_utils.ensure_local_checkpoint(
+            "org/model", local_files_only=cache_only == "local_files_only"
+        )
 
 
 def test_ensure_local_checkpoint_names_the_hub_error_when_nothing_is_cached(monkeypatch, tmp_path):
