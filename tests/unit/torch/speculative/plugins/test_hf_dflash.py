@@ -1142,3 +1142,42 @@ class TestDFlashDraftActivationCheckpointing:
         assert grads[False] and grads[False].keys() == grads[True].keys()
         for name, grad in grads[False].items():
             assert torch.equal(grad, grads[True][name]), name
+
+
+def test_frozen_base_forward_builds_no_graph():
+    """The default frozen base should stay cheap: no autograd graph through it."""
+    model = get_tiny_llama(num_hidden_layers=4)
+    config = get_dflash_config()
+    config["dflash_freeze_base_model"] = True
+    mtsp.convert(model, [("dflash", config)])
+
+    out = model(input_ids=torch.ones(1, SEQ_LEN, dtype=torch.long))
+
+    assert out.logits.grad_fn is None, "frozen base should not build a graph"
+
+
+def test_trainable_base_forward_builds_a_graph():
+    """dflash_freeze_base_model=False has to actually let gradient reach the base.
+
+    Regression test: the base forward used to run under an unconditional no_grad, so the
+    flag was honored on the parameters (requires_grad stayed True) while no graph was
+    built. The base then sat at its initial weights for the whole run and looked trainable
+    the entire time -- visible only as a loss that never moved.
+    """
+    model = get_tiny_llama(num_hidden_layers=4)
+    config = get_dflash_config()
+    config["dflash_freeze_base_model"] = False
+    mtsp.convert(model, [("dflash", config)])
+
+    base_params = [p for n, p in model.named_parameters() if "dflash_module" not in n]
+    assert any(p.requires_grad for p in base_params), "base params should be trainable"
+
+    out = model(input_ids=torch.ones(1, SEQ_LEN, dtype=torch.long))
+
+    assert out.logits.grad_fn is not None, "trainable base must build a graph"
+
+    # And the gradient must actually arrive, not merely be possible.
+    out.logits.sum().backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in base_params), (
+        "no gradient reached the base despite dflash_freeze_base_model=False"
+    )

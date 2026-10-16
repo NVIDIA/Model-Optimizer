@@ -75,6 +75,7 @@ Changelog
 - LiLiCorr now trains offline and in streaming mode, not only online: the target logits its distractor penalty reads are reconstructed from the captured final hidden state, the same path self-logit distillation uses.
 - Add ``dflash_lilicorr_w_cal`` (default ``0.0``, off): an optional LiLiCorr proposal-calibration term, a KL divergence from the target's distribution over each slot's candidates to the reranker's candidate distribution, usable in place of the distractor penalty.
 - ``examples/speculative_decoding/distributed_generate/server_generate_vlm_sglang.py`` ``--api_mode openai`` works against any OpenAI-compatible server, including vLLM, and gains ``--media_inline`` to send media as base64 ``data:`` URIs. Without ``--media_url_base`` or ``--media_inline`` the media path is still passed through verbatim, which only servers that read their own filesystem resolve (SGLang native does; vLLM needs ``--allowed-local-media-path``); that case now warns.
+- ``dflash_freeze_base_model=False`` now actually trains the base model. The base forward ran under an unconditional ``torch.no_grad()``, so the flag was honoured on the parameters while no autograd graph was built and no gradient ever reached them; the base stayed at its initial weights for the whole run. Training with the base unfrozen now also costs the activation memory that implies.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
