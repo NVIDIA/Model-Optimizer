@@ -49,8 +49,7 @@ jobs:
             # which newer TensorRT (26.06) removed. Bump once the source is updated for TensorRT 10.
             container_image: nvcr.io/nvidia/pytorch:26.05-py3
           - example: gpu_megatron
-            # A healthy run takes ~47 min on the 2-GPU nightly runner; 60 left no headroom.
-            timeout: 90
+            timeout: 60
             container_image: nvcr.io/nvidia/nemo:26.08
           - example: gpu_trtllm
             timeout: 15
