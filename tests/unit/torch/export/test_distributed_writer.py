@@ -46,7 +46,7 @@ from torch.multiprocessing.reductions import StorageWeakRef
 pytest.importorskip("safetensors")
 pytest.importorskip("transformers")
 from safetensors.torch import load_file, save_file
-from transformers import AutoModelForCausalLM, LlamaConfig, MixtralConfig, Qwen3MoeConfig
+from transformers import AutoModelForCausalLM, LlamaConfig, MixtralConfig, Qwen2MoeConfig
 from transformers.core_model_loading import Chunk, WeightConverter
 
 import modelopt.torch.quantization as mtq
@@ -923,15 +923,18 @@ def test_nogather_export_rejects_save_modelopt_state(gloo_world_of_one, tmp_path
     "quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG], ids=["fp8", "nvfp4"]
 )
 def test_nogather_export_writes_moe_experts_quantized(gloo_world_of_one, tmp_path, quant_cfg):
-    config = Qwen3MoeConfig(
+    """Qwen2-MoE's shared expert follows its experts in the same FSDP2 unit, and packing it opens a
+    weight window on that unit. Unless the experts were folded inside a window of their own, which
+    hands FSDP2 the packed weights, that window's reshard puts FSDP2's unquantized shards back."""
+    config = Qwen2MoeConfig(
         vocab_size=64,
         hidden_size=32,
         intermediate_size=32,
         moe_intermediate_size=32,
+        shared_expert_intermediate_size=32,
         num_hidden_layers=1,
         num_attention_heads=4,
         num_key_value_heads=2,
-        head_dim=8,
         num_experts=4,
         num_experts_per_tok=2,
         max_position_embeddings=32,
