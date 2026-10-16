@@ -150,6 +150,9 @@ class TRTLocalClient(RuntimeClient):
             )
 
         def initialize_input_output_tensors(self, engine):
+            # Select the profile before specifying dynamic input shapes.
+            self.execution_context.set_optimization_profile_async(0, self.stream.cuda_stream)
+
             # Allocate torch tensors for inputs and outputs
             input_tensors = []
             output_tensors = []
@@ -167,36 +170,38 @@ class TRTLocalClient(RuntimeClient):
                 else:
                     tensor_shape = trt.Dims(self.io_shapes[tensor_name])
                 tensor_dtype = convert_trt_dtype_to_torch(engine.get_tensor_dtype(tensor_name))
-                torch_tensor = torch.empty(tuple(tensor_shape), dtype=tensor_dtype, device="cuda")
+                tensor_device = (
+                    "cpu"
+                    if engine.get_tensor_location(tensor_name) == trt.TensorLocation.HOST
+                    else "cuda"
+                )
+                torch_tensor = torch.empty(
+                    tuple(tensor_shape), dtype=tensor_dtype, device=tensor_device
+                )
                 if engine.get_tensor_mode(tensor_name) == trt.TensorIOMode.INPUT:
                     input_tensors.append(torch_tensor)
                     self.execution_context.set_tensor_address(
                         tensor_name, input_tensors[idx].data_ptr()
                     )
-                    self.execution_context.set_input_shape(tensor_name, tensor_shape)
+                    shape_is_valid = self.execution_context.set_input_shape(
+                        tensor_name, tensor_shape
+                    )
+                    assert shape_is_valid, (
+                        f"Invalid shape for input tensor {tensor_name}: {tensor_shape}"
+                    )
                 else:
                     output_tensors.append(torch_tensor)
                     self.execution_context.set_tensor_address(
                         tensor_name,
                         output_tensors[idx - len(input_tensors)].data_ptr(),
                     )
-            assert self.execution_context.all_shape_inputs_specified, (
-                "Not all shape inputs are specified."
-            )
-
-            # Set selected profile idx
-            self.execution_context.set_optimization_profile_async(0, self.stream.cuda_stream)
-
-            # Assertion: to ensure all the shapes can be inferred when user does not provide them
-            if self.io_shapes == {}:
-                assert len(self.execution_context.infer_shapes()) == 0, (
-                    "Shapes of all the bindings cannot be inferred."
-                )
-
             return input_tensors, output_tensors
 
         def run(self, inputs):
             assert self.engine is not None, "Engine is not set."
+            assert len(inputs) == len(self.input_tensors), (
+                f"Expected {len(self.input_tensors)} input tensors, got {len(inputs)}."
+            )
 
             # Copy inputs to GPU
             with torch.cuda.stream(self.stream):
@@ -212,6 +217,12 @@ class TRTLocalClient(RuntimeClient):
 
                         # Assign the portion of input_t to the self.input_tensor[i]
                         self.input_tensors[i][slices] = input_t
+
+            # Shape inference may read host shape tensors, so wait for their input copies.
+            if any(t.device.type == "cpu" for t in self.input_tensors):
+                self.stream.synchronize()
+            missing_inputs = self.execution_context.infer_shapes()
+            assert not missing_inputs, f"Not all shape inputs are specified: {missing_inputs}"
 
             # Run inference
             self.execution_context.execute_async_v3(stream_handle=self.stream.cuda_stream)
