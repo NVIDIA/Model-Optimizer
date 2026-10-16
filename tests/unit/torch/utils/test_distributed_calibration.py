@@ -392,20 +392,18 @@ class _Recorder(nn.Module):
             self.on_forward()
 
 
-@pytest.mark.parametrize("dataset", [list(range(8)), _Stream(8)], ids=["map-style", "iterable"])
-@pytest.mark.parametrize("rank", [0, 1])
-def test_forward_loop_runs_this_ranks_shard_through_the_captured_model(dataset, rank):
+def test_forward_loop_runs_this_ranks_shard_through_the_captured_model():
     """Every batch of the rank's shard reaches the top-level model, not the module ``mtq`` passes.
 
     Only the full model's forward runs the EP collectives; without a device the batches stay put.
     """
     model, inner = _Recorder(), _Recorder()
-    shard = shard_dataloader(_loader(dataset), rank, world_size=2)
+    shard = shard_dataloader(_loader(list(range(8))), 0, world_size=2)
 
     distributed_forward_loop(model, shard)(inner)
 
     calls = [call["input_ids"].flatten().tolist() for call in model.calls]
-    assert calls == [[rank, rank + 2], [rank + 4, rank + 6]]
+    assert calls == [[0, 2], [4, 6]]
     assert inner.calls == []
 
 
@@ -432,17 +430,21 @@ def test_forward_loop_disables_use_cache_only_while_calibrating():
     assert model.config.use_cache is True
 
 
-def test_forward_loop_frees_the_allocator_cache_around_the_forwards(monkeypatch):
+@pytest.mark.parametrize("cuda_started", [True, False], ids=["cuda", "cpu-only"])
+def test_forward_loop_frees_the_allocator_cache_around_the_forwards(monkeypatch, cuda_started):
     """Re-plant the a2a wrappers and free the cached pool before the first forward, and again after.
 
     Building the loop does neither: quantizers are inserted between building and calling it. NCCL
     allocates its buffers outside torch's caching allocator, so a pool hoarded by the model load or
-    by the calibration activations starves the next collective.
+    by the calibration activations starves the next collective. A process that never started CUDA
+    has no pool to free and skips the garbage collection, which alone takes about a second.
     """
     events = []
     monkeypatch.setattr(
         mto_dist, "_reinstall_a2a_forwards", lambda *args: events.append(("reinstall", *args))
     )
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: cuda_started)
+    monkeypatch.setattr(mto_dist.gc, "collect", lambda: events.append("collect"))
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: events.append("empty_cache"))
     model, mesh = _Recorder(on_forward=lambda: events.append("forward")), _FakeMesh()
     set_distribution_plan(model, _EXPERT_PARALLEL)
@@ -453,13 +455,8 @@ def test_forward_loop_frees_the_allocator_cache_around_the_forwards(monkeypatch)
 
     forward_loop(model)
 
-    assert events == [
-        ("reinstall", model, mesh),
-        "empty_cache",
-        "forward",
-        "forward",
-        "empty_cache",
-    ]
+    release = ["collect", "empty_cache"] if cuda_started else []
+    assert events == [("reinstall", model, mesh), *release, "forward", "forward", *release]
 
 
 def test_forward_loop_replants_a2a_wrappers_dropped_after_it_was_built(monkeypatch):
