@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import warnings
 from collections import deque
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -740,6 +741,25 @@ class _CheckpointState:
         info = detect_resume_point(checkpoint_dir)
         if info is not None:
             manifest = info[1]
+            # `calib_mutates_weights` is derived from the algorithm rather than defaulted to
+            # True, so upgrading can legitimately flip it for an in-flight checkpoint. True is
+            # the conservative value -- it writes the full layer state, costing I/O -- so a
+            # checkpoint written that way stays resumable: adopt its value and keep one format
+            # for the whole run. The reverse (manifest False, this run True) is a real
+            # mismatch, because the completed layers lack the weights this run would need.
+            ckpt_mutates = manifest.get("calib_mutates_weights")
+            if ckpt_mutates is True and calib_mutates_weights is False:
+                # No "pass it explicitly to override" advice here: `wrapped_calib_func`
+                # resolves unset -> derived before this point, so an explicit False and a
+                # derived False are indistinguishable by the time we see them.
+                warnings.warn(
+                    "Checkpoint was written with calib_mutates_weights=True; keeping that for "
+                    "this resume so the checkpoint keeps one format. The only cost is the "
+                    "per-layer full-state write this run would otherwise have skipped.",
+                    stacklevel=2,
+                )
+                calib_mutates_weights = True
+
             for key, new_value in (
                 ("num_layers", num_layers),
                 ("save_every", save_every),

@@ -17,6 +17,7 @@
 
 import copy
 import json
+import os
 from collections import deque
 
 import pytest
@@ -28,8 +29,10 @@ from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
+    _CheckpointState,
     _OutsideQuantizerCalibrator,
     _SkipLayer,
+    _write_manifest,
 )
 
 
@@ -1341,3 +1344,58 @@ def test_layerwise_checkpoint_mismatch_save_every_raises(monkeypatch, tmp_path):
     fresh_model = _SimpleTransformerModel(n_layers=4, dim=16)
     with pytest.raises(ValueError, match="save_every mismatch"):
         mtq.quantize(fresh_model, cfg_mismatched, forward_loop=lambda m: [m(b) for b in calib_data])
+
+
+def test_resume_adopts_a_conservative_checkpoint_value(tmp_path):
+    """A checkpoint written with ``calib_mutates_weights=True`` stays resumable.
+
+    Deriving the flag from the algorithm flips it True -> False for max/mse/local_hessian, so
+    an in-flight checkpoint written by an earlier release would otherwise hard-fail on resume
+    and discard hours of completed layers. True is the conservative value -- it writes the
+    full layer state -- so the resume adopts it and keeps one format for the whole run.
+    """
+
+    ckpt = str(tmp_path / "ckpt")
+    os.makedirs(ckpt, exist_ok=True)
+    _write_manifest(
+        ckpt,
+        last_completed_layer=0,
+        num_layers=4,
+        save_every=1,
+        calib_mutates_weights=True,
+        save_layer_state=False,
+    )
+
+    with pytest.warns(UserWarning, match="calib_mutates_weights=True"):
+        state = _CheckpointState.from_folder(
+            ckpt,
+            num_layers=4,
+            save_every=1,
+            calib_mutates_weights=False,
+            save_layer_state=False,
+        )
+    assert state.calib_mutates_weights is True, "should adopt the checkpoint's value"
+
+
+def test_resume_still_rejects_the_unsafe_direction(tmp_path):
+    """Manifest False, new run True: completed layers lack the weights this run needs."""
+
+    ckpt = str(tmp_path / "ckpt")
+    os.makedirs(ckpt, exist_ok=True)
+    _write_manifest(
+        ckpt,
+        last_completed_layer=0,
+        num_layers=4,
+        save_every=1,
+        calib_mutates_weights=False,
+        save_layer_state=False,
+    )
+
+    with pytest.raises(ValueError, match="calib_mutates_weights mismatch"):
+        _CheckpointState.from_folder(
+            ckpt,
+            num_layers=4,
+            save_every=1,
+            calib_mutates_weights=True,
+            save_layer_state=False,
+        )
