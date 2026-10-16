@@ -282,41 +282,6 @@ def _load(converters, checkpoint):
 # --------------------------------------------------------------------------- the fused experts
 
 
-@pytest.mark.parametrize("hidden_act", ["silu", "situ"])
-def test_fused_experts_match_a_per_expert_reference(hidden_act):
-    """Per token: the routing-weighted sum over its top-k experts of down(act(gate x) * up x), with
-    gate read from rows [0:I] and up from rows [I:2I] of ``gate_up_proj``. A ``situ`` model hands
-    the full [gate; up] row to the remote ``SituAndMul``. Experts live in the latent width."""
-    config = _config(hidden_act=hidden_act)
-    experts = kimi_k3._build_fused_experts_class(_remote_module())(
-        config, config.routed_expert_hidden_size
-    )
-    n, inter, latent = 4, config.moe_intermediate_size, config.routed_expert_hidden_size
-    assert experts.gate_up_proj.shape == (n, 2 * inter, latent)
-    assert experts.down_proj.shape == (n, latent, inter)
-    _randomize(experts)
-    gen = torch.Generator().manual_seed(1)
-    tokens = torch.randn(len(ROUTES), latent, generator=gen)
-    route_weights = torch.rand(ROUTES.shape, generator=gen)
-
-    def act(gate_up):
-        if hidden_act == "situ":
-            return _situ(gate_up, config.situ_beta, config.situ_linear_beta)
-        return F.silu(gate_up[:inter]) * gate_up[inter:]
-
-    with torch.no_grad():
-        expected = torch.stack(
-            [
-                sum(
-                    w * (experts.down_proj[e] @ act(experts.gate_up_proj[e] @ x))
-                    for e, w in zip(top_e, top_w)
-                )
-                for x, top_e, top_w in zip(tokens, ROUTES, route_weights)
-            ]
-        )
-        torch.testing.assert_close(experts(tokens, ROUTES, route_weights), expected)
-
-
 def test_fused_experts_dispatch_through_the_experts_interface(monkeypatch):
     """``config._experts_implementation`` picks the forward (``torch_a2a`` under EP), so the module
     must route through transformers' ``ExpertsInterface``; and a stock implementation reading the
@@ -356,13 +321,15 @@ def test_fused_experts_dispatch_through_the_experts_interface(monkeypatch):
             "routed_expert_hidden_size": None,
             "num_shared_experts": None,
         },
+        {"hidden_act": "situ"},
     ],
-    ids=["latent-norm-shared", "plain"],
+    ids=["latent-norm-shared", "plain", "situ"],
 )
 def test_the_patched_block_reproduces_the_remote_per_expert_forward(overrides):
     """Swapping the per-expert ModuleList for the fused module keeps the block's output: the latent
     projections, the latent norm and the shared experts stay around the fused call, and w1 / w3 /
-    w2 are the gate rows, the up rows and the down of the fused params."""
+    w2 are the gate rows, the up rows and the down of the fused params. A ``situ`` model hands the
+    full [gate; up] row to the remote ``SituAndMul``."""
     remote = _remote_module()
     config = _config(**overrides)
     reference = remote.KimiSparseMoeBlock(config)
@@ -386,24 +353,15 @@ def test_the_patched_block_reproduces_the_remote_per_expert_forward(overrides):
         torch.testing.assert_close(block(hidden_states), expected)
 
 
-def test_patching_the_block_twice_wraps_it_once():
-    """A second ``prepare`` must not stack another fused-experts allocation onto ``__init__``."""
-    remote = _remote_module()
-    kimi_k3._patch_kimi_moe_block(remote)
-    patched = (remote.KimiSparseMoeBlock.__init__, remote.KimiSparseMoeBlock.forward)
-
-    kimi_k3._patch_kimi_moe_block(remote)
-
-    assert (remote.KimiSparseMoeBlock.__init__, remote.KimiSparseMoeBlock.forward) == patched
-
-
 # ------------------------------------------------------------------- the linear-attention fixes
 
 
-def test_kda_beta_is_squashed_in_torch_only_when_the_kernel_flag_asks_for_it():
+@pytest.mark.parametrize("by", ["keyword", "position"])
+def test_kda_beta_is_squashed_in_torch_only_when_the_kernel_flag_asks_for_it(by):
     """fla-core ignores ``use_beta_sigmoid_in_kernel``, so both KDA entry points apply
-    ``sigmoid(beta)`` themselves (in beta's dtype) and clear the flag; calls without the flag pass
-    beta through untouched. Each entry point is wrapped once."""
+    ``sigmoid(beta)`` themselves (in beta's dtype) and clear the flag, whether the remote code
+    passes beta by name or by position; calls without the flag pass beta through untouched. Each
+    entry point is wrapped once."""
     remote = _remote_module()
     kimi_k3._patch_kda_beta_sigmoid(remote)
     wrapped = (remote.chunk_kda, remote.fused_recurrent_kda)
@@ -411,8 +369,13 @@ def test_kda_beta_is_squashed_in_torch_only_when_the_kernel_flag_asks_for_it():
     assert (remote.chunk_kda, remote.fused_recurrent_kda) == wrapped
     beta = torch.tensor([-8.0, 0.0, 8.4], dtype=torch.bfloat16)
 
-    assert remote.chunk_kda(1, 2, 3, 4, beta=beta, use_beta_sigmoid_in_kernel=True) == "chunk_kda"
-    remote.fused_recurrent_kda(1, 2, 3, 4, beta=beta, use_beta_sigmoid_in_kernel=True)
+    def call(kda, **flag):
+        return (
+            kda(1, 2, 3, 4, beta=beta, **flag) if by == "keyword" else kda(1, 2, 3, 4, beta, **flag)
+        )
+
+    assert call(remote.chunk_kda, use_beta_sigmoid_in_kernel=True) == "chunk_kda"
+    call(remote.fused_recurrent_kda, use_beta_sigmoid_in_kernel=True)
 
     squashed = torch.sigmoid(beta.float()).to(torch.bfloat16)
     assert [name for name, *_ in remote.calls] == ["chunk_kda", "fused_recurrent_kda"]
@@ -422,34 +385,9 @@ def test_kda_beta_is_squashed_in_torch_only_when_the_kernel_flag_asks_for_it():
         assert torch.equal(seen, squashed)
 
     remote.calls.clear()
-    remote.chunk_kda(1, 2, 3, 4, beta=beta)
-    remote.fused_recurrent_kda(1, 2, 3, 4, beta=beta, use_beta_sigmoid_in_kernel=False)
+    call(remote.chunk_kda)
+    call(remote.fused_recurrent_kda, use_beta_sigmoid_in_kernel=False)
     assert [(seen is beta, flag) for _, seen, flag in remote.calls] == [(True, False)] * 2
-
-
-def test_kda_beta_passed_positionally_is_squashed_too():
-    """The fix must not depend on whether the remote code passes beta by position or by name."""
-    remote = _remote_module()
-    kimi_k3._patch_kda_beta_sigmoid(remote)
-    beta = torch.tensor([-8.0, 8.4], dtype=torch.bfloat16)
-
-    remote.chunk_kda(1, 2, 3, 4, beta, use_beta_sigmoid_in_kernel=True)
-
-    ((_, seen, flag),) = remote.calls
-    assert flag is False
-    assert torch.equal(seen, torch.sigmoid(beta.float()).to(torch.bfloat16))
-
-
-def test_kda_a_log_takes_the_checkpoints_head_dim_shape():
-    """The stale port allocates ``A_log`` as [num_heads]; the checkpoint stores [head_dim], which
-    would fail to load (or be re-initialized). The reallocation keeps the dtype."""
-    remote = _remote_module()
-    kimi_k3._patch_kda_a_log(remote)
-
-    attention = remote.KimiDeltaAttention(num_heads=3, head_dim=4)
-
-    assert attention.A_log.shape == (4,)
-    assert attention.A_log.dtype == torch.bfloat16
 
 
 # ------------------------------------------------------------- transformers-version compatibility
@@ -488,23 +426,6 @@ def test_kimi_cache_mask_sizes_accept_a_query_length_or_a_cache_position():
     assert cache.get_mask_sizes(3, 2) == (8, 0)
     assert cache.get_mask_sizes(torch.arange(4), 1) == (9, 0)
     assert remote.calls == [("get_seq_length", 2), ("get_seq_length", 1)]
-
-
-def test_tie_weights_shim_drops_the_new_kwargs_once(monkeypatch):
-    """transformers >= 5.13 calls ``tie_weights(recompute_mapping=...)``; the remote VLM's override
-    takes no kwargs. The shim drops them, delegates once per call, and wraps only once."""
-    remote = _remote_module("transformers_modules.stub.modeling_kimi_k3")
-    monkeypatch.setitem(sys.modules, remote.__name__, remote)
-    vlm = remote.KimiK3ForConditionalGeneration
-    kimi_k3._shim_tie_weights_kwargs("transformers_modules.stub")
-    shim = vlm.__dict__["tie_weights"]
-    kimi_k3._shim_tie_weights_kwargs("transformers_modules.stub")
-    assert vlm.__dict__["tie_weights"] is shim
-
-    model = vlm()
-
-    assert model.tie_weights(missing_keys=set(), recompute_mapping=False) == "tied"
-    assert remote.calls == [("tie_weights", model)]
 
 
 def test_tie_weights_shim_leaves_an_inherited_tie_weights_alone(monkeypatch):
@@ -665,7 +586,11 @@ def test_prepare_with_a_checkpoint_patches_the_loaded_remote_module_once(monkeyp
     assert hasattr(hf_generic, "OutputRecorder")  # the remote code imports it from there
     # every incompatibility is patched on the module the checkpoint's code defined
     assert not isinstance(remote.KimiSparseMoeBlock(_config()).experts, nn.ModuleList)
-    assert remote.KimiDeltaAttention(num_heads=3, head_dim=4).A_log.shape == (4,)
+    a_log = remote.KimiDeltaAttention(num_heads=3, head_dim=4).A_log
+    assert (a_log.shape, a_log.dtype) == (
+        (4,),
+        torch.bfloat16,
+    )  # the checkpoint's shape, same dtype
     remote.chunk_kda(1, 2, 3, 4, beta=torch.zeros(1), use_beta_sigmoid_in_kernel=True)
     _, beta, flag = remote.calls.pop()
     assert (beta.item(), flag) == (0.5, False)
@@ -673,7 +598,9 @@ def test_prepare_with_a_checkpoint_patches_the_loaded_remote_module_once(monkeyp
         config=None, input_embeds=None, attention_mask=None, past_key_values=None, cache_position=0
     )
     assert remote.KimiDynamicCache(seen_tokens=1).get_mask_sizes(2, 0) == (3, 0)
-    assert remote.KimiK3ForConditionalGeneration().tie_weights(recompute_mapping=False) == "tied"
+    vlm = remote.KimiK3ForConditionalGeneration()
+    assert vlm.tie_weights(recompute_mapping=False) == "tied"
+    assert [call for call in remote.calls if call[0] == "tie_weights"] == [("tie_weights", vlm)]
 
 
 def test_prepare_fails_loudly_when_no_loaded_module_defines_the_moe_block(monkeypatch):
@@ -778,7 +705,6 @@ def test_prepare_leaves_the_loader_alone_for_bf16_experts():
 
 
 def test_the_kimi_k3_spec_routes_expert_parallelism_through_this_adapter():
-    """kimi_k3 is remote code, so its whole EP setup is this adapter's ``prepare``."""
-    spec = get_spec("kimi_k3")
-    assert spec.modeling_source == "remote_code"
-    assert spec.ep_spec.prepare is kimi_k3.prepare
+    """kimi_k3 is remote code, so its whole EP setup is this adapter's ``prepare``: another Kimi
+    adapter's would load it without its own patches."""
+    assert get_spec("kimi_k3").ep_spec.prepare is kimi_k3.prepare

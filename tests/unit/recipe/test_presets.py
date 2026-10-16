@@ -115,9 +115,12 @@ class _KimiK3Layer(nn.Module):
 @pytest.mark.parametrize("qformat", ["fp8", "nvfp4"])
 def test_default_presets_leave_the_kimi_k3_projections_vllm_builds_unquantized(qformat):
     # vLLM's Kimi-K3 model passes quant_config=None for these, so it cannot load them quantized.
+    # Kimi-K2.5 and Kimi-K3 also name their multimodal projector ``mm_projector``; like the other
+    # projector spellings it stays BF16 unless a recipe re-enables it.
     model = nn.Module()
     model.layers = nn.ModuleList([_KimiK3Layer()])
     model.output_attn_res_proj = nn.Linear(32, 1, bias=False)
+    model.mm_projector = nn.Sequential(nn.Linear(32, 32), nn.GELU(), nn.Linear(32, 32))
     config = copy.deepcopy(presets.QUANT_CFG_CHOICES[qformat])
     config["algorithm"] = None  # placement only, no calibration forward
     mtq.quantize(model, config)
@@ -129,27 +132,12 @@ def test_default_presets_leave_the_kimi_k3_projections_vllm_builds_unquantized(q
         layer.self_attention_res_proj,
         layer.mlp_res_proj,
         model.output_attn_res_proj,
+        model.mm_projector[0],
+        model.mm_projector[2],
     ):
         assert not module.weight_quantizer.is_enabled
         assert not module.input_quantizer.is_enabled
     assert layer.self_attn.o_proj.weight_quantizer.is_enabled
-
-
-@pytest.mark.parametrize("qformat", ["fp8", "nvfp4"])
-def test_default_presets_keep_kimis_mm_projector_in_bf16(qformat):
-    # Kimi-K2.5 and Kimi-K3 name their multimodal projector ``mm_projector``; like the other
-    # projector spellings it stays BF16 unless a recipe re-enables it.
-    model = nn.Module()
-    model.mm_projector = nn.Sequential(nn.Linear(32, 32), nn.GELU(), nn.Linear(32, 32))
-    model.language_model = nn.Linear(32, 32)
-    config = copy.deepcopy(presets.QUANT_CFG_CHOICES[qformat])
-    config["algorithm"] = None  # placement only, no calibration forward
-    mtq.quantize(model, config)
-
-    for proj in (model.mm_projector[0], model.mm_projector[2]):
-        assert not proj.weight_quantizer.is_enabled
-        assert not proj.input_quantizer.is_enabled
-    assert model.language_model.weight_quantizer.is_enabled
 
 
 def test_local_hessian_layerwise_is_scoped_to_the_model_recipe():
