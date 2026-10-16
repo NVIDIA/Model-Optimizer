@@ -527,6 +527,24 @@ class HFDFlashModel(DFlashModel):
 
         return DFlashExporter(self)
 
+    @staticmethod
+    def _build_loss_mask(input_ids, attention_mask, labels, loss_mask):
+        """Return the float ``[B, seq_len]`` mask of positions anchor sampling and the loss may use.
+
+        Every DFlash-family training forward calls this so the variants mask the same positions.
+        """
+        mask = torch.ones(input_ids.shape, device=input_ids.device)
+        if labels is not None:
+            mask = mask * (labels != LabelSmoother.ignore_index).float()
+        # Labels carry optional answer-only masking but do not in general mark padding with -100
+        # (collators copy them from padded input_ids), so always intersect with attention_mask.
+        if attention_mask is not None:
+            mask = mask * attention_mask.float()
+        # In offline training, assistant mask is dumped and passed as kwarg.
+        if loss_mask is not None:
+            mask = mask * loss_mask
+        return mask
+
     def _sample_anchor_positions(self, seq_len, loss_mask, device):
         """Randomly sample anchor positions per sample.
 
@@ -925,19 +943,10 @@ class HFDFlashModel(DFlashModel):
                 target_hidden=target_hidden, logits=raw_outputs.logits
             )
 
-        # 2. Build loss mask. Labels carry optional answer-only masking, but do
-        # not in general mark padded tokens with -100 (the VLM collator creates
-        # them from padded input_ids). Always intersect with attention_mask so
-        # anchor sampling and loss never include the padded tail.
-        loss_mask = torch.ones(bsz, seq_len, device=device)
-        if labels is not None:
-            loss_mask = loss_mask * (labels != LabelSmoother.ignore_index).float()
-        if attention_mask is not None:
-            loss_mask = loss_mask * attention_mask.float()
-
-        # In offline training, assistant mask is dumped and passed as kwarg.
-        if kwargs.get("loss_mask") is not None:
-            loss_mask = loss_mask * kwargs["loss_mask"]
+        # 2. Build loss mask.
+        loss_mask = self._build_loss_mask(
+            input_ids, attention_mask, labels, kwargs.get("loss_mask")
+        )
 
         # 3. Random anchor sampling
         anchor_positions, block_keep_mask = self._sample_anchor_positions(

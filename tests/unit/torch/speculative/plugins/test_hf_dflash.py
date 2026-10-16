@@ -1142,3 +1142,28 @@ class TestDFlashDraftActivationCheckpointing:
         assert grads[False] and grads[False].keys() == grads[True].keys()
         for name, grad in grads[False].items():
             assert torch.equal(grad, grads[True][name]), name
+
+
+@pytest.mark.parametrize(
+    "variant_arch",
+    [
+        pytest.param({}, id="dflash"),
+        pytest.param({"projector_type": "dspark", "markov_rank": 16}, id="dspark"),
+        pytest.param(
+            {"projector_type": "domino", "gru_hidden_dim": 32, "emb_dim": 16}, id="domino"
+        ),
+    ],
+)
+def test_padding_is_never_supervised(variant_arch):
+    """Padding is unsupervised in every DFlash-family forward even when labels do not mark it."""
+    model = get_tiny_llama(num_hidden_layers=4)
+    config = get_dflash_config()
+    config["dflash_architecture_config"].update(variant_arch)
+    mtsp.convert(model, [("dflash", config)])
+    model.train()
+
+    batch = _dflash_batch(model.config.vocab_size)
+    batch["attention_mask"][:, SEQ_LEN // 2 :] = 0
+    # Only the padded tail keeps labels, so any supervision at all comes from padding.
+    batch["labels"][:, : SEQ_LEN // 2] = -100
+    assert model(**batch).loss.item() == 0.0
