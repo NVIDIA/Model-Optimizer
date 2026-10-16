@@ -177,5 +177,16 @@
       "Requests parent/user approval to replace invalid runs until at least 8 valid independent runs exist; does not retry solely for bounded failures",
       "Reports SciCode as INDETERMINATE when fewer than 8 valid runs are available"
     ]
+  },
+  {
+    "name": "livecodebench-judge-pin",
+    "skills": ["evaluation"],
+    "query": "Evaluate my NVFP4 checkpoint and its BF16 baseline on LiveCodeBench on SLURM",
+    "files": [],
+    "expected_behavior": [
+      "Keeps the ns_livecodebench task-level pre_cmd that force-reinstalls livecodebench at commit 7b16053 with --no-deps and asserts the installed commit",
+      "Sets NEMO_EVALUATOR_TRUST_PRE_CMD=1 before launching",
+      "Grades baseline and candidate with the same pinned judge rather than reusing an older LiveCodeBench score"
+    ]
   }
 ]

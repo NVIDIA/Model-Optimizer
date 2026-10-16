@@ -20,12 +20,8 @@ from collections.abc import Callable
 import torch
 
 from ..utils.calib_utils import GPTQHelper, register_gptq_helper
-from .common import pin_packed_weight
+from .common import floored_second_moments, pin_packed_weight
 from .registry import GGML_FORMAT_REGISTRY
-
-# Floor on the Hessian diagonal, relative to its mean, so a column calibration never activated
-# still has some weight in the search.
-_IMPORTANCE_FLOOR = 1e-4
 
 __all__ = ["GGMLGPTQHelper", "gptq_group_update"]
 
@@ -99,12 +95,8 @@ class GGMLGPTQHelper(GPTQHelper):
         assert self.weight is not None, "_blockwise_update called before update_weights()"
         importance = None
         if self.importance_weighted and ggml_format.weighted:
-            diagonal = self.hessian.diagonal().to(self.weight.device, torch.float32)
-            mean = diagonal.mean()
-            # A module no calibration token reached (an idle MoE expert) has a zero Hessian, and
-            # weighting by it would make every code score zero error: keep the plain search.
-            if mean > 0:
-                importance = diagonal.clamp_min(_IMPORTANCE_FLOOR * mean).sqrt()
+            diagonal = floored_second_moments(self.hessian.diagonal().to(self.weight.device))
+            importance = None if diagonal is None else diagonal.sqrt()
 
         def quantize_group(group, columns):
             kwargs = {} if importance is None else {"importance": importance[columns]}

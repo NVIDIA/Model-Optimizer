@@ -69,7 +69,9 @@ def unit(session, torch_ver, tf_ver):
     tf_pins = TRANSFORMERS_VERSIONS[tf_ver]
     if tf_pins:
         session.install(*tf_pins)
-    session.run("python", "-m", "pytest", "tests/unit", *_cov_args(), env=_CPU_ONLY_ENV)
+    session.run(
+        "python", "-m", "pytest", "tests/unit", *_cov_args(), *session.posargs, env=_CPU_ONLY_ENV
+    )
 
 
 @nox.session(python="3.12")
