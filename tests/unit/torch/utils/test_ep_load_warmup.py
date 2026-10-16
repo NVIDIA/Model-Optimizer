@@ -86,42 +86,43 @@ class _TinyMoe(nn.Module):
         return dict.fromkeys(names, _GPU)
 
 
-def test_experts_count_one_ep_shard_and_the_rest_counts_in_full():
-    """The router is replicated on every rank, so it counts in full like the other dense params."""
-    model = _TinyMoe()
-
-    with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN):
-        total = modeling_utils.get_total_byte_count(model, model.device_map(), None)
-
-    assert dict(total) == {_GPU: _EXPERT_BYTES // 4 + _DENSE_BYTES + _BUFFER_BYTES}
+class _OneBytePerElement:
+    def param_element_size(self, model, name, param):
+        return 1
 
 
-def test_dense_weights_left_on_meta_are_not_counted_but_buffers_are():
-    """With the sharded dense strategy every dense ``.weight`` / ``.bias`` stays on meta during
-    ``from_pretrained``; persistent buffers still load onto the device."""
-    model = _TinyMoe()
-
-    with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN, dense_on_meta=True):
-        total = modeling_utils.get_total_byte_count(model, model.device_map(), None)
-
-    assert dict(total) == {_GPU: _EXPERT_BYTES // 4 + _BUFFER_BYTES}
+_ALL_BYTES = _EXPERT_BYTES + _DENSE_BYTES + _BUFFER_BYTES
 
 
-def test_the_quantizer_sizes_the_elements():
-    class _OneBytePerElement:
-        def param_element_size(self, model, name, param):
-            return 1
-
-    model = _TinyMoe()
-
-    with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN):
-        total = modeling_utils.get_total_byte_count(model, model.device_map(), _OneBytePerElement())
-
-    # One byte per element where fp32 takes four.
-    assert dict(total) == {_GPU: (_EXPERT_BYTES // 4 + _DENSE_BYTES + _BUFFER_BYTES) // 4}
-
-
-def test_transformers_reserves_only_the_per_rank_footprint(monkeypatch):
+@pytest.mark.parametrize(
+    ("dense_on_meta", "quantizer", "stock_bytes", "per_rank_bytes"),
+    [
+        # Experts count one EP shard; the router is replicated, so it counts in full like the rest.
+        pytest.param(
+            False,
+            None,
+            _ALL_BYTES,
+            _EXPERT_BYTES // 4 + _DENSE_BYTES + _BUFFER_BYTES,
+            id="dense-replicated",
+        ),
+        # Sharded dense: every dense .weight / .bias stays on meta during from_pretrained, while
+        # persistent buffers still load onto the device.
+        pytest.param(
+            True, None, _ALL_BYTES, _EXPERT_BYTES // 4 + _BUFFER_BYTES, id="dense-on-meta"
+        ),
+        # The quantizer sizes the elements: one byte each where fp32 takes four.
+        pytest.param(
+            False,
+            _OneBytePerElement(),
+            _ALL_BYTES // 4,
+            (_EXPERT_BYTES // 4 + _DENSE_BYTES + _BUFFER_BYTES) // 4,
+            id="quantizer",
+        ),
+    ],
+)
+def test_transformers_reserves_only_the_per_rank_footprint(
+    monkeypatch, dense_on_meta, quantizer, stock_bytes, per_rank_bytes
+):
     """End to end: the one up-front allocation ``caching_allocator_warmup`` makes shrinks from the
     whole model (stock sizing, which also checks the byte counts above) to what this EP rank
     holds."""
@@ -136,14 +137,11 @@ def test_transformers_reserves_only_the_per_rank_footprint(monkeypatch):
         m.setattr(torch.cuda, "memory_reserved", lambda index: 0)
         m.setattr(torch.cuda, "memory_allocated", lambda index: 0)
         m.setattr(torch, "empty", fake_empty)
-        modeling_utils.caching_allocator_warmup(model, model.device_map(), None)
-        with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN):
-            modeling_utils.caching_allocator_warmup(model, model.device_map(), None)
+        modeling_utils.caching_allocator_warmup(model, model.device_map(), quantizer)
+        with _ep_aware_caching_allocator_warmup(4, _A2A_PLAN, dense_on_meta=dense_on_meta):
+            modeling_utils.caching_allocator_warmup(model, model.device_map(), quantizer)
 
-    assert reserved == [
-        (_EXPERT_BYTES + _DENSE_BYTES + _BUFFER_BYTES, _GPU),
-        (_EXPERT_BYTES // 4 + _DENSE_BYTES + _BUFFER_BYTES, _GPU),
-    ]
+    assert reserved == [(stock_bytes, _GPU), (per_rank_bytes, _GPU)]
 
 
 def test_an_error_while_sizing_falls_back_to_the_stock_sizing(monkeypatch):
@@ -167,19 +165,6 @@ def test_an_error_while_sizing_falls_back_to_the_stock_sizing(monkeypatch):
         assert modeling_utils.get_total_byte_count(model, device_map, quantizer) == {_GPU: 123}
 
     assert stock_calls == [(model, device_map, quantizer)]
-
-
-def test_the_stock_sizing_is_restored_on_exit_even_after_an_error():
-    stock = modeling_utils.get_total_byte_count
-
-    with (
-        pytest.raises(RuntimeError, match="load failed"),
-        _ep_aware_caching_allocator_warmup(4, _A2A_PLAN),
-    ):
-        assert modeling_utils.get_total_byte_count is not stock
-        raise RuntimeError("load failed")
-
-    assert modeling_utils.get_total_byte_count is stock
 
 
 @pytest.mark.parametrize("ep_degree", [1, 0])

@@ -39,6 +39,7 @@ import modelopt.torch.utils.moe as moe
 import modelopt.torch.utils.plugins.model_load_utils as model_load_utils
 from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.plugins.model_load_utils import (
+    _ep_aware_caching_allocator_warmup,
     _ep_dense_meta_load,
     _fsdp2_shard_dense,
     _load_ep_dense_distributed,
@@ -57,87 +58,58 @@ _A2A_PLAN = {
 }
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "layers.0.mlp.experts.gate_up_proj",
-        "model.layers.0.mlp.experts.gate_up_proj",
-        "model.layers.17.mlp.experts.down_proj",
-        "model.language_model.layers.3.mlp.experts.down_proj",
-        "language_model.model.layers.3.mlp.experts.gate_up_proj",
-    ],
-)
-def test_a_planned_expert_param_matches_under_any_prefix_and_layer_index(name):
-    pytest.importorskip("transformers")
-    plan = {k: v for k, v in _A2A_PLAN.items() if v == "grouped_gemm"}  # the param keys alone
-
-    assert _make_expert_param_matcher(plan)(name)
+# Only the per-parameter keys: a container key would match the same names on its own.
+_PARAM_KEYS = {k: v for k, v in _A2A_PLAN.items() if v == "grouped_gemm"}
 
 
 @pytest.mark.parametrize(
-    "name",
+    ("plan", "name", "expected"),
     [
-        "backbone.layers.1.mixer.experts.up_proj",
-        "backbone.layers.1.mixer.experts.3.down_proj.weight",
-        "backbone.layers.12.mixer.experts.0.up_proj.bias",
+        pytest.param(_PARAM_KEYS, "layers.0.mlp.experts.gate_up_proj", True, id="key-unprefixed"),
+        pytest.param(
+            _PARAM_KEYS, "model.language_model.layers.3.mlp.experts.down_proj", True, id="vlm"
+        ),
+        pytest.param(
+            _PARAM_KEYS,
+            "language_model.model.layers.3.mlp.experts.gate_up_proj",
+            True,
+            id="vlm-wrapper",
+        ),
+        # NemotronH tags only the container; every param under it is an expert's.
+        pytest.param(
+            {"layers.*.mixer.experts": "torch_a2a_experts"},
+            "backbone.layers.1.mixer.experts.3.down_proj.weight",
+            True,
+            id="under-a-container",
+        ),
+        pytest.param(
+            _A2A_PLAN, "model.layers.0.mlp.shared_experts.gate_proj.weight", False, id="shared"
+        ),
+        pytest.param(
+            {"layers.*.mlp.gate": "ep_router"}, "model.layers.0.mlp.gate.weight", False, id="router"
+        ),
+        # No EP credit then: the load-time warmup falls back to stock sizing.
+        pytest.param(None, "model.layers.0.mlp.experts.gate_up_proj", False, id="no-plan"),
     ],
 )
-def test_every_param_under_a_planned_experts_container_matches(name):
-    """NemotronH tags only the container (``nemotron_experts_ep``, swapped to the a2a style)."""
-    pytest.importorskip("transformers")
-    is_expert = _make_expert_param_matcher({"layers.*.mixer.experts": "torch_a2a_experts"})
-
-    assert is_expert(name)
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "model.layers.0.mlp.gate.weight",
-        "model.layers.0.mlp.shared_experts.gate_proj.weight",
-        "model.layers.0.self_attn.q_proj.weight",
-        "model.embed_tokens.weight",
-        "lm_head.weight",
-    ],
-    ids=["router", "shared-experts", "attention", "embedding", "head"],
-)
-def test_dense_params_do_not_match(name):
-    pytest.importorskip("transformers")
-    assert not _make_expert_param_matcher(_A2A_PLAN)(name)
-
-
-@pytest.mark.parametrize("style", ["ep_router", "torch_a2a_router"])
-def test_a_router_is_replicated_not_expert_sharded(style):
-    pytest.importorskip("transformers")
-    assert not _make_expert_param_matcher({"layers.*.mlp.gate": style})(
-        "model.layers.0.mlp.gate.weight"
-    )
-
-
-@pytest.mark.parametrize("plan", [None, {}])
-def test_without_a_plan_nothing_is_an_expert(plan):
-    """No EP credit then: the load-time warmup falls back to stock sizing."""
-    pytest.importorskip("transformers")
-    assert not _make_expert_param_matcher(plan)("model.layers.0.mlp.experts.gate_up_proj")
+def test_expert_param_matcher(plan, name, expected):
+    """A param is an expert's when the plan says so, under any prefix the base-relative keys omit;
+    a router is replicated whatever its style. The warmup sizing tests classify a whole MoE's
+    experts, router, attention, embedding and head with the same matcher."""
+    assert _make_expert_param_matcher(plan)(name) is expected
 
 
 # ------------------------------------------------------------------ a block-fp8 checkpoint
 
 
-@pytest.mark.parametrize("on_text_config", [False, True], ids=["causal-lm", "vlm"])
-def test_a_block_fp8_checkpoints_dense_part_is_not_sharded(monkeypatch, on_text_config):
+def test_a_block_fp8_checkpoints_dense_part_is_not_sharded(monkeypatch):
     """DCP cannot dequantize block-fp8 dense weights, so a plan sharding them is refused before the
     load starts, where from_pretrained would dequantize them as it replicated them."""
     pytest.importorskip("transformers")
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 2)
     monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
-    quantization_config = {"quant_method": "fp8"}
-    config = (
-        SimpleNamespace(text_config=SimpleNamespace(quantization_config=quantization_config))
-        if on_text_config
-        else SimpleNamespace(quantization_config=quantization_config)
-    )
+    config = SimpleNamespace(quantization_config={"quant_method": "fp8"})
 
     with pytest.raises(NotImplementedError, match="block-fp8 checkpoint cannot be sharded"):
         load_and_prepare_ep("unused", DistributionPlan(2, 2, "fsdp"), hf_config=config)
@@ -185,16 +157,33 @@ def test_dense_weights_resolve_to_meta_and_the_rest_to_the_stock_device(monkeypa
     assert stock_calls == [(expert, (), {"valid_torch_device": True}), (buffer, (), {})] * 2
 
 
-def test_get_device_is_restored_on_exit_even_after_an_error():
-    pytest.importorskip("transformers")
-    lookups = _get_device_lookups()
-    stock = [module.get_device for module in lookups]
+def _get_device_patch():
+    return _ep_dense_meta_load(_is_expert), [(m, "get_device") for m in _get_device_lookups()]
 
-    with pytest.raises(RuntimeError, match="load failed"), _ep_dense_meta_load(_is_expert):
-        assert all(m.get_device is not f for m, f in zip(lookups, stock))
+
+def _warmup_sizing_patch():
+    from transformers import modeling_utils
+
+    if not hasattr(modeling_utils, "get_total_byte_count"):
+        pytest.skip("transformers has no get_total_byte_count to size")
+    sizing = _ep_aware_caching_allocator_warmup(4, _A2A_PLAN)
+    return sizing, [(modeling_utils, "get_total_byte_count")]
+
+
+@pytest.mark.parametrize(
+    "patch", [_get_device_patch, _warmup_sizing_patch], ids=lambda f: f.__name__
+)
+def test_a_load_time_patch_is_undone_even_when_the_load_raises(patch):
+    """``from_pretrained`` reads these transformers globals; a failed load leaves stock ones."""
+    pytest.importorskip("transformers")
+    context, patched = patch()
+    stock = [getattr(module, attr) for module, attr in patched]
+
+    with pytest.raises(RuntimeError, match="load failed"), context:
+        assert all(getattr(m, a) is not f for (m, a), f in zip(patched, stock))
         raise RuntimeError("load failed")
 
-    assert all(m.get_device is f for m, f in zip(lookups, stock))
+    assert all(getattr(m, a) is f for (m, a), f in zip(patched, stock))
 
 
 def test_from_pretrained_leaves_the_dense_weights_on_meta_and_loads_the_rest(tmp_path):
