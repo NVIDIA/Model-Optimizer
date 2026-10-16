@@ -76,7 +76,7 @@ def unit(session, torch_ver, tf_ver):
     )
     if run_manual:
         # A separate process: some manual tests (e.g. multi-threaded from_pretrained) leak global
-        # state that breaks later tests. No coverage, so it cannot overwrite the main run's data.
+        # state that breaks later tests. No --cov here, so this run writes no coverage data.
         session.run(
             "python",
             # Caller args first: the last ``-m`` wins, and it must be ours.
@@ -113,32 +113,42 @@ def partial_unit(session, subset):
 # existing Python environment (e.g. /opt/venv in NeMo) instead of an isolated one.
 # Use `python -m pip/pytest` to ensure the container's active venv Python is used,
 # not a stale PATH entry (e.g. NeMo container has pip → /usr/local/bin/pip but python → /opt/venv/bin/python).
+# CUDA packages compiled against the container's torch, which takes minutes each. Pinned so the CI
+# cache of the built wheels (keyed on this file and the container image, see gpu_tests.yml) stays
+# valid: bump a pin deliberately, which also invalidates that cache.
+_SOURCE_BUILT_WHEELS = {
+    "fast_hadamard_transform": "git+https://github.com/Dao-AILab/fast-hadamard-transform.git@e7706faf8d1c3b9f241e36860640ad1dac644ede",
+    "mamba_ssm": "mamba_ssm==2.3.2.post1",
+    "causal_conv1d": "causal-conv1d==1.7.0",
+}
+
+
+def _install_built_from_source(session, *names):
+    """Install the named ``_SOURCE_BUILT_WHEELS``, building a wheel only if the wheelhouse lacks it.
+
+    CI caches ``MODELOPT_WHEELHOUSE`` per container image, so only the first run on an image builds.
+    """
+    wheelhouse = os.environ.get("MODELOPT_WHEELHOUSE", os.path.expanduser("~/.cache/wheelhouse"))
+    for name in names:
+        if not glob.glob(os.path.join(wheelhouse, f"{name}-*.whl")):
+            session.run(
+                *("python", "-m", "pip", "wheel", "--no-build-isolation", "--no-deps"),
+                *("--wheel-dir", wheelhouse, _SOURCE_BUILT_WHEELS[name]),
+            )
+    wheels = [glob.glob(os.path.join(wheelhouse, f"{name}-*.whl"))[0] for name in names]
+    session.run("python", "-m", "pip", "install", *wheels)
+
+
 # Container: nvcr.io/nvidia/pytorch:26.01-py3 or later
 @nox.session(venv_backend="none")
 def gpu(session):
+    _install_built_from_source(session, "fast_hadamard_transform")
+    session.run("python", "-m", "pip", "install", "-e", ".[all,dev-test,dev-fla]")
     # tests/gpu/_extensions/test_onnx_extensions.py fails for newer containers
     # until https://github.com/tbenthompson/cppimport/pull/98
-    session.run(
-        "python",
-        "-m",
-        "pip",
-        "install",
-        "--no-build-isolation",
-        "git+https://github.com/Dao-AILab/fast-hadamard-transform.git",
-    )
-    session.run("python", "-m", "pip", "install", "-e", ".[all,dev-test,dev-fla]")
     session.run("python", "-m", "pip", "uninstall", "-y", "cupy-cuda12x")
     session.run("python", "-m", "pip", "install", "cupy-cuda13x")
-    session.run(
-        "python",
-        "-m",
-        "pip",
-        "install",
-        "--no-build-isolation",
-        # Install the latest *released* sdists (built against the container torch)
-        "mamba_ssm",
-        "causal-conv1d",
-    )
+    _install_built_from_source(session, "mamba_ssm", "causal_conv1d")
     session.run("python", "-m", "pytest", "tests/gpu", *_cov_args())
 
 

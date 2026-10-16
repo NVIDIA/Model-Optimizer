@@ -45,19 +45,17 @@ jobs:
         include:
           - example: gpu
             timeout: 60
-            # Pinned to 26.05: benchmark.py uses trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH,
-            # which newer TensorRT (26.06) removed. Bump once the source is updated for TensorRT 10.
-            container_image: nvcr.io/nvidia/pytorch:26.05-py3
+            container_image: nvcr.io/nvidia/pytorch:26.09-py3
           - example: gpu_megatron
             timeout: 60
             container_image: nvcr.io/nvidia/nemo:26.08
           - example: gpu_trtllm
             timeout: 15
-            container_image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20
+            container_image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc29
           # Covers the RoutedExperts layout (0.24+)
           - example: gpu_vllm
             timeout: 15
-            container_image: docker.io/vllm/vllm-openai:v0.30.0
+            container_image: docker.io/vllm/vllm-openai:v0.31.0
           # Covers the legacy FusedMoE / SharedFusedMoE registration branches (vLLM < 0.24)
           - example: gpu_vllm
             timeout: 15
@@ -83,6 +81,13 @@ jobs:
       - uses: ./.github/actions/cache-extensions
         with:
           cache-key: rtxpro6000-${{ matrix.container_image }}
+      - name: Cache wheels built from source
+        # mamba_ssm and fast-hadamard-transform take ~10 min to compile (see noxfile.py `gpu`)
+        if: matrix.example == 'gpu'
+        uses: actions/cache@v6
+        with:
+          path: /root/.cache/wheelhouse
+          key: wheelhouse-${{ matrix.container_image }}-${{ hashFiles('noxfile.py') }}
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV

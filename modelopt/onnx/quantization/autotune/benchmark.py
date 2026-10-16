@@ -358,7 +358,10 @@ class TensorRTPyBenchmark(Benchmark):
         trt.init_libnvinfer_plugins(self.trt_logger, "")
         self._plugin_registry = trt.get_plugin_registry()
 
-        self.network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+        # Newer TensorRT removed EXPLICIT_BATCH: networks are always explicit-batch there.
+        self.network_flags = 0
+        if hasattr(trt.NetworkDefinitionCreationFlag, "EXPLICIT_BATCH"):
+            self.network_flags |= 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
         self.network_flags |= 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
         self._timing_cache = None
         self._load_timing_cache()
