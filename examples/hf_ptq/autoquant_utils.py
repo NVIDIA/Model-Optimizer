@@ -219,7 +219,7 @@ def _mtq_inputs_from_auto_quantize_config(
     and candidate cost come entirely from the recipe (no model introspection). KV cache falls back
     to ``--kv_cache_qformat`` when the recipe omits it.
     """
-    constraints = aq_config.constraints.model_dump(exclude_none=True)
+    constraints = aq_config.constraints.to_mtq_constraints()
     method_options = aq_config.method_options or {}
     if aq_config.uses_predicted_damage_target:
         # The recipe validator rejects an explicit bit budget; remove only the schema default.
