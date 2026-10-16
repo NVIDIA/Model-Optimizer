@@ -1879,8 +1879,64 @@ def test_native_fp8_experts_scales(has_gate, block_size, fold, activation_scheme
 
 
 @pytest.mark.parametrize("has_gate", [True, False])
+@pytest.mark.parametrize("unpacked_projection", [None, "first", "down_proj"])
+@pytest.mark.parametrize("fold_api", ["direct", "permanent", "temporary"])
+def test_native_fp8_experts_reject_packed_fold(has_gate, unpacked_projection, fold_api):
+    torch.manual_seed(42)
+    experts = FP8Experts(
+        PretrainedConfig(hidden_size=32, intermediate_size=32, num_experts=2, hidden_act="silu"),
+        block_size=None,
+        has_gate=has_gate,
+    )
+    first = "gate_up_proj" if has_gate else "up_proj"
+    for name in (first, "down_proj"):
+        weight = getattr(experts, name)
+        with torch.no_grad():
+            weight.copy_(torch.randn(weight.shape).to(weight.dtype))
+            getattr(experts, f"{name}_scale_inv").fill_(0.1)
+    # Put a foldable module first to check model-wide validation precedes all mutation.
+    model = nn.Sequential(nn.Linear(32, 32), experts)
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop=None)
+    if unpacked_projection is not None:
+        name = first if unpacked_projection == "first" else unpacked_projection
+        weight = torch.stack([experts.get_expert_weight(name, idx) for idx in range(2)])
+        setattr(experts, name, nn.Parameter(weight, requires_grad=False))
+    params = dict(model.named_parameters())
+    state = copy.deepcopy(model.state_dict())
+    quantizers = [q for q in model.modules() if isinstance(q, TensorQuantizer)]
+    enabled = [q.is_enabled for q in quantizers]
+    inputs = torch.randn(2, 32)
+    indices = torch.tensor([[0], [1]])
+    routing = torch.ones(2, 1)
+    expected = experts(inputs, indices, routing)
+
+    with pytest.raises(ValueError, match=r"Call unpack_weight\(\) before folding"):
+        if fold_api == "direct":
+            experts.fold_weight()
+        elif fold_api == "permanent":
+            mtq.fold_weight(model)
+        else:
+            with mtq.temporarily_fold_weights(model):
+                pytest.fail("Packed FP8 weights must be rejected before entering the context")
+
+    assert [q.is_enabled for q in quantizers] == enabled
+    for name, param in model.named_parameters():
+        assert param is params[name]
+        assert param.dtype == state[name].dtype
+    # Compare FP8 payloads in FP32 because CPU close/equality kernels do not support FP8.
+    torch.testing.assert_close(
+        {name: value.float() for name, value in model.state_dict().items()},
+        {name: value.float() for name, value in state.items()},
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(experts(inputs, indices, routing), expected)
+
+
+@pytest.mark.parametrize("has_gate", [True, False])
 @pytest.mark.parametrize("exception", [True, False])
-def test_native_fp8_experts_unpacked_temporary_fold(has_gate, exception):
+@pytest.mark.parametrize("snapshot_device", [None, "cpu"])
+def test_native_fp8_experts_unpacked_temporary_fold(has_gate, exception, snapshot_device):
     torch.manual_seed(42)
     config = PretrainedConfig(
         hidden_size=32, intermediate_size=32, num_experts=2, hidden_act="silu"
@@ -1912,7 +1968,7 @@ def test_native_fp8_experts_unpacked_temporary_fold(has_gate, exception):
     routing = torch.ones(2, 1)
     expected = experts(inputs, indices, routing)
     expected_exit = pytest.raises(RuntimeError, match="fold exit") if exception else nullcontext()
-    with expected_exit, mtq.temporarily_fold_weights(experts):
+    with expected_exit, mtq.temporarily_fold_weights(experts, snapshot_device=snapshot_device):
         assert all(not q.is_enabled for q in quantizers)
         for name, param in params.items():
             assert getattr(experts, name) is param
