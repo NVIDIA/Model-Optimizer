@@ -146,16 +146,16 @@ def test_prepare_rebuilds_the_language_model_config_without_a_decompressor(monke
 
 
 @pytest.mark.parametrize(
-    ("adapter", "remote", "trust_remote_code"),
+    ("adapter", "remote"),
     [
-        (kimi_vl, ("modeling_kimi_vl", "KimiVLForConditionalGeneration"), False),
-        (kimi_k25, ("modeling_kimi_k25", "KimiK25ForConditionalGeneration"), True),
+        (kimi_vl, ("modeling_kimi_vl", "KimiVLForConditionalGeneration")),
+        (kimi_k25, ("modeling_kimi_k25", "KimiK25ForConditionalGeneration")),
     ],
     ids=["vl", "k25"],
     indirect=["remote"],
 )
 def test_prepare_with_a_checkpoint_swaps_in_native_deepseek_v3_and_shims_tie_weights(
-    monkeypatch, adapter, remote, trust_remote_code
+    monkeypatch, adapter, remote
 ):
     """The VLM class builds its language model from the module-level ``DeepseekV3ForCausalLM``,
     which must now be transformers' native class. Both checkpoints' remote modeling imports a
@@ -164,12 +164,12 @@ def test_prepare_with_a_checkpoint_swaps_in_native_deepseek_v3_and_shims_tie_wei
     ``tie_weights`` twice."""
     monkeypatch.delattr(import_utils, "is_torch_fx_available", raising=False)
     monkeypatch.setattr(_onfly_decompress, "install_onfly_decompress", lambda cfg: None)
-    adapter.prepare(_vlm_config(), ckpt_path="/ckpt", trust_remote_code=trust_remote_code)
+    adapter.prepare(_vlm_config(), ckpt_path="/ckpt", trust_remote_code=True)
     shim = remote.vlm.tie_weights
-    adapter.prepare(_vlm_config(), ckpt_path="/ckpt", trust_remote_code=trust_remote_code)
+    adapter.prepare(_vlm_config(), ckpt_path="/ckpt", trust_remote_code=True)
 
     vlm_class = f"{remote.__name__.rsplit('.', 1)[-1]}.{remote.vlm.__name__}"
-    assert remote.loads == [(vlm_class, "/ckpt", {"trust_remote_code": trust_remote_code})] * 2
+    assert remote.loads == [(vlm_class, "/ckpt", {"trust_remote_code": True})] * 2
     assert remote.DeepseekV3ForCausalLM is DeepseekV3ForCausalLM
     assert import_utils.is_torch_fx_available() is False
     assert remote.vlm.tie_weights is shim
@@ -198,16 +198,32 @@ def test_the_swap_fails_loudly_when_the_remote_modeling_did_not_load(monkeypatch
 
 
 @pytest.mark.parametrize("adapter", [kimi_vl, kimi_k25], ids=["vl", "k25"])
-def test_prepare_rejects_a_config_without_a_text_config(monkeypatch, adapter):
-    """Before prepare patches anything process-wide, such as the loader's remote-code staging."""
+@pytest.mark.parametrize(
+    ("config", "kwargs", "match"),
+    [
+        (SimpleNamespace, {}, "text_config"),
+        # transformers' get_class_from_dynamic_module runs the checkpoint's code without checking
+        # trust_remote_code, so prepare must refuse before reaching it.
+        (_vlm_config, {"ckpt_path": "/ckpt"}, "trust_remote_code=True"),
+    ],
+    ids=["no-text-config", "untrusted-checkpoint"],
+)
+def test_prepare_refuses_before_patching_anything(monkeypatch, adapter, config, kwargs, match):
+    """Before prepare patches anything process-wide, such as the loader's remote-code staging, or
+    imports the checkpoint's code."""
 
     def unstaged_loader(*args, **kwargs):
         """The loader before any staging shim wraps it."""
 
     monkeypatch.setattr(dmu, "get_cached_module_file", unstaged_loader)
+    monkeypatch.setattr(
+        dmu,
+        "get_class_from_dynamic_module",
+        lambda *args, **kwargs: pytest.fail("the checkpoint's code was imported"),
+    )
 
-    with pytest.raises(ValueError, match="text_config"):
-        adapter.prepare(SimpleNamespace())
+    with pytest.raises(ValueError, match=match):
+        adapter.prepare(config(), **kwargs)
 
     assert dmu.get_cached_module_file is unstaged_loader
 
