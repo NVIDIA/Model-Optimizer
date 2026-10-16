@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from datetime import timedelta
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -21,9 +23,10 @@ from torch.nn.parallel import DistributedDataParallel
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.model_calib import max_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils import unwrap_model
-from modelopt.torch.utils.distributed import DistributedProcessGroup
+from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 
 
 def _test_data_parallel_helper(rank, size):
@@ -116,9 +119,6 @@ def test_a_quantizer_no_rank_calibrated_stays_uncalibrated(cpu_dist_workers):
 
 
 def _expert_input_amax_helper(rank, size, share):
-    from modelopt.torch.quantization.model_calib import max_calibrate
-    from modelopt.torch.utils.distributed import ParallelState
-
     model = torch.nn.Sequential(torch.nn.Linear(16, 16))
     mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop=None)
     expert = model[0]
@@ -144,3 +144,35 @@ def _expert_input_amax_helper(rank, size, share):
 def test_only_modules_that_opt_in_share_expert_input_amax_before_the_check(cpu_dist_workers, share):
     """Megatron's experts keep main's check-then-sync; HF fused experts share the input amax first."""
     cpu_dist_workers.run(_expert_input_amax_helper, share=share)
+
+
+def _tensor_parallel_sync_helper(rank, size, kv_cache):
+    model = torch.nn.Sequential(torch.nn.Linear(16, 16))
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop=None)
+    linear = model[0]
+    if kv_cache:
+        linear.k_bmm_quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
+        linear.v_bmm_quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
+        synced = [linear.k_bmm_quantizer, linear.v_bmm_quantizer]
+    else:
+        linear._is_column_parallel = True
+        synced = [linear.input_quantizer]
+    # A rank left waiting for a peer that skips the sync gives up in seconds on this group.
+    tp_group = dist.new_group(timeout=timedelta(seconds=10))
+    linear._parallel_state = ParallelState(data_parallel_group=-1, tensor_parallel_group=tp_group)
+
+    def forward_loop(m):  # only rank 0 calibrates the synced quantizers
+        if rank == 0:
+            for quantizer in synced:
+                quantizer(torch.ones(2, 16))
+
+    max_calibrate(model, forward_loop)
+    for quantizer in synced:
+        assert quantizer.amax is not None
+        assert quantizer.amax.item() == 1.0
+
+
+@pytest.mark.parametrize("kv_cache", [False, True], ids=["column-parallel", "kv-cache"])
+def test_a_rank_without_amax_still_joins_the_tensor_parallel_sync(cpu_dist_workers, kv_cache):
+    """Rather than leave the rank that has one waiting in the sync for it."""
+    cpu_dist_workers.run(_tensor_parallel_sync_helper, kv_cache=kv_cache)
