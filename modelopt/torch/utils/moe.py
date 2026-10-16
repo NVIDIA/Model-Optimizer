@@ -34,6 +34,24 @@ if TYPE_CHECKING:
     from torch import nn
 
 
+def require_transformers(min_version: str, feature: str) -> None:
+    """Fail loudly if the installed transformers is older than ``min_version`` (the floor for ``feature``).
+
+    Callers enforce the version where the needed APIs first exist, so a too-old transformers errors
+    clearly instead of silently mis-behaving (e.g. transformers 5.5 silently shards nothing for EP).
+    See each call site for the empirically-determined floor.
+    """
+    import transformers
+    from packaging.version import parse
+
+    have = transformers.__version__
+    if parse(have) < parse(min_version):
+        raise RuntimeError(
+            f"{feature} requires transformers >= {min_version}, but {have} is installed. "
+            f"Upgrade with: pip install -U 'transformers>={min_version}'."
+        )
+
+
 def _ep_config(hf_config):
     """Return the config that carries the EP plan / expert count.
 
