@@ -402,6 +402,118 @@ def _create_residual_graph():
     return graph, tensors
 
 
+def _create_real_residual_graph():
+    """Create a *real* onnx_graphsurgeon graph with a standard residual block.
+
+    Unlike ``_create_residual_graph`` (which uses MagicMock), this builds genuine
+    ``gs.Variable`` / ``gs.Node`` objects so that ``Variable.outputs`` (the list of
+    consuming nodes) is correctly maintained by graphsurgeon.
+
+    Graph structure (standard residual — no downsample)::
+
+        input ──────────────────────────────┐
+          │                                 │
+          ▼                                 │
+        Conv1 → conv1_out → Relu1 → relu1_out → Conv2 → conv2_out
+                                                           │
+                                                           ▼
+                                              Add (conv2_out, input) → add_out
+                                                           │
+                                                           ▼
+                                                         Relu2 → output
+
+    Returns:
+        Tuple of (graph, tensors_dict).
+    """
+    input_t = gs.Variable("input", dtype=np.float32, shape=[1, 64, 56, 56])
+
+    w1 = gs.Constant("conv1_weight", values=np.zeros([64, 64, 3, 3], dtype=np.float32))
+    conv1_out = gs.Variable("conv1_out", dtype=np.float32, shape=[1, 64, 56, 56])
+    conv1 = gs.Node("Conv", "conv1", inputs=[input_t, w1], outputs=[conv1_out])
+
+    relu1_out = gs.Variable("relu1_out", dtype=np.float32, shape=[1, 64, 56, 56])
+    relu1 = gs.Node("Relu", "relu1", inputs=[conv1_out], outputs=[relu1_out])
+
+    w2 = gs.Constant("conv2_weight", values=np.zeros([64, 64, 3, 3], dtype=np.float32))
+    conv2_out = gs.Variable("conv2_out", dtype=np.float32, shape=[1, 64, 56, 56])
+    conv2 = gs.Node("Conv", "conv2", inputs=[relu1_out, w2], outputs=[conv2_out])
+
+    add_out = gs.Variable("add_out", dtype=np.float32, shape=[1, 64, 56, 56])
+    add = gs.Node("Add", "add1", inputs=[conv2_out, input_t], outputs=[add_out])
+
+    output = gs.Variable("output", dtype=np.float32, shape=[1, 64, 56, 56])
+    relu2 = gs.Node("Relu", "relu2", inputs=[add_out], outputs=[output])
+
+    graph = gs.Graph(
+        nodes=[conv1, relu1, conv2, add, relu2],
+        inputs=[input_t],
+        outputs=[output],
+    )
+
+    tensors = {
+        "input": input_t,
+        "conv1_out": conv1_out,
+        "relu1_out": relu1_out,
+        "conv2_out": conv2_out,
+        "add_out": add_out,
+        "output": output,
+    }
+    return graph, tensors
+
+
+def _create_real_downsample_residual_graph():
+    """Like ``_create_real_residual_graph`` but with a downsample/projection Conv
+    on the skip connection::
+
+        input ──→ Conv1 → Relu1 → Conv2 → conv2_out ──→ Add → Relu2 → output
+          │                                               ↑
+          └──→ DownsampleConv → ds_out ──────────────────┘
+
+    ``input`` fans out to both Conv1 and DownsampleConv, so DownsampleConv's
+    activation input has >1 consumer — guard 2 should NOT skip ``ds_out``.
+    """
+    input_t = gs.Variable("input", dtype=np.float32, shape=[1, 32, 56, 56])
+
+    w1 = gs.Constant("conv1_weight", values=np.zeros([64, 32, 3, 3], dtype=np.float32))
+    conv1_out = gs.Variable("conv1_out", dtype=np.float32, shape=[1, 64, 56, 56])
+    conv1 = gs.Node("Conv", "conv1", inputs=[input_t, w1], outputs=[conv1_out])
+
+    relu1_out = gs.Variable("relu1_out", dtype=np.float32, shape=[1, 64, 56, 56])
+    relu1 = gs.Node("Relu", "relu1", inputs=[conv1_out], outputs=[relu1_out])
+
+    w2 = gs.Constant("conv2_weight", values=np.zeros([64, 64, 3, 3], dtype=np.float32))
+    conv2_out = gs.Variable("conv2_out", dtype=np.float32, shape=[1, 64, 56, 56])
+    conv2 = gs.Node("Conv", "conv2", inputs=[relu1_out, w2], outputs=[conv2_out])
+
+    # Downsample (1x1 Conv) on the skip path — shares input_t with conv1.
+    w_ds = gs.Constant("ds_weight", values=np.zeros([64, 32, 1, 1], dtype=np.float32))
+    ds_out = gs.Variable("ds_out", dtype=np.float32, shape=[1, 64, 56, 56])
+    ds_conv = gs.Node("Conv", "ds_conv", inputs=[input_t, w_ds], outputs=[ds_out])
+
+    add_out = gs.Variable("add_out", dtype=np.float32, shape=[1, 64, 56, 56])
+    add = gs.Node("Add", "add1", inputs=[conv2_out, ds_out], outputs=[add_out])
+
+    output = gs.Variable("output", dtype=np.float32, shape=[1, 64, 56, 56])
+    relu2 = gs.Node("Relu", "relu2", inputs=[add_out], outputs=[output])
+
+    graph = gs.Graph(
+        nodes=[conv1, relu1, conv2, ds_conv, add, relu2],
+        inputs=[input_t],
+        outputs=[output],
+    )
+
+    tensors = {
+        "input": input_t,
+        "conv1_out": conv1_out,
+        "relu1_out": relu1_out,
+        "conv2_out": conv2_out,
+        "ds_out": ds_out,
+        "add_out": add_out,
+        "output": output,
+    }
+    return graph, tensors
+
+
 class TestSkipInvalidInsertionPoints:
     """Test skip_invalid_insertion_points function."""
 
@@ -464,13 +576,73 @@ class TestSkipInvalidInsertionPoints:
 
         assert skip_invalid_insertion_points(graph, "shape_input", region) is True
 
-    def test_residual_block_add_inputs_allowed(self):
-        """Add node inputs in residual blocks should be allowed."""
+    def test_residual_block_add_inputs_allowed_mock(self):
+        """Mock-based residual: guards don't fire because MagicMock tensors
+        have len(outputs)==0, so Add→Relu guard 1 fails.  This test documents
+        the mock's limitation; real-graph coverage is below."""
         graph, _ = _create_residual_graph()
         add_node = graph.nodes[3]
 
+        # Mock: add_out.outputs is a MagicMock (len 0), so guard 1 never matches.
         assert skip_invalid_insertion_points(graph, "conv2_out", add_node) is False
         assert skip_invalid_insertion_points(graph, "input", add_node) is False
+
+    # -- Real-graph tests for Conv→[BN→]Add→Relu skip guards --
+
+    def test_add_relu_main_path_conv_skipped(self):
+        """Guard 1+2: Add feeds a single Relu, and the main-path Conv's
+        activation input has a single consumer → skip conv2_out."""
+        graph, _ = _create_real_residual_graph()
+        add_node = graph.nodes[3]  # Add
+        assert skip_invalid_insertion_points(graph, "conv2_out", add_node) is True
+
+    def test_add_relu_skip_connection_input_allowed(self):
+        """Graph input on the skip path has no producer node → guard
+        short-circuits (inp.inputs is empty) and the point is allowed."""
+        graph, _ = _create_real_residual_graph()
+        add_node = graph.nodes[3]  # Add
+        assert skip_invalid_insertion_points(graph, "input", add_node) is False
+
+    def test_add_relu_downsample_conv_not_skipped(self):
+        """Guard 2: downsample Conv's activation input (``input``) fans out
+        to multiple consumers (Conv1 and DownsampleConv) → NOT skipped."""
+        graph, _ = _create_real_downsample_residual_graph()
+        add_node = graph.nodes[4]  # Add
+        assert skip_invalid_insertion_points(graph, "ds_out", add_node) is False
+
+    def test_add_relu_main_path_still_skipped_with_downsample(self):
+        """Even with a downsample branch, the main-path Conv whose activation
+        input has a single consumer is still skipped."""
+        graph, _ = _create_real_downsample_residual_graph()
+        add_node = graph.nodes[4]  # Add
+        assert skip_invalid_insertion_points(graph, "conv2_out", add_node) is True
+
+    def test_add_without_relu_consumer_not_skipped(self):
+        """Guard 1: when Add's consumer is NOT Relu (e.g. another Add or
+        a pool), the fusion cannot form so both inputs are allowed."""
+        graph, tensors = _create_real_residual_graph()
+        # Replace Relu2 with a MaxPool so Add→Relu guard 1 fails.
+        pool_out = gs.Variable("pool_out", dtype=np.float32, shape=[1, 64, 56, 56])
+        pool_node = gs.Node("MaxPool", "pool1", inputs=[tensors["add_out"]], outputs=[pool_out])
+        graph.nodes[4] = pool_node  # Replace relu2
+        graph.outputs = [pool_out]
+        # Rebuild edges.
+        graph.cleanup()
+        add_node = graph.nodes[3]  # Add
+        assert skip_invalid_insertion_points(graph, "conv2_out", add_node) is False
+
+    def test_add_multiple_consumers_not_skipped(self):
+        """Guard 1: when Add fans out to multiple consumers, the fusion
+        cannot form so the point is allowed."""
+        graph, tensors = _create_real_residual_graph()
+        # Add a second consumer of add_out (a Sigmoid branch).
+        sig_out = gs.Variable("sig_out", dtype=np.float32, shape=[1, 64, 56, 56])
+        sig_node = gs.Node("Sigmoid", "sig1", inputs=[tensors["add_out"]], outputs=[sig_out])
+        graph.nodes.append(sig_node)
+        graph.outputs.append(sig_out)
+        graph.cleanup()
+        add_node = graph.nodes[3]  # Add
+        assert skip_invalid_insertion_points(graph, "conv2_out", add_node) is False
 
 
 class TestHasQuantizableOperations:
@@ -692,6 +864,99 @@ class TestMergeResolvedInsertionPoints(unittest.TestCase):
         assert len(result) == 1
         ip = next(iter(result))
         assert ip.node_index == 0  # Still node-specific
+
+    def test_concat_promotion_uncovered_all_concat(self):
+        """Uncovered consumers that are all Concat → promoted to tensor-level.
+
+        Graph: tensor "x" fans out to Conv (node 0) and Concat (node 1).
+        Q/DQ covers only Conv. Since the sole uncovered consumer is Concat,
+        merge should promote to tensor-level.
+        """
+        graph, _ = _create_simple_graph()
+
+        # "conv_out" used by BatchNorm (node 1, covered) and a Concat (node 4, uncovered)
+        # Add a Concat node to the graph
+        concat_node = _create_mock_node("Concat", [None], [None], "concat1")
+        graph.nodes.append(concat_node)
+
+        resolved = {
+            ResolvedInsertionPoint(tensor_name="conv_out", node_index=1, input_index=0),
+        }
+
+        with patch(
+            "modelopt.onnx.quantization.autotune.insertion_points.get_tensor_consumer_node_indices"
+        ) as mock_get:
+            # conv_out consumed by node 1 (BatchNorm, covered) and node 4 (Concat, uncovered)
+            mock_get.return_value = {"conv_out": [1, 4]}
+
+            result = merge_resolved_insertion_points(graph, resolved)
+
+        # Should be promoted to tensor-level
+        assert len(result) == 1
+        merged = next(iter(result))
+        assert merged.tensor_name == "conv_out"
+        assert merged.node_index is None
+        assert merged.input_index is None
+
+    def test_concat_promotion_mixed_uncovered_not_promoted(self):
+        """Mixed uncovered consumers (Concat + non-Concat) → NOT promoted.
+
+        Graph: tensor "x" fans out to Conv (covered), Concat (uncovered), and Relu (uncovered).
+        Since not all uncovered consumers are Concat, keep node-specific.
+        """
+        graph, _ = _create_simple_graph()
+
+        # Add Concat and extra Relu to the graph
+        concat_node = _create_mock_node("Concat", [None], [None], "concat1")
+        extra_relu = _create_mock_node("Relu", [None], [None], "extra_relu")
+        graph.nodes.extend([concat_node, extra_relu])
+
+        resolved = {
+            ResolvedInsertionPoint(tensor_name="conv_out", node_index=1, input_index=0),
+        }
+
+        with patch(
+            "modelopt.onnx.quantization.autotune.insertion_points.get_tensor_consumer_node_indices"
+        ) as mock_get:
+            # conv_out consumed by node 1 (covered), node 4 (Concat), node 5 (Relu)
+            mock_get.return_value = {"conv_out": [1, 4, 5]}
+
+            result = merge_resolved_insertion_points(graph, resolved)
+
+        # Should NOT be promoted — uncovered includes non-Concat (Relu)
+        assert len(result) == 1
+        ip = next(iter(result))
+        assert ip.node_index == 1  # Still node-specific
+
+    def test_concat_promotion_multiple_concat_uncovered(self):
+        """Multiple uncovered Concat consumers → promoted to tensor-level.
+
+        Tensor fans out to Conv (covered), Concat1 (uncovered), Concat2 (uncovered).
+        All uncovered are Concat, so promotion fires.
+        """
+        graph, _ = _create_simple_graph()
+
+        concat1 = _create_mock_node("Concat", [None], [None], "concat1")
+        concat2 = _create_mock_node("Concat", [None], [None], "concat2")
+        graph.nodes.extend([concat1, concat2])
+
+        resolved = {
+            ResolvedInsertionPoint(tensor_name="conv_out", node_index=1, input_index=0),
+        }
+
+        with patch(
+            "modelopt.onnx.quantization.autotune.insertion_points.get_tensor_consumer_node_indices"
+        ) as mock_get:
+            # conv_out consumed by node 1 (covered), node 4 (Concat1), node 5 (Concat2)
+            mock_get.return_value = {"conv_out": [1, 4, 5]}
+
+            result = merge_resolved_insertion_points(graph, resolved)
+
+        assert len(result) == 1
+        merged = next(iter(result))
+        assert merged.tensor_name == "conv_out"
+        assert merged.node_index is None
+        assert merged.input_index is None
 
 
 class TestNodeInputInsertionPointMethods(unittest.TestCase):
