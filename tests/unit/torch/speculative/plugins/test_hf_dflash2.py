@@ -349,6 +349,7 @@ class TestDFlash2Forward:
             losses[alpha] = float(out.loss.detach())
         assert losses[1.0] > losses[0.0]
 
+    @pytest.mark.timeout(300)  # ~53 s with torch's default threads, longer single-threaded
     def test_overfits_a_single_batch(self):
         """A few steps on one batch drive backbone and selector accuracy up.
 

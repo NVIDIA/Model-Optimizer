@@ -77,11 +77,12 @@ def unit(session, torch_ver, tf_ver):
     if run_manual:
         # A separate process: some manual tests (e.g. multi-threaded from_pretrained) leak global
         # state that breaks later tests. No coverage, so it cannot overwrite the main run's data.
+        # Serial too (CI's PYTEST_ADDOPTS asks for xdist): a worker would run them in some order.
         session.run(
             "python",
             # Caller args first: the last ``-m`` wins, and it must be ours.
             *("-m", "pytest", "tests/unit", *pytest_args, "--run-manual", "-m", "manual"),
-            env={**_CPU_ONLY_ENV, "COVERAGE_PROCESS_START": ""},
+            env={**_CPU_ONLY_ENV, "COVERAGE_PROCESS_START": "", "PYTEST_ADDOPTS": ""},
         )
 
 
