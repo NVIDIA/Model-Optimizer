@@ -1344,3 +1344,35 @@ def build_matmul_1xn_model():
     onnx.checker.check_model(model_inferred)
 
     return model_inferred
+
+
+#   x ----- relu -------------+
+#                             |
+#   cls (initializer, or  --- +--- concat --- matmul --- out
+#        relu(y) if not constant_input)
+#
+# ``cls`` mimics a ViT class token: a constant Concat input that has no producer node.
+def build_concat_with_constant_input_model(constant_input=True):
+    x = helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1, 4, 8])
+    y = helper.make_tensor_value_info("y", onnx.TensorProto.FLOAT, [1, 1, 8])
+    out = helper.make_tensor_value_info("out", onnx.TensorProto.FLOAT, [1, 5, 8])
+    nodes = [helper.make_node("Relu", ["x"], ["relu_out"], name="relu")]
+    inputs = [x]
+    initializers = [
+        helper.make_tensor("weight", onnx.TensorProto.FLOAT, [8, 8], np.ones(64, dtype=np.float32))
+    ]
+    if constant_input:
+        cls = helper.make_tensor(
+            "cls", onnx.TensorProto.FLOAT, [1, 1, 8], np.ones(8, dtype=np.float32)
+        )
+        initializers.append(cls)
+    else:
+        inputs.append(y)
+        nodes.append(helper.make_node("Relu", ["y"], ["cls"], name="relu_cls"))
+    nodes += [
+        helper.make_node("Concat", ["cls", "relu_out"], ["concat_out"], name="concat", axis=1),
+        helper.make_node("MatMul", ["concat_out", "weight"], ["out"], name="matmul"),
+    ]
+    graph = helper.make_graph(nodes, "concat_with_constant_input", inputs, [out], initializers)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    return onnx.shape_inference.infer_shapes(model)
