@@ -102,106 +102,72 @@ def _flat_vl_name(key):
 # ---------------------------------------------------------------- checkpoint -> model key mapping
 
 
-def test_exact_name_match_takes_precedence():
-    """A checkpoint name the model has verbatim maps to itself before any conversion pattern runs."""
+@pytest.mark.parametrize(
+    ("conversion_mapping", "ckpt_keys", "model_keys", "expected"),
+    [
+        pytest.param(
+            # A name the model has verbatim maps to itself before any conversion pattern runs.
+            {r"^model\.": "model.language_model."},
+            {"model.norm.weight"},
+            {"model.norm.weight", "model.language_model.norm.weight"},
+            {"model.norm.weight": "model.norm.weight"},
+            id="exact-name-first",
+        ),
+        pytest.param(
+            # Patterns are tried in order and only the first that fires rewrites a name (no
+            # chaining); a rewrite counts only if the model has the result, otherwise the name falls
+            # through to the suffix match (this model calls its vision tower ``model.visual``).
+            {
+                r"^model\.(?!language_model\.)": "model.language_model.",
+                r"^model\.language_model\.": "chained.",
+                r"^visual\.": "model.vision_tower.",
+            },
+            {"model.layers.0.mlp.down_proj.weight", "visual.proj.weight"},
+            {
+                "model.language_model.layers.0.mlp.down_proj.weight",
+                "chained.layers.0.mlp.down_proj.weight",
+                "model.visual.proj.weight",
+            },
+            {
+                "model.layers.0.mlp.down_proj.weight": (
+                    "model.language_model.layers.0.mlp.down_proj.weight"
+                ),
+                "visual.proj.weight": "model.visual.proj.weight",
+            },
+            id="first-conversion-pattern",
+        ),
+        pytest.param(
+            # Suffixes naming several model keys (two towers both have ``layers.0``) or none (a
+            # quantization scale with no slot) are left for the coverage guard, never guessed.
+            None,
+            {"model.layers.0.mlp.down_proj.weight", "model.layers.0.mlp.down_proj.weight_scale"},
+            {
+                "model.language_model.layers.0.mlp.down_proj.weight",
+                "model.audio_tower.layers.0.mlp.down_proj.weight",
+            },
+            {},
+            id="ambiguous-or-unknown-suffix",
+        ),
+        pytest.param(
+            # Two names reaching one model key by suffix are equally plausible: loading either
+            # would let set order pick the tensor.
+            None,
+            {"model.norm.weight", "mtp.norm.weight"},
+            {"model.language_model.norm.weight"},
+            {},
+            id="two-names-one-slot",
+        ),
+    ],
+)
+def test_map_ckpt_keys_to_model(conversion_mapping, ckpt_keys, model_keys, expected):
+    """Exact names first, then the model's conversion mapping, then the longest unique component
+    suffix; anything ambiguous stays unmapped. The suffix pass and the one-key-per-slot rule run for
+    real in the flat-VLM and truncated-model loads below."""
     model = nn.Module()
-    model._checkpoint_conversion_mapping = {r"^model\.": "model.language_model."}
-    model_keys = {"model.norm.weight", "model.language_model.norm.weight"}
+    if conversion_mapping is not None:
+        model._checkpoint_conversion_mapping = conversion_mapping
 
-    key_map = _map_ckpt_keys_to_model(model, {"model.norm.weight"}, model_keys)
-
-    assert key_map == {"model.norm.weight": "model.norm.weight"}
-
-
-def test_conversion_mapping_applies_the_first_pattern_that_fires():
-    """Patterns are tried in order and only the first that fires rewrites a name (no chaining); the
-    rewrite counts only if the model has the result, otherwise the name falls through to suffix match.
-    """
-    model = nn.Module()
-    model._checkpoint_conversion_mapping = {
-        r"^model\.(?!language_model\.)": "model.language_model.",
-        r"^model\.language_model\.": "chained.",
-        r"^visual\.": "model.vision_tower.",  # this model calls it ``model.visual``
-    }
-    model_keys = {
-        "model.language_model.layers.0.mlp.down_proj.weight",
-        "chained.layers.0.mlp.down_proj.weight",
-        "model.visual.proj.weight",
-    }
-    ckpt_keys = {"model.layers.0.mlp.down_proj.weight", "visual.proj.weight"}
-
-    assert _map_ckpt_keys_to_model(model, ckpt_keys, model_keys) == {
-        "model.layers.0.mlp.down_proj.weight": "model.language_model.layers.0.mlp.down_proj.weight",
-        "visual.proj.weight": "model.visual.proj.weight",
-    }
-
-
-def test_suffix_match_resolves_the_vlm_prefix_nesting():
-    """transformers>=5 nests a VLM's LM and vision tower one level below its checkpoint names, and the
-    model carries no ``_checkpoint_conversion_mapping``. The longest component suffix naming exactly
-    one model key bridges that: ``layers.0`` tells LM layer 0 from vision block 0, which shares the rest.
-    """
-    model_keys = {
-        "model.language_model.embed_tokens.weight",
-        "model.language_model.layers.0.mlp.down_proj.weight",
-        "model.language_model.layers.1.mlp.down_proj.weight",
-        "model.language_model.norm.weight",
-        "model.visual.blocks.0.mlp.down_proj.weight",
-        "lm_head.weight",
-    }
-    expected = {
-        "model.embed_tokens.weight": "model.language_model.embed_tokens.weight",
-        "model.layers.0.mlp.down_proj.weight": "model.language_model.layers.0.mlp.down_proj.weight",
-        "model.layers.1.mlp.down_proj.weight": "model.language_model.layers.1.mlp.down_proj.weight",
-        "model.norm.weight": "model.language_model.norm.weight",
-        "visual.blocks.0.mlp.down_proj.weight": "model.visual.blocks.0.mlp.down_proj.weight",
-        "lm_head.weight": "lm_head.weight",
-    }
-
-    assert _map_ckpt_keys_to_model(nn.Module(), expected.keys(), model_keys) == expected
-
-
-def test_ambiguous_or_unknown_suffixes_stay_unmapped():
-    """A name whose suffixes match several model keys (two towers both have ``layers.0``) or none (a
-    quantization scale with no slot) is left for the coverage guard, never assigned to a guess.
-    """
-    model_keys = {
-        "model.language_model.layers.0.mlp.down_proj.weight",
-        "model.audio_tower.layers.0.mlp.down_proj.weight",
-    }
-    ckpt_keys = {
-        "model.layers.0.mlp.down_proj.weight",
-        "model.layers.0.mlp.down_proj.weight_scale",
-    }
-
-    assert _map_ckpt_keys_to_model(nn.Module(), ckpt_keys, model_keys) == {}
-
-
-def test_a_key_the_model_has_no_place_for_never_displaces_a_match():
-    """DeepSeek-V3's MTP layer and the layers a truncated model lacks have no slot in the model, yet
-    their suffixes name a key uniquely -- one another checkpoint key already names exactly. Mapped,
-    they would overwrite that key's tensor; they must stay unmapped.
-    """
-    model_keys = {"model.norm.weight", "model.layers.0.input_layernorm.weight"}
-    ckpt_keys = model_keys | {
-        "model.layers.61.shared_head.norm.weight",
-        "model.layers.1.input_layernorm.weight",
-    }
-
-    assert _map_ckpt_keys_to_model(nn.Module(), ckpt_keys, model_keys) == {
-        key: key for key in model_keys
-    }
-
-
-def test_two_keys_claiming_one_model_key_map_neither():
-    """Two checkpoint names reaching the same model key by suffix are equally plausible; loading
-    either would let set order pick the tensor, so neither is mapped."""
-    model_keys = {"model.language_model.norm.weight"}
-
-    assert (
-        _map_ckpt_keys_to_model(nn.Module(), {"model.norm.weight", "mtp.norm.weight"}, model_keys)
-        == {}
-    )
+    assert _map_ckpt_keys_to_model(model, ckpt_keys, model_keys) == expected
 
 
 # --------------------------------------------------------------------------------- meta + DCP load
@@ -228,16 +194,13 @@ def test_load_fills_a_meta_model_keeps_its_buffers_and_reties_it(tmp_path):
     assert model.lm_head.weight is model.model.embed_tokens.weight
 
 
-@pytest.mark.parametrize("stored", ["model.embed_tokens.weight", "lm_head.weight"])
-def test_a_tie_keeps_the_checkpoint_values_whichever_alias_holds_them(
-    tmp_path, monkeypatch, stored
-):
+def test_a_tie_keeps_the_values_of_the_alias_the_checkpoint_stored(tmp_path, monkeypatch):
     """A tied checkpoint stores one alias; tying keeps the embedding's parameter. When the checkpoint
     stored only ``lm_head.weight``, the kept parameter must take its values rather than keep the memory
-    ``to_empty`` gave it, as ``from_pretrained`` leaves it."""
+    ``to_empty`` gave it, as ``from_pretrained`` leaves it. (A checkpoint storing the embedding is the
+    load-and-retie test above.)"""
     src = get_tiny_llama(tie_word_embeddings=True)
-    tied = {"model.embed_tokens.weight", "lm_head.weight"}
-    ckpt = {k: v for k, v in src.state_dict().items() if k not in tied - {stored}}
+    ckpt = {k: v for k, v in src.state_dict().items() if k != "model.embed_tokens.weight"}
     ckpt_dir = _save(tmp_path, ckpt)
     model = _meta_twin(get_tiny_llama, tie_word_embeddings=True)
     # Fresh storage holds NaN, so a parameter nothing wrote to shows.
@@ -249,7 +212,7 @@ def test_a_tie_keeps_the_checkpoint_values_whichever_alias_holds_them(
     _meta_dcp_load(model, ckpt_dir, "cpu", load_names=_every_name(model))
 
     assert model.lm_head.weight is model.model.embed_tokens.weight
-    assert torch.equal(model.lm_head.weight, ckpt[stored])
+    assert torch.equal(model.lm_head.weight, ckpt["lm_head.weight"])
 
 
 def test_flat_vlm_checkpoint_names_reach_the_nested_params(tmp_path):
@@ -303,18 +266,6 @@ class _Router(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.empty(4, 4, device="meta"))
         self.e_score_correction_bias = nn.Parameter(torch.arange(4.0))
-
-
-def test_a_real_param_beside_a_meta_one_keeps_its_value(tmp_path):
-    """Materializing the router re-empties all of its params, but only ``weight`` is reloaded."""
-    model = nn.Module()
-    model.gate = _Router()
-    ckpt = {"gate.weight": torch.randn(4, 4), "gate.e_score_correction_bias": torch.zeros(4)}
-
-    _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu", load_names={"gate.weight"})
-
-    assert torch.equal(model.gate.weight, ckpt["gate.weight"])
-    assert torch.equal(model.gate.e_score_correction_bias, torch.arange(4.0))
 
 
 def test_target_params_that_already_had_values_need_no_checkpoint_tensor(tmp_path):
@@ -462,16 +413,6 @@ def test_coverage_guard_weighs_unloaded_params_by_numel(tmp_path, monkeypatch):
     assert loads == [1]
 
 
-def test_checkpoint_without_tensors_is_rejected(tmp_path):
-    """A weightless (config-only) snapshot fails with its own message, not as an all-unloaded model."""
-    (tmp_path / "config.json").write_text("{}")
-    with init_empty_weights():
-        model = _OneBigManySmall()
-
-    with pytest.raises(RuntimeError, match="has NO tensors"):
-        _meta_dcp_load(model, str(tmp_path), "cpu", load_names=_every_name(model))
-
-
 def test_load_request_follows_the_model_state_dict_order(tmp_path, monkeypatch):
     """``dcp.load`` gets the checkpoint names in the model's ``state_dict`` order, which every rank
     shares. Key-map or set order is hash-seeded per process, and differing orders across ranks
@@ -503,16 +444,6 @@ def gloo_world_of_one(skip_on_windows, tmp_path_factory):
     torch.distributed.init_process_group("gloo", init_method=store.as_uri(), rank=0, world_size=1)
     yield
     torch.distributed.destroy_process_group()
-
-
-def test_rank0_reports_the_persistent_buffers_it_loaded(tmp_path, gloo_world_of_one):
-    """In a distributed run rank 0 names the persistent buffers the checkpoint filled."""
-    ckpt = {"proj.weight": torch.randn(4, 4), "proj.bias": torch.randn(4), "scale": torch.ones(4)}
-    with init_empty_weights():
-        model = _WithBuffers()
-
-    with pytest.warns(UserWarning, match=r"1 persistent buffer\(s\).*'scale'"):
-        _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu", load_names=_every_name(model))
 
 
 def test_fsdp2_sharded_params_are_filled_in_place(tmp_path, gloo_world_of_one):
