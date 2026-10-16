@@ -68,6 +68,7 @@ Changelog
 
 **Backward Breaking Changes**
 
+- ``modelopt.torch.utils.distributed.broadcast``/``allgather`` now reject objects of unregistered custom classes. Register them with ``torch.serialization.add_safe_globals``.
 - Bump minimum transformers version to ``5.5`` instead of ``4.57``; transformers 4.x is no longer supported. Upgrade with ``pip install -U "nvidia-modelopt[hf]"``.
 - ``modelopt.torch.distill.plugins.megatron.TopKLogitsKLLoss`` (``logit_kl_topk`` in ``DistillationConfig``) is renamed to ``TopLogitsKLLoss``, keeping the old name as a deprecated alias. It now normalizes both distributions over the full vocabulary instead of re-normalizing over the Top-K entries, and always appends a "ghost" token holding the probability mass outside the Top-K to both student and teacher (matching Megatron-LM's offline cached-logits KD loss). Loss values change for existing ``logit_kl_topk`` runs.
 - ``LogitsAndIntermediatesLossBalancer`` (Megatron distillation plugin) no longer rescales the distillation loss to the magnitude of the LM loss when the LM loss is included. The total is now the fixed convex combination ``(1 - alpha) * lm_loss + alpha * kd_loss`` with ``DistillationConfig.kd_loss_alpha`` (in [0, 1]), matching Megatron-LM's offline cached-logits KD. The default ``kd_loss_alpha=1.0`` skips the LM loss, as before. ``DistillationConfig.skip_lm_loss`` and ``kd_loss_scale`` are removed and raise ``ValueError`` if passed; set ``kd_loss_alpha`` instead. In ``examples/megatron_bridge/distill.py``, ``--kd_loss_alpha`` replaces ``--no_skip_lm_loss`` and ``--kd_loss_scale``.
@@ -129,6 +130,7 @@ Changelog
 
 **Bug Fixes**
 
+- Harden the distributed object broadcast/allgather helpers and the Megatron expert-parallel export gather so a compromised peer rank can no longer execute code through a crafted pickle payload: payloads load with ``weights_only=True`` and the export gathers raw bytes instead of pickled objects.
 - Fix LSQ clamping small, representable FP8 block scales too aggressively, which could zero quantized values and suppress scale gradients.
 - Fix ONNX AutoTune benchmark initialization with TensorRT 11 while preserving strongly typed networks on TensorRT 10.
 - Keep vision-block Linears in high precision in the ``qwen3_vl`` and ``qwen3_5`` FP8 vision recipes so exported checkpoints avoid a vLLM vision-attention shape failure. The recipes still quantize primary and deepstack merger Linears; re-quantize affected checkpoints before deployment.
