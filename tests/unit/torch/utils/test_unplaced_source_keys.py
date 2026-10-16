@@ -84,8 +84,8 @@ def test_records_the_stray_tensors_and_the_checkpoint(tmp_path):
 
 
 def test_the_hub_options_pick_the_snapshot_the_model_loads_from(tmp_path, monkeypatch):
-    """``revision``, ``token`` and ``cache_dir`` choose what a Hub ID resolves to; once it is a
-    local snapshot, ``from_pretrained`` would ignore them."""
+    """``revision``, ``token``, ``cache_dir`` and ``local_files_only`` choose what a Hub ID resolves
+    to; once it is a local snapshot, ``from_pretrained`` would ignore them."""
     config = _tiny_llama_config()
     _save(tmp_path, config, LlamaForCausalLM(config).state_dict())
     resolved = []
@@ -95,7 +95,12 @@ def test_the_hub_options_pick_the_snapshot_the_model_loads_from(tmp_path, monkey
         return model_name_or_path, str(tmp_path)
 
     monkeypatch.setattr(model_load_utils, "ensure_local_checkpoint", ensure_local_checkpoint)
-    hub_kwargs = {"revision": "abc123", "token": "hf_x", "cache_dir": str(tmp_path / "cache")}
+    hub_kwargs = {
+        "revision": "abc123",
+        "token": "hf_x",
+        "cache_dir": str(tmp_path / "cache"),
+        "local_files_only": True,
+    }
 
     model = load_pretrained("org/model", **hub_kwargs)
 
