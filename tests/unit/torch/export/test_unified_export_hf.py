@@ -18,6 +18,7 @@
 import importlib.util
 import json
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import torch
@@ -29,6 +30,7 @@ from _test_utils.torch.quantization.tied_modules import (
 from safetensors.torch import save_file
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export import distributed_writer, unified_export_hf
 from modelopt.torch.export.model_utils import (
     TiedWeightMap,
     get_language_model_from_vl,
@@ -43,9 +45,12 @@ from modelopt.torch.export.unified_export_hf import (
     _copy_non_model_files_from_source,
     _resolve_export_dtype,
     _source_checkpoint,
+    _write_base_config,
+    export_hf_checkpoint,
     read_unplaced_weights,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
 def test_multimodal_detection_accepts_null_architectures():
@@ -1035,10 +1040,9 @@ def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_pat
     """The EP load's DistributedConfig and torch_a2a plan stay out of config.json, the source's own
     plan survives, and the live configs keep the run's values afterwards."""
     pytest.importorskip("transformers")
+    # Local import: optional dependency, guarded by the importorskip above.
     from transformers import AutoConfig, Llama4Config
     from transformers.distributed import DistributedConfig
-
-    from modelopt.torch.export.unified_export_hf import _write_base_config
 
     source = tmp_path / "source"
     Llama4Config().save_pretrained(source)
@@ -1068,11 +1072,6 @@ def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_pat
 
 
 def _one_rank_fails_after_the_write_job(rank, size, tmp_dir):
-    from unittest import mock
-
-    from modelopt.torch.export import distributed_writer, unified_export_hf
-    from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
-
     model = torch.nn.Linear(2, 2)
     set_distribution_plan(model, DistributionPlan(size, ep_size=size))
     raised = None
@@ -1104,11 +1103,6 @@ def test_every_rank_fails_an_export_that_one_rank_failed_after_the_write(
 
 
 def _one_rank_fails_processing_job(rank, size, tmp_dir):
-    from unittest import mock
-
-    from modelopt.torch.export import distributed_writer, unified_export_hf
-    from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
-
     model = torch.nn.Linear(2, 2)
     set_distribution_plan(model, DistributionPlan(size, ep_size=size))
     failure = NotImplementedError("rank 1's experts mix quantized and unquantized ones")
@@ -1157,11 +1151,6 @@ class _FusedExpertsQuantizers(torch.nn.Module):
 
 
 def _expert_quantization_job(rank, size, tmp_dir, enabled_per_rank, down_enabled_per_rank, refused):
-    from unittest import mock
-
-    from modelopt.torch.export import distributed_writer, unified_export_hf
-    from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
-
     model = torch.nn.Module()
     down_enabled = None if down_enabled_per_rank is None else down_enabled_per_rank[rank]
     model.experts = _FusedExpertsQuantizers(enabled_per_rank[rank], down_enabled)
@@ -1224,9 +1213,6 @@ def test_expert_parallel_ranks_agree_on_their_experts_quantization_before_foldin
 def test_an_expert_parallel_plan_with_replicated_dense_shards_is_refused_before_folding(tmp_path):
     """Below the world size, EP leaves FSDP2's dense shards replicated across the expert-parallel
     groups, which the no-gather writer cannot write: refused before the export folds anything."""
-    from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
-    from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
-
     model = torch.nn.Sequential(torch.nn.Linear(16, 16))
     mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))
     set_distribution_plan(model, DistributionPlan(4, ep_size=2, dense="fsdp"))
