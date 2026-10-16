@@ -570,7 +570,13 @@ def _distributed_save_hf_checkpoint_impl(
 
     export_dir = Path(export_dir)
     rank, world = dist.get_rank(), dist.get_world_size()
-    device = torch.device(f"cuda:{torch.cuda.current_device()}")
+    # Where the expert input-scale all-reduce below runs: on the GPU under NCCL (distributed_run
+    # sets up "cpu:gloo,cuda:nccl"), on the CPU under a gloo-only group.
+    device = (
+        torch.device("cpu")
+        if dist.get_backend() == "gloo"
+        else torch.device("cuda", torch.cuda.current_device())
+    )
 
     # This writer targets a FULLY FSDP2-sharded model -- no expert parallelism. FSDP2
     # shards the fused 3-D expert weight on dim 0 (the expert axis), so fused experts are just
