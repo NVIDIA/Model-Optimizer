@@ -771,11 +771,11 @@ def _meta_dcp_load(
             )
             emptied.update(prefix + n for n in direct)
             m.to_empty(device=device, recurse=False)
-    for n, b in model.named_buffers():
-        src = saved_buffers.get(n)
-        if src is not None:
-            b.copy_(src.to(device=b.device, dtype=b.dtype))
     with torch.no_grad():
+        for n, b in model.named_buffers():
+            src = saved_buffers.get(n)
+            if src is not None:
+                b.copy_(src.to(device=b.device, dtype=b.dtype))
         for n, src in saved_params.items():
             p = model.get_parameter(n)
             p.copy_(src.to(device=p.device, dtype=p.dtype))
