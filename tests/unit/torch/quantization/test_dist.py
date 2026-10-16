@@ -89,33 +89,72 @@ def test_a_calibrated_zero_amax_survives_the_sync(cpu_dist_workers):
     cpu_dist_workers.run(_calibrated_zero_amax_helper)
 
 
-def _calibrators_dtype_helper(rank, size):
-    per_tensor = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
+# An NVFP4 activation quantizer's block sizes drive its runtime scales: it stores only a per-tensor
+# amax, the global scale, so it syncs as a per-tensor quantizer does.
+_PER_TENSOR_CFGS = {
+    "int8": {"num_bits": 8},
+    "nvfp4-dynamic": {
+        "num_bits": (2, 1),
+        "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+    },
+}
+
+
+def _calibrators_dtype_helper(rank, size, per_tensor_cfg):
+    cfg = QuantizerAttributeConfig(**_PER_TENSOR_CFGS[per_tensor_cfg])
+    one_calibrated, both_calibrated = TensorQuantizer(cfg), TensorQuantizer(cfg)
     if rank == 0:
-        per_tensor._set_buffer("_amax", torch.tensor(3.0, dtype=torch.bfloat16))
+        one_calibrated._set_buffer("_amax", torch.tensor(3.0, dtype=torch.bfloat16))
+    both_calibrated._set_buffer("_amax", torch.tensor(2.0 + rank, dtype=torch.bfloat16))
     per_channel = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=0))
     per_channel._set_buffer("_amax", torch.tensor([1.0, 2.0 + rank], dtype=torch.bfloat16))
-    _sync(per_tensor)
-    _sync(per_channel)
-    assert per_tensor.amax.dtype == torch.bfloat16
-    assert per_tensor.amax.item() == 3.0
-    assert per_channel.amax.dtype == torch.bfloat16
+    for quantizer in (one_calibrated, both_calibrated, per_channel):
+        _sync(quantizer)
+        assert quantizer.amax.dtype == torch.bfloat16
+    assert one_calibrated.amax.item() == 3.0
+    assert both_calibrated.amax.item() == 3.0
     assert per_channel.amax.tolist() == [1.0, 3.0]
 
 
-def test_the_sync_leaves_every_rank_the_calibrators_dtype(cpu_dist_workers):
-    """Including a rank that never calibrated the quantizer and so had no amax of its own."""
-    cpu_dist_workers.run(_calibrators_dtype_helper)
+@pytest.mark.parametrize("per_tensor_cfg", list(_PER_TENSOR_CFGS))
+def test_the_sync_leaves_every_rank_the_calibrators_dtype(cpu_dist_workers, per_tensor_cfg):
+    """And the group's max, including on a rank that never calibrated the quantizer and so had no
+    amax of its own. Synced as a per-block quantizer, an NVFP4 activation quantizer's uncalibrated
+    rank would raise instead."""
+    cpu_dist_workers.run(_calibrators_dtype_helper, per_tensor_cfg=per_tensor_cfg)
 
 
-def _never_calibrated_helper(rank, size):
-    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
+def _never_calibrated_helper(rank, size, axis):
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=axis))
     _sync(quantizer)
     assert getattr(quantizer, "_amax", None) is None
 
 
-def test_a_quantizer_no_rank_calibrated_stays_uncalibrated(cpu_dist_workers):
-    cpu_dist_workers.run(_never_calibrated_helper)
+@pytest.mark.parametrize("axis", [None, 0], ids=["per-tensor", "per-channel"])
+def test_a_quantizer_no_rank_calibrated_stays_uncalibrated(cpu_dist_workers, axis):
+    """A module no rank's calibration data reached, which is expected rather than an error."""
+    cpu_dist_workers.run(_never_calibrated_helper, axis=axis)
+
+
+def _uneven_per_channel_helper(rank, size):
+    # A rank left waiting in a collective its peer never joins gives up in seconds on this group.
+    group = DistributedProcessGroup(dist.new_group(timeout=timedelta(seconds=10)))
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=0))
+    if rank == 0:
+        quantizer._set_buffer("_amax", torch.full((4,), 3.0))
+    try:
+        quantizer.sync_amax_across_distributed_group(group)
+    except RuntimeError as error:
+        raised = str(error)
+    else:
+        raised = "no error"
+    assert "unevenly-calibrated" in raised, raised
+
+
+def test_uneven_per_channel_calibration_fails_on_every_rank(cpu_dist_workers):
+    """A rank without the amax cannot rebuild its per-channel shape, so the sync fails, on every
+    rank together: one rank raising alone would leave the other waiting in the collective."""
+    cpu_dist_workers.run(_uneven_per_channel_helper)
 
 
 def _expert_input_amax_helper(rank, size, share):
