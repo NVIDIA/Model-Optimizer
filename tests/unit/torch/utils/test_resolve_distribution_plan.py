@@ -342,12 +342,27 @@ def test_the_class_that_builds_the_whole_model(config, require_lm_head, expected
 # -------------------------------------------------------------------------------- the decision
 
 
+@pytest.mark.parametrize(
+    "knob",
+    [
+        None,
+        ("MODELOPT_EP_DEGREE", "4"),
+        ("MODELOPT_FSDP_SIZE", "world"),
+        ("MODELOPT_FSDP_SIZE", "2"),
+    ],
+    ids=["no_knob", "ep_degree", "fsdp_world", "fsdp_part"],
+)
 @pytest.mark.parametrize("world_size", [None, 1], ids=["no_process_group", "one_rank"])
-def test_a_single_process_holds_the_whole_model(run_as, serve, monkeypatch, tmp_path, world_size):
-    """With no ranks to shard over, even an MoE that knobs ask to shard loads whole, and no model is
-    built to decide it."""
+def test_a_single_process_holds_the_whole_model(
+    run_as, serve, monkeypatch, tmp_path, world_size, knob
+):
+    """With no ranks to shard over, even an MoE loads whole, and no model is built to decide it. A
+    shell still exporting a multi-GPU run's knobs must not reshape that: only the caller's own
+    arguments ask for FSDP2 on one rank."""
     if world_size is not None:
         run_as(world_size)
+    if knob is not None:
+        monkeypatch.setenv(*knob)
     served = serve(_qwen3_moe())
     monkeypatch.setattr(
         model_load_utils, "build_meta_causal_lm", lambda *a, **k: pytest.fail("built a model")
