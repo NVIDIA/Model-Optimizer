@@ -100,6 +100,42 @@ def test_prune_minitron(tmp_path, num_gpus, create_teacher, expected_pruned_conf
         assert getattr(pruned_model.config, field) == expected
 
 
+@pytest.mark.parametrize("output", ["megatron", "hf"])
+def test_prune_minitron_a_hub_model_id(tmp_path, fake_hub_checkpoint, output):
+    """A Hub ID is pruned from its local copy: the HF output carries that copy's non-model files,
+    and the Megatron output records the Hub ID as its tokenizer so it stays valid on other hosts."""
+    teacher_hf_path, teacher_model = create_tiny_qwen3_dir(
+        tmp_path, with_tokenizer=True, return_model=True, num_hidden_layers=1
+    )
+    fake_hub_checkpoint.serve(teacher_hf_path, "prune_minitron.py")
+    pruned_path = tmp_path / "pruned"
+    prune_command_parts = extend_cmd_parts(
+        ["torchrun", "--nproc_per_node=1", "prune_minitron.py"],
+        hf_model_name_or_path=fake_hub_checkpoint.hub_model_id,
+        **{f"output_{output}_path": pruned_path},
+        pp_size=1,
+        calib_dataset_name="cnn_dailymail",
+        calib_num_samples=8,
+        seq_length=16,
+        prune_target_params=int(sum(p.numel() for p in teacher_model.parameters()) * 0.8),
+        prune_score_func="mmlu_1pct_bs32",
+        score_lower_bound=0.0,
+        ss_channel_divisor=4,
+        hparams_to_skip="num_attention_heads",
+        top_k=1,
+    )
+    run_example_command(prune_command_parts, example_path="megatron_bridge")
+
+    if output == "megatron":
+        assert (
+            fake_hub_checkpoint.saved_tokenizer_model(pruned_path)
+            == fake_hub_checkpoint.hub_model_id
+        )
+    else:
+        assert (pruned_path / "config.json").exists()
+        assert (pruned_path / fake_hub_checkpoint.marker).exists()
+
+
 @pytest.mark.parametrize(
     "create_teacher",
     [

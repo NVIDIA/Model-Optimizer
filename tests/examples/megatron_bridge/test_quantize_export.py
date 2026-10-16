@@ -119,3 +119,41 @@ def test_quantize_and_export(
     # )
     # outputs = llm.generate(["Hello!"], vllm.SamplingParams(max_tokens=4))
     # assert outputs and outputs[0].outputs and outputs[0].outputs[0].text
+
+
+@pytest.mark.timeout(360)
+def test_quantize_and_export_a_hub_model_id(tmp_path: Path, fake_hub_checkpoint):
+    """A Hub ID is made local once: both steps load and export from that copy, while the
+    Megatron checkpoint records the Hub ID as its tokenizer so it stays valid on other hosts."""
+    fake_hub_checkpoint.serve(
+        create_tiny_qwen3_moe_dir(tmp_path, with_tokenizer=True, **_DENSE_KWARGS),
+        "quantize.py",
+        "export_quantized_megatron_to_hf.py",
+    )
+    megatron_path = tmp_path / "quantized_megatron"
+    hf_export_path = tmp_path / "quantized_hf"
+
+    quantize_cmd = extend_cmd_parts(
+        ["torchrun", "--nproc_per_node=1", "quantize.py", "--skip_generate"],
+        hf_model_name_or_path=fake_hub_checkpoint.hub_model_id,
+        recipe="general/ptq/nvfp4_default-kv_fp8",
+        calib_dataset_name="cnn_dailymail",
+        calib_num_samples=4,
+        calib_batch_size=2,
+        seq_length=16,
+        export_megatron_path=megatron_path,
+    )
+    run_example_command(quantize_cmd, example_path="megatron_bridge", setup_free_port=True)
+    assert (
+        fake_hub_checkpoint.saved_tokenizer_model(megatron_path) == fake_hub_checkpoint.hub_model_id
+    )
+
+    export_cmd = extend_cmd_parts(
+        ["torchrun", "--nproc_per_node=1", "export_quantized_megatron_to_hf.py"],
+        hf_model_name_or_path=fake_hub_checkpoint.hub_model_id,
+        megatron_path=megatron_path,
+        export_unified_hf_path=hf_export_path,
+    )
+    run_example_command(export_cmd, example_path="megatron_bridge", setup_free_port=True)
+    assert (hf_export_path / "hf_quant_config.json").exists()
+    assert (hf_export_path / fake_hub_checkpoint.marker).exists()
