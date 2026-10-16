@@ -616,12 +616,25 @@ def test_nogather_export_writes_moe_experts_quantized(gloo_world_of_one, tmp_pat
 # ------------------------------------------------------------------ the writer, two ranks
 
 
+def _mtp_tail():
+    """Tensors the model does not own, named like an inlined MTP tail the loader dropped."""
+    return {
+        "model.layers.99.mtp.weight": torch.arange(64, dtype=torch.bfloat16).reshape(8, 8),
+        "model.layers.99.mtp.bias": torch.full((8,), 3.0, dtype=torch.bfloat16),
+    }
+
+
 def _two_rank_job(rank, world_size, tmp_dir):
     mesh = init_device_mesh("cpu", (world_size,))
 
-    # An unquantized MoE whose vocab rows and experts split unevenly; the test compares what the
-    # two ranks wrote between them with the source checkpoint.
-    _write(_fsdp2_shard(_load(tmp_dir / "moe"), mesh), tmp_dir / "moe_export")
+    # An unquantized MoE whose vocab rows and experts split unevenly, written with tensors it does
+    # not own, which every rank is handed; the test compares what the two ranks wrote between them
+    # with the source checkpoint and those tensors.
+    _write(
+        _fsdp2_shard(_load(tmp_dir / "moe"), mesh),
+        tmp_dir / "moe_export",
+        extra_state_dict=_mtp_tail(),
+    )
 
     # A quantized dense model through the export entry point: fp8 weights and bf16 norms travel
     # in separate per-dtype buckets. Every rank quantizes identically, so rank 0's single-process
@@ -654,7 +667,8 @@ def _two_rank_job(rank, world_size, tmp_dir):
 
 
 def test_two_ranks_write_one_checkpoint_and_reject_inconsistent_state(cpu_dist_workers, tmp_path):
-    """Shards cross ranks point to point, each tensor gets one owner, files share one numbering.
+    """Shards cross ranks point to point, each tensor gets one owner, files share one numbering,
+    and the tensors handed to every rank are written once.
 
     The same job also checks the cross-rank consistency errors.
     """
@@ -667,5 +681,5 @@ def test_two_ranks_write_one_checkpoint_and_reject_inconsistent_state(cpu_dist_w
     n = len(shards)
     assert n > 2, "both ranks should have written several files"
     assert shards == [f"model-{i:05d}-of-{n:05d}.safetensors" for i in range(1, n + 1)]
-    want = load_file(str(src / "model.safetensors"))
+    want = {**load_file(str(src / "model.safetensors")), **_mtp_tail()}
     _assert_byte_identical(_load_checkpoint(tmp_path / "moe_export"), want)
