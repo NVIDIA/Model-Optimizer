@@ -264,3 +264,33 @@ def test_resuming_a_different_speculative_mode_is_refused(main_mod, stub_tokeniz
             base_model=_tiny_causal_lm(hidden=2 * HIDDEN),
             draft=restored,
         )
+
+
+def test_sparse_requires_a_tvd_objective(main_mod, stub_tokenizers):
+    """soft_ce needs full teacher logits; a sparse dump only stores the truncated policy.
+
+    Without the gate the run trains against a zero-padded distribution and the loss curve
+    looks ordinary, so the refusal has to happen before training starts.
+    """
+    recipe = _recipe(sparse_data_path="/tmp/policy")
+    recipe.external.external_loss = "soft_ce"
+    with pytest.raises(ValueError, match="external_loss"):
+        main_mod.setup_external_draft(
+            recipe,
+            _training_args(),
+            base_model=_tiny_causal_lm(hidden=2 * HIDDEN),
+            draft=_tiny_causal_lm(),
+        )
+
+
+def test_sparse_path_skips_the_base_head_attach(main_mod, stub_tokenizers):
+    """The sparse dump carries the teacher's policy, so the base lm_head is never needed."""
+    draft, _ = main_mod.setup_external_draft(
+        _recipe(sparse_data_path="/tmp/policy"),
+        _training_args(),
+        base_model=_tiny_causal_lm(hidden=2 * HIDDEN),
+        draft=_tiny_causal_lm(),
+    )
+    assert getattr(draft, "_base_lm_head", None) is None, (
+        "the sparse path attached the base head it does not use"
+    )

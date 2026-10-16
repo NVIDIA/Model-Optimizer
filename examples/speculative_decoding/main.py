@@ -61,6 +61,7 @@ from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.speculative.config import ExternalDraftConfig
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_domino import DominoLambdaCallback
+from modelopt.torch.speculative.plugins.hf_external import SPARSE_CAPABLE_LOSSES
 from modelopt.torch.speculative.plugins.hf_training_args import (
     TrainingArguments as SpecTrainingArgs,
 )
@@ -69,6 +70,7 @@ from modelopt.torch.speculative.plugins.modeling_fakebase import find_final_norm
 from modelopt.torch.speculative.utils import load_vlm_or_llm, patch_transformers5_params_loading
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import is_master, local_rank
+from modelopt.torch.utils.logging import warn_rank_0
 
 torch.manual_seed(0)
 mto.enable_huggingface_checkpointing()
@@ -236,6 +238,14 @@ def setup_external_draft(
         model_max_length=training_args.training_seq_len,
         trust_remote_code=recipe.model.trust_remote_code,
     )
+    # Sparse data carries only the teacher's truncated policy. Objectives that need full
+    # teacher logits would silently train against a zero-padded distribution, so gate on
+    # the list the plugin exports.
+    if recipe.data.mode == "sparse" and external_cfg["external_loss"] not in SPARSE_CAPABLE_LOSSES:
+        raise ValueError(
+            f"data.sparse_data_path requires external.external_loss in "
+            f"{list(SPARSE_CAPABLE_LOSSES)}, got {external_cfg['external_loss']!r}."
+        )
     restored_modes = {m for m, _ in modelopt_state(draft)["modelopt_state_dict"]}
     if "external" in restored_modes:
         # The restore replayed the config stored in the checkpoint, so modify() has already
@@ -269,16 +279,21 @@ def setup_external_draft(
     # The norm is not always at base_model.model.norm -- FakeBaseModel keeps it at .norm
     # -- so search the same paths the other offline modes use. It stays optional;
     # _teacher_logits raises only if the dump declares a pre-norm hidden.
-    norm_path = find_final_norm_path(base_model)
-    base_final_norm = base_model.get_submodule(norm_path) if norm_path else None
-    # Attach on the device training will run on: the draft is loaded with
-    # device_map="cpu", so otherwise the first forward moves the copies mid-step on
-    # every rank. training_args.device is the device accelerate assigned this process,
-    # which is correct both when every rank sees all GPUs and when CUDA_VISIBLE_DEVICES
-    # pins one GPU per rank -- local_rank arithmetic gets the second case wrong.
-    draft.attach_base_lm_head(
-        base_model.get_output_embeddings(), base_final_norm, device=training_args.device
-    )
+    # The sparse path carries the teacher's policy in the data, so the base lm_head is
+    # dead weight on the GPU; the base is still loaded for the vocabulary check, which is
+    # cheap under use_fake_base_for_offline.
+    if recipe.data.mode != "sparse":
+        norm_path = find_final_norm_path(base_model)
+        base_final_norm = base_model.get_submodule(norm_path) if norm_path else None
+        # Attach on the device training will run on: the draft is loaded with
+        # device_map="cpu", so otherwise the first forward moves the copies mid-step on
+        # every rank. training_args.device is the device accelerate assigned this
+        # process, which is correct both when every rank sees all GPUs and when
+        # CUDA_VISIBLE_DEVICES pins one GPU per rank -- local_rank arithmetic gets the
+        # second case wrong.
+        draft.attach_base_lm_head(
+            base_model.get_output_embeddings(), base_final_norm, device=training_args.device
+        )
     return draft, tokenizer
 
 
@@ -453,6 +468,14 @@ def train():
 
     print_rank_0("Loading dataset...")
     is_dflash = isinstance(recipe, ModelOptDFlashRecipe)
+    if recipe.data.mode == "sparse" and not isinstance(recipe, ModelOptExternalDraftRecipe):
+        # Only the external draft reads a sparse policy. Any other mode would build the
+        # dataset, hand the collator's teacher_topk_* to a forward that ignores them, and
+        # train on an all-zero loss -- so refuse instead of running an empty objective.
+        raise ValueError(
+            f"data.sparse_data_path is only supported by the external draft recipe; "
+            f"{type(recipe).__name__} cannot consume a sparse teacher policy."
+        )
     data_module = make_speculative_data_module(
         tokenizer,
         recipe.data,
@@ -465,6 +488,22 @@ def train():
         # loudly on a dump that omits them.
         aux_hidden_states_optional=isinstance(recipe, ModelOptExternalDraftRecipe),
     )
+    if recipe.data.mode == "sparse" and recipe.external.external_loss == "tvd_deploy":
+        # tvd_deploy filters the draft side by external_top_k, while the teacher side is
+        # whatever the producer baked into the dump. If the two disagree the objective
+        # compares two differently-truncated policies: the loss stays well-formed and
+        # still falls, so nothing surfaces except a draft that accepts worse than it
+        # should. Checked here because this is the first point where both the dump's
+        # stored top_k and the configured one are known. A wider draft filter can be a
+        # deliberate choice, so warn rather than refuse.
+        dump_top_k = getattr(data_module.get("train_dataset"), "top_k", None)
+        if dump_top_k and dump_top_k != recipe.external.external_top_k:
+            warn_rank_0(
+                f"the dump stores the teacher's top-{dump_top_k} policy but "
+                f"external.external_top_k={recipe.external.external_top_k} filters the draft; "
+                f"tvd_deploy then compares two differently-truncated policies. Set "
+                f"external.external_top_k={dump_top_k} to match the dump."
+            )
 
     callbacks = [EagleTrainingPlot(training_args.ar_validate_steps, training_args.estimate_ar)]
     if (

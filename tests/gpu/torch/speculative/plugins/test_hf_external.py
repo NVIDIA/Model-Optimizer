@@ -30,6 +30,7 @@ from _test_utils.torch.transformers_models import get_tiny_llama
 import modelopt.torch.speculative as mtsp
 
 SEQ_LEN = 16
+TOPK = 8
 
 
 def _external_draft(**overrides):
@@ -71,6 +72,48 @@ class TestExternalDraftDevicePlacement:
         param_ids = {id(p) for p in draft.parameters()}
         assert all(id(p) not in param_ids for p in base.get_output_embeddings().parameters())
         assert not any("_base_lm_head" in k for k in draft.state_dict())
+
+
+class TestExternalDraftSparseGPU:
+    """What the sparse path needs a GPU to prove: that its dedup is order-stable there.
+
+    The forward/backward and the no-teacher-head checks are device-independent and are
+    covered on CPU in tests/unit; repeating them here buys nothing. The dedup below is
+    different: it relies on ``sort(..., stable=True)`` keeping the first occurrence of a
+    repeated id, and unstable tie order is genuinely unspecified on CUDA.
+    """
+
+    def test_ragged_row_dedup_is_stable_on_cuda(self):
+        """A padded row repeating a real token must be charged once, not once per slot.
+
+        The builder pads ragged rows by repeating the trailing id, so the same token can
+        occupy several slots with the teacher's probability stored only in the first.
+        Keeping any other occurrence pairs the teacher's mass with the wrong q, which no
+        loss-magnitude check would catch -- so compare against the deduplicated reference.
+        """
+        draft = _external_draft(external_loss="tvd", external_report_acc=False).cuda()
+        vocab = draft.config.vocab_size
+        torch.manual_seed(0)
+        logits = torch.randn(1, 3, vocab, device="cuda")
+        # row = [7, 11, 11, 11, ...]: one real entry then pads repeating id 11
+        tok = torch.full((1, 3, TOPK), 11, dtype=torch.long, device="cuda")
+        tok[..., 0] = 7
+        prob = torch.zeros(1, 3, TOPK, device="cuda")
+        prob[..., 0] = 0.6
+        prob[..., 1] = 0.4  # the first 11 carries the mass; later slots are pads
+
+        loss, _ = draft.compute_sparse_loss(logits, tok, prob, torch.ones(1, 3, device="cuda"))
+
+        q_all = torch.softmax(logits[:, :-1].float(), dim=-1)
+        p = prob[:, 1:] / prob[:, 1:].sum(-1, keepdim=True)
+        q = q_all.gather(-1, tok[:, 1:])
+        keep = torch.zeros_like(q, dtype=torch.bool)
+        keep[..., :2] = True  # ids 7 and 11 once each; the rest are duplicates
+        q = q * keep
+        expected = 0.5 * ((p - q).abs().sum(-1) + (1.0 - q.sum(-1)).clamp_min(0.0))
+        assert torch.allclose(loss, expected.mean(), atol=1e-5), (
+            f"dedup kept the wrong occurrence on CUDA: {loss} vs {expected.mean()}"
+        )
 
 
 def test_dense_path_rejects_a_missing_teacher_head():
