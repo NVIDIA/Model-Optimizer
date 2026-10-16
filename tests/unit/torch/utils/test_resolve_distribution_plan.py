@@ -282,22 +282,30 @@ def _tiny_qwen2_5_vl():
 
 
 @pytest.mark.parametrize(
-    ("config", "expected"),
+    ("config", "require_lm_head", "expected"),
     [
-        (SimpleNamespace(architectures=["LlamaForCausalLM"]), AutoModelForCausalLM),
+        (SimpleNamespace(architectures=["LlamaForCausalLM"]), True, AutoModelForCausalLM),
+        (_vlm_config(), False, AutoModel),
         (
             _vlm_config(auto_map={"AutoModelForCausalLM": "m.KimiK25ForConditionalGeneration"}),
+            True,
             AutoModelForCausalLM,
         ),
-        (_tiny_qwen2_5_vl(), AutoModelForImageTextToText),
-        (_vlm_config(), AutoModel),
+        (_tiny_qwen2_5_vl(), True, AutoModelForImageTextToText),
+        (_vlm_config(), True, AutoModel),
     ],
-    ids=["causal-lm", "remote-vlm-with-head", "native-vlm-with-head", "unknown-vlm"],
+    ids=[
+        "causal-lm",
+        "vlm-backbone",
+        "remote-vlm-with-head",
+        "native-vlm-with-head",
+        "unknown-vlm",
+    ],
 )
-def test_the_class_that_builds_the_whole_model(config, expected):
-    """A VLM's AutoModel leaves the LM head out: it builds through the class that carries the head,
-    keeping the headless backbone only when no class recognizes the config."""
-    assert _auto_class(config) is expected
+def test_the_class_that_builds_the_whole_model(config, require_lm_head, expected):
+    """A VLM's AutoModel leaves the LM head out: with the head required it builds through the class
+    that carries it, keeping the headless backbone only when no class recognizes the config."""
+    assert _auto_class(config, require_lm_head) is expected
 
 
 # -------------------------------------------------------------------------------- the decision
