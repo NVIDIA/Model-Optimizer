@@ -1423,9 +1423,8 @@ def _fsdp2_shard_dense(model: nn.Module, fsdp_mesh, expert_modules) -> int:
 
     FSDP2 ``fully_shard`` the model's DENSE (non-expert) modules over ``fsdp_mesh``, leaving the routed
     experts (already EP-sharded on ``ep`` + the a2a transport) untouched -- the "FSDP2 dense + EP MoE"
-    hybrid. In the EDP=1 layout ``fsdp_mesh`` is the FULL world (dense shards over every rank, the same
-    ranks the experts are EP-sharded over); a 2D ``(dp, fsdp)`` ``fsdp_mesh`` gives the EDP>1 hybrid
-    (dense HSDP-sharded over ``fsdp`` and replicated over ``dp``, aligned with the experts' ``(edp, ep)``).
+    hybrid. ``fsdp_mesh`` is the FULL world (dense shards over every rank, the same ranks the experts are
+    EP-sharded over).
 
     Wraps at the DECODER-LAYER boundary (exactly like the proven pure-FSDP2 path,
     :func:`_fsdp2_wrap_modules` via HF ``_no_split_modules``) and passes
@@ -1701,6 +1700,14 @@ def load_and_prepare_ep(
 
     if not plan.is_expert_parallel:
         raise ValueError(f"{plan!r} shards no routed experts, which is what this load is for.")
+    if plan.is_fsdp_dense and plan.edp > 1:
+        # Refused before the load: the export, after the whole calibration, is what cannot write it.
+        raise NotImplementedError(
+            f"{plan!r} FSDP2-shards the dense part within each of {plan.edp} expert-data-parallel "
+            "replicas, a layout the export cannot write yet. Set MODELOPT_EP_DEGREE to the world "
+            "size if it divides the expert count, or MODELOPT_FSDP_SIZE=1 if the dense part fits "
+            "one GPU."
+        )
     # This loader assumes the caller has ALREADY initialized (and device-bound) the process group --
     # distributed bring-up belongs to the launcher, not this library function. The example launcher does
     # it in hf_ptq.main() via distributed_run() -> modelopt.torch.utils.distributed.setup() before
@@ -1898,28 +1905,22 @@ def load_and_prepare_ep(
     _unregister_expert_quant_wrappers(expert_modules.values())
 
     # "FSDP2 dense + EP MoE" hybrid: experts are EP-sharded over ``ep`` and the DENSE (non-expert) modules
-    # are FSDP2-sharded over the SAME ``ep`` group, replicated over ``edp``. At EDP=1 that is the full world
-    # (dense shards over every rank); at EDP>1 it is the 2D (edp, ep) HSDP layout -- dense shards over ``ep``
-    # (== ``mp``) and replicates over ``edp`` (== ``dp``), byte-for-byte aligned with the experts'
-    # ``sparse_moe_mesh``. Dense all-gather then expert a2a run sequentially within a forward (same
-    # ``ep`` group), so there is no concurrent-collective deadlock. Weight amax is computed on the
+    # are FSDP2-sharded over the same ranks, the whole world: a dense part sharded within several
+    # expert-parallel groups is refused above. Dense all-gather then expert a2a run sequentially within a
+    # forward (same ranks), so there is no concurrent-collective deadlock. Weight amax is computed on the
     # FSDP-gathered full weight (identical per rank); activation amax syncs over the whole world via the
     # dense ``dp`` group registered below.
     #
     # A replicated dense part stays data-parallel and needs no post-load step.
     if plan.is_fsdp_dense:
-        # Fully-distributed dense: dense was left on meta during from_pretrained; FSDP2-shard it and
-        # DCP-load each rank's shard directly (never replicated anywhere). EDP=1 -> the 1D full-world dense
-        # mesh (the original, validated layout); EDP>1 -> the 2D (edp, ep) mesh (fully_shard replicates dim0
-        # ``edp``, shards dim1 ``ep``), so the meta+DCP loader fills [Replicate(edp), Shard(ep)] DTensors.
-        dense_fsdp_mesh = dense_mesh["dp"] if dp == 1 else sparse_moe_mesh
+        # Fully-distributed dense: dense was left on meta during from_pretrained; FSDP2-shard it over the
+        # full-world mesh and DCP-load each rank's shard directly (never replicated anywhere).
+        dense_fsdp_mesh = dense_mesh["dp"]
         # Collective: rank 0 makes the checkpoint local (downloading a Hub ID once); the others wait.
         _, local_dir = ensure_local_checkpoint(ckpt_path)
         n_dense = _load_ep_dense_distributed(
             model, dense_fsdp_mesh, local_dir, is_expert_fn, expert_modules.values()
         )
-        # Nothing deduplicates the ``edp`` replicas on export: the no-gather HF export writes a dense
-        # part only as a 1-D full-world ``Shard(0)`` and refuses this EDP>1 layout.
         if is_master():
             _dims = tuple(dense_fsdp_mesh.shape)
             print(
