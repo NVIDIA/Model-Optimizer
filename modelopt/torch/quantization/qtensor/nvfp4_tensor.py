@@ -60,7 +60,8 @@ def cutlass_fp4_scale_to_modelopt_fp4_scale(
     row_blocks, col_blocks = -(-m // 128), -(-n // 4)
     tiles = cutlass_scale.reshape(row_blocks, col_blocks, 32, 4, 4)
     padded = tiles.permute(0, 3, 2, 1, 4).reshape(row_blocks * 128, col_blocks * 4)
-    return padded[:m, :n].view(torch.float8_e4m3fn)
+    # contiguous(): the slice is a strided view, and fp4_dequantize indexes the scale flatly.
+    return padded[:m, :n].contiguous().view(torch.float8_e4m3fn)
 
 
 class NVFP4QTensor(BaseQuantizedTensor):

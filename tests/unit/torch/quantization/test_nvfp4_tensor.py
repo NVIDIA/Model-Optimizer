@@ -148,4 +148,5 @@ def test_cutlass_fp4_scale_to_modelopt_fp4_scale_undoes_the_swizzle(weight_shape
     restored = cutlass_fp4_scale_to_modelopt_fp4_scale(_cublas_swizzle(scale), weight_shape)
 
     assert restored.dtype == torch.float8_e4m3fn
+    assert restored.is_contiguous()  # consumers index it flatly
     assert torch.equal(restored.view(torch.uint8), scale)
