@@ -31,6 +31,9 @@ transformers = pytest.importorskip("transformers")
 finegrained_fp8 = pytest.importorskip("transformers.integrations.finegrained_fp8")
 quantizer_fp8 = pytest.importorskip("transformers.quantizers.quantizer_finegrained_fp8")
 
+from transformers import FineGrainedFP8Config
+from transformers.core_model_loading import Concatenate, MergeModulelist, WeightConverter
+
 import modelopt.torch.utils.plugins.model_load_utils as model_load_utils
 
 if not hasattr(finegrained_fp8, "Fp8Dequantize"):
@@ -76,9 +79,9 @@ def _dequant_op(block_size):
     return Fp8Dequantize(SimpleNamespace(quantization_config=config))
 
 
-def _block_fp8(shape, grid):
+def _block_fp8(shape, grid, seed=0):
     """A random fp8 weight and its fp32 ``scale_inv`` grid."""
-    gen = torch.Generator().manual_seed(0)
+    gen = torch.Generator().manual_seed(seed)
     weight = (4 * torch.randn(shape, generator=gen)).to(torch.float8_e4m3fn)
     return weight, torch.rand(grid, generator=gen) + 0.5
 
@@ -173,6 +176,61 @@ def test_an_empty_scale_grid_passes_the_weight_through_unscaled(pre_5_10_transfo
     out = _dequant_op((4, 4))._dequantize_one(weight, scale_inv)
 
     assert torch.equal(out, weight.float())
+
+
+def test_the_expert_converter_leads_with_a_merge_that_dequantizes_each_expert(
+    pre_5_10_transformers,
+):
+    """transformers prepends ``Fp8Dequantize`` to the routed-expert converter, so its first op is
+    no longer the ``MergeModulelist`` the loader keys each expert's ``tensor_idx`` on, and the EP
+    load then slices every expert by rows. The patch fuses the two into one ``MergeModulelist``
+    that dequantizes each expert with its own scales and drops them before ``Concatenate``."""
+    if not hasattr(FineGrainedFP8HfQuantizer, "update_weight_conversions"):
+        pytest.skip("this transformers' FP8 quantizer prepends no dequant to the expert converter")
+    stock_dequant = Fp8Dequantize._dequantize_one
+    model_load_utils._patch_finegrained_fp8_dequant(torch.float32)
+    # This transformers' chain passes output_dtype, which the patched dequant (written for the
+    # versions it installs on) does not take; its arithmetic is tested above.
+    Fp8Dequantize._dequantize_one = stock_dequant
+    experts = WeightConverter(
+        source_patterns=["mlp.experts.*.gate_proj.weight", "mlp.experts.*.up_proj.weight"],
+        target_patterns="mlp.experts.gate_up_proj",
+        operations=[MergeModulelist(dim=0), Concatenate(dim=1)],
+    )
+    quantizer = FineGrainedFP8HfQuantizer(
+        FineGrainedFP8Config(weight_block_size=(4, 4), dequantize=True), pre_quantized=True
+    )
+
+    [converter] = [
+        conv
+        for conv in quantizer.update_weight_conversions([experts])
+        if conv.target_patterns == ["mlp.experts.gate_up_proj"]
+    ]
+
+    assert isinstance(converter.operations[0], MergeModulelist)
+    blocks = {  # every expert's weight and scales differ, so a mixed-up pair cannot pass
+        name: [_block_fp8((8, 12), (2, 3), seed=3 * p + e) for e in range(3)]
+        for p, name in enumerate(("gate_proj", "up_proj"))
+    }
+    tensors = {}  # what the loader collects for each of the converter's source patterns
+    for name, pairs in blocks.items():
+        tensors[f"mlp.experts.*.{name}.weight$"] = [weight for weight, _ in pairs]
+        tensors[f"mlp.experts.*.{name}.weight_scale_inv$"] = [scale_inv for _, scale_inv in pairs]
+    for op in converter.operations:
+        tensors = op.convert(
+            tensors,
+            source_patterns=converter.source_patterns,
+            target_patterns=converter.target_patterns,
+        )
+    [fused] = tensors.values()
+    expected = torch.cat(
+        [
+            torch.stack([_reference(weight, scale_inv, (4, 4)) for weight, scale_inv in pairs])
+            for pairs in blocks.values()
+        ],
+        dim=1,
+    )
+    assert torch.equal(fused, expected.to(fused.dtype))
 
 
 def test_patching_again_keeps_the_install_and_takes_the_new_dtype(pre_5_10_transformers):
