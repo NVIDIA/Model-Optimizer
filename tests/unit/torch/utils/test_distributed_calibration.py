@@ -125,6 +125,14 @@ def test_an_uneven_split_gives_every_rank_the_same_batch_count(kind, padded, dro
     assert seen.total() - (n - len(dropped)) == padded
 
 
+def test_a_stream_shorter_than_the_world_is_refused_on_every_rank():
+    """With fewer samples than ranks there is no complete group, so every rank would calibrate on
+    nothing; each rank refuses the stream instead, before any forward."""
+    for rank in range(4):
+        with pytest.raises(ValueError, match="fewer than the 4 ranks"):
+            _ids(shard_dataloader(_loader(_Stream(3)), rank, 4))
+
+
 def test_iterable_shards_split_their_groups_across_worker_processes(monkeypatch):
     """Each worker process iterates its own copy of the stream. Unless the workers split the groups
     between them, every one yields the whole shard and each sample comes out once per worker.
