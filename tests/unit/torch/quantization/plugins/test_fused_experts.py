@@ -788,6 +788,7 @@ class TestExportFusedExperts:
         [
             ("per_tensor", (1,), (1,)),
             ("per_channel", (INTERMEDIATE_DIM, 1), (HIDDEN_DIM, 1)),
+            ("per_row_1d", (INTERMEDIATE_DIM,), (HIDDEN_DIM,)),
             ("per_block", (INTERMEDIATE_DIM, 2), (HIDDEN_DIM, 2)),
             # What block-quant calibration records: (rows * blocks, 1).
             ("flat_block", (INTERMEDIATE_DIM, 2), (HIDDEN_DIM, 2)),
@@ -808,6 +809,7 @@ class TestExportFusedExperts:
             layouts = {
                 "per_tensor": lambda rows: (1,),
                 "per_channel": lambda rows: (rows, 1),
+                "per_row_1d": lambda rows: (rows,),
                 "per_block": lambda rows: (rows, 2),
                 "flat_block": lambda rows: (rows * 2, 1),
             }

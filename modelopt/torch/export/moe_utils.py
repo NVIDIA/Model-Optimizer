@@ -84,10 +84,13 @@ def _fallback_amax(weight: torch.Tensor, quantizer) -> torch.Tensor:
     if like is None or like.numel() == 1:
         amax = torch.maximum(weight.amax(), -weight.amin()).float()
         return amax if like is None else amax.view_as(like)
-    # Block-quant calibration records the flat (rows * blocks, 1); also accept (rows, blocks).
-    # Refuse any other layout (e.g. per input channel) rather than guess its grouping.
+    # Block-quant calibration records the flat (rows * blocks, 1); also accept (rows, blocks) and
+    # a per-row (rows,). Refuse any other layout (e.g. per input channel) rather than guess its
+    # grouping.
     rows = weight.shape[0]
-    if like.dim() == 2 and like.shape[-1] == 1 and like.shape[0] % rows == 0:
+    if like.dim() == 1 and like.shape[0] == rows:
+        blocks = 1
+    elif like.dim() == 2 and like.shape[-1] == 1 and like.shape[0] % rows == 0:
         blocks = like.shape[0] // rows
     elif like.dim() == 2 and like.shape[0] == rows:
         blocks = like.shape[1]
