@@ -686,61 +686,56 @@ def _knobs(**values):
         yield
 
 
-def _every_rank_takes_rank0s_plan_job(rank, size, ckpt, knobs, expected):
+def _every_rank_takes_rank0s_plan_job(rank, size, ckpt, knobs, expected, spec_applied):
     with bounded_collectives(), _knobs(**knobs[rank]):
-        plan, _ = resolve_distribution_plan(ckpt)
+        plan, hf_config = resolve_distribution_plan(ckpt)
     assert plan == expected, (rank, plan)
+    if spec_applied is not None:
+        spec_plan = get_spec(hf_config.model_type).ep_spec.base_model_ep_plan
+        applied = getattr(hf_config, "base_model_ep_plan", None) == spec_plan
+        assert applied is spec_applied, (rank, applied)
 
 
-def test_every_rank_takes_the_plan_rank0_decided(cpu_dist_workers, tmp_path):
-    """Over a real broadcast. Rank 1's own knobs, FSDP2 over the world, would decide another plan,
-    and ranks loading different plans would build mismatched meshes and hang."""
-    LlamaConfig(**_TINY).save_pretrained(tmp_path)
+@pytest.mark.parametrize(
+    ("config", "knobs", "expected", "spec_applied"),
+    [
+        pytest.param(
+            LlamaConfig(**_TINY),
+            [{}, {"MODELOPT_FSDP_SIZE": "world"}],
+            DistributionPlan(2),
+            None,
+            id="rank1-would-shard",
+        ),
+        pytest.param(
+            _deepseek_v3(n_routed_experts=8),
+            [{}, {"MODELOPT_EP_DEGREE": "1"}],
+            DistributionPlan(2, 2),
+            True,
+            id="rank1-would-skip-the-spec",
+        ),
+        pytest.param(
+            _deepseek_v3(n_routed_experts=8),
+            [{"MODELOPT_EP_DEGREE": "1", "MODELOPT_FSDP_SIZE": "world"}, {}],
+            DistributionPlan(2, dense="fsdp"),
+            False,
+            id="rank1-would-apply-the-spec",
+        ),
+    ],
+)
+def test_every_rank_takes_the_plan_rank0_decided(
+    cpu_dist_workers, tmp_path, config, knobs, expected, spec_applied
+):
+    """Over real broadcasts. Rank 1's own knobs would decide another plan, or apply the model's spec
+    where rank 0 skipped it, or skip it where rank 0 applied it: ranks loading different plans, or
+    one without the expert-parallel plan the others shard by, build mismatched meshes and hang."""
+    config.save_pretrained(tmp_path)
     cpu_dist_workers.run(
         _every_rank_takes_rank0s_plan_job,
         ckpt=str(tmp_path),
-        knobs=[{}, {"MODELOPT_FSDP_SIZE": "world"}],
-        expected=DistributionPlan(2),
+        knobs=knobs,
+        expected=expected,
+        spec_applied=spec_applied,
     )
-
-
-def _as_rank(monkeypatch, rank, **rank0_messages):
-    """Run as ``rank`` of a 4-rank run, answering its broadcasts; returns what this rank handed them.
-
-    A non-zero rank receives, for each broadcast, ``rank0_messages[label]``, as rank 0 would have
-    sent it. Every rank reads the checkpoint as this one does.
-    """
-    sent = []
-
-    def broadcast_object_list(message, group=None, group_src=None):
-        sent.append(message[0])
-        if rank != 0:
-            message[0] = rank0_messages[message[0][0]]
-
-    monkeypatch.setattr(dist, "is_distributed_run", lambda: True)
-    monkeypatch.setattr(dist, "size", lambda group=None: 4)
-    monkeypatch.setattr(dist, "is_master", lambda group=None: rank == 0)
-    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: rank)
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 4)
-    monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast_object_list)
-    monkeypatch.setattr(torch.distributed, "all_gather_object", _gathered_alike)
-    return sent
-
-
-@pytest.mark.parametrize("rank0_applies", [True, False])
-def test_other_ranks_apply_the_spec_as_rank0_decided(monkeypatch, serve, tmp_path, rank0_applies):
-    """A rank whose own EP knob says otherwise follows rank 0: had it skipped the spec rank 0
-    applied, it would load without the expert-parallel plan the others shard by."""
-    monkeypatch.setenv("MODELOPT_EP_DEGREE", "auto" if not rank0_applies else "1")
-    rank0_plan = DistributionPlan(4, 4) if rank0_applies else DistributionPlan(4)
-    _as_rank(monkeypatch, 1, spec=("spec", rank0_applies, None), plan=("plan", rank0_plan, None))
-    serve(_deepseek_v3(n_routed_experts=8))
-
-    plan, hf_config = resolve_distribution_plan(str(tmp_path))
-
-    assert plan == rank0_plan
-    spec_plan = get_spec("deepseek_v3").ep_spec.base_model_ep_plan
-    assert (getattr(hf_config, "base_model_ep_plan", None) == spec_plan) is rank0_applies
 
 
 def _one_rank_cannot_see_the_checkpoint_job(rank, size, ckpt):
