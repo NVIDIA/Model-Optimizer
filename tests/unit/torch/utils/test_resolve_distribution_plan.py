@@ -445,15 +445,18 @@ def test_a_run_without_expert_parallelism_needs_no_spec(run_as, serve, monkeypat
     [
         pytest.param(_deepseek_v3(n_routed_experts=3), None, id="auto_finds_no_degree"),
         pytest.param(_qwen3_moe(num_experts=8), "1", id="explicit_degree_one"),
+        pytest.param(_deepseek_v3(n_routed_experts=8), "1", id="explicit_degree_one_spec_plan"),
     ],
 )
 def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
     run_as, serve, monkeypatch, tmp_path, config, ep_degree
 ):
-    """No EP degree above 1 divides 3 experts over 2 ranks, and an explicit 1 asks for none. With
-    nothing sharded either, every rank would hold the whole MoE: that must fail, not run."""
+    """No EP degree above 1 divides 3 experts over 2 ranks, and an explicit 1 asks for none,
+    whether the plan comes with the config (Qwen3-MoE) or only from the model's spec, which an EP
+    degree of 1 skips (DeepSeek-V3). With nothing sharded either, every rank would hold the whole
+    MoE: that must fail, not run."""
     if ep_degree is not None:
-        if Version(transformers.__version__) < Version("5.7"):
+        if config.model_type == "qwen3_moe" and Version(transformers.__version__) < Version("5.7"):
             pytest.skip("qwen3_moe's base_model_ep_plan ships in transformers 5.7")
         monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
     run_as(2)
@@ -461,6 +464,23 @@ def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
 
     with pytest.raises(RuntimeError, match="can be expert-parallel, but the plan resolved"):
         resolve_distribution_plan(str(tmp_path))
+
+
+def test_the_plan_a_spec_would_supply(monkeypatch):
+    """What that guard reads at an EP degree of 1: the spec's plan, nothing for a model with no
+    spec or no expert-parallel section, and nothing for a spec that refuses expert parallelism even
+    when it names a plan."""
+    from modelopt.torch import models
+    from modelopt.torch.utils import moe
+
+    assert moe._spec_ep_plan("deepseek_v3") == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
+    assert moe._spec_ep_plan("llama") == {}
+    assert moe._spec_ep_plan("no_such_model_type") == {}
+    refusing = SimpleNamespace(
+        ep_spec=SimpleNamespace(unsupported="not yet", base_model_ep_plan={"layers.*.mlp": "x"})
+    )
+    monkeypatch.setattr(models, "get_spec", lambda model_type: refusing)
+    assert moe._spec_ep_plan("anything") == {}
 
 
 def test_an_ep_capable_moe_may_be_fsdp2_sharded_instead(run_as, serve, monkeypatch, tmp_path):

@@ -197,6 +197,21 @@ def apply_distributed_support(
     return hf_config
 
 
+def _spec_ep_plan(model_type: str) -> dict[str, str]:
+    """The ``base_model_ep_plan`` :func:`apply_distributed_support` would attach for ``model_type``.
+
+    Empty for a model type with no spec, no expert-parallel section, or one that refuses expert
+    parallelism. Only reads the spec: nothing is applied, checked or patched.
+    """
+    from modelopt.torch.models import get_spec
+
+    spec = get_spec(model_type)
+    ep = getattr(spec, "ep_spec", None) if spec is not None else None
+    if ep is None or ep.unsupported:
+        return {}
+    return dict(ep.base_model_ep_plan or {})
+
+
 # ---------------------------------------------------------------------------------------------------
 # DP=EP all-to-all expert transport (`torch_a2a`)
 #
