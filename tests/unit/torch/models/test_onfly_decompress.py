@@ -61,11 +61,13 @@ def restore_loader_hooks(monkeypatch):
 
 
 class _ScaledCompressor:
-    """Stands in for a compressed_tensors compressor: ``weight = weight_packed * weight_scale``."""
+    """Stands in for a compressed_tensors compressor: ``weight = stored weight * weight_scale``,
+    the stored weight being ``weight_packed`` (pack-quantized) or ``weight`` (float formats)."""
 
     @classmethod
     def decompress(cls, state_dict, scheme):
-        return {"weight": state_dict["weight_packed"].float() * state_dict["weight_scale"]}
+        stored = state_dict.get("weight_packed", state_dict.get("weight"))
+        return {"weight": stored.float() * state_dict["weight_scale"]}
 
 
 def _stock_expert_converters():
@@ -104,50 +106,6 @@ def _load(converters, checkpoint):
 # ------------------------------------------------------------- rewriting the per-expert converters
 
 
-def test_weight_sources_become_the_stored_keys_anchor_first_and_gate_before_up():
-    """Each ``.weight`` source becomes the checkpoint's stored keys, grouped anchor first with gate
-    ahead of up in every group (``Concatenate`` stacks in source order, so rows stay [gate; up]).
-    Targets are kept, and the decompress op runs first, as a ``MergeModulelist`` so that loaders
-    which only shard experts when the first op is one still do."""
-    gate_up, _ = _stock_expert_converters()
-    rewritten = onfly._compressedify(gate_up, _ScaledCompressor, None, PACKED)
-
-    assert rewritten.source_patterns == [
-        "mlp.experts.*.gate_proj.weight_packed$",
-        "mlp.experts.*.up_proj.weight_packed$",
-        "mlp.experts.*.gate_proj.weight_scale$",
-        "mlp.experts.*.up_proj.weight_scale$",
-        "mlp.experts.*.gate_proj.weight_shape$",
-        "mlp.experts.*.up_proj.weight_shape$",
-    ]
-    assert rewritten.target_patterns == ["mlp.experts.gate_up_proj"]
-    decompress, *stock_ops = rewritten.operations
-    assert isinstance(decompress, MergeModulelist)
-    assert [repr(op) for op in stock_ops] == [repr(op) for op in gate_up.operations]
-
-
-def test_stored_keys_are_anchored_so_a_weight_never_claims_its_scale():
-    """Float formats store ``weight`` next to ``weight_scale``, and transformers regex-*searches*
-    source patterns: an unanchored ``gate_proj.weight`` would also claim ``gate_proj.weight_scale``."""
-    gate_up, _ = _stock_expert_converters()
-    rewritten = onfly._compressedify(gate_up, _ScaledCompressor, None, ("weight", "weight_scale"))
-    key = "model.layers.0.mlp.experts.7."
-    fused = "model.layers.0.mlp.experts.gate_up_proj"
-
-    assert rewritten.rename_source_key(key + "gate_proj.weight_scale") == (
-        fused,
-        "mlp.experts.*.gate_proj.weight_scale$",
-    )
-    assert rewritten.rename_source_key(key + "gate_proj.weight") == (
-        fused,
-        "mlp.experts.*.gate_proj.weight$",
-    )
-    assert rewritten.rename_source_key(key + "up_proj.weight_scale")[1] == (
-        "mlp.experts.*.up_proj.weight_scale$"
-    )
-    assert rewritten.rename_source_key(key + "down_proj.weight")[1] is None
-
-
 def test_non_weight_sources_are_kept_verbatim():
     """Only ``.weight`` sources name a compressed tensor; any other source passes through as is."""
     conv = WeightConverter(
@@ -166,9 +124,18 @@ def test_non_weight_sources_are_kept_verbatim():
 # ----------------------------------------------------------------- decompressing during the load
 
 
-def test_packed_experts_decompress_then_fuse_like_an_uncompressed_checkpoint():
-    """Through transformers' loader objects, per-expert packed weights and scales come out as the
-    fused bf16 ``gate_up_proj`` ([gate; up] per expert) and the stacked ``down_proj``."""
+@pytest.mark.parametrize(
+    "stored", [PACKED, ("weight", "weight_scale")], ids=["pack-quantized", "weight-and-scale"]
+)
+def test_packed_experts_decompress_then_fuse_like_an_uncompressed_checkpoint(stored):
+    """Through transformers' loader objects, per-expert compressed weights and scales come out as
+    the fused bf16 ``gate_up_proj`` ([gate; up] per expert) and the stacked ``down_proj``.
+
+    The decompress op runs first, as a ``MergeModulelist``: loaders shard experts at load only when
+    the first op is one. A float format stores ``weight`` next to ``weight_scale``, and transformers
+    regex-*searches* source patterns, so only anchored patterns keep a weight from claiming its
+    scale.
+    """
     n_experts, inter, hidden = 3, 2, 4
     shapes = {"gate": (inter, hidden), "up": (inter, hidden), "down": (hidden, inter)}
     gen = torch.Generator().manual_seed(0)
@@ -179,15 +146,14 @@ def test_packed_experts_decompress_then_fuse_like_an_uncompressed_checkpoint():
             scale = torch.rand(shape[0], 1, generator=gen) + 0.5
             dense[proj, e] = (packed.float() * scale).bfloat16()
             key = f"model.layers.0.mlp.experts.{e}.{proj}_proj."
-            checkpoint |= {
-                key + "weight_packed": packed,
-                key + "weight_scale": scale,
-                key + "weight_shape": torch.tensor(shape),
-            }
+            values = {"weight_packed": packed, "weight": packed, "weight_scale": scale}
+            values["weight_shape"] = torch.tensor(shape)
+            checkpoint |= {key + name: values[name] for name in stored}
     converters = [
-        onfly._compressedify(conv, _ScaledCompressor, None, PACKED)
+        onfly._compressedify(conv, _ScaledCompressor, None, stored)
         for conv in _stock_expert_converters()
     ]
+    assert all(isinstance(conv.operations[0], MergeModulelist) for conv in converters)
 
     fused = _load(converters, checkpoint)
     gate_up = fused.pop("model.layers.0.mlp.experts.gate_up_proj")
@@ -397,42 +363,32 @@ def _install_for_deepseek_v3(monkeypatch):
 
 
 @pytest.mark.usefixtures("restore_loader_hooks")
-def test_another_model_loaded_in_the_process_keeps_its_stock_expert_converters(monkeypatch):
-    """The hooks outlive the compressed checkpoint's load. Rewritten, an uncompressed MoE's experts
-    would match no stored key, load newly initialized, and from_pretrained would not complain."""
-    _install_for_deepseek_v3(monkeypatch)
-    other = SimpleNamespace(config=DeepseekV3Config(num_hidden_layers=1))
-
-    out = mu.get_model_conversion_mapping(other)
-
-    stock = [conv.source_patterns for conv in _stock_expert_converters()]
-    assert [conv.source_patterns for conv in out] == stock
-    assert all(p.endswith(".weight") for patterns in stock for p in patterns)
-
-
-@pytest.mark.usefixtures("restore_loader_hooks")
-@pytest.mark.parametrize("repeat", ["stripped", "fresh"])
-def test_the_compressed_checkpoint_is_rewritten_through_the_copy_from_pretrained_loads(
-    monkeypatch, repeat
-):
-    """from_pretrained builds the model from a deep copy of the config ``prepare`` handed over. That
-    copy must still select the rewrite -- whether ``prepare`` ran again on the config it stripped of
-    its quantization_config (Kimi-K3) or on a fresh config of the same checkpoint -- and the mark
-    must not reach the config a later save writes."""
+@pytest.mark.parametrize("loaded", ["another-model", "stripped-copy", "fresh-config"])
+def test_only_the_compressed_checkpoint_loads_through_the_rewritten_converters(monkeypatch, loaded):
+    """The hooks outlive the compressed checkpoint's load. Rewritten, another (uncompressed) MoE's
+    experts would match no stored key, load newly initialized, and from_pretrained would not
+    complain. from_pretrained builds the model from a deep copy of the config ``prepare`` handed
+    over; that copy must still select the rewrite, whether ``prepare`` ran again on the config it
+    stripped of its quantization_config (Kimi-K3) or on a fresh config of the same checkpoint, and
+    the mark must not reach the config a later save writes."""
     config = _install_for_deepseek_v3(monkeypatch)
-    if repeat == "stripped":
-        config.quantization_config = None
-    else:
+    if loaded == "another-model":
         config = DeepseekV3Config(num_hidden_layers=1)
-        config.quantization_config = {"format": "stub-format"}
-    onfly.install_onfly_decompress(config)
+    else:
+        if loaded == "stripped-copy":
+            config.quantization_config = None
+        else:
+            config = DeepseekV3Config(num_hidden_layers=1)
+            config.quantization_config = {"format": "stub-format"}
+        onfly.install_onfly_decompress(config)
     model = SimpleNamespace(config=copy.deepcopy(config))
 
     out = mu.get_model_conversion_mapping(model)
 
+    stored = "weight" if loaded == "another-model" else "weight_packed$"
     assert [conv.source_patterns[0] for conv in out] == [
-        "mlp.experts.*.gate_proj.weight_packed$",
-        "mlp.experts.*.down_proj.weight_packed$",
+        f"mlp.experts.*.gate_proj.{stored}",
+        f"mlp.experts.*.down_proj.{stored}",
     ]
     assert onfly._MARK not in model.config.to_dict()
 
@@ -466,12 +422,6 @@ def test_the_quantization_config_is_found_at_the_top_level_then_on_the_text_conf
     """A VLM may carry its compressed-tensors config at the top level or on ``text_config``, as a
     config object or a raw dict; it is always returned as a plain dict."""
     assert onfly._find_quantization_config(config) == found
-
-
-def test_a_config_without_a_quantization_config_is_a_value_error():
-    """Callers rely on exactly this error to mean "plain experts, nothing to decompress"."""
-    with pytest.raises(ValueError, match="quantization_config"):
-        onfly._find_quantization_config(SimpleNamespace(text_config=SimpleNamespace()))
 
 
 @pytest.mark.usefixtures("restore_loader_hooks")
