@@ -21,7 +21,8 @@ imports:
 
 metadata:
   description: >-
-    Applies GGML-compatible IQ1_M weight-only quantization to MLP/MoE layers, calibrated with GPTQ.
-    Attention and the other linears stay in BF16. Requires calibration data.
+    Applies GGML-compatible IQ1_M weight-only quantization to MLP/MoE layers, calibrated with GPTQ;
+    fused MoE experts, which GPTQ does not reach, get an imatrix-weighted encode. Attention and the
+    other linears stay in BF16. Requires calibration data.
 quantize:
   $import: preset

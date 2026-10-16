@@ -1057,6 +1057,18 @@ class _DMRegistryCls:
 
         return decorator
 
+    def register_subclass(self, nn_cls: type[nn.Module], key: str) -> None:
+        """Register ``nn_cls`` like its registered base class, if it has one and is not covered yet.
+
+        Needed for subclasses that override ``forward``, which the automatic lookup skips.
+        """
+        if nn_cls in self:
+            return
+        for base_cls in self._registry:
+            if issubclass(nn_cls, base_cls):
+                self.register({nn_cls: key})(self[base_cls])
+                return
+
     def unregister(self, nn_cls: type[nn.Module] | type[T]) -> None:
         """Unregister a previously registered dynamic base module and all its inherited modules.
 

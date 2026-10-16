@@ -55,6 +55,7 @@ def get_data_loader(num_batches):
         yield torch.rand(2, 3, 56, 56), int(torch.randint(1000, (1,)))
 
 
+@pytest.mark.manual  # AutoNAS is not actively maintained; ~3s
 def test_automode(test_config):
     # Use model class to create a model inside mtn.convert
     model = mtn.convert((TinyMobileNetFeatures, (), {}), mode=[("autonas", test_config)])
@@ -118,6 +119,7 @@ def test_automode(test_config):
     assert not torch.allclose(out_dyn, out2)
 
 
+@pytest.mark.manual  # AutoNAS is not actively maintained; ~3s each
 @pytest.mark.parametrize("native_eval", [False, True])
 def test_prep_for_eval(native_eval, test_config):
     """Test all four ways of calling prep_for_eval.
@@ -288,6 +290,7 @@ def test_prep_for_eval(native_eval, test_config):
     assert max_config == mtn.get_subnet_config(model)
 
 
+@pytest.mark.manual  # AutoNAS is not actively maintained; ~4s
 def test_set_auto_mode(test_config):
     """Test whether we can correctly set automode on/off."""
     # setup model in autonas mode and training mode
@@ -412,15 +415,24 @@ def test_set_auto_mode(test_config):
             torch.randn(1, 16, 8, 8),
             ["autonas", "export_nas"],
         ),
-        (
+        pytest.param(
             TinyMobileNetFeatures,
             (),
             "",
             False,
             torch.randn(1, 3, 64, 64),
             ["autonas", "export_nas"],
+            marks=pytest.mark.manual,  # 5s; the InvertedResidual cases cover the same paths
         ),
-        (TinyMobileNetFeatures, (), "", False, torch.randn(1, 3, 64, 64), ["autonas"]),
+        pytest.param(
+            TinyMobileNetFeatures,
+            (),
+            "",
+            False,
+            torch.randn(1, 3, 64, 64),
+            ["autonas"],
+            marks=pytest.mark.manual,
+        ),
         (TinyMobileNetFeatures, (), "", False, torch.randn(1, 3, 64, 64), []),
     ],
 )

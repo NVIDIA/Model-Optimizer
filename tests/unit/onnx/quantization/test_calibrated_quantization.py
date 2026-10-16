@@ -78,6 +78,8 @@ def _initializer_arrays(model: onnx.ModelProto) -> dict[str, np.ndarray]:
             0.007997047156095505,
             [0.019685039296746254, 0.023622047156095505, 0.027559055015444756],
             id="int8-entropy",
+            # ~13s each; entropy calibration is also covered in tests/gpu/onnx
+            marks=pytest.mark.manual,
         ),
         pytest.param(
             "int8",
@@ -94,6 +96,8 @@ def _initializer_arrays(model: onnx.ModelProto) -> dict[str, np.ndarray]:
             0.028210056945681572,
             [0.06944013386964798, 0.08332816511392593, 0.09721619635820389],
             id="fp8-entropy",
+            # ~13s each; entropy calibration is also covered in tests/gpu/onnx
+            marks=pytest.mark.manual,
         ),
         pytest.param(
             "fp8",

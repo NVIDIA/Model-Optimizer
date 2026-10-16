@@ -77,12 +77,7 @@ def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertRe
             "Expected 'dflash' (default), 'domino', 'dspark', 'dflash2' or 'lilicorr'."
         )
 
-    original_cls = type(model)
-    if original_cls not in registry:
-        for cls in registry._registry:
-            if issubclass(original_cls, cls):
-                registry.register({original_cls: "base_model_class"})(registry[cls])
-                break
+    registry.register_subclass(type(model), "base_model_class")
 
     dflash_model = registry.convert(model)
     dflash_model.modify(config)

@@ -97,6 +97,7 @@ from modelopt.torch.quantization.plugins.transformer_engine import (
 )
 from modelopt.torch.quantization.qtensor import QTensorWrapper
 from modelopt.torch.quantization.utils import is_quantized_linear
+from modelopt.torch.quantization.utils.calib_utils import GPTQHelper
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 try:
@@ -1522,6 +1523,53 @@ def _test_gptq_mamba_hybrid(rank, size):
                 for e in m.local_experts
             )
     assert torch.isfinite(forward(model)).all()
+
+
+def test_gptq_hessian_sync_across_dp(dist_workers_size_2):
+    """GPTQ at DP2 must use the Hessian of both ranks' calibration data and agree across ranks."""
+    dist_workers_size_2.run(_test_gptq_hessian_sync_across_dp)
+
+
+def _test_gptq_hessian_sync_across_dp(rank, size):
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    model = get_mcore_gpt_model(tensor_model_parallel_size=1, num_layers=1).cuda()
+    ref_model = get_mcore_gpt_model(tensor_model_parallel_size=1, num_layers=1).cuda()
+    ref_model.load_state_dict(model.state_dict())
+
+    torch.manual_seed(SEED + rank)
+    batch = get_batch(model, batch_size=2)
+    all_input_ids = [torch.empty_like(batch[0]) for _ in range(size)]
+    torch.distributed.all_gather(all_input_ids, batch[0])
+
+    def forward(model, input_ids_list):
+        for input_ids in input_ids_list:
+            model(input_ids, *batch[2:4], labels=batch[1], loss_mask=batch[4])
+
+    hessians = {}
+    update_weights = GPTQHelper.update_weights
+
+    def capture_hessian(self, *args, **kwargs):
+        hessians[self.name] = self.hessian.clone()
+        return update_weights(self, *args, **kwargs)
+
+    quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
+    quant_cfg["algorithm"] = {"method": "gptq"}
+    with patch.object(GPTQHelper, "update_weights", capture_hessian):
+        mtq.quantize(model, quant_cfg, partial(forward, input_ids_list=[batch[0]]))
+        dp_hessians = dict(hessians)
+        # Every rank calibrates on the union of the data, so its Hessian is the full-data one.
+        mtq.quantize(ref_model, quant_cfg, partial(forward, input_ids_list=all_input_ids))
+
+    assert dp_hessians
+    for name, hessian in dp_hessians.items():
+        # TF32 matmuls in the Hessian update leave ~1e-4 relative noise between the two runs.
+        assert (hessian - hessians[name]).norm() < 1e-3 * hessians[name].norm(), name
+
+    for name, m in model.named_modules():
+        if is_quantized_linear(m) and m.weight_quantizer.is_enabled:
+            weights = [torch.empty_like(m.weight) for _ in range(size)]
+            torch.distributed.all_gather(weights, m.weight.contiguous())
+            assert all(torch.equal(w, weights[0]) for w in weights), f"{name} differs across ranks"
 
 
 def _auto_quantize_mamba_hybrid_cost_helper(rank, size, expert_model_parallel_size, result_path):
