@@ -22,12 +22,14 @@ from math import prod
 import torch
 import vllm
 from packaging.version import Version
+from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
     causal_conv1d_update,
     is_conv_state_dim_first,
 )
+from vllm.utils.math_utils import round_up
 
 from modelopt.torch.kernels.quantization.linear_attention.replayssm_cache import (
     _gdn_replay_state_spec,
@@ -55,12 +57,28 @@ def configure_vllm_replayssm(model_runner, config, quant_config):
     if Version(vllm.__version__).release[:2] != (0, 30):
         raise NotImplementedError("ReplaySSM serving requires vLLM 0.30.x")
     if (
-        not config.model_config.enforce_eager
-        or config.model_config.dtype != torch.bfloat16
+        config.model_config.dtype != torch.bfloat16
         or config.scheduler_config.async_scheduling
         or config.scheduler_config.max_num_seqs != 1
     ):
-        raise ValueError("ReplaySSM requires BF16, eager synchronous execution and max_num_seqs=1")
+        raise ValueError("ReplaySSM requires BF16, synchronous execution and max_num_seqs=1")
+    if not config.model_config.enforce_eager:
+        mode = config.compilation_config.cudagraph_mode
+        if mode not in (
+            CUDAGraphMode.PIECEWISE,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+        ) or (mode.has_full_cudagraphs() and not hasattr(model_runner, "req_states")):
+            raise ValueError(
+                "ReplaySSM CUDA graphs require V2 decode-only full graphs or PIECEWISE; "
+                "use --enforce-eager with the older runner"
+            )
+        if mode.has_mode(CUDAGraphMode.PIECEWISE) and (
+            "vllm::qwen_gdn_attention_core" not in (config.compilation_config.splitting_ops or [])
+        ):
+            raise ValueError(
+                "ReplaySSM piecewise graphs require the default attention splitting ops"
+            )
     if (
         config.speculative_config is not None
         or config.cache_config.enable_prefix_caching
@@ -113,11 +131,20 @@ class _ReplaySSMGDN(_LinearAttentionQuantMixin):
     def get_kv_cache_spec(self, vllm_config):
         spec = super().get_kv_cache_spec(vllm_config)
         extra = self._replay_spec()[1:]
-        return replace(
+        expanded = replace(
             spec,
             shapes=(*spec.shapes, *(shape for shape, _ in extra)),
             dtypes=(*spec.dtypes, *(dtype for _, dtype in extra)),
+            page_size_padded=None,
         )
+        # Hybrid alignment was computed from the original GDN state. Preserve
+        # its page multiple so vLLM can expand the attention pages consistently.
+        if spec.page_size_padded is not None:
+            expanded = replace(
+                expanded,
+                page_size_padded=round_up(expanded.page_size_bytes, spec.page_size_padded),
+            )
+        return expanded
 
     def bind_kv_cache(self, cache):
         # Preserve the native two-state warmup interface; only the engine cache
@@ -143,13 +170,18 @@ class _ReplaySSMGDN(_LinearAttentionQuantMixin):
         if hasattr(runner, "req_states"):
             # vLLM 0.30 V2 keeps request metadata in indexed CPU arrays.
             state = runner.req_states
+            if not state.req_id_to_index:
+                return None  # Compilation/capture warmup has no live request.
             index = next(iter(state.req_id_to_index.values()))
             return state.num_computed_tokens_np[index], state.prefill_len.np[index]
         batch = runner.input_batch
+        if not batch.num_reqs:
+            return None
         return batch.num_computed_tokens_cpu[0], batch.num_prompt_tokens[0]
 
     def _forward_core(self, mixed_qkv, b, a, core_attn_out):
-        metadata = get_forward_context().attn_metadata
+        context = get_forward_context()
+        metadata = context.attn_metadata
         metadata = metadata.get(self.prefix) if isinstance(metadata, dict) else None
         if metadata is None:
             return super()._forward_core(mixed_qkv, b, a, core_attn_out)
@@ -165,8 +197,18 @@ class _ReplaySSMGDN(_LinearAttentionQuantMixin):
         indices = metadata.non_spec_state_indices_tensor[
             : metadata.num_decodes + metadata.num_prefills
         ]
-        computed, prompt_length = self._prompt_progress()
-        is_prompt = computed < prompt_length
+        # V2 excludes every prefill, including one-token prompt tails, from
+        # full decode graphs. Its capture warmup has no live CPU request: run
+        # replay on the dummy decode slots so the graph records the GPU counter
+        # updates, not the native non-replay recurrence.
+        progress = self._prompt_progress()
+        if progress is None:
+            if metadata.num_prefills:
+                return super()._forward_core(mixed_qkv, b, a, core_attn_out)
+            is_prompt = False
+        else:
+            computed, prompt_length = progress
+            is_prompt = computed < prompt_length
         if is_prompt:
             if computed > 0 and torch.any(self._replay_cache.steps.index_select(0, indices) != 0):
                 raise ValueError("Continuation prefill after replay decode is not supported")

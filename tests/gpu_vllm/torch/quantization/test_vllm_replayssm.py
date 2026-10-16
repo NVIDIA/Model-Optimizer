@@ -31,7 +31,7 @@ native = pytest.importorskip("emulation", reason="Requires pinned upstream Repla
 ROOT = Path(__file__).parents[4]
 
 
-def _audit(worker, install=False):
+def _audit(worker, install=False, compiled=False):
     # This optional adapter is only imported inside the vLLM 0.30 worker.
     from modelopt.torch.quantization.plugins.vllm_replayssm import _ReplaySSMGDN
 
@@ -40,6 +40,16 @@ def _audit(worker, install=False):
     for layer in layers:
         cache = layer._replay_cache
         assert len(layer.kv_cache) == 9
+        if compiled:
+            if install:
+                original_reset = cache.reset
+
+                def reset(indices, _layer=layer, _reset=original_reset):
+                    _layer._replay_active_indices = indices.clone()
+                    _reset(indices)
+
+                cache.reset = reset
+            continue
         if install:
             layer._replay_counts = {"steps": 0, "resets": 0, "flushes": 0}
             original = cache.step
@@ -88,11 +98,33 @@ def _audit(worker, install=False):
                 _layer._replay_counts["steps"] += len(indices)
 
             cache.step = checked
+    if compiled:
+        return (
+            []
+            if install
+            else [
+                layer._replay_cache.steps.index_select(0, layer._replay_active_indices).tolist()
+                for layer in layers
+            ]
+        )
     return [layer._replay_counts for layer in layers]
 
 
-@pytest.fixture
-def replay_engine(tmp_path, monkeypatch):
+def _graph_replays(worker, start=False):
+    if start:
+        worker._replay_profiler = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+        )
+        worker._replay_profiler.start()
+        return
+    profiler = worker._replay_profiler
+    profiler.stop()
+    del worker._replay_profiler
+    return sum(event.count for event in profiler.key_averages() if event.key == "cudaGraphLaunch")
+
+
+@pytest.fixture(params=[True, False], ids=["eager", "full_decode_graph"])
+def replay_engine(tmp_path, monkeypatch, request):
     if Version(vllm_version).release[:2] != (0, 30):
         pytest.skip("ReplaySSM engine adapter requires vLLM 0.30.x")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
@@ -121,7 +153,7 @@ def replay_engine(tmp_path, monkeypatch):
         moe_intermediate_size=64,
         shared_expert_intermediate_size=64,
         mlp_only_layers=[],
-        full_attention_interval=2,
+        layer_types=["linear_attention", "full_attention"],
         architectures=["Qwen3NextForCausalLM"],
     ).save_pretrained(model)
     shutil.copytree(ROOT / "tests/_test_utils/torch/tokenizer", model, dirs_exist_ok=True)
@@ -132,7 +164,8 @@ def replay_engine(tmp_path, monkeypatch):
         max_model_len=128,
         max_num_seqs=1,
         max_num_batched_tokens=64,
-        enforce_eager=True,
+        enforce_eager=request.param,
+        compilation_config={"cudagraph_mode": "FULL_AND_PIECEWISE"} if not request.param else None,
         enable_prefix_caching=False,
         enable_chunked_prefill=True,
         async_scheduling=False,
@@ -145,25 +178,30 @@ def replay_engine(tmp_path, monkeypatch):
         seed=17,
     )
     try:
-        llm.collective_rpc(_audit, kwargs={"install": True})
-        yield llm
+        llm.collective_rpc(_audit, kwargs={"install": True, "compiled": not request.param})
+        yield llm, not request.param
     finally:
         llm.llm_engine.engine_core.shutdown()
 
 
 def test_replayssm_engine(replay_engine):
-    llm = replay_engine
+    llm, compiled = replay_engine
     samples = [{"prompt_token_ids": [3] * length} for length in (73, 5, 65, 1)]
     params = SamplingParams(temperature=0, max_tokens=34, ignore_eos=True, logprobs=1)
     first = llm.generate(samples, params, use_tqdm=False)
-    repeated = llm.generate(samples, params, use_tqdm=False)
+    if compiled:
+        llm.collective_rpc(_graph_replays, kwargs={"start": True})
+    try:
+        repeated = llm.generate(samples, params, use_tqdm=False)
+    finally:
+        if compiled:
+            assert all(count > 0 for count in llm.collective_rpc(_graph_replays))
 
     def values(outputs):
         return [(o.outputs[0].token_ids, o.outputs[0].cumulative_logprob) for o in outputs]
 
     assert values(first) == values(repeated)
     assert all(len(tokens) == 34 and math.isfinite(score) for tokens, score in values(first))
-    counts = llm.collective_rpc(_audit)
-    assert all(
-        layer == {"steps": 264, "resets": 8, "flushes": 16} for rank in counts for layer in rank
-    )
+    counts = llm.collective_rpc(_audit, kwargs={"compiled": compiled})
+    expected = [33] if compiled else {"steps": 264, "resets": 8, "flushes": 16}
+    assert all(layer == expected for rank in counts for layer in rank)

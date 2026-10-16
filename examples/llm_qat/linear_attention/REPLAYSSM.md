@@ -160,11 +160,22 @@ export PYTHONPATH="$PWD/examples/vllm_serve:/path/to/standalone-packages:${PYTHO
 export RECIPE_PATH=general/ptq/gdn_replayssm_fp8_read
 VLLM_GDN_DECODE_KERNEL=triton vllm serve /path/to/hf-checkpoint \
   --worker-cls replayssm_worker.ReplaySSMWorker \
-  --dtype bfloat16 --enforce-eager --no-async-scheduling \
+  --dtype bfloat16 --no-async-scheduling \
+  --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
   --max-num-seqs 1 --no-enable-prefix-caching --mamba-cache-mode none \
   --mamba-cache-dtype float32 \
   --additional-config '{"gdn_prefill_backend":"triton"}'
 ```
+
+The vLLM 0.30 V2 runner supports compiled execution with full decode CUDA
+graphs and piecewise prefill graphs. Its scheduler keeps prompt tokens, including
+one-token prompt tails, out of the full decode graph. Replay positions and refresh
+flags come from GPU counters, so they advance on every graph replay. Warmup records
+the ReplaySSM recurrence using dummy slots rather than the ordinary GDN recurrence.
+The default attention splitting operations must remain enabled. Use
+`--enforce-eager` for debugging or with the older runner; full graphs that include
+prefill are not supported. Single-request and synchronous-scheduling restrictions
+still apply.
 
 A BF16 checkpoint plus this recipe enables dynamic state PTQ without calibration.
 For QAT/QAD, provide the exported HF weights and the same recipe used in training;
@@ -200,6 +211,13 @@ all four requests exercised 264 decode steps and 16 flushes; every decode output
 and FP32 checkpoint matched the upstream runner bit-for-bit, and repeated token
 IDs and log probabilities were identical. Four local GPU checks also passed,
 including the existing training-adjoint checks.
+
+CUDA graph qualification on JHB GB300 also passed four indexed-cache cases
+(FP8/FP32 reads, eager/captured execution) and both eager and compiled engine cases.
+The captured cache retained bit-exact output, anchor, read-copy and counter parity
+with upstream ReplaySSM through refreshes and slot reuse. The compiled engine test
+confirmed CUDA graph launches, repeated generation, prompt-boundary handling and
+GPU counter advancement.
 
 This is functional coverage with dummy model weights, not a pretrained quality
 result or a full-model QAT/QAD export-to-serving qualification. The engine test

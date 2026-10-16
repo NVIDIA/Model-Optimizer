@@ -42,7 +42,8 @@ def _paged_buffers(slots, spec):
 
 
 @pytest.mark.parametrize("quantized_read", [True, False])
-def test_replay_cache_reordering_flush_and_reuse(quantized_read):
+@pytest.mark.parametrize("captured", [False, True])
+def test_replay_cache_reordering_flush_and_reuse(quantized_read, captured):
     torch.manual_seed(73)
     buffers = _paged_buffers(5, _gdn_replay_state_spec(1, 2, 64))
     cache = _GDNReplayCache(buffers, 1, quantized_read=quantized_read)
@@ -58,6 +59,19 @@ def test_replay_cache_reordering_flush_and_reuse(quantized_read):
         cache.reset(torch.tensor([slot], device="cuda", dtype=torch.int32))
         references[slot] = native.GDNReplay(state, 1, mode)
 
+    if captured:
+        # Fixed addresses, changing request slots and GPU counters on every replay.
+        static_qkv = torch.zeros(4, 384, device="cuda", dtype=torch.bfloat16)
+        static_a = torch.zeros(4, 2, device="cuda", dtype=torch.bfloat16)
+        static_b = torch.zeros_like(static_a)
+        static_indices = torch.zeros(4, device="cuda", dtype=torch.int32)
+        static_output = torch.empty(4, 2, 64, device="cuda")
+        for _ in range(3):
+            cache.step(static_qkv, static_a, static_b, rate, bias, static_indices, static_output)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            cache.step(static_qkv, static_a, static_b, rate, bias, static_indices, static_output)
     prefill(1)
     prefill(2)
     for iteration in range(40):
@@ -73,12 +87,23 @@ def test_replay_cache_reordering_flush_and_reuse(quantized_read):
             slots.insert(0, 3)
         if iteration % 4 == 0:
             slots.insert(1, 0)
+        if captured:
+            slots += [0] * (4 - len(slots))
         indices = torch.tensor(slots, device="cuda", dtype=torch.int32)
         qkv = torch.randn(len(slots), 384, device="cuda", dtype=torch.bfloat16)
         a = (torch.randn(len(slots), 2, device="cuda") * 0.1 - 3).bfloat16()
         b = torch.randn_like(a)
         output = torch.full((len(slots), 2, 64), 17.0, device="cuda")
-        cache.step(qkv, a, b, rate, bias, indices, output)
+        if captured:
+            for target, source in zip(
+                (static_qkv, static_a, static_b, static_indices, static_output),
+                (qkv, a, b, indices, output),
+            ):
+                target.copy_(source)
+            graph.replay()
+            output = static_output
+        else:
+            cache.step(qkv, a, b, rate, bias, indices, output)
         for row, slot in enumerate(slots):
             if slot == 0:
                 assert torch.all(output[row] == 17)
