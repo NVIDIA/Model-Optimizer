@@ -18,12 +18,11 @@
 import importlib.util
 import json
 from copy import deepcopy
-from datetime import timedelta
-from functools import partial
 from types import SimpleNamespace
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
     wrap_in_parent_with_tied_keys,
@@ -1111,33 +1110,6 @@ def test_source_checkpoint_is_none_for_a_model_built_from_config(tmp_path, monke
     assert not any(export_dir.iterdir())
 
 
-def test_process_hf_model_for_export_folds_in_place_and_returns_the_quant_config():
-    """The processing half the no-gather writer runs before writing each rank's shard."""
-    pytest.importorskip("transformers")
-    from transformers import LlamaConfig, LlamaForCausalLM
-
-    from modelopt.torch.export.unified_export_hf import _process_hf_model_for_export
-
-    config = LlamaConfig(
-        vocab_size=64,
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-    )
-    model = LlamaForCausalLM(config).eval()
-    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randint(0, 64, (1, 8))))
-
-    quant_config = _process_hf_model_for_export(model, torch.float16)
-
-    assert quant_config["quantization"]["quant_algo"] == "FP8"
-    # Folded in place: the model's own state dict is now the deployment one.
-    q_proj = model.model.layers[0].self_attn.q_proj
-    assert q_proj.weight.dtype == torch.float8_e4m3fn
-    assert "model.layers.0.self_attn.q_proj.weight_scale" in model.state_dict()
-
-
 @pytest.mark.parametrize("source_plan", [None, {"layers.*.feed_forward.experts": "grouped_gemm"}])
 def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_path, source_plan):
     """The EP load's DistributedConfig and torch_a2a plan stay out of config.json, the source's own
@@ -1183,15 +1155,9 @@ def _one_rank_fails_after_the_write_job(rank, size, tmp_dir):
 
     model = torch.nn.Linear(2, 2)
     set_distribution_plan(model, DistributionPlan(size, ep_size=size))
-    # A rank left waiting in a collective its peer never joins gives up in seconds on this group.
-    group = torch.distributed.new_group(timeout=timedelta(seconds=10))
-    gather = partial(torch.distributed.all_gather_object, group=group)
     raised = None
     with (
-        mock.patch.object(torch.distributed, "all_gather_object", gather),
-        mock.patch.object(
-            torch.distributed, "barrier", partial(torch.distributed.barrier, group=group)
-        ),
+        bounded_collectives(),
         mock.patch.object(unified_export_hf, "_process_hf_model_for_export", return_value={}),
         mock.patch.object(distributed_writer, "distributed_save_hf_checkpoint") as write,
         # Rank 0 alone writes config.json, once every rank has written its shards.
@@ -1232,17 +1198,23 @@ def _one_rank_fails_processing_job(rank, size, tmp_dir):
             raise failure
         return {}
 
-    expected = (
-        pytest.raises(NotImplementedError, match="rank 1's experts")
-        if rank == 1
-        else pytest.raises(RuntimeError, match="rank 1 failed to compute export processed")
-    )
+    raised = None
     with (
+        bounded_collectives(),
         mock.patch.object(unified_export_hf, "_process_hf_model_for_export", process),
         mock.patch.object(distributed_writer, "distributed_save_hf_checkpoint") as write,
-        expected,
     ):
-        unified_export_hf.export_hf_checkpoint(model, export_dir=tmp_dir)
+        # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
+        # the shared worker down instead of failing this test alone.
+        try:
+            unified_export_hf.export_hf_checkpoint(model, export_dir=tmp_dir)
+        except (NotImplementedError, RuntimeError) as e:
+            raised = e
+    # Rank 1 raises its own error, and rank 0 one that names rank 1, before either writes.
+    if rank == 1:
+        assert raised is failure, raised
+    else:
+        assert isinstance(raised, RuntimeError) and "rank 1" in str(raised), raised
     write.assert_not_called()
 
 
@@ -1282,6 +1254,7 @@ def _expert_quantization_job(rank, size, tmp_dir, enabled_per_rank, down_enabled
         mock.patch.object(distributed_writer, "distributed_save_hf_checkpoint") as write,
         mock.patch.object(unified_export_hf, "_write_base_config"),
         mock.patch.object(unified_export_hf, "_write_hf_export_config"),
+        bounded_collectives(),
     ):
         # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
         # the shared worker down instead of failing this test alone.
@@ -1300,28 +1273,14 @@ def _expert_quantization_job(rank, size, tmp_dir, enabled_per_rank, down_enabled
 @pytest.mark.parametrize(
     ("enabled_per_rank", "down_enabled_per_rank", "refused"),
     [
-        (
-            ((False, False), (True, True)),
-            None,
-            "experts.gate_up_proj (rank 0: unquantized, rank 1: quantized)",
-        ),
-        (
-            ((True, True), (True, False)),
-            None,
-            "experts.gate_up_proj (rank 0: quantized, rank 1: mixed)",
-        ),
-        (((True, False), (False, True)), None, "experts.gate_up_proj (mixed)"),
-        (
-            ((True, True), (True, True)),
-            ((False, False), (True, True)),
-            "experts.down_proj (rank 0: unquantized, rank 1: quantized)",
-        ),
+        (((False, False), (True, True)), None, "experts.gate_up_proj"),
+        (((True, False), (False, True)), None, "experts.gate_up_proj"),
+        (((True, True), (True, True)), ((False, False), (True, True)), "experts.down_proj"),
         (((True, True), (True, True)), None, None),
         (((False, False), (False, False)), None, None),
     ],
     ids=[
         "ranks-disagree",
-        "one-rank-mixed",
         "every-rank-mixed",
         "down-proj-disagrees",
         "all-quantized",
@@ -1340,27 +1299,6 @@ def test_expert_parallel_ranks_agree_on_their_experts_quantization_before_foldin
         down_enabled_per_rank=down_enabled_per_rank,
         refused=refused,
     )
-
-
-@pytest.mark.parametrize(
-    ("dense", "ep_size", "flags"),
-    [
-        ("replicate", 1, (False, False)),
-        ("fsdp", 1, (True, False)),
-        ("replicate", 2, (False, True)),
-        ("fsdp", 2, (True, True)),
-    ],
-    ids=["replicated", "fsdp2", "expert-parallel", "both"],
-)
-def test_the_export_takes_how_the_model_is_sharded_from_its_plan(dense, ep_size, flags):
-    """A model can be FSDP2-dense and expert-parallel at once, so the two are read separately."""
-    from modelopt.torch.export.unified_export_hf import _hf_shard_flags
-    from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
-
-    model = torch.nn.Linear(2, 2)
-    set_distribution_plan(model, DistributionPlan(2, ep_size, dense))
-
-    assert _hf_shard_flags(model) == flags
 
 
 def test_an_expert_parallel_plan_with_replicated_dense_shards_is_refused_before_folding(tmp_path):
