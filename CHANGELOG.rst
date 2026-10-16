@@ -183,6 +183,7 @@ Changelog
 - Fix ONNX preprocessing with custom TensorRT plugin libraries on TensorRT 11.
 - Fix GPTQ with Megatron data parallelism: each data-parallel replica of a module now builds its Hessian from the whole calibration set instead of only its own shard, so all replicas reach the same quantized weights.
 - Fix ONNX quantization with the default ``concat_elimination`` pass crashing in calibration with ``KeyError: '<tensor>_ReduceMin'`` when a ``Concat`` input is a constant, such as the class token of a ViT.
+- Fix PTQ of native Transformers FP8 experts to apply source weight scales during calibration and export. Re-quantize affected checkpoints from the original FP8 source.
 
 0.47.0 (2026-09-23)
 ^^^^^^^^^^^^^^^^^^^
