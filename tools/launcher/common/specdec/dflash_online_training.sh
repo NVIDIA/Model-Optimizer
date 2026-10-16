@@ -156,13 +156,15 @@ elif [ "${SLURM_PROCID:-0}" = "0" ]; then
     if [ -n "$OUTPUT_DIR" ]; then
         # Export all checkpoints that don't already have an exported version
         EXPORTED=0
-        for CKPT in $(ls -d ${OUTPUT_DIR}/checkpoint-* 2>/dev/null | sort -t- -k2 -n); do
+        for CKPT in "${OUTPUT_DIR}"/checkpoint-*; do
+            [ -d "$CKPT" ] || continue
             STEP=$(basename "$CKPT" | sed 's/checkpoint-//')
             EXPORT_DIR="${OUTPUT_DIR}/exported-checkpoint-${STEP}"
-            if [ -d "$EXPORT_DIR" ]; then
+            if [ -f "${EXPORT_DIR}/config.json" ]; then
                 echo "Already exported: ${EXPORT_DIR}"
                 continue
             fi
+            rm -rf "${EXPORT_DIR}"
             echo "=== Exporting: ${CKPT} → ${EXPORT_DIR} ==="
             CUDA_VISIBLE_DEVICES=0 python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
                 --model_path "${CKPT}" \
@@ -170,12 +172,14 @@ elif [ "${SLURM_PROCID:-0}" = "0" ]; then
                 --trust_remote_code
             EXPORTED=$((EXPORTED + 1))
         done
-        # Also export final model if saved directly to output_dir
-        if [ -f "${OUTPUT_DIR}/modelopt_state.pth" ] && [ ! -d "${OUTPUT_DIR}/exported-checkpoint-final" ]; then
-            echo "=== Exporting: ${OUTPUT_DIR} → ${OUTPUT_DIR}/exported-checkpoint-final ==="
+        FINAL_EXPORT="${OUTPUT_DIR}/exported-checkpoint-final"
+        if [ -f "${OUTPUT_DIR}/modelopt_state.pth" ] && { [ ! -f "${FINAL_EXPORT}/config.json" ] || \
+            [ "${OUTPUT_DIR}/modelopt_state.pth" -nt "${FINAL_EXPORT}/config.json" ]; }; then
+            rm -rf "${FINAL_EXPORT}"
+            echo "=== Exporting: ${OUTPUT_DIR} → ${FINAL_EXPORT} ==="
             CUDA_VISIBLE_DEVICES=0 python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
                 --model_path "${OUTPUT_DIR}" \
-                --export_path "${OUTPUT_DIR}/exported-checkpoint-final" \
+                --export_path "${FINAL_EXPORT}" \
                 --trust_remote_code
             EXPORTED=$((EXPORTED + 1))
         fi
