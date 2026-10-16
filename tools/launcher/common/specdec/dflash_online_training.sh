@@ -162,8 +162,15 @@ for arg in sys.argv[1:]:
         fi
     fi
 
-    # Regression check (uses env vars MAX_FINAL_LOSS, MIN_FINAL_ACC, etc.)
+    # Regression check (uses env vars MAX_FINAL_LOSS, MIN_FINAL_ACC, etc.). The verdict
+    # lands next to the exports for downstream gates. A regression only warns unless
+    # REGRESSION_STRICT=1, which fails the task (via the ERR trap) so Slurm reports it.
     if [ -n "$OUTPUT_DIR" ]; then
-        python3 common/check_regression.py "${OUTPUT_DIR}" || true
+        REGRESSION_ARGS=("${OUTPUT_DIR}" --json "${OUTPUT_DIR}/regression_check.json")
+        if [ "${REGRESSION_STRICT:-0}" = "1" ]; then
+            python3 common/check_regression.py "${REGRESSION_ARGS[@]}"
+        else
+            python3 common/check_regression.py "${REGRESSION_ARGS[@]}" || true
+        fi
     fi
 fi
