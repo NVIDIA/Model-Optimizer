@@ -962,15 +962,17 @@ def _decide_distribution(
         num_experts_from_config,
     )
 
+    if world_size == 1:
+        # Nothing to shard over, so nothing about the model matters, nor do the knobs: a shell still
+        # exporting a multi-GPU run's would otherwise reshape a single process's load. The caller's
+        # own arguments still count, as dense="fsdp" for FSDP2 on one rank.
+        return DistributionPlan(
+            ep_size=1 if ep_size is None or str(ep_size) in ("auto", "0") else int(ep_size),
+            dense="replicate" if dense in (None, "auto") else dense,
+        )
     ep_size = env.ep_degree() if ep_size is None else ep_size
     ep_size = "auto" if str(ep_size) in ("auto", "0") else int(ep_size)
     dense = _dense_from_env(world_size) if dense is None else dense
-    if world_size == 1:
-        # Nothing to shard over, so nothing about the model matters.
-        return DistributionPlan(
-            ep_size=1 if ep_size == "auto" else ep_size,
-            dense="replicate" if dense == "auto" else dense,
-        )
     try:
         model = build_meta_causal_lm(
             ckpt_path, trust_remote_code, None, hf_config, auto_class=_auto_class(hf_config)
@@ -1033,8 +1035,8 @@ def resolve_distribution_plan(
 
     ``None`` reads ``MODELOPT_EP_DEGREE`` and ``MODELOPT_FSDP_SIZE`` (``1`` replicates; ``world``,
     or the world size as a number, shards) from rank 0's environment, both defaulting to
-    ``"auto"``. A single process holds the whole model unless ``dense="fsdp"`` asks for FSDP2 on
-    one rank.
+    ``"auto"``. A single process reads neither and holds the whole model, unless ``dense="fsdp"``
+    asks for FSDP2 on one rank.
     """
     from modelopt.torch.utils import distributed as dist
 
