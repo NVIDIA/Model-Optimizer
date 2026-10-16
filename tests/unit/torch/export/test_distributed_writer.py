@@ -794,15 +794,6 @@ def test_distributed_save_writes_the_hub_checkpoint_of_a_sharded_moe(
     _assert_byte_identical(_load_checkpoint(tmp_path / "export"), want)
 
 
-def test_distributed_save_rejects_extra_state_dict_that_overlaps_the_model(
-    gloo_world_of_one, tmp_path
-):
-    model = _fsdp2_shard(_load(_save(_mixtral_config(), tmp_path / "src")), gloo_world_of_one)
-
-    with pytest.raises(RuntimeError, match="overlaps the exported model weights"):
-        _write(model, tmp_path / "export", extra_state_dict={"model.norm.weight": torch.ones(32)})
-
-
 @pytest.mark.parametrize("wrap_root", [True, False], ids=["root-wrapped", "layers-only"])
 @pytest.mark.parametrize(
     "quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG], ids=["fp8", "nvfp4"]
@@ -892,8 +883,6 @@ def _two_rank_job(rank, world_size, tmp_dir):
     model = _load(tmp_dir / "dense")
     want = _quantize_with_reference(model, mtq.FP8_DEFAULT_CFG)
     _nogather_export(_fsdp2_shard(model, mesh), tmp_dir / "dense_export")
-    if rank == 0:
-        _assert_byte_identical(_load_checkpoint(tmp_dir / "dense_export"), want)
 
     # Each dense tensor ends up whole and plain on exactly one rank, whatever its layout, and the
     # owners are spread out. A zero-row tensor has no rows to move: its owner writes it as it is.
@@ -929,6 +918,26 @@ def _two_rank_job(rank, world_size, tmp_dir):
         else:
             raised = "no error"
         assert diagnosis in raised, raised
+
+    # Tensors handed in that collide with the model's: rank 0 alone adds them, and every rank
+    # raises, not rank 0 alone.
+    overlap = {k: torch.zeros(1) for k in _load(tmp_dir / "dense").state_dict()}
+    try:
+        with bounded_collectives():
+            _write(
+                _fsdp2_shard(_load(tmp_dir / "dense"), mesh),
+                tmp_dir / "overlap_export",
+                extra_state_dict=overlap,
+            )
+    except RuntimeError as error:
+        raised = str(error)
+    else:
+        raised = "no error"
+    assert "overlaps the exported model weights" in raised, raised
+
+    # Last, after every collective: a failing rank 0 then leaves no rank waiting in one.
+    if rank == 0:
+        _assert_byte_identical(_load_checkpoint(tmp_dir / "dense_export"), want)
 
 
 def test_two_ranks_write_one_checkpoint_and_reject_inconsistent_state(cpu_dist_workers, tmp_path):
