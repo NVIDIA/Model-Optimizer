@@ -21,7 +21,7 @@ import os
 import sys
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from datetime import timedelta
 from typing import Any
@@ -39,6 +39,7 @@ __all__ = [
     "barrier",
     "fsdp2_wrap",
     "gather_bytes",
+    "gather_state_dicts",
     "is_available",
     "is_fsdp2_model",
     "is_initialized",
@@ -178,6 +179,25 @@ def gather_bytes(
                 k = min(length, max(0, sizes[i] - off))
                 out[i][off : off + k] = b[:k].cpu().numpy().tobytes()
     return out
+
+
+def gather_state_dicts(state: dict, dst: int, group=None) -> Iterator[dict]:
+    """Gathers ``state`` from every rank of ``group`` to global rank ``dst``, loaded with ``weights_only``.
+
+    Yields one rank's dict at a time on ``dst`` (to bound host memory) and nothing elsewhere. The collective
+    runs eagerly, so every rank must call this before iterating.
+    """
+    buf = io.BytesIO()
+    torch.save(state, buf)
+    gathered = gather_bytes(buf.getvalue(), dst, group)
+    del buf
+
+    def _load() -> Iterator[dict]:
+        while gathered:
+            # Explicit weights_only so TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD cannot re-enable pickle for peers.
+            yield torch.load(io.BytesIO(gathered.pop(0)), map_location="cpu", weights_only=True)
+
+    return _load()
 
 
 def _allgather(tensors: list[torch.Tensor], tensor: torch.Tensor, group=None) -> None:

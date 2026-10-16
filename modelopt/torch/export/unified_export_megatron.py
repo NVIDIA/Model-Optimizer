@@ -18,7 +18,6 @@
 
 """Code that export quantized Megatron Core models for deployment."""
 
-import io
 import json
 import os
 import re
@@ -38,7 +37,7 @@ from modelopt import __version__
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 from modelopt.torch.utils import import_plugin, warn_rank_0
-from modelopt.torch.utils.distributed import gather_bytes
+from modelopt.torch.utils.distributed import gather_state_dicts
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_hf_ckpt_remote_code,
     copy_non_safetensor_files_from_ckpt,
@@ -1714,24 +1713,14 @@ class GPTModelExporter:
                     self._record_layer_quant_config(expert_prefix, seen_qformat, seen_block_size)
 
         if ep_size > 1:
-            # all_gather_object pickles trip on quantized uint8 tensors whose
-            # UntypedStorage has no dtype attr -- round-trip through torch.save bytes.
-            _buf = io.BytesIO()
-            torch.save(local_expert_state, _buf)
-            local_bytes = _buf.getvalue()
-            del _buf
             # Gather to EP rank 0 only, which writes the shards: holding every expert on every EP
             # rank multiplies host memory by EP (a full GLM-5.3-Flash export OOMs at EP4).
-            # gather_bytes, not gather_object, so no peer-controlled pickle runs outside torch.load.
+            # Quantized uint8 tensors trip all_gather_object pickles, so go through torch.save bytes.
             ep_group = get_expert_model_parallel_group()
-            gathered_bytes = gather_bytes(
-                local_bytes, torch.distributed.get_global_rank(ep_group, 0), ep_group
-            )
-            del local_bytes
-            for b in gathered_bytes or ():
-                s_loaded = torch.load(io.BytesIO(b), map_location="cpu", weights_only=True)
+            for s_loaded in gather_state_dicts(
+                local_expert_state, torch.distributed.get_global_rank(ep_group, 0), ep_group
+            ):
                 self._state_dict.update(s_loaded)
-            del gathered_bytes
         else:
             self._state_dict.update(local_expert_state)
 
