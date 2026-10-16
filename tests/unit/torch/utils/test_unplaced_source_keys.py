@@ -78,11 +78,16 @@ def _load(path, auto_class=None, **kwargs):
     return model
 
 
-def test_records_the_stray_tensors_and_the_checkpoint(tmp_path):
-    """Nothing keys off a name such as 'mtp': an auxiliary tower is recorded by the same rule."""
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"mtp.fc.weight": torch.ones(2), "aux_tower.blocks.0.weight": torch.ones(2)}],
+    ids=["nothing-stray", "mtp-and-aux-tower"],
+)
+def test_records_the_stray_tensors_and_the_checkpoint(tmp_path, extra):
+    """Nothing keys off a name such as 'mtp': an auxiliary tower is recorded by the same rule. An
+    empty record is an answer too, so the export does not derive the list again."""
     config = _tiny_llama_config()
     state = LlamaForCausalLM(config).to(torch.bfloat16).state_dict()
-    extra = {"mtp.fc.weight": torch.ones(2), "aux_tower.blocks.0.weight": torch.ones(2)}
     _save(tmp_path, config, {**state, **extra})
 
     model = _load(tmp_path, dtype=torch.bfloat16)
@@ -127,16 +132,6 @@ def test_output_loading_info_is_refused_before_anything_loads():
     """
     with pytest.raises(ValueError, match="output_loading_info"):
         load_pretrained("no/such/checkpoint", output_loading_info=True)
-
-
-def test_records_an_empty_list_when_every_tensor_was_placed(tmp_path):
-    """An empty record is an answer, so the export does not derive the list again."""
-    config = _tiny_llama_config()
-    _save(tmp_path, config, LlamaForCausalLM(config).state_dict())
-
-    model = _load(tmp_path)
-
-    assert model._modelopt_unplaced_source_keys == []
 
 
 def test_an_ignore_rule_does_not_hide_an_unplaced_tensor(tmp_path):
