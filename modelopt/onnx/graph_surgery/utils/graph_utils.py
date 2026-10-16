@@ -503,11 +503,14 @@ def add_initializer(
     with_value_info: bool = True,
 ) -> str:
     """Add or reuse an identical initializer; reject name conflicts before changing the graph."""
-    tensor = array_to_initializer(data, name, is_bfloat16=dtype == TensorProto.BFLOAT16)
+    is_bf16 = dtype == TensorProto.BFLOAT16
+    if not is_bf16:
+        data = np.asarray(data, dtype=onnx.helper.tensor_dtype_to_np_dtype(dtype))
+    tensor = array_to_initializer(data, name, is_bfloat16=is_bf16)
     existing = find_initializer(graph, name)
     if existing is not None:
         if (
-            existing.data_type != tensor.data_type
+            existing.data_type != dtype
             or list(existing.dims) != list(tensor.dims)
             or numpy_helper.to_array(existing).tobytes() != numpy_helper.to_array(tensor).tobytes()
         ):
