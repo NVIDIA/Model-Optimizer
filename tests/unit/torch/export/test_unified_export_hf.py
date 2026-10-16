@@ -39,6 +39,7 @@ from modelopt.torch.export.quant_utils import (
     sync_tied_input_amax,
 )
 from modelopt.torch.export.unified_export_hf import (
+    _copy_non_model_files_from_source,
     _resolve_export_dtype,
     _source_checkpoint,
     read_unplaced_weights,
@@ -1011,19 +1012,9 @@ def test_an_unrecorded_model_derives_its_unplaced_keys_once(tmp_path, monkeypatc
     assert model._modelopt_unplaced_source_keys == [mtp]
 
 
-def test_source_checkpoint_is_none_for_a_model_built_from_config():
+def test_source_checkpoint_is_none_for_a_model_built_from_config(tmp_path, monkeypatch):
     """``from_config`` leaves ``_name_or_path`` empty; it must not resolve to the working directory,
     or every export would copy the cwd as the "source checkpoint"."""
-    assert _source_checkpoint(SimpleNamespace(config=SimpleNamespace(_name_or_path=""))) is None
-
-
-def test_a_model_built_from_a_config_names_no_source_checkpoint(tmp_path, monkeypatch):
-    """An empty ``_name_or_path`` is the working directory as a path; nothing there is the model's."""
-    from modelopt.torch.export.unified_export_hf import (
-        _copy_non_model_files_from_source,
-        _source_checkpoint,
-    )
-
     workdir = tmp_path / "workdir"
     workdir.mkdir()
     (workdir / "tokenizer.json").write_text("{}")
