@@ -517,6 +517,23 @@ class GraphSanitizer:
                 return value if return_array else value.item()
         return None
 
+    @staticmethod
+    def _clamp_to_fp32_range(data: np.ndarray, name: str) -> np.ndarray:
+        """Clamp finite values outside the FP32 range, leaving existing +/-inf untouched.
+
+        Casting a finite FP64 value larger than FP32's max straight to FP32 silently turns it
+        into infinity. Genuine infinities already in the data are not "too large for FP32" and
+        must be preserved as-is.
+        """
+        fp32_max = np.finfo(np.float32).max
+        out_of_range = np.isfinite(data) & (np.abs(data) > fp32_max)
+        if np.any(out_of_range):
+            logger.warning(
+                f"{name} contains FP64 values outside the FP32 range; clamping to {fp32_max}."
+            )
+            data = np.where(out_of_range, np.copysign(fp32_max, data), data)
+        return data
+
     def _convert_fp64_initializers(self) -> bool:
         """Convert FP64 initializers to FP32.
 
@@ -529,6 +546,7 @@ class GraphSanitizer:
             if initializer.data_type == onnx.TensorProto.DOUBLE:
                 # Convert the data to FP32
                 fp64_data = numpy_helper.to_array(initializer, base_dir=self.external_data_dir)
+                fp64_data = self._clamp_to_fp32_range(fp64_data, initializer.name)
                 fp32_data = fp64_data.astype(np.float32)
 
                 # Create new initializer with FP32 data
@@ -588,6 +606,9 @@ class GraphSanitizer:
                     if attr.name == "value" and attr.t.data_type == onnx.TensorProto.DOUBLE:
                         # Convert the tensor value to FP32
                         fp64_data = numpy_helper.to_array(attr.t, base_dir=self.external_data_dir)
+                        fp64_data = self._clamp_to_fp32_range(
+                            fp64_data, f"{node.op_type} node {node.name}"
+                        )
                         fp32_data = fp64_data.astype(np.float32)
                         new_tensor = numpy_helper.from_array(fp32_data)
                         attr.t.CopyFrom(new_tensor)
