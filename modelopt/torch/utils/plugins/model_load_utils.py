@@ -635,6 +635,49 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     return decoder_layers
 
 
+def _fsdp2_wrap_modules(model: "torch.nn.Module") -> list["torch.nn.Module"]:
+    """Return the transformer-block modules to FSDP2 ``fully_shard`` individually.
+
+    Uses HuggingFace's own ``_no_split_modules`` -- the class names of the atomic blocks that must not be
+    split across devices (what ``device_map="auto"`` wraps at) -- falling back to modelopt's decoder-layer
+    auto-detection.
+
+    For a VLM, this looks at the LANGUAGE backbone's boundaries, NOT the top-level VLM wrapper's
+    ``_no_split_modules`` (which for some VLMs -- e.g. Qwen2.5-VL -- ALSO lists the VISION block classes).
+    FSDP-sharding the vision blocks makes the calibration weight-access all-gather on those sharded vision
+    weights DEADLOCK; keeping the vision/audio towers REPLICATED (plain) -- the language-only calibration
+    never runs them and they are small enough to fit -- avoids that. This also covers VLMs whose top-level
+    wrapper exposes no ``_no_split_modules`` at all (e.g. Nemotron-Nano-VL).
+    """
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+
+    def _boundaries(root: "torch.nn.Module") -> "list[torch.nn.Module] | None":
+        ns = set(getattr(root, "_no_split_modules", None) or [])
+        if ns:
+            mods = [m for m in root.modules() if type(m).__name__ in ns]
+            if mods:
+                return mods
+        layers = LayerActivationCollector.get_decoder_layers(root)
+        return list(layers) if layers is not None else None
+
+    # VLM -> wrap only the language backbone's blocks (vision/audio stay replicated); else the whole model.
+    from modelopt.torch.export.model_utils import get_language_model_from_vl
+
+    lineage = get_language_model_from_vl(model)
+    if lineage and lineage[-1] is not model:
+        lm_mods = _boundaries(lineage[-1])
+        if lm_mods:
+            return lm_mods
+
+    mods = _boundaries(model)
+    if mods:
+        return mods
+    raise RuntimeError(
+        "Could not determine FSDP2 wrap boundaries: model exposes no `_no_split_modules` and modelopt's "
+        "decoder-layer auto-detection did not match. Provide a standard HF causal-LM / VLM checkpoint."
+    )
+
+
 def _map_ckpt_keys_to_model(model: "torch.nn.Module", ckpt_keys, model_keys) -> dict:
     """Map each checkpoint key to the model ``state_dict`` key it feeds.
 
