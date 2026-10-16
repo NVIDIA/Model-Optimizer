@@ -1108,7 +1108,11 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
                     module
                 ):
                     if on_weight is not None:
-                        on_weight(f"{name}.{weight_name}", weight[0], quantizers[0])
+                        # This rank's first expert, the one quantizers[0] quantizes: indexing an
+                        # expert-parallel DTensor names a global expert and all-gathers every expert.
+                        on_weight(
+                            f"{name}.{weight_name}", module._local_experts(weight)[0], quantizers[0]
+                        )
                     # Snapshot which experts are enabled now, before the caching forward silences
                     # all weight quantizers — so we don't capture (and discard) disabled experts.
                     enabled = {i for i, q in enumerate(quantizers) if q.is_enabled}
