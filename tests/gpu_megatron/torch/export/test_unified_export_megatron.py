@@ -81,9 +81,14 @@ def _verify_model_quant_config(
     if quant_config:
         quant_config_dict = hf_quant_config_dict["quantization"]
         quant_type = quant_config_dict["quant_algo"]
-        assert (
-            quant_type in quant_config
-        )  # quant config str is subset of quant config e.g. NVFP4 -> NVFP4_DEFAULT_CFG
+        if quant_config == "MXFP4_MLP_WEIGHT_ONLY_CFG":
+            assert quant_type == "W4A16_MXFP4"
+            group = config_dict["quantization_config"]["config_groups"]["group_0"]
+            assert group["weights"]["group_size"] == 32
+            assert "input_activations" not in group
+        else:
+            # quant config str is subset of quant config e.g. NVFP4 -> NVFP4_DEFAULT_CFG
+            assert quant_type in quant_config
         assert len(quant_config_dict["exclude_modules"]) > 1  # Dynamically added exclude modules
         if quant_type == "NVFP4":
             assert quant_config_dict["group_size"] == 16
@@ -656,6 +661,7 @@ def _test_unified_export_megatron(
         ("llama", None, None, None),
         ("llama", None, "FP8_DEFAULT_CFG", None),
         ("llama", None, "FP8_DEFAULT_CFG", "FP8_KV_CFG"),
+        ("llama", None, "MXFP4_MLP_WEIGHT_ONLY_CFG", None),
         ("llama", "eagle", None, None),
         ("llama", "medusa", None, None),
         ("qwen3vl", None, None, None),

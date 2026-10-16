@@ -65,6 +65,7 @@ from .quant_format import (
     QUANTIZATION_FP8_PB_WO,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
+    QUANTIZATION_W4A16_MXFP4,
     QUANTIZATION_W4A16_NVFP4,
 )
 from .quant_utils import (
@@ -379,6 +380,8 @@ class GPTModelExporter:
             quantization = "NVFP4"
         elif quantization_format == QUANTIZATION_W4A16_NVFP4:
             quantization = "W4A16_NVFP4"
+        elif quantization_format == QUANTIZATION_W4A16_MXFP4:
+            quantization = "W4A16_MXFP4"
         elif quantization_format in GGML_FORMATS:
             quantization = quantization_format.upper()
 
