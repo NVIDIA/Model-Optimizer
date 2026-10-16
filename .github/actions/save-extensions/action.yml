@@ -1,0 +1,16 @@
+name: Save extensions
+description: Save the JIT-compiled extensions restored by ./.github/actions/cache-extensions. Run it with `always()` so a failing or timed-out job still
+  populates the cache (actions/cache itself only saves when the job succeeds).
+
+inputs:
+  cache-key:
+    description: The `cache-key` output of ./.github/actions/cache-extensions.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache/save@v6
+      with:
+        path: /root/.cache/torch_extensions
+        key: ${{ inputs.cache-key }}

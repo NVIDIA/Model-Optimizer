@@ -59,6 +59,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: nv-gha-runners/setup-proxy-cache@main
       - uses: ./.github/actions/cache-extensions
+        id: ext-cache
         with:
           cache-key: rtxpro6000-${{ inputs.docker_image }}
       - name: Setup environment variables
@@ -113,6 +114,12 @@ jobs:
             pytest_args+=(-n 4)
           fi
           python3 -m pytest tests/examples/${{ inputs.example }} --cov "${pytest_args[@]}"
+      - name: Save extensions
+        # Not tied to the tests passing, see the action description
+        if: always() && steps.ext-cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/save-extensions
+        with:
+          cache-key: ${{ steps.ext-cache.outputs.cache-key }}
       - name: Flag allowed failure
         if: ${{ inputs.allow_failure && steps.run_tests.outcome == 'failure' }}
         run: |

@@ -1,10 +1,18 @@
 name: Cache extensions
-description: Cache and reuse JIT-compiled extensions (e.g. CUDA extensions) across runs.
+description: Restore JIT-compiled extensions (e.g. CUDA extensions) cached by an earlier run. Pair with ./.github/actions/save-extensions.
 
 inputs:
   cache-key:
     description: Environment discriminator for the cache key (e.g. GPU arch + container image).
     required: true
+
+outputs:
+  cache-hit:
+    description: Whether the extensions were restored from the exact key.
+    value: ${{ steps.cache.outputs.cache-hit }}
+  cache-key:
+    description: The key to pass to ./.github/actions/save-extensions.
+    value: ${{ steps.cache.outputs.cache-primary-key }}
 
 runs:
   using: composite
@@ -12,7 +20,7 @@ runs:
     - shell: bash
       run: echo "TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions" >> "$GITHUB_ENV"
     - id: cache
-      uses: actions/cache@v6
+      uses: actions/cache/restore@v6
       with:
         path: /root/.cache/torch_extensions
         key: torch-ext-${{ inputs.cache-key }}-${{ hashFiles('modelopt/torch/kernels/quantization/**', 'modelopt/torch/quantization/extensions.py', 'modelopt/torch/utils/cpp_extension.py')
