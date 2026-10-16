@@ -1162,6 +1162,67 @@ class TestReplaceZeroScaleWithSmallestNonzero:
         assert (scale_arr > 0).all()
 
 
+def create_test_model_with_matmul_qdq(zero_point: np.ndarray, scale: np.ndarray, weight):
+    """Create weight -> Q -> DQ -> MatMul, per-channel on the weight's output axis."""
+    graph = helper.make_graph(
+        nodes=[
+            helper.make_node(
+                "QuantizeLinear", ["weight", "w_scale", "w_zp"], ["w_q"], name="w_q", axis=1
+            ),
+            helper.make_node(
+                "DequantizeLinear", ["w_q", "w_scale", "w_zp"], ["w_dq"], name="w_dq", axis=1
+            ),
+            helper.make_node("MatMul", ["input", "w_dq"], ["output"], name="matmul"),
+        ],
+        name="matmul_qdq",
+        inputs=[helper.make_tensor_value_info("input", TensorProto.FLOAT, [4, weight.shape[0]])],
+        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [4, weight.shape[1]])],
+        initializer=[
+            numpy_helper.from_array(weight, "weight"),
+            numpy_helper.from_array(scale, "w_scale"),
+            numpy_helper.from_array(zero_point, "w_zp"),
+        ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+    return model
+
+
+class TestQdqToDqWeightType:
+    """The converted weight must keep the type of the zero point the DQ node still uses."""
+
+    @pytest.mark.parametrize("unsigned", [False, True])
+    def test_converted_weight_matches_zero_point_type(self, unsigned):
+        weight = np.random.RandomState(3).randn(16, 32).astype(np.float32)
+        if unsigned:
+            # Asymmetric UINT8: the zero point is non-zero and the weight spans 0..255.
+            low, high = weight.min(axis=0), weight.max(axis=0)
+            scale = ((high - low) / 255.0).astype(np.float32)
+            zero_point = np.round(-low / scale).astype(np.uint8)
+            expected_type = TensorProto.UINT8
+        else:
+            scale = (np.abs(weight).max(axis=0) / 127.0).astype(np.float32)
+            zero_point = np.zeros(32, dtype=np.int8)
+            expected_type = TensorProto.INT8
+
+        model = create_test_model_with_matmul_qdq(zero_point, scale, weight)
+        inputs = {"input": np.random.RandomState(5).randn(4, 16).astype(np.float32)}
+
+        def run(m):
+            return ort.InferenceSession(
+                m.SerializeToString(), providers=["CPUExecutionProvider"]
+            ).run(None, inputs)[0]
+
+        expected = run(model)
+        converted = qdq_to_dq(onnx.ModelProto.FromString(model.SerializeToString()))
+
+        stored = next(t for t in converted.graph.initializer if t.name == "weight")
+        assert stored.data_type == expected_type
+        # onnx.checker does not catch a weight/zero-point type mismatch, so load it.
+        assert np.array_equal(run(converted), expected)
+
+
 def create_test_model_with_dq_transpose_matmul(
     out_features: int,
     in_features: int,
