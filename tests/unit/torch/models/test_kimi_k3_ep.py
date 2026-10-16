@@ -614,6 +614,23 @@ def test_prepare_fails_loudly_when_no_loaded_module_defines_the_moe_block(monkey
     )
 
     with pytest.raises(RuntimeError, match="KimiSparseMoeBlock"):
+        kimi_k3.prepare(
+            SimpleNamespace(text_config=SimpleNamespace()),
+            ckpt_path="/ckpt",
+            trust_remote_code=True,
+        )
+
+
+def test_prepare_refuses_an_untrusted_checkpoint(monkeypatch):
+    """transformers' get_class_from_dynamic_module runs the checkpoint's code without checking
+    trust_remote_code, so prepare must refuse before importing it."""
+    monkeypatch.setattr(
+        kimi_k3,
+        "_force_load_remote_modeling",
+        lambda *args: pytest.fail("the checkpoint's code was imported"),
+    )
+
+    with pytest.raises(ValueError, match="trust_remote_code=True"):
         kimi_k3.prepare(SimpleNamespace(text_config=SimpleNamespace()), ckpt_path="/ckpt")
 
 
@@ -640,7 +657,7 @@ def test_each_checkpoint_revision_patches_its_own_remote_module(monkeypatch):
 
     def prepare(ckpt_path):
         config = SimpleNamespace(text_config=SimpleNamespace(), auto_map=auto_map)
-        kimi_k3.prepare(config, ckpt_path=ckpt_path)
+        kimi_k3.prepare(config, ckpt_path=ckpt_path, trust_remote_code=True)
 
     def patched_surface(remote):
         return (

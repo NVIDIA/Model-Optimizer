@@ -581,6 +581,13 @@ def prepare(
     from modelopt.torch.utils.moe import require_transformers
 
     require_transformers("5.8", "kimi_k3 expert-parallel PTQ")
+    if ckpt_path is not None and not trust_remote_code:
+        # Patching below imports the checkpoint's own modeling code, and transformers'
+        # get_class_from_dynamic_module runs it without checking trust_remote_code itself.
+        raise ValueError(
+            "kimi_k3: expert parallelism imports the checkpoint's own modeling code; "
+            "load it with trust_remote_code=True."
+        )
 
     text_cfg = getattr(hf_config, "text_config", None) or hf_config
 
