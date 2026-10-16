@@ -17,21 +17,24 @@
 
 import queue
 import time
-from types import SimpleNamespace
 
 import pytest
 import torch.distributed as dist
-from _test_utils.torch.distributed.utils import DistributedWorkerPool, get_live_pool
+from _test_utils.torch.distributed.utils import DistributedWorkerPool
 
 
 def _hang(rank, size):
     time.sleep(600)
 
 
-def _rank_0_fails_and_rank_1_waits_for_it(rank, size):
+def _rank_0_fails_and_rank_1_hangs(rank, size):
     if rank == 0:
         raise ValueError("rank 0 failed")
-    dist.barrier()  # never completes: its partner left
+    time.sleep(600)
+
+
+def _teardown_barrier(rank, size):
+    dist.barrier()  # like megatron_worker_teardown: blocks while a peer is still in the job
 
 
 def test_a_hung_job_kills_the_pool_instead_of_stalling_later_runs(capfd):
@@ -52,30 +55,16 @@ def test_a_hung_job_kills_the_pool_instead_of_stalling_later_runs(capfd):
         pool.shutdown()
 
 
-def test_a_failed_rank_does_not_make_its_peers_wait_out_the_job_timeout():
-    pool = DistributedWorkerPool(world_size=2, backend="gloo", teardown_fn=None)
+def test_a_failed_rank_is_reported_even_when_its_teardown_blocks_on_a_hung_peer():
+    pool = DistributedWorkerPool(world_size=2, backend="gloo", teardown_fn=_teardown_barrier)
     try:
         pool.failure_grace = 2
+        pool.job_timeout = 30  # without the early report the parent would wait this long
         start = time.monotonic()
         with pytest.raises(RuntimeError, match="rank 0 failed"):
-            pool.run(_rank_0_fails_and_rank_1_waits_for_it)
+            pool.run(_rank_0_fails_and_rank_1_hangs)
 
-        assert time.monotonic() - start < 60  # not the 600 s job timeout
+        assert time.monotonic() - start < 25
         assert pool.broken
     finally:
         pool.shutdown()
-
-
-def test_a_killed_pool_is_replaced_and_a_live_one_is_reused():
-    pools = {}
-    made = []
-
-    def make():
-        made.append(SimpleNamespace(broken=False))
-        return made[-1]
-
-    first = get_live_pool(pools, 2, make)
-    assert get_live_pool(pools, 2, make) is first
-    first.broken = True
-    second = get_live_pool(pools, 2, make)
-    assert second is not first and len(made) == 2

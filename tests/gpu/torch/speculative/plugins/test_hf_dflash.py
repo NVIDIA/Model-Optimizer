@@ -287,7 +287,7 @@ class TestShardedBaseGeneration:
         model._base_model.forward = sharded_forward
 
     def test_generate_gathers_sharded_hidden_states(self):
-        # 8 layers so the default target_layer_ids ([1, 5]) straddle the split; 4 gives [1, 1].
+        # 8 layers so the default target_layer_ids land in different halves; 4 collapses them.
         model = get_tiny_llama(num_hidden_layers=8)
         mtsp.convert(model, [("dflash", get_dflash_config(block_size=4))])
         model = model.to("cuda:1").eval()

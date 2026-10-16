@@ -187,11 +187,16 @@ class DistributedWorkerPool:
             fn, args, kwargs = cmd
             status = "ok"
             tb = None
+            reported = False
             try:
                 fn(rank, world_size, *args, **kwargs)
             except Exception:
                 status = "error"
                 tb = traceback.format_exc()
+                # Report before teardown: it may block on a collective whose peer is still stuck in
+                # ``fn``, and the parent's failure grace period starts when it hears of a failure.
+                result_queue.put((status, rank, tb))
+                reported = True
             finally:
                 if teardown_fn is not None:
                     try:
@@ -201,7 +206,8 @@ class DistributedWorkerPool:
                         status = "error"
                         teardown_tb = traceback.format_exc()
                         tb = (tb + "\n" if tb else "") + f"[teardown] {teardown_tb}"
-            result_queue.put((status, rank, tb))
+            if not reported:
+                result_queue.put((status, rank, tb))
 
         dist.destroy_process_group()
 
