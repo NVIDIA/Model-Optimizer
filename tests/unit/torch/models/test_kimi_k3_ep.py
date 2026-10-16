@@ -769,9 +769,7 @@ def test_the_remote_modeling_is_imported_through_the_class_the_auto_map_declares
 @pytest.mark.usefixtures("private_conversion_registry", "restore_loader_hooks")
 def test_prepare_leaves_the_loader_alone_for_bf16_experts():
     """Without a compressed-tensors config the experts are plain bf16: prepare completes and leaves
-    transformers' conversion mapping unwrapped. (Needs ``compressed_tensors`` importable: the
-    decompressor imports it before it looks for the config.)"""
-    pytest.importorskip("compressed_tensors")
+    transformers' conversion mapping unwrapped, with or without ``compressed_tensors`` installed."""
     stock = mu.get_model_conversion_mapping
 
     kimi_k3.prepare(SimpleNamespace(text_config=SimpleNamespace()))
