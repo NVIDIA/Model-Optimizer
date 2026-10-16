@@ -169,9 +169,9 @@ jobs:
       contents: read
     secrets: inherit
     with:
-      # rc23 is the newest without the Kimi KDA models (rc24+), whose `fla` import the image does not
-      # ship and which breaks quickstart_multimodal.py; rc29 also removed tensorrt_llm._torch.auto_deploy.
-      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc23"
+      # Newer releases break quickstart_multimodal.py (test_qwen_vl): rc21-rc23 import MultimodalConfig,
+      # which tensorrt_llm.llmapi does not export yet, and rc24+ import `fla`, which the image lacks.
+      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
