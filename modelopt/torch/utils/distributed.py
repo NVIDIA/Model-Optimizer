@@ -813,6 +813,17 @@ def _reinstall_a2a_forwards(model, ep_mesh) -> int:
     return n
 
 
+def _release_cached_cuda_memory():
+    """Hand the caching allocator's reserved-but-unused pool back to the driver.
+
+    Only a process that started CUDA has a pool to hand back; elsewhere the collection alone costs
+    about a second.
+    """
+    if torch.cuda.is_initialized():
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
 def distributed_forward_loop(model, dataloader, device=None, ep_mesh=None):
     """Build an ``mtq.quantize`` ``forward_loop`` for a distributed (e.g. expert-parallel) model.
 
@@ -848,8 +859,7 @@ def distributed_forward_loop(model, dataloader, device=None, ep_mesh=None):
             # reserved), leaving ~0 GB free, so the distributed a2a's NCCL comm buffers cannot be allocated
             # ("Failed to CUDA calloc") at the very first all_to_all. Freeing the cache hands that memory
             # back to the driver for NCCL + the calibration activations.
-            gc.collect()
-            torch.cuda.empty_cache()
+            _release_cached_cuda_memory()
             for batch in tqdm(dataloader, desc="Calibrating", disable=not is_master()):
                 if device is not None:
                     batch = {
@@ -864,8 +874,7 @@ def distributed_forward_loop(model, dataloader, device=None, ep_mesh=None):
             # single calib forward: alloc 86.0 GiB but reserved 156.6 GiB -> only 0.7 GiB free, and
             # the job then hung until the 2 h wall clock instead of exporting. NCCL comm buffers are
             # allocated OUTSIDE the torch allocator, so a full reserved pool starves them.
-            gc.collect()
-            torch.cuda.empty_cache()
+            _release_cached_cuda_memory()
 
     return calibrate
 
