@@ -698,8 +698,18 @@ def resolve_distribution_plan(
     """
     from modelopt.torch.utils import distributed as dist
 
-    _, ckpt_path = ensure_local_checkpoint(ckpt_path)
-    hf_config = AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
+    # Each rank reads the checkpoint for itself. One that cannot must fail every rank here, rather
+    # than leave the others waiting in a broadcast below for a rank that already raised.
+    read: list[tuple[str, PretrainedConfig]] = []
+
+    def checkpoint_read() -> bool:
+        _, local_path = ensure_local_checkpoint(ckpt_path)
+        config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        read.append((local_path, config))
+        return True
+
+    dist.all_reduce("checkpoint read", checkpoint_read, all)
+    ckpt_path, hf_config = read[0]
     world_size = dist.size()
     plan = dist.broadcast_from(
         "plan",
