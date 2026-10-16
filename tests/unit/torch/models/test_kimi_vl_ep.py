@@ -36,6 +36,7 @@ if Version(transformers.__version__) < Version("5.6"):
     pytest.skip("Kimi-VL expert parallelism needs transformers >= 5.6", allow_module_level=True)
 
 import transformers.dynamic_module_utils as dmu
+import transformers.utils.import_utils as import_utils
 from transformers import DeepseekV3Config, DeepseekV3ForCausalLM, PretrainedConfig
 
 from modelopt.torch.models import _onfly_decompress, get_spec
@@ -114,8 +115,6 @@ def test_prepare_rebuilds_the_language_model_config_without_a_decompressor(monke
     an EP plan for the fused experts, naming the experts the spec states for a run that skips
     prepare; the experts are bf16, so no decompressor is installed; the symbols the remote modeling
     imports exist; the remote-code staging shim is left installed."""
-    import transformers.utils.import_utils as import_utils
-
     monkeypatch.delattr(import_utils, "is_torch_fx_available", raising=False)
     monkeypatch.setattr(
         _onfly_decompress,
