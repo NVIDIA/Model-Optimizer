@@ -444,10 +444,21 @@ class EagleTrainingPlot(TrainerCallback):
         except Exception:
             print_rank_0(f"Step {state.global_step} Training Acc: {average_acc}")
         # Log accuracy to HF Trainer's logs dict (picked up by TensorBoard)
-        logs = kwargs.get("logs") or {}
-        for i, draft_acc in enumerate(average_acc):
-            for j, step_acc in enumerate(draft_acc):
-                logs[f"train_acc/parallel_{i}_step_{j}"] = float(step_acc)
+        logs = kwargs.get("logs")
+        if logs is None:
+            logs = {}
+        acc_logs = {
+            f"train_acc/parallel_{i}_step_{j}": float(step_acc)
+            for i, draft_acc in enumerate(average_acc)
+            for j, step_acc in enumerate(draft_acc)
+        }
+        logs.update(acc_logs)
+        # Trainer.log() appends a *copy* of logs to state.log_history before invoking
+        # callbacks, so mutating logs alone never reaches trainer_state.json -- which is
+        # the only file check_regression.py reads. Without this, MIN_FINAL_ACC is
+        # configured, printed to the console every log step, and silently never checked.
+        if state.log_history:
+            state.log_history[-1].update(acc_logs)
         if self.estimate_ar:
             # Calculate mean training AR since last log
             # NOTE: This is only an estimate of the real AR.

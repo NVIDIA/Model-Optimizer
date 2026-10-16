@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Effective quantizer selection for ``model_type/nemotron_h/ptq/nvfp4-aggressive-mse``.
+"""Effective quantizer selection for ``models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/ptq/nvfp4-mse``.
 
 The recipe's ``quant_cfg`` is ordered and last-match-wins, so what a module ends up with
 depends on rule order as much as on rule content. The KV asymmetry in particular is load
@@ -32,7 +32,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
 from modelopt.torch.quantization.nn import QuantModule, QuantModuleRegistry, TensorQuantizer
 
-_RECIPE = "model_type/nemotron_h/ptq/nvfp4-aggressive-mse"
+_RECIPE = "models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/ptq/nvfp4-mse"
 _WIDTH = 32
 
 
@@ -66,12 +66,22 @@ class _QuantAttention(QuantModule):
         self.v_bmm_quantizer = TensorQuantizer()
 
 
+class _CoreAttention(nn.Module):
+    """Megatron-Core's ``self_attention.core_attention``, the module that holds the KV quantizers."""
+
+
+class _QuantCoreAttention(_QuantAttention):
+    pass
+
+
 @pytest.fixture(autouse=True)
 def _register_kv_attention():
     mtq.register(original_cls=_Attention, quantized_cls=_QuantAttention)
+    mtq.register(original_cls=_CoreAttention, quantized_cls=_QuantCoreAttention)
     yield
-    if QuantModuleRegistry.get(_Attention) is not None:
-        mtq.unregister(_Attention)
+    for cls in (_Attention, _CoreAttention):
+        if QuantModuleRegistry.get(cls) is not None:
+            mtq.unregister(cls)
 
 
 class _Mamba(nn.Module):
@@ -130,9 +140,61 @@ def _nemotron_h(with_mtp: bool) -> nn.Module:
     return model
 
 
-def _quantize(with_mtp: bool):
+def _mcore_attention() -> nn.Module:
+    layer = nn.Module()
+    layer.self_attention = nn.Module()
+    layer.self_attention.linear_qkv = nn.Linear(_WIDTH, 3 * _WIDTH, bias=False)
+    layer.self_attention.linear_proj = nn.Linear(_WIDTH, _WIDTH, bias=False)
+    layer.self_attention.core_attention = _CoreAttention()
+    return layer
+
+
+def _mcore_moe() -> nn.Module:
+    layer = nn.Module()
+    layer.mlp = nn.Module()
+    layer.mlp.router = nn.Linear(_WIDTH, 2, bias=False)
+    for name in ("experts", "shared_experts"):
+        mlp = nn.Module()
+        mlp.linear_fc1 = nn.Linear(_WIDTH, _WIDTH, bias=False)
+        mlp.linear_fc2 = nn.Linear(_WIDTH, _WIDTH, bias=False)
+        setattr(layer.mlp, name, mlp)
+    return layer
+
+
+def _nemotron_h_mcore() -> nn.Module:
+    """Megatron-Core-named omni VL skeleton, as built by Megatron-Bridge.
+
+    Names follow a real PTQ checkpoint: the language model sits under ``language_model``,
+    attention is ``self_attention.linear_qkv`` / ``linear_proj``, lm_head is ``output_layer``,
+    and the MTP block nests its attention and MoE layers under ``mtp_model_layer.layers``. The
+    projector is ``vision_projection``. Megatron-Bridge builds no audio branch, but one is
+    included so the test pins the audio guards against the Megatron-Core attention rules too.
+    """
+    model = nn.Module()
+    lm = model.language_model = nn.Module()
+    lm.embedding = nn.Linear(_WIDTH, _WIDTH, bias=False)
+    lm.decoder = nn.Module()
+    lm.decoder.layers = nn.ModuleList([_mcore_attention(), _Block(_Mamba()), _mcore_moe()])
+    lm.output_layer = nn.Linear(_WIDTH, _WIDTH, bias=False)
+    mtp_block = nn.Module()
+    mtp_block.eh_proj = nn.Linear(2 * _WIDTH, _WIDTH, bias=False)
+    mtp_block.mtp_model_layer = nn.Module()
+    mtp_block.mtp_model_layer.layers = nn.ModuleList([_mcore_attention(), _mcore_moe()])
+    lm.mtp = nn.Module()
+    lm.mtp.layers = nn.ModuleList([mtp_block])
+    model.vision_model = nn.Module()
+    model.vision_model.blocks = nn.ModuleList([_Expert(), _mcore_attention()])
+    # An attention layer stands in under the projector to prove its guard.
+    model.vision_projection = nn.ModuleList([_mcore_attention()])
+    model.sound_projector = nn.Module()
+    model.sound_projector.sound_encoder = nn.Module()
+    model.sound_projector.sound_encoder.layers = nn.ModuleList([_mcore_attention()])
+    return model
+
+
+def _quantize(with_mtp: bool, mcore: bool = False):
     """Apply the recipe to a fresh skeleton and return it with its named modules."""
-    model = _nemotron_h(with_mtp)
+    model = _nemotron_h_mcore() if mcore else _nemotron_h(with_mtp)
     config = load_recipe(_RECIPE).quantize.model_dump()
 
     # Calibration settings the recipe promises, asserted before they are dropped: weight-MSE
@@ -313,4 +375,49 @@ def test_no_quantizer_outside_the_intended_set_is_enabled():
                     expected.add(f"{prefix}.mixer.{expert}.{proj}.{kind}")
         expected.add(f"lm_head.{kind}")
 
+    assert enabled == expected
+
+
+def test_megatron_core_names_get_the_same_formats():
+    """Under Megatron-Bridge the recipe selects the same layers as on a Hub checkpoint.
+
+    Attention, lm_head and the MTP block have Megatron-Core names of their own; without those
+    spellings attention and lm_head would silently stay BF16. Everything else is shared.
+    """
+    _, modules = _quantize(with_mtp=True, mcore=True)
+    lm, mtp = "language_model.decoder.layers", "language_model.mtp.layers.0.mtp_model_layer.layers"
+
+    expected = set()
+    for kind in ("weight_quantizer", "input_quantizer"):
+        for stem in (
+            f"{lm}.0.self_attention.linear_qkv",
+            f"{lm}.0.self_attention.linear_proj",
+            f"{lm}.1.mixer.in_proj",
+            f"{lm}.1.mixer.out_proj",
+            "language_model.output_layer",
+        ):
+            _assert_fp8(modules[f"{stem}.{kind}"], stem)
+            expected.add(f"{stem}.{kind}")
+        for prefix in (f"{lm}.2", f"{mtp}.1"):
+            for mlp in ("experts", "shared_experts"):
+                for fc in ("linear_fc1", "linear_fc2"):
+                    stem = f"{prefix}.mlp.{mlp}.{fc}"
+                    block_type = "static" if kind == "weight_quantizer" else "dynamic"
+                    _assert_nvfp4(modules[f"{stem}.{kind}"], stem, block_type=block_type)
+                    expected.add(f"{stem}.{kind}")
+
+    for which in ("k", "v"):
+        backbone = f"{lm}.0.self_attention.core_attention.{which}_bmm_quantizer"
+        _assert_fp8(modules[backbone], backbone)
+        assert modules[backbone]._use_constant_amax is True, f"{backbone} should cast"
+        mtp_kv = f"{mtp}.0.self_attention.core_attention.{which}_bmm_quantizer"
+        _assert_fp8(modules[mtp_kv], mtp_kv)
+        assert modules[mtp_kv]._use_constant_amax is False, f"{mtp_kv} should stay calibrated"
+        expected |= {backbone, mtp_kv}
+
+    enabled = {
+        name
+        for name, module in modules.items()
+        if isinstance(module, TensorQuantizer) and module.is_enabled
+    }
     assert enabled == expected

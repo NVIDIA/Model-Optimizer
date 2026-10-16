@@ -69,7 +69,7 @@ from .utils import (
     persistent_materialization,
     promote_static_block_weight_quantizers,
 )
-from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
+from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, _IMATRIX_ENCODER_REGISTRY, GPTQHelper
 
 __all__ = [
     "CalibratorFactory",
@@ -941,7 +941,7 @@ def _is_quant_fused_experts(module: nn.Module) -> bool:
     )
 
 
-class _LocalHessianInputHook:
+class _WeightInputHook:
     """Identify active input collectors so auxiliary modules can request a calibration forward."""
 
     def __init__(self, hook: Callable):
@@ -951,13 +951,14 @@ class _LocalHessianInputHook:
         self.hook(module, args)
 
 
-def _register_local_hessian_input_hooks(model, names, capture, block_size, warned):
+def _register_weight_input_hooks(model, names, capture, on_weight=None):
     """Register forward hooks feeding each weight's input activations to ``capture``.
 
-    Local-Hessian-specific (kept here rather than as a general ``QuantModule`` API): dense
-    quantized linears hook the layer input; HF fused-MoE experts hook the shared input quantizers,
-    keyed by the active expert (``_current_expert_idx``). Weights without a hook (conv,
-    SequentialQuantizer, non-eager experts) fall back to plain MSE. Returns removable handles.
+    ``capture(weight_quantizer, weight, inputs)`` runs on every forward of a weight whose quantizer
+    is enabled: dense quantized linears hook the layer input; HF fused-MoE experts hook the shared
+    input quantizers, keyed by the active expert (``_current_expert_idx``). Weights without a hook
+    (conv, SequentialQuantizer, non-eager experts) are never captured. ``on_weight(name, weight,
+    weight_quantizer)``, if given, is called once per hooked weight. Returns removable handles.
     """
     handles: list = []
 
@@ -980,15 +981,14 @@ def _register_local_hessian_input_hooks(model, names, capture, block_size, warne
                 weight = getattr(module, "weight", None)
                 if weight is None or weight.dim() != 2 or not module.weight_quantizer.is_enabled:
                     continue
-                _warn_local_hessian_fallback(
-                    name, weight, module.weight_quantizer, block_size, warned
-                )
+                if on_weight is not None:
+                    on_weight(name, weight, module.weight_quantizer)
 
             def _dense_hook(linear, args):
                 if args:
                     capture(linear.weight_quantizer, linear.weight, args[0])
 
-            handles.append(module.register_forward_pre_hook(_LocalHessianInputHook(_dense_hook)))
+            handles.append(module.register_forward_pre_hook(_WeightInputHook(_dense_hook)))
         elif _is_quant_fused_experts(module):
             with enable_weight_access_and_writeback(module, model, names):
                 first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
@@ -1005,9 +1005,8 @@ def _register_local_hessian_input_hooks(model, names, capture, block_size, warne
                     input_quantizer = getattr(module, input_q_name, None)
                     if weight is None or quantizers is None or input_quantizer is None:
                         continue
-                    _warn_local_hessian_fallback(
-                        f"{name}.{weight_name}", weight[0], quantizers[0], block_size, warned
-                    )
+                    if on_weight is not None:
+                        on_weight(f"{name}.{weight_name}", weight[0], quantizers[0])
                     # Snapshot which experts are enabled now, before the caching forward silences
                     # all weight quantizers — so we don't capture (and discard) disabled experts.
                     enabled = {i for i, q in enumerate(quantizers) if q.is_enabled}
@@ -1015,7 +1014,7 @@ def _register_local_hessian_input_hooks(model, names, capture, block_size, warne
                         continue
                     handles.append(
                         input_quantizer.register_forward_pre_hook(
-                            _LocalHessianInputHook(
+                            _WeightInputHook(
                                 _make_expert_hook(module, weight_name, quantizers, enabled)
                             )
                         )
@@ -1091,7 +1090,14 @@ def local_hessian_calibrate(
     # Phase 2: capture each weight's input activations during a forward with weight fake-quant
     # disabled (so H = ΣXᵀX reflects full-precision weights); input quantizers are left as-is.
     warned: set = set()
-    handles = _register_local_hessian_input_hooks(model, names, capture, block_size, warned)
+    handles = _register_weight_input_hooks(
+        model,
+        names,
+        capture,
+        on_weight=lambda name, weight, quantizer: _warn_local_hessian_fallback(
+            name, weight, quantizer, block_size, warned
+        ),
+    )
     print_rank_0("local_hessian: Caching activations and computing local Hessian...")
     try:
         with set_quantizer_by_cfg_context(
@@ -2344,6 +2350,7 @@ def gptq(
 
     for handle in gptq_handles.values():
         handle.cleanup()
+        handle.sync_hessian_across_dp()
 
     print_rank_0("Updating weights using GPTQ algorithm...")
     names = module_name_maps(model)
@@ -2356,6 +2363,105 @@ def gptq(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     print_rank_0(f"GPTQ time: {time.time() - total_start:.2f}s")
+
+
+# Calibration rows squared at a time, bounding imatrix's float32 temporaries to this slice of an
+# input rather than twice the whole of it.
+_IMATRIX_ROW_CHUNK = 1024
+
+
+@torch.no_grad()
+def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None):
+    """Encode weights once with their inputs' per-column second moments, llama.cpp's imatrix.
+
+    After ``max_calibrate``, one forward with weight fake-quant disabled accumulates
+    ``E[x_j^2]`` over the inputs of every weight whose quantizer backend registered an imatrix
+    encoder (see :func:`~modelopt.torch.quantization.utils.calib_utils.register_imatrix_encoder`)
+    and accepts the quantizer. Each such weight is then encoded once, its search weighted by that
+    statistic, and replaced by its fake-quantized value. Dense quantized linears and HF fused-MoE
+    experts (one statistic per expert, over the tokens routed to it) are both covered, so this
+    reaches the experts GPTQ skips. Encoders skip a quantizer that already holds final codes, so
+    ``[gptq, imatrix]`` runs GPTQ where it applies and imatrix on the rest.
+    """
+    if forward_loop is None:
+        warn_rank_0("imatrix: no forward_loop given; skipping imatrix calibration")
+        return
+    names = module_name_maps(model)
+
+    # Pick the targets before the forward disables every weight quantizer.
+    def _accepted(quantizer):
+        backend = getattr(quantizer, "backend", None)
+        encoder = _IMATRIX_ENCODER_REGISTRY.get(backend) if isinstance(backend, str) else None
+        return encoder is not None and encoder.accepts(quantizer)
+
+    targets: dict[int, list] = {}  # id(weight quantizer) -> [sum of x^2 per column, token count]
+    target_modules = []
+    for name, module in names.name_to_module.items():
+        if not isinstance(module, QuantModule):
+            continue
+        accepted = [q for q in module.iter_weight_quantizers_for_calibration() if _accepted(q)]
+        if accepted:
+            target_modules.append((name, module))
+            targets.update((id(q), [None, 0]) for q in accepted)
+
+    # Refuse a weight the encoder cannot take before any forward or calibration state changes;
+    # otherwise it would fail only after calibration, with the earlier weights already encoded.
+    for name, module in target_modules:
+        for weight, quantizer in module.iter_weights_for_calibration():
+            if id(quantizer) in targets:
+                try:
+                    _IMATRIX_ENCODER_REGISTRY[quantizer.backend].validate(weight, quantizer)
+                except (ValueError, TypeError) as e:
+                    raise type(e)(f"imatrix cannot encode a weight of {name}: {e}") from e
+
+    # TODO: sum the statistics across data-parallel ranks, as max_calibrate syncs amax.
+    if targets and dist_is_initialized() and dist_size() > 1:
+        warn_rank_0(
+            "imatrix: statistics are not synced across ranks, so ranks that calibrate on "
+            "different data may encode different codes. Treat imatrix as single-rank for now."
+        )
+
+    # The forward below collects what imatrix needs; max only runs one if activations need it.
+    max_calibrate(model, forward_loop, skip_forward_without_activation_calib=True)
+    if not targets:
+        print_rank_0("imatrix: no weight quantizer has an imatrix encoder, skipping")
+        return
+
+    def capture(quantizer, _weight, inputs):
+        entry = targets.get(id(quantizer))
+        if entry is None:
+            return
+        inputs = inputs.to_local() if hasattr(inputs, "to_local") else inputs
+        x = inputs.detach().reshape(-1, inputs.shape[-1])
+        if x.shape[0] == 0:
+            return
+        sum_sq = sum(rows.float().square().sum(dim=0) for rows in x.split(_IMATRIX_ROW_CHUNK))
+        entry[0] = sum_sq if entry[0] is None else entry[0] + sum_sq
+        entry[1] += x.shape[0]
+
+    handles = _register_weight_input_hooks(model, names, capture)
+    try:
+        with set_quantizer_by_cfg_context(
+            model, [{"quantizer_name": "*weight_quantizer", "enable": False}]
+        ):
+            forward_loop(model)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    encoded = 0
+    for _, module in target_modules:
+        with enable_weight_access_and_writeback(module, model, names):
+            for weight, quantizer in module.iter_weights_for_calibration():
+                entry = targets.get(id(quantizer))
+                if entry is None:
+                    continue
+                sum_sq, count = entry
+                second_moments = None if count == 0 else sum_sq.to(weight.device) / count
+                encoder = _IMATRIX_ENCODER_REGISTRY[quantizer.backend]
+                weight.copy_(encoder.encode(weight, quantizer, second_moments))
+                encoded += 1
+    print_rank_0(f"imatrix: encoded {encoded} weights")
 
 
 def _run_weight_scale_calibration(model, forward_loop, scale_algorithm):

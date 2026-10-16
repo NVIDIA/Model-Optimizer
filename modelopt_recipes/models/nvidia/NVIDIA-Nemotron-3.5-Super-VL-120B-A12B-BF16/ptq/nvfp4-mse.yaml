@@ -14,11 +14,17 @@
 # limitations under the License.
 
 
-# NemotronH -- aggressive NVFP4 tier, weight-MSE calibration.
+# NVIDIA Nemotron 3.5 Super VL -- NVFP4, weight-MSE calibration.
 #
-# For hybrid Mamba-MoE NemotronH checkpoints, including the omni VL wrappers. Broader FP8 weight
-# coverage than the conservative tier; the MTP rules apply only when the checkpoint carries an
-# MTP tail and are inert otherwise.
+# The PTQ stage for NVIDIA Nemotron 3.5 Super VL, keyed to the BF16 source checkpoint it runs
+# on: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16. It reproduces the released precision
+# assignment, not the released weights -- the published
+# nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4 is refined by quantization-aware
+# distillation after this stage, which no PTQ recipe performs.
+#
+# The model is a hybrid Mamba-MoE NemotronH omni checkpoint, and nothing here is specific to
+# this release beyond the calibration choices, so the rules apply to NemotronH hybrids
+# generally. The MTP rules are inert on a checkpoint with no MTP tail.
 #
 #   MoE routed + shared experts   NVFP4 W4A4, static weight scales
 #   attention q/k/v/o, Mamba in/out_proj, lm_head   FP8
@@ -29,19 +35,26 @@
 # quant_cfg is ordered and the LAST match wins, so the blanket disable comes first and the
 # vision / MTP rules come last. Only configs/numerics/* is imported, so every rule that
 # applies to this model is visible in this file.
+#
+# Rules are written for both Hugging Face (hf_ptq) and Megatron-Core (Megatron-Bridge) module
+# names. Where the two differ -- attention, lm_head and the MTP block -- both spellings are
+# listed; each is inert on the other framework's model.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   nvfp4: configs/numerics/nvfp4
   nvfp4_static: configs/numerics/nvfp4_static
   fp8: configs/numerics/fp8
 
 metadata:
-  recipe_type: ptq
   description: >-
-    NemotronH aggressive tier, weight-MSE calibrated: NVFP4 routed and shared MoE experts with
-    static weight scales and dynamic NVFP4 activations, the same for the MTP block-1 experts;
-    FP8 attention projections, Mamba in/out_proj and lm_head; BF16 latent MoE and vision tower.
-    FP8 KV cache, with the backbone cast at a fixed range and MTP calibrated.
+    PTQ stage for NVIDIA Nemotron 3.5 Super VL, run on
+    nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 and weight-MSE calibrated: NVFP4 routed
+    and shared MoE experts with static weight scales and dynamic NVFP4 activations, the same for
+    the MTP block-1 experts; FP8 attention projections, Mamba in/out_proj and lm_head; BF16
+    latent MoE, router, embeddings and vision stack. FP8 KV cache, with the backbone cast at a
+    fixed range and MTP calibrated. The released NVFP4 checkpoint adds quantization-aware
+    distillation on top of this stage.
 quantize:
   algorithm:
     method: mse
@@ -84,6 +97,19 @@ quantize:
     - quantizer_name: '*mixer.out_proj.input_quantizer'
       cfg:
         $import: fp8
+    # Megatron-Core attention: q/k/v_proj are fused into linear_qkv, o_proj is linear_proj.
+    - quantizer_name: '*self_attention.linear_qkv.weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*self_attention.linear_qkv.input_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*self_attention.linear_proj.weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*self_attention.linear_proj.input_quantizer'
+      cfg:
+        $import: fp8
     # Backbone KV casts at a fixed FP8 range: no _amax buffer, so no k_scale/v_scale is
     # exported, matching configs/ptq/units/kv_fp8_cast. MTP KV below stays calibrated and
     # keeps its pair.
@@ -105,7 +131,22 @@ quantize:
     - quantizer_name: '*mtp.layers.1.mixer.shared_experts.*input_quantizer'
       cfg:
         $import: nvfp4
-    # Restated so this rule cannot inherit the backbone setting above.
+    # Megatron-Core MTP block 1 is mtp.layers.0.mtp_model_layer.layers.1.
+    - quantizer_name: '*mtp_model_layer.layers.1.mlp.experts.*weight_quantizer'
+      cfg:
+        $import: nvfp4_static
+    - quantizer_name: '*mtp_model_layer.layers.1.mlp.experts.*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*mtp_model_layer.layers.1.mlp.shared_experts.*weight_quantizer'
+      cfg:
+        $import: nvfp4_static
+    - quantizer_name: '*mtp_model_layer.layers.1.mlp.shared_experts.*input_quantizer'
+      cfg:
+        $import: nvfp4
+    # Restated so this rule cannot inherit the backbone setting above. It also matches the
+    # Megatron-Core MTP attention (mtp.layers.0.mtp_model_layer.layers.0...), so it needs no
+    # separate Megatron-Core rule.
     - quantizer_name: '*mtp.layers.0.*[kv]_bmm_quantizer'
       cfg:
         $import: fp8
@@ -120,9 +161,22 @@ quantize:
       enable: true
       cfg:
         $import: fp8
+    # Megatron-Core lm_head. Effective only with untied embeddings: for a tied output_layer the
+    # Megatron checkpoint save drops its quantizer state, so it reloads and exports BF16.
+    - quantizer_name: '*output_layer.weight_quantizer'
+      enable: true
+      cfg:
+        $import: fp8
+    - quantizer_name: '*output_layer.input_quantizer'
+      enable: true
+      cfg:
+        $import: fp8
     - quantizer_name: '*vision_model*'
       enable: false
     - quantizer_name: '*vision_projector*'
+      enable: false
+    # Megatron-Bridge names the projector vision_projection.
+    - quantizer_name: '*vision_projection*'
       enable: false
     - quantizer_name: '*radio_model*'
       enable: false
@@ -142,6 +196,8 @@ quantize:
     # quantization like any other. Image calibration supplies no audio, so those input
     # quantizers collect no amax and the export drops the input scale while still writing an
     # FP8 weight scale -- a layer that claims W8A8 with no activation scale. Keep it BF16.
+    # Megatron-Bridge builds no audio branch for the omni wrapper; these guards also cover the
+    # Megatron-Core attention rules should it name one sound_encoder / sound_projector.
     - quantizer_name: '*audio_tower*'
       enable: false
     - quantizer_name: '*sound_encoder*'

@@ -1447,12 +1447,20 @@ def _export_diffusers_checkpoint(
         if not is_partial_export and not model_index_path.exists() and hasattr(pipe, "save_config"):
             pipe.save_config(export_dir)
 
-        # Last resort: synthesize a minimal model_index.json from exported components.
+        # Preserve pipeline settings while listing only the exported components.
         if not model_index_path.exists() and hasattr(pipe, "config") and pipe.config is not None:
+            pipeline_components = pipe.components
             model_index = {
-                "_class_name": type(pipe).__name__,
-                "_diffusers_version": diffusers.__version__,
+                key: value
+                for key, value in json.loads(pipe.to_json_string()).items()
+                if key not in pipeline_components and not key.startswith("_")
             }
+            model_index.update(
+                {
+                    "_class_name": type(pipe).__name__,
+                    "_diffusers_version": diffusers.__version__,
+                }
+            )
             for name, comp in all_components.items():
                 module = type(comp).__module__
                 library = module.split(".")[0]
@@ -1653,8 +1661,12 @@ def _source_checkpoint(model: nn.Module) -> str | None:
     tensors never reach ``exclude_modules`` because the two halves disagreed about where the
     checkpoint was.
     """
-    return getattr(model, "_modelopt_source_checkpoint", None) or getattr(
-        getattr(model, "config", None), "_name_or_path", None
+    # ``or None``: a model built with ``from_config`` has ``_name_or_path == ""``, which would
+    # otherwise name the current directory.
+    return (
+        getattr(model, "_modelopt_source_checkpoint", None)
+        or getattr(getattr(model, "config", None), "_name_or_path", None)
+        or None
     )
 
 
@@ -1880,7 +1892,7 @@ def export_hf_checkpoint(
         export_dir: The target export path.
         save_modelopt_state: Whether to save the modelopt state_dict.
         components: Only used for diffusers pipelines. Optional list of component names
-            to export. If None, all quantized components are exported.
+            to export. If None, all components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
         max_shard_size: Maximum size of each safetensors shard file. Defaults to "10GB".
         **kwargs: Runtime-specific post-processing options forwarded to

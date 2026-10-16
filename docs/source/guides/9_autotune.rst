@@ -569,10 +569,7 @@ Using TensorRT Python API
    # Create builder and logger
    logger = trt.Logger(trt.Logger.WARNING)
    builder = trt.Builder(logger)
-   network = builder.create_network(
-       1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-       | 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
-   )
+   network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
    parser = trt.OnnxParser(network, logger)
 
    # Parse optimized ONNX model

@@ -67,7 +67,9 @@ jobs:
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
-        run: pip install nox uv && nox -s "unit-3.12(torch_214, tf_latest)"
+          # Everything but PRs also runs the slow tests marked ``manual`` (e.g. AutoNAS).
+          PYTEST_EXTRA: ${{ github.event_name != 'pull_request' && '--run-manual' || '' }}
+        run: pip install nox uv && nox -s "unit-3.12(torch_214, tf_latest)" -- $PYTEST_EXTRA
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v7
         with:

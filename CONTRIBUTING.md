@@ -110,6 +110,8 @@ Currently we have 2 places where we mention pip dependencies: [pyproject.toml](.
 
 If adding a new PIP dependency to any of these, make sure to verify the LICENSE of the dependency. If its not a permissive license (e.g. MIT, Apache 2), you need to provide a justification for the use of the dependency in the PR and check with `@NVIDIA/modelopt-setup-codeowners` if its allowed or not.
 
+Do not regenerate or commit `uv.lock` in your PR, even when changing dependencies in `pyproject.toml`. A [weekly workflow](./.github/workflows/bump_uv_lock.yml) refreshes it automatically.
+
 ## 🔒 Security coding practices
 
 All contributors must follow the security coding practices documented in *Security Coding Practices for
@@ -183,6 +185,16 @@ nox -s "unit-3.12(torch_211, tf_latest)"
   keeping CI/CD fast and lean. Default to one test per behavior: use `@pytest.mark.parametrize` instead of
   near-duplicate test functions, and don't add a per-branch test for a helper that a higher-level test already
   exercises. More tests is not better coverage — every checked-in test is CI time and maintenance forever.
+  Before adding a test, check whether an existing unit, GPU, or example test already exercises the path; if so,
+  extend it instead. Do not add tests that only restate the implementation, assert on mocks, pin log/warning
+  wording, or re-cover a branch of a helper whose caller is tested. A PR that adds many tests should be able to
+  say what regression each one catches.
+- **Keep `tests/unit` fast — the `linux` job has a hard 20-minute limit** and runs the whole suite serially.
+  A unit test should take well under 5s (check with `pytest --durations=20`). Tests that spawn processes or
+  subprocesses (`spawn_multiprocess_job`, `subprocess.run` importing torch), train for many steps, or build
+  real-size models belong in `tests/gpu*`; batch several cases into one spawn rather than one spawn per case,
+  or reuse the session-scoped `cpu_dist_workers` fixture for multi-rank CPU tests.
+  Slow tests for features without active maintenance (e.g. AutoNAS) should be `@pytest.mark.manual` or nightly-only.
 - **Exercise the behavior a test claims to validate.** Mocks are useful for focused interface and wiring coverage, but
   replacing the implementation under test does not validate its real behavior. Include an end-to-end test that runs
   the actual implementation whenever the test claims backend or runtime behavior. For example, a test of
