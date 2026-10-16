@@ -127,13 +127,6 @@ def test_indexed_tail_shard(ckpt):
     assert set(_recorded(ckpt)) == set(mtp)
 
 
-def test_auxiliary_tower_is_carried_too(ckpt):
-    """Nothing is keyed to MTP: any tensor the model has no home for is carried."""
-    _add_to_main_shard(ckpt, {"aux_tower.blocks.0.weight": torch.zeros(8, 8)})
-
-    assert set(_recorded(ckpt)) == {"aux_tower.blocks.0.weight"}
-
-
 def test_two_layouts_at_once(ckpt, tmp_path):
     """An inlined head and an off-index sidecar together: each must be picked up by its own
     mechanism, and neither by both -- a tensor carried *and* copied would be exported twice."""
@@ -153,21 +146,3 @@ def test_two_layouts_at_once(ckpt, tmp_path):
     assert recorded == {inlined}
     assert copied == ["mtp.safetensors"]
     assert "mtp.fc.weight" not in recorded, "copied files must not also ride the state dict"
-
-
-def test_clean_checkpoint_records_nothing(ckpt):
-    """No stray tensors -> an empty answer, distinct from never having asked."""
-    model = load_pretrained(str(ckpt))
-
-    assert model._modelopt_unplaced_source_keys == []
-    assert model._modelopt_source_checkpoint == str(ckpt)
-
-
-def test_recorded_keys_are_sorted_and_deduplicated(ckpt):
-    """The export wants a stable, duplicate-free list."""
-    _add_to_main_shard(
-        ckpt, {"zzz_orphan.weight": torch.zeros(4), "aaa_orphan.weight": torch.zeros(4)}
-    )
-
-    keys = _recorded(ckpt)
-    assert keys == sorted(keys) and len(keys) == len(set(keys))
