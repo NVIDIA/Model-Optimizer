@@ -40,6 +40,7 @@ from modelopt.torch.export.quant_aware_conversion import (
     SplitRule,
     _assert_experts_pre_expanded,
     _build_reverse_rules,
+    _dense_split_rule,
     _source_checkpoint_keys,
     _SourceAwareRenamer,
     apply_reverse_rules,
@@ -1286,6 +1287,7 @@ def test_revert_quant_config_names_mapper():
 def _as_loading_rewrote(conversions, siblings):
     """``conversions`` with every expert converter's ``.weight`` sources expanded the way a
     load-time rewrite expands them: one anchored source per checkpoint tensor it consumes."""
+    # Local import: optional dependency; every caller importorskips transformers first.
     from transformers.core_model_loading import WeightConverter
 
     rewritten = []
@@ -1320,6 +1322,7 @@ def test_experts_revert_through_converters_loading_rewrote(siblings):
     conversions (MiniMax-M2.7 kept its in-memory expert names) nor re-encode a weight.
     """
     pytest.importorskip("transformers")
+    # Local import: optional dependency, guarded by the importorskip above.
     from _test_utils.torch.transformers_models import get_tiny_mixtral
 
     try:
@@ -1369,9 +1372,8 @@ def test_dense_split_names_each_part_once_through_load_siblings():
     """A dense fused converter that a dequantizing load rewrote still un-fuses into one part per
     module, not one per checkpoint tensor the load consumed."""
     pytest.importorskip("transformers")
+    # Local import: optional dependency, guarded by the importorskip above.
     from transformers.core_model_loading import Concatenate, WeightConverter
-
-    from modelopt.torch.export.quant_aware_conversion import _dense_split_rule
 
     modules = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")
     leaves = ("weight", "weight_scale_inv")
