@@ -70,7 +70,13 @@ QAD 500 raises SciCode's mean completion length by +90.9% over BF16 at an unchan
 - The **median** also roughly doubles (+91.6%), so the whole distribution shifted right — this is not *only* a tail effect.
 - Capped rate peaks at **iteration 50** (4.3%) and settles at 3.1% / 3.6% by 300 / 500; it is not gradual drift.
 
-The obvious suspect — that `--logit_kl_top_k 4096` leaves the stop tokens outside the loss — **did not hold up**. Probing the BF16 teacher over one runaway trace: `</think>` does fall outside top-4096 at 35% of positions overall, but *in the looping region* the teacher gives `<|im_end|>` a median rank of **5** and `</think>` ~570, both well inside top-k. The teacher is signalling "stop here" at positions the loss did cover, and the student still does not stop. Neither assistant-only loss nor training on the teacher's own responses removes it ([data format](#data-format-pre-tokenized-blend-vs-chat-sft-data)). More likely, a teacher-forced loss never exercises free-running generation 10K+ tokens deep.
+The obvious suspect — that `--logit_kl_top_k 4096` leaves the stop tokens outside the loss — **did not hold up**. We scored 16 BF16 sub-steps that stop normally and 16 QAD-500 runaway sub-steps, with the eval's exact prompts, under the BF16 teacher and the PTQ, QAD-50 and QAD-500 students, over the full vocabulary:
+
+- **The top-4096 tokens hold essentially all of the teacher's probability**: on average 1e-5 falls outside. `</think>` is often ranked outside the top-4096 mid-reasoning, but only with negligible probability, so the top-k loss sees nearly the whole distribution.
+- **QAD does not suppress stopping.** Fed the teacher's text, every student puts nearly all probability on `</think>` exactly where the teacher stops.
+- **Inside the loops the teacher keeps going too.** Its stop probability there is about e<sup>-22</sup>, and it predicts the next repeated token with probability ~0.98.
+
+So once a loop has started, a teacher-forced loss has nothing to correct: teacher and student agree. The difference is that the student enters loops in its own free-running generation, which KD on fixed text never exercises. Neither assistant-only loss nor training on the teacher's own responses removes it ([data format](#data-format-pre-tokenized-blend-vs-chat-sft-data)). The students were scored with their quantized weights dequantized to BF16 and BF16 activations; the first and last findings depend only on the teacher.
 
 ### `presence_penalty: 1.5` removes it at decode time
 
@@ -103,5 +109,5 @@ Measured on single-Slurm-segment runs on both sides, so neither figure includes 
 ### For the next QAD run
 
 - Track the **length-capped rate** as a first-class metric alongside accuracy: a benchmark score can stay flat while 3.6% of responses return nothing.
-- Consider **top-p instead of top-k** for the KD loss, so coverage adapts to the teacher's entropy rather than a fixed rank.
-- If memory allows, use **full-vocab KL**. At 32K on this 248,320-token vocabulary the dense fp32 logits are 30.31 GiB per tensor, which is why top-k was used here.
+- Changing the KD loss's vocabulary coverage (top-p, full-vocab KL) is unlikely to help: the top-4096 tokens already hold nearly all of the teacher's probability.
+- The training-side lever this points to is **on-policy distillation**: KD on the student's own generations, so the loss sees the states where the student starts to loop.
