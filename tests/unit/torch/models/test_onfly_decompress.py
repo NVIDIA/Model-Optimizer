@@ -574,7 +574,9 @@ EXPERTS = ["re:.*experts.*"]
 def test_the_expert_config_group_decides_the_stored_params(groups, zero_point):
     """With several config groups the one targeting experts wins, else the first; an asymmetric
     scheme stores a zero-point next to the packed weight, a symmetric one does not."""
-    pytest.importorskip("compressed_tensors")
+    pytest.importorskip(
+        "compressed_tensors", reason="needs compressed-tensors (CI's unit session installs it)"
+    )
     config = SimpleNamespace(quantization_config=_pack_quantized(**groups))
 
     _, scheme, names, fmt = onfly._read_compression(config)
@@ -588,7 +590,9 @@ def test_the_expert_config_group_decides_the_stored_params(groups, zero_point):
 def test_real_pack_quantized_experts_round_trip_exactly():
     """With the real compressed_tensors INT4 compressor, packed experts come back out of the fused
     converter as the original weights (chosen to be exact in INT4 x 0.5 and in bf16)."""
-    pytest.importorskip("compressed_tensors")
+    pytest.importorskip(
+        "compressed_tensors", reason="needs compressed-tensors (CI's unit session installs it)"
+    )
     config = SimpleNamespace(quantization_config=_pack_quantized(experts=_int4(True, ["Linear"])))
     compressor, scheme, names, _ = onfly._read_compression(config)
     n_experts, inter, hidden = 3, 4, 64
