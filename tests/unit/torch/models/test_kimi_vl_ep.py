@@ -39,6 +39,7 @@ import transformers.dynamic_module_utils as dmu
 from transformers import DeepseekV3Config, DeepseekV3ForCausalLM, PretrainedConfig
 
 from modelopt.torch.models import _onfly_decompress, get_spec
+from modelopt.torch.models.kimi_k25 import ep as kimi_k25
 from modelopt.torch.models.kimi_vl import ep as kimi_vl
 from modelopt.torch.utils.moe import _routed_expert_keys
 
@@ -158,15 +159,27 @@ def test_prepare_with_a_checkpoint_swaps_in_native_deepseek_v3_and_shims_tie_wei
     assert remote.tied == [model]
 
 
-def test_the_swap_fails_loudly_when_the_remote_modeling_did_not_load(monkeypatch):
+# Kimi-K2.5's adapter is Kimi-VL's with on-the-fly decompression added; these hold for both.
+
+
+@pytest.mark.parametrize(
+    ("swap", "modeling"),
+    [
+        (lambda: kimi_vl._patch_kimi_vl_modeling_to_native("/ckpt", False), "modeling_kimi_vl"),
+        (lambda: kimi_k25._patch_kimi_modeling_to_native("/ckpt", True), "modeling_kimi_k25"),
+    ],
+    ids=["vl", "k25"],
+)
+def test_the_swap_fails_loudly_when_the_remote_modeling_did_not_load(monkeypatch, swap, modeling):
     """Skipping the swap silently would build the per-expert layout that EP cannot shard."""
     monkeypatch.setattr(dmu, "get_class_from_dynamic_module", lambda *args, **kwargs: None)
 
-    with pytest.raises(RuntimeError, match="modeling_kimi_vl"):
-        kimi_vl._patch_kimi_vl_modeling_to_native("/ckpt", False)
+    with pytest.raises(RuntimeError, match=modeling):
+        swap()
 
 
-def test_prepare_rejects_a_config_without_a_text_config(monkeypatch):
+@pytest.mark.parametrize("adapter", [kimi_vl, kimi_k25], ids=["vl", "k25"])
+def test_prepare_rejects_a_config_without_a_text_config(monkeypatch, adapter):
     """Before prepare patches anything process-wide, such as the loader's remote-code staging."""
 
     def unstaged_loader(*args, **kwargs):
@@ -175,13 +188,15 @@ def test_prepare_rejects_a_config_without_a_text_config(monkeypatch):
     monkeypatch.setattr(dmu, "get_cached_module_file", unstaged_loader)
 
     with pytest.raises(ValueError, match="text_config"):
-        kimi_vl.prepare(SimpleNamespace())
+        adapter.prepare(SimpleNamespace())
 
     assert dmu.get_cached_module_file is unstaged_loader
 
 
-def test_the_kimi_vl_spec_routes_expert_parallelism_through_this_adapter():
-    """kimi_vl is remote code, so its whole EP setup is this adapter's ``prepare``."""
-    spec = get_spec("kimi_vl")
-    assert spec.modeling_source == "remote_code"
-    assert spec.ep_spec.prepare is kimi_vl.prepare
+@pytest.mark.parametrize(
+    ("model_type", "adapter"), [("kimi_vl", kimi_vl), ("kimi_k25", kimi_k25)], ids=["vl", "k25"]
+)
+def test_the_spec_routes_expert_parallelism_through_its_own_adapter(model_type, adapter):
+    """The checkpoint's code builds no EP-capable experts, so its whole EP setup is this adapter's
+    ``prepare``: another Kimi adapter's would load it without its own swap or decompression."""
+    assert get_spec(model_type).ep_spec.prepare is adapter.prepare
