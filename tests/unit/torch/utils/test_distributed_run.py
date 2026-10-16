@@ -17,6 +17,7 @@
 """Unit tests for distributed PTQ: the distribution plan and a model's record of it, the collectives
 that fail together, the process group's lifetime, launch detection."""
 
+from contextlib import nullcontext
 from datetime import timedelta
 
 import pytest
@@ -312,32 +313,72 @@ def test_a_single_process_is_rank_0_of_one_on_the_given_device(monkeypatch):
 
 def test_a_distributed_launch_yields_this_ranks_state_on_its_cuda_device(monkeypatch):
     monkeypatch.setenv("WORLD_SIZE", "4")
-    monkeypatch.setattr(dist, "setup", lambda timeout=None: None)
+    timeouts = []
+    monkeypatch.setattr(dist, "setup", lambda timeout=None: timeouts.append(timeout))
     monkeypatch.setattr(dist, "cleanup", lambda: None)
     monkeypatch.setattr(dist, "rank", lambda group=None: 2)
     monkeypatch.setattr(dist, "size", lambda group=None: 4)
     monkeypatch.setattr(dist, "local_rank", lambda: 1)
-    with distributed_run(device="cpu") as state:
+    with distributed_run(timeout=timedelta(hours=1), device="cpu") as state:
         assert state == DistributedState(rank=2, world_size=4, device=torch.device("cuda:1"))
         assert not state.is_main
+    assert timeouts == [timedelta(hours=1)]
 
 
-def test_the_run_destroys_a_group_its_body_set_up(monkeypatch):
-    """An FSDP2 load on one rank sets a group up mid-run; the run tears it down like a launch's."""
-    monkeypatch.delenv("WORLD_SIZE", raising=False)
-    live, destroyed = [], []
+class _ExitedError(Exception):
+    """Raised by a stand-in for abort(), which exits the process instead of returning."""
+
+
+@pytest.mark.parametrize(
+    ("launch", "body_raises", "ends_by"),
+    [
+        (True, None, "cleanup"),
+        (True, ValueError, "abort"),
+        (True, SystemExit, "cleanup"),
+        (False, None, "cleanup"),
+        (False, ValueError, "cleanup"),
+    ],
+    ids=["launch", "launch-raises", "launch-exits", "single-process", "single-process-raises"],
+)
+def test_the_run_ends_the_group_it_set_up(monkeypatch, launch, body_raises, ends_by):
+    """The launch's group, or the one a single process's FSDP2 load sets up mid-run, is destroyed on
+    the way out. A rank of several whose body raised exits through abort() instead, and torchrun tears
+    the job down: the cleanup's barrier and destroy_process_group would wait on peers that may sit in
+    a collective this rank never reaches. Every rank reaches an intentional exit."""
+    if launch:
+        monkeypatch.setenv("WORLD_SIZE", "2")
+    else:
+        monkeypatch.delenv("WORLD_SIZE", raising=False)
+    live, ended = [], []
+    monkeypatch.setattr(dist, "setup", lambda timeout=None: live.append("the launch's group"))
     monkeypatch.setattr(dist, "is_initialized", lambda: bool(live))
-    monkeypatch.setattr(dist, "cleanup", lambda: destroyed.append(0))
+    monkeypatch.setattr(dist, "rank", lambda group=None: 0)
+    monkeypatch.setattr(dist, "size", lambda group=None: 2 if launch else 1)
+    monkeypatch.setattr(dist, "local_rank", lambda: 0)
+    monkeypatch.setattr(dist, "cleanup", lambda: ended.append("cleanup"))
 
-    with distributed_run(device="cpu"):
-        live.append("the body's group")
+    def abort():
+        ended.append("abort")
+        raise _ExitedError
 
-    assert len(destroyed) == 1
+    monkeypatch.setattr(dist, "abort", abort)
+    escapes = _ExitedError if ends_by == "abort" else body_raises
+    expected = pytest.raises(escapes) if escapes else nullcontext()
+
+    with expected, distributed_run(device="cpu"):
+        if not launch:
+            live.append("the body's group")
+        if body_raises:
+            raise body_raises
+
+    assert ended == [ends_by]
 
 
+@pytest.mark.parametrize("raises", [False, True], ids=["returns", "raises"])
 @pytest.mark.parametrize("world_size", [None, "2"], ids=["single-process", "launch"])
-def test_the_run_leaves_a_group_it_found_alone(monkeypatch, world_size):
-    """Under a launch too: a caller that set its group up before the run keeps it."""
+def test_the_run_leaves_a_group_it_found_alone(monkeypatch, world_size, raises):
+    """Under a launch too, and when the body raises: a caller that set its group up before the run
+    keeps it, and gets the error."""
     if world_size is None:
         monkeypatch.delenv("WORLD_SIZE", raising=False)
     else:
@@ -348,36 +389,11 @@ def test_the_run_leaves_a_group_it_found_alone(monkeypatch, world_size):
         monkeypatch.setattr(dist, "local_rank", lambda: 0)
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(dist, "cleanup", lambda: pytest.fail("destroyed the caller's group"))
-    with distributed_run(device="cpu"):
-        pass
-
-
-def test_a_distributed_launch_owns_the_group_even_when_the_body_raises(monkeypatch, capsys):
-    """The group is torn down on the way out, and the body's error is printed first: a rank failing
-    alone would otherwise wait in the cleanup barrier while the rest sit in a collective."""
-    monkeypatch.setenv("WORLD_SIZE", "2")
-    calls, live = [], []
-
-    def setup(timeout=None):
-        calls.append(("setup", timeout))
-        live.append("the launch's group")
-
-    monkeypatch.setattr(dist, "is_initialized", lambda: bool(live))
-    monkeypatch.setattr(dist, "setup", setup)
-    monkeypatch.setattr(dist, "rank", lambda group=None: 0)
-    monkeypatch.setattr(dist, "size", lambda group=None: 2)
-    monkeypatch.setattr(dist, "local_rank", lambda: 0)
-    monkeypatch.setattr(dist, "cleanup", lambda: calls.append(("cleanup", capsys.readouterr().out)))
-
-    with (
-        pytest.raises(ValueError, match="calibration failed"),
-        distributed_run(timeout=timedelta(hours=1)),
-    ):
-        raise ValueError("calibration failed")
-
-    assert calls[0] == ("setup", timedelta(hours=1))
-    assert calls[1][0] == "cleanup"
-    assert "calibration failed" in calls[1][1], "the error must be printed before the cleanup"
+    monkeypatch.setattr(dist, "abort", lambda: pytest.fail("exited the caller's process"))
+    expected = pytest.raises(ValueError, match="calibration failed") if raises else nullcontext()
+    with expected, distributed_run(device="cpu"):
+        if raises:
+            raise ValueError("calibration failed")
 
 
 # ------------------------------------------------------------------------------------ launch detect

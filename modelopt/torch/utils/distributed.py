@@ -494,7 +494,10 @@ def distributed_run(timeout: timedelta | None = None, device: torch.device | str
 
     On exit, even if the body raises, it destroys the group the run set up: the launch's, or one the
     body set up, such as the one-rank group a single process's FSDP2 load shards through. A group
-    that was already there when the run began is the caller's, and is left as it is.
+    that was already there when the run began is the caller's, and is left as it is. A rank whose
+    body raised in a run of several ranks exits through :func:`abort` instead, and the launcher
+    tears the job down: destroying the group would wait on peers that may sit in a collective this
+    rank never reaches.
     """
     launched = is_distributed_launch()
     group_was_there = is_initialized()
@@ -507,20 +510,24 @@ def distributed_run(timeout: timedelta | None = None, device: torch.device | str
             else DistributedState(0, 1, device)
         )
     finally:
-        # If the body is unwinding due to an exception, PRINT it here BEFORE cleanup()'s collective
-        # barrier. A per-rank exception (only some ranks raise) otherwise makes those ranks enter the
-        # cleanup barrier while the rest are still inside a calibration a2a collective -> cross-rank
-        # DEADLOCK, with the original exception never surfaced (pending behind the hung barrier).
+        # If the body is unwinding due to an exception, PRINT it here BEFORE anything that waits on
+        # the peers. A per-rank exception (only some ranks raise) leaves the rest inside a
+        # calibration a2a collective, so this rank's cleanup barrier or destroy_process_group would
+        # DEADLOCK with the original exception never surfaced. A run of several ranks that owns its
+        # group therefore aborts the rank: abort() prints the traceback and exits.
         exc = sys.exc_info()[1]
+        owns_group = not group_was_there and is_initialized()
         if exc is not None:
             print(
                 f"[distributed_run][rank {os.environ.get('RANK', '?')}] body raised "
                 f"{type(exc).__name__}: {exc}",
                 flush=True,
             )
+            if owns_group and not isinstance(exc, SystemExit) and size() > 1:
+                abort()
             traceback.print_exc()
             sys.stderr.flush()
-        if not group_was_there and is_initialized():
+        if owns_group:
             cleanup()
 
 
