@@ -1471,6 +1471,8 @@ def load_and_prepare_ep(
                 "[ep] native mxfp4 checkpoint (e.g. gpt-oss) -> Mxfp4Config(dequantize=True) -> bf16",
                 flush=True,
             )
+    # The swapped plan is this load's own: the caller's config keeps the plan its checkpoint declares.
+    hf_config = copy.deepcopy(hf_config)
     ep_cfg = _ep_config(hf_config)  # for VLMs the plan lives on .text_config
     ep_plan = dict(getattr(ep_cfg, "base_model_ep_plan", None) or {})
     if not ep_plan:

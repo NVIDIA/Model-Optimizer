@@ -67,6 +67,8 @@ def _sharded_model_matches_the_whole_one(rank, size, ckpt_dir, ep_degree):
     config = AutoConfig.from_pretrained(ckpt_dir)  # carries qwen3_moe's own base_model_ep_plan
     plan = DistributionPlan(size, ep_size=ep_degree)
     model = load_and_prepare_ep(ckpt_dir, plan, hf_config=config).eval()
+    # The loader swaps the plan on its own copy: the caller's config keeps the checkpoint's.
+    assert config.base_model_ep_plan == AutoConfig.from_pretrained(ckpt_dir).base_model_ep_plan
     # The loader records no plan; loading through it directly, the caller records one.
     with pytest.raises(RuntimeError, match="no distribution plan recorded"):
         distribution_plan(model)
