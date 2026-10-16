@@ -191,6 +191,10 @@ Changelog
   name. Those tensors already carry the hub name, so C-RADIO towers exported
   ``vision_model.radio_model.radio_model.input_conditioner.norm_mean``. Re-export affected
   checkpoints.
+- Fix unified Hugging Face export of GLM-5.3-Flash (``glm5_next``) keeping transformers'
+  in-memory tensor names (``conv1d``, ``forget_gate.*``) instead of the hub layout, which vLLM
+  cannot load. The fused KDA ``q/k/v_conv1d`` weights are now split back. Re-export affected
+  checkpoints.
 - Fix shared ONNX export metadata and Diffusers attention policy: every ``NVFP4QuantExporter`` post-process now upgrades the default-domain opset to at least 23, all FP8 custom-op exports re-run ONNX shape/type inference after setting output metadata, and quantized SDPA derives FP8 MHA enablement from the live Q/K/V quantizers instead of honoring a caller-set ``_disable_fp8_mha`` attribute.
 - Fix ONNX FP16 conversion failing to preserve public output types when type inference changes a graph output declaration before output casts are inserted.
 - Fix ``examples/hf_ptq/hf_ptq.py`` discarding a completed PTQ run (no checkpoint exported) when the optional post-quantization sanity-check ``generate()`` call raised, for example because ``device_map="auto"`` placed part of the model on CPU. That failure is now caught and only skips the sanity check; export proceeds regardless.
