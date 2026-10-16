@@ -48,6 +48,7 @@ from modelopt.onnx.quantization.precision_utils import (
 from modelopt.onnx.quantization.qdq_graph import (
     get_concat_eliminated_tensors,
     remove_partial_input_qdq,
+    remove_scalar_input_qdq,
 )
 from modelopt.onnx.quantization.qdq_utils import has_qdq_nodes
 
@@ -300,6 +301,7 @@ def quantize(
         onnx_model = onnx.load(tmp_onnx_path)
         graph = gs.import_onnx(onnx_model)
         remove_partial_input_qdq(graph, no_quantize_inputs)
+        remove_scalar_input_qdq(graph)
         onnx_model = gs.export_onnx(graph)
 
     onnx_model = _convert_to_runtime_precision(
