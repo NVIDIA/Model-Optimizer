@@ -3,6 +3,9 @@ name: Unit tests
 on:
   pull_request:
     branches: [main, release/*, feature/*]
+  # The merge queue re-runs the required checks on the PR merged with the target branch.
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main, release/*, feature/*]
     paths:
@@ -35,15 +38,18 @@ jobs:
       - id: non-pr
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: echo "any_changed=true" >> $GITHUB_OUTPUT
-      - if: github.event_name == 'pull_request'
+      - if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - if: github.event_name == 'pull_request'
+      - if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         name: Check for changes in test-relevant paths
         id: changed
         uses: step-security/changed-files@v47.0.5
         with:
+          # Only set in a merge queue group (empty for PRs, where the action finds the base itself)
+          base_sha: ${{ github.event.merge_group.base_sha }}
+          sha: ${{ github.event.merge_group.head_sha }}
           files: |
             .github/workflows/unit_tests.yml
             modelopt/**
@@ -67,10 +73,11 @@ jobs:
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
-          # Everything but PRs also runs the slow tests marked ``manual`` (e.g. AutoNAS).
-          PYTEST_EXTRA: ${{ github.event_name != 'pull_request' && '--run-manual' || '' }}
+          # Everything but PRs and merge queue groups also runs the slow tests marked ``manual`` (e.g. AutoNAS).
+          PYTEST_EXTRA: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' && '--run-manual' || '' }}
         run: pip install nox uv && nox -s "unit-3.12(torch_214, tf_latest)" -- $PYTEST_EXTRA
       - name: Upload coverage reports to Codecov
+        if: github.event_name != 'merge_group'
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -220,7 +227,7 @@ jobs:
           python -m pytest plugins/modelopt/skills/ -o addopts="" -p no:cacheprovider -v
   unit-pr-required-check:
     # Run even if some jobs are skipped
-    if: ${{ github.event_name == 'pull_request' && always() }}
+    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && always() }}
     needs: [check-file-changes, linux, windows, multi-version, partial-install, launcher, mcp, skills]
     runs-on: ubuntu-latest
     steps:

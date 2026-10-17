@@ -107,7 +107,7 @@ jobs:
             # Keep legacy ONNX/TRT tests available manually during deprecation.
             pytest_args+=(--ignore=tests/examples/diffusers/test_diffusers_onnx_trt.py)
           fi
-          if [[ "${{ inputs.example }}" == "hf_ptq" && "${{ github.ref }}" == refs/heads/pull-request/* ]]; then
+          if [[ "${{ inputs.example }}" == "hf_ptq" && ( "${{ github.ref }}" == refs/heads/pull-request/* || "${{ github.event_name }}" == "merge_group" ) ]]; then
             # One GPU on PR runners: small-model tests share it and the rest run alone on it
             # (tests/examples/hf_ptq/conftest.py). The 2-GPU nightly stays serial.
             pytest_args+=(-n 4)
@@ -118,6 +118,7 @@ jobs:
         run: |
           echo "::warning title=Allowed example failure::'${{ inputs.example }}' failed but is in the allow-failure list (vars.ALLOW_FAILURE_EXAMPLE_TESTS); not blocking. Remove it from the variable once fixed."
       - name: Upload coverage to Codecov
+        if: github.event_name != 'merge_group'
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

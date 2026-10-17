@@ -4,6 +4,9 @@ on:
   push:
     branches: ["pull-request/[0-9]+"]
     # NOTE: paths cannot be used since push happens to copied PR and only latest commit to PR is used
+  # The merge queue re-runs the required checks on the PR merged with the target branch.
+  merge_group:
+    types: [checks_requested]
   schedule:
     - cron: "0 0 * * *" # Nightly
   workflow_dispatch:
@@ -40,7 +43,7 @@ jobs:
   regression-tests:
     needs: [pr-gate]
     if: needs.pr-gate.outputs.any_changed == 'true'
-    runs-on: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
+    runs-on: ${{ (startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
     timeout-minutes: 15
     container:
       image: nvcr.io/nvidia/pytorch:26.07-py3
@@ -62,6 +65,7 @@ jobs:
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: python -m pip install nox && nox -s regression
       - name: Upload regression coverage to Codecov
+        if: github.event_name != 'merge_group'
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -72,7 +76,7 @@ jobs:
 
   regression-pr-required-check:
     # Run even if regression-tests is skipped
-    if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
+    if: ${{ (startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group') && always() }}
     needs: [pr-gate, regression-tests]
     runs-on: ubuntu-latest
     steps:

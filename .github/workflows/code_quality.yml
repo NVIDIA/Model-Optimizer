@@ -3,6 +3,9 @@ name: Code Quality
 on:
   pull_request:
     branches: [main, release/*, feature/*]
+  # The merge queue re-runs the required checks on the PR merged with the target branch.
+  merge_group:
+    types: [checks_requested]
   schedule:
     - cron: "0 0 * * *" # Nightly
   workflow_dispatch:
@@ -21,12 +24,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # PRs: TruffleHog needs the base commit, else it errors, scans nothing, and passes.
-          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+          # PRs and merge queue groups: TruffleHog needs the base commit, else it errors, scans nothing, and passes.
+          fetch-depth: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && '0' || '1' }}
       - uses: ./.github/actions/ubuntu-setup
       - name: Secret Scanning
         uses: trufflesecurity/trufflehog@v3.90.5
         with:
+          # Only set in a merge queue group, where the diff to scan is base..head (empty for the other events,
+          # which the action handles itself)
+          base: ${{ github.event.merge_group.base_sha }}
+          head: ${{ github.event.merge_group.head_sha }}
           # Exclude lob: its `(live|test)_[a-zA-Z0-9_]{35}` pattern matches any pytest function
           # whose name happens to be exactly 35 characters after `test_`, and it reports them as
           # verified. Only nightly sees them, since it scans all history while PRs scan their diff.

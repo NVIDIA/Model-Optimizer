@@ -4,6 +4,9 @@ on:
   push:
     branches: ["pull-request/[0-9]+"]
     # NOTE: paths cannot be used since push happens to copied PR and only latest commit to PR is used
+  # The merge queue re-runs the required checks on the PR merged with the target branch.
+  merge_group:
+    types: [checks_requested]
   schedule:
     - cron: "0 0 * * *" # Nightly
   workflow_dispatch:
@@ -60,7 +63,7 @@ jobs:
           - example: gpu_vllm
             timeout: 15
             container_image: docker.io/vllm/vllm-openai:v0.20.0
-    runs-on: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
+    runs-on: ${{ (startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
     timeout-minutes: ${{ matrix.timeout }}
     container:
       image: ${{ matrix.container_image }}
@@ -92,6 +95,7 @@ jobs:
           # Use `python3` (the vllm image has no `python` on PATH)
           python3 -m pip install nox && nox -s ${{ matrix.example }}
       - name: Upload GPU coverage to Codecov
+        if: github.event_name != 'merge_group'
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -102,7 +106,7 @@ jobs:
 
   gpu-pr-required-check:
     # Run even if gpu-tests is skipped
-    if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
+    if: ${{ (startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group') && always() }}
     needs: [pr-gate, gpu-tests]
     runs-on: ubuntu-latest
     steps:

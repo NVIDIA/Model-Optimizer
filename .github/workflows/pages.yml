@@ -4,6 +4,9 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, closed]
     branches: [main, release/*, feature/*]
+  # The merge queue re-runs the required checks on the PR merged with the target branch.
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
   schedule:

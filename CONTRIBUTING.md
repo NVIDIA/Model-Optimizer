@@ -282,7 +282,11 @@ nox -s "unit-3.12(torch_211, tf_latest)"
 - **Contributors without write access:** When GitHub requests workflow approval, a reviewer with write permission
   must select **Approve and run workflows** to start GitHub Actions CI.
 - If any CI/CD checks fail, fix the issues and push again.
-- Once your PR is approved and all checks pass, one of the reviewers will merge the PR.
+- Once your PR is approved and all checks pass, one of the reviewers will merge the PR. With the merge queue
+  enabled on `main`, merging adds the PR to the queue: GitHub builds a temporary branch of `main` plus the
+  queued PRs, re-runs the required checks on it (the same checks, path gating and runners as a PR run, without
+  the nightly-only tests) and merges the PR only if they pass. A PR that fails in the queue is removed from it;
+  fix it and queue it again.
 - If your PR is a bug fix that should also land in an ongoing release branch, add the
   `cherry-pick-<X.Y.Z>` label (e.g. `cherry-pick-0.47.0`) matching that release. Labeled PRs are
   cherry-picked into the release branch so the fix is included in the next release candidate.

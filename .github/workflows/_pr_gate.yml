@@ -27,18 +27,19 @@ jobs:
     outputs:
       any_changed: ${{ steps.changed-tests.outputs.any_modified || steps.non-pr.outputs.any_changed }}
     steps:
-      # For non-PR triggers (schedule, workflow_dispatch), always run tests
+      # For non-PR triggers (schedule, workflow_dispatch), always run tests. A PR run is a push to a
+      # copy-pr-bot branch (pull-request/N) or a merge queue group, which both diff against the base.
       - id: non-pr
-        if: "!startsWith(github.ref, 'refs/heads/pull-request/')"
+        if: "!(startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group')"
         run: echo "any_changed=true" >> $GITHUB_OUTPUT
-      - if: startsWith(github.ref, 'refs/heads/pull-request/')
+      - if: startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group'
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - if: startsWith(github.ref, 'refs/heads/pull-request/')
+      - if: startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group'
         id: base
         uses: ./.github/actions/pr-merge-base
-      - if: startsWith(github.ref, 'refs/heads/pull-request/')
+      - if: startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group'
         name: Check for changes in test-relevant directories
         id: changed-tests
         uses: step-security/changed-files@v47.0.5
@@ -51,7 +52,7 @@ jobs:
   wait-checks:
     needs: [check-file-changes]
     if: >-
-      startsWith(github.ref, 'refs/heads/pull-request/') &&
+      (startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group') &&
       needs.check-file-changes.outputs.any_changed == 'true'
     runs-on: ubuntu-latest
     permissions:
