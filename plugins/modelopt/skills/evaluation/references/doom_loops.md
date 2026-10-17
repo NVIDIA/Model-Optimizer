@@ -32,16 +32,25 @@ and confirm every task keeps it in the dry-run's resolved config:
 
 nel-next: the same dict under `proxy.extra_body.repetition_detection`.
 
-On a hit vLLM ends the whole request with `finish_reason: "repetition"`. No final
-answer is produced, so the sample scores as it would after looping to the cap.
+On a hit vLLM ends the whole request with `finish_reason: "repetition"`, so the
+sample gets no final answer. Most loops run to the cap anyway, but a badly damaged
+model sometimes escapes one and answers (see Guards).
 
-**Keep 512/32/3.** Replaying vLLM's detector on 1,152 healthy DeepSeek-R1 traces,
-512/32/3 fired on none and still caught the degenerate loops; 512/4/3 fired on 4.2% of
-correct math and 12.2% of complete code traces (`1,000,000,000`, `0.333333333333`,
-`5 \times 5 \times 5`), each a correct answer turned wrong. Don't lower
-`min_pattern_size` to catch more. Tokenizers that group digits (Llama 3) shift
-these numbers. The check costs ~30 ms of scheduler time per decode step at 256
-running requests; `max_pattern_size: 256` halves it if throughput drops.
+**Keep 512/32/3.** Replays of vLLM's detector on finished eval outputs:
+
+- **Healthy models:** one fire across 1,152 healthy DeepSeek-R1 traces and 7,471
+  non-looping Qwen3.8-Flash-Next BF16 generations, on an answer that was wrong
+  anyway. 512/4/3 fired on 4.2% of correct R1 math and 12.2% of complete code
+  traces (`1,000,000,000`, `0.333333333333`, `5 \times 5 \times 5`), each a correct
+  answer turned wrong. Don't lower `min_pattern_size` to catch more.
+- **IQ1-quantized Qwen3.8-Flash-Next:** caught 99-100% of SciCode and GPQA loops
+  and saved 18-67% of generated tokens. AA-LCR loops cycle whole paragraphs
+  (periods up to ~4K tokens), so 512 caught 85-90%; 1024 catches 91-93% and 4096
+  all, at the cost of more lost answers.
+- **Cost:** scheduler time grows with `max_pattern_size`, ~30 ms per decode step at
+  256 running requests for 512 (256 halves it, 1024 doubles it).
+
+Tokenizers that group digits (Llama 3) shift these numbers.
 
 ## Guards
 
@@ -60,6 +69,10 @@ running requests; `max_pattern_size: 256` halves it if throughput drops.
   SGLang and TRT-LLM don't support it: tell the user and don't add the field.
 - **Matched runs.** Baseline and candidate use the identical setting. Published
   scores ran without it; say so when comparing against them.
+- **Damaged checkpoints score lower with it.** Ending the request also cuts loops
+  the model would have escaped and answered: at 512/32/3 this cost IQ1 checkpoints
+  0.1-0.75 pt on GPQA and AA-LCR (1.5 pt on AA-LCR at 4096), IQ2 at most 0.13 pt
+  and BF16 nothing. Report such scores as detector-on.
 - **Record it.** Append `repetition_detection=512/32/3` to
   `export.mlflow.description` and add it as a tag; it is not otherwise queryable.
 - **Validation.** In run-validation's Output limits row and Response gate, count
