@@ -26,27 +26,47 @@ Environment variables (all optional — no check if unset):
                      passing unevaluated.
     MAX_FINAL_PERPLEXITY: Final perplexity must be below this value
 
+An empty variable counts as unset. Once any threshold is set, a missing or
+unreadable trainer_state.json, or one without training logs, also fails the check.
+
 Usage:
-    python check_regression.py /path/to/output_dir
+    python check_regression.py /path/to/output_dir [--json verdict.json]
 
     Or from a shell script:
     python common/check_regression.py ${OUTPUT_DIR}
 
+    --json also writes the verdict as {"pass", "failure_class", "trainer_state",
+    "metrics", "thresholds", "messages"}, so a pipeline gate can read it without
+    parsing logs. failure_class is null, "TRAIN_REGRESSION" or "METRICS_MISSING".
+
 Exit codes:
     0 — all checks pass (or no thresholds set)
-    1 — regression detected
+    1 — regression detected, or thresholds set but no metrics to check
 """
 
+import argparse
 import json
 import os
 import sys
 from glob import glob
+from typing import Any
+
+THRESHOLD_VARS = ("MAX_FINAL_LOSS", "MIN_FINAL_ACC", "MAX_FINAL_PERPLEXITY")
+
+
+def _checkpoint_step(trainer_state_path):
+    """Step number of <output_dir>/checkpoint-<step>/trainer_state.json, or -1."""
+    name = os.path.basename(os.path.dirname(trainer_state_path))
+    step = name.removeprefix("checkpoint-")
+    return int(step) if step.isdigit() else -1
 
 
 def find_trainer_state(output_dir):
     """Find the latest trainer_state.json in the output directory."""
-    # Check checkpoint subdirs first (sorted by step number)
-    checkpoint_states = sorted(glob(os.path.join(output_dir, "checkpoint-*", "trainer_state.json")))
+    checkpoint_states = sorted(
+        glob(os.path.join(output_dir, "checkpoint-*", "trainer_state.json")),
+        key=_checkpoint_step,
+    )
     if checkpoint_states:
         return checkpoint_states[-1]
     # Fall back to output_dir itself
@@ -81,8 +101,8 @@ def get_final_metrics(trainer_state_path):
     return metrics
 
 
-def check_regression(metrics):
-    """Check metrics against environment variable thresholds. Returns (passed, messages)."""
+def check_regression(metrics, thresholds):
+    """Check metrics against {env_var: threshold}. Returns (passed, messages)."""
     checks = [
         (
             "MAX_FINAL_LOSS",
@@ -108,10 +128,9 @@ def check_regression(metrics):
     messages = []
 
     for env_var, metric_key, check_fn, fail_msg in checks:
-        thresh_str = os.environ.get(env_var)
-        if thresh_str is None:
+        if env_var not in thresholds:
             continue
-        thresh = float(thresh_str)
+        thresh = thresholds[env_var]
         val = metrics.get(metric_key)
         if val is None:
             # Setting a threshold asserts the run must be checked against it. If the
@@ -132,40 +151,70 @@ def check_regression(metrics):
     return passed, messages
 
 
-def main():
-    """Entry point for regression check CLI."""
-    if len(sys.argv) < 2:
-        print("Usage: python check_regression.py <output_dir>")
-        sys.exit(0)
-
-    output_dir = sys.argv[1]
-
-    # Skip if no thresholds set
-    if not any(
-        os.environ.get(v) for v in ["MAX_FINAL_LOSS", "MIN_FINAL_ACC", "MAX_FINAL_PERPLEXITY"]
-    ):
-        return
+def evaluate(output_dir):
+    """Run the check on output_dir. Returns the verdict dict that --json writes."""
+    thresholds = {v: float(os.environ[v]) for v in THRESHOLD_VARS if os.environ.get(v)}
+    verdict: dict[str, Any] = {
+        "pass": True,
+        "failure_class": None,
+        "trainer_state": None,
+        "metrics": {},
+        "thresholds": thresholds,
+        "messages": [],
+    }
+    if not thresholds:
+        return verdict
 
     trainer_state = find_trainer_state(output_dir)
-    if not trainer_state:
-        print(f"WARNING: No trainer_state.json found in {output_dir}, skipping regression check")
-        return
-
-    print(f"=== Regression Check ({trainer_state}) ===")
-    metrics = get_final_metrics(trainer_state)
+    verdict["trainer_state"] = trainer_state
+    where = trainer_state or f"{output_dir} (no trainer_state.json)"
+    try:
+        metrics = get_final_metrics(trainer_state) if trainer_state else {}
+        missing = f"no training logs to check in {where}"
+    except (OSError, ValueError) as e:
+        metrics, missing = {}, f"cannot read {where}: {e}"
     if not metrics:
-        print("No training logs found in trainer_state.json")
-        return
+        # Thresholds were set, so an unreadable run must not pass as unchecked.
+        verdict.update(
+            {
+                "pass": False,
+                "failure_class": "METRICS_MISSING",
+                "messages": [f"REGRESSION: {missing}"],
+            }
+        )
+        return verdict
 
-    print(f"Final metrics: {metrics}")
-    passed, messages = check_regression(metrics)
-    for msg in messages:
-        print(f"  {msg}")
-
+    passed, messages = check_regression(metrics, thresholds)
+    verdict.update({"pass": passed, "metrics": metrics, "messages": messages})
     if not passed:
-        sys.exit(1)
-    print("Regression check PASSED")
+        verdict["failure_class"] = "TRAIN_REGRESSION"
+    return verdict
+
+
+def main(argv=None):
+    """Entry point for regression check CLI."""
+    parser = argparse.ArgumentParser(description="Regression check for training jobs.")
+    parser.add_argument("output_dir", nargs="?", help="Training output directory")
+    parser.add_argument("--json", dest="json_path", help="Create a JSON file storing the verdict")
+    args = parser.parse_args(argv)
+    if args.output_dir is None:
+        parser.print_usage()
+        return 0
+
+    verdict = evaluate(args.output_dir)
+    if verdict["thresholds"]:
+        print(f"=== Regression Check ({verdict['trainer_state'] or args.output_dir}) ===")
+        if verdict["metrics"]:
+            print(f"Final metrics: {verdict['metrics']}")
+        for msg in verdict["messages"]:
+            print(f"  {msg}")
+        print(f"Regression check {'PASSED' if verdict['pass'] else 'FAILED'}")
+
+    if args.json_path:
+        with open(args.json_path, "w") as f:
+            json.dump(verdict, f, indent=2)
+    return 0 if verdict["pass"] else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
