@@ -31,17 +31,28 @@ class LogitsDistillationLoss(Loss):
     This function implements the distillation loss found in the paper: https://arxiv.org/abs/1503.02531.
     """
 
-    def __init__(self, temperature: float = 1.0, reduction: str = "mean"):
+    def __init__(
+        self, temperature: float = 1.0, reduction: str = "mean", vocab_size: int | None = None
+    ):
         """Constructor.
 
         Args:
             temperature: A value used to soften the logits_t and logits_s before computing loss on them.
             reduction: How to reduce the final pointwise loss before returning. Pass ``"none"`` to
                 use your own reduction function afterwards, i.e. with loss masks.
+            vocab_size: Optional shared vocabulary size. When set, both logits tensors are
+                restricted to their first ``vocab_size`` entries before computing the loss. This
+                supports models with padded vocabulary tails when the retained token IDs are
+                aligned between the teacher and student.
         """
         super().__init__()
         self._temperature: float = temperature
         self._reduction: str = reduction
+        if vocab_size is not None and (
+            isinstance(vocab_size, bool) or not isinstance(vocab_size, int) or vocab_size <= 0
+        ):
+            raise ValueError("`vocab_size` must be a positive integer or None.")
+        self._vocab_size: int | None = vocab_size
 
     def forward(self, logits_s: torch.Tensor, logits_t: torch.Tensor) -> torch.Tensor:
         """Compute KD loss on student and teacher logits.
@@ -54,6 +65,14 @@ class LogitsDistillationLoss(Loss):
 
             Assumes class logits dimension is last.
         """
+        if self._vocab_size is not None:
+            if logits_s.size(-1) < self._vocab_size or logits_t.size(-1) < self._vocab_size:
+                raise ValueError(
+                    "`vocab_size` cannot exceed the vocabulary dimension of either logits tensor."
+                )
+            logits_s = logits_s[..., : self._vocab_size]
+            logits_t = logits_t[..., : self._vocab_size]
+
         soft_log_probs = F.log_softmax(logits_s / self._temperature, dim=-1)
         soft_targets = F.softmax(logits_t / self._temperature, dim=-1)
 
