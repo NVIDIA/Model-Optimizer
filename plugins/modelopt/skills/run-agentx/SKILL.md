@@ -39,12 +39,10 @@ Set `AGENTX_DATASET` to an accepted with-subagents alias from the
 Check the current tutorial for supported CLI options and scenario defaults.
 The public loader downloads and caches the traces and prompt reconstruction assets.
 An alias, even a dated one, does not select an immutable Hugging Face revision.
-Resolve the alias's repository to a commit SHA and pass it as `revision` to
-Hugging Face `load_dataset`. If the harness has no revision flag, set the selected
-Weka loader's `hf_revision` to that SHA in the campaign's client installation;
-the base loader forwards it to `load_dataset`. Record this small local patch and
-the repository/SHA with every run. Verify the revision reaches the loader before
-using the command below. Keep the chosen SHA fixed throughout the campaign.
+Resolve the alias's repository to a commit SHA and record both with every run.
+Before benchmarking, verify that the loader passes that SHA as `revision` to
+Hugging Face `load_dataset`. Without a revision flag, set the selected Weka loader's
+`hf_revision` to that SHA in the campaign's client installation.
 
 Prefer the deployed checkpoint's local tokenizer. If it requires custom code, add
 `--tokenizer-trust-remote-code` only after the user explicitly trusts its repository.
