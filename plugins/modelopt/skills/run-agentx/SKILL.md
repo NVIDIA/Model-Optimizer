@@ -38,8 +38,24 @@ Set `AGENTX_DATASET` to an accepted with-subagents alias from the
 [AgentX tutorial](https://github.com/SemiAnalysisAI/agentx-harness/blob/master/docs/tutorials/agentx-mvp.md).
 Check the current tutorial for supported CLI options and scenario defaults.
 The public loader downloads and caches the traces and prompt reconstruction assets.
-Resolve and pin the dataset revision for the campaign; even dated aliases can move. Prefer the deployed
-checkpoint's local tokenizer. If it requires custom code, add
+An alias, even a dated one, does not select an immutable Hugging Face revision.
+For the public-alias command below, freeze a warmed cache using
+[Hugging Face offline mode](https://huggingface.co/docs/datasets/loading#offline):
+
+1. Set `HF_HOME="$AGENTX_WORKDIR/hf-cache"` and
+   `HF_DATASETS_CACHE="$HF_HOME/datasets"` before preparation. Use fresh caches
+   dedicated to this campaign; do not share mutable caches with other runs.
+2. Warm the selected public loader, reconstruction assets, and tokenizer during an
+   unmeasured preflight. Record the alias, resolved repository/commit IDs, dataset
+   fingerprint, and loaded cache files in `$AGENTX_WORKDIR/dataset-revisions.json`.
+   Save SHA256 checksums of the cached data and reference files, excluding transient
+   locks, in `$AGENTX_WORKDIR/dataset-cache.sha256` using absolute file paths.
+3. Keep that snapshot fixed and retain the public alias. Set `HF_HUB_OFFLINE=1` and
+   `HF_DATASETS_OFFLINE=1` for every comparison, verify the checksums before each
+   point, and copy both records into its artifacts. Stop on a cache miss or mismatch;
+   do not refresh online or substitute local traces with `--unsafe-override`.
+
+Prefer the deployed checkpoint's local tokenizer. If it requires custom code, add
 `--tokenizer-trust-remote-code` only after the user explicitly trusts its repository.
 
 ## Choose concurrency
@@ -61,10 +77,14 @@ concurrency separately with a fresh artifact directory:
 ```bash
 set -euo pipefail
 source "${AGENTX_WORKDIR:?}/venv/bin/activate"
-export HF_HOME="${HF_HOME:-$AGENTX_WORKDIR/hf-cache}"
+export HF_HOME="$AGENTX_WORKDIR/hf-cache"
+export HF_DATASETS_CACHE="$HF_HOME/datasets"
+export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export AIPERF_DATASET_MMAP_CACHE_DIR="$AGENTX_WORKDIR/dataset-cache"
 mkdir -p "$AGENTX_WORKDIR/results"
 AGENTX_RUN_DIR=$(mktemp -d "$AGENTX_WORKDIR/results/run-XXXXXX")
+sha256sum --check "$AGENTX_WORKDIR/dataset-cache.sha256"
+cp "$AGENTX_WORKDIR"/dataset-{revisions.json,cache.sha256} "$AGENTX_RUN_DIR/"
 python -m pip freeze > "$AGENTX_RUN_DIR/client-packages.txt"
 aiperf profile \
   --scenario inferencex-agentx-mvp \
