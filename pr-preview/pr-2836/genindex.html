@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="./">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Index - Model Optimizer 0.0.1.dev1+g7569e17bc</title><link rel="index" title="Index" href="#" /><link rel="search" title="Search" href="search.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Index - Model Optimizer 0.0.1.dev1+gea3938aba</title><link rel="index" title="Index" href="#" /><link rel="search" title="Search" href="search.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="_static/pygments.css?v=e1a1ceaf" />
@@ -1022,6 +1022,8 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.torch.export.trtllm.layer_utils.html#modelopt.torch.export.trtllm.layer_utils.build_embedding_config">build_embedding_config() (in module modelopt.torch.export.trtllm.layer_utils)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.export.trtllm.layer_utils.html#modelopt.torch.export.trtllm.layer_utils.build_fused_linear_config">build_fused_linear_config() (in module modelopt.torch.export.trtllm.layer_utils)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.export.quantized_weight_export.html#modelopt.torch.export.quantized_weight_export.build_hf_quantization_config">build_hf_quantization_config() (in module modelopt.torch.export.quantized_weight_export)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.export.trtllm.layer_utils.html#modelopt.torch.export.trtllm.layer_utils.build_layernorm_config">build_layernorm_config() (in module modelopt.torch.export.trtllm.layer_utils)</a>
 </li>
@@ -2406,6 +2408,8 @@ data-aria-dark="Switch to auto color mode">
 </li>
       </ul></li>
       <li><a href="reference/generated/modelopt.torch.quantization.export_onnx.html#modelopt.torch.quantization.export_onnx.export_mxfp8">export_mxfp8() (in module modelopt.torch.quantization.export_onnx)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.export.quantized_weight_export.html#modelopt.torch.export.quantized_weight_export.export_quantized_weight_tensors">export_quantized_weight_tensors() (in module modelopt.torch.export.quantized_weight_export)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.sparsity.weight_sparsity.mode.html#modelopt.torch.sparsity.weight_sparsity.mode.export_sparse">export_sparse() (in module modelopt.torch.sparsity.weight_sparsity.mode)</a>
 </li>
@@ -4592,6 +4596,8 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.torch.export.trtllm.model_config_utils.html#modelopt.torch.export.trtllm.model_config_utils.merge_qkv">merge_qkv() (in module modelopt.torch.export.trtllm.model_config_utils)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.quantization.lora.html#modelopt.torch.quantization.lora.merge_quant_lora">merge_quant_lora() (in module modelopt.torch.quantization.lora)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.export.quantized_weight_export.html#modelopt.torch.export.quantized_weight_export.merge_quantized_weight_export_states">merge_quantized_weight_export_states() (in module modelopt.torch.export.quantized_weight_export)</a>
 </li>
       <li><a href="reference/generated/modelopt.onnx.quantization.autotune.html#modelopt.onnx.quantization.autotune.Region.metadata">metadata (Region attribute)</a>
 </li>
@@ -9898,14 +9904,14 @@ data-aria-dark="Switch to auto color mode">
 </li>
       <li><a href="reference/generated/modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.reset_bias">reset_bias() (TensorQuantizer method)</a>
 </li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="reference/generated/modelopt.torch.nas.hparams.concat.html#modelopt.torch.nas.hparams.concat.ConcatTracedHp.reset_choices">reset_choices() (ConcatTracedHp method)</a>
 
       <ul>
         <li><a href="reference/generated/modelopt.torch.opt.hparam.html#modelopt.torch.opt.hparam.Hparam.reset_choices">(Hparam method)</a>
 </li>
       </ul></li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="reference/generated/modelopt.torch.opt.dynamic.html#modelopt.torch.opt.dynamic.DynamicModule.reset_dynamic_attributes">reset_dynamic_attributes() (DynamicModule method)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.opt.searcher.html#modelopt.torch.opt.searcher.BaseSearcher.reset_search">reset_search() (BaseSearcher method)</a>
@@ -10011,6 +10017,8 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.torch.export.trtllm.model_config_utils.html#modelopt.torch.export.trtllm.model_config_utils.restore_model_config">restore_model_config() (in module modelopt.torch.export.trtllm.model_config_utils)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.puzzletron_nas_plugin.html#modelopt.torch.puzzletron.puzzletron_nas_plugin.restore_puzzletron_model">restore_puzzletron_model() (in module modelopt.torch.puzzletron.puzzletron_nas_plugin)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.export.quantized_weight_export.html#modelopt.torch.export.quantized_weight_export.restore_quantized_weight_export_state">restore_quantized_weight_export_state() (in module modelopt.torch.export.quantized_weight_export)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.nas.autonas.html#modelopt.torch.nas.autonas.restore_searchspace">restore_searchspace() (in module modelopt.torch.nas.autonas)</a>
 </li>
@@ -10336,6 +10344,8 @@ data-aria-dark="Switch to auto color mode">
         <li><a href="reference/generated/modelopt.torch.nas.utils.html#modelopt.torch.nas.utils.select">(in module modelopt.torch.nas.utils)</a>
 </li>
       </ul></li>
+      <li><a href="reference/generated/modelopt.torch.export.quantized_weight_export.html#modelopt.torch.export.quantized_weight_export.select_quantized_weight_export_state">select_quantized_weight_export_state() (in module modelopt.torch.export.quantized_weight_export)</a>
+</li>
       <li><a href="reference/generated/modelopt.torch.export.trtllm.model_config.html#modelopt.torch.export.trtllm.model_config.DecoderLayerConfig.self_attention">self_attention (DecoderLayerConfig attribute)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.export.trtllm.model_config.html#modelopt.torch.export.trtllm.model_config.DecoderLayerConfig.self_attention_layernorm">self_attention_layernorm (DecoderLayerConfig attribute)</a>
@@ -10527,6 +10537,8 @@ data-aria-dark="Switch to auto color mode">
       <li><a href="reference/generated/modelopt.torch.models.html#modelopt.torch.models.SpecSection">SpecSection (class in modelopt.torch.models)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.export.trtllm.model_config_utils.html#modelopt.torch.export.trtllm.model_config_utils.split_config_and_weights">split_config_and_weights() (in module modelopt.torch.export.trtllm.model_config_utils)</a>
+</li>
+      <li><a href="reference/generated/modelopt.torch.export.quantized_weight_export.html#modelopt.torch.export.quantized_weight_export.split_quantized_weight_export_state">split_quantized_weight_export_state() (in module modelopt.torch.export.quantized_weight_export)</a>
 </li>
       <li><a href="reference/generated/modelopt.torch.puzzletron.replacement_library.replacement_utils.html#modelopt.torch.puzzletron.replacement_library.replacement_utils.split_replacements_to_teacher_and_student">split_replacements_to_teacher_and_student() (in module modelopt.torch.puzzletron.replacement_library.replacement_utils)</a>
 </li>

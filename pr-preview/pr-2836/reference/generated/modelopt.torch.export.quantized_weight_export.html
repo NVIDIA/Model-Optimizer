@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>quantized_weight_export - Model Optimizer 0.0.1.dev1+g7569e17bc</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="registry" href="modelopt.torch.export.registry.html" /><link rel="prev" title="quant_utils" href="modelopt.torch.export.quant_utils.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>quantized_weight_export - Model Optimizer 0.0.1.dev1+gea3938aba</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="registry" href="modelopt.torch.export.registry.html" /><link rel="prev" title="quant_utils" href="modelopt.torch.export.quant_utils.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -394,8 +394,14 @@ data-aria-dark="Switch to auto color mode">
       <i class="i-lucide close"></i>
     </button>
     <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.build_hf_quantization_config"><code class="docutils literal notranslate"><span class="pre">build_hf_quantization_config()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.capture_quantized_weight_export_state"><code class="docutils literal notranslate"><span class="pre">capture_quantized_weight_export_state()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.export_quantized_weight_tensors"><code class="docutils literal notranslate"><span class="pre">export_quantized_weight_tensors()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.get_quantized_weight_export_spec"><code class="docutils literal notranslate"><span class="pre">get_quantized_weight_export_spec()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.merge_quantized_weight_export_states"><code class="docutils literal notranslate"><span class="pre">merge_quantized_weight_export_states()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.restore_quantized_weight_export_state"><code class="docutils literal notranslate"><span class="pre">restore_quantized_weight_export_state()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.select_quantized_weight_export_state"><code class="docutils literal notranslate"><span class="pre">select_quantized_weight_export_state()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.split_quantized_weight_export_state"><code class="docutils literal notranslate"><span class="pre">split_quantized_weight_export_state()</span></code></a></li>
 </ul>
 </div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
   </aside>
@@ -440,20 +446,52 @@ data-aria-dark="Switch to auto color mode">
   <article class="yue dark-code" role="main">
           <section id="quantized-weight-export">
 <h1>quantized_weight_export<a class="headerlink" href="#quantized-weight-export" title="Link to this heading">#</a></h1>
-<p id="module-modelopt.torch.export.quantized_weight_export">Capture state for functional quantized-weight export.</p>
+<p id="module-modelopt.torch.export.quantized_weight_export">Functional export of quantized weight tensors.</p>
 <p class="rubric">Functions</p>
 <div class="table-wrapper autosummary longtable docutils container">
 <table class="autosummary longtable docutils align-default">
 <tbody>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.capture_quantized_weight_export_state" title="modelopt.torch.export.quantized_weight_export.capture_quantized_weight_export_state"><code class="xref py py-obj docutils literal notranslate"><span class="pre">capture_quantized_weight_export_state</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.build_hf_quantization_config" title="modelopt.torch.export.quantized_weight_export.build_hf_quantization_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_hf_quantization_config</span></code></a></p></td>
+<td><p>Build canonical HF configuration, rejecting unrepresentable activation settings.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.capture_quantized_weight_export_state" title="modelopt.torch.export.quantized_weight_export.capture_quantized_weight_export_state"><code class="xref py py-obj docutils literal notranslate"><span class="pre">capture_quantized_weight_export_state</span></code></a></p></td>
 <td><p>Capture detached state for one weight, or <code class="docutils literal notranslate"><span class="pre">None</span></code> when it is not quantized.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.export_quantized_weight_tensors" title="modelopt.torch.export.quantized_weight_export.export_quantized_weight_tensors"><code class="xref py py-obj docutils literal notranslate"><span class="pre">export_quantized_weight_tensors</span></code></a></p></td>
+<td><p>Pack a logical weight into canonical ModelOpt checkpoint tensors.</p></td>
 </tr>
 <tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.get_quantized_weight_export_spec" title="modelopt.torch.export.quantized_weight_export.get_quantized_weight_export_spec"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_quantized_weight_export_spec</span></code></a></p></td>
 <td><p>Return stable deployment metadata without retaining quantizer tensors.</p></td>
 </tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.merge_quantized_weight_export_states" title="modelopt.torch.export.quantized_weight_export.merge_quantized_weight_export_states"><code class="xref py py-obj docutils literal notranslate"><span class="pre">merge_quantized_weight_export_states</span></code></a></p></td>
+<td><p>Merge state for logical weight shards concatenated along <code class="docutils literal notranslate"><span class="pre">weight_dim</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.restore_quantized_weight_export_state" title="modelopt.torch.export.quantized_weight_export.restore_quantized_weight_export_state"><code class="xref py py-obj docutils literal notranslate"><span class="pre">restore_quantized_weight_export_state</span></code></a></p></td>
+<td><p>Restore opaque export state after its tensor values have been transported.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.select_quantized_weight_export_state" title="modelopt.torch.export.quantized_weight_export.select_quantized_weight_export_state"><code class="xref py py-obj docutils literal notranslate"><span class="pre">select_quantized_weight_export_state</span></code></a></p></td>
+<td><p>Select logical indices that preserve complete quantization blocks.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quantized_weight_export.split_quantized_weight_export_state" title="modelopt.torch.export.quantized_weight_export.split_quantized_weight_export_state"><code class="xref py py-obj docutils literal notranslate"><span class="pre">split_quantized_weight_export_state</span></code></a></p></td>
+<td><p>Separate opaque state metadata from tensor values for typed transport.</p></td>
+</tr>
 </tbody>
 </table>
 </div>
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quantized_weight_export.build_hf_quantization_config">
+<span class="sig-name descname"><span class="pre">build_hf_quantization_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">named_states</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quantized_weight_export.build_hf_quantization_config" title="Link to this definition">#</a></dt>
+<dd><p>Build canonical HF configuration, rejecting unrepresentable activation settings.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>named_states</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>_QuantizedWeightExportState</em><em> | </em><em>_QuantizedWeightExportSpec</em><em> | </em><em>None</em><em>] </em><em>| </em><em>Iterable</em><em>[</em><em>tuple</em><em>[</em><em>str</em><em>, </em><em>_QuantizedWeightExportState</em><em> | </em><em>_QuantizedWeightExportSpec</em><em> | </em><em>None</em><em>]</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
 <dl class="py function">
 <dt class="sig sig-object py" id="modelopt.torch.export.quantized_weight_export.capture_quantized_weight_export_state">
 <span class="sig-name descname"><span class="pre">capture_quantized_weight_export_state</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weight_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'weight'</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">cpu</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quantized_weight_export.capture_quantized_weight_export_state" title="Link to this definition">#</a></dt>
@@ -473,6 +511,25 @@ data-aria-dark="Switch to auto color mode">
 </dd></dl>
 
 <dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quantized_weight_export.export_quantized_weight_tensors">
+<span class="sig-name descname"><span class="pre">export_quantized_weight_tensors</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">state</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dtype</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weight_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'weight'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quantized_weight_export.export_quantized_weight_tensors" title="Link to this definition">#</a></dt>
+<dd><p>Pack a logical weight into canonical ModelOpt checkpoint tensors.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>weight</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>state</strong> (<em>_QuantizedWeightExportState</em>)</p></li>
+<li><p><strong>dtype</strong> (<em>dtype</em>)</p></li>
+<li><p><strong>weight_name</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>OrderedDict</em>[<em>str</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
 <dt class="sig sig-object py" id="modelopt.torch.export.quantized_weight_export.get_quantized_weight_export_spec">
 <span class="sig-name descname"><span class="pre">get_quantized_weight_export_spec</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weight_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'weight'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quantized_weight_export.get_quantized_weight_export_spec" title="Link to this definition">#</a></dt>
 <dd><p>Return stable deployment metadata without retaining quantizer tensors.</p>
@@ -485,6 +542,72 @@ data-aria-dark="Switch to auto color mode">
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
 <dd class="field-even"><p><em>_QuantizedWeightExportSpec</em> | <em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quantized_weight_export.merge_quantized_weight_export_states">
+<span class="sig-name descname"><span class="pre">merge_quantized_weight_export_states</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">states</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weight_dim</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quantized_weight_export.merge_quantized_weight_export_states" title="Link to this definition">#</a></dt>
+<dd><p>Merge state for logical weight shards concatenated along <code class="docutils literal notranslate"><span class="pre">weight_dim</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>states</strong> (<em>Sequence</em><em>[</em><em>_QuantizedWeightExportState</em><em>]</em>)</p></li>
+<li><p><strong>weight_dim</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>_QuantizedWeightExportState</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quantized_weight_export.restore_quantized_weight_export_state">
+<span class="sig-name descname"><span class="pre">restore_quantized_weight_export_state</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">metadata</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tensors</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quantized_weight_export.restore_quantized_weight_export_state" title="Link to this definition">#</a></dt>
+<dd><p>Restore opaque export state after its tensor values have been transported.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>metadata</strong> (<em>object</em>)</p></li>
+<li><p><strong>tensors</strong> (<em>Sequence</em><em>[</em><em>Tensor</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>_QuantizedWeightExportState</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quantized_weight_export.select_quantized_weight_export_state">
+<span class="sig-name descname"><span class="pre">select_quantized_weight_export_state</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weight_dim</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">indices</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quantized_weight_export.select_quantized_weight_export_state" title="Link to this definition">#</a></dt>
+<dd><p>Select logical indices that preserve complete quantization blocks.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>state</strong> (<em>_QuantizedWeightExportState</em>)</p></li>
+<li><p><strong>weight_dim</strong> (<em>int</em>)</p></li>
+<li><p><strong>indices</strong> (<em>Iterable</em><em>[</em><em>int</em><em>] </em><em>| </em><em>Tensor</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>_QuantizedWeightExportState</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quantized_weight_export.split_quantized_weight_export_state">
+<span class="sig-name descname"><span class="pre">split_quantized_weight_export_state</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quantized_weight_export.split_quantized_weight_export_state" title="Link to this definition">#</a></dt>
+<dd><p>Separate opaque state metadata from tensor values for typed transport.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>state</strong> (<em>_QuantizedWeightExportState</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<em>object</em>, <em>tuple</em>[<em>Tensor</em>, …]]</p>
 </dd>
 </dl>
 </dd></dl>

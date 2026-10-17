@@ -37,7 +37,13 @@ quantized\_weight\_export
    .. autosummary::
       :nosignatures:
    
+      build_hf_quantization_config
       capture_quantized_weight_export_state
+      export_quantized_weight_tensors
       get_quantized_weight_export_spec
+      merge_quantized_weight_export_states
+      restore_quantized_weight_export_state
+      select_quantized_weight_export_state
+      split_quantized_weight_export_state
    
    
