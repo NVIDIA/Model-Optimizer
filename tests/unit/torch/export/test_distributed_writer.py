@@ -537,7 +537,7 @@ def _two_rank_job(rank, world_size, tmp_dir):
     _write(
         _fsdp2_shard(_load(tmp_dir / "moe"), mesh),
         tmp_dir / "moe_export",
-        extra_state_dict=_mtp_tail(),
+        extra_state_dict=_mtp_tail() if rank == 0 else None,
     )
 
     # A quantized dense model through the export entry point: fp8 weights and bf16 norms travel
@@ -590,7 +590,7 @@ def _two_rank_job(rank, world_size, tmp_dir):
             _write(
                 _fsdp2_shard(_load(tmp_dir / "dense"), mesh),
                 tmp_dir / "overlap_export",
-                extra_state_dict=overlap,
+                extra_state_dict=overlap if rank == 0 else None,
             )
     except RuntimeError as error:
         raised = str(error)
