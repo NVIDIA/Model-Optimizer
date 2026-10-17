@@ -11,6 +11,7 @@ Changelog
 - On Linux x86-64 with Python 3.11 and later, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; Python 3.10 and other platforms retain their existing dependency selections.
 - Add imatrix calibration (``algorithm: {method: imatrix}``) for the GGML formats with a weighted search: each weight is encoded once, its search weighted by the square root of its inputs' per-column ``E[x^2]`` (llama.cpp's imatrix statistic), and HF fused-MoE experts get one statistic per expert. A weight that already holds final codes is left alone, so ``[{method: gptq}, {method: imatrix}]`` runs GPTQ on the dense linears and imatrix on the experts GPTQ skips; the built-in IQ1 and IQ2 recipes now do this, and new ``<format>_experts_only`` recipes apply imatrix to the routed MoE experts alone.
 - Add a checkpoint-specific NVIDIA Nemotron 3.5 Super VL AutoQuantize recipe with a 4.9-effective-bit NVFP4-MSE/FP8/BF16 search and fixed NVFP4 MTP experts. Select it under ``models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/auto_quantize/``.
+- Add an opt-in no-gather HuggingFace export for FSDP2-sharded models: with ``MODELOPT_FSDP2_EXPORT=nogather``, ``export_hf_checkpoint`` sends each tensor to a single owner rank and every rank writes its own shards in parallel, instead of gathering the full state dict on one host. MoE experts stay sharded through the export, so each rank only materializes its own experts.
 
 *Speculative Decoding*
 
@@ -23,6 +24,7 @@ Changelog
 **Backward Breaking Changes**
 
 - Hugging Face MoE calibration now runs fused experts on the ``grouped_mm`` backend Transformers selects by default instead of forcing ``eager``, so calibrated activation scales can differ from earlier releases: some of Qwen3-30B-A3B's moved by up to about 10%. Load the model with ``experts_implementation="eager"`` to calibrate exactly as earlier releases did.
+- ``export_hf_checkpoint`` and ``modelopt.torch.utils.dataset_utils.get_max_batch_size`` now read how a model is distributed from the plan ``load_pretrained`` records on it, and raise for an FSDP2-sharded model, or one in a multi-rank run, that carries none. If you distribute a model yourself, for example with ``fsdp2_wrap``, which records no plan, record one with ``modelopt.torch.utils.distributed.set_distribution_plan`` before calibrating or exporting it.
 
 **Deprecations**
 
