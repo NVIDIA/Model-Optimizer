@@ -46,8 +46,8 @@ from modelopt.onnx.quantization.autotune.benchmark import _validate_shape_range
 
 @pytest.fixture
 def simple_conv_model_bytes():
-    """ONNX model bytes: Input -> Conv -> Relu -> Output (from _test_utils)."""
-    model = _create_simple_conv_onnx_model()
+    """ONNX model bytes: Input -> Conv -> Relu -> Output (from _test_utils), small input."""
+    model = _create_simple_conv_onnx_model(batch_size=1, spatial_size=32)
     return model.SerializeToString()
 
 
@@ -431,7 +431,12 @@ class TestTrtExecBenchmark:
         with tempfile.NamedTemporaryFile(suffix=".cache", delete=False) as f:
             cache_path = f.name
         try:
-            benchmark = TrtExecBenchmark(timing_cache_file=cache_path, warmup_runs=1, timing_runs=2)
+            benchmark = TrtExecBenchmark(
+                timing_cache_file=cache_path,
+                warmup_runs=1,
+                timing_runs=2,
+                trtexec_args=["--duration=0"],
+            )
             latency_ms = benchmark.run(simple_conv_model_path)
             assert isinstance(latency_ms, float)
             assert latency_ms > 0
@@ -445,7 +450,12 @@ class TestTrtExecBenchmark:
         with tempfile.NamedTemporaryFile(suffix=".cache", delete=False) as f:
             cache_path = f.name
         try:
-            benchmark = TrtExecBenchmark(timing_cache_file=cache_path, warmup_runs=1, timing_runs=2)
+            benchmark = TrtExecBenchmark(
+                timing_cache_file=cache_path,
+                warmup_runs=1,
+                timing_runs=2,
+                trtexec_args=["--duration=0"],
+            )
             latency_ms = benchmark.run(simple_conv_model_bytes)
             assert isinstance(latency_ms, float)
             assert latency_ms > 0

@@ -23,10 +23,19 @@ from _test_utils.onnx.quantization.utils import assert_nodes_are_quantized
 
 from modelopt.onnx.quantization.quantize import quantize
 
+# Keep every Conv above the 16-channel limit for INT8/FP8 quantization (graph_selection.py) so the
+# same nodes are quantized as with the default 128-channel model, but calibrate a small input.
+SMALL_MODEL_SHAPE = {"channels": 32, "height": 16, "width": 16}
+
 
 def _check_concat_qdq_status(onnx_path, quantize_mode):
-    # Quantize the input model
-    quantize(onnx_path, quantize_mode=quantize_mode, passes="concat_elimination")
+    # Quantize the input model. Only the graph rewrite is checked, so calibrate on CPU.
+    quantize(
+        onnx_path,
+        quantize_mode=quantize_mode,
+        passes="concat_elimination",
+        calibration_eps=["cpu"],
+    )
 
     # Output model should be produced in the same tmpdir
     output_onnx_path = onnx_path.replace(".onnx", ".quant.onnx")
@@ -61,7 +70,7 @@ def _check_concat_qdq_status(onnx_path, quantize_mode):
 
 def test_concat_elim_int8(tmp_path):
     # Copy the test model to the tmp_path
-    model = build_conv_concat_model()
+    model = build_conv_concat_model(**SMALL_MODEL_SHAPE)
     this_function_name = sys._getframe().f_code.co_name
     onnx_path = os.path.join(tmp_path, f"{this_function_name}.onnx")
     onnx.save(model, onnx_path)
@@ -70,7 +79,7 @@ def test_concat_elim_int8(tmp_path):
 
 def test_concat_elim_fp8(tmp_path):
     # Copy the test model to the tmp_path
-    model = build_conv_concat_model()
+    model = build_conv_concat_model(**SMALL_MODEL_SHAPE)
     this_function_name = sys._getframe().f_code.co_name
     onnx_path = os.path.join(tmp_path, f"{this_function_name}.onnx")
     onnx.save(model, onnx_path)
