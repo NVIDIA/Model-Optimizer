@@ -306,18 +306,30 @@ def test_revert_whole_sd_renames_to_hub_names_in_place():
     assert torch.equal(sd[f"{hub}.experts.0.w2.weight"], w2)
 
 
-def test_revert_whole_sd_keeps_in_memory_names_when_the_reverse_fails(monkeypatch):
-    def _fail(model, state_dict):
-        raise RuntimeError("unsupported op")
-
-    monkeypatch.setattr(quant_aware_conversion, "revert_weight_conversion_quant_aware", _fail)
+def _one_rank_cannot_revert_job(rank, world_size):
+    # Rank 0's subset reverts; rank 1's fails, as a merge whose group ownership split does.
+    model = AutoModelForCausalLM.from_config(_mixtral_config())
     sd = {"model.layers.0.mlp.experts.0.up_proj.weight": torch.ones(2)}
     before = dict(sd)
-
-    with pytest.warns(UserWarning):
-        assert _revert_whole_sd(torch.nn.Module(), sd) is False
+    failure = mock.patch.object(
+        quant_aware_conversion,
+        "revert_weight_conversion_quant_aware",
+        side_effect=RuntimeError("incomplete merge"),
+    )
+    with (
+        bounded_collectives(),
+        failure if rank == 1 else contextlib.nullcontext(),
+        pytest.warns(UserWarning, match="rank 1: incomplete merge"),
+    ):
+        assert _revert_whole_sd(model, sd) is False
 
     assert sd == before
+
+
+def test_revert_whole_sd_keeps_in_memory_names_on_every_rank_when_one_fails(cpu_dist_workers):
+    """Rank 0 could revert its own subset, but a checkpoint mixing hub and in-memory names would
+    load neither way."""
+    cpu_dist_workers.run(_one_rank_cannot_revert_job)
 
 
 def test_write_even_shards_writes_even_shards_and_an_index_of_every_tensor(

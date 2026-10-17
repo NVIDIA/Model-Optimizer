@@ -355,18 +355,36 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
 def _revert_whole_sd(model: nn.Module, local_sd: dict) -> bool:
     """Reverse the transformers conversion mapping on this rank's whole tensors, in place.
 
-    Safe to run per-rank on a disjoint subset: renames are per-key, and a split's outputs stay on
-    the rank that owned the input. Every value is a whole plain tensor by now, so no placement
-    handling is needed. Best-effort and atomic, mirroring the single-process path -- on any
-    failure the in-memory names are kept for the whole dict rather than half-applied.
+    Each rank reverts the disjoint subset it owns. Every value is a whole plain tensor by now, so no
+    placement handling is needed. Renames and splits act on one tensor at a time, so a subset is
+    all they need. A merge is different: it needs its whole group, ownership may spread a group
+    over ranks, and a rank holding none of it fails. Best-effort and atomic across the ranks,
+    mirroring the single-process path, which keeps the in-memory names for the whole dict on any
+    failure. If the reverse fails on any rank, every rank keeps them, rather than writing a
+    checkpoint that mixes the two. Collective.
     """
+    from modelopt.torch.utils.distributed import all_reduce
+
     from .quant_aware_conversion import revert_weight_conversion_quant_aware
 
-    try:
-        reverted = revert_weight_conversion_quant_aware(model, local_sd)
-    except Exception as exc:
+    reverted = local_sd
+
+    def revert() -> str | None:
+        nonlocal reverted
+        try:
+            reverted = revert_weight_conversion_quant_aware(model, local_sd)
+        except Exception as exc:
+            return str(exc)
+        return None
+
+    failures = all_reduce(
+        "reverse weight conversion",
+        revert,
+        lambda errors: [f"rank {r}: {error}" for r, error in enumerate(errors) if error],
+    )
+    if failures:
         warnings.warn(
-            f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
+            f"Quant-aware reverse weight conversion skipped ({failures[0]}); exported tensor "
             "names may not match the original HF hub checkpoint."
         )
         return False
