@@ -16,6 +16,10 @@ Changelog
 
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
 
+*Misc*
+
+- ``modelopt.torch.utils.plugins.model_load_utils.load_pretrained`` now also loads a model distributed. Under ``torchrun`` it FSDP2-shards the model or gives every rank a whole copy, by the plan the new ``resolve_distribution_plan`` decides from the model and the ``MODELOPT_FSDP_SIZE`` variable, or by a plan passed as its new ``distribution`` argument. The loaded model records the plan (``modelopt.torch.utils.distributed.distribution_plan``).
+
 **Backward Breaking Changes**
 
 - Hugging Face MoE calibration now runs fused experts on the ``grouped_mm`` backend Transformers selects by default instead of forcing ``eager``, so calibrated activation scales can differ from earlier releases: some of Qwen3-30B-A3B's moved by up to about 10%. Load the model with ``experts_implementation="eager"`` to calibrate exactly as earlier releases did.

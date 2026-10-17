@@ -156,6 +156,21 @@ def test_a_model_with_no_plan_raises_in_a_run_of_several_ranks(cpu_dist_workers)
     cpu_dist_workers.run(_no_plan_on_several_ranks_job)
 
 
+def test_fsdp2_wrap_keeps_its_old_path(monkeypatch):
+    """fsdp2_wrap loads a model, so it lives with the loaders; callers of the old path still reach it."""
+    model_load_utils = pytest.importorskip("modelopt.torch.utils.plugins.model_load_utils")
+    calls = []
+    monkeypatch.setattr(
+        model_load_utils,
+        "fsdp2_wrap",
+        lambda model, **kwargs: calls.append((model, kwargs)) or "layers",
+    )
+    model = nn.Linear(2, 2)
+
+    assert dist.fsdp2_wrap(model, shard_root=False, cpu_offload=True) == "layers"
+    assert calls == [(model, {"shard_root": False, "mp_policy": None, "cpu_offload": True})]
+
+
 # ------------------------------------------------------------------------------------ collectives
 
 
