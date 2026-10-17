@@ -38,12 +38,17 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    DeepseekV3Config,
+    GptOssConfig,
     LlamaConfig,
     Qwen2_5_VLConfig,
     Qwen3MoeConfig,
 )
 
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch import models
+from modelopt.torch.models import EPSpec, get_spec
+from modelopt.torch.utils import moe
 from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.moe import (
     _routed_expert_modules,
@@ -71,6 +76,24 @@ needs_qwen3_moe_ep_plan = pytest.mark.skipif(
 def _qwen3_moe(num_experts=8):
     """Qwen3-MoE, whose base_model_ep_plan ships with transformers itself."""
     return Qwen3MoeConfig(num_experts=num_experts, moe_intermediate_size=8, **_TINY)
+
+
+def _deepseek_v3(n_routed_experts=8):
+    """DeepSeek-V3 without a plan of its own, so only its model spec can make it EP-capable.
+
+    Its one layer is an MoE layer: DeepSeek-V3's first layers are dense by default.
+    """
+    config = DeepseekV3Config(
+        n_routed_experts=n_routed_experts,
+        first_k_dense_replace=0,
+        moe_intermediate_size=8,
+        n_group=1,
+        topk_group=1,
+        num_experts_per_tok=1,
+        **_TINY,
+    )
+    config.base_model_ep_plan = None  # holds even if a later transformers ships a plan
+    return config
 
 
 def _bytes(module):
@@ -358,6 +381,7 @@ def test_an_ep_capable_moe_is_planned_expert_parallel(run_as, serve, tmp_path, c
     assert ("Distribution:" in capsys.readouterr().out) == (rank == 0)
 
 
+@needs_qwen3_moe_ep_plan  # its spec asks for the release that ships its plan
 def test_an_moe_without_an_ep_plan_is_not_expert_parallel(run_as, serve, tmp_path):
     """The config counts 8 experts, but with no base_model_ep_plan nothing could shard them."""
     run_as(4)
@@ -368,36 +392,101 @@ def test_an_moe_without_an_ep_plan_is_not_expert_parallel(run_as, serve, tmp_pat
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4)
 
 
-@needs_qwen3_moe_ep_plan
+def test_the_spec_is_applied_before_the_decision(run_as, serve, tmp_path):
+    """DeepSeek-V3's plan comes only from its spec. Deciding before applying it would read the MoE
+    as dense; applied first, it shards, and the config handed on carries the spec's plan."""
+    run_as(4)
+    serve(_deepseek_v3(n_routed_experts=8))
+
+    plan, hf_config = resolve_distribution_plan(str(tmp_path))
+
+    assert plan == DistributionPlan(4, 4)
+    assert hf_config.base_model_ep_plan == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
+
+
+def test_a_run_without_expert_parallelism_needs_no_spec(run_as, serve, monkeypatch, tmp_path):
+    """GPT-OSS cannot be expert-parallel, which its spec says by refusing. A run that rules expert
+    parallelism out, as FSDP2 does, does not ask its spec, and its spec does not refuse it."""
+    run_as(2)
+    serve(GptOssConfig(num_local_experts=4, **_TINY))
+
+    with pytest.raises(NotImplementedError, match="cannot be quantized expert-parallel yet"):
+        resolve_distribution_plan(str(tmp_path))
+    plan, _ = resolve_distribution_plan(str(tmp_path), ep_size=1, dense="fsdp")
+    assert plan == DistributionPlan(2, dense="fsdp")
+    monkeypatch.setenv("MODELOPT_EP_DEGREE", "1")
+    assert resolve_distribution_plan(str(tmp_path), dense="fsdp")[0] == plan
+
+
+# The refusals of an MoE left whole on every rank, by whether its spec allows expert parallelism.
+_CAN_BE_EP = "can be expert-parallel, but the plan resolved"
+_NO_EP_YET = "cannot be quantized expert-parallel yet, and the plan replicates"
+
+
 @pytest.mark.parametrize(
-    ("config", "ep_degree"),
+    ("config", "ep_degree", "refusal"),
     [
-        pytest.param(_qwen3_moe(num_experts=3), None, id="auto_finds_no_degree"),
-        pytest.param(_qwen3_moe(num_experts=8), "1", id="explicit_degree_one"),
+        pytest.param(_deepseek_v3(n_routed_experts=3), None, _CAN_BE_EP, id="auto_finds_no_degree"),
+        pytest.param(_qwen3_moe(num_experts=8), "1", _CAN_BE_EP, id="explicit_degree_one"),
+        pytest.param(
+            _deepseek_v3(n_routed_experts=8), "1", _CAN_BE_EP, id="explicit_degree_one_spec_plan"
+        ),
+        pytest.param(
+            GptOssConfig(num_local_experts=4, **_TINY), "1", _NO_EP_YET, id="spec_refuses_ep"
+        ),
     ],
 )
 def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
-    run_as, serve, monkeypatch, tmp_path, config, ep_degree
+    run_as, serve, monkeypatch, tmp_path, config, ep_degree, refusal
 ):
-    """No EP degree above 1 divides 3 experts over 2 ranks, and an explicit 1 asks for none. With
-    nothing sharded either, every rank would hold the whole MoE: that must fail, not run."""
+    """No EP degree above 1 divides 3 experts over 2 ranks, and an explicit 1 asks for none,
+    whether the plan comes with the config (Qwen3-MoE) or only from the model's spec, which an EP
+    degree of 1 skips (DeepSeek-V3). With nothing sharded either, every rank would hold the whole
+    MoE: that must fail, not run. GPT-OSS carries a plan too, but its spec refuses expert
+    parallelism, so this check refuses it as an MoE that cannot be expert-parallel yet; the spec's
+    own refusal, a NotImplementedError and so a RuntimeError too, words it differently."""
     if ep_degree is not None:
+        if config.model_type == "qwen3_moe" and Version(transformers.__version__) < Version("5.7"):
+            pytest.skip("qwen3_moe's base_model_ep_plan ships in transformers 5.7")
         monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
     run_as(2)
     serve(config)
 
-    with pytest.raises(RuntimeError, match="can be expert-parallel, but the plan resolved"):
+    with pytest.raises(RuntimeError, match=refusal):
         resolve_distribution_plan(str(tmp_path))
 
 
-@needs_qwen3_moe_ep_plan
+def test_the_plan_a_spec_would_supply(monkeypatch):
+    """What that guard reads at an EP degree of 1: the spec's plan, or the plan it states its
+    ``prepare`` attaches, read without running ``prepare``; nothing for a model with no spec or no
+    expert-parallel section, and nothing for a spec that refuses expert parallelism even when it
+    names a plan."""
+    assert moe._spec_ep_plan("deepseek_v3") == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
+    assert moe._spec_ep_plan("llama") == {}
+    assert moe._spec_ep_plan("no_such_model_type") == {}
+    prepared = {"layers.*.mlp.experts": "moe_tp_experts"}
+    specs = {
+        "preparing": SimpleNamespace(
+            ep_spec=EPSpec(
+                prepare=lambda *a, **k: pytest.fail("ran prepare"), prepared_ep_plan=prepared
+            )
+        ),
+        "refusing": SimpleNamespace(
+            ep_spec=SimpleNamespace(unsupported="not yet", base_model_ep_plan={"layers.*.mlp": "x"})
+        ),
+    }
+    monkeypatch.setattr(models, "get_spec", specs.get)
+    assert moe._spec_ep_plan("preparing") == prepared
+    assert moe._spec_ep_plan("refusing") == {}
+
+
 def test_an_ep_capable_moe_may_be_fsdp2_sharded_instead(run_as, serve, monkeypatch, tmp_path):
     """Asked for no expert parallelism but for dense sharding, the MoE is sharded whole by FSDP2,
     which is not the waste of a replica on every rank."""
     monkeypatch.setenv("MODELOPT_EP_DEGREE", "1")
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
     run_as(2)
-    serve(_qwen3_moe(num_experts=8))
+    serve(_deepseek_v3(n_routed_experts=8))
 
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2, dense="fsdp")
 
@@ -572,21 +661,55 @@ def _knobs(**values):
         yield
 
 
-def _every_rank_takes_rank0s_plan_job(rank, size, ckpt, knobs, expected):
+def _every_rank_takes_rank0s_plan_job(rank, size, ckpt, knobs, expected, spec_applied):
     with bounded_collectives(), _knobs(**knobs[rank]):
-        plan, _ = resolve_distribution_plan(ckpt)
+        plan, hf_config = resolve_distribution_plan(ckpt)
     assert plan == expected, (rank, plan)
+    if spec_applied is not None:
+        spec_plan = get_spec(hf_config.model_type).ep_spec.base_model_ep_plan
+        applied = getattr(hf_config, "base_model_ep_plan", None) == spec_plan
+        assert applied is spec_applied, (rank, applied)
 
 
-def test_every_rank_takes_the_plan_rank0_decided(cpu_dist_workers, tmp_path):
-    """Over a real broadcast. Rank 1's own knobs, FSDP2 over the world, would decide another plan,
-    and ranks loading different plans would build mismatched meshes and hang."""
-    LlamaConfig(**_TINY).save_pretrained(tmp_path)
+@pytest.mark.parametrize(
+    ("config", "knobs", "expected", "spec_applied"),
+    [
+        pytest.param(
+            LlamaConfig(**_TINY),
+            [{}, {"MODELOPT_FSDP_SIZE": "world"}],
+            DistributionPlan(2),
+            None,
+            id="rank1-would-shard",
+        ),
+        pytest.param(
+            _deepseek_v3(n_routed_experts=8),
+            [{}, {"MODELOPT_EP_DEGREE": "1"}],
+            DistributionPlan(2, 2),
+            True,
+            id="rank1-would-skip-the-spec",
+        ),
+        pytest.param(
+            _deepseek_v3(n_routed_experts=8),
+            [{"MODELOPT_EP_DEGREE": "1", "MODELOPT_FSDP_SIZE": "world"}, {}],
+            DistributionPlan(2, dense="fsdp"),
+            False,
+            id="rank1-would-apply-the-spec",
+        ),
+    ],
+)
+def test_every_rank_takes_the_plan_rank0_decided(
+    cpu_dist_workers, tmp_path, config, knobs, expected, spec_applied
+):
+    """Over real broadcasts. Rank 1's own knobs would decide another plan, or apply the model's spec
+    where rank 0 skipped it, or skip it where rank 0 applied it: ranks loading different plans, or
+    one without the expert-parallel plan the others shard by, build mismatched meshes and hang."""
+    config.save_pretrained(tmp_path)
     cpu_dist_workers.run(
         _every_rank_takes_rank0s_plan_job,
         ckpt=str(tmp_path),
-        knobs=[{}, {"MODELOPT_FSDP_SIZE": "world"}],
-        expected=DistributionPlan(2),
+        knobs=knobs,
+        expected=expected,
+        spec_applied=spec_applied,
     )
 
 

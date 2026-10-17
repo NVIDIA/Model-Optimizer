@@ -140,6 +140,79 @@ def _routed_expert_modules(model: "nn.Module", ep_plan: dict[str, str]) -> "dict
     }
 
 
+def _ep_spec(model_type: str):
+    """``model_type``'s :class:`~modelopt.torch.models.EPSpec`, or ``None``."""
+    from modelopt.torch.models import get_spec
+
+    return getattr(get_spec(model_type), "ep_spec", None)
+
+
+def apply_distributed_support(
+    model_type: str,
+    hf_config,
+    *,
+    ckpt_path: "str | None" = None,
+    trust_remote_code: bool = False,
+):
+    """Prepare ``hf_config`` so ``model_type`` can be loaded expert-parallel, from its model spec.
+
+    Reads the model's :class:`~modelopt.torch.models.EPSpec` and applies it: enforce the
+    transformers floor this model's expert parallelism needs, then attach the
+    ``base_model_ep_plan`` it requires to whichever config carries its MoE -- the root for a plain
+    MoE, the nested text/LLM config for a VLM whose experts live in its language sub-model, since
+    the plan's globs are written against that module tree and a plan on the wrong config matches
+    nothing at all rather than failing.
+
+    An existing plan always wins: stock transformers ships one for some models, and overwriting it
+    would substitute our idea of the layout for the model's own.
+
+    Returns the config to load, unchanged for a model type with no spec or no EP section. The
+    generic all-to-all transport is not wired here -- it self-registers in
+    :func:`~modelopt.torch.utils.plugins.model_load_utils.load_and_prepare_ep`, so nothing about it
+    is per-model.
+    """
+    ep = _ep_spec(model_type)
+    if ep is None:
+        return hf_config
+
+    if ep.unsupported:
+        raise NotImplementedError(
+            f"{model_type} cannot be quantized expert-parallel yet: {ep.unsupported} Quantize it "
+            "without expert parallelism, e.g. with FSDP2 (--use_fsdp2 in examples/hf_ptq/hf_ptq.py)."
+        )
+    if ep.requires_transformers:
+        require_transformers(ep.requires_transformers, f"{model_type} expert-parallel PTQ")
+
+    if ep.base_model_ep_plan:
+        target = hf_config
+        if ep.plan_config_attr:
+            target = getattr(hf_config, ep.plan_config_attr, None)
+            if target is None:
+                raise ValueError(
+                    f"{model_type} expects its expert-parallel plan on "
+                    f"config.{ep.plan_config_attr}, which this checkpoint's config does not have."
+                )
+        if not getattr(target, "base_model_ep_plan", None):
+            target.base_model_ep_plan = dict(ep.base_model_ep_plan)
+
+    if ep.prepare is not None:
+        hf_config = ep.prepare(hf_config, ckpt_path=ckpt_path, trust_remote_code=trust_remote_code)
+    return hf_config
+
+
+def _spec_ep_plan(model_type: str) -> dict[str, str]:
+    """The ``base_model_ep_plan`` :func:`apply_distributed_support` would attach for ``model_type``.
+
+    Itself, or through the spec's ``prepare``. Empty for a model type with no spec, no
+    expert-parallel section, or one that refuses expert parallelism. Only reads the spec: nothing
+    is applied, checked or patched, and ``prepare`` does not run.
+    """
+    ep = _ep_spec(model_type)
+    if ep is None or ep.unsupported:
+        return {}
+    return dict(ep.base_model_ep_plan or ep.prepared_ep_plan or {})
+
+
 # ---------------------------------------------------------------------------------------------------
 # DP=EP all-to-all expert transport (`torch_a2a`)
 #
