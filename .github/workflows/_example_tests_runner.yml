@@ -61,7 +61,8 @@ jobs:
       - uses: ./.github/actions/cache-extensions
         id: ext-cache
         with:
-          cache-key: rtxpro6000-${{ inputs.docker_image }}
+          # Per example: jobs sharing an image build different extensions, and the first to save wins the key.
+          cache-key: rtxpro6000-example-${{ inputs.example }}-${{ inputs.docker_image }}
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu:/usr/local/tensorrt/targets/x86_64-linux-gnu/lib" >> $GITHUB_ENV

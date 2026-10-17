@@ -76,7 +76,8 @@ jobs:
       - uses: ./.github/actions/cache-extensions
         id: ext-cache
         with:
-          cache-key: rtxpro6000-${{ matrix.container_image }}
+          # Per job: jobs sharing an image build different extensions, and the first to save wins the key.
+          cache-key: rtxpro6000-${{ matrix.example }}-${{ matrix.container_image }}
       - name: Restore wheels built from source
         # mamba_ssm and fast-hadamard-transform take ~10 min to compile (see noxfile.py `gpu`)
         id: wheelhouse
