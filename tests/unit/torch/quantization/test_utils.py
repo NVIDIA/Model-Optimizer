@@ -367,6 +367,7 @@ def _shared_group_override_restores_prior_attributes(rank, size):
     mesh = init_device_mesh("cpu", (size,))
     block = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8))
     fully_shard(list(block), mesh=mesh)  # both linears share one FSDPParamGroup
+    fully_shard(block, mesh=mesh)
     group = fully_shard.state(block[0])._fsdp_param_group
     prior_reshard = group.reshard  # pre-existing instance override must survive
     group.reshard = prior_reshard
@@ -377,6 +378,9 @@ def _shared_group_override_restores_prior_attributes(rank, size):
         assert "unshard" in group.__dict__
     assert "unshard" not in group.__dict__
     assert group.__dict__["reshard"] is prior_reshard
+    # A layer that is not itself FSDP-wrapped was not gathered, so its FSDP submodules must unshard.
+    with _disable_fsdp_unshard_reshard(torch.nn.Sequential(*block)):
+        assert "unshard" not in group.__dict__
 
 
 def test_disable_fsdp_unshard_reshard_shared_group_and_nesting(cpu_dist_workers):

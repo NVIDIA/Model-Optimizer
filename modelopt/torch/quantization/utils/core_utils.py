@@ -833,6 +833,9 @@ def _disable_fsdp_unshard_reshard(layer):
     Patched per group instance, not on ``FSDPParamGroup``: the rest of the model still runs forward
     (e.g. while collecting the next layer's inputs) and must unshard as usual.
     """
+    if not isinstance(layer, FSDPModule):  # nothing was gathered for its FSDP submodules
+        yield
+        return
     groups = {
         id(group): group  # ``fully_shard([a, b])`` gives several modules one group
         for module in layer.modules()
