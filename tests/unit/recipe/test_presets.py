@@ -22,8 +22,10 @@ PTQ example).
 """
 
 import argparse
+import copy
 
 import pytest
+import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe, presets
@@ -94,6 +96,48 @@ def test_w4a16_nvfp4_preset_disables_vllm_marlin_incompatible_projections():
         "*visual*",
         "*vision_tower*",
     } <= disabled_quantizers
+
+
+class _KimiK3Layer(nn.Module):
+    """Kimi-K3's decoder-layer projections that vLLM builds unquantized, beside one it quantizes."""
+
+    def __init__(self, hidden=32, latent=16):
+        super().__init__()
+        self.self_attn = nn.Module()
+        self.self_attn.o_proj = nn.Linear(hidden, hidden, bias=False)
+        self.self_attention_res_proj = nn.Linear(hidden, 1, bias=False)
+        self.mlp_res_proj = nn.Linear(hidden, 1, bias=False)
+        self.block_sparse_moe = nn.Module()
+        self.block_sparse_moe.routed_expert_down_proj = nn.Linear(hidden, latent, bias=False)
+        self.block_sparse_moe.routed_expert_up_proj = nn.Linear(latent, hidden, bias=False)
+
+
+@pytest.mark.parametrize("qformat", ["fp8", "nvfp4"])
+def test_default_presets_leave_the_kimi_k3_projections_vllm_builds_unquantized(qformat):
+    # vLLM's Kimi-K3 model passes quant_config=None for these, so it cannot load them quantized.
+    # Kimi-K2.5 and Kimi-K3 also name their multimodal projector ``mm_projector``; like the other
+    # projector spellings it stays BF16 unless a recipe re-enables it.
+    model = nn.Module()
+    model.layers = nn.ModuleList([_KimiK3Layer()])
+    model.output_attn_res_proj = nn.Linear(32, 1, bias=False)
+    model.mm_projector = nn.Sequential(nn.Linear(32, 32), nn.GELU(), nn.Linear(32, 32))
+    config = copy.deepcopy(presets.QUANT_CFG_CHOICES[qformat])
+    config["algorithm"] = None  # placement only, no calibration forward
+    mtq.quantize(model, config)
+
+    layer = model.layers[0]
+    for module in (
+        layer.block_sparse_moe.routed_expert_down_proj,
+        layer.block_sparse_moe.routed_expert_up_proj,
+        layer.self_attention_res_proj,
+        layer.mlp_res_proj,
+        model.output_attn_res_proj,
+        model.mm_projector[0],
+        model.mm_projector[2],
+    ):
+        assert not module.weight_quantizer.is_enabled
+        assert not module.input_quantizer.is_enabled
+    assert layer.self_attn.o_proj.weight_quantizer.is_enabled
 
 
 def test_local_hessian_layerwise_is_scoped_to_the_model_recipe():
