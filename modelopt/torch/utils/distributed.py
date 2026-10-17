@@ -16,7 +16,9 @@
 """Utility functions for using torch.distributed."""
 
 import functools
+import gc
 import io
+import itertools
 import os
 import sys
 import time
@@ -32,6 +34,9 @@ import torch
 import torch.distributed
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
+from torch.utils.data import DataLoader, IterableDataset, get_worker_info
+from torch.utils.data.distributed import DistributedSampler
+from tqdm import tqdm
 
 __all__ = [
     "DistributedProcessGroup",
@@ -42,6 +47,7 @@ __all__ = [
     "backend",
     "barrier",
     "broadcast_from",
+    "distributed_forward_loop",
     "distributed_run",
     "distribution_plan",
     "fsdp2_wrap",
@@ -55,6 +61,7 @@ __all__ = [
     "is_master",
     "rank",
     "set_distribution_plan",
+    "shard_dataloader",
     "size",
 ]
 
@@ -529,6 +536,224 @@ def distributed_run(timeout: timedelta | None = None, device: torch.device | str
             sys.stderr.flush()
         if owns_group:
             cleanup()
+
+
+class _StridedIterableShard(IterableDataset):
+    """Rank-strided shard of a streaming ``IterableDataset`` (no ``len()`` required).
+
+    ``DistributedSampler`` only works with map-style datasets. Streaming calibration datasets (e.g. the
+    Nemotron image-text ``NemotronTarPlusJsonlIterable``) are iterable, so each rank instead builds its
+    own identical stream (deterministic seed) and takes slot ``rank`` from every complete group of
+    ``world_size`` consecutive samples. Any trailing incomplete group is dropped so every rank yields
+    exactly the same count -- preserving the equal-per-rank-batch invariant that keeps per-step EP
+    collectives from hanging when one rank runs short. A stream shorter than ``world_size`` has no
+    complete group, so it is refused rather than leaving every rank with nothing to calibrate on. Each
+    DataLoader worker process iterates its own copy of the stream, so the workers split the groups
+    between them rather than each yielding them all.
+    ``vlm_dataset_utils._ShardedIterable`` cannot stand in: it pads every rank to a count its own loader
+    knows, while this wraps any loader's stream, which may know none, and splits across its workers.
+    """
+
+    def __init__(self, base: IterableDataset, rank: int, world_size: int):
+        self.base = base
+        self.rank = rank
+        self.world_size = world_size
+
+    def __iter__(self):
+        info = get_worker_info()
+        num_workers, worker = (info.num_workers, info.id) if info is not None else (1, 0)
+        it = iter(self.base)
+        for index in itertools.count():
+            group = list(itertools.islice(it, self.world_size))
+            if len(group) < self.world_size:
+                if index == 0:
+                    # Every rank and worker sees the same stream, so all of them refuse it together.
+                    raise ValueError(
+                        f"The calibration stream has {len(group)} sample(s), fewer than the "
+                        f"{self.world_size} ranks: no rank would get a sample to calibrate on."
+                    )
+                return  # drop incomplete trailing group -> equal counts across ranks
+            if index % num_workers == worker:
+                yield group[self.rank]
+
+
+def shard_dataloader(loader, rank: int, world_size: int):
+    """Wrap a DataLoader so each rank sees a unique shard.
+
+    For map-style datasets a ``DistributedSampler`` is used. ``drop_last=False`` keeps per-rank batch
+    counts equal (else a rank exits calibration early and hangs the others on the per-step collectives),
+    at the cost of the sampler repeating up to ``world_size - 1`` samples to pad the even split. For
+    streaming ``IterableDataset`` datasets (which have no ``len()`` and so can't use a sampler) each rank
+    strides its own deterministic copy of the stream via :class:`_StridedIterableShard`. Every DataLoader
+    worker must see that whole stream: a dataset that splits itself across workers by
+    ``get_worker_info()`` would be split twice and lose samples, so load one with ``num_workers=0``.
+
+    Forwards all non-sampler DataLoader settings from ``loader`` (workers, pinning,
+    prefetch, init fn, generator, ...).
+    """
+    if isinstance(loader.dataset, IterableDataset):
+        return DataLoader(
+            _StridedIterableShard(loader.dataset, rank, world_size),
+            batch_size=loader.batch_size,
+            drop_last=loader.drop_last,
+            collate_fn=loader.collate_fn,
+            num_workers=loader.num_workers,
+            pin_memory=loader.pin_memory,
+            timeout=loader.timeout,
+            worker_init_fn=loader.worker_init_fn,
+            multiprocessing_context=loader.multiprocessing_context,
+            generator=loader.generator,
+            prefetch_factor=loader.prefetch_factor,
+            persistent_workers=loader.persistent_workers,
+            pin_memory_device=getattr(loader, "pin_memory_device", ""),
+        )
+    sampler = DistributedSampler(
+        loader.dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False,
+        drop_last=False,
+    )
+    return DataLoader(
+        loader.dataset,
+        batch_size=loader.batch_size,
+        drop_last=loader.drop_last,
+        sampler=sampler,
+        collate_fn=loader.collate_fn,
+        num_workers=loader.num_workers,
+        pin_memory=loader.pin_memory,
+        timeout=loader.timeout,
+        worker_init_fn=loader.worker_init_fn,
+        multiprocessing_context=loader.multiprocessing_context,
+        generator=loader.generator,
+        prefetch_factor=loader.prefetch_factor,
+        persistent_workers=loader.persistent_workers,
+        pin_memory_device=getattr(loader, "pin_memory_device", ""),
+    )
+
+
+def _reinstall_a2a_forwards(model, ep_mesh) -> int:
+    """Re-plant the torch_a2a TP forward wrappers that quantizer insertion clobbered.
+
+    transformers installs its TP input/output transforms by REPLACING ``module.forward`` with an
+    instance attribute (TensorParallelLayer.install_forward). For torch_a2a_experts that wrapper is
+    what passes the EP ``process_group`` into the experts forward. ModelOpt's quantizer insertion
+    rebinds ``module.forward`` on the same instance, dropping the wrapper -- after which
+    ``torch_a2a_experts_forward`` receives ``process_group=None`` and raises.
+
+    Called at the top of the calibration loop: after conversion (so it wraps the QUANTIZED forward)
+    and before the first forward. Idempotent via a per-module flag, so repeated calibration passes
+    do not stack wrappers (which would inject the process_group argument twice). ``ep_mesh`` is the
+    mesh the routed experts are sharded over; without one there is nothing to re-plant.
+    """
+    if ep_mesh is None:
+        return 0
+    try:
+        from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
+    except ImportError:  # older transformers
+        from transformers.integrations.tensor_parallel import ALL_PARALLEL_STYLES
+    try:
+        from transformers.distributed.tensor_parallel import _get_parameter_tp_plan
+    except ImportError:
+        from transformers.integrations.tensor_parallel import _get_parameter_tp_plan
+
+    plan = getattr(model, "tp_plan", None) or {}
+    if not plan:
+        return 0
+
+    # install_forward() -- and the clobber it causes -- only exist on transformers >=5.16. Older
+    # releases install their TP input/output transforms as forward PRE-HOOKS, which survive
+    # ModelOpt rebinding ``module.forward``, so there is nothing to re-plant and calling the
+    # missing method would AttributeError. No-op rather than fail on 5.9/5.13.
+    if not any(
+        hasattr(ALL_PARALLEL_STYLES.get(s), "install_forward")
+        for s in ("torch_a2a_experts", "torch_a2a_router")
+    ):
+        return 0
+    n = 0
+    for name, mod in model.named_modules():
+        if getattr(mod, "_modelopt_a2a_forward_reinstalled", False):
+            continue
+        style_name = _get_parameter_tp_plan(parameter_name=name, tp_plan=plan, is_weight=False)
+        if (
+            style_name in ("torch_a2a_experts", "torch_a2a_router")
+            and style_name in ALL_PARALLEL_STYLES
+        ):
+            ALL_PARALLEL_STYLES[style_name].install_forward(mod, ep_mesh)
+            mod._modelopt_a2a_forward_reinstalled = True
+            n += 1
+    if n and is_master():
+        print(
+            f"[ep] re-installed {n} torch_a2a forward wrapper(s) clobbered by quantizer insertion",
+            flush=True,
+        )
+    return n
+
+
+def _release_cached_cuda_memory():
+    """Hand the caching allocator's reserved-but-unused pool back to the driver.
+
+    Only a process that started CUDA has a pool to hand back; elsewhere the collection alone costs
+    about a second.
+    """
+    if torch.cuda.is_initialized():
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
+def distributed_forward_loop(model, dataloader, device=None, ep_mesh=None):
+    """Build an ``mtq.quantize`` ``forward_loop`` for a distributed (e.g. expert-parallel) model.
+
+    Moves each batch onto ``device``, when given, and runs the captured ``model`` forward (the EP
+    all-reduce / all-to-all collectives fire inside that forward). A model whose plan
+    (:func:`distribution_plan`) is expert-parallel passes the ``ep_mesh`` its experts are sharded
+    over, for the all-to-all forwards that quantizer insertion drops to be re-installed before the
+    first forward; any other model passes none. ``mtq.quantize`` hands the
+    ``forward_loop`` callback an inner module that this closure ignores, calling the captured
+    top-level ``model`` instead so the full distributed forward (and its collectives) runs.
+
+    KV/state caching is disabled for the duration (via ``_disable_use_cache``), mirroring the
+    single-node ``_forward_loop``. This distributed path previously omitted the guard, so it ran
+    calibration at ``config.use_cache`` (default ``True``); for hybrid Mamba/attention models
+    (e.g. NemotronH) the cache is mutated in-place, which both wastes memory and breaks
+    calibration correctness.
+    """
+    # Local import to avoid any import cycle within modelopt.torch.utils.
+    from modelopt.torch.utils.dataset_utils import _disable_use_cache
+
+    plan = distribution_plan(model)
+    if plan.is_expert_parallel != (ep_mesh is not None):
+        raise ValueError(
+            f"{plan!r}: an expert-parallel model calibrates with the ep_mesh its routed experts "
+            "are sharded over, and any other model without one."
+        )
+
+    def calibrate(_inner_model):
+        _reinstall_a2a_forwards(model, ep_mesh)
+        with _disable_use_cache(model):
+            # Reclaim the caching allocator's reserved-but-unused pool left by the load/quantizer-insertion
+            # memory peak. Without this, torch hoards ~the whole GPU (e.g. 91 GB live weights vs 275 GB
+            # reserved), leaving ~0 GB free, so the distributed a2a's NCCL comm buffers cannot be allocated
+            # ("Failed to CUDA calloc") at the very first all_to_all. Freeing the cache hands that memory
+            # back to the driver for NCCL + the calibration activations.
+            _release_cached_cuda_memory()
+            for batch in tqdm(dataloader, desc="Calibrating", disable=not is_master()):
+                if device is not None:
+                    batch = {
+                        k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+                        for k, v in batch.items()
+                    }
+                model(**batch)
+            # Symmetric to the pre-forward reclaim above, and for the same reason one stage later:
+            # the calibration forwards leave their activations in the caching allocator's reserved
+            # pool, so whatever runs next (amax sync, export collectives) can find the device full
+            # even though little is live. Measured on Kimi-K3 (EP64, 184 GiB cards) right after the
+            # single calib forward: alloc 86.0 GiB but reserved 156.6 GiB -> only 0.7 GiB free, and
+            # the job then hung until the 2 h wall clock instead of exporting. NCCL comm buffers are
+            # allocated OUTSIDE the torch allocator, so a full reserved pool starves them.
+            _release_cached_cuda_memory()
+
+    return calibrate
 
 
 def cleanup():

@@ -14,6 +14,9 @@
 # limitations under the License.
 
 import json
+from datetime import timedelta
+from functools import partial
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -34,6 +37,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     prepare_messages_for_chat_template,
 )
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
 def test_prepare_messages_for_chat_template():
@@ -406,6 +410,7 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
             raise torch.cuda.OutOfMemoryError
 
     model = Mock(spec=torch.nn.Module)
+    model.modules.return_value = []  # no plan recorded and no FSDP2 module: a single process's
     # get_max_batch_size calls the module (model(...)) so FSDP2 hooks fire, not model.forward,
     # so route the mock's __call__ via side_effect.
     model.side_effect = fake_call
@@ -434,6 +439,56 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
     assert seen_batch_sizes == [1, 10, 5]
     # Final batch is 5 -> regulated to 4 (5 // 4 * 4 = 4).
     assert result == 4
+
+
+class _BatchSizeProbe(torch.nn.Module):
+    """Records the batch size of every forward."""
+
+    def __init__(self):
+        super().__init__()
+        self.batch_sizes = []
+
+    def forward(self, x):
+        self.batch_sizes.append(x.shape[0])
+
+
+def _smallest_batch_size_job(rank, world_size):
+    model = _BatchSizeProbe()
+    set_distribution_plan(model, DistributionPlan(world_size))
+    # A sample takes 100 bytes: rank 0's GPU has room for 4 of them, rank 1's for 10 (regulated to 8).
+    free = [400, 1000][rank]
+    measured = []
+
+    def mem_get_info(device):
+        measured.append(device)
+        return (free if len(measured) == 1 else free - 100, 0)
+
+    # A rank left waiting in the reduction gives up in seconds on this group.
+    group = torch.distributed.new_group(timeout=timedelta(seconds=10))
+    gather = partial(torch.distributed.all_gather_object, group=group)
+    with (
+        patch.object(torch.distributed, "all_gather_object", gather),
+        patch("torch.cuda.empty_cache"),
+        patch(
+            "torch.cuda.get_device_properties", return_value=SimpleNamespace(total_memory=10**12)
+        ),
+        patch("torch.cuda.device_count", return_value=4),
+        patch("torch.cuda.mem_get_info", side_effect=mem_get_info),
+        patch("torch.cuda.max_memory_allocated", return_value=0),
+    ):
+        batch_size = get_max_batch_size(
+            model, max_sample_length=8, sample_input_single_batch=torch.ones((1, 8))
+        )
+
+    assert measured == [torch.device("cuda", rank)] * 2  # its own GPU (LOCAL_RANK) only
+    assert model.batch_sizes == [1]  # one probe: an OOM retry would run more forwards on some ranks
+    assert batch_size == 4  # rank 0's
+
+
+def test_get_max_batch_size_takes_the_smallest_ranks_in_a_distributed_run(cpu_dist_workers):
+    """Every rank must run the same number of calibration steps, so ranks agree on one batch size
+    for a model whose plan distributes it over them: the smallest any rank's GPU allows."""
+    cpu_dist_workers.run(_smallest_batch_size_job)
 
 
 def test_get_dataset_samples_with_unsupported_dataset(make_toy_hf_dataset):
