@@ -21,7 +21,9 @@ from PIL import Image
 from transformers import AutoImageProcessor, AutoProcessor
 
 
-def run_vl_preview_generation(model, tokenizer, model_path, stage_name, trust_remote_code=False):
+def run_vl_preview_generation(
+    model, tokenizer, model_path, stage_name, trust_remote_code=False, generation_kwargs=None
+):
     """Run preview generation for VL models using sample images.
 
     Args:
@@ -30,6 +32,7 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name, trust_re
         model_path: Path to the model (for loading image processor)
         stage_name: Description of the stage (e.g., "before quantization")
         trust_remote_code: Whether to trust remote code for Huggingface models and tokenizers
+        generation_kwargs: Extra ``generate`` kwargs, such as ``synced_gpus`` for a sharded model
     Returns:
         Generated response text for logging/comparison
     """
@@ -79,6 +82,7 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name, trust_re
             "max_new_tokens": 50,
             "do_sample": False,
             "eos_token_id": tokenizer.eos_token_id,
+            **(generation_kwargs or {}),
         }
 
         print(f"Generating VL response ({stage_name})...")

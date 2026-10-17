@@ -377,6 +377,21 @@ def test_forward_loop_moves_tensors_to_the_device_it_is_given():
     assert [call["logits_to_keep"] for call in model.calls] == [1, 1]
 
 
+def test_forward_loop_runs_each_batch_through_the_forward_it_is_given():
+    """A batch that needs its own call into the model, as a VLM's image-text batch does, goes
+    through ``forward``, on the device and with the cache disabled like any other."""
+    batches = [{"input_ids": torch.zeros(2, 3)}] * 2
+    model = _Recorder()
+
+    distributed_forward_loop(
+        model, batches, device="meta", forward=lambda batch: model(**batch, own_call=True)
+    )(model)
+
+    assert [call["own_call"] for call in model.calls] == [True, True]
+    assert [call["input_ids"].device.type for call in model.calls] == ["meta"] * 2
+    assert model.use_cache_seen == [False, False]
+
+
 def test_forward_loop_disables_use_cache_only_while_calibrating():
     """KV/state caching is off for the calibration forwards (it breaks hybrid Mamba models)."""
     model = _Recorder()
