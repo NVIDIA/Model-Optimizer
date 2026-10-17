@@ -15,12 +15,13 @@
 
 
 import pytest
+import torch
+import torch.nn as nn
 from _test_utils.torch.misc import set_seed
 from _test_utils.torch.quantization.models import SimpleLinear
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.backends import gemm_registry
-from modelopt.torch.quantization.backends.fp8_per_tensor_gemm import Fp8PerTensorLinear
+from modelopt.torch.quantization.backends import Fp8PerTensorLinear, gemm_registry
 from modelopt.torch.quantization.backends.utils import fp8_compatible
 
 set_seed()
@@ -50,3 +51,16 @@ def test_fp8_per_tensor_gemm_available(model_cls, config):
     # Find the matching GEMM implementation
     gemm_forward = gemm_registry.find_match(module, input_tensor, [], {})
     assert gemm_forward == Fp8PerTensorLinear.apply
+
+
+@pytest.mark.skipif(not fp8_compatible(), reason="FP8 is not supported on this GPU")
+@pytest.mark.parametrize(("in_features", "out_features"), [(60, 32), (32, 2)])
+def test_fp8_per_tensor_gemm_unavailable_for_unaligned_weight(in_features, out_features):
+    """torch._scaled_mm needs weight dims divisible by 16; other layers fall back to fake quant."""
+    model = nn.Sequential(nn.Linear(in_features, out_features)).cuda()
+    x = torch.randn(8, in_features, device="cuda")
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(x))
+    mtq.compress(model)
+
+    assert gemm_registry.find_match(model[0], x, [], {}) is None
+    model(x)
