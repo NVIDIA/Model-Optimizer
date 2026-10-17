@@ -2,7 +2,9 @@ name: PR merge base
 description: >
   Resolve the commit to diff a PR run against. For a copied PR branch it is the merge base of the
   PR's head and its target branch; for a merge queue group it is the commit the group was built
-  on. Outputs are empty for non-PR triggers, which have no diff to inspect.
+  on. Outputs are empty for non-PR triggers, which have no diff to inspect. Also says whether the
+  GPU system tests run: always in a merge queue group, and on a copied PR branch only when the PR
+  carries the `run-system-tests` label (the other PR runs get the unit tests only).
   Requires a prior actions/checkout with fetch-depth 0.
 
 outputs:
@@ -12,6 +14,9 @@ outputs:
   head_sha:
     description: The PR's head commit, or the merge queue group's head commit.
     value: ${{ steps.pr-shas.outputs.head_sha || steps.merge-group.outputs.head_sha }}
+  run_system:
+    description: '"true" if the GPU system tests run in this PR run, else "false". Empty for non-PR triggers.'
+    value: ${{ steps.pr-shas.outputs.run_system || steps.merge-group.outputs.run_system }}
 
 runs:
   using: composite
@@ -28,6 +33,7 @@ runs:
       run: |
         echo "head_sha=$(echo "$PR_INFO" | jq -r '.head.sha')" >> $GITHUB_OUTPUT
         echo "base_sha=$(echo "$PR_INFO" | jq -r '.base.sha')" >> $GITHUB_OUTPUT
+        echo "run_system=$(echo "$PR_INFO" | jq -r '[(.labels // [])[].name] | index("run-system-tests") != null')" >> $GITHUB_OUTPUT
     # Get commit from the target branch that is present in the PR to use as base for changed files
     - if: startsWith(github.ref, 'refs/heads/pull-request/')
       id: calculate-merge-base
@@ -48,3 +54,4 @@ runs:
       run: |
         echo "base_sha=$BASE_SHA" | tee --append "${GITHUB_OUTPUT}"
         echo "head_sha=$HEAD_SHA" | tee --append "${GITHUB_OUTPUT}"
+        echo "run_system=true" | tee --append "${GITHUB_OUTPUT}"

@@ -371,6 +371,7 @@ markers = [
     "integration: Tests that require external services or other non-hermetic dependencies",
     "manual: Only run when --run-manual is given",
     "release: Regression tests that should be run before every release",
+    "system: GPU system tests (several processes or GPUs, subprocesses, inference engines, heavy compilation); run by the merge queue and nightly, not on every pull request push",
 ]
 
 

@@ -342,6 +342,7 @@ def test_run_timing_passes_stream_handle_to_trt():
 # --- TensorRTPyBenchmark (integration) ---
 
 
+@pytest.mark.system
 class TestTensorRTPyBenchmark:
     """End-to-end tests for TensorRTPyBenchmark. Requires TensorRT and CUDA."""
 
@@ -418,6 +419,7 @@ class TestTensorRTPyBenchmark:
 # --- TrtExecBenchmark (integration) ---
 
 
+@pytest.mark.system
 class TestTrtExecBenchmark:
     """End-to-end tests for TrtExecBenchmark. Requires trtexec in PATH."""
 

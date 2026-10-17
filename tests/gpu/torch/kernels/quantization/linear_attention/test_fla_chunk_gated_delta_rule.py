@@ -29,6 +29,8 @@ from modelopt.torch.kernels.quantization.linear_attention.fla_chunk_gated_delta_
     chunk_gated_delta_rule,
 )
 
+pytestmark = pytest.mark.system
+
 
 def make_inputs():
     torch.manual_seed(123)

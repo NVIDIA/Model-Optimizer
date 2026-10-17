@@ -22,7 +22,7 @@ the module-level kernel cache is warm by the time those tests run in the same pr
 import pytest
 
 # Override default timeout as these tests JIT-compile the CUDA extensions, which is slow
-pytestmark = pytest.mark.timeout(180)
+pytestmark = [pytest.mark.system, pytest.mark.timeout(180)]
 
 
 def test_conv3d_implicit_gemm():

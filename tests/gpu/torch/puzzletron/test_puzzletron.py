@@ -25,6 +25,8 @@ from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
 import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.utils.distributed as dist
 
+pytestmark = pytest.mark.system
+
 # The e2e test to compress a model based on Local Neural Architecture Search (Mixed Integer Programing NAS search)
 # using a one-click command.
 #
