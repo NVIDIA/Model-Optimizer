@@ -980,6 +980,8 @@ class TensorQuantizer(nn.Module):
         def get_axis_quant_params(ax):
             ax = ax if ax in self.block_sizes else ax - inputs.dim()
             bsize = self.block_sizes.get(ax, None)
+            if ax in self.block_sizes and bsize is None:
+                bsize = inputs.shape[ax]
             padding, ax_slice = None, None
             if bsize is not None and inputs.shape[ax] % bsize != 0:
                 padding = (bsize - (inputs.shape[ax] % bsize), 0)
