@@ -183,18 +183,18 @@ def is_nemotron_vl(model_or_config):
     return any("nemotron" in arch.lower() for arch in architectures)
 
 
-def create_vlm_calibration_loop(full_model, calib_dataloader):
-    """Create a calibration loop for VLM models that handles multimodal inputs.
+def create_vlm_calibration_forward(full_model):
+    """Return ``forward(batch)``, which runs one multimodal calibration batch through the VLM.
 
-    This function inspects the model's forward signature and filters batch kwargs
-    to only include supported parameters, then calls the appropriate forward method.
+    It filters the batch kwargs to the parameters the model's forward accepts, then calls the
+    appropriate forward method. :func:`create_vlm_calibration_loop` runs it over a dataloader; an
+    expert-parallel run hands it to ``distributed_forward_loop`` instead.
 
     Args:
         full_model: The full VLM model
-        calib_dataloader: DataLoader yielding multimodal batches
 
     Returns:
-        A calibration function that can be passed to mtq.quantize()
+        A function that runs one batch through ``full_model``
     """
     # Import here to avoid circular dependency
     from nemotron_vl_calib import safe_nemotron_vl_forward
@@ -218,37 +218,55 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
         or (is_nemotron_vl(full_model) and not hasattr(full_model, "extract_feature"))
     )
 
-    def calibrate_loop(_model):
-        # Inspect model's forward signature to determine what parameters it accepts
-        forward_params = inspect.signature(full_model.forward).parameters
-        accepts_kwargs = any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in forward_params.values()
-        )
-        allowed_keys = set(forward_params.keys())
+    # Inspect model's forward signature to determine what parameters it accepts
+    forward_params = inspect.signature(full_model.forward).parameters
+    accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in forward_params.values())
+    allowed_keys = set(forward_params.keys())
 
+    def forward(batch):
+        # For encoder-decoder models, rename input_ids → decoder_input_ids
+        # and disable KV caching to avoid tuple index errors in decoder layers
+        if is_enc_dec and "input_ids" in batch and "pixel_values" in batch:
+            batch["decoder_input_ids"] = batch.pop("input_ids")
+            if "attention_mask" in batch:
+                batch["decoder_attention_mask"] = batch.pop("attention_mask")
+            batch["use_cache"] = False
+
+        # Filter batch to only include parameters the model accepts
+        if accepts_kwargs:
+            call_kwargs = batch
+        else:
+            call_kwargs = {k: v for k, v in batch.items() if k in allowed_keys}
+        # Remove None values
+        call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
+
+        if use_safe_forward:
+            safe_nemotron_vl_forward(full_model, call_kwargs)
+        else:
+            full_model(**call_kwargs)
+
+    return forward
+
+
+def create_vlm_calibration_loop(full_model, calib_dataloader):
+    """Create a calibration loop for VLM models that handles multimodal inputs.
+
+    It runs every batch through :func:`create_vlm_calibration_forward`.
+
+    Args:
+        full_model: The full VLM model
+        calib_dataloader: DataLoader yielding multimodal batches
+
+    Returns:
+        A calibration function that can be passed to mtq.quantize()
+    """
+
+    def calibrate_loop(_model):
+        forward = create_vlm_calibration_forward(full_model)
         full_model.eval()
         with torch.no_grad():
             for batch in calib_dataloader:
-                # For encoder-decoder models, rename input_ids → decoder_input_ids
-                # and disable KV caching to avoid tuple index errors in decoder layers
-                if is_enc_dec and "input_ids" in batch and "pixel_values" in batch:
-                    batch["decoder_input_ids"] = batch.pop("input_ids")
-                    if "attention_mask" in batch:
-                        batch["decoder_attention_mask"] = batch.pop("attention_mask")
-                    batch["use_cache"] = False
-
-                # Filter batch to only include parameters the model accepts
-                if accepts_kwargs:
-                    call_kwargs = batch
-                else:
-                    call_kwargs = {k: v for k, v in batch.items() if k in allowed_keys}
-                # Remove None values
-                call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
-
-                if use_safe_forward:
-                    safe_nemotron_vl_forward(full_model, call_kwargs)
-                else:
-                    full_model(**call_kwargs)
+                forward(batch)
 
     return calibrate_loop
 
