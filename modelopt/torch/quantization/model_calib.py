@@ -339,8 +339,9 @@ def max_calibrate(
         skip_forward_without_activation_calib: If True, skip the (potentially expensive)
             ``forward_loop`` when no enabled quantizer needs data-driven activation statistics
             (see :func:`_needs_activation_forward_for_max_calib`). Weight calibration still runs.
-            Only opt-in for the top-level ``max`` path; algorithms that always need activations
-            (MSE, local Hessian, SmoothQuant, SVDQuant, GPTQ) call this with the default False.
+            Opted into by the top-level ``max`` path and by GPTQ and imatrix, which run their own
+            forward; algorithms that always need activations (MSE, local Hessian, SmoothQuant,
+            SVDQuant) call this with the default False.
 
     See :class:`MaxCalibConfig <modelopt.torch.quantization.config.MaxCalibConfig>` for
     details on the remaining arguments.
@@ -2320,12 +2321,14 @@ def gptq(
     * **Non-layerwise** (``layerwise.enable=False``): called once on the full
       model. All layers are quantized in parallel from the original activations.
 
-    We recommend enabling layerwise calibration
-    (``"layerwise": {"enable": True}``) and using a calibration batch size of 1.
+    We recommend enabling layerwise calibration (``"layerwise": {"enable": True}``). The
+    calibration batch size only trades memory for speed: each forward of an HF fused-MoE layer
+    loops over its experts, so batch 1 pays that loop once per sample.
 
     Per-module steps:
 
-    1. ``max_calibrate`` to set amax values from the current activations.
+    1. ``max_calibrate`` to set weight amax, running a forward only when an enabled activation
+       quantizer needs data-driven amax.
     2. Promote eligible quantizers to ``StaticBlockScaleQuantizer`` (two-level scaling).
     3. Collect Hessian matrices via forward hooks: one per quantized linear layer, and one per
        expert and projection of HF fused-MoE experts, over the tokens routed to that expert.
@@ -2353,7 +2356,8 @@ def gptq(
         _refuse_packed_fused_expert_weights(name, module, "GPTQ", lambda q: q.is_enabled)
 
     # TODO: Add support for other scale setting strateiges like weight-mse or local-hessian
-    max_calibrate(model, forward_loop=forward_loop)
+    # The Hessian pass below is GPTQ's own forward; max only runs one if activations need amax.
+    max_calibrate(model, forward_loop=forward_loop, skip_forward_without_activation_calib=True)
 
     quantized_layers = [
         (n, m)

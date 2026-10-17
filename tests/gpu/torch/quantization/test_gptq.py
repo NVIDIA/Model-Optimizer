@@ -25,7 +25,9 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.model_calib import gptq
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+from modelopt.torch.quantization.utils import calib_utils
 from modelopt.torch.quantization.utils.calib_utils import (
+    GPTQHelper,
     compute_hessian_inverse,
     gptq_blockwise_update,
     gptq_blockwise_update_fused_scalar,
@@ -35,6 +37,24 @@ from modelopt.torch.utils.dataset_utils import create_forward_loop, get_dataset_
 
 RAND_SEED = 42
 torch.manual_seed(RAND_SEED)
+
+
+def test_hessian_of_a_full_gpu_goes_to_an_idle_gpu(need_2_gpus, monkeypatch):
+    """A Hessian whose GPU is full lands on an idle GPU rather than the CPU, with the same values."""
+
+    def used_fraction(device):
+        return 0.9 if torch.device(device).index in (0, None) else 0.1
+
+    monkeypatch.setattr(calib_utils, "get_used_gpu_mem_fraction", used_fraction)
+    linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
+    shard = torch.zeros(1, device="cuda:1")  # the model also lives on cuda:1
+    helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
+    assert helper.hessian.device == shard.device
+
+    inputs = torch.randn(32, 64, device="cuda:0")
+    helper.accumulate(inputs)
+    reference, _ = update_hessian(inputs, torch.zeros(64, 64, device="cuda:0"), 0)
+    torch.testing.assert_close(helper.hessian.to("cuda:0"), reference)
 
 
 @pytest.mark.parametrize(
