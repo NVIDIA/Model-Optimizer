@@ -26,6 +26,7 @@ jobs:
     with:
       files: |
         .github/actions/**
+        .github/workflows/_gpu_tests_runner.yml
         .github/workflows/_pr_gate.yml
         .github/workflows/gpu_tests.yml
         modelopt/**
