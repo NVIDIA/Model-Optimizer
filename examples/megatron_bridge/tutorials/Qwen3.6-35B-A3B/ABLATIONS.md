@@ -26,13 +26,13 @@ Everything else matches the main run: 32 nodes, EP=8, ~16M tokens per step, LR 1
 | tau2-bench Telecom (3) | 94.2 | −4.2 | −1.4 | −2.9 | −1.2 | −2.2 | **−0.9** | −2.8 |
 | **Mean delta** | | −1.30 | **−0.34** | −1.19 | −1.05 | −0.98 | **−0.30** | −0.83 |
 | SciCode capped sub-steps | 0.7% | 4.3% | 3.0% | 3.1% | 3.1% | 5.9% | **3.6%** | 5.7% |
-| SciCode median tokens | 1,806 | 2,684 | 2,244 | 2,236 | 3,726 | 3,208 | **3,482** | 2,766 |
+| SciCode median tokens | 1,817 | 2,684 | 2,244 | 2,236 | 3,726 | 3,208 | **3,482** | 2,766 |
 
 ><sup>1</sup> 3 runs at iterations 50 and 300, 8 at 500.
 >
 > *Capped* = hit the 131,072-token limit without a stop token, out of 2,704 SciCode sub-steps (338 × 8 runs). See [SciCode non-termination](#scicode-non-termination-diagnosis-and-decode-time-fix).
 
-**Chat SFT's early lead does not last.** At iteration 50 it leads on 4 of 6 benchmarks, ties SciCode and trails only on IFBench (mean −0.34 vs −1.30); it also cuts the SciCode runaway rate from 4.3% to 3.0%. At 300 the two formats tie, and at 500 the pre-tokenized run is better (mean −0.30 vs −0.83, mostly tau2-bench and MMMU-Pro). Chat SFT keeps the median SciCode response shorter, but its capped rate *rises* with training, to ~5.8% against the pre-tokenized run's 3.1-3.6%. Masking the loss to assistant tokens is therefore not what drives the runaway.
+**Chat SFT's early lead does not last.** At iteration 50 it leads on 4 of 6 benchmarks, ties SciCode and trails only on IFBench (mean −0.34 vs −1.30); it also cuts the SciCode runaway rate from 4.3% to 3.0%. At 300 the two formats are nearly tied (mean −1.05 vs −0.98), and at 500 the pre-tokenized run is better (mean −0.30 vs −0.83, mostly tau2-bench and SciCode). Chat SFT keeps the median SciCode response shorter, but its capped rate *rises* with training, to ~5.8% against the pre-tokenized run's 3.1-3.6%. Masking the loss to assistant tokens is therefore not what drives the runaway.
 
 **Self-distillation does not fix the length drift either.** At iteration 50 its SciCode capped rate and median length match chat SFT's, though its training targets are the teacher's own responses; SciCode scores 1.7 points below BF16. It recovers IFBench fully (the only iteration-50 build to do so) but is no better on average and costs extra generation, so it was not continued.
 
