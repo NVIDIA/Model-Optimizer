@@ -23,13 +23,15 @@ Keep them fixed across sweep points, cache formats, and repeats unless they are 
 variable under test. Record local patches; treat upgrades as a new comparison baseline.
 
 Install the latest [AgentX harness](https://github.com/SemiAnalysisAI/agentx-harness)
-in a separate client environment using a supported Python interpreter.
+in a separate client environment. Set `AGENTX_PYTHON` to a Python executable
+satisfying the latest release's `Requires-Python` metadata on
+[PyPI](https://pypi.org/project/agentx-harness/).
 Installing upstream `aiperf` alone is insufficient.
 
 ```bash
 set -euo pipefail
 export AGENTX_WORKDIR="${AGENTX_WORKDIR:-$PWD/agentx-work}"
-python3 -m venv "$AGENTX_WORKDIR/venv"
+"${AGENTX_PYTHON:?}" -m venv "$AGENTX_WORKDIR/venv"
 source "$AGENTX_WORKDIR/venv/bin/activate"
 python -m pip install --upgrade agentx-harness
 ```
