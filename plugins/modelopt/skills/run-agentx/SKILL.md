@@ -15,29 +15,28 @@ Enable prefix caching, streaming usage, and cached-token reporting. For vLLM, us
 `--enable-prefix-caching --enable-prompt-tokens-details`. Verify the context limit
 fits the traces with the model's tokenizer; never silently truncate requests.
 
-Choose compatible versions from the current upstream documentation and user
-requirements at the start of each benchmark campaign. Record and pin the harness
+Start each benchmark campaign with the latest harness and compatible serving-stack
+releases unless the user requests specific versions. Record and pin the resolved harness
 and other code revisions, dataset/model/tokenizer revisions, serving framework
 (e.g. vLLM), and client/server dependencies or container digests in the run artifacts.
 Keep them fixed across sweep points, cache formats, and repeats unless they are the
 variable under test. Record local patches; treat upgrades as a new comparison baseline.
 
-Install the [AgentX harness](https://github.com/SemiAnalysisAI/agentx-harness) in a
-separate client environment using a supported Python interpreter. Set
-`AGENTX_VERSION` to the release selected for this campaign; the skill does not
-prescribe a version. Installing upstream `aiperf` alone is insufficient.
+Install the latest [AgentX harness](https://github.com/SemiAnalysisAI/agentx-harness)
+in a separate client environment using a supported Python interpreter.
+Installing upstream `aiperf` alone is insufficient.
 
 ```bash
 set -euo pipefail
 export AGENTX_WORKDIR="${AGENTX_WORKDIR:-$PWD/agentx-work}"
 python3 -m venv "$AGENTX_WORKDIR/venv"
 source "$AGENTX_WORKDIR/venv/bin/activate"
-python -m pip install "agentx-harness==${AGENTX_VERSION:?}"
+python -m pip install --upgrade agentx-harness
 ```
 
 Set `AGENTX_DATASET` to an accepted with-subagents alias from the
 [AgentX tutorial](https://github.com/SemiAnalysisAI/agentx-harness/blob/master/docs/tutorials/agentx-mvp.md).
-Use the tutorial revision matching the selected harness and verify its CLI and scenario defaults.
+Check the current tutorial for supported CLI options and scenario defaults.
 The public loader downloads and caches the traces and prompt reconstruction assets.
 Resolve and pin the dataset revision for the campaign; even dated aliases can move. Prefer the deployed
 checkpoint's local tokenizer. If it requires custom code, add
