@@ -439,21 +439,23 @@ def test_distributed_calibration_gives_each_rank_its_own_shard(hf_ptq, monkeypat
     assert calib_loader(world_size=1) is loader
 
 
+@pytest.mark.parametrize("images", [False, True], ids=["text", "images"])
 @pytest.mark.parametrize(
     ("plan", "loop"),
     [(DistributionPlan(2, ep_size=2), "distributed"), (DistributionPlan(2, dense="fsdp"), "plain")],
     ids=["expert_parallel", "fsdp2"],
 )
 def test_only_an_expert_parallel_run_calibrates_through_the_distributed_forward_loop(
-    hf_ptq, monkeypatch, plan, loop
+    hf_ptq, monkeypatch, plan, loop, images
 ):
     """Only distributed_forward_loop re-plants the all-to-all forwards that quantizer insertion
     clobbers, so an expert-parallel run must calibrate through it, over the mesh load_and_prepare_ep
-    loaded the experts over. Without expert parallelism there is nothing to re-plant: FSDP2 keeps
-    the plain loop and its split-on-OOM retry, as on main."""
-    ep_mesh = object()
-    model = torch.nn.Linear(2, 2)
-    set_distribution_plan(model, plan)
+    loaded the experts over, image batches included: they run through the whole VLM's own forward
+    there (Nemotron-H Omni calibrates on images by default). Without expert parallelism there is
+    nothing to re-plant: FSDP2 keeps the plain loop and its split-on-OOM retry, as on main."""
+    ep_mesh, vlm_forward = object(), object()
+    full_model, language_model = torch.nn.Linear(2, 2), torch.nn.Linear(2, 2)
+    set_distribution_plan(full_model, plan)
     chosen, quantized = [], []
     monkeypatch.setattr(hf_ptq, "is_quantized", lambda m: False)
     monkeypatch.setattr(hf_ptq, "need_calibration", lambda cfg: True)
@@ -461,7 +463,13 @@ def test_only_an_expert_parallel_run_calibrates_through_the_distributed_forward_
     monkeypatch.setattr(
         hf_ptq,
         "distributed_forward_loop",
-        lambda *a, **k: chosen.append(("distributed", k["ep_mesh"])) or object(),
+        lambda model, loader, **k: chosen.append((model, k["ep_mesh"], k["forward"])) or object(),
+    )
+    monkeypatch.setattr(hf_ptq, "create_vlm_calibration_forward", lambda model: vlm_forward)
+    monkeypatch.setattr(
+        hf_ptq,
+        "create_vlm_calibration_loop",
+        lambda model, loader: chosen.append("vlm") or object(),
     )
     monkeypatch.setattr(
         hf_ptq, "create_forward_loop", lambda **k: chosen.append("plain") or object()
@@ -471,7 +479,7 @@ def test_only_an_expert_parallel_run_calibrates_through_the_distributed_forward_
     )
     args = SimpleNamespace(
         qformat="fp8",
-        calib_with_images=False,
+        calib_with_images=images,
         dist_state=_dist_state(world_size=2),
         layerwise_export=False,
         specdec_offline_dataset=None,
@@ -480,8 +488,8 @@ def test_only_an_expert_parallel_run_calibrates_through_the_distributed_forward_
     hf_ptq.mono_quantize(
         args,
         {"algorithm": "max"},
-        model,
-        model,
+        full_model,
+        language_model,
         model_type="qwen3_moe",
         calibration_only=False,
         calib_dataloader=object(),
@@ -489,7 +497,12 @@ def test_only_an_expert_parallel_run_calibrates_through_the_distributed_forward_
     )
 
     assert len(quantized) == 1
-    assert chosen == ([("distributed", ep_mesh)] if loop == "distributed" else ["plain"])
+    if loop == "plain":
+        assert chosen == ["vlm" if images else "plain"]
+    elif images:
+        assert chosen == [(full_model, ep_mesh, vlm_forward)]
+    else:
+        assert chosen == [(language_model, ep_mesh, None)]
 
 
 class _PreviewModel(torch.nn.Module):

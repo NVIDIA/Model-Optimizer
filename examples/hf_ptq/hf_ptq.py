@@ -38,6 +38,7 @@ from example_utils import (
     HF_PTQ,
     _prepare_quant_cfg,
     build_quant_cfg,
+    create_vlm_calibration_forward,
     create_vlm_calibration_loop,
     generate_excludes_prompt,
     get_model,
@@ -608,9 +609,7 @@ def mono_quantize(
             # Image calibration batches contain multimodal kwargs (for example pixel_values).
             # They must be consumed by the complete VLM even when only a nested component is the
             # quantization target; the full forward still exercises that component's quantizers.
-            if args.calib_with_images:
-                calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
-            elif distribution_plan(full_model).is_expert_parallel:
+            if distribution_plan(full_model).is_expert_parallel:
                 # An expert-parallel run has to calibrate through distributed_forward_loop, not the
                 # plain one: it is the only caller of _reinstall_a2a_forwards, which re-plants the
                 # torch_a2a expert/router forward wrappers that quantizer insertion clobbers on
@@ -620,13 +619,20 @@ def mono_quantize(
                 # On <= 5.13 the wrappers are pre-hooks that survive, so the reinstall is a no-op --
                 # which is why this is invisible on older transformers and fatal on newer.
                 # It also restores the use_cache guard the plain loop does not apply. Other
-                # distributed runs (FSDP2) keep the plain loop and its split-on-OOM retry.
+                # distributed runs (FSDP2) keep the plain loop and its split-on-OOM retry. Image
+                # batches go through the VLM's own forward, as they do without expert parallelism:
+                # Nemotron-H Omni, for one, calibrates on images by default.
                 calibrate_loop = distributed_forward_loop(
-                    language_model,
+                    full_model if args.calib_with_images else language_model,
                     calib_dataloader,
                     device=args.dist_state.device,
                     ep_mesh=expert_parallel_mesh(full_model),
+                    forward=create_vlm_calibration_forward(full_model)
+                    if args.calib_with_images
+                    else None,
                 )
+            elif args.calib_with_images:
+                calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
             else:
                 calibrate_loop = create_forward_loop(
                     dataloader=calib_dataloader,
