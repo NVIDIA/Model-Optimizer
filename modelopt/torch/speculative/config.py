@@ -146,8 +146,20 @@ class DFlashConfig(ModeloptBaseConfig):
     )
 
     dflash_use_torch_compile: bool = ModeloptField(
-        default=True,
-        description="Whether to use torch.compile on DFlash forward/loss methods.",
+        default=False,
+        description=(
+            "Whether to torch.compile the draft decoder stack and the DSpark TVD chunk in "
+            "training. Compiles once, on the first step, and needs a working Inductor "
+            "toolchain."
+        ),
+    )
+
+    dflash_use_flex_attention: bool = ModeloptField(
+        default=False,
+        description=(
+            "Compute the draft's attention with FlexAttention over a block-sparse BlockMask "
+            "instead of SDPA with a dense [B, 1, Q, KV] mask, skipping fully-masked tiles."
+        ),
     )
 
     dflash_swa_window_size: int | None = ModeloptField(
