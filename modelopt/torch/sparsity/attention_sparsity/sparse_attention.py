@@ -61,7 +61,7 @@ class SparseAttentionModule(DynamicModule):
         Args:
             attribute_cfg: Sparse attention attribute configuration.
         """
-        from .config import VSAAttributeConfig
+        from .config import SolAttnAttributeConfig, VSAAttributeConfig
 
         # Determine which config class to use based on method
         config_dict = attribute_cfg or {}
@@ -75,11 +75,16 @@ class SparseAttentionModule(DynamicModule):
         # Select appropriate config class based on method
         if method == "vsa":
             config_class = VSAAttributeConfig
+        elif method == "sol_attn":
+            config_class = SolAttnAttributeConfig
         else:
             config_class = SparseAttentionAttributeConfig
 
         # Ensure config is validated through Pydantic
-        if not isinstance(attribute_cfg, (SparseAttentionAttributeConfig, VSAAttributeConfig)):
+        if not isinstance(
+            attribute_cfg,
+            (SparseAttentionAttributeConfig, VSAAttributeConfig, SolAttnAttributeConfig),
+        ):
             attribute_cfg = config_class(**(config_dict))
 
         # Store raw config for method initialization
@@ -176,8 +181,9 @@ class SparseAttentionModule(DynamicModule):
     def forward(self, *args, **kwargs):
         """Forward with selected sparse attention method.
 
-        - VSA: patches ``F.scaled_dot_product_attention`` to intercept the SDPA
-          call inside the original forward. Cross-attention is skipped.
+        - SDPA-replacing methods (VSA, Sol-Attn): patch ``F.scaled_dot_product_attention``
+          to intercept the SDPA call inside the original forward. Ineligible calls
+          (e.g. cross-attention) fall back to dense SDPA.
         - Softmax-patching methods (e.g. ``flash_skip_softmax``): use the
           context manager path below.
         """
@@ -185,12 +191,10 @@ class SparseAttentionModule(DynamicModule):
         if not self.is_enabled:
             return super().forward(*args, **kwargs)
 
-        # VSA: patch F.scaled_dot_product_attention so the VSA kernel intercepts
-        # the SDPA call inside the original forward. This works for diffusers models
-        # since SDPA is the common attention primitive.
-        # Only self-attention is replaced. Cross-attention (Q/K have different seq_len) is skipped.
-        if self._method == "vsa":
-            result = self._forward_with_vsa_sdpa_patch(args, kwargs)
+        # SDPA is the common attention primitive in diffusers models, so SDPA-replacing
+        # methods intercept it inside the original forward.
+        if self._sparse_method_instance.patches_sdpa:
+            result = self._forward_with_sdpa_patch(args, kwargs)
 
             if self._stats_manager is not None and self._last_stats is not None:
                 self._stats_manager.collect(self._last_stats)
@@ -211,34 +215,31 @@ class SparseAttentionModule(DynamicModule):
 
         return result
 
-    def _forward_with_vsa_sdpa_patch(self, args, kwargs):
-        """Run forward with F.scaled_dot_product_attention patched for VSA.
+    def _forward_with_sdpa_patch(self, args, kwargs):
+        """Run forward with F.scaled_dot_product_attention routed to the method kernel.
 
-        Replaces SDPA with the VSA kernel for self-attention calls (Q and K/V
-        have the same seq_len).  Cross-attention calls fall through to the
-        original SDPA.  Warns if SDPA was never called.
+        Calls rejected by the method's ``can_replace_sdpa`` fall through to the original
+        SDPA.  Warns if SDPA was never called.
         """
         import torch.nn.functional as F
 
         from modelopt.torch.quantization.utils import replace_function
 
-        vsa = self._sparse_method_instance
+        method = self._sparse_method_instance
         original_sdpa = F.scaled_dot_product_attention
-        self._vsa_sdpa_called = False
+        self._sdpa_called = False
 
         def _patched_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, **kw):
-            self._vsa_sdpa_called = True
-
-            # Fall back to original SDPA when VSA cannot handle this call:
-            # - Cross-attention: Q and K/V have different seq_len
-            # - video_shape not set: VSA cannot compute tile metadata
-            # - seq_len mismatch: input doesn't match the configured video shape
-            can_apply_vsa = (
-                vsa.video_shape is not None
-                and query.shape[2] == key.shape[2]
-                and query.shape[2] == vsa.video_shape[0] * vsa.video_shape[1] * vsa.video_shape[2]
-            )
-            if not can_apply_vsa:
+            self._sdpa_called = True
+            if not method.can_replace_sdpa(
+                query,
+                key,
+                value,
+                attn_mask=attn_mask,
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+                **kw,
+            ):
                 return original_sdpa(
                     query,
                     key,
@@ -248,20 +249,20 @@ class SparseAttentionModule(DynamicModule):
                     is_causal=is_causal,
                     **kw,
                 )
-            output, stats = vsa.forward_attention(query, key, value)
+            output, stats = method.forward_attention(query, key, value)
             self._last_stats = stats
             return output
 
         with replace_function(F, "scaled_dot_product_attention", _patched_sdpa):
             result = super().forward(*args, **kwargs)
 
-        if not self._vsa_sdpa_called:
+        if not self._sdpa_called:
             import warnings
 
             warnings.warn(
-                f"VSA: F.scaled_dot_product_attention was not called during "
+                f"{method.name}: F.scaled_dot_product_attention was not called during "
                 f"{type(self).__name__}.forward(). The attention layer may use a "
-                f"custom kernel that bypasses SDPA. VSA had no effect on this layer.",
+                f"custom kernel that bypasses SDPA. {method.name} had no effect on this layer.",
             )
 
         return result
