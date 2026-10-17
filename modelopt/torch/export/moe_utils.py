@@ -117,7 +117,7 @@ def _export_fused_experts(
     """Split fused MoE expert weights and export per-expert quantization scales.
 
     Works with any module wrapped by ``_QuantFusedExperts`` (gated, with a fused
-    ``gate_up_proj``) or ``_QuantNonGatedFusedExperts`` (non-gated, with a single
+    ``gate_up_proj``) or ``_QuantNemotronHExperts`` (non-gated, with a single
     ``up_proj`` — e.g. NemotronH). Both store their projections as 3-D
     ``nn.Parameter`` tensors with per-expert quantizer ``nn.ModuleList`` s.
 

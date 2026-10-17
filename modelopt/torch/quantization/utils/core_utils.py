@@ -566,6 +566,16 @@ def fsdp2_weight_access_and_writeback_context(
             continue
         original_placements = param.placements
         original_device_mesh = param.device_mesh
+        dim_names = original_device_mesh.mesh_dim_names
+        if (
+            dim_names is not None
+            and fsdp_device_mesh.mesh_dim_names is not None
+            and dim_names[:fsdp_dim] != fsdp_device_mesh.mesh_dim_names
+        ):
+            # Not FSDP's shard: a DTensor on another mesh, such as an expert-parallel weight that
+            # fully_shard was told to ignore. Gathering it would hand every rank every expert, which
+            # its module indexes by local expert.
+            continue
         if fsdp_dim != original_device_mesh.ndim:
             assert (
                 fsdp_device_mesh.mesh_dim_names == original_device_mesh.mesh_dim_names[:fsdp_dim]

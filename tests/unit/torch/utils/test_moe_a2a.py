@@ -33,6 +33,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.moe as moe
 from modelopt.torch.utils.moe import a2a_moe
 
@@ -211,19 +212,55 @@ def _assert_experts_backward_matches(rank, whole, local, owned, size):
         )
 
 
-def _real_experts_backward_job(rank, size):
+def _fake_quantized_like_the_whole_module(rank, size, whole, local, owned):
+    """Both with ModelOpt's fake quantizers, the local ones set to the whole module's calibrated
+    scales so the two compute the same quantized function; returns them converted. Calibrating
+    through the torch_a2a forward sees only the tokens dispatched to this rank's experts."""
+    cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*proj_input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+            {"quantizer_name": "*proj_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        ],
+        "algorithm": "max",
+    }
+    x, weights, index = _routed_tokens(size)
+    tok = slice(rank * T, (rank + 1) * T)
+    whole_holder, local_holder = torch.nn.ModuleList([whole]), torch.nn.ModuleList([local])
+    whole.config._experts_implementation = "grouped_mm"
+    mtq.quantize(whole_holder, cfg, lambda m: m[0](x, index, weights))
+    local.config._experts_implementation = "torch_a2a"
+    mtq.quantize(
+        local_holder, cfg, lambda m: m[0](x[tok], index[tok], weights[tok], dist.group.WORLD)
+    )
+    whole, local = whole_holder[0], local_holder[0]
+    for name in ("gate_up_proj_input_quantizer", "down_proj_input_quantizer"):
+        getattr(local, name).amax = getattr(whole, name).amax
+    for name in ("gate_up_proj_weight_quantizers", "down_proj_weight_quantizers"):
+        for i, quantizer in enumerate(getattr(local, name)):
+            quantizer.amax = getattr(whole, name)[owned.start + i].amax
+    return whole, local
+
+
+def _real_experts_backward_job(rank, size, quantized):
     moe.register_torch_a2a()
     whole, local, owned = _split_qwen3_moe_experts(rank, size)
+    if quantized:
+        whole, local = _fake_quantized_like_the_whole_module(rank, size, whole, local, owned)
     _assert_experts_backward_matches(rank, whole, local, owned, size)
 
 
-def test_fused_experts_backward_through_torch_a2a_matches_the_whole_module(cpu_dist_workers):
+@pytest.mark.parametrize("quantized", [False, True], ids=["unquantized", "fake-quantized"])
+def test_fused_experts_backward_through_torch_a2a_matches_the_whole_module(
+    cpu_dist_workers, quantized
+):
     """transformers' fused experts, split over two ranks, train through the torch_a2a forward exactly
     as the whole module does on one process: same output, and same gradients for the hidden states,
-    the routing weights and each rank's experts."""
+    the routing weights and each rank's experts. With ModelOpt's fake quantizers inserted, that is
+    QAT under expert parallelism."""
     transformers = pytest.importorskip("transformers")
     from packaging.version import Version
 
     if Version(transformers.__version__) < Version("5.6"):
         pytest.skip("expert parallelism needs transformers >= 5.6")
-    cpu_dist_workers.run(_real_experts_backward_job)
+    cpu_dist_workers.run(_real_experts_backward_job, quantized=quantized)

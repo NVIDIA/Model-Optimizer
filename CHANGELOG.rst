@@ -18,6 +18,8 @@ Changelog
 
 **Backward Breaking Changes**
 
+- Hugging Face MoE calibration now runs fused experts on the ``grouped_mm`` backend Transformers selects by default instead of forcing ``eager``, so calibrated activation scales can differ from earlier releases: some of Qwen3-30B-A3B's moved by up to about 10%. Load the model with ``experts_implementation="eager"`` to calibrate exactly as earlier releases did.
+
 **Deprecations**
 
 **Bug Fixes**
