@@ -747,10 +747,16 @@ def get_weight_scale(weight, block_size=None):
             slice_after_padding = slice(org_shape[0])
             weight = _pad(weight, block_size)
             org_shape = weight.shape
-        weight = weight.reshape(block_size, -1)
-    weight_abs_amax = weight.__abs__().max(axis=0, keepdims=True)
-    scale = weight.__abs__() / (weight_abs_amax + np.finfo(weight_abs_amax.dtype).tiny)
-    scale = scale.reshape(org_shape)
+        # Blocks are `block_size` consecutive rows; splitting dim 0 into
+        # (n_blocks, block_size) keeps each block's rows together, unlike
+        # reshape(block_size, -1), which interleaves rows from different blocks.
+        weight = weight.reshape(org_shape[0] // block_size, block_size, org_shape[1])
+        weight_abs_amax = weight.__abs__().max(axis=1, keepdims=True)
+        scale = weight.__abs__() / (weight_abs_amax + np.finfo(weight_abs_amax.dtype).tiny)
+        scale = scale.reshape(org_shape)
+    else:
+        weight_abs_amax = weight.__abs__().max(axis=0, keepdims=True)
+        scale = weight.__abs__() / (weight_abs_amax + np.finfo(weight_abs_amax.dtype).tiny)
     if slice_after_padding is not None:
         scale = scale[slice_after_padding, ...]
     scale = scale.mean(1)
