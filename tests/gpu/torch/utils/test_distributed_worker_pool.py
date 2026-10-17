@@ -22,8 +22,13 @@ import time
 from types import SimpleNamespace
 
 import pytest
+import torch
 import torch.distributed as dist
-from _test_utils.torch.distributed.utils import DistributedWorkerPool, get_live_pool
+from _test_utils.torch.distributed.utils import (
+    DistributedWorkerPool,
+    get_live_pool,
+    reset_worker_state,
+)
 
 
 def _hang(rank, size):
@@ -40,6 +45,32 @@ def _rank_0_dies_and_rank_1_waits_for_it(rank, size):
     if rank == 0:
         os._exit(13)  # what an illegal memory access or an OOM kill does: no exception, no result
     time.sleep(600)
+
+
+def _torch_settings():
+    return (
+        torch.backends.cudnn.deterministic,
+        torch.backends.cudnn.benchmark,
+        torch.backends.cudnn.allow_tf32,
+        torch.backends.cuda.matmul.allow_tf32,
+        torch.are_deterministic_algorithms_enabled(),
+    )
+
+
+def _change_the_settings_then_reset_them(rank, size):
+    spawn_time = _torch_settings()
+    torch.backends.cudnn.deterministic = not spawn_time[0]
+    torch.backends.cudnn.benchmark = not spawn_time[1]
+    torch.backends.cudnn.allow_tf32 = not spawn_time[2]
+    torch.backends.cuda.matmul.allow_tf32 = not spawn_time[3]
+    torch.use_deterministic_algorithms(not spawn_time[4])
+    torch.manual_seed(5)
+    assert _torch_settings() != spawn_time
+
+    reset_worker_state(rank, size)
+
+    assert _torch_settings() == spawn_time
+    assert torch.initial_seed() == 1234
 
 
 def test_a_hung_job_kills_the_pool_instead_of_stalling_later_runs(capfd):
@@ -102,6 +133,14 @@ def test_a_failed_start_raises_and_leaves_no_workers(kwargs, error):
         DistributedWorkerPool(world_size=1, **{"backend": "gloo", "teardown_fn": None, **kwargs})
     time.sleep(1)
     assert {p.pid for p in multiprocessing.active_children()} <= before
+
+
+def test_reset_worker_state_restores_the_settings_a_worker_starts_with():
+    pool = DistributedWorkerPool(world_size=1, backend="gloo", teardown_fn=None)
+    try:
+        pool.run(_change_the_settings_then_reset_them)
+    finally:
+        pool.shutdown()
 
 
 def test_a_killed_pool_is_replaced_and_a_live_one_is_reused():
