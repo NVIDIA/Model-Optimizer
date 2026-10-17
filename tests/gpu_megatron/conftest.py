@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import contextlib
+import gc
 import queue
 
 import pytest
@@ -92,6 +93,9 @@ def megatron_worker_teardown(rank, world_size):
     for group in list(torch.distributed.distributed_c10d._world.pg_map):
         if group is not torch.distributed.GroupMember.WORLD:
             torch.distributed.destroy_process_group(group)
+    # The finished test's modules can still reference the destroyed groups. Collect them here, with
+    # no kernels in flight, rather than at an arbitrary point of the next job.
+    gc.collect()
     torch.cuda.empty_cache()
 
 
