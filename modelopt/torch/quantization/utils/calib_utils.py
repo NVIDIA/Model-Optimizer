@@ -38,14 +38,35 @@
 
 """GPTQ helper and Hessian utilities for calibration."""
 
-import math
-
 import torch
 import torch.distributed as dist
 
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
+
+# Used fraction of a GPU's memory above which GPTQ keeps new Hessians off it.
+_HESSIAN_GPU_MEM_LIMIT = 0.65
+
+
+def _gpu_is_full(device) -> bool:
+    return get_used_gpu_mem_fraction(device) > _HESSIAN_GPU_MEM_LIMIT
+
+
+def _hessian_offload_device() -> torch.device:
+    """Where a Hessian goes when its weight's GPU is full: the emptiest GPU with room, else CPU.
+
+    A model sharded over several GPUs leaves the ones not holding the current layer idle, and a
+    Hessian there costs a device-to-device copy per update instead of a host copy and a CPU
+    rescale of the whole matrix. Only GPUs this process already holds memory on are candidates,
+    and only outside distributed runs, so no other job's or rank's GPU is touched.
+    """
+    if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
+        gpus = [i for i in range(torch.cuda.device_count()) if torch.cuda.memory_reserved(i)]
+        gpus.sort(key=get_used_gpu_mem_fraction)
+        if gpus and not _gpu_is_full(gpus[0]):
+            return torch.device("cuda", gpus[0])
+    return torch.device("cpu")
 
 
 def update_hessian(input, hessian, n_samples):
@@ -61,19 +82,22 @@ def update_hessian(input, hessian, n_samples):
     Note: input must be non-empty (batch_size > 0); a zero-sized input causes division by zero.
     """
     # Flatten to 2D (total_tokens, features) first, so batch_size counts tokens
-    input_flat = input.reshape(-1, input.shape[-1]).t().float()
-    batch_size = input_flat.shape[1]
+    input_flat = input.reshape(-1, input.shape[-1]).float()
+    batch_size = input_flat.shape[0]
 
     if batch_size == 0:  # in MOEs some experts receive no tokens
         return hessian, n_samples
 
-    # Incremental averaging: scale down old hessian
-    hessian *= n_samples / (n_samples + batch_size)
+    # Incremental averaging, H = H * n / (n + b) + (2 / (n + b)) * X^T X, in one GEMM: this runs
+    # once per expert per forward, and separate scale and add passes each rewrite all of H.
+    scale = n_samples / (n_samples + batch_size)
     n_samples += batch_size
-
-    # Compute outer product: H += (2/n_samples) * X @ X^T
-    scaled_input = math.sqrt(2 / n_samples) * input_flat
-    hessian.add_((scaled_input @ scaled_input.t()).to(hessian.device))
+    if hessian.device == input_flat.device:
+        hessian.addmm_(input_flat.t(), input_flat, beta=scale, alpha=2 / n_samples)
+    else:
+        hessian.mul_(scale).add_(
+            (input_flat.t() @ input_flat).to(hessian.device), alpha=2 / n_samples
+        )
 
     return hessian, n_samples
 
@@ -154,10 +178,10 @@ class GPTQHelper:
         weight = module.weight if weight is None else weight
         in_features = weight.shape[-1]
         device = weight.device
-        if device.type == "meta" or (
-            offload_to_cpu and device.type == "cuda" and get_used_gpu_mem_fraction(device) > 0.65
-        ):
-            device = "cpu"
+        if device.type == "meta":
+            device = torch.device("cpu")
+        elif offload_to_cpu and device.type == "cuda" and _gpu_is_full(device):
+            device = _hessian_offload_device()
         self.hessian = torch.zeros(in_features, in_features, dtype=torch.float32, device=device)
         self.n_samples = 0
         # Set by update_weights(); listed here for documentation.
