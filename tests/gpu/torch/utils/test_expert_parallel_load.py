@@ -66,6 +66,16 @@ def _local(tensor):
     return tensor.to_local() if isinstance(tensor, DTensor) else tensor
 
 
+# (dense part sharded, share of the GPUs the experts span). A dense part FSDP2-sharded within several
+# expert-parallel groups (sharded with half the GPUs per group) is refused by the loader: the export
+# cannot write it.
+_LAYOUTS = [
+    pytest.param(False, 1, id="dense-replicated-ep-world"),
+    pytest.param(False, 2, id="dense-replicated-ep-half"),
+    pytest.param(True, 1, id="dense-sharded-ep-world"),
+]
+
+
 def _sharded_model_matches_the_whole_one(rank, size, ckpt_dir, fsdp_dense, ep_degree):
     device = torch.device(f"cuda:{rank}")
     config = AutoConfig.from_pretrained(ckpt_dir)  # carries qwen3_moe's own base_model_ep_plan
@@ -102,8 +112,7 @@ def _sharded_model_matches_the_whole_one(rank, size, ckpt_dir, fsdp_dense, ep_de
     torch.testing.assert_close(sharded.float(), reference.float(), atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.parametrize("ep_share", [1, 2], ids=["ep-world", "ep-half"])
-@pytest.mark.parametrize("fsdp_dense", [False, True], ids=["dense-replicated", "dense-sharded"])
+@pytest.mark.parametrize(("fsdp_dense", "ep_share"), _LAYOUTS)
 def test_expert_parallel_model_matches_the_whole_model(
     need_2_gpus, dist_workers, tmp_path, fsdp_dense, ep_share
 ):
@@ -206,8 +215,7 @@ def _sharded_model_backward_matches_the_whole_one(rank, size, ckpt_dir, fsdp_den
     )
 
 
-@pytest.mark.parametrize("ep_share", [1, 2], ids=["ep-world", "ep-half"])
-@pytest.mark.parametrize("fsdp_dense", [False, True], ids=["dense-replicated", "dense-sharded"])
+@pytest.mark.parametrize(("fsdp_dense", "ep_share"), _LAYOUTS)
 def test_expert_parallel_backward_matches_the_whole_model(
     need_2_gpus, dist_workers, tmp_path, fsdp_dense, ep_share
 ):
@@ -280,9 +288,8 @@ def _quantized_sharded_model_trains_like_the_whole_one(
     )
 
 
-@pytest.mark.parametrize("ep_share", [1, 2], ids=["ep-world", "ep-half"])
 @pytest.mark.parametrize("fmt", ["fp8", "nvfp4"])
-@pytest.mark.parametrize("fsdp_dense", [False, True], ids=["dense-replicated", "dense-sharded"])
+@pytest.mark.parametrize(("fsdp_dense", "ep_share"), _LAYOUTS)
 def test_quantized_expert_parallel_model_trains_like_the_whole_model(
     need_2_gpus, dist_workers, tmp_path, fsdp_dense, fmt, ep_share
 ):
