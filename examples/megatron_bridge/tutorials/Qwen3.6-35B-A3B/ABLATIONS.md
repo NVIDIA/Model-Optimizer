@@ -36,6 +36,8 @@ Everything else matches the main run: 32 nodes, EP=8, ~16M tokens per step, LR 1
 
 **Self-distillation does not fix the length drift either.** At iteration 50 its SciCode capped rate and median length match chat SFT's, though its training targets are the teacher's own responses; SciCode scores 1.7 points below BF16. It recovers IFBench fully (the only iteration-50 build to do so) but is no better on average and costs extra generation, so it was not continued.
 
+**Caveat: the chat-SFT teachers were noisier.** Both chat-SFT variants pack two conversations into one THD micro-batch (`cu_seqlens`), and on that path the Gated DeltaNet kernels are not reproducible: the BF16 teacher's logits for the same packed input differ run to run by 0.001–0.007 nats/token of KL on average, against a KD loss of ~0.03. The same conversations unpacked are bit-exact, and the pre-tokenized run feeds unpacked 32K windows, so only the chat-SFT arms trained on these noisier targets. Treat their gap to the pre-tokenized run as provisional until the kernel is fixed.
+
 ### Cost
 
 32 nodes × 4 GB200 = 128 GPUs for every run.
