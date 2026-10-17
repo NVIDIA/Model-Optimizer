@@ -358,14 +358,6 @@ def test_an_ep_capable_moe_is_planned_expert_parallel(run_as, serve, tmp_path, c
     assert ("Distribution:" in capsys.readouterr().out) == (rank == 0)
 
 
-@needs_qwen3_moe_ep_plan
-def test_no_ep_degree_dividing_the_experts_leaves_them_whole(run_as, serve, tmp_path):
-    run_as(2)
-    serve(_qwen3_moe(num_experts=3))
-
-    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
-
-
 def test_an_moe_without_an_ep_plan_is_not_expert_parallel(run_as, serve, tmp_path):
     """The config counts 8 experts, but with no base_model_ep_plan nothing could shard them."""
     run_as(4)
@@ -374,6 +366,40 @@ def test_an_moe_without_an_ep_plan_is_not_expert_parallel(run_as, serve, tmp_pat
     serve(config)
 
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4)
+
+
+@needs_qwen3_moe_ep_plan
+@pytest.mark.parametrize(
+    ("config", "ep_degree"),
+    [
+        pytest.param(_qwen3_moe(num_experts=3), None, id="auto_finds_no_degree"),
+        pytest.param(_qwen3_moe(num_experts=8), "1", id="explicit_degree_one"),
+    ],
+)
+def test_an_ep_capable_moe_left_whole_on_every_rank_is_an_error(
+    run_as, serve, monkeypatch, tmp_path, config, ep_degree
+):
+    """No EP degree above 1 divides 3 experts over 2 ranks, and an explicit 1 asks for none. With
+    nothing sharded either, every rank would hold the whole MoE: that must fail, not run."""
+    if ep_degree is not None:
+        monkeypatch.setenv("MODELOPT_EP_DEGREE", ep_degree)
+    run_as(2)
+    serve(config)
+
+    with pytest.raises(RuntimeError, match="can be expert-parallel, but the plan resolved"):
+        resolve_distribution_plan(str(tmp_path))
+
+
+@needs_qwen3_moe_ep_plan
+def test_an_ep_capable_moe_may_be_fsdp2_sharded_instead(run_as, serve, monkeypatch, tmp_path):
+    """Asked for no expert parallelism but for dense sharding, the MoE is sharded whole by FSDP2,
+    which is not the waste of a replica on every rank."""
+    monkeypatch.setenv("MODELOPT_EP_DEGREE", "1")
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+    run_as(2)
+    serve(_qwen3_moe(num_experts=8))
+
+    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2, dense="fsdp")
 
 
 @needs_qwen3_moe_ep_plan

@@ -18,7 +18,7 @@ Changelog
 
 *Misc*
 
-- ``modelopt.torch.utils.plugins.model_load_utils.load_pretrained`` now also loads a model distributed. Under ``torchrun`` it FSDP2-shards the model or gives every rank a whole copy, by the plan the new ``resolve_distribution_plan`` decides from the model and the ``MODELOPT_FSDP_SIZE`` variable, or by a plan passed as its new ``distribution`` argument. The loaded model records the plan (``modelopt.torch.utils.distributed.distribution_plan``).
+- ``modelopt.torch.utils.plugins.model_load_utils.load_pretrained`` now also loads a model distributed. Under ``torchrun`` it shards an MoE's routed experts across the ranks, FSDP2-shards the model, or gives every rank a whole copy, by the plan the new ``resolve_distribution_plan`` decides from the model and the ``MODELOPT_EP_DEGREE`` / ``MODELOPT_FSDP_SIZE`` variables, or by a plan passed as its new ``distribution`` argument. The loaded model records the plan (``modelopt.torch.utils.distributed.distribution_plan``).
 
 **Backward Breaking Changes**
 
