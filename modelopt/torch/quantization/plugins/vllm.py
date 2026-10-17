@@ -549,6 +549,10 @@ def _check_unsupported_quantizers_disabled(module: torch.nn.Module, names) -> No
 
 class _VLLMParallelLinear(QuantModule):
     _QUANTIZER_NAMES = ("input_quantizer", "weight_quantizer", "output_quantizer")
+    # The parallel kind tells max_calibrate which amax to sync across TP ranks. Subclasses set it;
+    # _setup turns it off on layers that are not TP shards.
+    _is_column_parallel = False
+    _is_row_parallel = False
 
     def _setup(self):
         self.input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
@@ -685,7 +689,6 @@ def post_restore_vllm_parallel_linears(model: torch.nn.Module) -> None:
             module.modelopt_post_restore("")
 
 
-# The parallel kind tells max_calibrate which amax to sync across TP ranks.
 @QuantModuleRegistry.register({vllm_linear.RowParallelLinear: "vllm_RowParallelLinear"})
 class _QuantVLLMRowParallelLinear(_VLLMParallelLinear):
     _is_row_parallel = True
@@ -696,16 +699,18 @@ class _QuantVLLMColumnParallelLinear(_VLLMParallelLinear):
     _is_column_parallel = True
 
 
+# vLLM's merged and QKV layers use ColumnParallelLinear's forward, so the registry gives them the
+# class above, which is registered first. Subclassing it keeps them the same if that order changes.
 @QuantModuleRegistry.register(
     {vllm_linear.MergedColumnParallelLinear: "vllm_MergedColumnParallelLinear"}
 )
-class _QuantVLLMMergedColumnParallelLinear(_VLLMParallelLinear):
-    _is_column_parallel = True
+class _QuantVLLMMergedColumnParallelLinear(_QuantVLLMColumnParallelLinear):
+    pass
 
 
 @QuantModuleRegistry.register({vllm_linear.QKVParallelLinear: "vllm_QKVParallelLinear"})
-class _QuantVLLMQKVParallelLinear(_VLLMParallelLinear):
-    _is_column_parallel = True
+class _QuantVLLMQKVParallelLinear(_QuantVLLMColumnParallelLinear):
+    pass
 
 
 # ReplicatedLinear is for MoE router and should not be quantized

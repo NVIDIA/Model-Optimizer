@@ -649,12 +649,12 @@ def test_unregistered_unquantized_subclass_is_unsupported():
 
 
 @pytest.mark.parametrize(
-    ("cls", "row_parallel"),
+    ("nn_cls", "row_parallel"),
     [
-        (vllm_plugin._QuantVLLMRowParallelLinear, True),
-        (vllm_plugin._QuantVLLMColumnParallelLinear, False),
-        (vllm_plugin._QuantVLLMMergedColumnParallelLinear, False),
-        (vllm_plugin._QuantVLLMQKVParallelLinear, False),
+        (vllm_plugin.vllm_linear.RowParallelLinear, True),
+        (vllm_plugin.vllm_linear.ColumnParallelLinear, False),
+        (vllm_plugin.vllm_linear.MergedColumnParallelLinear, False),
+        (vllm_plugin.vllm_linear.QKVParallelLinear, False),
     ],
 )
 @pytest.mark.parametrize(
@@ -663,19 +663,20 @@ def test_unregistered_unquantized_subclass_is_unsupported():
     ids=["tp_shard", "disable_tp_replica", "conv1d_weight"],
 )
 def test_vllm_linears_sync_amax_across_tp_and_not_ep(
-    monkeypatch, cls, row_parallel, tp_size, weight_shape, tp_shard
+    monkeypatch, nn_cls, row_parallel, tp_size, weight_shape, tp_shard
 ):
     """max_calibrate syncs a TP shard's amax across TP by its parallel kind, and not across vLLM's
-    EP group, which spans the TP ranks. Replicas and non-2-D weights keep their groups."""
+    EP group, which spans the TP ranks. Replicas and non-2-D weights keep their groups. The layers
+    go through the registry, so they get the same quant class as real layers."""
     dp, tp, ep = object(), object(), object()
     monkeypatch.setattr(
         vllm_plugin, "create_parallel_state", lambda: vllm_plugin.ParallelState(dp, tp, ep)
     )
-    linear = _new_attention(cls)
+    linear = _new_attention(nn_cls)
     linear.tp_size = tp_size
     linear.weight = torch.nn.Parameter(torch.empty(weight_shape))
     linear.quant_method = vllm_plugin.vllm_linear.UnquantizedLinearMethod()
-    linear._setup()
+    linear = vllm_plugin.QuantModuleRegistry.convert(linear)
 
     assert is_quantized_row_parallel_linear(linear) == (tp_shard and row_parallel)
     assert is_quantized_column_parallel_linear(linear) == (tp_shard and not row_parallel)
