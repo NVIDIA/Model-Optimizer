@@ -10,6 +10,7 @@ Changelog
 
 - Add imatrix calibration (``algorithm: {method: imatrix}``) for the GGML formats with a weighted search: each weight is encoded once, its search weighted by the square root of its inputs' per-column ``E[x^2]`` (llama.cpp's imatrix statistic), and HF fused-MoE experts get one statistic per expert. A weight that already holds final codes is left alone, so ``[{method: gptq}, {method: imatrix}]`` runs GPTQ where it applies and imatrix on the rest; the built-in IQ1 and IQ2 recipes now do this, and new ``<format>_experts_only`` recipes apply imatrix to the routed MoE experts alone.
 - GPTQ now also quantizes HuggingFace fused MoE experts, each with its own Hessian from the tokens routed to it; they were previously skipped. The built-in IQ1 and IQ2 recipes therefore run GPTQ on the experts too, and large MoEs need layerwise calibration to hold one layer's expert Hessians at a time.
+- GPTQ no longer runs a max-calibration forward when no activation quantizer needs one, and ``hf_ptq.py`` now sizes the default layerwise calibration batch at 8,192 tokens (16 samples at ``--calib_seq 512``) instead of 1. Layerwise GPTQ on HF fused-MoE models runs over 10x faster; pass ``--batch_size 1`` for the old batching, which pads no sample.
 - Add a checkpoint-specific NVIDIA Nemotron 3.5 Super VL AutoQuantize recipe with a 4.9-effective-bit NVFP4-MSE/FP8/BF16 search and fixed NVFP4 MTP experts. Select it under ``models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/auto_quantize/``.
 
 *Speculative Decoding*

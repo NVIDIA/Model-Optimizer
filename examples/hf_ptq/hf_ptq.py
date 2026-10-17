@@ -110,6 +110,8 @@ from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloa
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
+# Tokens per calibration batch when layerwise calibration picks the batch size (16 x 512).
+LAYERWISE_CALIB_TOKENS = 8192
 
 mto.enable_huggingface_checkpointing()
 
@@ -986,10 +988,17 @@ def quantize_main(
             )
             args.batch_size = 1
         # Layerwise calibration processes one layer at a time; auto batch-size probing runs a
-        # full-model forward which defeats the point and can OOM on very large models.
+        # full-model forward which defeats the point and can OOM on very large models. A batch
+        # then only holds one layer's activations, so size it by tokens: batch 1 makes an MoE
+        # layer run its per-expert loop once per sample.
         elif is_layerwise:
-            print("Layerwise calibration enabled. Using default batch_size=1 for calibration.")
-            args.batch_size = 1
+            args.batch_size = max(
+                1, min(LAYERWISE_CALIB_TOKENS // args.calib_seq, sum(args.calib_size))
+            )
+            print(
+                f"Layerwise calibration enabled. Using default batch_size={args.batch_size} "
+                f"({LAYERWISE_CALIB_TOKENS} tokens per batch) for calibration."
+            )
         else:
             # Calibration/sparsification will actually take much more memory than regular inference
             # due to intermediate tensors for fake quantization. Setting sample_memory_usage_ratio
