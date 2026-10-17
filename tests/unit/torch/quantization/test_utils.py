@@ -23,7 +23,10 @@ from modelopt.torch.quantization.utils import (
     reduce_amax,
     reduce_block_amax,
 )
-from modelopt.torch.quantization.utils.core_utils import persistent_materialization
+from modelopt.torch.quantization.utils.core_utils import (
+    _disable_fsdp_unshard_reshard,
+    persistent_materialization,
+)
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 
@@ -358,3 +361,23 @@ def _forward_through_other_layers_while_one_is_materialized(rank, size, writebac
 @pytest.mark.parametrize("writeback", [True, False])
 def test_persistent_materialization_only_skips_unshard_for_its_layer(cpu_dist_workers, writeback):
     cpu_dist_workers.run(_forward_through_other_layers_while_one_is_materialized, writeback)
+
+
+def _shared_group_override_restores_prior_attributes(rank, size):
+    mesh = init_device_mesh("cpu", (size,))
+    block = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8))
+    fully_shard(list(block), mesh=mesh)  # both linears share one FSDPParamGroup
+    group = fully_shard.state(block[0])._fsdp_param_group
+    prior_reshard = group.reshard  # pre-existing instance override must survive
+    group.reshard = prior_reshard
+    with _disable_fsdp_unshard_reshard(block):
+        with _disable_fsdp_unshard_reshard(block):
+            pass
+        assert group.unshard() is None  # outer no-op survives the inner exit
+        assert "unshard" in group.__dict__
+    assert "unshard" not in group.__dict__
+    assert group.__dict__["reshard"] is prior_reshard
+
+
+def test_disable_fsdp_unshard_reshard_shared_group_and_nesting(cpu_dist_workers):
+    cpu_dist_workers.run(_shared_group_override_restores_prior_attributes)
