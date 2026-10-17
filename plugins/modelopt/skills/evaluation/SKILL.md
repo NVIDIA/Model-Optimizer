@@ -128,6 +128,9 @@ Read [Step 6](references/launcher-workflow.md#step-6--multi-node).
 
 Read [Step 7](references/launcher-workflow.md#step-7--interceptors).
 
+If the user asks to avoid doom loops (looping reasoning), or a canary under a long
+`max_new_tokens` runs far longer than expected, read [doom_loops.md](references/doom_loops.md).
+
 ### Step 7.5 — Container registry auth (SLURM private images only)
 
 Read [Step 7.5](references/launcher-workflow.md#step-75--container-registry-auth-slurm-private-images-only).
