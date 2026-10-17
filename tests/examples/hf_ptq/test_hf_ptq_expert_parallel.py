@@ -137,6 +137,8 @@ def _args(dist_state, **overrides):
         local_checkpoint_path=_CKPT,
         trust_remote_code=False,
         attn_implementation=None,
+        sparsity_fmt="dense",
+        qformat="fp8",
     )
     vars(args).update(overrides)
     return args
@@ -206,6 +208,31 @@ def test_dense_fsdp2_within_expert_data_parallel_replicas_is_refused(
         assert hf_ptq._resolve_distribution(args)[0] == DistributionPlan(4, ep_size=4, dense="fsdp")
     else:
         with pytest.raises(NotImplementedError, match=r"MODELOPT_EP_DEGREE.*MODELOPT_FSDP_SIZE=1"):
+            hf_ptq._resolve_distribution(args)
+
+
+@pytest.mark.parametrize(
+    ("world_size", "options"),
+    [
+        (2, {"qformat": "int8_smoothquant"}),
+        (2, {"sparsity_fmt": "sparsegpt"}),
+        (1, {"sparsity_fmt": "sparsegpt"}),
+    ],
+    ids=["int8_smoothquant", "sparsity", "single_process"],
+)
+def test_a_tensorrt_llm_checkpoint_export_needs_a_single_process(
+    hf_ptq, monkeypatch, torchrun, world_size, options
+):
+    """That exporter reads the process count as Megatron's training tensor parallelism: launched
+    with torchrun, it hangs in a barrier on rank 0 alone, and on every rank it merges replicas as
+    shards. So it fails before the load and the calibration; a single process exports as before."""
+    _serve(monkeypatch, hf_ptq, LlamaConfig(**_TINY))
+    args = _args(torchrun(world_size=world_size), **options)
+
+    if world_size == 1:
+        assert hf_ptq._resolve_distribution(args)[0] == DistributionPlan(1)
+    else:
+        with pytest.raises(NotImplementedError, match="single process"):
             hf_ptq._resolve_distribution(args)
 
 

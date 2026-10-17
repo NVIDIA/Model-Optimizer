@@ -339,7 +339,25 @@ def _resolve_distribution(args: argparse.Namespace):
             "size if it divides the expert count, or MODELOPT_FSDP_SIZE=1 if the dense part fits "
             "one GPU."
         )
+    if plan.world_size > 1 and _exports_tensorrt_llm_checkpoint(args, hf_model_type(hf_config)):
+        # That exporter reads the process count as Megatron's training tensor parallelism. Rank 0
+        # alone waits in its barrier for ranks that never arrive, and every rank would merge
+        # whole replicas as if they were shards. Refused before the load, like the layout above.
+        raise NotImplementedError(
+            f"{plan!r}: the TensorRT-LLM checkpoint export (encoder-decoder models, "
+            "--sparsity_fmt, int8_smoothquant) runs in a single process; launch hf_ptq without "
+            "torchrun for it."
+        )
     return plan, hf_config
+
+
+def _exports_tensorrt_llm_checkpoint(args: argparse.Namespace, model_type: str | None) -> bool:
+    """Whether the run exports through the deprecated TensorRT-LLM checkpoint exporter."""
+    return (
+        is_trtllm_enc_dec_export(model_type)
+        or args.sparsity_fmt != "dense"
+        or "int8_smoothquant" in args.qformat
+    )
 
 
 def load_model(args: argparse.Namespace):
@@ -727,12 +745,7 @@ def export_quantized(
                 save_source_config(args, export_path)
 
         start_time = time.time()
-        is_tensorrt_llm_export = (
-            is_trtllm_enc_dec_export(model_type)
-            or args.sparsity_fmt != "dense"
-            or "int8_smoothquant" in args.qformat
-        )
-        if is_tensorrt_llm_export:
+        if _exports_tensorrt_llm_checkpoint(args, model_type):
             if (
                 args.inference_tensor_parallel != 1 or args.inference_pipeline_parallel != 1
             ) and args.qformat == "nvfp4_svdquant":
