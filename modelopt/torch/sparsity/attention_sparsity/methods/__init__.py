@@ -24,5 +24,6 @@ __all__ = [
 ]
 
 # Import method implementations to trigger registration
-# Note: vsa imports no external deps at module level; fastvideo_kernel is imported lazily at runtime.
-from . import flash_skip_softmax, triton_skip_softmax, triton_sparse_softmax, vsa
+# Note: vsa and sol_attn import no external deps at module level; fastvideo_kernel and sol_attn
+# are imported lazily at runtime.
+from . import flash_skip_softmax, sol_attn, triton_skip_softmax, triton_sparse_softmax, vsa

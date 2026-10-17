@@ -1,4 +1,4 @@
-# Skip-Softmax Sparse Attention for Diffusion Models
+# Sparse Attention for Diffusion Models
 
 > [!WARNING]
 > **Third-Party License Notice — LTX-2**
@@ -77,6 +77,35 @@ no extra conversion needed downstream.
 | **Fixed threshold** (`--skip-softmax-threshold 0.61557`) | Kernel converts the lambda threshold with `log2(lambda)` | Quick testing, sweeps |
 | **Calibrated** (`--calibrate --target-sparsity 0.5`) | `scale_factor = a * exp(b * target)`, then backend computes `threshold = scale_factor / seq_k`, then kernel converts `log2(threshold)` | Production use with automatic seqlen adaptation |
 | **Static lambda** (default `skip_softmax_threshold=0.1`) | Kernel converts `log2(lambda)` | Fallback when neither fixed nor calibrated |
+
+## Sol-Attn
+
+[Sol-Attn](https://arxiv.org/abs/2607.24027) is a training-free sparse attention method:
+it routes high-scoring KV blocks to exact attention during online softmax and approximates
+the remaining blocks with proxy scores, so no calibration is needed. Install the kernel
+package first (CuTe DSL kernels on SM89/SM90/SM100/SM120, Triton otherwise):
+
+```bash
+pip install "sol-attn @ git+https://github.com/NVlabs/Sana@sol-engine#subdirectory=techniques/sparse_backends"
+```
+
+```bash
+# Higher --tau selects fewer exact KV blocks (more sparsity)
+python wan22_sol_attn.py \
+    --model-path /path/to/Wan2.2-T2V-A14B-Diffusers \
+    --tau 1.0 --prompt "A cat playing piano" --output sol_attn.mp4
+```
+
+Or from Python, on any model whose self-attention calls `F.scaled_dot_product_attention`:
+
+```python
+import modelopt.torch.sparsity.attention_sparsity as mtsa
+
+mtsa.sparsify(transformer, mtsa.SOL_ATTN_DEFAULT)
+```
+
+Only non-causal, unmasked BF16 self-attention with head dimension 128 runs Sol-Attn;
+other calls (e.g. text cross-attention) fall back to dense SDPA.
 
 ## Known Issues
 
