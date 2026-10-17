@@ -53,7 +53,8 @@ from modelopt.torch.export.moe_utils import (
     split_fused_experts_state_dict,
 )
 from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
-from modelopt.torch.quantization.nn import QuantModuleRegistry
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
@@ -256,6 +257,45 @@ def test_keep_fused_then_split_writes_exactly_the_per_expert_export(
         got = split_fused_experts_state_dict(_keep_fused_export(experts))
 
     _assert_byte_identical(got, want)
+
+
+@pytest.mark.parametrize("amax_state", ["calibrated", "zero"])
+def test_the_fold_derives_a_w4a8_experts_amax_per_quantizer_stage(monkeypatch, amax_state):
+    """W4A8's SequentialQuantizer has no amax of its own, and its INT4 block stage rejects a scalar:
+    an expert calibration never reached gets a per-block amax there and a scalar on the FP8 stage."""
+    experts = _quantized_experts(_KeepFusedGatedExperts, mtq.FP8_DEFAULT_CFG)
+    block = 16
+    rows = {"gate_up_proj": 2 * INTERMEDIATE_DIM, "down_proj": HIDDEN_DIM}
+    blocks = {"gate_up_proj": HIDDEN_DIM // block, "down_proj": INTERMEDIATE_DIM // block}
+    for proj in rows:
+        for i in range(NUM_EXPERTS):
+            int4 = TensorQuantizer(
+                QuantizerAttributeConfig(num_bits=4, block_sizes={-1: block, "type": "static"})
+            )
+            fp8 = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3)))
+            fill = 0.0 if amax_state == "zero" else 1.0
+            int4.amax = torch.full(
+                (rows[proj] * blocks[proj], 1), fill
+            )  # as block calibration records
+            fp8.amax = torch.tensor(fill)
+            getattr(experts, f"{proj}_weight_quantizers")[i] = SequentialQuantizer(int4, fp8)
+
+    seen = []
+
+    def spy(wrapper, dtype, **_kwargs):
+        int4, fp8 = wrapper.weight_quantizer
+        seen.append((int4._amax.clone(), fp8._amax.clone()))
+        wrapper.weight_scale = torch.ones(1)
+
+    monkeypatch.setattr("modelopt.torch.export.unified_export_hf._export_quantized_weight", spy)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _export_fused_experts_keep_fused(experts, torch.bfloat16)
+
+    assert len(seen) == 2 * NUM_EXPERTS
+    assert {amax.shape for amax, _ in seen} == {(64, 1), (32, 1)}
+    assert all(torch.all(int4_amax > 0) and torch.all(fp8_amax > 0) for int4_amax, fp8_amax in seen)
+    assert any("was not calibrated" in str(w.message) for w in caught) == (amax_state == "zero")
 
 
 @LAYOUTS
