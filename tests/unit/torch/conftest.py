@@ -57,8 +57,11 @@ def use_channel_div_4():
 
 @pytest.fixture
 def gloo_world_of_one(skip_on_windows, tmp_path_factory):
-    """A one-rank gloo process group, so the code under test takes its distributed path."""
+    """A one-rank gloo process group, so the code under test takes its distributed path, and its
+    CPU device mesh."""
+    from torch.distributed.device_mesh import init_device_mesh
+
     store = tmp_path_factory.mktemp("pg") / "store"
     torch.distributed.init_process_group("gloo", init_method=store.as_uri(), rank=0, world_size=1)
-    yield
+    yield init_device_mesh("cpu", (1,))
     torch.distributed.destroy_process_group()

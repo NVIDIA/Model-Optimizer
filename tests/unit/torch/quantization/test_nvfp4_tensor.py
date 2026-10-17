@@ -105,6 +105,32 @@ class TestNVFP4ScaleClamping:
         out = _cast_per_block_scale_to_fp8(tiny).float()
         assert (out > 0).all(), f"FP8 cast produced zero scales: {out.tolist()}"
 
+    @staticmethod
+    def _dynamic_block_scales():
+        weight = torch.zeros(1, 48)
+        weight[0, 16] = 6.0  # amax 6 at a second-level scale of 1: block scale exactly 1
+        weight[0, 32] = 3.0  # amax 3: block scale 0.5
+        scale, _ = NVFP4QTensor.get_weights_scaling_factor(weight, 16, torch.tensor(1.0))
+        return scale.float()[0]
+
+    @staticmethod
+    def _static_block_scales():
+        q = SimpleNamespace(
+            block_sizes={-1: 16},
+            global_amax=torch.tensor(6.0 * 448.0),  # a second-level scale of 1
+            _amax=torch.tensor([0.0, 6.0, 3.0]),
+        )
+        scale, _ = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(q, torch.randn(1, 48))
+        return scale.float()[0]
+
+    @pytest.mark.parametrize("path", ["dynamic", "static"])
+    def test_an_all_zero_block_gets_a_scale_of_one(self, path):
+        """Blocks of amax 0, 6 and 3: the zero block gets 1, as the amax-6 block does, not the clamp."""
+        zero, unit, half = getattr(self, f"_{path}_block_scales")().tolist()
+
+        assert zero == unit == 1.0
+        assert half == 0.5
+
     def test_static_path_no_nan_when_block_amax_zero(self):
         """Static path: zero-amax block + small global_amax must clamp to 448, not cast to NaN."""
         block_size = 16
