@@ -26,6 +26,7 @@ jobs:
     with:
       files: |
         .github/actions/**
+        .github/workflows/_gpu_tests_runner.yml
         .github/workflows/_pr_gate.yml
         .github/workflows/gpu_tests.yml
         modelopt/**
@@ -39,16 +40,31 @@ jobs:
         tests/gpu_trtllm/**
         tests/gpu_vllm/**
 
+  # The GPU unit tests run on every change. The system tests (pytest marker `system`, see
+  # tests/conftest.py) run in the merge queue, on nightly and on-demand runs, and on a PR that
+  # carries the `run-system-tests` label: the gate says which (`run_system`).
   gpu-tests:
     needs: [pr-gate]
     if: needs.pr-gate.outputs.any_changed == 'true'
+    uses: ./.github/workflows/_gpu_tests_runner.yml
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      example: gpu
+      timeout_minutes: 60
+      container_image: nvcr.io/nvidia/pytorch:26.07-py3
+      runner: ${{ (startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
+      unit_only: ${{ needs.pr-gate.outputs.run_system != 'true' }}
+
+  # Lanes whose tests are all system tests
+  gpu-system-tests:
+    needs: [pr-gate]
+    if: needs.pr-gate.outputs.any_changed == 'true' && needs.pr-gate.outputs.run_system == 'true'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - example: gpu
-            timeout: 60
-            container_image: nvcr.io/nvidia/pytorch:26.07-py3
           - example: gpu_megatron
             timeout: 60
             container_image: nvcr.io/nvidia/nemo:26.08
@@ -63,53 +79,25 @@ jobs:
           - example: gpu_vllm
             timeout: 15
             container_image: docker.io/vllm/vllm-openai:v0.20.0
-    runs-on: ${{ (startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
-    timeout-minutes: ${{ matrix.timeout }}
-    container:
-      image: ${{ matrix.container_image }}
-      env:
-        GIT_DEPTH: 1000 # For correct version
-        PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        # Build CUDA kernels only for the runner's RTX PRO 6000 (sm_120), not the image's ~6 archs.
-        TORCH_CUDA_ARCH_LIST: "12.0"
-    steps:
-      - name: Install git
-        # The vllm container ships without git; needed for a real checkout (correct
-        # setuptools-scm version) and for the Codecov upload below.
-        if: matrix.example == 'gpu_vllm'
-        run: apt-get update && apt-get install -y git
-      - uses: actions/checkout@v6
-      - uses: nv-gha-runners/setup-proxy-cache@main
-      - uses: ./.github/actions/cache-extensions
-        with:
-          cache-key: rtxpro6000-${{ matrix.container_image }}
-      - name: Setup environment variables
-        run: |
-          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-      - name: Run gpu tests
-        env:
-          COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
-          COVERAGE_FILE: ${{ github.workspace }}/.coverage
-        run: |
-          # Use `python3` (the vllm image has no `python` on PATH)
-          python3 -m pip install nox && nox -s ${{ matrix.example }}
-      - name: Upload GPU coverage to Codecov
-        if: github.event_name != 'merge_group'
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage.xml
-          flags: gpu
-          fail_ci_if_error: false # test may be skipped if relevant file changes are not detected
-          verbose: true
+    uses: ./.github/workflows/_gpu_tests_runner.yml
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      example: ${{ matrix.example }}
+      timeout_minutes: ${{ matrix.timeout }}
+      container_image: ${{ matrix.container_image }}
+      runner: ${{ (startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
 
   gpu-pr-required-check:
     # Run even if gpu-tests is skipped
     if: ${{ (startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group') && always() }}
-    needs: [pr-gate, gpu-tests]
+    needs: [pr-gate, gpu-tests, gpu-system-tests]
     runs-on: ubuntu-latest
     steps:
+      - name: GPU system tests are left to the merge queue
+        if: ${{ needs.pr-gate.outputs.any_changed == 'true' && needs.pr-gate.outputs.run_system != 'true' }}
+        run: echo "::notice::Only the GPU unit tests ran. The system tests run in the merge queue; add the run-system-tests label and re-run this workflow to run them on this PR."
       - name: Required GPU tests did not succeed
-        if: ${{ needs.pr-gate.result != 'success' || (needs.pr-gate.outputs.any_changed == 'true' && needs.gpu-tests.result != 'success') }}
+        if: ${{ needs.pr-gate.result != 'success' || (needs.pr-gate.outputs.any_changed == 'true' && (needs.gpu-tests.result != 'success' || (needs.pr-gate.outputs.run_system == 'true' && needs.gpu-system-tests.result != 'success'))) }}
         run: exit 1

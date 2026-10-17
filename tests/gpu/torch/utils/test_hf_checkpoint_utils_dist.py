@@ -26,6 +26,8 @@ from modelopt.torch.utils.plugins import hf_checkpoint_utils
 
 pytest.importorskip("huggingface_hub")
 
+pytestmark = pytest.mark.system
+
 
 class _FakeHfApi:
     """``HfApi`` whose ``repo_info`` succeeds, so the Hub counts as reachable."""

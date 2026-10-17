@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import onnx
 import onnx_graphsurgeon as gs
+import pytest
 from _test_utils.import_helper import skip_if_no_tensorrt
 from _test_utils.onnx.lib_test_models import export_as_onnx
 from _test_utils.onnx.quantization.autotune.models import _create_simple_resnet18_model
@@ -29,6 +30,8 @@ from modelopt.onnx.quantization.autotune.workflows import (
 from modelopt.onnx.quantization.quantize import _preprocess_onnx, quantize
 
 skip_if_no_tensorrt()
+
+pytestmark = pytest.mark.system
 
 
 def _quantized_tensor_indices(model: onnx.ModelProto) -> set[tuple[str, int]]:

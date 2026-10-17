@@ -18,6 +18,7 @@ from datetime import timedelta
 from functools import partial
 from pathlib import Path
 
+import pytest
 import torch
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
@@ -25,6 +26,8 @@ from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
 import modelopt.torch.nas as mtn
 import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.utils.distributed as dist
+
+pytestmark = pytest.mark.system
 
 
 def test_nas_convert_ffn_pruning(project_root_path: Path, tmp_path: Path):

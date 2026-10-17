@@ -150,11 +150,10 @@ We use [pytest](https://docs.pytest.org/) for all tests. For any new features / 
 Test filenames must mirror the production module they primarily cover: tests for `foo.py` belong in `test_foo.py`. When a production module is renamed, split, or removed, rename or split its tests in the same change so test filenames do not preserve obsolete module names. A cross-module integration test may use a feature-oriented name only when no single production module owns the behavior.
 
 - `tests/unit`: Fast cpu-based unit tests for the core ModelOpt library. They should not take more than a few seconds to run.
-- `tests/gpu`: Fast GPU-based unit tests for the core ModelOpt library. In most cases, they should not take more than a few seconds to run.
-- `tests/gpu_megatron`: Fast GPU-based unit tests for the core ModelOpt library for Megatron-Core features. In most cases, they should not take more than a few seconds to run.
-- `tests/gpu_trtllm`: Fast GPU-based unit tests for the core ModelOpt library for TensorRT-LLM features. In most cases, they should not take more than a few seconds to run.
-- `tests/gpu_vllm`: Fast GPU-based unit tests for the core ModelOpt library for vLLM features. In most cases, they should not take more than a few seconds to run.
-- `tests/examples`: Integration tests for ModelOpt examples. They should not take more than a few minutes to run. Please refer to [example test README](./tests/examples/README.md) for more details.
+- `tests/gpu`: GPU-based tests for the core ModelOpt library: fast GPU unit tests, and the GPU system tests marked `system` (see [GPU unit and system tests](#gpu-unit-and-system-tests)).
+- `tests/gpu_megatron`, `tests/gpu_trtllm`, `tests/gpu_vllm`: GPU system tests for the Megatron-Core, TensorRT-LLM and vLLM features of the core ModelOpt library.
+- `tests/regression`: Training regression tests (GPU system tests).
+- `tests/examples`: Integration tests for ModelOpt examples (system tests). They should not take more than a few minutes to run. Please refer to [example test README](./tests/examples/README.md) for more details.
 
 For lightweight focused local validation, run `pytest` directly on the relevant test path. For example:
 
@@ -167,6 +166,15 @@ For broader repo validation and dependency setup, use [noxfile.py](./noxfile.py)
 ```bash
 nox -s "unit-3.12(torch_211, tf_latest)"
 ```
+
+### GPU unit and system tests
+
+GPU tests come in two kinds, and CI runs them at different times:
+
+- **GPU unit tests** run in the pytest process on one GPU, on tiny in-memory models, and take seconds. They run on every push to a pull request.
+- **GPU system tests** carry the pytest marker `system`. A test is one if it uses several processes or GPUs (the `dist_workers` and `need_N_gpus` fixtures, `spawn_multiprocess_job`), launches a subprocess (`hf_ptq`, `trtexec`, an example script), builds or runs an inference engine, trains or evaluates for several steps, or compiles for tens of seconds. They run in the merge queue and on the nightly, not on every pull request push. To run them on a pull request, add the `run-system-tests` label and re-run the workflows.
+
+Everything in `tests/gpu_megatron`, `tests/gpu_trtllm`, `tests/gpu_vllm`, `tests/regression` and `tests/examples` is a system test. In `tests/gpu`, a test that requests `dist_workers` or `need_N_gpus` is one automatically; mark any other with `pytestmark = pytest.mark.system` (a whole module) or `@pytest.mark.system`. Locally, `pytest tests/gpu -m "not system"` runs the GPU unit tests and `pytest tests/gpu -m system` the system tests.
 
 ### Test design principles
 
@@ -284,9 +292,9 @@ nox -s "unit-3.12(torch_211, tf_latest)"
 - If any CI/CD checks fail, fix the issues and push again.
 - Once your PR is approved and all checks pass, one of the reviewers will merge the PR. With the merge queue
   enabled on `main`, merging adds the PR to the queue: GitHub builds a temporary branch of `main` plus the
-  queued PRs, re-runs the required checks on it (the same checks, path gating and runners as a PR run, without
-  the nightly-only tests) and merges the PR only if they pass. A PR that fails in the queue is removed from it;
-  fix it and queue it again.
+  queued PRs, re-runs the required checks on it (path gating and runners as in a PR run, but with the GPU
+  system tests, which a PR run leaves out unless it carries the `run-system-tests` label) and merges the PR
+  only if they pass. A PR that fails in the queue is removed from it; fix it and queue it again.
 - If your PR is a bug fix that should also land in an ongoing release branch, add the
   `cherry-pick-<X.Y.Z>` label (e.g. `cherry-pick-0.47.0`) matching that release. Labeled PRs are
   cherry-picked into the release branch so the fix is included in the next release candidate.

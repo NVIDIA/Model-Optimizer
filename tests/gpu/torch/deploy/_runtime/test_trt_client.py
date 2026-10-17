@@ -31,6 +31,8 @@ skip_if_no_trtexec()
 from modelopt.torch._deploy._runtime.trt_client import TRTLocalClient
 from modelopt.torch._deploy.compilation import compile
 
+pytestmark = pytest.mark.system
+
 deployment = {
     "runtime": "TRT",
     "accelerator": "GPU",

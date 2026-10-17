@@ -30,6 +30,7 @@ jobs:
       contents: read
     outputs:
       any_changed: ${{ steps.lanes.outputs.any_changed }}
+      run_system: ${{ steps.base.outputs.run_system || 'true' }}
       torch: ${{ steps.lanes.outputs.torch }}
       vllm: ${{ steps.lanes.outputs.vllm }}
       trtllm: ${{ steps.lanes.outputs.trtllm }}
@@ -91,6 +92,8 @@ jobs:
         env:
           # Nightly and on-demand runs have no diff to inspect, so they run everything.
           NON_PR: ${{ !(startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group') }}
+          # The example tests are system tests: a PR run without the run-system-tests label skips them
+          RUN_SYSTEM: ${{ steps.base.outputs.run_system || 'true' }}
           COMMON: ${{ steps.changed.outputs.common_any_modified }}
           TORCH: ${{ steps.changed.outputs.torch_any_modified }}
           VLLM: ${{ steps.changed.outputs.vllm_any_modified }}
@@ -101,7 +104,7 @@ jobs:
         run: |
           any=false
           for lane in TORCH VLLM TRTLLM MEGATRON DIFFUSERS ONNX; do
-            if [[ "$NON_PR" == "true" || "$COMMON" == "true" || "${!lane}" == "true" ]]; then
+            if [[ "$RUN_SYSTEM" == "true" && ("$NON_PR" == "true" || "$COMMON" == "true" || "${!lane}" == "true") ]]; then
               run=true
               any=true
             else
@@ -242,6 +245,9 @@ jobs:
     needs: [pr-gate, torch, vllm, trtllm, megatron, diffusers, onnx]
     runs-on: ubuntu-latest
     steps:
+      - name: Example tests are left to the merge queue
+        if: ${{ needs.pr-gate.outputs.run_system != 'true' }}
+        run: echo "::notice::The example tests are system tests and run in the merge queue. Add the run-system-tests label and re-run this workflow to run them on this PR."
       - name: Required example tests did not succeed
         if: |
           needs.pr-gate.result != 'success' ||

@@ -25,6 +25,8 @@ import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
 from modelopt.torch.export import export_hf_checkpoint
 
+pytestmark = pytest.mark.system
+
 _VISION_RECIPE = "fp8_vision-kv_none"
 _JOINT_RECIPE = "fp8_vision_lm-kv_fp8_cast"
 

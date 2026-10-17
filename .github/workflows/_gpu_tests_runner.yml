@@ -1,0 +1,77 @@
+# Reusable workflow for running one lane of the GPU tests
+name: GPU Tests Runner
+
+on:
+  workflow_call:
+    inputs:
+      example:
+        description: "nox session of the lane (gpu, gpu_megatron, gpu_trtllm or gpu_vllm)"
+        required: true
+        type: string
+      container_image:
+        description: "Docker image to use for the lane"
+        required: true
+        type: string
+      timeout_minutes:
+        description: "Timeout in minutes for the job"
+        required: false
+        type: number
+        default: 60
+      runner:
+        description: "GitHub runner to use"
+        required: true
+        type: string
+      unit_only:
+        description: "Run only the GPU unit tests (pytest -m 'not system'), as a PR without the run-system-tests label does"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  run-test:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
+    container:
+      image: ${{ inputs.container_image }}
+      env:
+        GIT_DEPTH: 1000 # For correct version
+        PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        # Build CUDA kernels only for the runner's RTX PRO 6000 (sm_120), not the image's ~6 archs.
+        TORCH_CUDA_ARCH_LIST: "12.0"
+    steps:
+      - name: Install git
+        # The vllm container ships without git; needed for a real checkout (correct
+        # setuptools-scm version) and for the Codecov upload below.
+        if: inputs.example == 'gpu_vllm'
+        run: apt-get update && apt-get install -y git
+      - uses: actions/checkout@v6
+      - uses: nv-gha-runners/setup-proxy-cache@main
+      - uses: ./.github/actions/cache-extensions
+        with:
+          cache-key: rtxpro6000-${{ inputs.container_image }}
+      - name: Setup environment variables
+        run: |
+          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+      - name: Run gpu tests
+        env:
+          COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
+          COVERAGE_FILE: ${{ github.workspace }}/.coverage
+          # The system tests (see tests/conftest.py) are left out of a PR run without the label
+          PYTEST_ADDOPTS: ${{ inputs.unit_only && '-m "not system"' || '' }}
+        run: |
+          # Use `python3` (the vllm image has no `python` on PATH)
+          python3 -m pip install nox && nox -s ${{ inputs.example }}
+      - name: Upload GPU coverage to Codecov
+        # A run of the unit tests only would upload a partial `gpu` report and skew the comparison
+        # with main; carryforward keeps the last full report instead.
+        if: ${{ !inputs.unit_only && github.event_name != 'merge_group' }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          flags: gpu
+          fail_ci_if_error: false # test may be skipped if relevant file changes are not detected
+          verbose: true
