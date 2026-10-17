@@ -15,6 +15,7 @@
 
 import contextlib
 import faulthandler
+import gc
 import os
 import queue
 import signal
@@ -94,6 +95,36 @@ def get_live_pool(pools, key, make_pool):
     if pool is None or pool.broken:
         pools[key] = pool = make_pool()
     return pool
+
+
+_BASELINE_TORCH_FLAGS = {}
+
+
+def _capture_baseline_torch_flags():
+    """Remember the torch settings a freshly spawned worker starts with."""
+    _BASELINE_TORCH_FLAGS.update(
+        cudnn_deterministic=torch.backends.cudnn.deterministic,
+        cudnn_benchmark=torch.backends.cudnn.benchmark,
+        cudnn_tf32=torch.backends.cudnn.allow_tf32,
+        matmul_tf32=torch.backends.cuda.matmul.allow_tf32,
+        deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
+    )
+
+
+def reset_worker_state(rank, world_size):
+    """Return a persistent worker to the state it had right after spawning.
+
+    ``set_seed`` and similar helpers change process-global torch settings; run this job at the
+    boundary between test modules that share workers.
+    """
+    torch.backends.cudnn.deterministic = _BASELINE_TORCH_FLAGS["cudnn_deterministic"]
+    torch.backends.cudnn.benchmark = _BASELINE_TORCH_FLAGS["cudnn_benchmark"]
+    torch.backends.cudnn.allow_tf32 = _BASELINE_TORCH_FLAGS["cudnn_tf32"]
+    torch.backends.cuda.matmul.allow_tf32 = _BASELINE_TORCH_FLAGS["matmul_tf32"]
+    torch.use_deterministic_algorithms(_BASELINE_TORCH_FLAGS["deterministic_algorithms"])
+    torch.manual_seed(1234)
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def default_worker_teardown(rank, world_size):
@@ -208,6 +239,7 @@ class DistributedWorkerPool:
         if backend == "nccl" and torch.cuda.is_available():
             torch.cuda.set_device(rank)
         torch.manual_seed(1234)
+        _capture_baseline_torch_flags()
         result_queue.put("ready")
 
         while True:
@@ -245,7 +277,9 @@ class DistributedWorkerPool:
         not finish within ``failure_grace`` (they are typically blocked in a collective waiting for
         it), the workers are still inside the job and every later ``run`` would hang until its own
         timeout. The workers are killed instead and the pool is marked ``broken``; callers that
-        want to continue need a new pool.
+        want to continue need a new pool. A pool is also retired after any failed job: a failure
+        can leave its workers unusable (a CUDA error such as an illegal memory access is sticky,
+        and every later job in that process fails with it).
         """
         if self.broken:
             raise RuntimeError("Worker pool was killed after an earlier job hung; create a new one")
@@ -270,12 +304,15 @@ class DistributedWorkerPool:
             raise
 
         if errors:
+            if not self.broken:
+                # Every rank replied, but the workers may be poisoned: never hand them to another job.
+                self._abort(dump_stacks=False)
             raise RuntimeError("Worker(s) failed:\n" + "\n".join(errors))
 
-    def _abort(self):
-        """Print every worker's stack (to stderr, for the CI log), then kill the workers."""
+    def _abort(self, dump_stacks=True):
+        """Kill the workers, first printing their stacks (to stderr, for the CI log) if asked."""
         self.broken = True
-        if hasattr(signal, "SIGUSR1"):
+        if dump_stacks and hasattr(signal, "SIGUSR1"):
             for p in self._processes:
                 with contextlib.suppress(OSError):
                     os.kill(p.pid, signal.SIGUSR1)
