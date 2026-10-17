@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import contextlib
+import queue
 
 import pytest
 import torch
@@ -111,8 +112,8 @@ def _pool_cache():
     e.g. on a 2-GPU runner ``dist_workers`` and ``dist_workers_size_2`` are both size 2.
     Isolation between tests comes from ``megatron_worker_teardown`` (model-parallel state and
     process groups after every job), from ``_reset_shared_pools`` (process-global torch settings
-    at each module boundary) and from ``get_live_pool`` replacing a pool that a hung, timed-out
-    or crashed job killed.
+    at each module boundary) and from ``get_live_pool`` replacing a pool that a failed, hung,
+    timed-out or crashed job retired (a sticky CUDA error would otherwise fail every later test).
     """
     pools: dict[int, DistributedWorkerPool] = {}
     yield pools
@@ -125,7 +126,10 @@ def _reset_shared_pools(_pool_cache):
     """Workers outlive test modules: undo what the previous module did to process-global torch state."""
     for pool in _pool_cache.values():
         if not pool.broken:
-            pool.run(reset_worker_state)
+            # A pool whose reset fails is retired by run(); the next test that needs one gets a new
+            # pool, and the module's tests, which may not use a pool at all, are not errored.
+            with contextlib.suppress(RuntimeError, queue.Empty):
+                pool.run(reset_worker_state)
 
 
 def _get_pool(cache, world_size):

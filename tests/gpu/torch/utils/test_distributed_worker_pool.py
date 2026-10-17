@@ -41,6 +41,11 @@ def _rank_0_fails_and_rank_1_waits_for_it(rank, size):
     dist.barrier()  # never completes: its partner left
 
 
+def _rank_0_fails(rank, size):
+    if rank == 0:
+        raise ValueError("rank 0 failed")
+
+
 def _rank_0_dies_and_rank_1_waits_for_it(rank, size):
     if rank == 0:
         os._exit(13)  # what an illegal memory access or an OOM kill does: no exception, no result
@@ -101,6 +106,21 @@ def test_a_failed_rank_does_not_make_its_peers_wait_out_the_job_timeout():
 
         assert time.monotonic() - start < 60  # not the 600 s job timeout
         assert pool.broken
+    finally:
+        pool.shutdown()
+
+
+def test_a_failed_job_retires_the_pool_even_when_every_rank_replied():
+    pool = DistributedWorkerPool(world_size=2, backend="gloo", teardown_fn=None)
+    try:
+        with pytest.raises(RuntimeError, match="rank 0 failed"):
+            pool.run(_rank_0_fails)  # rank 1 returns at once, so no rank is left waiting
+
+        # A sticky CUDA error would fail every later job in these workers
+        assert pool.broken
+        assert not any(p.is_alive() for p in pool._processes)
+        with pytest.raises(RuntimeError, match="killed"):
+            pool.run(_rank_0_fails)
     finally:
         pool.shutdown()
 
