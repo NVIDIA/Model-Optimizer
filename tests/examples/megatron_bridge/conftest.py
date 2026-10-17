@@ -40,18 +40,22 @@ def _fast_example_runner():
 
 
 @pytest.fixture(autouse=True)
-def _isolate_megatron_global_state():
+def _isolate_megatron_global_state(request):
     """Reset shared state around every test so a failure cannot cascade into the next one.
 
     In-process steps share the interpreter. Besides Megatron's singletons, Transformer-Engine
     records its chosen attention backend in ``NVTE_*``, which failed a Mamba hybrid that ran after
     an attention model -- so the environment is restored wholesale rather than by naming variables.
     """
+    # Only tests that take ``num_gpus`` run example steps; the gc-heavy reset is wasted on the rest.
+    reset_state = "num_gpus" in request.fixturenames
     env_before = os.environ.copy()
-    reset_megatron_global_state()
+    if reset_state:
+        reset_megatron_global_state()
     try:
         yield
     finally:
-        reset_megatron_global_state()
+        if reset_state:
+            reset_megatron_global_state()
         os.environ.clear()
         os.environ.update(env_before)

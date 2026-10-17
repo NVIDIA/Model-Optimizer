@@ -1,24 +1,52 @@
 name: Cache extensions
-description: Cache and reuse JIT-compiled extensions (e.g. CUDA extensions) across runs.
+description: Restore JIT-compiled CUDA extensions and Triton kernels cached by earlier runs. Pair with cache-extensions/save after the tests.
 
 inputs:
   cache-key:
-    description: Environment discriminator for the cache key (e.g. GPU arch + container image).
+    description: Environment discriminator for the cache keys (e.g. GPU arch + lane + container image).
     required: true
+
+outputs:
+  ext-key:
+    description: Key under which cache-extensions/save stores the torch extensions cache.
+    value: ${{ steps.ext.outputs.cache-primary-key }}
+  ext-hit:
+    description: "'true' if the torch extensions cache was restored with an exact key match."
+    value: ${{ steps.ext.outputs.cache-hit }}
+  triton-key:
+    description: Key under which cache-extensions/save stores the Triton cache.
+    value: ${{ steps.triton.outputs.cache-primary-key }}
+  triton-hit:
+    description: "'true' if the Triton cache was restored with an exact key match."
+    value: ${{ steps.triton.outputs.cache-hit }}
 
 runs:
   using: composite
   steps:
     - shell: bash
-      run: echo "TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions" >> "$GITHUB_ENV"
-    - id: cache
-      uses: actions/cache@v6
+      run: |
+        echo "TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions" >> "$GITHUB_ENV"
+        echo "TRITON_CACHE_DIR=/root/.cache/triton" >> "$GITHUB_ENV"
+    # CUDA extensions: exact key only, because ninja decides what to rebuild from file timestamps.
+    # Only CUDA/C++ sources and the loaders are hashed, so Triton-only edits keep the entry valid.
+    - id: ext
+      uses: actions/cache/restore@v6
       with:
         path: /root/.cache/torch_extensions
-        key: torch-ext-${{ inputs.cache-key }}-${{ hashFiles('modelopt/torch/kernels/quantization/**', 'modelopt/torch/quantization/extensions.py', 'modelopt/torch/utils/cpp_extension.py')
-          }}
+        key: torch-ext-${{ inputs.cache-key }}-${{ hashFiles('modelopt/torch/kernels/quantization/**/*.cu', 'modelopt/torch/kernels/quantization/**/*.cuh',
+          'modelopt/torch/kernels/quantization/**/*.cpp', 'modelopt/torch/kernels/quantization/**/*.h', 'modelopt/torch/kernels/quantization/conv/implicit_gemm_cuda.py',
+          'modelopt/torch/quantization/extensions.py', 'modelopt/torch/utils/cpp_extension.py') }}
     # On a cache hit, backdate sources below the cached objects so ninja reuses them (touching
     # the objects instead would desync ninja's .ninja_deps and force a rebuild).
-    - if: steps.cache.outputs.cache-hit == 'true'
+    - if: steps.ext.outputs.cache-hit == 'true'
       shell: bash
       run: find modelopt/torch/kernels/quantization -exec touch -d '2000-01-01' {} +
+    # Triton: entries are content-addressed, so restoring a cache from an older commit is safe
+    # and only costs the kernels that changed.
+    - id: triton
+      uses: actions/cache/restore@v6
+      with:
+        path: /root/.cache/triton
+        key: triton-${{ inputs.cache-key }}-${{ hashFiles('modelopt/torch/kernels/**/*.py') }}
+        restore-keys: |
+          triton-${{ inputs.cache-key }}-

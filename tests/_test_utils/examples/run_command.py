@@ -137,13 +137,20 @@ def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tupl
     return returncode, "".join(chunks)
 
 
-# Set by a suite's conftest to run a command without spawning a subprocess (see
-# ``_test_utils.examples.megatron_example_runner``). Unset means always use a subprocess.
+# Set by a suite's conftest to run steps without a subprocess each. Unset means always use one, and so
+# does MODELOPT_EXAMPLE_RUNNER=subprocess (to bisect a suspected leak between steps).
 _in_process_runner = None
 
 
 def set_in_process_runner(runner) -> None:
-    """Register ``runner(cmd_parts, example_path) -> str``; it must not fall back to a subprocess."""
+    """Register either of two kinds of runner.
+
+    A plain callable ``runner(cmd_parts, example_path) -> str`` runs every step in the ambient
+    environment and must not fall back to a subprocess (``megatron_example_runner``). An object
+    with ``accepts(cmd_parts)`` and ``runner(cmd_parts, example_path, env=env) -> str`` takes the
+    step's environment and only the steps it accepts; the rest run as subprocesses
+    (``example_runner.ExampleRunner``).
+    """
     global _in_process_runner
     _in_process_runner = runner
 
@@ -158,24 +165,32 @@ def run_example_command(
 ) -> str | None:
     """Run an example command, retrying transient HuggingFace access errors."""
     print(f"[{example_path}] Running command: {cmd_parts}")
-    in_process = _in_process_runner if env is None else None
-    if _in_process_runner is not None and env is not None:
-        # The in-process runner uses the ambient environment, so a caller-supplied env would be
+    in_process = (
+        None if os.environ.get("MODELOPT_EXAMPLE_RUNNER") == "subprocess" else _in_process_runner
+    )
+    takes_env = hasattr(in_process, "accepts")
+    if takes_env and not in_process.accepts(cmd_parts):
+        in_process = None
+    elif in_process is not None and not takes_env and env is not None:
+        # A plain in-process runner uses the ambient environment, so a caller-supplied env would be
         # silently dropped. Fall back to a subprocess rather than run with the wrong environment.
         warnings.warn(f"[{example_path}] env= given; running this step as a subprocess")
+        in_process = None
     env = os.environ.copy() if env is None else env
     cwd = MODELOPT_ROOT / "examples" / example_path
 
     for attempt in range(hf_max_retries + 1):
         if setup_free_port:
-            # Subprocess steps only: an in-process runner picks its own free port, since env is a
-            # copy it never sees.
+            # A plain in-process runner picks its own free port, since env is a copy it never sees.
             env["MASTER_PORT"] = str(get_free_port())  # fresh port per attempt
         if in_process is not None:
             # Inside the loop so in-process steps get the same transient-HuggingFace retries;
             # these tests do hit the Hub (e.g. calib_dataset_name="cnn_dailymail").
             try:
-                result = in_process(cmd_parts, example_path)
+                if takes_env:
+                    result = in_process(cmd_parts, example_path, env=env)
+                else:
+                    result = in_process(cmd_parts, example_path)
             except Exception as e:
                 # Re-raise unless it looks transient, so a real failure keeps its traceback
                 # instead of being flattened into CalledProcessError.
