@@ -356,6 +356,10 @@ class DFlashExporter(SpeculativeDecodingExporter):
                 export_sd[export_key] = value.clone()
         return export_sd
 
+    def _prepare_quantization_config(self, hf_quant_config: dict) -> dict:
+        """Return the quantization config to write alongside the exported weights."""
+        return hf_quant_config
+
     def _export_config(self):
         """Build config.json matching z-lab DFlash format."""
         model = self.model
@@ -469,6 +473,9 @@ class DFlashExporter(SpeculativeDecodingExporter):
         else:
             full_sd, hf_quant_config = self.model.state_dict(), None
 
+        if hf_quant_config is not None:
+            hf_quant_config = self._prepare_quantization_config(hf_quant_config)
+
         # Export state dict
         drafter_sd = self._extract_state_dict(full_sd)
         assert drafter_sd, "No dflash_module weights found in state dict"
@@ -538,6 +545,47 @@ class LiLiCorrExporter(DFlashExporter):
     any tensor shape, so a default guessed in their absence loads cleanly and scores a
     different function.
     """
+
+    _NAME_REWRITES = (
+        (r"lilicorr\.feature_mlp\.0(?=\.|$)", "lilicorr.feature_norm"),
+        (r"lilicorr\.feature_mlp\.1(?=\.|$)", "lilicorr.feature_mlp.up_proj"),
+        (r"lilicorr\.feature_mlp\.3(?=\.|$)", "lilicorr.feature_mlp.down_proj"),
+        (r"(lilicorr\.layers\.\d+\.mlp)\.0(?=\.|$)", r"\1.up_proj"),
+        (r"(lilicorr\.layers\.\d+\.mlp)\.2(?=\.|$)", r"\1.down_proj"),
+    )
+
+    @classmethod
+    def _vllm_name(cls, name: str) -> str:
+        """Translate ModelOpt's Sequential indices to vLLM's named LiLiCorr modules."""
+        for pattern, replacement in cls._NAME_REWRITES:
+            name = re.sub(pattern, replacement, name)
+        return name
+
+    def _extract_state_dict(self, full_state_dict: dict):
+        """Export LiLiCorr tensors under the named module layout consumed by vLLM."""
+        modelopt_sd = super()._extract_state_dict(full_state_dict)
+        export_sd = {}
+        for key, value in modelopt_sd.items():
+            export_key = self._vllm_name(key)
+            if export_key in export_sd:
+                raise ValueError(
+                    f"LiLiCorr export maps multiple tensors to {export_key!r}; "
+                    "refusing to overwrite one silently."
+                )
+            export_sd[export_key] = value
+        return export_sd
+
+    def _prepare_quantization_config(self, hf_quant_config: dict) -> dict:
+        """Move quantization exclusions onto the same names as the exported tensors."""
+        config = deepcopy(hf_quant_config)
+        sections = [config]
+        if isinstance(config.get("quantization"), dict):
+            sections.append(config["quantization"])
+        for section in sections:
+            for field in ("exclude_modules", "ignore"):
+                if field in section:
+                    section[field] = [self._vllm_name(name) for name in section[field]]
+        return config
 
     def _export_config(self):
         """Extend the DFlash config with the LiLiCorr head fields."""
