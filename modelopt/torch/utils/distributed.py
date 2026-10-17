@@ -22,9 +22,10 @@ import sys
 import time
 import traceback
 from collections.abc import Callable, Iterator
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal, TypeVar
 from warnings import warn
 
 import torch
@@ -34,17 +35,26 @@ from torch.distributed.tensor import DTensor
 
 __all__ = [
     "DistributedProcessGroup",
+    "DistributedState",
+    "DistributionPlan",
     "ParallelState",
+    "all_reduce",
     "backend",
     "barrier",
+    "broadcast_from",
+    "distributed_run",
+    "distribution_plan",
     "fsdp2_wrap",
     "gather_bytes",
     "gather_state_dicts",
     "is_available",
+    "is_distributed_launch",
+    "is_distributed_run",
     "is_fsdp2_model",
     "is_initialized",
     "is_master",
     "rank",
+    "set_distribution_plan",
     "size",
 ]
 
@@ -96,6 +106,25 @@ def is_master(group=None) -> bool:
 def is_last_process(group=None) -> bool:
     """Returns whether the current process is the last process."""
     return rank(group=group) == size(group=group) - 1
+
+
+def is_distributed_launch() -> bool:
+    """True if launched distributed (WORLD_SIZE>1), readable BEFORE the process group is set up.
+
+    Env-based, so parse-time code can detect the launch mode before :func:`distributed_run` sets the
+    process group up. Once it has, :func:`is_distributed_run` reads the live group.
+    """
+    return int(os.environ.get("WORLD_SIZE", "1")) > 1
+
+
+def is_distributed_run() -> bool:
+    """True if a real multi-rank job is running: the process group is initialized and world size > 1.
+
+    Runtime state (checks the live process group), unlike :func:`is_distributed_launch` which reads
+    only the launch env. A single process or a 1-rank group returns False. Backend-agnostic -- true
+    for any backend that initialized ``torch.distributed`` (HF EP/DP loader, Megatron, plain DDP).
+    """
+    return is_initialized() and size() > 1
 
 
 def _serialize(obj: Any) -> torch.Tensor:
@@ -267,6 +296,239 @@ def setup(timeout: timedelta | None = None):
     torch.cuda.set_device(local_rank())
     if not is_initialized():
         torch.distributed.init_process_group("cpu:gloo,cuda:nccl", timeout=timeout)
+
+
+@dataclass(frozen=True)
+class DistributionPlan:
+    """How a model is distributed over the ranks of a run.
+
+    * ``world_size`` -- the ranks that hold the model; ``1`` for a single process.
+    * ``ep_size`` -- the expert-parallel degree: an MoE's routed experts are sharded over groups of
+      ``ep_size`` ranks. ``1`` shards none.
+    * ``dense`` -- how the rest of the model, all of it without expert parallelism, is placed:
+      ``"replicate"`` gives every rank a whole copy, ``"fsdp"`` FSDP2-shards it.
+
+    Every rank calibrates on its own data, so data parallelism spans the whole world, and each expert
+    shard is replicated ``edp = world_size / ep_size`` times.
+    """
+
+    world_size: int = 1
+    ep_size: int = 1
+    dense: Literal["replicate", "fsdp"] = "replicate"
+
+    def __post_init__(self) -> None:
+        """Reject a plan no load could carry out, before any rank starts on it."""
+        for name in ("world_size", "ep_size"):
+            # Below 1 a degree is meaningless: ep_size=-2 would divide the world and read as no
+            # expert parallelism, ep_size=0 would divide by zero.
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name}={getattr(self, name)} must be at least 1.")
+        if self.world_size % self.ep_size != 0:
+            raise ValueError(f"ep_size={self.ep_size} must divide world_size={self.world_size}")
+        if self.dense not in ("replicate", "fsdp"):
+            raise ValueError(f"dense={self.dense!r}: expected 'replicate' or 'fsdp'.")
+
+    @property
+    def edp(self) -> int:
+        """Expert-data-parallel degree: how many ranks hold a replica of each expert shard."""
+        return self.world_size // self.ep_size
+
+    @property
+    def is_expert_parallel(self) -> bool:
+        """Whether routed experts are sharded across ranks."""
+        return self.ep_size > 1
+
+    @property
+    def is_fsdp_dense(self) -> bool:
+        """Whether the dense part is FSDP2-sharded rather than replicated."""
+        return self.dense == "fsdp"
+
+
+_PLAN_ATTR = "_modelopt_distribution_plan"
+
+
+def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> None:
+    """Record that ``model`` is distributed as ``plan``, on it and on every submodule.
+
+    Code handed a submodule, such as a VLM's language model, then reads the same plan as code handed
+    the whole model. ``load_pretrained`` records the plan it loads by; code that distributes a model
+    itself records it here before calibrating or exporting the model.
+
+    A model is distributed once, and its plan recorded once: recording a plan on a model that, or
+    any of whose submodules, already records one raises, the same plan included, and leaves the
+    model as it was. No code reloads or re-distributes a model it loaded.
+    """
+    for module in model.modules():
+        recorded = getattr(module, _PLAN_ATTR, None)
+        if recorded is not None:
+            raise ValueError(
+                f"{type(module).__name__} is already recorded as distributed by {recorded!r}; a "
+                f"model is distributed and its plan recorded once, so {plan!r} cannot be recorded "
+                "over it."
+            )
+    for module in model.modules():
+        setattr(module, _PLAN_ATTR, plan)
+
+
+def distribution_plan(model: torch.nn.Module) -> DistributionPlan:
+    """How ``model`` is distributed: the plan recorded on it (:func:`set_distribution_plan`).
+
+    A model with no plan recorded is a single process's, unless it shows otherwise: one that is
+    FSDP2-sharded, or held in a run of several ranks, raises rather than be taken for one.
+    """
+    plan = getattr(model, _PLAN_ATTR, None)
+    if plan is not None:
+        return plan
+    sharded = is_fsdp2_model(model)
+    if sharded or size() > 1:
+        how = "is FSDP2-sharded" if sharded else f"is held in a run of {size()} ranks"
+        raise RuntimeError(
+            f"{type(model).__name__} {how}, but has no distribution plan recorded. Load it with "
+            "load_pretrained, or record how it is distributed with set_distribution_plan()."
+        )
+    return DistributionPlan()
+
+
+_V = TypeVar("_V")
+
+
+def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
+    """Return ``fn()`` run on ``rank`` only, on every rank.
+
+    For a value that depends on what each rank reads for itself -- the environment, its GPU, files
+    on its node -- so that ranks computing it for themselves could disagree. If ``fn`` raises, every
+    rank raises, instead of waiting in a broadcast ``rank`` never sends. Ranks broadcasting
+    different labels at the same point fail. Collective: every rank calls it at the same point,
+    with the same ``rank``. Outside a distributed run ``fn`` runs alone.
+    """
+    if not is_distributed_run():
+        return fn()
+    if not 0 <= rank < size():
+        raise ValueError(f"rank={rank} is not a rank of this {size()}-rank run.")
+    sending = torch.distributed.get_rank() == rank
+    value: Any = None
+    error = None
+    if sending:
+        try:
+            value = fn()
+        except Exception as e:
+            # Still send: the other ranks would otherwise wait in the broadcast for this one.
+            error = e
+    # One message from the sending rank: its label, so a rank broadcasting another learns the two
+    # are out of step, and its value or its error. The error goes as text: the other ranks only
+    # need to stop, and an exception is not guaranteed to pickle.
+    message = [(label, value, None if error is None else f"{type(error).__name__}: {error}")]
+    torch.distributed.broadcast_object_list(message, group_src=rank)
+    sent_label, value, sent_error = message[0]
+    if error is not None:
+        raise error
+    if sent_error is not None:
+        raise RuntimeError(f"rank {rank} failed to compute {label}: {sent_error}")
+    if sent_label != label:
+        raise RuntimeError(
+            f"Ranks broadcast out of step: this rank broadcast {label!r} while rank {rank} sent "
+            f"{sent_label!r}. Every rank must broadcast them in the same order."
+        )
+    return value
+
+
+def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _V]) -> _V:
+    """Return ``combine`` of every rank's ``fn()``, on every rank.
+
+    ``combine`` takes the ranks' values in rank order and returns the one every rank gets, e.g.
+    ``min`` for a batch size each rank's memory bounds, where one rank's choice could run another
+    out of memory. If ``fn`` raises on any rank, every rank raises, instead of waiting in the gather
+    that rank never joins. Ranks reducing different labels at the same point fail. Collective;
+    outside a distributed run ``fn`` runs alone.
+    """
+    if not is_distributed_run():
+        return combine([fn()])
+    value, error = None, None
+    try:
+        value = fn()
+    except Exception as e:
+        # Still join the gather: the other ranks would otherwise wait in it for this one.
+        error = e
+    mine = (label, value, None if error is None else f"{type(error).__name__}: {error}")
+    gathered: list[Any] = [None] * torch.distributed.get_world_size()
+    torch.distributed.all_gather_object(gathered, mine)
+    if error is not None:
+        raise error
+    for rank_, (_, _, rank_error) in enumerate(gathered):
+        if rank_error is not None:
+            raise RuntimeError(f"rank {rank_} failed to compute {label}: {rank_error}")
+    labels = sorted({rank_label for rank_label, _, _ in gathered})
+    if labels != [label]:
+        raise RuntimeError(
+            f"Ranks reduced out of step: {labels} at the same point. Every rank must reduce "
+            "them in the same order."
+        )
+    # The gathered values are unpickled copies, so the result shares nothing with the callers'.
+    return combine([rank_value for _, rank_value, _ in gathered])
+
+
+@dataclass(frozen=True)
+class DistributedState:
+    """This process's place in a run: its rank, the run's size, and the device it computes on.
+
+    :func:`distributed_run` yields it, for a single process too (rank 0 of a run of one).
+    """
+
+    rank: int
+    world_size: int
+    device: torch.device | str
+
+    @property
+    def is_main(self) -> bool:
+        """Whether this is rank 0, the rank that writes the run's outputs."""
+        return self.rank == 0
+
+
+@contextmanager
+def distributed_run(timeout: timedelta | None = None, device: torch.device | str = "cuda"):
+    """Own the run's process group for the block, and yield this process's state.
+
+    On a distributed launch (``WORLD_SIZE>1``) this sets the process group up, binding this rank's
+    CUDA device, with ``timeout``. It yields this rank's :class:`DistributedState`, on that CUDA
+    device. A single process sets nothing up and is rank 0 of a run of one, on ``device``.
+
+    On exit, even if the body raises, it destroys the group the run set up: the launch's, or one the
+    body set up, such as the one-rank group a single process's FSDP2 load shards through. A group
+    that was already there when the run began is the caller's, and is left as it is. A rank whose
+    body raised in a run of several ranks exits through :func:`abort` instead, and the launcher
+    tears the job down: destroying the group would wait on peers that may sit in a collective this
+    rank never reaches.
+    """
+    launched = is_distributed_launch()
+    group_was_there = is_initialized()
+    if launched:
+        setup(timeout=timeout)
+    try:
+        yield (
+            DistributedState(rank(), size(), torch.device(f"cuda:{local_rank()}"))
+            if launched
+            else DistributedState(0, 1, device)
+        )
+    finally:
+        # If the body is unwinding due to an exception, PRINT it here BEFORE anything that waits on
+        # the peers. A per-rank exception (only some ranks raise) leaves the rest inside a
+        # calibration a2a collective, so this rank's cleanup barrier or destroy_process_group would
+        # DEADLOCK with the original exception never surfaced. A run of several ranks that owns its
+        # group therefore aborts the rank: abort() prints the traceback and exits.
+        exc = sys.exc_info()[1]
+        owns_group = not group_was_there and is_initialized()
+        if exc is not None:
+            print(
+                f"[distributed_run][rank {os.environ.get('RANK', '?')}] body raised "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            if owns_group and not isinstance(exc, SystemExit) and size() > 1:
+                abort()
+            traceback.print_exc()
+            sys.stderr.flush()
+        if owns_group:
+            cleanup()
 
 
 def cleanup():

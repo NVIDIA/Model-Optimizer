@@ -21,6 +21,10 @@ import signal
 import socket
 import time
 import traceback
+from contextlib import ExitStack, contextmanager
+from datetime import timedelta
+from functools import partial
+from unittest import mock
 
 import torch
 import torch.distributed as dist
@@ -117,6 +121,28 @@ def reseeding_worker_teardown(rank, world_size):
     """
     default_worker_teardown(rank, world_size)
     torch.manual_seed(1234)
+
+
+@contextmanager
+def bounded_collectives(seconds: float = 10):
+    """Run the object collectives on a new group that gives up after ``seconds``, within the block.
+
+    For a pooled job driving code that runs ``broadcast_object_list``, ``all_gather_object`` or
+    ``barrier`` on the default group: a rank left waiting in one its peer never joins then raises in
+    seconds instead of hanging for the default group's timeout, and the default group, which the
+    workers keep for the next job, stays in step. Every rank of the job must enter it.
+    """
+    group = dist.new_group(timeout=timedelta(seconds=seconds))
+    try:
+        with ExitStack() as stack:
+            for name in ("broadcast_object_list", "all_gather_object", "barrier"):
+                collective = partial(getattr(dist, name), group=group)
+                stack.enter_context(mock.patch.object(dist, name, collective))
+            yield
+    finally:
+        # The workers outlive the job, and would keep the group and its connections. Destroying it
+        # also fails a peer still waiting in it at once, instead of at the timeout.
+        dist.destroy_process_group(group)
 
 
 class DistributedWorkerPool:
