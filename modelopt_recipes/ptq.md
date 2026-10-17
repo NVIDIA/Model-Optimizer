@@ -344,8 +344,9 @@ linear layers and MSE-calibrated NVFP4 to routed experts, with expert
 remain unquantized.
 
 **`qwen3_vl/ptq`** and **`qwen3_5/ptq`** provide FP8 recipes for the `visual` branch of
-validated Qwen3-VL and dense Qwen3.5 checkpoints. `fp8_vision-kv_none` enables only Vision
-Encoder `nn.Linear` weights and inputs, including the primary merger and any deepstack mergers.
+validated Qwen3-VL and dense Qwen3.5 checkpoints. `fp8_vision-kv_none` enables FP8 only on the
+primary and any deepstack vision-merger `nn.Linear` weights and inputs. Vision blocks remain in
+high precision because vLLM's FP8 GEMM flattens their 3D attention inputs.
 `fp8_vision_lm-kv_fp8_cast` combines that visual configuration with the standard W8A8 FP8 model
 and FP8 KV-cache-cast units. Both keep patch embedding and vision-attention BMM operands in high
 precision. The shared visual snippet lives under `qwen3_vl`; thin wrappers remain discoverable
@@ -485,7 +486,10 @@ checkpoint's** quant config verbatim:
   and the KV cache use FP8. It uses max calibration.
 - **`models/MiniMaxAI/MiniMax-M2.7/ptq/nvfp4_experts_only-kv_fp8_cast`** reproduces
   `nvidia/MiniMax-M2.7-NVFP4` with max-calibrated NVFP4 W4A4 experts (block size
-  16) and FP8 KV-cache cast mode; attention projections, router, and LM head stay BF16.
+  16) and FP8 KV-cache cast mode, supporting both `block_sparse_moe.experts` and
+  `mlp.experts` layouts, including fused experts. Attention projections, router,
+  and LM head are excluded from additional quantization: the source checkpoint
+  stores attention weights in FP8, router weights in FP32, and LM-head weights in BF16.
 - **`models/Qwen/Qwen3.8-27B/ptq/nvfp4_w4a4_mlp_fp8_attn_local_hessian`**
   reproduces NVFP4 W4A4 mixed precision quantization recipe used for `nvidia/Qwen3.8-27B-NVFP4`:
   MLP projections and `lm_head` use NVFP4 W4A4, self-attention and

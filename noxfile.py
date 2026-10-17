@@ -187,13 +187,11 @@ def _install_built_from_source(session, *names):
     session.run("python", "-m", "pip", "install", *wheels)
 
 
-# Container: nvcr.io/nvidia/pytorch:26.01-py3 or later
+# Container: nvcr.io/nvidia/pytorch:26.07-py3 or later with CUDA 13
 @nox.session(venv_backend="none")
 def gpu(session):
     _install_built_from_source(session, "fast_hadamard_transform")
     session.run("python", "-m", "pip", "install", "-e", ".[all,dev-test,dev-fla]")
-    session.run("python", "-m", "pip", "uninstall", "-y", "cupy-cuda12x")
-    session.run("python", "-m", "pip", "install", "cupy-cuda13x")
     _install_built_from_source(session, "mamba_ssm", "causal_conv1d")
     # Every wheel is built: CI saves the wheelhouse only then, so a run that stopped halfway cannot
     # freeze a partial wheelhouse under the cache key.

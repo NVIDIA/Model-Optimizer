@@ -484,7 +484,9 @@ class ExternalDraftConfig(ModeloptBaseConfig):
             "``tvd`` is total-variation distance between the two untruncated "
             "distributions. ``tvd_deploy`` puts both through the serving filter first "
             "(``external_top_k`` then ``external_top_p``), making it the acceptance the "
-            "deployed pair will see: ``alpha = 1 - TVD``."
+            "deployed pair will see: ``alpha = 1 - TVD``. Sparse data requires one of the "
+            "TVD objectives, since the dump is already a truncated policy and "
+            "``soft_ce`` needs full base logits."
         ),
     )
 

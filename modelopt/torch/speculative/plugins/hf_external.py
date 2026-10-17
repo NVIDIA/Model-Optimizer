@@ -37,7 +37,16 @@ from ..external.conversion import ExternalDraftDMRegistry
 from ..external.external_model import ExternalDraftModel
 from .modeling_final_norm import _maybe_apply_base_final_norm
 
-__all__ = ["HFExternalDraftModel"]
+# Objectives with a sparse implementation: they read only the teacher's stored
+# top-k policy. soft_ce needs full teacher logits and so cannot run on that data.
+# main.py gates data.sparse_data_path on this, so it must be defined beside the
+# implementations rather than duplicated there.
+# On the sparse path the base's truncation is baked into the dump, so both TVD
+# variants are computable there; they differ only in whether the *draft* is put
+# through the serving filter too. soft_ce needs full base logits and is dense-only.
+SPARSE_CAPABLE_LOSSES = ("tvd", "tvd_deploy")
+
+__all__ = ["SPARSE_CAPABLE_LOSSES", "HFExternalDraftModel"]
 
 
 def _train_acc(acc):
@@ -121,6 +130,8 @@ class HFExternalDraftModel(ExternalDraftModel):
         attention_mask=None,
         loss_mask=None,
         base_model_outputs=None,
+        teacher_topk_tok=None,
+        teacher_topk_prob=None,
         **kwargs,
     ):
         """Score the draft against cached base hidden states.
@@ -128,24 +139,32 @@ class HFExternalDraftModel(ExternalDraftModel):
         Only ``base_model_hidden_states`` is consumed; ``aux_hidden_states`` exists in the
         dump for the head-based modes and is not used here.
         """
-        if base_model_outputs is None:
+        sparse = teacher_topk_tok is not None
+        if not sparse and base_model_outputs is None:
             raise ValueError(
                 "External draft training expects offline base_model_outputs in the batch; "
                 "online training against a live base model is not supported."
             )
         draft_out = super().forward(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
-        base_logits = self._teacher_logits(
-            base_model_outputs["base_model_hidden_states"], base_model_outputs
-        )
         if loss_mask is None:
             # Derive from attention_mask so padding is not trained on, matching the
             # other speculative plugins; all-ones only when there is no mask at all.
+            # Both paths default identically: the sparse collator always supplies a mask,
+            # but when it does not, training on padding is as wrong here as it is there.
             loss_mask = (
                 attention_mask.clone().detach()
                 if attention_mask is not None
                 else torch.ones_like(input_ids)
             ).to(draft_out.logits.dtype)
-        loss, acc = self.compute_loss(draft_out.logits, base_logits, loss_mask)
+        if sparse:
+            loss, acc = self.compute_sparse_loss(
+                draft_out.logits, teacher_topk_tok, teacher_topk_prob, loss_mask
+            )
+        else:
+            base_logits = self._teacher_logits(
+                base_model_outputs["base_model_hidden_states"], base_model_outputs
+            )
+            loss, acc = self.compute_loss(draft_out.logits, base_logits, loss_mask)
         draft_out.loss = loss
         if acc is not None:
             draft_out.train_acc = _train_acc(acc)
@@ -270,6 +289,70 @@ class HFExternalDraftModel(ExternalDraftModel):
             p = p * torch.zeros_like(keep).scatter(-1, idx, keep)
         return p / p.sum(-1, keepdim=True).clamp_min(1e-9)
 
+    def _draft_probs(self, draft_logits):
+        """The draft's distribution under the configured objective.
+
+        ``tvd_deploy`` puts the draft through the serving filter so the loss is the
+        acceptance the deployed pair will see; the other objectives use it unfiltered.
+        Shared so the two loss paths cannot drift apart on which filter they applied.
+        """
+        if self.external_loss == "tvd_deploy":
+            return self._deployment_probs(draft_logits, self.external_top_k, self.external_top_p)
+        return torch.softmax(draft_logits.float(), dim=-1)
+
+    @staticmethod
+    def _top1_accuracy(teacher_top1, draft_logits, mask):
+        """Fraction of scored positions where the draft's argmax matches the teacher's."""
+        with torch.no_grad():
+            valid = mask.bool()
+            correct = (teacher_top1 == draft_logits.detach().argmax(dim=-1)) & valid
+            return correct.sum().float() / valid.sum().clamp_min(1).float()
+
+    def _tvd_sparse(self, draft_logits, topk_tok, topk_prob):
+        """Plain TVD against the stored teacher policy, over the whole vocabulary.
+
+        The draft is not renormalised over the teacher's support, so probability
+        it places outside that support counts as error. The stored policy is the
+        teacher's deployment distribution and is exactly zero off its own support,
+        which makes the out-of-support term simply ``1 - sum(q_topk)``.
+        """
+        p = topk_prob / topk_prob.sum(-1, keepdim=True).clamp_min(1e-9)
+        q = self._draft_probs(draft_logits).gather(-1, topk_tok)
+        # A ragged dump is padded to a rectangular width, and the pad slots must not
+        # charge the draft again for a token the row already holds. Pads identify
+        # themselves: both builder paths zero-initialise, so a padded slot is exactly
+        # one with zero stored probability. Keying on that rather than on id equality
+        # needs no assumption about builder ordering, and leaves a genuinely repeated
+        # id alone -- an id-equality collapse would drop its second occurrence from q
+        # while p kept both entries.
+        q = q * (topk_prob > 0)
+        # q sums to 1 over its own support, so the mass it placed off the base's
+        # support is whatever is left over.
+        outside = (1.0 - q.sum(-1)).clamp_min(0.0)
+        return 0.5 * ((p - q).abs().sum(-1) + outside)
+
+    def compute_sparse_loss(self, draft_logits, topk_tok, topk_prob, loss_mask):
+        """``tvd`` against a sparse teacher policy; returns ``(loss, accuracy)``.
+
+        The sparse policy is indexed by the token it produced: position ``t`` holds the
+        distribution the base sampled ``input_ids[t]`` from, conditioned on ``< t``. The
+        draft's logits at ``t`` are conditioned on ``<= t`` and predict ``t + 1``, so the
+        draft is shifted one position left before the two are compared. Dropping the shift
+        still yields a falling loss curve -- it just trains against the wrong target.
+        """
+        seq = min(draft_logits.shape[1], topk_tok.shape[1])
+        draft = draft_logits[:, : seq - 1]
+        tok, prob = topk_tok[:, 1:seq], topk_prob[:, 1:seq]
+        mask = loss_mask[:, 1:seq].to(draft_logits.dtype)
+        denom = mask.sum() + 1e-5
+        tvd = self._tvd_sparse(draft, tok, prob)
+        loss = (tvd * mask).sum() / denom
+        accuracy = None
+        if self.external_report_acc:
+            teacher_top1 = tok.gather(-1, prob.argmax(-1, keepdim=True)).squeeze(-1)
+            accuracy = self._top1_accuracy(teacher_top1, draft, mask)
+        return loss, accuracy
+
     def compute_loss(self, draft_logits, base_logits, loss_mask, base_predict_tok=None):
         """Compute the configured objective against the base model's distribution.
 
@@ -294,10 +377,9 @@ class HFExternalDraftModel(ExternalDraftModel):
                 # Both sides through the serving filter, so the loss is the
                 # acceptance the deployed pair will actually see.
                 p = self._deployment_probs(base_logits, self.external_top_k, self.external_top_p)
-                q = self._deployment_probs(draft_logits, self.external_top_k, self.external_top_p)
             else:
                 p = torch.softmax(base_logits.float(), dim=-1)
-                q = torch.softmax(draft_logits.float(), dim=-1)
+            q = self._draft_probs(draft_logits)
             loss = (0.5 * (p - q).abs().sum(-1) * mask).sum() / denom
         else:
             # Identical in form to hf_eagle._eagle_loss so switching modes does not
@@ -308,11 +390,8 @@ class HFExternalDraftModel(ExternalDraftModel):
 
         accuracy = None
         if self.external_report_acc:
-            with torch.no_grad():
-                if base_predict_tok is None:
-                    base_predict_tok = base_logits.argmax(dim=-1)
-                valid = mask.bool()
-                correct = (base_predict_tok == draft_logits.detach().argmax(dim=-1)) & valid
-                accuracy = correct.sum().float() / valid.sum().clamp_min(1).float()
+            if base_predict_tok is None:
+                base_predict_tok = base_logits.argmax(dim=-1)
+            accuracy = self._top1_accuracy(base_predict_tok, draft_logits, mask)
 
         return loss, accuracy
