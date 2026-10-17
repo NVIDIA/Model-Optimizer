@@ -16,7 +16,7 @@
 """Configuration classes for sparse attention optimization."""
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -715,6 +715,61 @@ VSA_DEFAULT = {
 }
 
 
+class SolAttnAttributeConfig(ModeloptBaseConfig):
+    """Sol-Attn attribute configuration for image and video diffusion models."""
+
+    method: Literal["sol_attn"] = ModeloptField(
+        default="sol_attn",
+        title="Sparse attention method.",
+        description="Must be 'sol_attn' for Sol-Attn.",
+    )
+
+    enable: bool = ModeloptField(
+        default=True,
+        title="Enable Sol-Attn.",
+        description="If True, enables Sol-Attn. If False, bypasses sparsity.",
+    )
+
+    tau: float = ModeloptField(
+        default=1.0,
+        title="Routing threshold multiplier.",
+        description=(
+            "KV blocks scoring above mean + tau * std are computed exactly; the rest are "
+            "approximated. Higher values select fewer exact blocks (more sparsity)."
+        ),
+    )
+
+    thresh_type: Literal["diag", "exact"] = ModeloptField(
+        default="diag",
+        title="Routing threshold type.",
+        description="'diag' uses a diagonal-covariance threshold; 'exact' the full covariance.",
+    )
+
+    kv_splits: Literal["auto", 1, 2, 4] = ModeloptField(
+        default="auto",
+        title="KV splits.",
+        description=(
+            "KV splits for the SM90 CuTe kernel. 'auto' uses 4 for SM90 sequences of at "
+            "least 65,536 tokens and 1 otherwise; other backends require 1."
+        ),
+    )
+
+    collect_stats: bool = ModeloptField(
+        default=False,
+        title="Collect statistics.",
+        description="Whether to count Sol-Attn calls per layer during forward.",
+    )
+
+
+# Pre-defined Sol-Attn configuration for diffusion models.
+SOL_ATTN_DEFAULT = {
+    "sparse_cfg": {
+        "*attn*": {"method": "sol_attn", "tau": 1.0, "enable": True},
+        "default": {"enable": False},
+    },
+}
+
+
 # Default N:M sparse softmax configuration
 SPARSE_SOFTMAX_DEFAULT = {
     "sparse_cfg": {
@@ -779,10 +834,12 @@ __all__ = [
     "SKIP_SOFTMAX_DEFAULT",
     "SKIP_SOFTMAX_TRITON_CALIB",
     "SKIP_SOFTMAX_TRITON_DEFAULT",
+    "SOL_ATTN_DEFAULT",
     "SPARSE_SOFTMAX_DEFAULT",
     "VSA_DEFAULT",
     "CalibrationConfig",
     "FlashSkipSoftmaxConfig",
+    "SolAttnAttributeConfig",
     "SparseAttentionAttributeConfig",
     "SparseAttentionCfgType",
     "SparseAttentionConfig",

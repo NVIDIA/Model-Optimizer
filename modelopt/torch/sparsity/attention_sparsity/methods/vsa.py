@@ -64,6 +64,8 @@ class VSA(SparseAttentionMethod):
         - Input tensors must be 4D: [batch, heads, seq_len, dim]
     """
 
+    patches_sdpa = True
+
     def __init__(self, method_config: dict | None = None):
         """Initialize VSA method.
 
@@ -235,6 +237,14 @@ class VSA(SparseAttentionMethod):
 
         # Extract non-padded tokens and reverse order
         return tensor[:, :, non_pad_index][:, :, reverse_indices]
+
+    def can_replace_sdpa(self, query, key, value, **sdpa_kwargs) -> bool:
+        """Self-attention whose length matches the configured video shape."""
+        return (
+            self.video_shape is not None
+            and query.shape[2] == key.shape[2]
+            and query.shape[2] == math.prod(self.video_shape)
+        )
 
     def forward_attention(
         self,

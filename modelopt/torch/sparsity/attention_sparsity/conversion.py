@@ -27,6 +27,7 @@ from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
 from modelopt.torch.utils import atomic_print, get_unwrapped_name
 
 from .config import SparseAttentionConfig
+from .methods import get_sparse_method
 from .plugins import register_custom_model_plugins_on_the_fly
 from .sparse_attention import SparseAttentionModule, SparseAttentionRegistry
 from .utils import get_named_sparse_attention_modules, get_sparse_attention_modules
@@ -70,9 +71,9 @@ def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) ->
     - ``backend="pytorch"`` (default): sets ``attn_implementation="eager"`` so that
       softmax-patching methods (e.g. skip-softmax) work correctly.  FlashAttention
       and SDPA bypass ``F.softmax``, so eager is required.
-    - ``method="vsa"``: no-op. VSA patches ``F.scaled_dot_product_attention``
-      directly in ``SparseAttentionModule.forward()``, so no ``attn_implementation``
-      change is needed.
+    - SDPA-replacing methods (``"vsa"``, ``"sol_attn"``): no-op. They patch
+      ``F.scaled_dot_product_attention`` directly in ``SparseAttentionModule.forward()``,
+      so no ``attn_implementation`` change is needed.
 
     This is called automatically during ``mtsa.sparsify()`` so users never need
     to manually set ``attn_implementation``.
@@ -82,21 +83,22 @@ def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) ->
     # Collect methods and backends only from layer configs (identified by having a "method" key).
     # Other dict entries (e.g. "calibration") are not layer configs.
     layer_cfgs = [v for v in sparse_cfg.values() if isinstance(v, dict) and "method" in v]
-    methods = {v.get("method") for v in layer_cfgs}
+    methods = {v["method"] for v in layer_cfgs}
     backends = {v.get("backend", "pytorch") for v in layer_cfgs}
 
-    # VSA patches F.scaled_dot_product_attention directly — it does not change
-    # attn_implementation.  Skip the rest for VSA-only configs.
-    if methods == {"vsa"}:
+    # SDPA-replacing methods do not change attn_implementation; skip the rest for them.
+    sdpa_methods = {m for m in methods if get_sparse_method(m).patches_sdpa}
+    if methods and methods == sdpa_methods:
         return
 
-    # Reject mixed VSA + non-VSA configs (VSA patches SDPA globally per-module,
-    # while softmax-patching methods need attn_implementation="eager").
-    non_vsa_methods = methods - {"vsa"}
-    if "vsa" in methods and non_vsa_methods:
+    # Reject mixing them with softmax-patching or triton methods, which need a different
+    # attn_implementation.
+    other_methods = methods - sdpa_methods
+    if sdpa_methods and other_methods:
         raise ValueError(
-            f"Cannot mix VSA with other sparse attention methods ({non_vsa_methods}). "
-            f"VSA patches F.scaled_dot_product_attention, which is incompatible "
+            f"Cannot mix SDPA-replacing methods {sdpa_methods} with other sparse attention "
+            f"methods ({other_methods}). "
+            f"They patch F.scaled_dot_product_attention, which is incompatible "
             f"with softmax-patching or triton methods."
         )
 

@@ -339,15 +339,16 @@ class TestSetAttnImplementation:
         # Should remain eager — VSA patches SDPA directly
         assert model.config._attn_implementation == "eager"
 
-    def test_mixed_vsa_and_non_vsa_raises(self):
-        """VSA + non-VSA methods are rejected."""
+    @pytest.mark.parametrize("sdpa_method", ["vsa", "sol_attn"])
+    def test_mixed_sdpa_and_softmax_methods_raises(self, sdpa_method):
+        """SDPA-replacing + softmax-patching methods are rejected."""
         model = type("M", (), {"config": None})()
         config = type("Cfg", (), {"sparse_cfg": {}})()
         config.sparse_cfg = {
-            "layer1": {"method": "vsa"},
+            "layer1": {"method": sdpa_method},
             "layer2": {"method": "flash_skip_softmax", "backend": "pytorch"},
         }
-        with pytest.raises(ValueError, match="Cannot mix VSA"):
+        with pytest.raises(ValueError, match="Cannot mix SDPA-replacing methods"):
             _set_attn_implementation(model, config)
 
 

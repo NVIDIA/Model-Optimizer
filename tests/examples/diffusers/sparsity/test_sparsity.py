@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for skip-softmax sparse attention on Wan 2.2 (examples/diffusers/sparsity/).
+"""Tests for sparse attention on Wan 2.2 (examples/diffusers/sparsity/).
 
 Uses a tiny Wan 2.2 model (dual transformer, 2 layers, hidden_dim=24) created
 from scratch. Tests run the wan22_skip_softmax.py example script in baseline,
@@ -106,6 +106,23 @@ def test_wan22_skip_softmax_threshold(tiny_wan22_path, tmp_path):
         "test",
         "--output",
         str(tmp_path / "skip_softmax_threshold.mp4"),
+        *_TINY_ARGS,
+    ]
+    run_example_command(cmd, EXAMPLE_PATH)
+
+
+def test_wan22_sol_attn(tiny_wan22_path, tmp_path):
+    """Sol-Attn on self-attention; tiny heads (dim != 128) exercise the dense fallback."""
+    pytest.importorskip("sol_attn")
+    cmd = [
+        "python",
+        "wan22_sol_attn.py",
+        "--model-path",
+        tiny_wan22_path,
+        "--prompt",
+        "test",
+        "--output",
+        str(tmp_path / "sol_attn.mp4"),
         *_TINY_ARGS,
     ]
     run_example_command(cmd, EXAMPLE_PATH)
