@@ -53,7 +53,7 @@ jobs:
             timeout: 15
             container_image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20
           - example: gpu_vllm
-            timeout: 15
+            timeout: 20
             container_image: docker.io/vllm/vllm-openai:v0.30.0
     runs-on: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
     timeout-minutes: ${{ matrix.timeout }}
