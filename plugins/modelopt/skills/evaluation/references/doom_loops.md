@@ -8,12 +8,14 @@ vLLM ≥ 0.17.0 ends such a request through the per-request `repetition_detectio
 - **Suspected** (under a long `max_new_tokens` a canary runs far longer than its
   sample count implies, a few requests stay `Running` after the rest finish, or
   `finish_reason: length` responses end in one block repeated verbatim): show the
-  evidence and ask first, since it changes the eval protocol.
+  evidence and ask first, since it changes the eval protocol. Long but varied
+  reasoning, e.g. from a high reasoning effort, is not a loop.
 
 ## Config
 
-Add beside the existing entries in the top-level
-`target.api_endpoint.adapter_config.params_to_add` (nel-next: `proxy.extra_body`):
+Add beside the existing entries in
+`evaluation.nemo_evaluator_config.target.api_endpoint.adapter_config.params_to_add`
+(nel-next: `services.<service>.proxy.extra_body`):
 
 ```yaml
             repetition_detection:
@@ -22,25 +24,26 @@ Add beside the existing entries in the top-level
               min_count: 3            # back-to-back copies that end the request
 ```
 
-On `ns_aa_lcr`, override `max_pattern_size: 1024` in the task's own `adapter_config`:
-its loops restate paragraphs up to ~4K tokens long. Confirm every task's values in
-the dry-run's resolved config. A hit ends the whole request with
-`finish_reason: "repetition"` and no answer.
+AA-LCR loops restate paragraphs up to ~4K tokens long, so on `ns_aa_lcr` set only
+`repetition_detection.max_pattern_size: 1024` at the same path in the task's
+`nemo_evaluator_config`. NEL deep-merges task config over the top level, so the
+other entries survive; check the dry-run's `config_ef.yaml` block. A hit ends the
+whole request with `finish_reason: "repetition"` and no answer.
 
-**Keep these values.** In replays on BF16 and IQ1/IQ2 Qwen3.8-Flash-Next outputs,
-256 caught 98-100% of SciCode/GPQA loops and 1024 caught 91-93% of AA-LCR's, with
-one fire on 7,471 non-looping BF16 generations. Larger sizes add scheduler CPU
-(~1 ms per request per decode step at 4096) and cut more escaped-loop answers.
+**Keep these values**; larger sizes add scheduler CPU (~1 ms per request per decode
+step at 4096) and cut more escaped-loop answers.
 
 ## Guards
 
 - **Backend.** vLLM < 0.17.0 silently ignores the field. Check the image's vLLM
-  version; probe an external endpoint (expect `repetition`, not `length`):
+  version; for an external endpoint, run this probe. `logit_bias` forces one token
+  every step, so the output repeats at once: `repetition` means the field works,
+  `length` means it was ignored.
 
   ```bash
   curl -s "$BASE_URL/v1/completions" -H 'Content-Type: application/json' -d '{
-    "model": "<served_model_name>", "prompt": "ha ha ha ha ha ha", "max_tokens": 64,
-    "temperature": 0, "repetition_detection":
+    "model": "<served_model_name>", "prompt": "Hi", "max_tokens": 16,
+    "temperature": 0, "logit_bias": {"1000": 100}, "repetition_detection":
       {"max_pattern_size": 4, "min_pattern_size": 1, "min_count": 2}}' \
     | jq -r '.choices[0].finish_reason'
   ```
@@ -52,8 +55,5 @@ one fire on 7,471 non-looping BF16 generations. Larger sizes add scheduler CPU
   model would have escaped: IQ1 lost up to 0.75 pt per benchmark at 512 (1.5 pt on
   AA-LCR at 4096), IQ2 at most 0.13 pt, BF16 nothing. Published scores ran without it.
 
-Ending only the reasoning, so the model still answers, needs unmerged vLLM PR #52677
-(server-side `--reasoning-config` `loop_break_*` keys, Model Runner V2 only). It can
-lift a damaged model above its real score: use it only when asked, matched on both
-sides, with a transition phrase before `</think>` in `reasoning_end_str` (a bare
-`</think>` re-entered the loop).
+Ending only the reasoning (unmerged vLLM PR #52677) lets the model still answer but
+can inflate damaged-model scores: use it only when the user asks, matched on both sides.
