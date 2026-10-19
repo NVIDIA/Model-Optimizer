@@ -34,19 +34,35 @@ the reasoning leaves no final answer.
 **Keep these values**; larger sizes add scheduler CPU (~1 ms per request per decode
 step at 4096) and cut more escaped-loop answers.
 
+**nemo-skills tasks (`ns_*`) need the hit reported as `length`.** Their litellm client
+rejects `"repetition"` (pydantic `literal_error`) and retries the request, resampling
+the loop away and inflating the score. Remap it in the serving container, and submit
+with `NEMO_EVALUATOR_TRUST_PRE_CMD=1`:
+
+```yaml
+deployment:
+  pre_cmd: |-
+    F=$(python3 -c 'import os, vllm; print(os.path.join(os.path.dirname(vllm.__file__), "v1", "engine", "__init__.py"))')
+    sed -i 's/"abort", "error", "repetition")/"abort", "error", "length")/' "$F"
+    grep -q '"error", "length")' "$F" || { echo "finish_reason remap failed"; exit 1; }
+```
+
+A hit then scores as a truncated, unanswered sample, like one at `max_new_tokens`
+(`length` below the cap). Confirm the canary's client logs have no `literal_error`.
+
 ## Guards
 
 - **Backend.** vLLM < 0.17.0 silently ignores the field. Check the image's vLLM
   version; for an external endpoint, run this probe. `logit_bias` forces one token
-  every step, so the output repeats at once: `repetition` means the field works,
-  `length` means it was ignored.
+  every step, so the output repeats at once: `repetition_detected` means the field
+  works (remapped or not), `null` means it was ignored.
 
   ```bash
   curl -s "$BASE_URL/v1/completions" -H 'Content-Type: application/json' -d '{
     "model": "<served_model_name>", "prompt": "Hi", "max_tokens": 16,
     "temperature": 0, "logit_bias": {"1000": 100}, "repetition_detection":
       {"max_pattern_size": 4, "min_pattern_size": 1, "min_count": 2}}' \
-    | jq -r '.choices[0].finish_reason'
+    | jq -r '.choices[0].stop_reason'
   ```
 
   SGLang and TRT-LLM don't support it: tell the user and don't add the field.
