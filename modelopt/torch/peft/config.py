@@ -18,7 +18,7 @@
 import importlib
 import inspect
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import torch.nn.init as init
 from pydantic import PlainSerializer, WithJsonSchema, field_validator
@@ -88,6 +88,34 @@ class PEFTAttributeConfig(ModeloptBaseConfig):
         description="Initializer from ``torch.nn.init`` (in-place; name ends with ``\\_``).",
     )
 
+    lora_dtype: str | None = ModeloptField(
+        default=None,
+        title="LoRA factor dtype",
+        description=(
+            "Dtype string for the LoRA factor tensors, independent of the base layer "
+            "(e.g. ``'bf16'`` to pin a BF16 sidecar on top of a fake-quantized base). "
+            "One of ``'bf16'``, ``'fp16'``, ``'fp32'``, or the equivalent long forms "
+            "``'bfloat16'``, ``'float16'``, ``'float32'``. "
+            "``None`` (default) inherits from the wrapped layer's parameter dtype."
+        ),
+    )
+
+    lora_init_method: Literal["kaiming_zeros", "svdquant"] = ModeloptField(
+        default="kaiming_zeros",
+        title="LoRA initialization method",
+        description=(
+            "How to seed the LoRA factor tensors. "
+            "``'kaiming_zeros'`` (default) honors ``lora_a_init`` / ``lora_b_init`` and "
+            "matches the legacy behavior. "
+            "``'svdquant'`` seeds the factors from a rank-r SVD of the quantization residual "
+            "``W_fp - quant(W_fp)``, requiring the wrapped layer to have an attached "
+            "``weight_quantizer`` (i.e. ``mtq.quantize`` must run first). If no quantizer is "
+            "present, ``'svdquant'`` falls back to zero-init on both factors and emits a "
+            "warning. Currently honored by the TE-grouped MoE plugin "
+            "(``modelopt/torch/peft/lora/plugins/megatron_moe.py``)."
+        ),
+    )
+
     @field_validator("lora_a_init", "lora_b_init", mode="before")
     @classmethod
     def _parse_init_callable(cls, v):
@@ -142,6 +170,26 @@ class PEFTAttributeConfig(ModeloptBaseConfig):
         if v <= 0:
             raise ValueError("scale must be a positive number")
         return v
+
+    @field_validator("lora_dtype")
+    @classmethod
+    def validate_lora_dtype(cls, v):
+        """Validate and normalize lora_dtype to one of the canonical short forms."""
+        if v is None:
+            return v
+        aliases = {
+            "bf16": "bf16",
+            "bfloat16": "bf16",
+            "fp16": "fp16",
+            "float16": "fp16",
+            "fp32": "fp32",
+            "float32": "fp32",
+        }
+        if v not in aliases:
+            raise ValueError(
+                f"lora_dtype must be one of {sorted(set(aliases))} or None, got {v!r}"
+            )
+        return aliases[v]
 
 
 # Type alias for adapter configuration
