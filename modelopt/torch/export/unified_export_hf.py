@@ -1750,6 +1750,14 @@ def unplaced_keys_for(model: nn.Module, ckpt: "str | Path") -> list[str]:
     module scope. Where those are absent the recorded set stands alone -- degraded, but no worse
     than before this function existed.
     """
+    # Local import breaks the cycle: layerwise_export imports this module.
+    from .layerwise_export import LAYERWISE_EXPORTER_ATTR
+
+    exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
+    snapshot = getattr(exporter, "_source_key_snapshot", None)
+    if snapshot is not None and snapshot[0] == str(ckpt):
+        return list(snapshot[1])
+
     recorded = getattr(model, "_modelopt_unplaced_source_keys", None) or []
     structural: list[str] = []
     try:
