@@ -32,18 +32,22 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
 # hf_streaming_dataset imports LabelSmoother at module scope.
 pytest.importorskip("transformers")
 httpx = pytest.importorskip("httpx")
 
+from modelopt.torch.speculative.eagle.utils import EagleOfflineDataCollator
 from modelopt.torch.speculative.plugins import hf_streaming_dataset
 from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
     EagleVllmStreamingConfig,
     EagleVllmStreamingDataset,
+    PretokenizedEagleVllmStreamingDataset,
     StreamingConfig,
     StreamingDataset,
 )
+from modelopt.torch.utils.plugins.transformers_dataset import load_packed_dataset
 
 
 def _entries(n: int) -> list[dict]:
@@ -543,3 +547,57 @@ def test_answer_only_loss_rejects_slow_tokenizer_without_recovery():
     tok.convert_tokens_to_ids.return_value = None  # defeat recovery detect()s
     with pytest.raises(RuntimeError, match="fast tokenizer"):
         hf_streaming_dataset._tokenize_with_loss_mask(tok, _CONV, answer_only_loss=True)
+
+
+@pytest.mark.parametrize("shift_labels", [False, True])
+@pytest.mark.parametrize("append_decode_token", [False, True])
+def test_pretokenized_streaming_preserves_final_token_and_masks(
+    tmp_path, monkeypatch, shift_labels, append_decode_token
+):
+    tokenizer = MagicMock()
+    save_file(
+        {
+            "input_ids": torch.tensor([11, 12, 13, 14], dtype=torch.int32),
+            "loss_mask": torch.tensor([0, 0, 1, 1], dtype=torch.uint8),
+            "offsets": torch.tensor([0, 4]),
+        },
+        str(tmp_path / "shard_00000.safetensors"),
+    )
+    entries = load_packed_dataset(tmp_path)
+    config = EagleVllmStreamingConfig(server_urls=["http://unused"], model="unused", max_seq_len=4)
+    dataset = PretokenizedEagleVllmStreamingDataset(
+        entries, tokenizer, config, shift_labels=shift_labels
+    )
+    assert dataset.entries is entries
+
+    def fetch(sample):
+        assert sample["token_ids"] == [11, 12, 13, 14]
+        ids = torch.tensor(sample["token_ids"] + ([15] if append_decode_token else []))
+        return {
+            "token_ids": ids,
+            "hidden_states": torch.zeros(len(ids), 2, 3),
+            "loss_mask": dataset._align_loss_mask(sample["loss_mask"], len(ids)),
+        }
+
+    monkeypatch.setattr(dataset, "_fetch", fetch)
+    row = dataset[0]
+    tokenizer.apply_chat_template.assert_not_called()
+    assert row["loss_mask"].tolist() == [0, 0, 1, 1] + ([0] if append_decode_token else [])
+    expected = [-100, -100, 13, 14] + ([-100] if append_decode_token else [])
+    if shift_labels:
+        expected = [*expected[1:], -100]
+    assert row["labels"].tolist() == expected
+    batch = EagleOfflineDataCollator(train_len=6, label_pad_token_id=-100)([row])
+    assert batch["labels"][0].tolist() == expected + [-100] * (6 - len(expected))
+    assert batch["loss_mask"][0, 4:].sum() == 0
+
+
+def test_pretokenized_streaming_truncates_before_fetch_and_rejects_left_padding():
+    config = EagleVllmStreamingConfig(server_urls=["http://unused"], model="unused", max_seq_len=3)
+    dataset = PretokenizedEagleVllmStreamingDataset([{}], MagicMock(), config)
+    sample = dataset._tokenize_entry({"input_ids": [1, 2, 3, 4], "loss_mask": [0, 1, 1, 1]})
+    assert sample["token_ids"] == [1, 2, 3]
+    assert sample["loss_mask"].tolist() == [0, 1, 1]
+    assert dataset._tokenize_entry({"input_ids": [1, 2, 3, 4], "loss_mask": [0, 0, 0, 1]}) is None
+    with pytest.raises(ValueError, match="right padding"):
+        dataset._tokenize_entry({"input_ids": [1, 2], "attention_mask": [0, 1]})

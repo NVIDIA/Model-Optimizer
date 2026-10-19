@@ -61,12 +61,10 @@ class DataArguments(BaseModel):
     mode: Literal["online", "offline", "streaming", "packed"] | None = None
     data_path: str | None = None
     offline_data_path: str | None = None
-    # A ``datasets.save_to_disk`` directory of FIXED-LENGTH blocks with an ``input_ids``
-    # column (``labels`` optional; defaults to ``input_ids``). This is the pretraining-style
-    # path: raw corpus text has no conversation structure, so the chat-template collator the
-    # online path uses cannot express it. Packing stays the caller's job on purpose -- it is
-    # expensive, it must be byte-identical across compared runs, and tokenizer policy does
-    # not belong to this library.
+    # Pre-tokenized input: a datasets.save_to_disk directory or Falconer safetensors
+    # shards with flat input_ids, binary loss_mask, and sample offsets. Combine with
+    # streaming_server_url to fetch hidden states from the server; otherwise the
+    # trainer runs the base model. Tokenization stays outside this library.
     packed_data_path: str | None = None
     lazy_preprocess: bool = True
     draft_vocab_cache: str | None = None
@@ -97,10 +95,14 @@ class DataArguments(BaseModel):
         has_offline = self.offline_data_path is not None
         has_streaming = self.streaming_server_url is not None
         has_packed = self.packed_data_path is not None
-        if sum((has_offline, has_streaming, has_packed)) > 1:
+        if has_packed and self.data_path is not None:
             raise ValueError(
-                "ambiguous: set only one of data.offline_data_path / "
-                "data.streaming_server_url / data.packed_data_path"
+                "ambiguous: data.packed_data_path cannot be combined with data.data_path"
+            )
+        if has_offline and (has_streaming or has_packed):
+            raise ValueError(
+                "ambiguous: data.offline_data_path cannot be combined with "
+                "data.streaming_server_url or data.packed_data_path"
             )
         self.mode = (
             "offline"

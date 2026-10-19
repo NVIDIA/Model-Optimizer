@@ -18,9 +18,11 @@
 GPU-dependent tests (training forward, module forward) are in tests/gpu/.
 """
 
+import importlib
 import json
 import logging
 import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -31,12 +33,14 @@ from _test_utils.torch.transformers_models import (
     get_tiny_llama,
     tf_modelopt_state_and_output_tester,
 )
+from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM
 from transformers.modeling_layers import GradientCheckpointingLayer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
 import modelopt.torch.speculative.plugins.hf_dflash as hf_dflash
+from modelopt.recipe.config import ModelOptDFlashRecipe
 from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashAttention,
     DFlashModule,
@@ -44,12 +48,16 @@ from modelopt.torch.speculative.plugins.hf_dflash import (
     _dpace_position_weights,
     build_target_layer_ids,
 )
+from modelopt.torch.speculative.plugins.hf_training_args import DataArguments
 from modelopt.torch.speculative.plugins.master_weight_adamw import (
     MasterWeightAdamW,
     VerifyMasterWeightsCallback,
 )
 from modelopt.torch.speculative.utils import AcceptanceRateValidation
-from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
+from modelopt.torch.utils.plugins.transformers_dataset import (
+    LanguageDataCollator,
+    PackedBlockDataCollator,
+)
 
 BLOCK_SIZE = 4
 NUM_DRAFT_LAYERS = 2
@@ -1305,3 +1313,107 @@ def test_packed_mode_is_not_treated_as_offline():
     src = Path(__file__).parents[5] / "examples/speculative_decoding/main.py"
     line = next(ln for ln in src.read_text().splitlines() if "use_offline_training =" in ln)
     assert re.search(r'not in \(\s*"online",\s*"packed"\s*\)', line), line
+
+
+@pytest.mark.parametrize("offline", [False, True])
+def test_packed_streaming_config_modes(offline):
+    args = {
+        "packed_data_path": "/unused",
+        "streaming_server_url": "http://unused",
+        "streaming_model_name": "unused",
+    }
+    if offline:
+        with pytest.raises(ValueError, match="ambiguous"):
+            DataArguments(**args, offline_data_path="/unused")
+    else:
+        assert DataArguments(**args).mode == "streaming"
+        with pytest.raises(ValueError, match="ambiguous"):
+            DataArguments(**args, data_path="/unused/chat.jsonl")
+        with pytest.raises(ValueError, match="streaming_model_name"):
+            DataArguments(packed_data_path="/unused", streaming_server_url="http://unused")
+
+
+@pytest.mark.parametrize("train_base", [False, True])
+def test_packed_masks_reach_dflash_loss_and_base_lm_labels(train_base, monkeypatch):
+    torch.manual_seed(0)
+    model = get_tiny_llama(num_hidden_layers=4)
+    config = get_dflash_config()
+    config["dflash_freeze_base_model"] = not train_base
+    config["dflash_base_lm_loss_alpha"] = 1.0 if train_base else 0.0
+    mtsp.convert(model, [("dflash", config)])
+    rows = [{"input_ids": [1] * SEQ_LEN, "loss_mask": [0] * 8 + [1] * 8}]
+    batch = PackedBlockDataCollator()(rows)
+    observed = []
+    original = model._sample_anchor_positions
+
+    def capture(seq_len, loss_mask, device):
+        observed.append(loss_mask.detach().clone())
+        return original(seq_len, loss_mask, device)
+
+    monkeypatch.setattr(model, "_sample_anchor_positions", capture)
+    assert batch["labels"][0, :8].eq(-100).all()
+    assert batch["labels"][0, -1] == 1
+    output = model(**batch)
+    assert torch.isfinite(output.loss)
+    assert observed and torch.equal(observed[0], batch["loss_mask"].float())
+    if train_base:
+        output.loss.backward()
+        assert any(
+            parameter.grad is not None and parameter.grad.abs().sum() > 0
+            for name, parameter in model.named_parameters()
+            if "dflash_module" not in name
+        )
+
+
+def test_packed_streaming_training_entrypoint_and_data_module(tmp_path, monkeypatch):
+    example_dir = Path(__file__).resolve().parents[5] / "examples" / "speculative_decoding"
+    monkeypatch.syspath_prepend(str(example_dir))
+    main = importlib.import_module("examples.speculative_decoding.main")
+    save_file(
+        {
+            "input_ids": torch.tensor([11, 12, 13]),
+            "loss_mask": torch.tensor([0, 1, 1]),
+            "offsets": torch.tensor([0, 3]),
+        },
+        str(tmp_path / "shard_00000.safetensors"),
+    )
+    recipe = ModelOptDFlashRecipe(
+        data={
+            "packed_data_path": str(tmp_path),
+            "streaming_server_url": "http://unused",
+            "streaming_model_name": "unused",
+        }
+    )
+    monkeypatch.setattr(main, "_parse_cli", lambda: ("unused.yaml", False, []))
+    monkeypatch.setattr(main, "load_recipe", lambda *args, **kwargs: recipe)
+    monkeypatch.setattr(
+        main,
+        "HfTrainingArguments",
+        lambda **kwargs: SimpleNamespace(cp_size=1, output_dir=str(tmp_path)),
+    )
+    monkeypatch.setattr(main, "init_distributed_env", lambda args: None)
+    monkeypatch.setattr(main, "is_master", lambda: False)
+
+    def checkpoint(*args):
+        raise RuntimeError("source validation complete")
+
+    monkeypatch.setattr(main, "get_last_checkpoint", checkpoint)
+    with pytest.raises(RuntimeError, match="source validation complete"):
+        main.train()
+    module = main.make_speculative_data_module(
+        MagicMock(pad_token_id=0), recipe.data, train_len=4, shift_labels=False
+    )
+    dataset = module["train_dataset"]
+
+    def fetch(sample):
+        return {
+            "token_ids": torch.tensor(sample["token_ids"]),
+            "loss_mask": sample["loss_mask"],
+            "hidden_states": torch.zeros(3, 2, 8),
+        }
+
+    monkeypatch.setattr(dataset, "_fetch", fetch)
+    batch = module["data_collator"]([dataset[0]])
+    assert batch["input_ids"].tolist() == [[11, 12, 13, 0]]
+    assert batch["labels"].tolist() == [[-100, 12, 13, -100]]
+    assert batch["loss_mask"].tolist() == [[0, 1, 1, 0]]

@@ -185,9 +185,10 @@ class OfflineSupervisedDataset(Dataset):
 class EagleOfflineDataCollator:
     """Data collator that truncates or pads data for offline training."""
 
-    def __init__(self, train_len):
-        """Initialize with the target sequence length for truncation/padding."""
+    def __init__(self, train_len, label_pad_token_id=0):
+        """Set the target sequence length and label padding value."""
         self.train_len = train_len
+        self.label_pad_token_id = label_pad_token_id
 
     def _pad_or_truncate(self, x: torch.Tensor, length: int, dim: int = 0):
         """Pad or truncate a tensor to length along a given dimension."""
@@ -212,6 +213,11 @@ class EagleOfflineDataCollator:
             k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
             for k in ["input_ids", "attention_mask", "loss_mask", "labels"]
         }
+
+        if self.label_pad_token_id != 0:
+            base_batch["labels"].masked_fill_(
+                base_batch["attention_mask"] == 0, self.label_pad_token_id
+            )
 
         base_model_outputs = {
             k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])

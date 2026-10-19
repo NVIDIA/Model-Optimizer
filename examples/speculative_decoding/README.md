@@ -132,6 +132,38 @@ Once we finish dumping hidden states, launch offline training pointing to the hi
 
 For large base models, you can stream hidden states from a live `vllm serve` instead of dumping them to disk: a co-located server produces the base-model hidden states on the fly and sends them to the trainer over NIXL RDMA, scaling to multiple nodes (dedicated serve replicas + DDP trainers). See the launcher examples, e.g. [Kimi-K2.5 streaming EAGLE3](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_eagle3_multi_node.yaml) and [streaming DFlash](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_dflash_multi_node.yaml).
 
+### Pre-tokenized inputs and loss masks
+
+Set `data.packed_data_path` to use tokenized samples without a chat template.
+The directory can contain a Hugging Face dataset written with `datasets.save_to_disk`.
+Each row needs `input_ids`. Rows can include `labels`, `attention_mask`, and a binary `loss_mask`.
+DFlash uses unshifted labels. EAGLE3 uses next-token labels. A zero mask value excludes the token from supervision.
+Existing `labels=-100` exclusions remain excluded. The collator pads shorter rows and truncates longer rows on the right.
+
+Falconer directories can contain `shard_*.safetensors` files. Each shard needs these one-dimensional tensors:
+
+- `input_ids`: nonnegative integer token IDs.
+- `loss_mask`: binary values aligned with `input_ids`.
+- `offsets`: integer sample boundaries, starting at zero and ending at the token count.
+
+Each offset interval defines one nonempty sample. Extra tensors, such as `source_dataset_ids`, are ignored.
+If `manifest.json` exists, its `shards` list specifies shard order. Relative paths can reference sibling directories.
+Without a manifest, the loader sorts the shard names. The loader reads each sample when requested.
+
+Add the existing streaming settings to fetch hidden states for these tokens from vLLM:
+
+```yaml
+data:
+  packed_data_path: /path/to/falconer/preprocessed
+  streaming_server_url: http://server:8000
+  streaming_model_name: base-model-name
+```
+
+The streaming path applies `training.training_seq_len` before requesting hidden states.
+Supplied masks control supervision regardless of `training.answer_only_loss`.
+Use the base model's tokenizer to prepare the input token IDs.
+The streaming path requires right padding if the saved rows contain an `attention_mask`.
+
 ## Model Validation
 
 For online training checkpoints, we can run in-framework evaluation on MT-bench:

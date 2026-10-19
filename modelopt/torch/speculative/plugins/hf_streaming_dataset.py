@@ -53,11 +53,13 @@ from transformers.trainer_pt_utils import LabelSmoother
 
 from modelopt.torch.utils import print_rank_0, warn_rank_0
 from modelopt.torch.utils.loss_mask import get_loss_mask_recovery
+from modelopt.torch.utils.plugins.transformers_dataset import _packed_sample
 
 __all__ = [
     "EagleFetchPayload",
     "EagleVllmStreamingConfig",
     "EagleVllmStreamingDataset",
+    "PretokenizedEagleVllmStreamingDataset",
     "StreamingConfig",
     "StreamingDataset",
 ]
@@ -220,12 +222,12 @@ class StreamingDataset(Dataset):
             config: Tuning knobs (timeout, answer_only_loss, ...); defaults to
                 ``self.config_cls()``. See :class:`StreamingConfig`.
         """
-        if not entries:
+        if len(entries) == 0:
             raise ValueError("entries is empty")
         self.tokenizer = tokenizer
         self.config = config if config is not None else self.config_cls()
-        # Materialize to a plain list so DataLoader worker processes fork it cheaply.
-        self.entries = list(entries)
+        # Keep map-style sources lazy; packed shards can exceed worker memory.
+        self.entries = entries
         # Per-process consecutive-failure counter for the circuit breaker. Reset to 0
         # on every successful fetch; tripped only by fetch failures (not unfit entries).
         self._consecutive_fail = 0
@@ -611,3 +613,38 @@ class EagleVllmStreamingDataset(StreamingDataset):
             "labels": labels,
             "base_hidden_prenorm": self.config.base_hidden_prenorm,
         }
+
+
+class PretokenizedEagleVllmStreamingDataset(EagleVllmStreamingDataset):
+    """Fetch hidden states for tokenized samples without applying a chat template."""
+
+    def __init__(self, entries, tokenizer, config, shift_labels=False):
+        """Set label alignment for the selected draft algorithm."""
+        super().__init__(entries, tokenizer, config)
+        self.shift_labels = shift_labels
+
+    def _tokenize_entry(self, entry):
+        row = _packed_sample(entry)
+        # Padding must remain at the right because the server receives a contiguous prompt.
+        length = int(row["attention_mask"].sum())
+        if row["attention_mask"][length:].any() or not row["attention_mask"][:length].all():
+            raise ValueError("streaming packed samples require right padding")
+        if self.config.max_seq_len is not None:
+            length = min(length, self.config.max_seq_len)
+        mask = row["loss_mask"][:length]
+        if length == 0 or not mask.any():
+            return None
+        return {
+            "cid": str(entry.get("conversation_id", entry.get("uuid", "packed"))),
+            "token_ids": row["input_ids"][:length].tolist(),
+            "loss_mask": mask,
+        }
+
+    def _format(self, fetched):
+        row = super()._format(fetched)
+        labels = row["input_ids"].clone().masked_fill(~row["loss_mask"].bool(), IGNORE_TOKEN_ID)
+        if self.shift_labels:
+            labels[:-1] = labels[1:].clone()
+            labels[-1] = IGNORE_TOKEN_ID
+        row["labels"] = labels
+        return row

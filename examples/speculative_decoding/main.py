@@ -186,8 +186,14 @@ def train():
 
     if not dry_run and recipe.data.mode == "packed" and not recipe.data.packed_data_path:
         raise ValueError("data.mode='packed' requires data.packed_data_path.")
-    if not dry_run and recipe.data.mode in ("online", "streaming") and not recipe.data.data_path:
-        raise ValueError(f"data.mode={recipe.data.mode!r} requires data.data_path.")
+    if (
+        not dry_run
+        and recipe.data.mode in ("online", "streaming")
+        and not (recipe.data.data_path or recipe.data.packed_data_path)
+    ):
+        raise ValueError(
+            f"data.mode={recipe.data.mode!r} requires data.data_path or data.packed_data_path."
+        )
     if training_args.cp_size > 1:
         patch_ring_attention_for_ttt()
         # accelerate requires an fsdp_plugin when cp_size > 1; the --fsdp launcher flags that

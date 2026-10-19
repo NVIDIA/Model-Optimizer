@@ -42,6 +42,7 @@ from modelopt.torch.utils.plugins.transformers_dataset import (
     PackedBlockDataCollator,
     ShardedDataset,
     VisionLanguageDataCollator,
+    load_packed_dataset,
 )
 
 try:
@@ -98,23 +99,20 @@ def make_speculative_data_module(
         from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
             EagleVllmStreamingConfig,
             EagleVllmStreamingDataset,
+            PretokenizedEagleVllmStreamingDataset,
         )
 
-        # data_path may be a single jsonl, a glob string, or a directory of shards.
-        # HF load_dataset's data_files takes a file/glob/list but NOT a bare directory,
-        # so expand a directory into its sorted *.jsonl files (avoids physically
-        # concatenating large multi-shard corpora and shell-glob fragility).
-        _dp = data_args.data_path
-        if Path(_dp).is_dir():
-            _data_files = sorted(str(p) for p in Path(_dp).glob("*.jsonl"))
-            if not _data_files:
-                raise ValueError(f"No .jsonl files found in directory {_dp}")
-            print_rank_0(f"Loading {len(_data_files)} jsonl shards from directory {_dp}")
+        if data_args.packed_data_path:
+            ds = load_packed_dataset(data_args.packed_data_path)
         else:
-            _data_files = _dp
-        ds = load_dataset("json", data_files=_data_files, split="train")
+            # HF load_dataset accepts files and globs, but not a bare directory.
+            path = Path(data_args.data_path)
+            files = sorted(str(p) for p in path.glob("*.jsonl")) if path.is_dir() else str(path)
+            if not files:
+                raise ValueError(f"No .jsonl files found in directory {path}")
+            ds = load_dataset("json", data_files=files, split="train")
         if data_args.sample_size > 0:
-            ds = ds.select(range(data_args.sample_size))
+            ds = torch.utils.data.Subset(ds, range(min(data_args.sample_size, len(ds))))
         # Map-style dataset: each rank fetches its own DistributedSampler shard.
         # Fetch concurrency comes from the DataLoader's num_workers, not a config knob;
         # shuffling/order is the sampler's job (seeded by training_args.seed).
@@ -126,24 +124,31 @@ def make_speculative_data_module(
             answer_only_loss=answer_only_loss,
             final_aux_is_base_hidden=final_aux_is_base_hidden,
         )
-        train_dataset = EagleVllmStreamingDataset(
-            entries=ds,
-            tokenizer=tokenizer,
-            config=streaming_cfg,
+        if data_args.packed_data_path:
+            train_dataset = PretokenizedEagleVllmStreamingDataset(
+                entries=ds, tokenizer=tokenizer, config=streaming_cfg, shift_labels=shift_labels
+            )
+        else:
+            train_dataset = EagleVllmStreamingDataset(
+                entries=ds, tokenizer=tokenizer, config=streaming_cfg
+            )
+        data_collator = EagleOfflineDataCollator(
+            train_len=train_len, label_pad_token_id=-100 if data_args.packed_data_path else 0
         )
-        data_collator = EagleOfflineDataCollator(train_len=train_len)
 
     elif mode == "packed":
-        # Pretraining-style: a save_to_disk directory of fixed-length tokenized blocks.
-        # No tokenizer and no chat template are involved -- the packing already happened,
-        # deliberately outside this library so it can be done once and shared byte-identically
-        # by runs that are being compared.
-        from datasets import load_from_disk
-
-        train_dataset = load_from_disk(data_args.packed_data_path)
-        train_dataset.set_format(type="torch")
+        # Tokenization stays outside the trainer so runs can reuse identical samples.
+        train_dataset = load_packed_dataset(data_args.packed_data_path)
+        if data_args.sample_size > 0:
+            train_dataset = torch.utils.data.Subset(
+                train_dataset, range(min(data_args.sample_size, len(train_dataset)))
+            )
         print_rank_0(f"Loaded {len(train_dataset)} packed blocks from {data_args.packed_data_path}")
-        data_collator = PackedBlockDataCollator(train_len=train_len)
+        data_collator = PackedBlockDataCollator(
+            train_len=train_len,
+            pad_token_id=getattr(tokenizer, "pad_token_id", None) or 0,
+            shift_labels=shift_labels,
+        )
 
     elif mode == "online":
         train_dataset = ShardedDataset("json", data_files=data_args.data_path)

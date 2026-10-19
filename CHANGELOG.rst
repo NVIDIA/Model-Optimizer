@@ -6,6 +6,10 @@ Changelog
 
 **New Features**
 
+*Speculative Decoding*
+
+- Add Falconer safetensors inputs and binary loss masks through ``data.packed_data_path``. Combine this path with streaming settings to train from remote hidden states without chat-template tokenization.
+
 **Backward Breaking Changes**
 
 **Deprecations**

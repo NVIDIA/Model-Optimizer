@@ -15,14 +15,17 @@
 
 """Processing large data to tokenize for pretraining."""
 
+import bisect
 import copy
 import itertools
 import json
 import os
+from pathlib import Path
 
 import torch
 import transformers
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
+from safetensors import safe_open
 from transformers.trainer_pt_utils import LabelSmoother
 
 from modelopt.torch.utils import print_rank_0
@@ -103,56 +106,149 @@ class ShardedDataset(torch.utils.data.Dataset):
             self._raw_samples = shard
 
 
+def _packed_sample(instance):
+    if "input_ids" not in instance:
+        raise ValueError("packed dataset rows must carry an 'input_ids' column")
+    ids = torch.as_tensor(instance["input_ids"])
+    if ids.ndim != 1 or ids.dtype not in (
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+        torch.uint8,
+    ):
+        raise ValueError("input_ids must be a one-dimensional integer tensor")
+    if ids.numel() == 0 or (ids < 0).any():
+        raise ValueError("input_ids must contain nonnegative token IDs and cannot be empty")
+    labels = torch.as_tensor(instance.get("labels", ids))
+    if labels.shape != ids.shape or labels.dtype not in (
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+        torch.uint8,
+    ):
+        raise ValueError("labels must be an integer tensor matching input_ids")
+    mask = torch.as_tensor(instance.get("loss_mask", torch.ones_like(ids)))
+    attention = torch.as_tensor(instance.get("attention_mask", torch.ones_like(ids)))
+    for name, value in (("loss_mask", mask), ("attention_mask", attention)):
+        if value.shape != ids.shape or not ((value == 0) | (value == 1)).all():
+            raise ValueError(f"{name} must be binary and match input_ids")
+    mask = mask.bool() & attention.bool() & (labels != IGNORE_TOKEN_ID)
+    return {
+        "input_ids": ids.long(),
+        "labels": labels.long().masked_fill(~mask, IGNORE_TOKEN_ID),
+        "loss_mask": mask.long(),
+        "attention_mask": attention.long(),
+    }
+
+
+class PackedSafetensorsDataset(torch.utils.data.Dataset):
+    """Read tokenized samples lazily from Falconer-style safetensors shards."""
+
+    def __init__(self, paths):
+        """Read shard offsets and validate sample boundaries."""
+        self.paths = paths
+        self.offsets = []
+        self.ends = []
+        count = 0
+        for path in paths:
+            with safe_open(path, framework="pt", device="cpu") as shard:
+                offsets = shard.get_tensor("offsets")
+                ids = shard.get_slice("input_ids")
+                mask = shard.get_slice("loss_mask")
+                if offsets.ndim != 1 or offsets.dtype not in (torch.int32, torch.int64):
+                    raise ValueError(f"{path}: offsets must be a one-dimensional integer tensor")
+                if (
+                    offsets.numel() < 2
+                    or ids.get_shape() != mask.get_shape()
+                    or len(ids.get_shape()) != 1
+                    or offsets[0] != 0
+                    or offsets[-1] != ids.get_shape()[0]
+                    or not (offsets[1:] > offsets[:-1]).all()
+                ):
+                    raise ValueError(
+                        f"{path}: invalid offsets or mismatched flat input_ids/loss_mask"
+                    )
+                self.offsets.append(offsets)
+                count += len(offsets) - 1
+                self.ends.append(count)
+
+    def __len__(self):
+        return self.ends[-1]
+
+    def __getitem__(self, index):
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        shard_index = bisect.bisect_right(self.ends, index)
+        sample_index = index - (self.ends[shard_index - 1] if shard_index else 0)
+        start, end = self.offsets[shard_index][sample_index : sample_index + 2].tolist()
+        with safe_open(self.paths[shard_index], framework="pt", device="cpu") as shard:
+            row = _packed_sample(
+                {name: shard.get_slice(name)[start:end] for name in ("input_ids", "loss_mask")}
+            )
+        row["conversation_id"] = f"{shard_index}:{sample_index}"
+        return row
+
+
+def load_packed_dataset(path):
+    """Load Falconer shards or a Hugging Face dataset saved with save_to_disk."""
+    path = Path(path)
+    manifest = path / "manifest.json"
+    if manifest.is_file():
+        with manifest.open() as stream:
+            names = json.load(stream).get("shards")
+        if (
+            not isinstance(names, list)
+            or not names
+            or not all(isinstance(name, str) for name in names)
+        ):
+            raise ValueError("Falconer manifest must contain a nonempty shards list")
+        shards = [path / name for name in names]
+    else:
+        shards = sorted(path.glob("shard_*.safetensors"))
+    if shards:
+        return PackedSafetensorsDataset([str(shard) for shard in shards])
+    dataset = load_from_disk(path)
+    dataset.set_format(type="torch")
+    return dataset
+
+
 class PackedBlockDataCollator:
-    """Collate pre-packed fixed-length blocks for pretraining-style training.
+    """Pad or truncate tokenized samples and preserve their supervision masks."""
 
-    The online collator renders conversations through a chat template. Raw corpus text has
-    no conversation structure, so that path cannot express it -- wrapping documents in
-    pseudo-turns would insert chat tokens into the text and, with ``answer_only_loss``, mask
-    most of it away.
-
-    Blocks are already fixed-length and already tokenized, so collation is a stack. ``labels``
-    defaults to ``input_ids``: for causal LM the shift belongs to the loss, not the data, and
-    the DFlash path shifts there (``shift_labels=not is_dflash``).
-    """
-
-    def __init__(self, train_len: int | None = None):
-        """Initialize the collator.
-
-        Args:
-            train_len: Optional right-truncation target for each block.
-        """
+    def __init__(
+        self, train_len: int | None = None, pad_token_id: int = 0, shift_labels: bool = False
+    ):
+        """Set the optional length limit and padding token ID."""
         self.train_len = train_len
+        self.pad_token_id = pad_token_id
+        self.shift_labels = shift_labels
 
     def __call__(self, instances):
-        """Stack a list of packed blocks into a batch."""
-        import torch
-
-        def column(name, default=None):
-            vals = [inst.get(name, default) for inst in instances]
-            if any(v is None for v in vals):
-                return None
-            out = torch.stack([v if torch.is_tensor(v) else torch.as_tensor(v) for v in vals])
-            # Right-truncate rather than pad: a packed block shorter than train_len would
-            # mean the packer and the trainer disagree, which is worth failing on, but a
-            # longer one is a harmless superset the caller may reuse across lengths.
-            if self.train_len is not None and out.size(1) > self.train_len:
-                out = out[:, : self.train_len]
-            return out
-
-        input_ids = column("input_ids")
-        if input_ids is None:
-            raise ValueError("packed dataset rows must carry an 'input_ids' column")
-        labels = column("labels")
-        if labels is None:
-            labels = input_ids.clone()
-        batch = {
-            "input_ids": input_ids,
-            "labels": labels,
-            "attention_mask": column("attention_mask"),
+        """Return labels with masked and padded positions set to -100."""
+        rows = [_packed_sample(instance) for instance in instances]
+        length = max(row["input_ids"].numel() for row in rows)
+        if self.train_len is not None:
+            length = min(length, self.train_len)
+        padding = {
+            "input_ids": self.pad_token_id,
+            "labels": IGNORE_TOKEN_ID,
+            "attention_mask": 0,
+            "loss_mask": 0,
         }
-        if batch["attention_mask"] is None:
-            batch["attention_mask"] = torch.ones_like(input_ids)
+        batch = {}
+        for name, fill in padding.items():
+            output = torch.full((len(rows), length), fill, dtype=torch.long)
+            for index, row in enumerate(rows):
+                value = row[name][:length]
+                output[index, : value.numel()] = value
+            batch[name] = output
+        if self.shift_labels:
+            batch["labels"][:, :-1] = batch["labels"][:, 1:].clone()
+            batch["labels"][:, -1] = IGNORE_TOKEN_ID
         return batch
 
 
