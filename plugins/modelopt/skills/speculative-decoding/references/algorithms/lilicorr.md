@@ -35,12 +35,13 @@ the `--config` recipe differs.
 | Task | Script | Purpose | Output |
 | --- | --- | --- | --- |
 | task_0 | `common/eagle3/make_dataset.sh` | Build training conversations (Daring-Anteater multi-turn SFT, 50K, `--full-conversations`) | `/scratchspace/data/train.jsonl` |
-| task_1 | `common/specdec/dflash_online_training.sh` | Online train against a live base model, then export | `/scratchspace/lilicorr_bs16` |
+| task_1 | `common/specdec/dflash_online_training.sh` | Online train against a live base model, then export | `<training.output_dir>/exported-checkpoint-{<step>,final}` — `/scratchspace/lilicorr_bs16/...` in the example |
 
-**Online only, and not by convention.** `data.mode: online` is a hard requirement:
-the distractor penalty weights every competing candidate by the target model's own
-logit gap, so a target model has to be in the process. An offline or streaming run
-fails at loss construction rather than training a weaker model.
+**Modes.** The recipe defaults to `data.mode: online`, but offline and streaming
+both work since #2589: the distractor penalty needs the target's logits, and offline
+training reconstructs them from the captured final hidden state rather than reading
+them from a live target. What still fails — at loss construction, not at `modify()` —
+is a run where those logits are unavailable at all.
 
 As committed the example is a short convergence check (`max_steps=2000`,
 1 node x 8 GPUs). The published Qwen3-8B numbers come from 6 epochs at
@@ -56,7 +57,7 @@ Everything in `dflash.md` applies. LiLiCorr adds a three-term head objective on 
 of the DFlash block loss:
 
 ```text
-loss = dflash_loss + w_ce*CE + w_margin*hinge + w_pen*penalty
+loss = dflash_loss + w_ce*CE + w_margin*hinge + w_pen*penalty + w_cal*calibration
 ```
 
 No outer multiplier, so `loss == origin_loss + lilicorr_loss` holds exactly.
@@ -66,7 +67,8 @@ No outer multiplier, so `loss == origin_loss + lilicorr_loss` holds exactly.
 | `dflash.dflash_architecture_config.projector_type` | `lilicorr` | Selects the variant |
 | `dflash.dflash_lilicorr_w_ce` | 0.25 | Cross-entropy term |
 | `dflash.dflash_lilicorr_w_margin` | 0.0 | Hinge term. **0 in the `base` variant** |
-| `dflash.dflash_lilicorr_w_pen` | 0.25 | Distractor penalty. Needs the target model's logits — hence online-only |
+| `dflash.dflash_lilicorr_w_pen` | 0.25 | Distractor penalty. Needs the target's logits — read live when online, reconstructed from the captured final hidden state when offline/streaming |
+| `dflash.dflash_lilicorr_w_cal` | 0.0 | Optional calibration term (#2589): KL from the target's distribution renormalized over each slot's k candidates to the reranker's. An alternative to `w_pen` whose gradient does not scale with the target's logit gap. Also needs the target's logits. **Not** part of the three weights' all-or-nothing validation |
 | `dflash.dflash_lilicorr_margin` | 2.0 | Hinge width in log-potential units. Unused while `w_margin` is 0; must be > 0 when it isn't |
 | `dflash.dflash_fp32_master_weights` | true | The published numbers were trained with this on. Turning it off changes the optimizer's arithmetic, not just its memory |
 
@@ -78,7 +80,9 @@ No outer multiplier, so `loss == origin_loss + lilicorr_loss` holds exactly.
 | `margin` | 0.125 | 0.125 | 0.25 |
 
 The head's total weight is 0.50 either way. The weights are **absolute and validated
-all-or-nothing** — at least one of the three must be above 0.
+all-or-nothing** — at least one of them must be above 0. `w_cal` sits outside that
+trio: it defaults to 0 and is a no-op there, but it counts towards the "not all zero"
+check.
 
 Reranker geometry, under `dflash_architecture_config`. **Every field is required and
 never defaulted**, which matters more here than elsewhere: `lilicorr_candidate_topk`
@@ -165,7 +169,8 @@ Everything in `dflash.md`'s table applies, plus the DFlash-family items:
 ## Success markers
 
 Same as `dflash.md`. The example ships no smoke test or AR eval, so the in-pipeline
-evidence is training progress plus the export landing in `training.output_dir`.
+evidence is training progress plus the export landing in
+`<training.output_dir>/exported-checkpoint-{<step>,final}`.
 
 ## Quality gate
 
@@ -194,8 +199,8 @@ failures (`seq_len` divisibility, offline eval, mask token, chat template) are i
 
 | Error pattern | Root cause | Fix |
 | --- | --- | --- |
-| `All three LiLiCorr objective weights are 0, so the reranker would never ...` | `w_ce`, `w_margin` and `w_pen` all 0 | Set at least one above 0 |
-| `dflash_lilicorr_w_pen > 0 requires the target model's logits, which are ...` | Offline or streaming mode with the penalty enabled | Use `data.mode: online`, or set `w_pen: 0` |
+| `All LiLiCorr objective weights are 0, so the reranker would never ...` | `w_ce`, `w_margin`, `w_pen` and `w_cal` all 0 | Set at least one above 0 |
+| `<weight> > 0 requires the target model's logits` | The penalty or calibration term ran without target logits available. Raised at loss construction in `_candidate_target_logits`, not by `modify()` | Supply a path that provides them: online reads them live, offline/streaming reconstructs them from the captured final hidden state |
 | `dflash_lilicorr_w_margin > 0 requires a positive dflash_lilicorr_margin` | Hinge enabled with a zero/negative width | Set `dflash_lilicorr_margin` above 0 |
 | `LiLiCorr block_size must be >= 2, got N` | Block too small for a lattice | Raise `dflash_block_size` |
 | `LiLiCorr candidate_topk must be >= 1` / `lilicorr_candidate_topk=K exceeds the vocabulary size V` | Lattice width out of range | Set `1 <= lilicorr_candidate_topk <= vocab_size` |

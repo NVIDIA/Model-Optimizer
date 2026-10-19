@@ -26,28 +26,43 @@ Reference: <https://inco.ai/blog/dflash2>. Serving support is vLLM PR #52816.
 
 ## Pipeline tasks
 
-Two committed shapes, both 2 tasks — identical in layout to DFlash's, only the
-`--config` recipe differs.
+Two committed shapes. They differ in task count and in where the export lands, so
+read the one you are running.
 
-**Online** (`hf_online_dflash2.yaml`):
+**Online** (`hf_online_dflash2.yaml`) — 2 tasks:
 
 | Task | Script | Purpose | Output |
 | --- | --- | --- | --- |
 | task_0 | `common/eagle3/make_dataset.sh` | Build training conversations (Daring-Anteater multi-turn SFT, 50K, `--full-conversations`) | `/scratchspace/data/train.jsonl` |
-| task_1 | `common/specdec/dflash_online_training.sh` | Online train against a live base model, then export | `/scratchspace/export` |
+| task_1 | `common/specdec/dflash_online_training.sh` | Online train against a live base model, then export | `<training.output_dir>/exported-checkpoint-<step>` and `-final` |
+
+The export goes under `training.output_dir` (`/scratchspace/dflash2_bs16` in the
+example), **not** `/scratchspace/export` — that path belongs to the streaming flow.
+Checking the wrong one reports a successful run as missing its export.
 
 `data.mode=online` is the recipe default. As committed the example is a short
 convergence check (`max_steps=2000`, 1 node x 8 GPUs). The header documents the full
 published A/B run: 3 epochs over the 1.96M-conversation Spec-Decoding-Dataset-v1,
 8 nodes x 8 H100, global batch 64, `save_steps=4000`.
 
-**Streaming** (`hf_streaming_dflash2.yaml`) — same two scripts with
-`data.mode=streaming`; see `dspark.md` for the streaming environment variables, which
-are shared across the whole DFlash family.
+**Streaming** (`hf_streaming_dflash2.yaml`) — 3 tasks:
 
-No inference path is wired into either example. The selector is not applied in
-`pseudo_speculative_generate`, so acceptance measured from this repo reports the
-backbone (plus convolutions) alone.
+| Task | Script | Purpose | Output |
+| --- | --- | --- | --- |
+| task_0 | `common/eagle3/make_dataset.sh` | Build training conversations | `/scratchspace/data/train.jsonl` |
+| task_1 | `common/eagle3/train_eagle_streaming.sh` | Streaming train (serve replicas + DDP trainers), then export | `/scratchspace/export` |
+| task_2 | `common/specdec/vllm_smoke_test.sh` | Serve the exported drafter and measure acceptance length | gate: `MIN_ACCEPTANCE_LENGTH=1.2` |
+
+See `dspark.md` for the streaming environment variables, which are shared across the
+whole DFlash family. task_2 keeps `SPEC_METHOD: "dflash"` — vLLM has no separate
+dflash2 method and selects the DFlash2 path from the checkpoint's
+`architectures: ["DFlash2DraftModel"]`.
+
+**Scope of the selector caveat.** The candidate selector is not applied in
+`pseudo_speculative_generate`, so acceptance measured through the *local* AR path
+reports the backbone plus convolutions alone. That does **not** apply to the
+streaming example's vLLM smoke test, which serves the exported checkpoint and
+measures real acceptance with the selector in play.
 
 ## Recipe and training knobs
 
@@ -61,7 +76,7 @@ Everything in `dflash.md` applies. DFlash2 adds:
 | `dflash.dflash_architecture_config.selector_rank` | 256 | Rank of the transition codebooks. Must be >= 1 |
 | `dflash.dflash_architecture_config.selector_top_k` | 16 | How many backbone candidates per position the selector re-ranks. Must be in `[1, vocab_size]` |
 | `dflash.dflash_selector_loss_alpha` | 1.0 | Selector cross-entropy weight. **0 disables the selector** and trains backbone + convolutions only |
-| `dflash.dflash_lk_loss_type` | `lambda` | Anneals the block objective from cross-entropy toward acceptance as acceptance rises. Requires `dflash_self_logit_distillation: false` |
+| `dflash.dflash_lk_loss_type` | `lambda` | One of `ce` / `tv` / `lambda` (config default `ce`). `lambda` anneals the block objective from cross-entropy toward acceptance as acceptance rises, and requires `dflash_self_logit_distillation: false`; `ce` is the only value compatible with distillation |
 | `dflash.dflash_lk_ce_scale` / `dflash_lk_ce_decay` | 1.0 / 1.0 | Shape of that anneal |
 
 `dflash_self_logit_distillation` is **false**, and not merely as a default: the
@@ -88,9 +103,13 @@ Everything in `dflash.md`'s table applies, plus the DFlash-family items:
 
 ## Success markers
 
-Same as `dflash.md`. Because neither example ships a smoke test or AR eval, the
-in-pipeline evidence is training progress plus the export landing in
-`/scratchspace/export`.
+Same as `dflash.md`, with the export path differing by mode — check the one the run
+actually uses:
+
+| Mode | Export lands in | Further evidence |
+| --- | --- | --- |
+| Online | `<training.output_dir>/exported-checkpoint-{<step>,final}` | training progress only |
+| Streaming | `/scratchspace/export` | task_2's acceptance length against `MIN_ACCEPTANCE_LENGTH` |
 
 ## Quality gate
 
@@ -100,8 +119,10 @@ the candidate selector is not applied. The convolutions *are* — they run insid
 backbone layers — so a reported AR measures backbone + convolutions and understates
 the trained model.
 
-Evaluate by exporting and benchmarking on the serving stack (vLLM PR #52816), or via
-the offline acceptance-length harness.
+Evaluate by serving the export instead. The streaming example already does this in
+task_2 (`vllm_smoke_test.sh`, gate `MIN_ACCEPTANCE_LENGTH=1.2`); the online example
+ships no such step, so benchmark its export separately on the serving stack
+(vLLM PR #52816) or via the offline acceptance-length harness.
 
 The training-regression gate from `dflash.md` (`MAX_FINAL_LOSS`, `MIN_FINAL_ACC` via
 `check_regression.py`) applies; the online example sets `MAX_FINAL_LOSS=5.0` and
@@ -121,6 +142,6 @@ failures (`seq_len` divisibility, offline eval, mask token, chat template) are i
 | `DFlash2 conv_group_size (N) must be >= 1 and divide hidden_size (H)` | Group size does not divide the draft hidden size | Pick a divisor of the draft's `hidden_size` |
 | `DFlash2 convolution needs a sequence length divisible by block_size (N), got M` | `training_seq_len` not a multiple of `dflash_block_size` | Same divisibility rule as DFlash — round `training_seq_len` to a multiple |
 | `DFlash2 selector_rank must be >= 1` / `selector_top_k must be in [1, vocab_size=V]` | Selector geometry out of range | Correct the value |
-| `dflash_lk_loss_type=... needs the draft's probability of the gold token, which the KD path never forms` | `dflash_self_logit_distillation` turned on alongside the `lk` anneal | Keep `dflash_self_logit_distillation: false`, or set `dflash_lk_loss_type: null` |
+| `dflash_lk_loss_type=... needs the draft's probability of the gold token, which the KD path never forms` | A non-`ce` `dflash_lk_loss_type` alongside `dflash_self_logit_distillation: true` | Keep `dflash_self_logit_distillation: false`, or set `dflash_lk_loss_type: ce` to keep distillation. **Not `null`** — the field is `Literal["ce", "tv", "lambda"]` and rejects it |
 | DDP hangs or complains about unused parameters | `dflash_selector_loss_alpha` set to 0, leaving the selector untrained | Keep `training.ddp_find_unused_parameters: true`, as the recipe does |
 | Benchmark reports a poor acceptance length | `--draft_length` was passed. The DFlash family reads `--block_size`, and it must match the drafter's | Pass `--block_size <N>` matching the drafter |
