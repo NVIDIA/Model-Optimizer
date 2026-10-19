@@ -185,7 +185,8 @@ def test_ggml_cache_invalidates_after_version_bypassing_weight_update(num_bits):
     model.weight.data.add_(0.01)
     assert model.weight._version == version
 
-    model(inputs)
+    with torch.no_grad():
+        model(inputs)
     after = quantizer._quantizer_cache.packed_weights.clone()
     assert not torch.equal(after, before)
 

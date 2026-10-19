@@ -168,10 +168,10 @@ def _matching_cache(
         and cache.format_name == format_name
     ):
         return None
-    training_weight = inputs.requires_grad and torch.is_grad_enabled()
+    trainable_weight = inputs.requires_grad
     if (
         (
-            training_weight
+            trainable_weight
             and (
                 _same_input_layout(cache.input_key, input_key)
                 or (
@@ -182,7 +182,7 @@ def _matching_cache(
             and torch.equal(cache.input_fingerprint, _input_fingerprint(inputs))
         )
         or (
-            not training_weight
+            not trainable_weight
             and (
                 cache.input_key == input_key
                 or (any_contiguous_view and _same_elements(cache.input_key, input_key))
