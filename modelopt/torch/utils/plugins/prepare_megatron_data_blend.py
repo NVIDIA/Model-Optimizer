@@ -199,8 +199,9 @@ def _to_chat(
             if row.get(key):
                 chat[key] = row[key]
     else:
-        text = row.get("text") or ""
-        if not text:
+        text = row.get("text")
+        # A non-string value (e.g. a list) would otherwise pass as list content.
+        if not isinstance(text, str) or not text:
             return None
         if "<extra_id_" not in text:
             return {"messages": [{"role": "assistant", "content": text}]}
@@ -277,9 +278,16 @@ def _take_chat_rows(
     max_rejected = 10 * want + 100
     try:
         for row in _iter_rows(source, output_dir, shuffle, seed):
-            chat = _to_chat(row, source["content_field"], reasoning_content)
-            # Judge the source row's top-level media keys too, which the conversion does not keep.
-            if chat is None or not is_text_only_chat_example({**row, **chat}):
+            try:
+                chat = _to_chat(row, source["content_field"], reasoning_content)
+                # Judge the source row's top-level media keys too, which the conversion drops.
+                if chat is not None and not is_text_only_chat_example({**row, **chat}):
+                    chat = None
+            except (AttributeError, KeyError, TypeError, ValueError) as e:
+                # As in the tokenizing reader: one malformed record must not lose the source.
+                print(f"[WARN] {name}: skipping a row that cannot be converted: {e!r}", flush=True)
+                chat = None
+            if chat is None:
                 rejected += 1
                 if rejected > max_rejected:
                     break
@@ -288,7 +296,7 @@ def _take_chat_rows(
             if len(rows) >= want:
                 break
     except Exception as e:  # e.g. a gated split, or a schema the streaming reader cannot cast
-        raise RuntimeError(f"{name}: failed to read or convert") from e
+        raise RuntimeError(f"{name}: failed to read") from e
     if len(rows) < want:
         gave_up = rejected > max_rejected
         reason = f"gave up after {rejected} rejected rows" if gave_up else "source exhausted"

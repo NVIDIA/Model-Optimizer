@@ -1,6 +1,6 @@
-# NemotronH Omni VL: W4A4 NVFP4 PTQ + QAD + Deployment
+# NVIDIA Nemotron 3.5 Super VL: W4A4 NVFP4 PTQ + QAD + Deployment
 
-End-to-end W4A4 quantization of a NemotronH omni vision-language checkpoint (architecture `NemotronH_Omni_Reasoning_V3`), a Mamba-Transformer MoE language model with a vision tower: mixed NVFP4/FP8 post-training quantization → Quantization-Aware Distillation (QAD) → Hugging Face export → vLLM serving. This document covers:
+End-to-end W4A4 quantization of [NVIDIA Nemotron 3.5 Super VL](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16) (architecture `NemotronH_Omni_Reasoning_V3`), a Mamba-Transformer MoE language model with a vision tower: mixed NVFP4/FP8 post-training quantization → Quantization-Aware Distillation (QAD) → Hugging Face export → vLLM serving. This document covers:
 
 1. **[Data Preparation](#1-data-preparation)**: the chat-format QAD blend, from `data_blend.yaml`
 2. **[Quantization](#2-quantization)**: W4A4 PTQ with `examples/megatron_bridge/quantize.py`
@@ -9,6 +9,8 @@ End-to-end W4A4 quantization of a NemotronH omni vision-language checkpoint (arc
 5. **[Evaluation and Serving](#5-evaluation-and-serving)**: the vLLM settings behind the results
 
 Only the language model (including its MTP head) is quantized; the vision tower and projector stay BF16 and are copied from the source checkpoint.
+
+The PTQ recipe is the same as the one used for the released [`nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4) checkpoint. The calibration data and the QAD training data are all public Hugging Face datasets. The evaluation results below differ from the official model card scores.
 
 ## Results
 
@@ -72,14 +74,14 @@ PTQ runs on **one 4-GPU GB300 node** with 512 calibration samples.
 
 ```bash
 torchrun --nproc_per_node 4 /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
-    --hf_model_name_or_path <nemotron_h_omni-checkpoint> \
+    --hf_model_name_or_path nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 \
     --trust_remote_code \
     --recipe models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/ptq/nvfp4-mse \
     --tp_size 1 --ep_size 4 --pp_size 1 \
     --calib_dataset_name cnn_nemotron_v2_mix \
     --calib_num_samples 512 \
     --calib_batch_size 1 \
-    --export_megatron_path /path/to/nemotron_h_omni_w4a4_megatron \
+    --export_megatron_path /path/to/nemotron_3_5_super_vl_w4a4_megatron \
     --skip_generate
 ```
 
@@ -108,9 +110,9 @@ We used **8 nodes × 4 GB300 (32 GPUs)** with context parallelism 4 and expert p
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1) MASTER_PORT=29500
 srun bash -c 'export RANK=$SLURM_PROCID WORLD_SIZE=$SLURM_NTASKS LOCAL_RANK=$SLURM_LOCALID
 python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
-    --teacher_hf_path <nemotron_h_omni-checkpoint> \
-    --student_hf_path <nemotron_h_omni-checkpoint> \
-    --student_megatron_path /path/to/nemotron_h_omni_w4a4_megatron \
+    --teacher_hf_path nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 \
+    --student_hf_path nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 \
+    --student_megatron_path /path/to/nemotron_3_5_super_vl_w4a4_megatron \
     --trust_remote_code \
     --tp_size 1 --pp_size 1 --cp_size 4 --ep_size 32 \
     --sft --sft_hf_dataset /path/to/qad_blend/train.jsonl \
@@ -145,10 +147,10 @@ Export the QAD checkpoint to a Hugging Face checkpoint on one 4-GPU node (pipeli
 
 ```bash
 torchrun --nproc_per_node 4 /opt/Model-Optimizer/examples/megatron_bridge/export_quantized_megatron_to_hf.py \
-    --hf_model_name_or_path <nemotron_h_omni-checkpoint> \
+    --hf_model_name_or_path nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 \
     --trust_remote_code \
     --megatron_path /path/to/qad_output/checkpoints \
-    --export_unified_hf_path /path/to/nemotron_h_omni_w4a4_hf \
+    --export_unified_hf_path /path/to/nemotron_3_5_super_vl_w4a4_hf \
     --pp_size 4
 ```
 
@@ -167,9 +169,10 @@ Serve with vLLM on one 4-GPU GB300 node, TP=4 with expert parallelism. Quantized
 | Setting | Value |
 | --- | --- |
 | `--kv-cache-dtype` | `fp8` |
-| `--max-model-len` | 262144 |
+| `--max-model-len` | 262144 (32768 for MMLU-ProX) |
 | `--mamba-ssm-cache-dtype` | `float16` |
-| `--mamba-conv-cache-dtype` | `float32` |
-| Mamba cache rounding | stochastic rounding, 5 Philox rounds |
+| `--mamba-cache-dtype` | `float32` |
+| `--enable-mamba-cache-stochastic-rounding` | on |
+| `--mamba-cache-philox-rounds` | 5 |
 | Reasoning parser | `nemotron_v3` |
 | Chat template | the checkpoint's `chat_template.jinja` |

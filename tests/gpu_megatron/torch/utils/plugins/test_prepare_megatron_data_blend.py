@@ -203,6 +203,7 @@ def test_to_chat_handles_all_row_shapes():
         "messages": [{"role": "assistant", "content": "def f(): pass"}]
     }
     assert blend_module._to_chat({"text": ""}, "text") is None
+    assert blend_module._to_chat({"text": ["x"]}, "text") is None
     # Markers that parse to no turns: dropped, never trained as assistant text.
     assert blend_module._to_chat({"text": "<extra_id_0>\nraw body\n"}, "text") is None
     # A role without a mapping would cut its turn out of the middle: the whole row is dropped.
@@ -342,7 +343,7 @@ def test_chat_blend_fails_on_a_bad_short_or_tiny_source(tmp_path: Path, chat_ble
         raise TypeError("cannot cast")
 
     monkeypatch.setattr(blend_module, "_iter_rows", iter_rows)
-    with pytest.raises(RuntimeError, match="org/a train: failed to read or convert"):
+    with pytest.raises(RuntimeError, match="org/a train: failed to read"):
         blend_module.prepare_chat_data_blend(write_config())
     assert not (tmp_path / "blend" / "train.jsonl").exists()
 
@@ -357,8 +358,10 @@ def test_write_jsonl_is_atomic(tmp_path: Path):
 def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch):
     plain, packed = tmp_path / "a.jsonl", tmp_path / "b.jsonl.gz"
     lines = [json.dumps(_chat(i)) for i in range(20)]
-    # A malformed record is skipped with a warning, as in the tokenizing reader.
-    plain.write_text("\n".join([*lines[:10], '{"messages": [', *lines[10:]]) + "\n", "utf-8")
+    # Malformed records, unparseable or unconvertible, are skipped with a warning as in the
+    # tokenizing reader.
+    bad = ['{"messages": [', '{"messages": "hello"}']
+    plain.write_text("\n".join([*lines[:10], *bad, *lines[10:]]) + "\n", "utf-8")
     with gzip.open(packed, "wt", encoding="utf-8") as f:
         f.writelines(json.dumps(_chat(i)) + "\n" for i in range(20, 40))
     paths = {"data/a.jsonl": str(plain), "data/b.jsonl.gz": str(packed)}
