@@ -76,6 +76,11 @@ jobs:
     needs: [pr-gate, regression-tests]
     runs-on: ubuntu-latest
     steps:
+      - name: Stacked PR, regression tests deferred
+        if: needs.pr-gate.outputs.stacked == 'true'
+        run: |
+          echo "::error::This PR targets another PR's branch, so regression tests are deferred until it targets main. After retargeting, push or use 'Re-run all jobs'."
+          exit 1
       - name: Required regression tests did not succeed
         if: |
           needs.pr-gate.result != 'success' ||
