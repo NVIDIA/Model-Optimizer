@@ -28,7 +28,8 @@ AA-LCR loops restate paragraphs up to ~4K tokens long, so on `ns_aa_lcr` set onl
 `repetition_detection.max_pattern_size: 1024` at the same path in the task's
 `nemo_evaluator_config`. NEL deep-merges task config over the top level, so the
 other entries survive; check the dry-run's `config_ef.yaml` block. A hit ends the
-whole request with `finish_reason: "repetition"` and no answer.
+request with `finish_reason: "repetition"`, keeping the text so far; a loop inside
+the reasoning leaves no final answer.
 
 **Keep these values**; larger sizes add scheduler CPU (~1 ms per request per decode
 step at 4096) and cut more escaped-loop answers.
