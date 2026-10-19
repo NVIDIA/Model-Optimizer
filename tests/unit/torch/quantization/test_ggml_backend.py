@@ -154,6 +154,53 @@ def test_ggml_backend_caches_packed_weight_and_invalidates_on_change(monkeypatch
     assert call_count == 3
 
 
+@pytest.mark.parametrize("num_bits", ["iq1_s", "q8_0"])
+def test_ggml_cache_invalidates_after_version_bypassing_weight_update(num_bits):
+    torch.manual_seed(1234)
+    model = torch.nn.Linear(256, 64, bias=False)
+    inputs = torch.randn(2, 256)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {
+                    "num_bits": num_bits,
+                    "block_sizes": {-1: 256},
+                    "backend": "ggml",
+                },
+                "enable": True,
+            },
+        ],
+        "algorithm": "max",
+    }
+
+    mtq.quantize(model, config, forward_loop=lambda module: module(inputs))
+    quantizer = model.weight_quantizer
+    model(inputs)
+    before = quantizer._quantizer_cache.packed_weights.clone()
+    version = model.weight._version
+
+    model.weight.data.add_(0.01)
+    assert model.weight._version == version
+
+    model(inputs)
+    after = quantizer._quantizer_cache.packed_weights.clone()
+    assert not torch.equal(after, before)
+
+    quantizer._quantizer_cache = None
+    fresh_output = model(inputs)
+    fresh = quantizer._quantizer_cache.packed_weights
+    assert torch.equal(after, fresh)
+    assert torch.equal(model(inputs), fresh_output)
+
+    with torch.no_grad():
+        model.weight.add_(0.01)
+    assert model.weight._version != version
+    model(inputs)
+    assert not torch.equal(quantizer._quantizer_cache.packed_weights, fresh)
+
+
 def test_narrow_to_float32_matches_the_cuda_load_float_policy():
     """Non-finite elements become zero; finite out-of-range elements saturate."""
     largest = torch.finfo(torch.float32).max
