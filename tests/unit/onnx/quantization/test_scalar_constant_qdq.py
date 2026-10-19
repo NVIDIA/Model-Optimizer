@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,6 +29,9 @@ import onnx_graphsurgeon as gs
 import pytest
 
 import modelopt.onnx.quantization as moq
+from modelopt.onnx.quantization.autotune.common import Config
+from modelopt.onnx.quantization.autotune.export_utils import export_qdq_onnx
+from modelopt.onnx.quantization.autotune.insertion_points import ResolvedInsertionPoint
 from modelopt.onnx.quantization.qdq_graph import remove_scalar_input_qdq
 
 
@@ -70,6 +73,28 @@ def test_scalar_constant_input_is_not_quantized(tmp_path, quantize_mode):
         and node.inputs[0].values.ndim == 0
     }
     assert not quantized_rank0, f"rank-0 constants were quantized: {sorted(quantized_rank0)}"
+
+
+def test_autotune_export_skips_rank0_constant_qdq(tmp_path):
+    onnx_path = os.path.join(tmp_path, "model.onnx")
+    _build_matmul_add_relu(onnx_path)
+    model = onnx.load(onnx_path)
+
+    # Standalone autotune export targets the rank-0 constant "one" for Q/DQ.
+    insertion_points = {ResolvedInsertionPoint(tensor_name="one")}
+    exported = export_qdq_onnx(model, insertion_points, Config(default_quant_type="int8"))
+
+    graph = gs.import_onnx(exported)
+    quantized_rank0 = {
+        node.inputs[0].name
+        for node in graph.nodes
+        if node.op == "QuantizeLinear"
+        and isinstance(node.inputs[0], gs.Constant)
+        and node.inputs[0].values.ndim == 0
+    }
+    assert not quantized_rank0, (
+        f"rank-0 constant quantized in autotune export: {sorted(quantized_rank0)}"
+    )
 
 
 def _graph_with_qdq_scalar(op_type, scalar_shape):
