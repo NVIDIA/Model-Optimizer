@@ -18,6 +18,7 @@
 import re
 from typing import Any, cast
 
+import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
 from onnx_graphsurgeon.ir.graph import Graph
@@ -387,6 +388,28 @@ def build_non_residual_input_map(
     return non_residual_inputs, no_quantize_inputs
 
 
+def _scalar_from_constant_node(constant: Node, name: str) -> gs.Constant | None:
+    """Resolve a ``Constant`` node's value to a ``gs.Constant`` across attribute forms.
+
+    GraphSurgeon imports ``Constant(value=...)`` as a ``gs.Constant`` tensor, but the
+    scalar/list attribute forms (``value_float``, ``value_int``, ``value_floats``,
+    ``value_ints``) arrive as plain Python attributes. Convert those into a scalar
+    ``gs.Constant`` too, so the size/rank check below still catches them.
+    """
+    value = constant.attrs.get("value")
+    if isinstance(value, gs.Constant):
+        return value
+    for attr, dtype in (
+        ("value_float", np.float32),
+        ("value_floats", np.float32),
+        ("value_int", np.int64),
+        ("value_ints", np.int64),
+    ):
+        if attr in constant.attrs:
+            return gs.Constant(name, values=np.asarray(constant.attrs[attr], dtype=dtype))
+    return None
+
+
 def remove_scalar_input_qdq(graph: Graph, target_dla: bool = False) -> None:
     """Keep single-element (scalar) constant inputs unquantized.
 
@@ -416,7 +439,7 @@ def remove_scalar_input_qdq(graph: Graph, target_dla: bool = False) -> None:
             source = quantize.inputs[0]
             value = source
             if source.inputs and source.inputs[0].op == "Constant":
-                value = source.inputs[0].attrs.get("value")
+                value = _scalar_from_constant_node(source.inputs[0], source.name)
             if not isinstance(value, gs.Constant) or value.values.size != 1:
                 continue
             # A per-tensor Q/DQ on a rank-0 constant breaks the TensorRT parser,

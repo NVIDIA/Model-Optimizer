@@ -145,3 +145,37 @@ def test_remove_scalar_input_qdq(op_type, scalar_shape, target_dla, expect_strip
     producers = op.inputs[1].inputs
     stripped = not (producers and producers[0].op == "DequantizeLinear")
     assert stripped == expect_stripped
+
+
+@pytest.mark.parametrize("value_attr", [{"value_float": 1.0}, {"value_int": 1}])
+def test_remove_scalar_input_qdq_handles_constant_node_scalar_attrs(value_attr):
+    # A Constant node can hold its scalar via value_float/value_int instead of a
+    # tensor `value`; the pass must still recognize it as rank-0 and strip the Q/DQ.
+    x = gs.Variable("x", dtype=np.float32, shape=[4, 4])
+    const_out = gs.Variable("const", dtype=np.float32)
+    const_node = gs.Node(
+        op="Constant", name="const_node", inputs=[], outputs=[const_out], attrs=value_attr
+    )
+    scale = gs.Constant("scale", values=np.array(0.1, dtype=np.float32))
+    zero_point = gs.Constant("zp", values=np.array(0, dtype=np.int8))
+
+    quantized = gs.Variable("const_q", dtype=np.int8)
+    quantize = gs.Node(
+        op="QuantizeLinear", name="q", inputs=[const_out, scale, zero_point], outputs=[quantized]
+    )
+    dequantized = gs.Variable("const_dq", dtype=np.float32)
+    dequantize = gs.Node(
+        op="DequantizeLinear",
+        name="dq",
+        inputs=[quantized, scale, zero_point],
+        outputs=[dequantized],
+    )
+    out = gs.Variable("y", dtype=np.float32)
+    op = gs.Node(op="Add", name="op", inputs=[x, dequantized], outputs=[out])
+
+    graph = gs.Graph(nodes=[const_node, quantize, dequantize, op], inputs=[x], outputs=[out])
+    remove_scalar_input_qdq(graph)
+
+    op = next(node for node in graph.nodes if node.name == "op")
+    producers = op.inputs[1].inputs
+    assert not (producers and producers[0].op == "DequantizeLinear")
