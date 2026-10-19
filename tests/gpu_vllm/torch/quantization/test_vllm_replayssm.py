@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import yaml
 from packaging.version import Version
 from transformers import Qwen3NextConfig
 from vllm import LLM, SamplingParams
@@ -124,8 +125,8 @@ def _graph_replays(worker, start=False):
 
 
 @pytest.fixture(
-    params=[("fp8", True), ("fp8", False), ("nvfp4", False)],
-    ids=["fp8_eager", "fp8_full_decode_graph", "nvfp4_full_decode_graph"],
+    params=[("fp8", True), ("fp8", False), ("nvfp4", False), ("nvfp4_stochastic", False)],
+    ids=["fp8_eager", "fp8_full_decode_graph", "nvfp4_full_decode_graph", "nvfp4_stochastic_graph"],
 )
 def replay_engine(tmp_path, monkeypatch, request):
     if Version(vllm_version).release[:2] != (0, 30):
@@ -133,7 +134,20 @@ def replay_engine(tmp_path, monkeypatch, request):
     read_format, eager = request.param
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", "triton")
-    monkeypatch.setenv("RECIPE_PATH", f"general/ptq/gdn_replayssm_{read_format}_read")
+    recipe_path = f"general/ptq/gdn_replayssm_{read_format.removesuffix('_stochastic')}_read"
+    if read_format.endswith("_stochastic"):
+        from modelopt.recipe import load_recipe
+
+        recipe = {
+            "metadata": {"recipe_type": "ptq"},
+            "quantize": load_recipe(recipe_path).quantize.model_dump(),
+        }
+        for rule in recipe["quantize"]["quant_cfg"]:
+            if rule.get("quantizer_name") == "*gdn_read_quantizer":
+                rule["cfg"]["rounding"] = "stochastic"
+        recipe_path = str(tmp_path / "stochastic.yaml")
+        Path(recipe_path).write_text(yaml.safe_dump(recipe))
+    monkeypatch.setenv("RECIPE_PATH", recipe_path)
     paths = [str(ROOT), str(ROOT / "examples/vllm_serve"), str(Path(__file__).parent)]
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join([*paths, os.environ.get("PYTHONPATH", "")]))
     for path in paths:
@@ -188,14 +202,20 @@ def replay_engine(tmp_path, monkeypatch, request):
         llm.llm_engine.engine_core.shutdown()
 
 
+def _seed_reads(worker):
+    torch.cuda.manual_seed_all(101)
+
+
 def test_replayssm_engine(replay_engine):
     llm, compiled = replay_engine
     samples = [{"prompt_token_ids": [3] * length} for length in (73, 5, 65, 1)]
     params = SamplingParams(temperature=0, max_tokens=34, ignore_eos=True, logprobs=1)
+    llm.collective_rpc(_seed_reads)
     first = llm.generate(samples, params, use_tqdm=False)
     if compiled:
         llm.collective_rpc(_graph_replays, kwargs={"start": True})
     try:
+        llm.collective_rpc(_seed_reads)
         repeated = llm.generate(samples, params, use_tqdm=False)
     finally:
         if compiled:

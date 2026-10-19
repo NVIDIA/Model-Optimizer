@@ -164,6 +164,11 @@ class _ReplaySSMGDN(_LinearAttentionQuantMixin):
             self.kv_cache[1:],
             self.num_k_heads // self.tp_size,
             read_mode=validate_two_precision(self.gdn_state_quantizer, self.gdn_read_quantizer),
+            read_rounding=(
+                self.gdn_read_quantizer.rounding
+                if self.gdn_read_quantizer.is_enabled and self.gdn_read_quantizer._if_quant
+                else "nearest"
+            ),
         )
 
     def _prompt_progress(self):
@@ -187,8 +192,13 @@ class _ReplaySSMGDN(_LinearAttentionQuantMixin):
         if metadata is None:
             return super()._forward_core(mixed_qkv, b, a, core_attn_out)
         read_enabled = self.gdn_read_quantizer.is_enabled and self.gdn_read_quantizer._if_quant
-        if self.gdn_state_quantizer.is_enabled or read_enabled != (
-            self._replay_cache.read_mode != "s32_rs"
+        if (
+            self.gdn_state_quantizer.is_enabled
+            or read_enabled != (self._replay_cache.read_mode != "s32_rs")
+            or (
+                read_enabled
+                and self.gdn_read_quantizer.rounding != self._replay_cache.read_rounding
+            )
         ):
             raise ValueError("Restart the ReplaySSM worker to change checkpoint precision")
         if metadata.spec_sequence_masks is not None or (

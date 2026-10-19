@@ -41,12 +41,20 @@ def _paged_buffers(slots, spec):
     return buffers
 
 
-@pytest.mark.parametrize("read_mode", ["tp8_hi32", "tp4_hi32", "s32_rs"])
+@pytest.mark.parametrize(
+    ("read_mode", "rounding"),
+    [
+        ("tp8_hi32", "nearest"),
+        ("tp4_hi32", "nearest"),
+        ("s32_rs", "nearest"),
+        ("tp4_hi32", "stochastic"),
+    ],
+)
 @pytest.mark.parametrize("captured", [False, True])
-def test_replay_cache_reordering_flush_and_reuse(read_mode, captured):
+def test_replay_cache_reordering_flush_and_reuse(read_mode, rounding, captured):
     torch.manual_seed(73)
     buffers = _paged_buffers(5, _gdn_replay_state_spec(1, 2, 144, read_mode=read_mode))
-    cache = _GDNReplayCache(buffers, 1, read_mode=read_mode)
+    cache = _GDNReplayCache(buffers, 1, read_mode=read_mode, read_rounding=rounding)
     pointers = [x.data_ptr() for x in buffers]
     references = {}
     rate = torch.zeros(2, device="cuda")
@@ -56,7 +64,15 @@ def test_replay_cache_reordering_flush_and_reuse(read_mode, captured):
         state = torch.randn(1, 2, 144, 128, device="cuda") * 0.1
         buffers[0][slot].copy_(state[0])
         cache.reset(torch.tensor([slot], device="cuda", dtype=torch.int32))
-        references[slot] = native.GDNReplay(state, 1, read_mode)
+        if rounding == "stochastic":
+            from modelopt.torch.quantization.linear_attention._two_precision import _native_replay
+
+            references[slot] = _native_replay(
+                state[0].transpose(-1, -2), read_mode, rounding, key_heads=1
+            )
+            references[slot].read_seeds.copy_(cache.read_seeds[slot : slot + 1])
+        else:
+            references[slot] = native.GDNReplay(state, 1, read_mode)
 
     if captured:
         # Fixed addresses, changing request slots and GPU counters on every replay.
@@ -125,3 +141,24 @@ def test_replay_cache_reordering_flush_and_reuse(read_mode, captured):
     # The reserved slot and a never-used slot are untouched, despite poisoned initial contents.
     assert torch.isnan(buffers[0][[0, 4]]).all()
     assert torch.all(cache.steps[[0, 4]] == -1)
+
+
+def test_stochastic_read_grid():
+    from modelopt.torch.kernels.quantization.linear_attention.replayssm_read import (
+        refresh_nvfp4_read,
+    )
+
+    anchor = torch.full((1, 1, 128, 128), 1.125, device="cuda")
+    anchor[..., 1::2] = -1.125
+    anchor[..., 15::16] = 6  # Exact global and E4M3 scales; adjacent codes are +/-1 and +/-1.5.
+    read = torch.empty_like(anchor)
+    amax = torch.full((1, 1, 2), 6.0, device="cuda")
+    seed = torch.tensor([17], device="cuda", dtype=torch.int32)
+    zero = torch.zeros_like(seed)
+    refresh_nvfp4_read(anchor, read, amax, seed, zero, zero, zero)
+    actual = read[..., :15].reshape(-1)
+    expected = anchor[..., :15].reshape(-1)
+    assert ((actual.abs() == 1) | (actual.abs() == 1.5)).all()
+    assert (actual[expected > 0].mean() - 1.125).abs() < 0.02
+    assert (actual[expected < 0].mean() + 1.125).abs() < 0.02
+    assert torch.all(read[..., 15::16] == 6)

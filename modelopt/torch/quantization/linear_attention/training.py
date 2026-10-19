@@ -351,6 +351,7 @@ def _prefill_decode_forward(
             *(x[b, split:end] for x in (q, k, v, g, beta)),
             config=policy,
             read_mode=read_mode,
+            read_rounding=read_quantizer.rounding if read_mode != "s32_rs" else "nearest",
             state_quantizer=state_quantizer,
             initial_state=state,
             output_final_state=output_final_state,

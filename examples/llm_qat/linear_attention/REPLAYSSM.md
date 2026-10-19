@@ -75,7 +75,7 @@ The recipe sets `precision="replayssm_two_precision"`, `replay_window=16`, and:
 | `gdn_read_quantizer` (NVFP4 recipe) | Dynamic E2M1, block16 E4M3 scales, identity STE | Groups of 16 key channels; one FP32 global scale per request |
 
 NVFP4 uses the existing TensorQuantizer configuration and upstream replay codec.
-A second upstream kernel reduces the request-wide amax and refreshes the read
+A second kernel reduces the request-wide amax and refreshes the read
 copy at initialization and each 16-token flush. Training and the vLLM cache
 adapter use the same mode. The FP32 recurrence anchor never uses the quantized read copy.
 
@@ -83,7 +83,46 @@ Disabling the read quantizer retains the same replay schedule with FP32 reads
 inside an explicit training phase. The initial profile requires GDN, normalized
 Q/K, K=128, and `scale=K**-0.5`. It accepts `output_final_state=False`
 (the default); exporting a dense state from an incomplete window is not supported.
-KDA, lower-precision recurrence anchors and stochastic rounding remain follow-ups.
+KDA and lower-precision recurrence anchors remain follow-ups.
+
+### Stochastic NVFP4 reads
+
+The `gdn_replayssm_nvfp4_read` recipe supports optional stochastic rounding:
+set `rounding: stochastic` in its `*gdn_read_quantizer` configuration. The default
+is nearest. Only E2M1 read values change; E4M3 block scales retain nearest rounding
+and the recurrence anchor remains FP32. Reads refresh at initialization and each
+16-token replay flush. Backward uses saved read values with the identity STE and
+draws no new random numbers.
+
+For example, create a resolved recipe usable by training and the ReplaySSM worker:
+
+```python
+import yaml
+from pathlib import Path
+from modelopt.recipe import load_recipe
+
+recipe = {
+    "metadata": {"recipe_type": "ptq"},
+    "quantize": load_recipe("general/ptq/gdn_replayssm_nvfp4_read").quantize.model_dump(),
+}
+for rule in recipe["quantize"]["quant_cfg"]:
+    if rule.get("quantizer_name") == "*gdn_read_quantizer":
+        rule["cfg"]["rounding"] = "stochastic"
+Path("nvfp4_stochastic.yaml").write_text(yaml.safe_dump(recipe))
+# Training: mtq.quantize(model, load_recipe("nvfp4_stochastic.yaml").quantize)
+# Serving: RECIPE_PATH=/absolute/path/nvfp4_stochastic.yaml with ReplaySSMWorker.
+```
+
+The native adapter derives one request seed from PyTorch's device RNG and uses
+logical state coordinates plus the refresh count. Cache-slot reordering and CUDA
+graph replay therefore preserve each request's random sequence. Repeatability
+requires the same seed, request initialization order and shapes; it does not imply
+bit-exact agreement with the generic Torch sampler. ModelOpt checkpoints save the
+rounding policy; training checkpoints must additionally save the RNG state.
+Standard inference export rejects stochastic rounding; the ReplaySSM worker uses
+the explicit recipe above to install its supported read-rounding policy.
+
+### Backend installation
 
 Install the main example's public vLLM 0.30 and FLA dependencies for the chunked
 prefix. Expose only the pinned upstream checkout's `emulation` package, so its

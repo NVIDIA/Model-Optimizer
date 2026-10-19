@@ -29,7 +29,11 @@ def validate_two_precision(state_quantizer, read_quantizer):
         raise ValueError("Two-precision GDN requires an FP32 anchor; disable gdn_state_quantizer")
     if read_quantizer is not None and read_quantizer.is_enabled:
         validate_gdn_quantizer(
-            read_quantizer, name="gdn_read_quantizer", num_bits=((4, 3), (2, 1)), block_sizes=(128,)
+            read_quantizer,
+            name="gdn_read_quantizer",
+            num_bits=((4, 3), (2, 1)),
+            block_sizes=(128,),
+            rounding=("nearest", "stochastic") if read_quantizer.is_nvfp4_dynamic else ("nearest",),
         )
         if not read_quantizer.is_nvfp4_dynamic and read_quantizer.block_sizes != {-1: 128}:
             raise ValueError("gdn_read_quantizer requires FP8 block128 or NVFP4 block16 along K")
@@ -38,23 +42,51 @@ def validate_two_precision(state_quantizer, read_quantizer):
     return "s32_rs"
 
 
-def _native_replay(state, read_mode):
+def _native_replay(state, read_mode, read_rounding="nearest", *, key_heads=None):
     # Optional standalone backend; installing public vLLM does not install this package.
     from emulation import GDNReplay
 
-    return GDNReplay(
+    runner_type = GDNReplay
+    if read_rounding == "stochastic":
+        if read_mode != "tp4_hi32":
+            raise ValueError("Stochastic ReplaySSM reads require NVFP4 with an FP32 anchor")
+        from modelopt.torch.kernels.quantization.linear_attention.replayssm_read import (
+            refresh_nvfp4_read,
+        )
+
+        class StochasticReadReplay(GDNReplay):
+            def _finish_step(self, grid):
+                refresh_nvfp4_read(
+                    self.state_hi,
+                    self.state_lo,
+                    self.amax,
+                    self.read_seeds,
+                    self.write_pos,
+                    self.window_idx,
+                    self.state_idx,
+                )
+                self.steps.add_(1)
+                return self.output
+
+        runner_type = StochasticReadReplay
+    elif read_rounding != "nearest":
+        raise ValueError(f"Unsupported read rounding: {read_rounding}")
+    runner = runner_type(
         state.transpose(-1, -2).unsqueeze(0).contiguous(),
-        state.shape[0],
+        state.shape[0] if key_heads is None else key_heads,
         mode=read_mode,
     )
+    if read_rounding == "stochastic":
+        runner.read_seeds = torch.randint(2**31 - 1, (1,), device=state.device, dtype=torch.int32)
+    return runner
 
 
 class _TwoPrecision(torch.autograd.Function):
     """Execute one native suffix; rematerialize at most one 16-token window in backward."""
 
     @staticmethod
-    def forward(ctx, q, k, v, g, beta, state, gate_inputs, read_mode):
-        runner = _native_replay(state, read_mode)
+    def forward(ctx, q, k, v, g, beta, state, gate_inputs, read_mode, read_rounding):
+        runner = _native_replay(state, read_mode, read_rounding)
         raw_g, raw_beta, rate, bias = gate_inputs
         operands = torch.cat([x.flatten(1) for x in (q, k, v)], -1).to(torch.bfloat16)
         raw_g, raw_beta = (x.bfloat16().float().contiguous() for x in (raw_g, raw_beta))
@@ -98,12 +130,12 @@ class _TwoPrecision(torch.autograd.Function):
                 for dest, value in zip(gradients, grads[:-1]):
                     dest[start:end] = value
                 grad_anchor = grads[-1]
-        return (*gradients, grad_anchor.transpose(-1, -2), None, None)
+        return (*gradients, grad_anchor.transpose(-1, -2), None, None, None)
 
 
-def two_precision_decode(q, k, v, g, beta, state, gate_inputs, read_mode):
+def two_precision_decode(q, k, v, g, beta, state, gate_inputs, read_mode, read_rounding="nearest"):
     """Return native GDN output with an identity-STE window adjoint, without a server."""
-    return _TwoPrecision.apply(q, k, v, g, beta, state, gate_inputs, read_mode)
+    return _TwoPrecision.apply(q, k, v, g, beta, state, gate_inputs, read_mode, read_rounding)
 
 
 def _rounded(x, dtype=torch.bfloat16):

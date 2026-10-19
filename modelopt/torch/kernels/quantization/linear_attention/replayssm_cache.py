@@ -45,7 +45,7 @@ def _gdn_replay_state_spec(key_heads, value_heads, value_dim, *, read_mode="tp8_
         ((value_heads, 16), torch.float32),  # beta
         ((value_heads, 16, value_dim), torch.float16),  # read-side residuals
         *extra,
-        ((4,), torch.int32),  # decode count + padding to preserve 16-byte page alignment
+        ((4,), torch.int32),  # decode count, request seed, and 16-byte alignment padding
     )
 
 
@@ -58,7 +58,7 @@ class _GDNReplayCache:
     are left untouched. A fresh prefill must write the anchor and call reset.
     """
 
-    def __init__(self, buffers, key_heads, *, read_mode="tp8_hi32"):
+    def __init__(self, buffers, key_heads, *, read_mode="tp8_hi32", read_rounding="nearest"):
         (
             self.anchor,
             self.read,
@@ -86,7 +86,12 @@ class _GDNReplayCache:
                 raise ValueError("Invalid ReplaySSM cache shape, dtype, device or row layout")
         if self.anchor.stride(0) != self.read.stride(0):
             raise ValueError("Recurrence and read checkpoints must have the same slot stride")
-        self.steps = steps[:, 0]
+        if read_rounding not in ("nearest", "stochastic") or (
+            read_rounding == "stochastic" and read_mode != "tp4_hi32"
+        ):
+            raise ValueError("Stochastic ReplaySSM reads require NVFP4 with an FP32 anchor")
+        self.steps, self.read_seeds = steps[:, 0], steps[:, 1]
+        self.read_rounding = read_rounding
         self.key_heads = key_heads
         self.read_mode = read_mode
 
@@ -98,6 +103,11 @@ class _GDNReplayCache:
         writes the read checkpoint, so clearing the large buffers is unnecessary.
         """
         self.steps.index_fill_(0, indices.long(), 0)
+        if self.read_rounding == "stochastic":
+            seeds = torch.randint(
+                2**31 - 1, indices.shape, device=indices.device, dtype=torch.int32
+            )
+            self.read_seeds.index_copy_(0, indices.long(), seeds)
         if self.read_mode == "tp4_hi32":
             # Unused row tiles participate in the request-wide reduction and must be zero.
             self.amax.index_fill_(0, indices.long(), 0)
@@ -186,7 +196,20 @@ class _GDNReplayCache:
             precision.read if precision.two_precision else precision.state,
             precision.nvfp4,
         )
-        if precision.nvfp4:
+        if self.read_rounding == "stochastic":
+            from .replayssm_read import refresh_nvfp4_read
+
+            refresh_nvfp4_read(
+                self.anchor,
+                self.read,
+                self.amax,
+                self.read_seeds,
+                positions,
+                windows,
+                indices,
+                null=0,
+            )
+        elif precision.nvfp4:
             # Upstream's second pass shares one global scale across each request's heads/tiles.
             _flush_quant_kernel[grid](
                 self.anchor,

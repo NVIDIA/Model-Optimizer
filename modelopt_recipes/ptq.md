@@ -99,6 +99,11 @@ It never falls back to prepared-only arithmetic.
 The adapters use the fixed vLLM 0.30.0 value-first cache layout. Native-forward
 comparisons and independent recurrence checks validate it in GPU tests.
 
+The `gdn_replayssm_nvfp4_read` recipe supports `rounding: stochastic` on its
+read quantizer; scales retain nearest rounding and the anchor remains FP32.
+See the [ReplaySSM example](../examples/llm_qat/linear_attention/REPLAYSSM.md#stochastic-nvfp4-reads)
+for a recipe usable by both training and serving.
+
 The `linear_attention_state_int8_dynamic` recipe uses the optional private
 `mxinO/quantized-replayssm` fork, branch `mxin/quantized-replayssm`.
 Its imports and kernel contract are isolated from the public 0.30.0 profiles;

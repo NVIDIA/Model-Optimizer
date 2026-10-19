@@ -21,6 +21,7 @@ import torch
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.linear_attention import LinearAttentionConfig, gdn_state_qat
 from modelopt.torch.quantization.linear_attention._two_precision import (
+    _native_replay,
     two_precision_decode,
     validate_two_precision,
 )
@@ -30,20 +31,21 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 native = pytest.importorskip("emulation", reason="Requires pinned upstream ReplaySSM emulation")
 
 
-@pytest.fixture(params=["fp8", "nvfp4"])
+@pytest.fixture(params=["fp8", "nvfp4", "nvfp4_stochastic"])
 def read_quantizer(request):
-    nvfp4 = request.param == "nvfp4"
+    nvfp4 = request.param.startswith("nvfp4")
     return TensorQuantizer(
         QuantizerAttributeConfig(
             num_bits=(2, 1) if nvfp4 else (4, 3),
             type="dynamic",
+            rounding="stochastic" if request.param.endswith("stochastic") else "nearest",
             pass_through_bwd=True,
             block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)} if nvfp4 else {-1: 128},
         )
     ).cuda()
 
 
-def _oracle(q, k, v, g, beta, state, quantizer):
+def _oracle(q, k, v, g, beta, state, quantizer, reads=None):
     # Canonical [H,K,V] state, unlike the production value-first window adjoint.
     def rounded(x, dtype=torch.bfloat16):
         return forward_value(x, x.to(dtype))
@@ -60,7 +62,7 @@ def _oracle(q, k, v, g, beta, state, quantizer):
         stop = min(start + 16, len(q))
         local_g = g[start:stop].cumsum(0)
         keys = k[start:stop].transpose(0, 1)
-        read = read_copy(state)
+        read = read_copy(state) if reads is None else forward_value(state, reads[start // 16])
         updates = []
         for i in range(stop - start):
             t = start + i
@@ -114,24 +116,35 @@ def test_native_two_precision_forward_and_window_backward(read_quantizer):
     params = (q, k, v, g, beta, state)
     rate, bias = torch.zeros(2, device="cuda"), torch.zeros(2, device="cuda")
     mode = validate_two_precision(None, read_quantizer)
-    actual = two_precision_decode(*params, (a, b, rate, bias), mode)
-    runner = native.GDNReplay(state.detach().transpose(-1, -2)[None].contiguous(), 2, mode)
+    torch.manual_seed(91)
+    actual = two_precision_decode(*params, (a, b, rate, bias), mode, read_quantizer.rounding)
+    torch.manual_seed(91)
+    runner = _native_replay(state.detach(), mode, read_quantizer.rounding)
     exact = native.GDNReplay(state.detach().transpose(-1, -2)[None].contiguous(), 2, "s32_rs")
-    expected = []
+    expected, reads = [], []
     for i in range(33):
         packed = torch.cat([x[i].flatten() for x in (q, k, v)])[None].bfloat16()
         inputs = (packed, a[i : i + 1], b[i : i + 1], rate, bias)
         expected.append(runner.step(*inputs)[0].clone())
+        if i % 16 == 0:
+            reads.append(runner.state_lo[0].transpose(-1, -2).clone())
         exact_output = exact.step(*inputs)[0].clone()
         # Quantized reads must never contaminate the FP32 recurrence checkpoint.
         torch.testing.assert_close(runner.state_hi, exact.state_hi, rtol=0, atol=0)
         if i in (0, 15, 31):
             torch.testing.assert_close(expected[-1], exact_output, rtol=0, atol=0)
     torch.testing.assert_close(actual, torch.stack(expected), rtol=0, atol=0)
-    reference = _oracle(*params, read_quantizer)
+    stochastic = read_quantizer.rounding == "stochastic"
+    if stochastic:
+        torch.manual_seed(92)
+        other = two_precision_decode(*params, (a, b, rate, bias), mode, "stochastic")
+        assert not torch.equal(actual, other)
+    reference = _oracle(*params, read_quantizer, reads=reads if stochastic else None)
     torch.testing.assert_close(actual, reference, rtol=2e-3, atol=2e-6)
     upstream = torch.randn_like(actual)
+    rng_state = torch.cuda.get_rng_state()
     gradients = torch.autograd.grad(actual, params, upstream)
+    torch.testing.assert_close(torch.cuda.get_rng_state(), rng_state)
     expected_gradients = torch.autograd.grad(reference, params, upstream)
     for gradient, expected_gradient in zip(gradients, expected_gradients):
         assert torch.isfinite(gradient).all() and gradient.norm() > 0
@@ -208,7 +221,9 @@ def test_two_precision_packed_matches_separate_sequences(read_quantizer):
 
     # Different prefix lengths, partial replay windows, and padding in both segments.
     bounds = torch.tensor([0, 80, 160], device="cuda", dtype=torch.int32)
+    torch.manual_seed(93)
     packed = forward(inputs, 0, 160, [62, 58], [79, 75], bounds)
+    torch.manual_seed(93)
     separate = torch.cat(
         [forward(inputs, 0, 80, [62], [79]), forward(inputs, 80, 160, [58], [75])], 1
     )
@@ -225,5 +240,6 @@ def test_two_precision_packed_matches_separate_sequences(read_quantizer):
         changed = [x.clone() for x in inputs]
         for x in changed:
             x[:, :80].neg_()
+        torch.manual_seed(93)
         result = forward(changed, 0, 160, [62, 58], [79, 75], bounds)
         torch.testing.assert_close(result[:, 80:], packed[:, 80:], rtol=0, atol=0)

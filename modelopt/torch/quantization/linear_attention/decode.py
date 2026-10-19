@@ -35,6 +35,7 @@ def _recurrent_decode(
     initial_state,
     output_final_state=False,
     read_mode="s32_rs",
+    read_rounding="nearest",
     scale=None,
     use_qk_l2norm_in_kernel=False,
     gate_inputs=None,
@@ -50,7 +51,9 @@ def _recurrent_decode(
         return v + zero, initial_state if output_final_state else None
     scale = q.shape[-1] ** -0.5 if scale is None else scale
     if config.precision == "replayssm_two_precision":
-        return two_precision_decode(q, k, v, g, beta, initial_state, gate_inputs, read_mode), None
+        return two_precision_decode(
+            q, k, v, g, beta, initial_state, gate_inputs, read_mode, read_rounding
+        ), None
     if config.precision == "replayssm":
         from .replay import _replay_decode
 
