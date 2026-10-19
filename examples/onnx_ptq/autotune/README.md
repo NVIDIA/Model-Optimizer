@@ -265,7 +265,7 @@ All examples above use the command-line interface. For **low-level programmatic 
 
 **See the API Reference documentation for low-level usage:**
 
-- [`docs/source/reference/2_qdq_placement.rst`](../../docs/source/reference/2_qdq_placement.rst)
+- [`docs/source/guides/9_autotune.rst`](../../../docs/source/guides/9_autotune.rst)
 
 The API docs include detailed examples of:
 
@@ -278,13 +278,13 @@ The API docs include detailed examples of:
 
 For comprehensive documentation on QDQ placement optimization, see:
 
-- **User Guide**: [`docs/source/guides/9_qdq_placement.rst`](../../docs/source/guides/9_qdq_placement.rst)
+- **User Guide**: [`docs/source/guides/9_autotune.rst`](../../../docs/source/guides/9_autotune.rst)
   - Detailed explanations of how the autotuner works
   - Advanced usage patterns and best practices
   - Configuration options and performance tuning
   - Troubleshooting common issues
 
-- **API Reference**: [`docs/source/reference/2_qdq_placement.rst`](../../docs/source/reference/2_qdq_placement.rst)
+- **API Reference**: [`docs/source/guides/9_autotune.rst`](../../../docs/source/guides/9_autotune.rst)
   - Complete API documentation for all classes and functions
   - Low-level usage examples
   - State management and pattern cache details
