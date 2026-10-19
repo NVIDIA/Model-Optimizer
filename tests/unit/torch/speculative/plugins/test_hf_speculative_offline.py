@@ -188,6 +188,46 @@ def test_vlm_collator_applies_image_limits_to_video_processor():
     assert video_processor.size == {"shortest_edge": 64, "longest_edge": 512}
 
 
+def test_vlm_collator_applies_pixel_limits_to_image_processor():
+    """VLM_MIN_PIXELS/VLM_MAX_PIXELS must bind for images, not only for video.
+
+    The Qwen3-VL image processor reads its bounds from ``size``, not from the
+    ``min_pixels``/``max_pixels`` from_pretrained kwargs, so passing the kwargs alone
+    left images uncapped -- measured token counts per image were identical at
+    max_pixels 3145728, 1048576 and 524288.
+    """
+    image_processor = types.SimpleNamespace(size={"shortest_edge": 32, "longest_edge": 16777216})
+    processor = types.SimpleNamespace(image_processor=image_processor)
+
+    transformers_dataset.VisionLanguageDataCollator._configure_image_processor(
+        processor, {"min_pixels": 64, "max_pixels": 512}
+    )
+
+    assert image_processor.size == {"shortest_edge": 64, "longest_edge": 512}
+
+
+def test_vlm_collator_image_limits_noop_without_bounds():
+    """With no pixel env set, the checkpoint's own image size is left untouched."""
+    original = {"shortest_edge": 32, "longest_edge": 16777216}
+    image_processor = types.SimpleNamespace(size=dict(original))
+    processor = types.SimpleNamespace(image_processor=image_processor)
+
+    transformers_dataset.VisionLanguageDataCollator._configure_image_processor(processor, {})
+
+    assert image_processor.size == original
+
+
+def test_vlm_collator_rejects_inverted_image_pixel_bounds():
+    """A min above max is a configuration error, not a silently clamped range."""
+    image_processor = types.SimpleNamespace(size={"shortest_edge": 32, "longest_edge": 256})
+    processor = types.SimpleNamespace(image_processor=image_processor)
+
+    with pytest.raises(ValueError, match="VLM_MIN_PIXELS must not exceed VLM_MAX_PIXELS"):
+        transformers_dataset.VisionLanguageDataCollator._configure_image_processor(
+            processor, {"min_pixels": 512, "max_pixels": 256}
+        )
+
+
 @pytest.mark.parametrize(
     ("env_name", "value", "message"),
     [
