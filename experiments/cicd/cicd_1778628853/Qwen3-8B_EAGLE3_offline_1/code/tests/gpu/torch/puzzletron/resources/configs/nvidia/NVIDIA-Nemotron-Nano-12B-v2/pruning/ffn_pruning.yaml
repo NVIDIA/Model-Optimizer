@@ -1,0 +1,12 @@
+defaults:
+  - /pruning/ffn_pruning_base@_here_
+  - _self_
+
+pruning_mixin:
+  layer_descriptor:
+    _target_: modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2.nemotron_h_v2_model_descriptor.NemotronHV2FFNIntermediateLayerDescriptor
+
+activation_hooks_kwargs:
+  method: iterative
+  target_layer: "mixer.down_proj"
+  layer_input_descriptors_path:
