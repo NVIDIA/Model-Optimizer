@@ -373,12 +373,8 @@ def quantizer_recipe_to_quant_cfg(recipe: dict[str, Any], model: Any) -> dict[st
     # Uncaptured quantizers stay disabled; exported weights are already folded.
     entries = [{"quantizer_name": "*", "enable": False}]
     for name, state in mapped_recipe.items():
-        entry = {"quantizer_name": name, "enable": not state["_disabled"]}
-        cfg = {
-            key[1:]: value
-            for key, value in state.items()
-            if key in ("_num_bits", "_axis", "_block_sizes", "_backend", "_backend_extra_args")
-        }
+        cfg = TensorQuantizer.attribute_config_from_modelopt_state(state)
+        entry = {"quantizer_name": name, "enable": cfg.pop("enable")}
         if cfg:
             entry["cfg"] = cfg
         entries.append(entry)

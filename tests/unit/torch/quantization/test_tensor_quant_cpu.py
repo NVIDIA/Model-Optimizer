@@ -18,6 +18,7 @@
 import numpy as np
 import pytest
 import torch
+import yaml
 from _test_utils.torch.quantization.models import SimpleLinear
 from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTester
 
@@ -623,3 +624,27 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         quantizer.get_modelopt_state(properties_only=True) for quantizer in model.weight_quantizer
     ]
     assert restored_states == original_states
+
+
+@pytest.mark.parametrize(
+    "attribute_cfg",
+    [
+        {
+            "num_bits": (2, 1),
+            "axis": None,
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+        },
+        {"num_bits": (4, 3), "axis": None, "use_constant_amax": True},
+        {"num_bits": 8, "axis": 0, "unsigned": True, "narrow_range": True, "type": "dynamic"},
+        {"num_bits": "custom", "backend": "custom_backend", "backend_extra_args": {"offset": 0.25}},
+        {"enable": False},
+    ],
+)
+def test_attribute_config_from_modelopt_state_round_trips_yaml(attribute_cfg):
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(**attribute_cfg))
+    state = quantizer.get_modelopt_state(properties_only=True)
+    restored_cfg = TensorQuantizer.attribute_config_from_modelopt_state(
+        yaml.safe_load(yaml.safe_dump(state))
+    )
+    restored = TensorQuantizer(QuantizerAttributeConfig(**restored_cfg))
+    assert restored.get_modelopt_state(properties_only=True) == state

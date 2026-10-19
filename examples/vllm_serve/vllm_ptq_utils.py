@@ -318,6 +318,12 @@ def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: list) -> list:
     return kv_quant_cfg
 
 
+# Header of a versioned exported quantizer recipe; its ``quantizers`` map HF quantizer names to
+# properties-only ModelOpt quantizer states.
+QUANTIZER_RECIPE_FORMAT = "modelopt_quantizer_recipe"
+QUANTIZER_RECIPE_VERSION = 1
+
+
 def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]:
     """Resolve and merge model and KV-cache quantization configuration."""
     import copy
@@ -331,6 +337,14 @@ def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]
     if quant_config["recipe_path"]:
         recipe_path = Path(quant_config["recipe_path"])
         raw_recipe = yaml.safe_load(recipe_path.read_text()) if recipe_path.is_file() else None
+        if isinstance(raw_recipe, dict) and raw_recipe.get("format") == QUANTIZER_RECIPE_FORMAT:
+            # Versioned per-quantizer recipe, e.g. written by Megatron-Bridge's HF export.
+            if raw_recipe.get("version") != QUANTIZER_RECIPE_VERSION:
+                raise ValueError(
+                    f"Unsupported {QUANTIZER_RECIPE_FORMAT} version {raw_recipe.get('version')!r}; "
+                    f"expected {QUANTIZER_RECIPE_VERSION}"
+                )
+            raw_recipe = raw_recipe.get("quantizers")
         if (
             isinstance(raw_recipe, dict)
             and raw_recipe

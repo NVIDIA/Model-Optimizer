@@ -34,6 +34,7 @@ from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.opt.config_loader import load_config
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.vllm import VllmMLAAttention
@@ -250,6 +251,7 @@ def test_recipe_path_rejects_manual_quant_config(conflicting_field):
         ("", ValueError),
         ("quantize: [", yaml.YAMLError),
         ("- not\n- a mapping\n", ValueError),
+        ("format: modelopt_quantizer_recipe\nversion: 2\nquantizers: {}\n", ValueError),
     ],
 )
 def test_invalid_recipe_yaml_is_rejected(tmp_path, contents, error):
@@ -260,6 +262,29 @@ def test_invalid_recipe_yaml_is_rejected(tmp_path, contents, error):
 
     with pytest.raises(error):
         ptq_utils.get_quant_config(config, model=None)
+
+
+def test_versioned_recipe_restores_full_quantizer_state(monkeypatch, tmp_path):
+    monkeypatch.syspath_prepend(str(_EXAMPLES_DIR))
+    ptq_utils = _load_example_module("vllm_ptq_utils")
+    source = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=(4, 3), axis=None, use_constant_amax=True)
+    )
+    recipe = {
+        "format": ptq_utils.QUANTIZER_RECIPE_FORMAT,
+        "version": ptq_utils.QUANTIZER_RECIPE_VERSION,
+        "quantizers": {"k_bmm_quantizer": source.get_modelopt_state(properties_only=True)},
+    }
+    recipe_path = tmp_path / "quant_recipe.yaml"
+    recipe_path.write_text(yaml.safe_dump(recipe))
+    model = torch.nn.Module()
+    model.k_bmm_quantizer = TensorQuantizer()
+    model.v_bmm_quantizer = TensorQuantizer()
+    config = {"recipe_path": str(recipe_path), "quant_cfg": None, "kv_quant_cfg": None}
+    mtq.quantize(model, {**ptq_utils.get_quant_config(config, model), "algorithm": None})
+    assert model.k_bmm_quantizer.is_enabled and model.k_bmm_quantizer._use_constant_amax
+    assert model.k_bmm_quantizer.num_bits == (4, 3)
+    assert not model.v_bmm_quantizer.is_enabled
 
 
 def _calibration_worker(

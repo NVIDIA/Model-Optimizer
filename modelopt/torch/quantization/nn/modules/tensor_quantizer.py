@@ -289,6 +289,24 @@ class TensorQuantizer(nn.Module):
         if self.is_mx_format:
             self._pass_through_bwd = True
 
+    @staticmethod
+    def attribute_config_from_modelopt_state(state: dict[str, Any]) -> dict[str, Any]:
+        """Return the :class:`QuantizerAttributeConfig` fields of a properties-only quantizer state.
+
+        Inverts :meth:`set_from_attribute_config` for the state saved by
+        ``get_modelopt_state(properties_only=True)``; keys that are not config fields are ignored.
+        """
+        inverse_getters: dict[str, tuple[str, Callable]] = {
+            "_disabled": ("enable", lambda val: not val),
+            "_dynamic": ("type", lambda val: "dynamic" if val else "static"),
+        }
+        attribute_cfg = {}
+        for key, val in state.items():
+            attribute, getter = inverse_getters.get(key, (key.removeprefix("_"), lambda v: v))
+            if attribute in QuantizerAttributeConfig.model_fields:
+                attribute_cfg[attribute] = getter(val)
+        return attribute_cfg
+
     def dequantize(self, inputs: BaseQuantizedTensor | QTensorWrapper):
         """De-quantize a real quantized tensor to a given dtype."""
         qtensor = inputs.get_qtensor() if isinstance(inputs, QTensorWrapper) else inputs
