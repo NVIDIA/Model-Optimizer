@@ -291,8 +291,11 @@ def _paged_cache_for(seqs_kv, num_kv_heads, head_dim, page_size, device, dtype):
     blocks_per_seq = [(kv.shape[0] + page_size - 1) // page_size for kv, _ in seqs_kv]
     num_blocks = sum(blocks_per_seq)
     max_blocks = max(blocks_per_seq)
-    cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-        num_blocks, page_size, num_kv_heads, head_dim
+    get_cache_shape = getattr(FlashAttentionBackend, "get_kv_cache_shape", None)
+    cache_shape = (
+        get_cache_shape(num_blocks, page_size, num_kv_heads, head_dim)
+        if get_cache_shape is not None
+        else (num_blocks, num_kv_heads, page_size, 2 * head_dim)
     )
     kv_cache = torch.zeros(cache_shape, device=device, dtype=dtype)
     k_cache, v_cache = attention_plugin._flash_attention_kv_cache_views(kv_cache, head_dim)
@@ -484,7 +487,7 @@ class TestCalibrationForward:
 # FlashInfer adapter: cache write must precede the calibrate-kernel read
 # ---------------------------------------------------------------------------
 class TestFlashInferCalibrationOrdering:
-    @pytest.mark.parametrize("layout", ["NHD", "HND"])
+    @pytest.mark.parametrize("layout", ["NHD", "HND", "packed"])
     def test_cache_write_happens_before_calibrate_read(self, monkeypatch, layout):
         calls = []
         monkeypatch.setattr(
@@ -496,6 +499,11 @@ class TestFlashInferCalibrationOrdering:
         def fake_calibrate(q, *args, **kwargs):
             calls.append("calibrate")
             calls.append(kwargs["k_cache"].stride())
+            for name, expected in (("k_cache", expected_key), ("v_cache", expected_value)):
+                cache = kwargs[name]
+                torch.testing.assert_close(cache, expected)
+                assert cache.stride() == expected_stride
+                assert cache.untyped_storage().data_ptr() == kv_cache.untyped_storage().data_ptr()
             counters = torch.zeros(len(TRIALS), 2, dtype=torch.int64)
             return torch.zeros_like(q), counters
 
@@ -510,12 +518,28 @@ class TestFlashInferCalibrationOrdering:
             _calib_threshold_trials=list(TRIALS),
             _calib_records=[],
         )
-        shape = (3, 2, page, num_kv_heads, head_dim)
-        kv_cache = torch.zeros(shape, dtype=torch.bfloat16)
-        if layout == "HND":
-            kv_cache = torch.zeros(
-                shape[0], shape[1], shape[3], shape[2], shape[4], dtype=torch.bfloat16
-            ).permute(0, 1, 3, 2, 4)
+        expected_key = (
+            torch.arange(3 * page * num_kv_heads * head_dim)
+            .remainder(127)
+            .reshape(3, page, num_kv_heads, head_dim)
+            .to(torch.bfloat16)
+        )
+        expected_value = -expected_key - 1
+        if layout == "packed":
+            kv_cache = (
+                torch.cat((expected_key, expected_value), dim=-1).transpose(1, 2).contiguous()
+            )
+            expected_stride = (
+                2 * num_kv_heads * page * head_dim,
+                2 * head_dim,
+                2 * page * head_dim,
+                1,
+            )
+        else:
+            kv_cache = torch.stack((expected_key, expected_value), dim=1)
+            if layout == "HND":
+                kv_cache = kv_cache.permute(0, 1, 3, 2, 4).contiguous().permute(0, 1, 3, 2, 4)
+            expected_stride = kv_cache[:, 0].stride()
         attn_metadata = SimpleNamespace(
             _modelopt_block_table=torch.zeros(1, 1, dtype=torch.int32),
             _modelopt_seq_lens=torch.tensor([8], dtype=torch.int32),
@@ -540,7 +564,7 @@ class TestFlashInferCalibrationOrdering:
             output=torch.empty_like(q),
         )
 
-        assert calls == ["cache_write", "calibrate", kv_cache[:, 0].stride()]
+        assert calls == ["cache_write", "calibrate", expected_stride]
         assert torch.isfinite(out).all()
         assert len(impl._calib_records) == 1
         assert impl._calib_records[0]["phase"] == "decode"

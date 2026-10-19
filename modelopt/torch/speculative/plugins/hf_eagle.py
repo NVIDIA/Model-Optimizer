@@ -43,8 +43,8 @@ from .modeling_eagle import EagleBaseModelOutput, EagleModule
 from .modeling_fakebase import (
     _BASE_MODEL_PATHS,
     _EMBED_TOKENS_PATHS,
-    _FINAL_NORM_PATHS,
     _LM_HEAD_PATHS,
+    find_final_norm_path,
 )
 from .modeling_final_norm import _maybe_apply_base_final_norm
 
@@ -138,14 +138,7 @@ class HFEagleModel(EagleModel):
 
         # Final pre-lm_head norm is OPTIONAL (set None if absent): used to re-normalize the
         # un-normed final hidden captured by vLLM in the offline/streaming path.
-        self.base_model_norm_path = None
-        for path in _FINAL_NORM_PATHS:
-            try:
-                assert isinstance(self.get_submodule(path), torch.nn.Module)
-                self.base_model_norm_path = path
-                break
-            except Exception:
-                continue
+        self.base_model_norm_path = find_final_norm_path(self)
 
     def _activate_torch_compile(self):
         import torch._dynamo
@@ -357,7 +350,7 @@ class HFEagleModel(EagleModel):
         arch_config = config.eagle_architecture_config
 
         # Populate base-model-dependent fields before constructing PretrainedConfig,
-        # since transformers >=5.4 validates rope_scaling during __init__.
+        # since transformers validates rope_scaling during __init__.
         arch_config["hidden_size"] = self._base_llm_config.hidden_size
         arch_config["vocab_size"] = self._base_llm_config.vocab_size
         arch_config["max_position_embeddings"] = self._base_llm_config.max_position_embeddings
@@ -366,7 +359,7 @@ class HFEagleModel(EagleModel):
             rope_scaling["rope_theta"] = arch_config["rope_theta"]
 
         # Use the base model's config class so fields like max_position_embeddings are declared
-        # before transformers>=5.5 rope standardization runs in __post_init__.
+        # before transformers' rope standardization runs in __post_init__.
         base_config_cls = type(self._base_llm_config)
         self.eagle_config = base_config_cls.from_dict(arch_config)
         self.eagle_config.eagle_decoder_type = self.eagle_decoder_type

@@ -40,6 +40,7 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     _amax_to_scale,
 )
 from modelopt.torch.quantization.tensor_quant import int_cast_ste
+from modelopt.torch.quantization.utils.numeric_utils import E4M3_MAX
 from modelopt.torch.quantization.utils.shared_input import SharedWeightGlobalAmaxState
 from modelopt.torch.utils import to_empty_if_meta_device
 
@@ -426,6 +427,7 @@ class TestFakeQuantizeLSQ:
         assert quantize_flags == [True, False]
 
     def test_skip_pre_scale_quantization_uses_raw_scale_floor(self, monkeypatch):
+        """Keep the raw pre-scale floor unchanged while normalizing the FP8 post-scale floor."""
         q = self._make_lsq_quantizer()
         q._quantize_scales = True
         q._quantize_pre_scale = False
@@ -446,7 +448,7 @@ class TestFakeQuantizeLSQ:
         out = q._fake_quantize(torch.randn(4, 16))
 
         assert out.shape == (4, 16)
-        assert torch.equal(min_values[0], torch.tensor([_FP8_E4M3_MIN_POSITIVE]))
+        assert torch.equal(min_values[0], torch.tensor([_FP8_E4M3_MIN_POSITIVE / E4M3_MAX]))
         assert min_values[1] == 1e-8
 
 
@@ -484,6 +486,7 @@ class TestLSQSharedGlobalAmax:
         return members
 
     def test_block_scale_tracks_shared_update(self):
+        """Check each member's FP8 scale floor against the updated shared global amax."""
         members = self._make_tied_lsq_group(global_amax=3.0)
         new_value = 5.0
         # Mutate the shared buffer in place, mimicking export unification.
@@ -493,7 +496,7 @@ class TestLSQSharedGlobalAmax:
             expected = _amax_to_scale(torch.tensor(new_value), member._quant_max_bound)
             scale = member._block_scale_from_amax(member.amax_post, quantize=True)
             assert scale.shape == member.amax_post.shape
-            assert torch.all(scale >= _FP8_E4M3_MIN_POSITIVE * expected)
+            assert torch.all(scale >= (_FP8_E4M3_MIN_POSITIVE / E4M3_MAX) * expected)
 
     def test_members_produce_identical_output_after_shared_update(self):
         members = self._make_tied_lsq_group(global_amax=3.0)

@@ -775,7 +775,7 @@ def load_vlm_or_llm(
         model_name_or_path,
         config=model_config if pass_config else None,
         trust_remote_code=trust_remote_code,
-        torch_dtype=dtype,
+        dtype=dtype,
         device_map=device_map,
         **extra,
     )

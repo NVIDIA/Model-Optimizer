@@ -19,7 +19,9 @@ import fnmatch
 import importlib
 from collections import Counter
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import torch
@@ -32,6 +34,9 @@ from .sparse_attn_config import load_from_checkpoint_metadata, match_sparse_conf
 
 __all__ = [
     "VllmAttentionInstallReport",
+    "collect_sparse_validation",
+    "enable_sparse_validation",
+    "get_sparse_attention_metadata",
     "install_vllm_nvfp4_attention",
     "install_vllm_skip_softmax_calibration",
     "install_vllm_sparse_attention_from_checkpoint",
@@ -116,10 +121,7 @@ def _model_config(model_runner):
 
 def _calibration_ignore_patterns(model_runner) -> tuple[str, ...]:
     """Return the existing skip-softmax layer exclusions, if any."""
-    hf_config = getattr(_model_config(model_runner), "hf_config", None)
-    sparse_meta = getattr(hf_config, "sparse_attention_config", None)
-    if not isinstance(sparse_meta, dict):
-        return ()
+    sparse_meta = get_sparse_attention_metadata(model_runner) or {}
     groups = sparse_meta.get("config_groups")
     if not isinstance(groups, dict):
         return ()
@@ -575,6 +577,85 @@ def _attention_quant_error(module) -> str | None:
     if active := _active_attention_quantization(module):
         return f"{active}; skip-softmax calibration requires unquantized attention"
     return None
+
+
+def get_sparse_attention_metadata(model_runner) -> dict | None:
+    """Copy sparse metadata from vLLM's resolved checkpoint, including Hub overrides."""
+    hf_config = getattr(_model_config(model_runner), "hf_config", None)
+    metadata = getattr(hf_config, "sparse_attention_config", None)
+    return deepcopy(metadata) if isinstance(metadata, dict) else None
+
+
+def enable_sparse_validation(model_runner, sparse_config: dict) -> int:
+    """Apply a candidate only if every selected layer has a calibration adapter."""
+    model = _unwrapped_model(model_runner)
+    detected = load_from_checkpoint_metadata(SimpleNamespace(sparse_attention_config=sparse_config))
+    if detected is None:
+        raise ValueError("Candidate has no serving sparse attention configuration")
+    resolved, _ = detected
+    impls = list(attention_plugin.iter_sparse_impls(model))
+    impl_ids = {id(impl) for impl in impls}
+    selected = []
+    missing = []
+    for name, module in model.named_modules():
+        if not isinstance(module, _VLLM_ATTENTION):
+            continue
+        sparse_kw = _sparse_kwargs(name, resolved)
+        if "threshold_scale_factor" not in sparse_kw:
+            continue
+        impl = getattr(module, "impl")
+        if id(impl) not in impl_ids:
+            missing.append(name)
+        selected.append((impl, sparse_kw))
+    if missing:
+        raise ValueError(
+            "Candidate enables layers without calibration adapters: " + ", ".join(missing)
+        )
+    if not selected:
+        raise ValueError("Candidate selects no calibrated sparse attention layers")
+
+    # Validate the full serving selection before changing any adapter or counters.
+    attention_plugin.disable_calibration(impls)
+    for impl in impls:
+        impl.sparse_kw = {}
+        impl._sparse_validation_stats = None
+    for impl, sparse_kw in selected:
+        impl.sparse_kw = sparse_kw
+        impl._sparse_validation_stats = {}
+    model_runner._modelopt_sparse_validation_impls = [impl for impl, _ in selected]
+    # The checkpoint loader gives every selected layer the same skip-softmax phase map.
+    model_runner._modelopt_sparse_validation_phases = tuple(
+        phase
+        for phase in ("prefill", "decode")
+        if phase in selected[0][1]["threshold_scale_factor"]
+    )
+    return len(selected)
+
+
+def collect_sparse_validation(model_runner) -> dict[str, dict[str, int]]:
+    """Collect every selected layer/phase, marking missing measurements as incomplete."""
+    result: dict[str, dict[str, int]] = {}
+    for impl in model_runner._modelopt_sparse_validation_impls:
+        stats_by_phase = impl._sparse_validation_stats or {}
+        for phase in model_runner._modelopt_sparse_validation_phases:
+            stats = stats_by_phase.get(phase, {})
+            record = result.setdefault(
+                phase,
+                {
+                    "total": 0,
+                    "skipped": 0,
+                    "launches": 0,
+                    "unmeasured_launches": 0,
+                    "min_seq_len": stats.get("min_seq_len", 0),
+                },
+            )
+            for key in ("total", "skipped", "launches", "unmeasured_launches"):
+                record[key] += stats.get(key, 0)
+            if stats.get("launches", 0) == 0:
+                record["unmeasured_launches"] += 1
+            record["min_seq_len"] = min(record["min_seq_len"], stats.get("min_seq_len", 0))
+        impl._sparse_validation_stats = None
+    return result
 
 
 def install_vllm_skip_softmax_calibration(model_runner) -> VllmAttentionInstallReport:

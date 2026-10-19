@@ -217,4 +217,7 @@ def run_hf_ptq_command(*, model: str, quant: str | None = None, vlm: bool = Fals
         # VLM PTQ shares the hf_ptq entry point; --vlm runs the multimodal deploy smoke test.
         cmd_parts.append("--vlm")
     cmd_parts = extend_cmd_parts(cmd_parts, **kwargs)
-    run_example_command(cmd_parts, "hf_ptq")
+    # Run a single-GPU TRT-LLM deploy's executor in the script's process. By default it spawns an
+    # MPI worker that imports TRT-LLM again, adding ~20s to every deploy.
+    env = {**os.environ, "TLLM_WORKER_USE_SINGLE_PROCESS": "1"}
+    run_example_command(cmd_parts, "hf_ptq", env=env)

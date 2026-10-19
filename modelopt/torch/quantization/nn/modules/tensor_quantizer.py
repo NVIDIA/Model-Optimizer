@@ -63,7 +63,7 @@ from ...tensor_quant import (
     static_blockwise_fp4_fake_quant,
 )
 from ...utils import is_torch_export_mode
-from ...utils.numeric_utils import fp8_max_for_normalization
+from ...utils.numeric_utils import E4M3_MAX, fp8_max_for_normalization
 from ..functional import normalized_hadamard_transform
 
 # torch.finfo(...).tiny gives the smallest normal E4M3 value; scale clamping needs
@@ -736,7 +736,9 @@ class TensorQuantizer(nn.Module):
     def _get_amax(self, inputs):
         """Get amax from buffer or compute it dynamically."""
         if self._use_constant_amax:
-            return torch.tensor(torch.finfo(torch.float8_e4m3fn).max, device=inputs.device)
+            # torch.full fills on the device; torch.tensor would copy from the host on every call,
+            # which CUDA graph capture rejects.
+            return torch.full((), torch.finfo(torch.float8_e4m3fn).max, device=inputs.device)
         if hasattr(self, "_amax"):
             amax = self._amax
             # A constant_amax buffer is registered at config time (on CPU) and may not have
@@ -747,8 +749,9 @@ class TensorQuantizer(nn.Module):
             reduce_axis = quant_utils.convert_quantization_axis_to_reduce_axis(inputs, self._axis)
             amax = quant_utils.reduce_amax(inputs, axis=reduce_axis, keepdims=True).detach()
 
-        amax = amax.detach() if is_torch_export_mode() else amax.data
-        return amax
+        if is_torch_export_mode() or torch.compiler.is_exporting():
+            return amax.detach()
+        return amax.data
 
     def validate_attr(
         self, attr_value=None, attr_name="amax", raise_error=False, warn_error=False, name=""
@@ -1727,7 +1730,9 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         """Compute the per-block scale from a per-block amax, optionally FP8-quantizing it."""
         if quantize:
             per_tensor_scale = _amax_to_scale(self.global_amax, self._quant_max_bound)
-            min_value = _FP8_E4M3_MIN_POSITIVE * per_tensor_scale.view(-1)
+            # scaled_e4m3 maps per_tensor_scale to E4M3_MAX (448); apply the inverse
+            # mapping to express the minimum encoded FP8 scale in physical scale units.
+            min_value = (_FP8_E4M3_MIN_POSITIVE / E4M3_MAX) * per_tensor_scale.view(-1)
             scale = _amax_to_scale(amax, self._quant_max_bound, min_value=min_value)
             return scaled_e4m3(scale, per_tensor_scale, None, 4, 3)
         return _amax_to_scale(amax, self._quant_max_bound, min_value=1e-8)

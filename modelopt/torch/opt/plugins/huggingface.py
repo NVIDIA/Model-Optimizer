@@ -19,12 +19,10 @@ import functools
 import os
 import threading
 import warnings
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from typing import Any
 
 import torch
-from huggingface_hub import try_to_load_from_cache
-from huggingface_hub.errors import HFValidationError
 
 from modelopt.torch.utils import print_rank_0
 
@@ -65,6 +63,10 @@ def _get_modelopt_state_path(model_name_or_path: str) -> str:
     """
     if os.path.isdir(model_name_or_path):
         return os.path.join(model_name_or_path, _MODELOPT_STATE_SAVE_NAME)
+    # Optional [hf] dependency: this module is imported even when huggingface_hub is not installed.
+    from huggingface_hub import try_to_load_from_cache
+    from huggingface_hub.errors import HFValidationError
+
     try:
         return try_to_load_from_cache(model_name_or_path, _MODELOPT_STATE_SAVE_NAME) or ""
     except HFValidationError:
@@ -72,7 +74,7 @@ def _get_modelopt_state_path(model_name_or_path: str) -> str:
 
 
 @contextmanager
-def _patch_model_init_for_modelopt(cls, model_path, extra_context=None):
+def _patch_model_init_for_modelopt(cls, model_path):
     """Patch for `cls.init` method to restore ModelOpt state after `init`."""
     # Note: Keeping original config in local as the package will be shared among threads
     added_original_init = False
@@ -90,8 +92,7 @@ def _patch_model_init_for_modelopt(cls, model_path, extra_context=None):
         modelopt_state_path = _get_modelopt_state_path(model_path)
         _original__init__(self, *args, **kwargs)
         if os.path.isfile(modelopt_state_path):
-            with extra_context() if extra_context else nullcontext():
-                restore_from_modelopt_state(self, modelopt_state_path=modelopt_state_path)
+            restore_from_modelopt_state(self, modelopt_state_path=modelopt_state_path)
 
             print_rank_0(f"Restored ModelOpt state from {modelopt_state_path}")
 

@@ -1,6 +1,6 @@
 # Qwen3.6-35B-A3B: W4A4 NVFP4 PTQ + QAD + vLLM Deployment
 
-End-to-end W4A4 optimization of [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) demonstrating how to push past weight-only quantization: NVFP4 W4A4 post-training quantization → Quantization-Aware Distillation (QAD) to recover the accuracy it costs → evaluation benchmarking → vLLM deployment. This document covers:
+End-to-end W4A4 optimization of [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) demonstrating how to quantize both weights and activations: NVFP4 W4A4 post-training quantization → Quantization-Aware Distillation (QAD) to recover the accuracy it costs → evaluation benchmarking → vLLM deployment. This document covers:
 
 1. **[Data Preparation](#1-data-preparation)** — tokenizing the SFT blend for distillation
 2. **[Quantization](#2-quantization)** — W4A4 NVFP4 PTQ with `examples/megatron_bridge/quantize.py`
@@ -9,7 +9,7 @@ End-to-end W4A4 optimization of [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qw
 5. **[Evaluation](#5-evaluation)** — benchmarking with NeMo Evaluator across MMMU-Pro, GPQA Diamond, SciCode, and more
 6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)** — throughput comparison against BF16 on GB200
 
-It closes with [potential further improvements](#potential-further-improvements) — the levers this run did not explore, and what the evidence says each might buy.
+It closes with [potential further improvements](#potential-further-improvements): settings we did not test and their potential benefits. Experiments that did not become the recommended recipe — chat-format SFT data with assistant-only loss, self-distilled data, and the SciCode non-termination diagnosis — are in [ABLATIONS.md](ABLATIONS.md).
 
 > [!NOTE]
 > This tutorial complements the [Nemotron-3-Nano-30B-A3B tutorial](../NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md), which covers pruning + distillation + FP8 PTQ. Here the starting point is an unpruned model and the technique under test is **W4A4** — aggressive enough that PTQ alone leaves a measurable accuracy gap, which is exactly what QAD exists to close.
@@ -176,7 +176,7 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
     --gbs 512 \
     --train_iters 500 \
     --lr 1e-5 --min_lr 1e-6 --lr_warmup_iters 50 \
-    --logit_kl_topk 4096 \
+    --logit_kl_top_k 4096 \
     --recompute_granularity full --recompute_method uniform --recompute_num_layers 1 \
     --no_async_save \
     --eval_iters 0 \
@@ -187,10 +187,10 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
 Non-default arguments:
 
 - `--student_megatron_path` — the quantized checkpoint from Section 2; `--student_hf_path` still points at the BF16 model, which supplies the architecture.
-- `--tp_size 1 --pp_size 1 --cp_size 1` — **required, not chosen** (see below). `--ep_size 8` must match the PTQ checkpoint.
+- `--tp_size 1 --pp_size 1` — **required, not chosen** (see below). `--ep_size 8` must match the PTQ checkpoint. You may increase `--cp_size` to enable context parallelism for longer sequence lengths (`nemo:26.10` container onwards).
 - `--seq_length 32768 --gbs 512` — 16.8M tokens/iteration, 1.7B per 100 iterations.
 - `--lr 1e-5 --min_lr 1e-6` — an order of magnitude below typical distillation LRs: the job is to adapt weights to quantization, not to learn the task.
-- `--logit_kl_topk 4096` — restricts the KD loss to the teacher's top-4096 vocab entries. With a 248,320-token vocabulary the dense `[seq, vocab]` fp32 logits are **30.31 GiB per tensor** at 32K, which OOMs on its own.
+- `--logit_kl_top_k 4096` — restricts the KD loss to the teacher's top-4096 vocab entries. With a 248,320-token vocabulary the dense `[seq, vocab]` fp32 logits are **30.31 GiB per tensor** at 32K, which OOMs on its own.
 - `--recompute_*` / `--no_async_save` / `--eval_iters 0` — all needed to fit. Async save spawns a worker needing its own CUDA context; the validation path computes full-vocab LM and MTP cross-entropy (top-k applies to training only), so eval OOMs at 32K even though training fits.
 
 </details>
@@ -244,8 +244,10 @@ Sampling follows the [nvidia/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/nvidi
 > it cannot share a config with the others (`deployment.command` is global). `qwen3_coder` is what
 > the model card specifies; the template's `<tool_call>` markers resemble `hermes`, which would
 > mis-parse tool calls and silently invalidate the benchmark. Its `top_k` / `presence_penalty` go
-> through tau2's `agent_args` passthrough, which NEL's top-level `params` block does not accept —
-> that is why the other five configs omit them.
+> through tau2's `agent_args` passthrough, which NEL's top-level `params` block does not accept.
+> On an `ns_*` task they go through the adapter's `params_to_add` instead — the other five configs
+> still omit them, deliberately, so they reproduce the table above; see **Output length** below
+> for when `presence_penalty` helps and when it is pure cost.
 
 > [!IMPORTANT]
 > Every task sets `num_repeats: 1`; the repeat counts above come from **launching a config that many times**. N launches give N independent `pass@1` values, which is what `mean ± sem` and the paired tests need — `num_repeats: N` instead yields a single `pass@1[avg-of-N]` with no spread. GPQA is the deliberate exception.
@@ -310,21 +312,7 @@ Accuracy is only half the serving cost — a model that scores the same while em
 
 **4-bit weights lengthen SciCode outputs by ~23-25% on their own** — the published W4A16 checkpoint does it too, so it is not something QAD or W4A4 introduced. **QAD then pushes SciCode to +90.9%**, for an unchanged score (40.2 vs 39.9), while pulling GPQA and MMMU-Pro back toward BF16. The throughput table is measured at fixed output length, so it does not capture this.
 
-<details>
-<summary><b>What the SciCode number actually is — worth reading before running QAD on another model</b></summary>
-
-It is not verbosity. It is a **failure to terminate on a small fraction of sub-steps**:
-
-- Sub-steps that hit the 131,072-token cap inside `<think>` go from **0.7% (20/2704, BF16) to 3.6% (96/2704, QAD 500)**. Almost all return **zero answer tokens** (93 of those 96) — the model writes a complete solution, says *"I think I've been going in circles"*, and writes it again. In the case we inspected, a 20-word window repeats **352 times** and 97.7% of the trace's 20-word windows are duplicates.
-- Those 3.6% of sub-steps burn **45.7% of all completion tokens**, so they dominate the mean: excluding them it is **+30.4%** rather than +90.9%.
-- The **median** also roughly doubles (+91.6%), so the whole distribution shifted right — this is not *only* a tail effect.
-- Capped rate peaks at **iteration 50** (4.3%) and settles at 3.1% / 3.6% by 300 / 500; it is not gradual drift.
-
-The obvious suspect — that `--logit_kl_topk 4096` leaves the stop tokens outside the loss — **did not hold up**. Probing the BF16 teacher over one runaway trace: `</think>` does fall outside top-4096 at 35% of positions overall, but *in the looping region* the teacher gives `<|im_end|>` a median rank of **5** and `</think>` ~570, both well inside top-k. The teacher is signalling "stop here" at positions the loss did cover, and the student still does not stop. More likely: the blend has few "the answer is written, now stop" positions in this style, and a teacher-forced loss never exercises free-running generation 10K+ tokens deep.
-
-**For the next QAD run**, three things follow: track the **length-capped rate** as a first-class metric alongside accuracy (a benchmark score can stay flat while 3.6% of responses return nothing); consider **top-p instead of top-k** for the KD loss so coverage adapts to the teacher's entropy rather than a fixed rank; and if memory allows, **full-vocab KL** — at 32K on this 248,320-token vocabulary the dense fp32 logits are 30.31 GiB per tensor, which is why top-k was used here, but more GPU memory or a smaller model or shorter sequence may afford it.
-
-</details>
+The SciCode increase is not verbosity: **3.6% of sub-steps never terminate** (BF16: 0.7%). They hit the 131,072-token cap with no answer and use 45.7% of all completion tokens. **`presence_penalty: 1.5` fixes it at decode time**: capped sub-steps drop from 96 to 2 of 2,704, accuracy stays within noise, and SciCode runs 12-44% faster. [scicode.yaml](eval_configs/scicode.yaml) has the line commented out so it reproduces the results table; uncomment it to apply the fix. Do not set it for every benchmark: on GPQA Diamond it costs 4.8× throughput for no accuracy change. Details are in [ABLATIONS.md](ABLATIONS.md#scicode-non-termination-diagnosis-and-decode-time-fix).
 
 ---
 
@@ -377,6 +365,6 @@ This is a single 500-iteration run at 32K on a text-only blend. Each of those th
 
 **2. Longer sequence length (64K).** The model serves at 262K context, so 32K trains on a fraction of it; AA-LCR, the one long-context benchmark, showed no movement either way. At 32K the run already needs top-k KD plus full recompute, and memory is dominated by the resident student + teacher + fp32 gradient buffer rather than by sequence length — so 64K needs a different memory lever.
 
-**3. A better data blend.** The clearest signal in the study: **MMMU-Pro is multimodal, the blend is text-only, and MMMU-Pro is the one deficit QAD did not close.** Since QAD supports language-model distillation with text-only data, recovering a multimodal benchmark that way asks the method to do something it is not set up for. Agentic coverage is also thin (agent/SWE splits under 9%, and tau2-bench showed the transient 8× `agent_error` spike), and weights here are simply proportional to token count — contrast the [Nemotron-3-Nano blend](../NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md#data-blend), which is deliberately designed against target benchmarks and [ablated](../NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/ABLATIONS.md#effect-of-data-blend-tool_calling).
+**3. A better data blend.** The clearest signal in the study: **MMMU-Pro is multimodal, the blend is text-only, and MMMU-Pro is the one deficit QAD did not close.** Since QAD supports language-model distillation with text-only data, recovering a multimodal benchmark that way asks the method to do something it is not set up for. Agentic coverage is also thin (agent/SWE splits under 9%, and tau2-bench showed the transient 8× `agent_error` spike), and weights here are simply proportional to token count — contrast the [Nemotron-3-Nano blend](../NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md#data-blend), which is deliberately designed against target benchmarks and [ablated](../NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/ABLATIONS.md#effect-of-data-blend-tool_calling). So the lever is *what* the blend contains: feeding the same conversations as chat data with assistant-only loss did not help (provisionally; see the [data-format ablation](ABLATIONS.md#data-format-pre-tokenized-blend-vs-chat-sft-data)).
 
 If you run only one, run **(1)**: no engineering risk, the trajectory says the gain is still arriving, and it produces the evidence to judge whether (2) and (3) are worth their cost.

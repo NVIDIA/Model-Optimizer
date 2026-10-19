@@ -36,7 +36,9 @@ from modelopt.torch.export.quant_format import (
     QUANTIZATION_IQ1_S,
     QUANTIZATION_IQ2_XS,
     QUANTIZATION_NVFP4,
+    QUANTIZATION_Q8_0,
     QUANTIZATION_W4A8_AWQ,
+    QUANTIZATION_W4A16_MXFP4,
 )
 from modelopt.torch.export.quant_utils import (
     _get_carried_over_module_names,
@@ -49,7 +51,9 @@ from modelopt.torch.export.quant_utils import (
     seed_carried_over_exclusions,
     uses_iq_quantization,
 )
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import (
+    GroupedQuantizer,
     NVFP4StaticQuantizer,
     SequentialQuantizer,
     TensorQuantizer,
@@ -64,13 +68,16 @@ class _FakeAttention(torch.nn.Module):
 
 
 @pytest.mark.parametrize(
-    ("num_bits", "quantization_format", "payload_bytes", "effective_bits"),
+    ("num_bits", "quantization_format", "block_size", "payload_bytes", "effective_bits"),
     [
-        ("iq1_s", QUANTIZATION_IQ1_S, 50, 1.5625),
-        ("iq2_xs", QUANTIZATION_IQ2_XS, 74, 2.3125),
+        ("iq1_s", QUANTIZATION_IQ1_S, 256, 50, 1.5625),
+        ("iq2_xs", QUANTIZATION_IQ2_XS, 256, 74, 2.3125),
+        ("q8_0", QUANTIZATION_Q8_0, 32, 34, 8.5),
     ],
 )
-def test_iq_quantization_config(num_bits, quantization_format, payload_bytes, effective_bits):
+def test_iq_quantization_config(
+    num_bits, quantization_format, block_size, payload_bytes, effective_bits
+):
     model = torch.nn.Sequential(torch.nn.Linear(256, 256, bias=False))
     mtq.quantize(
         model,
@@ -81,7 +88,7 @@ def test_iq_quantization_config(num_bits, quantization_format, payload_bytes, ef
                     "quantizer_name": "*weight_quantizer",
                     "cfg": {
                         "num_bits": num_bits,
-                        "block_sizes": {-1: 256},
+                        "block_sizes": {-1: block_size},
                         "backend": "ggml",
                     },
                 },
@@ -97,7 +104,7 @@ def test_iq_quantization_config(num_bits, quantization_format, payload_bytes, ef
     assert config["quantization"]["effective_bits"] == effective_bits
     hf_config = convert_hf_quant_config_format(config)
     assert "config_groups" not in hf_config
-    assert hf_config["group_size"] == 256
+    assert hf_config["group_size"] == block_size
     assert hf_config["effective_bits"] == effective_bits
     assert hf_config["packing"] == "ggml"
     assert hf_config["block_payload_bytes"] == payload_bytes
@@ -142,6 +149,34 @@ def test_uses_iq_quantization_false_without_iq_layers():
     assert not uses_iq_quantization(model)
 
 
+class _FakeGroupedLinear(torch.nn.Module):
+    """TEGroupedLinear layout: ``weight0..N`` behind one GroupedQuantizer and no ``weight``."""
+
+    def __init__(self, weight_cfg):
+        super().__init__()
+        self.weight0 = torch.nn.Parameter(torch.randn(4, 4))
+        self.weight1 = torch.nn.Parameter(torch.randn(4, 4))
+        quantizers = [TensorQuantizer(), TensorQuantizer()]
+        for q in quantizers:
+            q.set_from_attribute_config(weight_cfg)
+        self.weight_quantizer = GroupedQuantizer(*quantizers)
+        self.input_quantizer = TensorQuantizer()
+        self.input_quantizer.set_from_attribute_config({"num_bits": (4, 3)})
+
+
+def test_grouped_experts_only_model_reports_its_format():
+    """An experts-only recipe leaves grouped experts as the only quantized modules."""
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4), _FakeGroupedLinear({"num_bits": (4, 3)}))
+
+    assert get_quantization_format(model) == QUANTIZATION_FP8
+
+
+def test_uses_iq_quantization_sees_grouped_experts():
+    model = torch.nn.Sequential(_FakeGroupedLinear(_IQ_WEIGHT_CFG))
+
+    assert uses_iq_quantization(model)
+
+
 def test_uses_iq_quantization_tolerates_sequential_quantizer():
     """A SequentialQuantizer has is_enabled but no num_bits, and is never IQ.
 
@@ -153,6 +188,19 @@ def test_uses_iq_quantization_tolerates_sequential_quantizer():
     assert not hasattr(layer.weight_quantizer, "num_bits")
 
     assert not uses_iq_quantization(torch.nn.Sequential(layer))
+
+
+def test_grouped_q8_0_quantizer_is_detected_for_export():
+    module = torch.nn.Module()
+    module.weight0 = torch.nn.Parameter(torch.empty(256, 256))
+    quantizer = TensorQuantizer()
+    quantizer.set_from_attribute_config(
+        {"num_bits": "q8_0", "block_sizes": {-1: 32}, "backend": "ggml"}
+    )
+    module.weight_quantizer = GroupedQuantizer(quantizer)
+
+    assert uses_iq_quantization(module)
+    assert get_quantization_format(module) == QUANTIZATION_Q8_0
 
 
 def test_iq_export_rejects_enabled_input_quantizer():
@@ -291,6 +339,17 @@ def test_get_quantization_format(config, expected):
     model = ToyModel()
     mtq.quantize(model, config, lambda x: x(torch.randn(1, 4, 10)))
     assert get_quantization_format(model) == expected
+
+
+def test_mxfp4_weight_only_without_input_quantizer():
+    module = torch.nn.Linear(32, 32, bias=False)
+    module.weight_quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+        )
+    )
+    assert get_quantization_format(module) == QUANTIZATION_W4A16_MXFP4
 
 
 def test_nvfp4_static_quantizer_export():

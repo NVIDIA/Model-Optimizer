@@ -19,13 +19,18 @@ from __future__ import annotations
 
 import warnings
 from enum import Enum
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.quantization.config import QuantizeConfig  # noqa: TC001
-from modelopt.torch.speculative.config import DFlashConfig, EagleConfig, MedusaConfig
+from modelopt.torch.speculative.config import (
+    DFlashConfig,
+    EagleConfig,
+    ExternalDraftConfig,
+    MedusaConfig,
+)
 from modelopt.torch.speculative.plugins.hf_training_args import DataArguments as SpecDataArgs
 from modelopt.torch.speculative.plugins.hf_training_args import ModelArguments as SpecModelArgs
 from modelopt.torch.speculative.plugins.hf_training_args import (
@@ -58,6 +63,7 @@ class RecipeType(str, Enum):
     SPECULATIVE_EAGLE = "speculative_eagle"
     SPECULATIVE_DFLASH = "speculative_dflash"
     SPECULATIVE_MEDUSA = "speculative_medusa"
+    SPECULATIVE_EXTERNAL = "speculative_external"
     # QAT = "qat" # Not implemented yet, will be added in the future.
 
 
@@ -282,10 +288,17 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         description="Optional per-module overrides for candidate formats and BF16/no-quant "
         "selectability. Matching is performed after runtime-fusion grouping.",
     )
-    auto_quantize_method: Literal["gradient", "kl_div"] = ModeloptField(
+    auto_quantize_method: Literal["gradient", "kl_div", "aumann_shapley"] = ModeloptField(
         default="gradient",
         title="Sensitivity scoring method",
-        description="'gradient' (Taylor + Fisher, needs labels) or 'kl_div' (no labels).",
+        description="'gradient' uses task labels; 'kl_div' and 'aumann_shapley' compare the "
+        "model's own outputs without labels.",
+    )
+    method_options: dict[str, Any] | None = ModeloptField(
+        default=None,
+        title="Method-specific scoring options",
+        description="Options forwarded to the selected scoring method. Each method validates "
+        "its supported keys and values.",
     )
     score_size: int = ModeloptField(
         default=128,
@@ -312,8 +325,29 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         "the --kv_cache_qformat CLI flag when omitted.",
     )
 
+    @property
+    def uses_predicted_damage_target(self) -> bool:
+        """Whether predicted damage, rather than effective bits, is the search target."""
+        return (self.method_options or {}).get("max_predicted_damage") is not None
+
     @model_validator(mode="after")
-    def _has_search_space(self):
+    def _validate_search_targets_and_space(self):
+        if self.method_options and "method" in self.method_options:
+            raise ValueError(
+                "auto_quantize.method_options cannot contain 'method'; "
+                "use auto_quantize_method to select the scoring method."
+            )
+        if self.uses_predicted_damage_target and self.auto_quantize_method != "aumann_shapley":
+            raise ValueError(
+                "method_options.max_predicted_damage requires "
+                "auto_quantize_method='aumann_shapley'."
+            )
+        has_explicit_bit_budget = "effective_bits" in self.constraints.model_fields_set
+        if self.uses_predicted_damage_target and has_explicit_bit_budget:
+            raise ValueError(
+                "A damage-bound AutoQuantize recipe must omit constraints.effective_bits; "
+                "max_predicted_damage supplies the search target."
+            )
         if not self.candidate_formats and not self.module_search_spaces:
             raise ValueError(
                 "auto_quantize requires candidate_formats or at least one module_search_spaces "
@@ -324,6 +358,8 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
                 raise ValueError(
                     "KV-cache AutoQuant currently requires auto_quantize_method=kl_div."
                 )
+            if self.method_options:
+                raise ValueError("KV-cache AutoQuant does not accept method_options.")
             if self.module_search_spaces:
                 raise ValueError(
                     "KV-cache AutoQuant uses one candidate space for all eligible attention "
@@ -338,6 +374,10 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
                     "KV-cache AutoQuant does not support cost_excluded_layers; use "
                     "disabled_layers to exclude non-KV-cache modules from the search."
                 )
+        if self.method_options and self.auto_quantize_method != "aumann_shapley":
+            raise ValueError(
+                f"auto_quantize_method={self.auto_quantize_method!r} accepts no method_options."
+            )
         return self
 
 
@@ -490,6 +530,31 @@ class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
         return self
 
 
+class ModelOptExternalDraftRecipe(ModelOptSpeculativeRecipeBase):
+    """Our config class for external (standalone) draft speculative decoding recipes."""
+
+    RECIPE_TYPE: ClassVar[RecipeType] = RecipeType.SPECULATIVE_EXTERNAL
+
+    metadata: RecipeMetadataConfig = _metadata_field()
+
+    external: ExternalDraftConfig = ModeloptField(
+        default=ExternalDraftConfig(),
+        title="External draft config",
+        description="External (standalone) draft model configuration.",
+        validate_default=True,
+    )
+
+    draft_model_name_or_path: str | None = ModeloptField(
+        default=None,
+        title="Draft model",
+        description=(
+            "Path or HF id of the pretrained draft model to train. Unlike the head-based "
+            "recipes, ``model.model_name_or_path`` refers to the *base* model, which is "
+            "used only for its lm_head and vocabulary."
+        ),
+    )
+
+
 class ModelOptMedusaRecipe(ModelOptSpeculativeRecipeBase):
     """Our config class for Medusa speculative decoding recipes."""
 
@@ -513,4 +578,5 @@ RECIPE_TYPE_TO_CLASS: dict[RecipeType, type[ModelOptRecipeBase]] = {
     RecipeType.SPECULATIVE_EAGLE: ModelOptEagleRecipe,
     RecipeType.SPECULATIVE_DFLASH: ModelOptDFlashRecipe,
     RecipeType.SPECULATIVE_MEDUSA: ModelOptMedusaRecipe,
+    RecipeType.SPECULATIVE_EXTERNAL: ModelOptExternalDraftRecipe,
 }

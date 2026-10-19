@@ -15,11 +15,15 @@
 
 """Pure-function tests for ``modelopt.torch.utils.distributed``."""
 
+import os
+import pickle
+
 import pytest
 import torch
 import torch.nn as nn
 
-from modelopt.torch.utils.distributed import _off_dtype_params
+from modelopt.torch.nas.hparams.container import DepthHparam
+from modelopt.torch.utils.distributed import _deserialize, _off_dtype_params, _serialize
 
 
 def _model(*sizes_and_dtypes) -> nn.Module:
@@ -61,3 +65,24 @@ def test_off_dtype_params_dominant_is_by_numel(params, expected):
         off = _off_dtype_params(model)
     kept = {n for n, p in model.named_parameters() if p not in off}
     assert kept == {expected}
+
+
+class _Gadget:
+    def __reduce__(self):
+        return (os.system, ("exit 1",))
+
+
+@pytest.mark.parametrize("force_no_weights_only", [False, True])
+def test_deserialize_rejects_pickle_gadget(monkeypatch, force_no_weights_only):
+    # The override that trusts local checkpoints must not also trust peer payloads.
+    if force_no_weights_only:
+        monkeypatch.setenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
+    with pytest.raises(pickle.UnpicklingError):
+        _deserialize(_serialize(_Gadget()))
+
+
+def test_deserialize_traced_hp_subclass():
+    # The allowlist matches exact classes, so each TracedHp subclass must be registered too.
+    hp = _deserialize(_serialize(DepthHparam([1, 2])))
+    assert type(hp) is DepthHparam
+    assert hp.choices == [1, 2]

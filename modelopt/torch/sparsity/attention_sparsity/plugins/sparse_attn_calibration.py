@@ -31,6 +31,9 @@ Everything here operates on plain Python data and is unit-testable without
 vLLM installed.
 """
 
+import math
+from collections.abc import Callable
+from copy import deepcopy
 from typing import Any
 
 # One canonical sweep for both calibration paths: re-exported from the HF-path
@@ -47,8 +50,10 @@ __all__ = [
     "fit_from_counts",
     "merge_count_records",
     "merge_phase_counts",
+    "refine_scales",
     "split_records_by_phase",
     "stats_from_counts",
+    "summarize_validation",
 ]
 
 _PHASES = ("prefill", "decode")
@@ -287,3 +292,90 @@ def build_sparse_attention_config(
     if isinstance(legacy_sparse_softmax, dict):
         result["sparse_softmax"] = legacy_sparse_softmax
     return result
+
+
+def summarize_validation(
+    worker_stats: list[dict], target: float, tolerance: float, phases=("prefill", "decode")
+) -> dict:
+    """Combine TP counts, requiring matching launch counts and complete measurements."""
+    result = {}
+    for phase in phases:
+        records = [worker.get(phase, {}) for worker in worker_stats]
+        total = sum(r.get("total", 0) for r in records)
+        skipped = sum(r.get("skipped", 0) for r in records)
+        # TP shards execute the same selected layers and single-sequence schedule.
+        complete = len({r.get("launches", 0) for r in records}) == 1 and all(
+            r.get("launches", 0) > 0
+            and r.get("total", 0) > 0
+            and r.get("unmeasured_launches", 0) == 0
+            and 0 <= r.get("skipped", -1) <= r["total"]
+            for r in records
+        )
+        achieved = skipped / total if complete else None
+        result[phase] = {
+            "target": target,
+            "total": total,
+            "skipped": skipped,
+            "achieved": achieved,
+            "error_pp": 100 * (achieved - target) if complete else None,
+            "min_seq_len": min((r.get("min_seq_len", 0) for r in records), default=0),
+            "complete": complete,
+            "passed": complete and target - tolerance <= achieved <= target + tolerance,
+        }
+    return result
+
+
+def refine_scales(
+    config: dict, measure: Callable[[dict], dict], max_steps: int
+) -> tuple[dict, dict]:
+    """Refine prefill then decode, retaining the best measured calibration candidate.
+
+    ``measure`` runs a candidate on calibration inputs and returns per-phase
+    results from :func:`summarize_validation`. Held-out inputs must not drive it.
+    """
+    config = deepcopy(config)
+    group = config["config_groups"]["group_0"]
+    measured = measure(config)
+    for phase in ("prefill", "decode"):
+        if phase not in measured:
+            continue
+        params = group["threshold_scale_factor"][phase]
+        target = group["target_sparsity"][phase]
+        multiplier = math.exp(params["b"] * target)
+        best_a = params["a"]
+        best_error = float("inf")
+        lower = 0.0
+        # lambda >= 1 disables skipping in the serving resolver. Stay inside
+        # that domain for every request, including the shortest one.
+        upper = measured[phase]["min_seq_len"] * (1.0 - 1e-6)
+        bracketed = False
+        for step in range(max_steps + 1):
+            stats = measured[phase]
+            if not stats["complete"]:
+                if step < max_steps and upper > 0 and params["a"] * multiplier >= upper:
+                    candidate_a = upper / multiplier
+                    if candidate_a == params["a"]:
+                        break
+                    params["a"] = candidate_a
+                    measured = measure(config)
+                    continue
+                break
+            error = abs(stats["error_pp"])
+            if error < best_error:
+                best_error, best_a = error, params["a"]
+            if stats["passed"] or step == max_steps:
+                break
+            scale = params["a"] * multiplier
+            if stats["achieved"] < target:
+                lower = scale
+            else:
+                upper, bracketed = scale, True
+            candidate = (lower + upper) / 2 if bracketed else min(scale * 4, upper)
+            if candidate <= 0 or math.isclose(candidate, scale, rel_tol=1e-6):
+                break
+            params["a"] = candidate / multiplier
+            measured = measure(config)
+        if params["a"] != best_a:
+            params["a"] = best_a
+            measured = measure(config)
+    return config, measured

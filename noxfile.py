@@ -46,12 +46,8 @@ TORCH_VERSIONS = {
 # Extra install pins applied per transformers matrix entry (installed after the base
 # ``.[all,dev-test]`` install to constrain that env).
 TRANSFORMERS_VERSIONS = {
-    "tf_latest": ("transformers~=5.14.0",),
-    # transformers 4.57 caps ``huggingface_hub<1.0``, but ``diffusers>=0.40`` requires
-    # ``huggingface_hub>=1.23``. Bound diffusers to a hub<1.0-compatible release so this env
-    # stays internally consistent; otherwise diffusers' pipeline import fails and diffusers
-    # models silently misroute to the LLM path on export.
-    "tf_min": ("transformers~=4.57.0", "diffusers<0.40"),
+    "tf_latest": ("transformers~=5.18.0",),
+    "tf_min": ("transformers~=5.5.0",),
 }
 
 
@@ -73,7 +69,20 @@ def unit(session, torch_ver, tf_ver):
     tf_pins = TRANSFORMERS_VERSIONS[tf_ver]
     if tf_pins:
         session.install(*tf_pins)
-    session.run("python", "-m", "pytest", "tests/unit", *_cov_args(), env=_CPU_ONLY_ENV)
+    run_manual = "--run-manual" in session.posargs
+    pytest_args = [arg for arg in session.posargs if arg != "--run-manual"]
+    session.run(
+        "python", "-m", "pytest", "tests/unit", *_cov_args(), *pytest_args, env=_CPU_ONLY_ENV
+    )
+    if run_manual:
+        # A separate process: some manual tests (e.g. multi-threaded from_pretrained) leak global
+        # state that breaks later tests. No coverage, so it cannot overwrite the main run's data.
+        session.run(
+            "python",
+            # Caller args first: the last ``-m`` wins, and it must be ours.
+            *("-m", "pytest", "tests/unit", *pytest_args, "--run-manual", "-m", "manual"),
+            env={**_CPU_ONLY_ENV, "COVERAGE_PROCESS_START": ""},
+        )
 
 
 @nox.session(python="3.12")
@@ -104,7 +113,7 @@ def partial_unit(session, subset):
 # existing Python environment (e.g. /opt/venv in NeMo) instead of an isolated one.
 # Use `python -m pip/pytest` to ensure the container's active venv Python is used,
 # not a stale PATH entry (e.g. NeMo container has pip → /usr/local/bin/pip but python → /opt/venv/bin/python).
-# Container: nvcr.io/nvidia/pytorch:26.01-py3 or later
+# Container: nvcr.io/nvidia/pytorch:26.07-py3 or later with CUDA 13
 @nox.session(venv_backend="none")
 def gpu(session):
     # tests/gpu/_extensions/test_onnx_extensions.py fails for newer containers
@@ -117,9 +126,7 @@ def gpu(session):
         "--no-build-isolation",
         "git+https://github.com/Dao-AILab/fast-hadamard-transform.git",
     )
-    session.run("python", "-m", "pip", "install", "-e", ".[all,dev-test]")
-    session.run("python", "-m", "pip", "uninstall", "-y", "cupy-cuda12x")
-    session.run("python", "-m", "pip", "install", "cupy-cuda13x")
+    session.run("python", "-m", "pip", "install", "-e", ".[all,dev-test,dev-fla]")
     session.run(
         "python",
         "-m",
@@ -140,7 +147,7 @@ def gpu_megatron(session):
     session.run("pip", "uninstall", "-y", "tensorrt_llm")
     # Pre-installed nvidia-modelopt shadows the editable install
     session.run("pip", "uninstall", "-y", "nvidia-modelopt")
-    session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test]")
+    session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test,dev-fla]")
     session.run("python", "-m", "pytest", "tests/gpu_megatron", *_cov_args())
 
 

@@ -17,12 +17,13 @@ import contextlib
 import pytest
 import torch
 from _test_utils.fs_utils import assert_unmodified_tree
-from _test_utils.torch.distributed.utils import DistributedWorkerPool
+from _test_utils.torch.distributed.utils import DistributedWorkerPool, get_live_pool
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from megatron.core.parallel_state import destroy_model_parallel
 
 import modelopt.torch.quantization.extensions as ext
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.utils.plugins.megatron_preprocess_data import _prestart_forkserver
 
 
 @pytest.fixture(scope="session")
@@ -52,6 +53,17 @@ def _prebuild_quant_cuda_extensions():
     .so from the shared ``TORCH_EXTENSIONS_DIR``.
     """
     ext.precompile()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _prestart_preprocess_forkserver():
+    """Start the forkserver that ``megatron_preprocess_data`` workers fork from, at session start.
+
+    Its first start cold-imports torch/megatron, which would otherwise land inside the first
+    multi-worker preprocess test and its per-test timeout. Starting it here, without waiting,
+    overlaps that import with the earlier tests. The server's environment is fixed at start.
+    """
+    _prestart_forkserver()
 
 
 def megatron_worker_teardown(rank, world_size):
@@ -96,31 +108,31 @@ def _pool_cache():
 
 
 def _get_pool(cache, world_size):
-    if world_size not in cache:
-        cache[world_size] = _make_pool(world_size)
-    return cache[world_size]
+    # A hung test kills its pool; a fresh one keeps a single hang from timing out every later
+    # test in the module (that cascade cost the nightly 20+ min).
+    return get_live_pool(cache, world_size, lambda: _make_pool(world_size))
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def dist_workers(_pool_cache):
-    """Module-scoped pool with world_size=torch.cuda.device_count()."""
+    """Pool (cached per module) with world_size=torch.cuda.device_count()."""
     return _get_pool(_pool_cache, torch.cuda.device_count())
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def dist_workers_size_1(_pool_cache):
-    """Module-scoped pool with world_size=1 for tests that require a single process."""
+    """Pool (cached per module) with world_size=1 for tests that require a single process."""
     return _get_pool(_pool_cache, 1)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def dist_workers_size_2(_pool_cache):
     if torch.cuda.device_count() < 2:
         pytest.skip("Need at least 2 GPUs")
     return _get_pool(_pool_cache, 2)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def dist_workers_size_4(_pool_cache):
     if torch.cuda.device_count() < 4:
         pytest.skip("Need at least 4 GPUs")

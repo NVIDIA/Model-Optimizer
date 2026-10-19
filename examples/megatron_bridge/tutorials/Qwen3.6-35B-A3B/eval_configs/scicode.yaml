@@ -86,6 +86,9 @@ evaluation:
           params_to_add:
             chat_template_kwargs:
               enable_thinking: true
+            # Uncomment to suppress non-termination (see the tutorial's "Output length").
+            # Left out so this config reproduces the published results table.
+            # presence_penalty: 1.5
   tasks:
     - name: ns_scicode
       nemo_evaluator_config:

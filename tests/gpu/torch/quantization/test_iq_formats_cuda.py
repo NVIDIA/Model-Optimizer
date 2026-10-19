@@ -22,13 +22,16 @@ derives the block scale in its own kernel instead of taking a precomputed one.
 
 import pytest
 import torch
+from _test_utils.torch.quantization.iq_llama_cpp_vectors import expected_values, packed_blocks
 
+import modelopt.torch.quantization.ggml.iq1_m as iq1_m_module
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
 import modelopt.torch.quantization.ggml.iq2_s as iq2_s_module
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
 import modelopt.torch.quantization.ggml.iq2_xxs as iq2_xxs_module
 from modelopt.torch.quantization.extensions import get_cuda_ext_ggml
 from modelopt.torch.quantization.ggml import (
+    IQ1_M_BLOCK_BYTES,
     IQ1_S_BLOCK_BYTES,
     IQ2_S_BLOCK_BYTES,
     IQ2_XS_BLOCK_BYTES,
@@ -39,6 +42,7 @@ from modelopt.torch.quantization.ggml import (
 # module, packer name, per-block payload size, whether the packer takes precomputed scales
 FORMATS = {
     "iq1_s": (iq1_s_module, "iq1_s_pack", IQ1_S_BLOCK_BYTES, False),
+    "iq1_m": (iq1_m_module, "iq1_m_pack", IQ1_M_BLOCK_BYTES, True),
     "iq2_xxs": (iq2_xxs_module, "iq2_xxs_pack", IQ2_XXS_BLOCK_BYTES, True),
     "iq2_xs": (iq2_xs_module, "iq2_xs_pack", IQ2_XS_BLOCK_BYTES, True),
     "iq2_s": (iq2_s_module, "iq2_s_pack", IQ2_S_BLOCK_BYTES, True),
@@ -183,6 +187,86 @@ def test_cuda_float64_matches_pytorch_encoder(monkeypatch, name):
     assert torch.equal(reference, packed)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16, torch.float64])
+@pytest.mark.parametrize("name", sorted(FORMATS))
+def test_cuda_decoder_matches_pytorch_decoder(monkeypatch, name, dtype):
+    """Fake quant decodes on every forward; the CUDA decoder must be the PyTorch one, bit for bit."""
+    module, _, block_bytes, _ = FORMATS[name]
+    assert hasattr(_extension(), f"{name}_unpack")
+    dequantize = getattr(module, f"dequantize_{name}")
+    generator = torch.Generator().manual_seed(5)
+    # Every byte pattern, including block scales that decode to inf or NaN.
+    random_payload = torch.randint(0, 256, (3000, 1, block_bytes), generator=generator).to(
+        device="cuda", dtype=torch.uint8
+    )
+    weight = torch.randn((64, 1024), generator=generator).cuda()
+    encoded, weight_shape = getattr(module, f"quantize_{name}")(weight)
+    cases = [(random_payload, torch.tensor([3000, 256])), (encoded, weight_shape)]
+
+    decoded = [dequantize(payload, shape, dtype=dtype) for payload, shape in cases]
+    monkeypatch.setattr(module, "get_cuda_ext_ggml", lambda: None)
+    for (payload, shape), got in zip(cases, decoded):
+        expected = dequantize(payload, shape, dtype=dtype)
+        assert got.dtype == dtype and got.is_cuda
+        torch.testing.assert_close(got, expected, rtol=0, atol=0, equal_nan=True)
+
+
+@pytest.mark.parametrize("name", sorted(FORMATS))
+def test_cuda_decoder_matches_llama_cpp_on_captured_blocks(name):
+    """The CUDA decoder reproduces llama.cpp's own values for bytes we did not produce."""
+    module, _, block_bytes, _ = FORMATS[name]
+    blocks = torch.from_numpy(packed_blocks(name)).cuda()
+    count = blocks.shape[0]
+    decoded = getattr(module, f"dequantize_{name}")(
+        blocks.reshape(count, 1, block_bytes), torch.tensor([count, 256]), dtype=torch.float32
+    )
+    assert torch.equal(decoded.reshape(count, 256).cpu(), torch.from_numpy(expected_values(name)))
+
+
 def test_every_registered_format_is_covered():
     """A format registered for dispatch must also be listed here, or it escapes this contract."""
     assert sorted(IQ_FORMAT_REGISTRY) == sorted(FORMATS)
+
+
+# The formats whose packer takes a per-input-column importance.
+WEIGHTED = sorted(name for name, fmt in IQ_FORMAT_REGISTRY.items() if fmt.weighted)
+
+
+@pytest.mark.parametrize("name", WEIGHTED)
+def test_cuda_weighted_pack_matches_pytorch_encoder(monkeypatch, name):
+    """The weighted search agrees with the reference as closely as the unweighted one does."""
+    module, _, _, _ = FORMATS[name]
+    quantize = getattr(module, f"quantize_{name}")
+    dequantize = getattr(module, f"dequantize_{name}")
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    weight = torch.randn((128, 2048), generator=generator, device="cuda", dtype=torch.bfloat16)
+    importance = torch.randn(2048, generator=generator, device="cuda").mul(1.5).exp()
+    blocks = weight.numel() // 256
+
+    packed, shape = quantize(weight, importance=importance)
+    assert torch.equal(
+        quantize(weight, importance=torch.ones_like(importance))[0], quantize(weight)[0]
+    )
+    monkeypatch.setattr(module, "get_cuda_ext_ggml", lambda: None)
+    reference, _ = quantize(weight, importance=importance)
+
+    def weighted_error(payload):
+        decoded = dequantize(payload, shape, dtype=torch.float32)
+        return ((decoded - weight.float()) ** 2 * importance).sum()
+
+    differing = int((packed != reference).any(dim=-1).sum())
+    assert differing <= blocks // 1000, f"{differing} of {blocks} blocks differ"
+    assert torch.isclose(weighted_error(packed), weighted_error(reference), rtol=1e-5)
+
+
+@pytest.mark.parametrize("name", WEIGHTED)
+def test_cuda_packer_rejects_importance_that_does_not_tile_the_blocks(name):
+    module, packer, _, takes_scales = FORMATS[name]
+    weight = torch.randn((4, 512), device="cuda")
+    blocks = weight.reshape(-1, 256)
+    grid = getattr(module, f"{name}_grid")("cuda")
+    # IQ1_S predicts its block scales inside the packer.
+    scales = (getattr(module, f"_predict_{name}_scales")(blocks),) if takes_scales else ()
+
+    with pytest.raises(RuntimeError, match="importance must be float32"):
+        getattr(_extension(), packer)(blocks, grid, *scales, torch.ones(3, 256, device="cuda"))

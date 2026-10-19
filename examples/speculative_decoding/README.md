@@ -19,6 +19,7 @@ This example focuses on training with Hugging Face. To train with Megatron‑LM,
 | Online Training | Train draft model alongside base model in GPU memory | \[[Link](#training-draft-model-with-online-base-model)\] |
 | Offline Training | Train draft model using pre-computed hidden states | \[[Link](#training-draft-model-with-offline-base-model)\] |
 | Streaming Training | Train draft on hidden states streamed from a live vLLM serve (no disk dump) | \[[Link](#training-draft-model-with-streaming-base-model)\] |
+| External Draft Training | Train a standalone pretrained LM as the draft, not a grafted head | \[[Link](#training-a-standalone-external-draft-model)\] |
 | After Training | Evaluation, export and deployment | \[[Link](#model-validation)\] |
 | Advanced Usage | Data synthesis, vocab compression, and configuration | \[[Link](#advanced-usage)\] |
 | Support Matrix | Supported models for speculative decoding training | \[[Link](#support-matrix)\] |
@@ -131,6 +132,44 @@ Once we finish dumping hidden states, launch offline training pointing to the hi
 ## Training Draft Model with Streaming Base Model
 
 For large base models, you can stream hidden states from a live `vllm serve` instead of dumping them to disk: a co-located server produces the base-model hidden states on the fly and sends them to the trainer over NIXL RDMA, scaling to multiple nodes (dedicated serve replicas + DDP trainers). See the launcher examples, e.g. [Kimi-K2.5 streaming EAGLE3](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_eagle3_multi_node.yaml) and [streaming DFlash](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_dflash_multi_node.yaml).
+
+## Training a Standalone (External) Draft Model
+
+The modes above graft a draft head onto the target. The `external` mode instead
+trains an ordinary pretrained causal LM as the draft: it keeps its own embeddings
+and lm_head, the target is never modified, and the result exports as a plain HF
+checkpoint that TRT-LLM, vLLM and SGLang load with no mode-specific support. The
+draft must index the same vocabulary as the target.
+
+Training consumes dumped base hidden states, as in the offline flow above. Pass
+`--no-aux-hidden-states` when dumping: this mode never reads them and they
+dominate the dump size. Streaming feeds the same hidden states from a live
+`vllm serve` and is accepted here, though it has not been exercised for this
+mode. Online training is rejected: it produces no cached base outputs for the
+draft to be scored against.
+
+```bash
+torchrun --nproc_per_node 8 main.py \
+  --config ../../modelopt_recipes/general/speculative_decoding/external_draft.yaml \
+  model.model_name_or_path=$BASE_MODEL \
+  draft_model_name_or_path=$DRAFT_MODEL \
+  data.offline_data_path=$HIDDEN_STATES_DIR \
+  external.external_loss=tvd \
+  training.output_dir=$OUTPUT_DIR
+```
+
+`external.external_loss` selects the objective:
+
+| value | what it scores |
+|---|---|
+| `soft_ce` | cross-entropy against the base's soft distribution (the EAGLE offline objective) |
+| `tvd` | total-variation distance between the two full distributions |
+| `tvd_deploy` | the same, with both sides put through the serving filter (`external_top_k`, then `external_top_p`) first, so the loss is the acceptance the deployed pair sees |
+
+Under rejection sampling the acceptance probability is exactly `sum(min(p, q))`,
+so `tvd_deploy` is `1 - acceptance` — the deployment metric itself rather than a
+proxy for it. Report which truncation you trained under, since `top_k` and
+`top_p` settings are not interchangeable.
 
 ## Model Validation
 
@@ -271,10 +310,12 @@ First, prepare input conversation skeletons using `--mode generate` (default) fr
 
 ```bash
 pip install vllm
-vllm serve meta-llama/Llama-3.2-1B-Instruct --api-key token-abc123 --port 8000  --tensor-parallel-size 1
+vllm serve meta-llama/Llama-3.2-1B-Instruct --api-key token-abc123 --port 8000 --generation-config vllm --tensor-parallel-size 1
 ```
 
 Note: Add `--quantization=modelopt` flag for quantized models.
+
+The `--generation-config vllm` server option avoids a checkpoint-specific output cap.
 
 Then, we generate conversations with the base model using the prepared prompts:
 
@@ -282,7 +323,48 @@ Then, we generate conversations with the base model using the prepared prompts:
 python scripts/server_generate.py --data_path input_conversations/train.jsonl --output_path synthetic/train.jsonl
 ```
 
-To add a system prompt, use the `--system_prompt <system_prompt_text>` argument.
+Inputs can use `conversations` or `messages`, with either full conversations or user-only
+skeletons. Every user turn gets a fresh response using the previously generated responses
+as history. Input system messages are preserved; `--system_prompt <system_prompt_text>`
+overrides them and emits a warning when an input system message is replaced.
+Output remains one full conversation per JSONL record, with no train/eval/test
+split or expansion into separate assistant-turn examples. Existing output IDs are skipped on resume.
+
+Use `--extra_body` to pass model-specific chat parameters, including thinking controls and
+sampling settings. For example, with a compatible Qwen server and reasoning parser:
+
+```bash
+python scripts/server_generate.py --data_path input_conversations/train.jsonl \
+    --output_path synthetic/train.jsonl --model qwen3.8-27b --temperature 1.0 --max_tokens 8192 \
+    --extra_body '{"reasoning_effort":"medium","top_p":0.95,"top_k":20,"chat_template_kwargs":{"enable_thinking":true,"preserve_thinking":true}}'
+```
+
+The client uses the server's default thinking mode and effort unless overridden through
+`--extra_body`. Returned reasoning is saved in the
+assistant's `reasoning_content` field and included in subsequent requests. Token-capped
+conversations retain the existing `truncated: true` flag and need filtering before training.
+Failed conversations and partial answers are excluded from training output. Generation continues
+after per-conversation failures and records each one in `<output_path>.failures`, a JSONL journal
+whose filename deliberately does not end in `.jsonl` so the shard combiner ignores it.
+
+Rerun the same command with the same input ordering and output path to resume. Completed
+conversation IDs are skipped. Connection errors, timeouts, rate limits, and temporary server
+errors remain retryable on resume. Empty final answers also remain retryable when `--temperature`
+is greater than zero. At temperature zero, empty final answers are recorded as rejected to
+avoid repeating greedy-generation failures. Other rejected inputs and responses, including
+unsupported tool roles or calls and HTTP 400/422 responses, are skipped on ordinary resume.
+Inspect the journal and use `--retry_failed` to retry these rejections after correcting the
+input or request settings. This script has no tool-execution loop.
+
+Use `--fail_on_error` to return a nonzero exit status if failures remain after the batch finishes.
+Authentication failures, missing endpoints or models, and unexpected internal or output-write
+errors still exit nonzero by default. When `--log_empty_conversations` is enabled, the `finished` marker means
+every conversation is either saved or recorded as rejected; no marker is appended while
+retryable failures remain. Always inspect the failure journal before using the generated data.
+
+For chat generation, `--max_tokens 0` sends no fixed response cap; the server determines
+the budget from its configured context window and generation defaults. Increase
+`--request_timeout` (seconds, default 600) when long responses need more time.
 
 For large scale data generation, please see [SLURM prepare data](SLURM_prepare_data.md) for SLURM support.
 

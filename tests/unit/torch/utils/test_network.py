@@ -15,6 +15,8 @@
 
 # Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
 
+import sys
+import types
 from contextlib import nullcontext
 
 import pytest
@@ -23,14 +25,17 @@ from _test_utils.torch.nas_prune.utils import param_num
 from torch import nn
 from torchvision.models import MobileNetV2
 
+from modelopt.torch.utils import network
 from modelopt.torch.utils.network import (
     compare_dict,
     create_param_grad_clear_hook,
     get_model_attributes,
     get_same_padding,
+    get_unwrapped_name,
     make_divisible,
     set_submodule,
     standardize_model_args,
+    unwrap_model,
 )
 
 
@@ -221,3 +226,22 @@ def test_create_param_post_grad_hook():
     accum_grad, handle = create_param_grad_clear_hook(model.weight)
     model(torch.randn(16)).sum().backward()
     assert model.weight.grad is None
+
+
+def test_deepspeed_engine_is_unwrapped_once_deepspeed_is_imported(monkeypatch):
+    # Stand in for deepspeed.runtime.engine: modelopt looks the engine up there instead of
+    # importing deepspeed itself.
+    class DeepSpeedEngine(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+    engine_module = types.ModuleType("deepspeed.runtime.engine")
+    engine_module.DeepSpeedEngine = DeepSpeedEngine
+    monkeypatch.setitem(sys.modules, "deepspeed.runtime.engine", engine_module)
+    monkeypatch.setattr(network, "SUPPORTED_WRAPPERS", dict(network.SUPPORTED_WRAPPERS))
+
+    inner = nn.Linear(2, 2)
+    engine = DeepSpeedEngine(inner)
+    assert unwrap_model(engine) is inner
+    assert get_unwrapped_name("module.weight", engine) == "weight"

@@ -47,8 +47,6 @@ pytest.importorskip("transformers")
 import transformers
 from transformers import AutoModelForCausalLM, LlamaForCausalLM
 from transformers.integrations.finegrained_fp8 import FP8Linear
-from transformers.models.dbrx.configuration_dbrx import DbrxConfig, DbrxFFNConfig
-from transformers.models.dbrx.modeling_dbrx import DbrxExpertGLU, DbrxExperts, DbrxFFN
 
 
 class HFModel(nn.Module):
@@ -150,53 +148,6 @@ def test_fp8_linear_per_tensor_dequant(monkeypatch):
     torch.testing.assert_close(
         module._dequantize_weight(torch.float32), module.weight.float() * 2.0
     )
-
-
-@pytest.mark.skipif(
-    Version(transformers.__version__) < Version("5.0"),
-    reason="test_dbrx is not supported for transformers<5.0",
-)
-def test_dbrx():
-    assert DbrxExperts in QuantModuleRegistry
-    assert DbrxExpertGLU in QuantModuleRegistry
-
-    config = DbrxConfig(
-        ffn_config=DbrxFFNConfig(ffn_hidden_size=8, moe_num_experts=2, hidden_size=32),
-        hidden_size=32,
-    )
-
-    model_ref = DbrxFFN(config)
-    model_test = DbrxFFN(config)
-    with torch.no_grad():
-        model_ref.experts.mlp.w1.copy_(torch.randn(16, 32))
-        model_ref.experts.mlp.v1.copy_(torch.randn(16, 32))
-        model_ref.experts.mlp.w2.copy_(torch.randn(16, 32))
-
-    model_test.load_state_dict(model_ref.state_dict())
-
-    mtq.replace_quant_module(model_test)
-
-    expertglu_ref = model_ref.experts.mlp
-    expertglu_test = model_test.experts.mlp
-
-    assert hasattr(expertglu_test, "w1_linear") and not hasattr(expertglu_test, "w1")
-    assert hasattr(expertglu_test, "v1_linear") and not hasattr(expertglu_test, "v1")
-    assert hasattr(expertglu_test, "w2_linear") and not hasattr(expertglu_test, "w2")
-
-    # Weights are stored transposed (W = w1[i].T) to match F.linear semantics with
-    # transformers 5.0's raw matmul: x @ w1[i] = F.linear(x, w1[i].T)
-    assert torch.allclose(
-        torch.concat([m.weight.T for m in expertglu_test.w1_linear], dim=0),
-        expertglu_ref.w1,
-    )
-
-    mtq.set_quantizer_attributes_partial(model_test, "*", {"enable": False})
-
-    # In transformers 5.0, the FFN input dimension is ffn_hidden_size (not hidden_size)
-    x = torch.randn(1, 4, 8)
-    out_1 = model_ref(x)
-    out_2 = model_test(x)
-    assert torch.allclose(out_1[0], out_2[0])
 
 
 @pytest.mark.skipif(

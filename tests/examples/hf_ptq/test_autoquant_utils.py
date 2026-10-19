@@ -35,6 +35,12 @@ def autoquant_utils(monkeypatch):
     return importlib.import_module("autoquant_utils")
 
 
+def _validated_autoquant_config(**updates):
+    config = load_recipe("general/auto_quantize/nvfp4_fp8_at_5p4bits").auto_quantize
+    values = {name: getattr(config, name) for name in type(config).model_fields}
+    return AutoQuantizeConfig.model_validate({**values, **updates})
+
+
 def test_autoquant_recipe_builds_mtq_inputs(autoquant_utils):
     """The recipe path maps an AutoQuantizeConfig to the expected mtq.auto_quantize inputs."""
     args = SimpleNamespace(kv_cache_qformat="none")
@@ -50,6 +56,7 @@ def test_autoquant_recipe_builds_mtq_inputs(autoquant_utils):
     }
     assert inputs["kv_cache_quant_cfg"] is None
     assert inputs["method"] == "gradient"
+    assert "method_options" not in inputs
     assert inputs["score_size"] == 128
     assert inputs["fixed_quantization_config"] is None
     assert inputs["module_search_spaces"] == []
@@ -272,6 +279,85 @@ def test_fsdp2_preload_guard_distinguishes_weight_and_kv_autoquant(autoquant_uti
     assert not autoquant_utils._recipe_is_kv_auto_quantize(
         "general/auto_quantize/nvfp4_fp8_at_5p4bits"
     )
+
+
+def test_autoquant_recipe_forwards_aumann_shapley_options(autoquant_utils):
+    args = SimpleNamespace(kv_cache_qformat="none")
+    aq = _validated_autoquant_config(
+        auto_quantize_method="aumann_shapley",
+        method_options={"num_path_nodes": 3, "damage_link": "additive"},
+    )
+    inputs = autoquant_utils._mtq_inputs_from_auto_quantize_config(aq, args)
+
+    assert inputs["constraints"]["effective_bits"] == 5.4
+    assert inputs["method"] == {
+        "method": "aumann_shapley",
+        "num_path_nodes": 3,
+        "damage_link": "additive",
+    }
+    assert "method_options" not in inputs
+
+
+def test_autoquant_recipe_damage_bound_omits_default_effective_bits(autoquant_utils):
+    args = SimpleNamespace(kv_cache_qformat="none")
+    aq = _validated_autoquant_config(
+        constraints={},
+        cost_excluded_layers=[],
+        auto_quantize_method="aumann_shapley",
+        method_options={"max_predicted_damage": 0.05},
+    )
+    inputs = autoquant_utils._mtq_inputs_from_auto_quantize_config(aq, args)
+
+    assert inputs["constraints"] == {"cost_model": "weight"}
+    assert inputs["method"] == {
+        "method": "aumann_shapley",
+        "max_predicted_damage": 0.05,
+    }
+
+
+@pytest.mark.parametrize(
+    ("method", "method_options", "loss_func_is_none"),
+    [
+        ("kl_div", None, False),
+        ("aumann_shapley", {"num_path_nodes": 3, "damage_link": "additive"}, True),
+    ],
+)
+def test_autoquant_label_free_recipe_calls_mtq(
+    autoquant_utils, monkeypatch, method, method_options, loss_func_is_none
+):
+    args = SimpleNamespace(
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=False,
+        batch_size=1,
+        kv_cache_qformat="none",
+    )
+    aq = _validated_autoquant_config(
+        auto_quantize_method=method,
+        method_options=method_options,
+    )
+    batch = {"input_ids": torch.tensor([[1.0, 2.0]])}
+
+    class LogitsModel(torch.nn.Module):
+        def forward(self, input_ids):
+            return SimpleNamespace(logits=input_ids + 1)
+
+    captured = {}
+
+    def fake_auto_quantize(model, **kwargs):
+        captured.update(kwargs)
+        assert torch.equal(kwargs["forward_step"](model, batch), batch["input_ids"] + 1)
+        return model, {}
+
+    monkeypatch.setattr(autoquant_utils.mtq, "auto_quantize", fake_auto_quantize)
+    model = LogitsModel()
+
+    assert autoquant_utils.auto_quantize(args, model, [batch], aq) is model
+    expected_method = {"method": method, **method_options} if method_options else method
+    assert captured["method"] == expected_method
+    assert "method_options" not in captured
+    assert (captured["loss_func"] is None) is loss_func_is_none
+    assert captured["constraints"]["effective_bits"] == 5.4
 
 
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(autoquant_utils):

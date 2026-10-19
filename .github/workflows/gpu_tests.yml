@@ -45,9 +45,7 @@ jobs:
         include:
           - example: gpu
             timeout: 60
-            # Pinned to 26.05: benchmark.py uses trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH,
-            # which newer TensorRT (26.06) removed. Bump once the source is updated for TensorRT 10.
-            container_image: nvcr.io/nvidia/pytorch:26.05-py3
+            container_image: nvcr.io/nvidia/pytorch:26.07-py3
           - example: gpu_megatron
             timeout: 60
             container_image: nvcr.io/nvidia/nemo:26.08
@@ -57,7 +55,7 @@ jobs:
           # Covers the RoutedExperts layout (0.24+)
           - example: gpu_vllm
             timeout: 15
-            container_image: docker.io/vllm/vllm-openai:v0.26.0
+            container_image: docker.io/vllm/vllm-openai:v0.30.0
           # Covers the legacy FusedMoE / SharedFusedMoE registration branches (vLLM < 0.24)
           - example: gpu_vllm
             timeout: 15

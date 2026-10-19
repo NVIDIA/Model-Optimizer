@@ -41,6 +41,7 @@
 import math
 
 import torch
+import torch.distributed as dist
 
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
@@ -129,14 +130,17 @@ class GPTQHelper:
 
     CACHE_NAME = "_forward_no_gptq_hessian"
 
-    def __init__(self, module, name, offload_to_cpu=False, fused=False):
+    def __init__(self, module, name, offload_to_cpu=False, fused=False, importance_weighted=False):
         """Initialize GPTQHelper with module state and Hessian storage."""
         self.module = module
         self.name = name
         self.fused = fused
+        self.importance_weighted = importance_weighted
         in_features = module.weight.shape[-1]
         device = module.weight.device
-        if device.type == "meta" or (offload_to_cpu and get_used_gpu_mem_fraction(device) > 0.65):
+        if device.type == "meta" or (
+            offload_to_cpu and device.type == "cuda" and get_used_gpu_mem_fraction(device) > 0.65
+        ):
             device = "cpu"
         self.hessian = torch.zeros(in_features, in_features, dtype=torch.float32, device=device)
         self.n_samples = 0
@@ -167,6 +171,25 @@ class GPTQHelper:
     def cleanup(self):
         """Unpatch the module's forward method."""
         unpatch_forward_method(self.module, self.CACHE_NAME)
+
+    def sync_hessian_across_dp(self):
+        """Merge the Hessians of this module's data-parallel replicas, which saw different data."""
+        parallel_state = getattr(self.module, "parallel_state", None)
+        group = parallel_state.data_parallel_group if parallel_state is not None else None
+        if group is None or not group.is_initialized() or group.world_size() == 1:
+            return
+        on_cuda = "nccl" in dist.get_backend(group.group)
+        device = (
+            torch.device("cuda", torch.cuda.current_device()) if on_cuda else torch.device("cpu")
+        )
+        n_samples = torch.tensor(self.n_samples, dtype=torch.float64, device=device)
+        hessian = self.hessian.to(device).mul_(self.n_samples)
+        dist.all_reduce(n_samples, group=group.group)
+        dist.all_reduce(hessian, group=group.group)
+        self.n_samples = int(n_samples.item())
+        if self.n_samples:
+            hessian /= self.n_samples
+        self.hessian = hessian.to(self.hessian.device)
 
     def free(self):
         """Release Hessian and working tensors to reclaim memory."""
@@ -324,3 +347,39 @@ def register_gptq_helper(backend: str, factory: type[GPTQHelper]) -> None:
     construct ``factory`` instead of the default ``GPTQHelper``.
     """
     _GPTQ_HELPER_REGISTRY[backend] = factory
+
+
+class ImatrixEncoder:
+    """Encodes a weight once, its search weighted by its inputs' per-column second moments.
+
+    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` collects ``E[x_j^2]`` for
+    every weight whose quantizer an encoder accepts, then calls :meth:`encode` with it.
+    """
+
+    def accepts(self, quantizer) -> bool:
+        """Whether this encoder handles ``quantizer``; decided before calibration runs."""
+        raise NotImplementedError
+
+    def validate(self, weight: torch.Tensor, quantizer) -> None:
+        """Raise if :meth:`encode` would refuse ``weight``; checked before calibration runs."""
+
+    def encode(
+        self, weight: torch.Tensor, quantizer, second_moments: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Return ``weight`` fake-quantized by ``quantizer``, weighted by ``second_moments``.
+
+        ``second_moments`` is ``None`` when no calibration input reached the weight.
+        """
+        raise NotImplementedError
+
+
+_IMATRIX_ENCODER_REGISTRY: dict[str, ImatrixEncoder] = {}
+
+
+def register_imatrix_encoder(backend: str, encoder: ImatrixEncoder) -> None:
+    """Register the :class:`ImatrixEncoder` for a quantizer backend.
+
+    :func:`modelopt.torch.quantization.model_calib.imatrix_calibrate` only encodes weights whose
+    ``weight_quantizer.backend`` has a registered encoder.
+    """
+    _IMATRIX_ENCODER_REGISTRY[backend] = encoder
