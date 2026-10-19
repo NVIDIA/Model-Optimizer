@@ -18,7 +18,6 @@
 import argparse
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any
 
 import torch
 from batch import phase_lengths
@@ -47,7 +46,6 @@ from megatron.bridge.training.post_training.distillation import ModelOptDistillC
 from megatron.bridge.training.pretrain import pretrain
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
-from megatron.core import parallel_state
 from megatron.core.ssm import gated_delta_net
 from megatron.core.utils import unwrap_model
 from transformers import AutoTokenizer
@@ -105,23 +103,10 @@ def run_training(config, quant_config, prefill_tokens=None, teacher_provider=Non
 
         def forward_step(state: GlobalState, data_iterator, model, return_schedule_plan=False):
             if data_lengths:
-                # Read once on the TP source; broadcast metadata before Bridge broadcasts tensors.
-                group = parallel_state.get_tensor_model_parallel_group()
-                source = parallel_state.get_tensor_model_parallel_src_rank()
-                batch = None
-                metadata: list[Any] = [None]
-                if torch.distributed.get_rank() == source:
-                    try:
-                        batch = dict(next(data_iterator))
-                        metadata[0] = (phase_lengths(batch, prefill_tokens), None)
-                    except (ValueError, KeyError, StopIteration) as error:
-                        metadata[0] = (None, str(error))
-                torch.distributed.broadcast_object_list(metadata, src=source, group=group)
-                lengths, message = metadata[0]
-                if message is not None:
-                    raise ValueError(message)
-                prefix, valid, boundaries = lengths
-                if batch is not None and prefill_tokens is not None:
+                # Bridge's iterator supplies the batch on every TP rank, including metadata.
+                batch = dict(next(data_iterator))
+                prefix, valid, boundaries = phase_lengths(batch, prefill_tokens)
+                if prefill_tokens is not None:
                     batch["loss_mask"] = batch["loss_mask"].clone()
                     if boundaries is None:
                         batch["loss_mask"][..., :prefill_tokens] = 0
