@@ -128,12 +128,13 @@ workers on every node. The library does not enforce these settings at import.
 ## Select a state quantization recipe
 
 `--recipe` accepts a built-in name or a custom YAML path. The complete recipes
-under `general/ptq/` configure both GDN and KDA state quantizers and their
+under `general/ptq/` configure the supported linear-attention quantizers and their
 execution policy. They use dynamic quantization without a calibration pass.
 
 | Recipe | State quantization | Runtime |
 | --- | --- | --- |
 | `linear_attention_state_int8_block32_dynamic` (default) | INT8 QDQ at handoff and every suffix token; one scale per key row and 32 value channels | Public vLLM |
+| `gdn_replayssm_fp8_read` | GDN FP32 recurrence anchor and FP8 block128 reads; 16-token replay windows | [Optional ReplaySSM emulation](REPLAYSSM.md#two-precision-gdn-profile) |
 
 ModelOpt separates quantization settings from execution and batch metadata:
 
@@ -316,3 +317,8 @@ backward, so long suffixes can be slow. Each prefix and suffix token runs one
 native forward. Kernel/cache agreement does not establish pretrained-model
 quality recovery, full serving-engine equivalence, or training speed. Prefill
 GEMM quantization and approximate inverse are outside this example.
+
+## Optional ReplaySSM profile
+
+See [ReplaySSM state QAT](REPLAYSSM.md) for the optional INT8/Hadamard fork,
+its checkpoint window, and the proposed two-precision extension.
