@@ -120,6 +120,32 @@ def _same_elements(key: _CacheKey, other: _CacheKey) -> bool:
     )
 
 
+def _same_input_layout(key: _CacheKey, other: _CacheKey) -> bool:
+    return (
+        key.data_ptr,
+        key.dtype,
+        key.device,
+        key.shape,
+        key.stride,
+    ) == (
+        other.data_ptr,
+        other.dtype,
+        other.device,
+        other.shape,
+        other.stride,
+    )
+
+
+def _same_contiguous_layout(key: _CacheKey, other: _CacheKey) -> bool:
+    return (
+        key.dtype == other.dtype
+        and key.device == other.device
+        and math.prod(key.shape) == math.prod(other.shape)
+        and _is_contiguous(key.shape, key.stride)
+        and _is_contiguous(other.shape, other.stride)
+    )
+
+
 def _matching_cache(
     quantizer, inputs: torch.Tensor, format_name: str, *, any_contiguous_view: bool = False
 ) -> _PackedWeightCache | None:
@@ -144,7 +170,17 @@ def _matching_cache(
         return None
     training_weight = inputs.requires_grad and torch.is_grad_enabled()
     if (
-        (training_weight and torch.equal(cache.input_fingerprint, _input_fingerprint(inputs)))
+        (
+            training_weight
+            and (
+                _same_input_layout(cache.input_key, input_key)
+                or (
+                    any_contiguous_view
+                    and _same_contiguous_layout(cache.input_key, input_key)
+                )
+            )
+            and torch.equal(cache.input_fingerprint, _input_fingerprint(inputs))
+        )
         or (
             not training_weight
             and (
