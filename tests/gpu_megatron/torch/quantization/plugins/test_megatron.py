@@ -1699,18 +1699,22 @@ class _VLMWrapper(MegatronModule):
         self.language_model = language_model
 
     def forward(self, *args, **kwargs):
-        return self.language_model(*args, **kwargs)
+        # Post-processes the language model's output, as real wrappers do.
+        return self.language_model(*args, **kwargs).float()
 
 
-def _test_layerwise_calibrate_vlm_text_forward_loop(rank, size):
+def _test_layerwise_calibrate_vlm_text_forward_loop(drive_wrapper, rank, size):
     initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
     language_model = _gpt_model_provider(tp_size=1, hidden_size=64)
     model = _VLMWrapper(language_model)
     tokens = torch.randint(0, language_model.vocab_size, (2, 16), device="cuda")
 
-    # As in examples/megatron_bridge/quantize.py: text calibration drives the inner language model.
+    # Text calibration in examples/megatron_bridge/quantize.py drives the inner language model; image-text
+    # calibration drives the wrapper, so both patched forwards are on the stack when the stop is raised.
     def forward_loop(_model):
-        megatron_prefill(language_model, tokens, skip_return_logits=True)
+        megatron_prefill(
+            model if drive_wrapper else language_model, tokens, skip_return_logits=True
+        )
 
     config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
     config["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
@@ -1721,8 +1725,9 @@ def _test_layerwise_calibrate_vlm_text_forward_loop(rank, size):
     assert all(m.input_quantizer.amax is not None for m in calibrated)
 
 
-def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1):
-    dist_workers_size_1.run(_test_layerwise_calibrate_vlm_text_forward_loop)
+@pytest.mark.parametrize("drive_wrapper", [False, True])
+def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1, drive_wrapper):
+    dist_workers_size_1.run(partial(_test_layerwise_calibrate_vlm_text_forward_loop, drive_wrapper))
 
 
 def _test_ggml_gptq_payload_sharded_state_dict(tmp_path, rank, size):
