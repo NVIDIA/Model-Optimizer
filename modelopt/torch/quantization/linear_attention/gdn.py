@@ -59,7 +59,7 @@ def gdn_state_qat(
     QDQ; passing None or a disabled quantizer retains the unquantized native path.
     ``precision="vllm"`` requires ``gate_inputs=(raw_g, raw_beta, A_log, bias)``
     for native gate preparation; the prepared ``g`` and ``beta`` supply the adjoint.
-    ``replayssm_two_precision`` uses ``read_quantizer`` for FP8 block128 reads,
+    ``replayssm_two_precision`` uses ``read_quantizer`` for FP8 block128 or NVFP4 block16 reads,
     requires an unquantized recurrence anchor, and does not return partial-window
     state. Its adjoint reconstructs one replay window at a time during backward.
     """

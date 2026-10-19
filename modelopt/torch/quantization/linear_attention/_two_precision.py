@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GDN replay with an FP32 recurrence anchor and an independently rounded FP8 read copy."""
+"""GDN replay with an FP32 recurrence anchor and an independently rounded FP8/NVFP4 read copy."""
 
 import torch
 from torch.autograd.function import once_differentiable
@@ -28,21 +28,24 @@ def validate_two_precision(state_quantizer, read_quantizer):
     if state_quantizer is not None and state_quantizer.is_enabled:
         raise ValueError("Two-precision GDN requires an FP32 anchor; disable gdn_state_quantizer")
     if read_quantizer is not None and read_quantizer.is_enabled:
-        validate_gdn_quantizer(read_quantizer, name="gdn_read_quantizer", block_sizes=(128,))
-        if read_quantizer.block_sizes != {-1: 128}:
-            raise ValueError("gdn_read_quantizer requires FP8 block128 along the key dimension")
-        return read_quantizer._if_quant
-    return False
+        validate_gdn_quantizer(
+            read_quantizer, name="gdn_read_quantizer", num_bits=((4, 3), (2, 1)), block_sizes=(128,)
+        )
+        if not read_quantizer.is_nvfp4_dynamic and read_quantizer.block_sizes != {-1: 128}:
+            raise ValueError("gdn_read_quantizer requires FP8 block128 or NVFP4 block16 along K")
+        if read_quantizer._if_quant:
+            return "tp4_hi32" if read_quantizer.is_nvfp4_dynamic else "tp8_hi32"
+    return "s32_rs"
 
 
-def _native_replay(state, enabled):
+def _native_replay(state, read_mode):
     # Optional standalone backend; installing public vLLM does not install this package.
     from emulation import GDNReplay
 
     return GDNReplay(
         state.transpose(-1, -2).unsqueeze(0).contiguous(),
         state.shape[0],
-        mode="tp8_hi32" if enabled else "s32_rs",
+        mode=read_mode,
     )
 
 
@@ -50,8 +53,8 @@ class _TwoPrecision(torch.autograd.Function):
     """Execute one native suffix; rematerialize at most one 16-token window in backward."""
 
     @staticmethod
-    def forward(ctx, q, k, v, g, beta, state, gate_inputs, enabled):
-        runner = _native_replay(state, enabled)
+    def forward(ctx, q, k, v, g, beta, state, gate_inputs, read_mode):
+        runner = _native_replay(state, read_mode)
         raw_g, raw_beta, rate, bias = gate_inputs
         operands = torch.cat([x.flatten(1) for x in (q, k, v)], -1).to(torch.bfloat16)
         raw_g, raw_beta = (x.bfloat16().float().contiguous() for x in (raw_g, raw_beta))
@@ -66,7 +69,9 @@ class _TwoPrecision(torch.autograd.Function):
                 ].clone()
             )
             if t % 16 == 0:
-                reads.append((runner.state_lo if enabled else runner.state_hi)[0].clone())
+                reads.append(
+                    (runner.state_hi if read_mode == "s32_rs" else runner.state_lo)[0].clone()
+                )
         ctx.save_for_backward(q, k, v, g, beta, torch.stack(anchors), torch.stack(reads))
         return torch.stack(outputs)
 
@@ -96,9 +101,9 @@ class _TwoPrecision(torch.autograd.Function):
         return (*gradients, grad_anchor.transpose(-1, -2), None, None)
 
 
-def two_precision_decode(q, k, v, g, beta, state, gate_inputs, enabled):
+def two_precision_decode(q, k, v, g, beta, state, gate_inputs, read_mode):
     """Return native GDN output with an identity-STE window adjoint, without a server."""
-    return _TwoPrecision.apply(q, k, v, g, beta, state, gate_inputs, enabled)
+    return _TwoPrecision.apply(q, k, v, g, beta, state, gate_inputs, read_mode)
 
 
 def _rounded(x, dtype=torch.bfloat16):

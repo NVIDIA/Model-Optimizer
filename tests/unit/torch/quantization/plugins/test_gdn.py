@@ -333,8 +333,9 @@ def test_nvfp4_state_recipe_restore():
     }
 
 
-def test_two_precision_recipe_and_checkpoint(tmp_path):
-    config = load_recipe("general/ptq/gdn_replayssm_fp8_read").quantize.model_dump()
+@pytest.mark.parametrize("read_format", ["fp8", "nvfp4"])
+def test_two_precision_recipe_and_checkpoint(tmp_path, read_format):
+    config = load_recipe(f"general/ptq/gdn_replayssm_{read_format}_read").quantize.model_dump()
     model = mtq.quantize(TinyGatedDeltaNet(), config)
     assert not model.gdn_state_quantizer.is_enabled
     assert model.gdn_read_quantizer.is_enabled
@@ -347,7 +348,11 @@ def test_two_precision_recipe_and_checkpoint(tmp_path):
     mto.save(model, checkpoint)
     restored = mto.restore(TinyGatedDeltaNet(), checkpoint)
     assert restored.linear_attention_config == model.linear_attention_config
-    assert restored.gdn_read_quantizer.block_sizes == {-1: 128}
+    assert (
+        restored.gdn_read_quantizer.get_modelopt_state()
+        == model.gdn_read_quantizer.get_modelopt_state()
+    )
+    assert restored.gdn_read_quantizer.num_bits == ((4, 3) if read_format == "fp8" else (2, 1))
     assert restored.gdn_read_quantizer.is_enabled
     restored.gdn_state_quantizer.enable()
     with pytest.raises(ValueError, match="FP32 anchor"):

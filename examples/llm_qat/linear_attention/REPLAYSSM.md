@@ -59,24 +59,30 @@ just its quantizer setting.
 The reference is upstream ReplaySSM's
 [GDN emulation](https://github.com/Johnny-Liou/ReplaySSM/blob/73a9592e9d8a2268620e8883a82f5cec7442ed36/emulation/gdn_replay_unf_vf.py),
 pinned at `73a9592e9d8a2268620e8883a82f5cec7442ed36`. ModelOpt imports its
-`emulation.GDNReplay` wrapper with mode `tp8_hi32`; no upstream kernels are
+`emulation.GDNReplay` wrapper with mode `tp8_hi32` (FP8) or `tp4_hi32` (NVFP4); no upstream kernels are
 copied into ModelOpt. This backend stores quantized values in FP32 tensors.
 It qualifies numerical emulation, not compressed cache storage or speed.
 
-Select `--recipe general/ptq/gdn_replayssm_fp8_read` in the main QAT/QAD example.
+Select `--recipe general/ptq/gdn_replayssm_fp8_read` or
+`--recipe general/ptq/gdn_replayssm_nvfp4_read` in the main QAT/QAD example.
 The recipe sets `precision="replayssm_two_precision"`, `replay_window=16`, and:
 
 | Quantizer | Setting | Checkpoint layout |
 | --- | --- | --- |
 | `gdn_state_quantizer` | Disabled: recurrence stays FP32 | `[H,V,K]` internally |
-| `gdn_read_quantizer` | Dynamic E4M3, `block_sizes={-1: 128}`, identity STE | One scale per 128 key channels of each value row |
+| `gdn_read_quantizer` (FP8 recipe) | Dynamic E4M3, `block_sizes={-1: 128}`, identity STE | One scale per 128 key channels of each value row |
+| `gdn_read_quantizer` (NVFP4 recipe) | Dynamic E2M1, block16 E4M3 scales, identity STE | Groups of 16 key channels; one FP32 global scale per request |
+
+NVFP4 uses the existing TensorQuantizer configuration and upstream replay codec.
+A second upstream kernel reduces the request-wide amax and refreshes the read
+copy at initialization and each 16-token flush. The FP32 recurrence anchor never
+uses the quantized read copy.
 
 Disabling the read quantizer retains the same replay schedule with FP32 reads
 inside an explicit training phase. The initial profile requires GDN, normalized
 Q/K, K=128, and `scale=K**-0.5`. It accepts `output_final_state=False`
 (the default); exporting a dense state from an incomplete window is not supported.
-KDA, lower-precision recurrence anchors, NVFP4 reads and stochastic rounding
-remain follow-ups.
+KDA, lower-precision recurrence anchors and stochastic rounding remain follow-ups.
 
 Install the main example's public vLLM 0.30 and FLA dependencies for the chunked
 prefix. Expose only the pinned upstream checkout's `emulation` package, so its
@@ -100,9 +106,8 @@ read_copy = Q_read(S)
 ```
 
 Never form `read_copy` from the rounded anchor, or overwrite the anchor with the
-read copy. This implementation uses an FP32 anchor and FP8 read copy. Extending
-it to an FP16 anchor or NVFP4 reads requires matching the upstream grouping and
-rounding schedule independently.
+read copy. This implementation uses an FP32 anchor and an FP8 or NVFP4 read copy.
+Lower-precision anchors require their own upstream grouping and rounding schedule.
 
 The forward schedule is:
 
@@ -174,34 +179,22 @@ ReplaySSM serving support is claimed by this plan.
 
 ## Validation and remaining work
 
-Focused CPU tests cover policy validation, recipe loading, read-only enablement,
-and ModelOpt checkpoint save/restore (40 tests passed). Two GPU tests passed on
-RTX A6000 with PyTorch 2.9.1 and Triton 3.5.1:
+Focused CPU tests cover policy validation, both read recipes, read-only enablement,
+and ModelOpt checkpoint save/restore (41 tests passed). Four local GPU cases passed
+on RTX A6000. All six training GPU cases passed on JHB GB300, including packed
+sequences, with PyTorch 2.13.0+cu130, Triton 3.7.1, vLLM 0.30.0 and fla-core 0.5.1.
+The GPU cases exercise both FP8 and NVFP4 reads and check:
 
-- Native token outputs match bit-for-bit across 33 tokens, including handoff and
-  two flushes. Switching FP8 reads to FP32 leaves every recurrence anchor and
-  both flush outputs bit-identical.
-- A separate triangular-solve oracle checks the window adjoint; padded positions
-  have zero gradients, incoming state receives gradients, and disabled reads use
-  the same replay schedule.
+- Bit-exact output parity with the pinned upstream native runner across two replay
+  windows, and a separate Torch recurrence for the window adjoint.
+- Prefix/handoff gradients, zero padding gradients, and the disabled-read baseline.
+- Packed versus separate sequence outputs and gradients, including sequence isolation.
 
-A single-layer smoke test also passed on H100 with PyTorch 2.13.0, Triton 3.7.1,
-vLLM 0.30.0 and FLA 0.5.1: 64 prefix tokens, 33 suffix tokens, three padded
-positions, and three optimizer steps each for QAT and QAD. Both runs changed
-weights, propagated suffix loss into prefix inputs, preserved zero padding
-gradients, and matched native inference bit-for-bit after ModelOpt save/reload.
-Activation recomputation also reproduced the forward and input gradients.
-QAT cross-entropy changed from 2.770705 to 2.770207; QAD KL (computed in FP64 to
-avoid cancellation near zero) changed from 1.99646e-7 to 1.98797e-7. These are
-synthetic smoke-test losses, not an accuracy-recovery result.
+These are numerical and workflow checks, not full-model NVFP4 QAT/QAD or accuracy
+results. The tests require the optional upstream `emulation` package and skip
+when it is absent. The existing fork-only tests remain separate qualification.
 
-An additional K=256 probe exceeded the reference tolerances (maximum output
-difference 4.54e-5, maximum query-gradient difference 3.65e-5). That shape is
-not enabled in this initial profile. Further qualification must resolve this reference discrepancy before expanding
-support.
-Full-model accuracy, Megatron/Bridge training with this new profile, HF export,
-and vLLM engine request-lifecycle validation remain separate qualification steps.
-The existing fork-only GPU tests continue to cover the INT8/Hadamard baseline.
-
-The new GPU tests require the optional upstream `emulation` package and skip
-when it is absent; they are run explicitly in the qualification environment.
+K=256 failed the predefined numerical gate in the earlier FP8 qualification and
+remains unsupported. No tolerance was relaxed. KDA two-precision support,
+lower-precision anchors, stochastic rounding, full-model accuracy and engine
+integration remain follow-ups.

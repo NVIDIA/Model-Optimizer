@@ -207,9 +207,9 @@ def _prefill_decode_forward(
             Defaults to the dense row length or each packed storage segment length.
     """
     two_precision = policy.precision == "replayssm_two_precision"
-    read_enabled = False
+    read_mode = "s32_rs"
     if two_precision:
-        read_enabled = validate_two_precision(state_quantizer, read_quantizer)
+        read_mode = validate_two_precision(state_quantizer, read_quantizer)
         if g.ndim != 3 or q.shape[-1] != 128 or not use_qk_l2norm_in_kernel:
             raise ValueError(
                 "Two-precision replay currently requires GDN, K=128 and Q/K normalization"
@@ -223,7 +223,7 @@ def _prefill_decode_forward(
     elif read_quantizer is not None and read_quantizer.is_enabled:
         raise ValueError("gdn_read_quantizer requires precision='replayssm_two_precision'")
     state_quantizer = _resolve_state_quantizer(state_quantizer, state_codec=policy.state_codec)
-    if (state_quantizer is not None or read_enabled) and prefill_lengths is None:
+    if (state_quantizer is not None or read_mode != "s32_rs") and prefill_lengths is None:
         raise ValueError(
             "State quantization requires explicit prefill lengths through "
             "linear_attention_training_phase"
@@ -350,7 +350,7 @@ def _prefill_decode_forward(
         suffix, final_state = _recurrent_decode(
             *(x[b, split:end] for x in (q, k, v, g, beta)),
             config=policy,
-            read_enabled=read_enabled,
+            read_mode=read_mode,
             state_quantizer=state_quantizer,
             initial_state=state,
             output_final_state=output_final_state,
