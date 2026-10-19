@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 import torch
 import torch.nn as nn
+import yaml
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -334,9 +335,20 @@ def test_nvfp4_state_recipe_restore():
     }
 
 
-@pytest.mark.parametrize("read_format", ["fp8", "nvfp4"])
+@pytest.mark.parametrize("read_format", ["fp8", "nvfp4", "nvfp4_stochastic"])
 def test_two_precision_recipe_and_checkpoint(tmp_path, read_format):
-    config = load_recipe(f"general/ptq/gdn_replayssm_{read_format}_read").quantize.model_dump()
+    config = load_recipe(
+        f"general/ptq/gdn_replayssm_{read_format.removesuffix('_stochastic')}_read"
+    ).quantize.model_dump()
+    if read_format.endswith("_stochastic"):
+        for rule in config["quant_cfg"]:
+            if rule.get("quantizer_name") == "*gdn_read_quantizer":
+                rule["cfg"]["rounding"] = "stochastic"
+        recipe_file = tmp_path / "stochastic.yaml"
+        recipe_file.write_text(
+            yaml.safe_dump({"metadata": {"recipe_type": "ptq"}, "quantize": config})
+        )
+        config = load_recipe(recipe_file).quantize.model_dump()
     model = mtq.quantize(TinyGatedDeltaNet(), config)
     assert not model.gdn_state_quantizer.is_enabled
     assert model.gdn_read_quantizer.is_enabled

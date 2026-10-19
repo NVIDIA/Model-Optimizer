@@ -6,8 +6,8 @@ and checkpointing. QAT uses next-token cross-entropy; QAD uses a frozen,
 unquantized teacher and Bridge's logits distillation loss.
 
 Training combines native chunked prefill with a recurrent suffix that follows
-the selected serving arithmetic and state quantization schedule. Loss is applied
-to the suffix, with gradients flowing through the state handoff into the prefix.
+the selected serving arithmetic and state quantization schedule. Loss follows the
+dataset's response mask, with gradients flowing through the state handoff into the prefix.
 See [State quantization alignment](STATE_QUANTIZATION.md) for the mismatch,
 solution, and numerical validation. The example quantizes recurrent state only.
 
@@ -39,6 +39,14 @@ checkout also needs its dataset extension built: run
 Core revision supplies GDN but not `KimiDeltaAttention`; this pair does not
 qualify KDA Bridge training.
 
+For **packed THD training on Blackwell (SM10x) with 256-dimensional attention
+heads**, TE's cuDNN backend needs Transformer Engine 2.18+, cuDNN 9.25+, and
+cuDNN Frontend 1.26+. The older TE 2.16/cuDNN 9.20 combination can run eval but
+rejects this training shape. The CUDA 13 setup uses `transformer-engine==2.18.0`,
+`nvidia-cudnn-cu13==9.25.1.1`, and `nvidia-cudnn-frontend==1.26.0`, with the matching
+`transformer-engine-torch` extension built against the installed PyTorch.
+See the [upstream backend support](https://github.com/NVIDIA/TransformerEngine/releases/tag/v2.18).
+
 Prepare a local model/tokenizer snapshot and a Megatron `.bin`/`.idx` dataset
 using that tokenizer. `--train-data` takes the shared filename prefix without an
 extension; see [data preparation](../../megatron_bridge/README.md#data-preparation).
@@ -63,6 +71,8 @@ continuation. Bridge tokenization supplies `context_lengths` and `token_count`.
 The phase uses those prompt lengths and excludes right padding using the valid
 input length (`token_count - 1`, accounting for the next-token label shift).
 Loss masks remain dataset-owned; their values are not used to guess lengths.
+The first response label is predicted at the last prompt position, as in serving;
+the remaining response labels are predicted by the recurrent suffix.
 
 ```bash
 bash examples/llm_qat/linear_attention/with_vllm_defaults.sh \
@@ -83,6 +93,12 @@ storage boundaries (`cu_seqlens_q_padded` when present). Padded boundaries alone
 do not identify real tokens. The example does not provide a chat packer.
 
 ## Run QAT or QAD with a fixed split
+
+Fixed splits are useful for workflow smoke tests. The token-only dataset concatenates
+documents without resetting attention or recurrent state at document boundaries, and
+the suffix loss can include system/user tokens. Use prompt-completion data above for
+request-aligned QAT; enabling packing also requires per-segment phase metadata, not
+just an attention mask or EOS tokens.
 
 ```bash
 bash examples/llm_qat/linear_attention/with_vllm_defaults.sh \
