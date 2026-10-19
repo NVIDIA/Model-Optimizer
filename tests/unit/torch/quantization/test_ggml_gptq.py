@@ -319,6 +319,8 @@ def test_folding_a_bf16_weight_decodes_the_pinned_payload():
     assert torch.equal(model.weight_quantizer(model.weight.float()).to(torch.bfloat16), decoded)
     mtq.fold_weight(model)
     assert torch.equal(model.weight, decoded)
+    # The folded weight is the decoding, so the payload is dropped with the other quantizer state.
+    assert _pin(model) is None
 
 
 def test_pin_survives_save_and_restore():

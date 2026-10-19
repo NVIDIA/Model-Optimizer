@@ -164,7 +164,9 @@ class QuantModule(DynamicModule):
             # Disable pre-quant scaling so it is not applied twice.
             quantizer._enable_pre_quant_scale = False
         elif not keep_attrs:
-            for attr_name in ("_pre_quant_scale", "_amax"):
+            # Each of these only re-derives the folded weight (e.g. a pinned GGML payload).
+            buffers = {name for name, _ in quantizer.named_buffers(recurse=False)}
+            for attr_name in buffers | {"_pre_quant_scale", "_amax"}:
                 if hasattr(quantizer, attr_name):
                     delattr(quantizer, attr_name)
 
@@ -176,10 +178,10 @@ class QuantModule(DynamicModule):
 
         Every fake-quant weight quantizer is folded, including disabled quantizers whose pre-quant
         scale or rotation remains active. The folded transform is baked into the stored weight and
-        then disabled, so subsequent forwards use the stored weight directly. Calibration buffers
-        (``_pre_quant_scale``, ``_amax``) are dropped unless ``keep_attrs``. A retained pre-quant
-        scale remains stored but is made inactive because it has already been applied to the folded
-        weight.
+        then disabled, so subsequent forwards use the stored weight directly. The quantizer's
+        buffers (e.g. ``_pre_quant_scale``, ``_amax``) are dropped unless ``keep_attrs``. A
+        retained pre-quant scale remains stored but is made inactive because it has already been
+        applied to the folded weight.
         """
         # Handle all attributes that end with _weight_quantizer
         for name in dir(self):
