@@ -28,27 +28,27 @@ AA-LCR loops restate paragraphs up to ~4K tokens long, so on `ns_aa_lcr` set onl
 `repetition_detection.max_pattern_size: 1024` at the same path in the task's
 `nemo_evaluator_config`. NEL deep-merges task config over the top level, so the
 other entries survive; check the dry-run's `config_ef.yaml` block. A hit ends the
-request with `finish_reason: "repetition"`, keeping the text so far; a loop inside
-the reasoning leaves no final answer.
+request with `finish_reason: "repetition"` (`length` on `ns_*`, see below), keeping
+the text so far; a loop inside the reasoning leaves no final answer.
 
 **Keep these values**; larger sizes add scheduler CPU (~1 ms per request per decode
 step at 4096) and cut more escaped-loop answers.
 
 **nemo-skills tasks (`ns_*`) need the hit reported as `length`.** Their litellm client
 rejects `"repetition"` (pydantic `literal_error`) and retries the request, resampling
-the loop away and inflating the score. Remap it in the serving container, and submit
-with `NEMO_EVALUATOR_TRUST_PRE_CMD=1`:
+the loop away and inflating the score. Remap it in the serving container (append to
+any existing `deployment.pre_cmd`) and submit with `NEMO_EVALUATOR_TRUST_PRE_CMD=1`:
 
 ```yaml
 deployment:
   pre_cmd: |-
-    F=$(python3 -c 'import os, vllm; print(os.path.join(os.path.dirname(vllm.__file__), "v1", "engine", "__init__.py"))')
+    F=$(python3 -c 'import vllm; print(vllm.__path__[0])')/v1/engine/__init__.py
     sed -i 's/"abort", "error", "repetition")/"abort", "error", "length")/' "$F"
     grep -q '"error", "length")' "$F" || { echo "finish_reason remap failed"; exit 1; }
 ```
 
-A hit then scores as a truncated, unanswered sample, like one at `max_new_tokens`
-(`length` below the cap). Confirm the canary's client logs have no `literal_error`.
+A hit then scores like a `max_new_tokens` truncation. Confirm the canary's client logs
+show no `literal_error`.
 
 ## Guards
 
