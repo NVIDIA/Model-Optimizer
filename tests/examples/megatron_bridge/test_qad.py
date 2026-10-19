@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 import torch
 import torch.distributed.checkpoint as dcp
+import yaml
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.export.unified_checkpoint import (
     assert_exported_checkpoint_matches,
@@ -34,7 +35,11 @@ from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_5_moe_vl_dir,
     create_tiny_qwen3_dir,
 )
+from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
 from torch.distributed.checkpoint import FileSystemReader
+
+# TODO: drop this probe once the minimum Megatron-Bridge writes the ModelOpt quantizer sidecars.
+HAS_BRIDGE_QUANTIZER_SIDECARS = hasattr(MegatronModelBridge, "build_modelopt_quantizer_recipe")
 
 # The fix ships in the nemo:26.10 container.
 # TODO(Megatron-Bridge#6243): drop this probe once the minimum Megatron-Bridge carries it.
@@ -244,3 +249,31 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
     if is_moe:
         # allow_unexpected waives the expert names wholesale; this re-tightens it.
         assert_per_expert_experts_complete(hf_export_path)
+
+    # Step 4: export for vLLM fake-quant evaluation. Megatron-Bridge writes the whole model, so
+    # a VLM's language-model-only QAD checkpoint must still come out with the original vision tower.
+    if HAS_BRIDGE_QUANTIZER_SIDECARS:
+        fakequant_path = tmp_path / "qad_vllm_fakequant"
+        fakequant_cmd = extend_cmd_parts(
+            [
+                "torchrun",
+                f"--nproc_per_node={num_gpus}",
+                "export_quantized_megatron_to_hf.py",
+                "--vllm_fakequant_export",
+            ],
+            hf_model_name_or_path=hf_model_path,
+            megatron_path=distilled_megatron_path,
+            export_unified_hf_path=fakequant_path,
+            tp_size=num_gpus,
+        )
+        run_example_command(fakequant_cmd, example_path="megatron_bridge", setup_free_port=True)
+        assert_exported_checkpoint_matches(
+            fakequant_path,
+            hf_model_path,
+            check_values=False,
+            bit_exact_prefixes=("model.visual.",) if is_vlm else (),
+        )
+        recipe = yaml.safe_load((fakequant_path / "quant_recipe.yaml").read_text())
+        state = torch.load(fakequant_path / "quantizer_state.pth", weights_only=True)
+        assert any(name.endswith("k_bmm_quantizer") for name in recipe["quantizers"])
+        assert {key.rpartition(".")[0] for key in state} <= recipe["quantizers"].keys()

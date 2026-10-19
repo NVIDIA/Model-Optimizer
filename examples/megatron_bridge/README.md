@@ -371,6 +371,27 @@ sequence length, and GPU memory: measure per-stage time and memory over a few it
 
 The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) (point `--megatron_path` at `/output/qwen3_8b_nvfp4_qad/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
 
+#### Evaluating a QAD checkpoint in vLLM with fake quantization
+
+To evaluate a format vLLM has no kernels for (e.g. NVFP4 on Hopper, GGML IQ2, or a custom research format), export with `--vllm_fakequant_export`. The weight quantizers are folded into BF16 weights and Megatron-Bridge saves the model at any TP / EP / PP, VLMs included. The enabled activation and KV-cache quantizers go to `quantizer_state.pth` (ranges) and `quant_recipe.yaml` (settings), both under HF names:
+
+```bash
+torchrun --nproc_per_node 8 export_quantized_megatron_to_hf.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --megatron_path /output/qwen3_8b_nvfp4_qad/checkpoints \
+    --tp_size 8 \
+    --vllm_fakequant_export \
+    --export_unified_hf_path /tmp/Qwen3-8B-NVFP4-QAD-vllm-fq
+```
+
+Serve the export with [vllm_serve_fakequant.py](../vllm_serve/vllm_serve_fakequant.py), which loads both sidecars automatically, then run your evaluations against the server:
+
+```bash
+python ../vllm_serve/vllm_serve_fakequant.py /tmp/Qwen3-8B-NVFP4-QAD-vllm-fq -tp 8 --port 8000
+```
+
+Weight-only formats leave no quantizer enabled after folding, so no sidecars are written and stock `vllm serve` loads the export as a plain BF16 checkpoint. This mode needs a Megatron-Bridge that writes the quantizer sidecars.
+
 ### LoRA QAD
 
 Add `--lora_rank` to PTQ to train low-rank weight updates with the usual QAD flow:

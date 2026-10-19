@@ -15,6 +15,7 @@
 """Export Megatron Core Model to HuggingFace vLLM fakequant checkpoint."""
 
 import os
+import re
 import tempfile
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -35,7 +36,7 @@ from modelopt.torch.quantization.nn import GroupedQuantizer, SequentialQuantizer
 from modelopt.torch.utils import get_unwrapped_name
 from modelopt.torch.utils.distributed import DistributedProcessGroup, is_master
 
-__all__ = ["export_mcore_gpt_to_hf_vllm_fq"]
+__all__ = ["check_mcore_vllm_fakequant_quantizers", "export_mcore_gpt_to_hf_vllm_fq"]
 
 
 def _quantizer_configs(module: torch.nn.Module) -> tuple[dict[str, dict], str]:
@@ -95,6 +96,36 @@ def _quantizer_configs(module: torch.nn.Module) -> tuple[dict[str, dict], str]:
             recipe.update({"_" + name: getattr(quantizer, name) for name in attributes})
         configs[get_unwrapped_name(name, module)] = recipe
     return configs, ""
+
+
+def check_mcore_vllm_fakequant_quantizers(model: torch.nn.Module) -> None:
+    """Raise if vLLM fake-quant reload cannot reproduce a quantizer of a Megatron model.
+
+    Checks the settings the vLLM fake-quant export and reload support, with weight quantizers
+    folded into the weights. Collective: a failure on any rank raises on every rank.
+    """
+    _, failure = _quantizer_configs(model)
+    tied = any(getattr(m, "share_embeddings_and_output_weights", False) for m in model.modules())
+    for name, quantizer in model.named_modules():
+        if failure:
+            break
+        if not isinstance(quantizer, TensorQuantizer):
+            continue
+        active = quantizer.is_enabled and quantizer._if_quant
+        transform = quantizer.rotate_is_enabled or quantizer.pre_quant_scale is not None
+        if re.search(r"(^|\.)mtp\.", name) and (active or transform):
+            failure = f"MTP quantization is not supported by vLLM fakequant export/reload: {name}"
+        elif re.search(r"(^|\.)output_layer\.", name) and (
+            (active and (tied or "weight_quantizer" not in name)) or (tied and transform)
+        ):
+            failure = f"Unsupported lm_head quantization for vLLM fakequant: {name}"
+    failure = DistributedProcessGroup.get_dist_syncd_obj(
+        failure,
+        DistributedProcessGroup(None),
+        lambda failures: next((message for message in failures if message), ""),
+    )
+    if failure:
+        raise ValueError(failure)
 
 
 def _save_quantizer_state(path: Path, save: Callable[[Path], object]) -> None:
