@@ -23,6 +23,7 @@ Changelog
 *Speculative Decoding*
 
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
+- Add a matched A|B speculative-decoding benchmark: ``examples/specdec_bench/compare_ab.py`` summarizes target-alone vs target + drafter runs (speedup, acceptance length, greedy match), and the launcher's ``specdec_ab_dflash2.yaml`` runs both arms in one job.
 
 *Megatron Framework (M-LM / M-Bridge)*
 

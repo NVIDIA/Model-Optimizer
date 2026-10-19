@@ -1,0 +1,58 @@
+# Matched A|B benchmark of a Qwen3-8B DFlash2 drafter on vLLM: Qwen3-8B alone (A) vs
+# Qwen3-8B + drafter (B), in one job on one node, so the two arms share GPU, image,
+# prompts and sampling. See common/specdec_bench/ab_compare.sh.
+#
+# Output in <<global_vars.output_dir>>:
+#   r<repeat>/{A,B}_c<concurrency>/   run.py results per arm
+#   ab_summary.json                   per (repeat, concurrency): Output TPS of both arms,
+#                                     speedup B/A, AL, step time, TTFT, response counts, and
+#                                     A-vs-B exact match at concurrency 1 and temperature 0;
+#                                     the job fails if any row lists problems
+#   env.json                          host and GPUs the job ran on
+#
+# draft_model must point at an exported drafter, typically the output of
+# hf_online_dflash2.yaml in an earlier experiment:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/specdec_ab_dflash2.yaml --yes \
+#     pipeline.global_vars.draft_model=/cicd/<experiment_id>/dflash2_bs16/exported-checkpoint-final
+#
+# Expect speedup > 1 at every concurrency, shrinking as concurrency grows, and exact match
+# close to, but not always at, 100% at concurrency 1: the drafter's verification pass batches
+# tokens differently, so rare numeric ties can flip. Plan roughly 45 min per repeat on one
+# GPU; throughput at high concurrency is noisy, so use REPEATS >= 2 when comparing drafters.
+
+job_name: Qwen3-8B_DFlash2_ab_vllm
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+    hf_data: /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
+    draft_model: /cicd/<experiment_id>/dflash2_bs16/exported-checkpoint-final
+    output_dir: /scratchspace/ab
+
+  task_0:
+    script: common/specdec_bench/ab_compare.sh
+    args:
+      - --mtbench <<global_vars.hf_data>>
+      - --temperature 0
+      - --output_length 4096
+      - --tp_size 1
+      - --ep_size 1
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - DRAFT_MODEL: <<global_vars.draft_model>>
+      - SAVE_ROOT: <<global_vars.output_dir>>
+      - SPEC_ALGO: DFLASH
+      # Positions past 7 accept ~0 for a 2000-step drafter (7 and 15 give the same AL).
+      - NUM_SPEC_TOKENS: "7"
+      # Commas, not spaces: nemo_run emits unquoted `export FOO=value`.
+      - CONCURRENCIES: "1,8,32"
+      - REPEATS: "1"
+      # Node-local: a shared Triton cache breaks when jobs on different nodes write it.
+      - TRITON_CACHE_DIR: /tmp/triton-cache
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      time: "04:00:00"
+      # A release with DFlash2 serving (vllm#52816).
+      container: vllm/vllm-openai:v0.31.0
