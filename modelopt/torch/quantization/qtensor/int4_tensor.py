@@ -59,7 +59,11 @@ class INT4QTensor(BaseQuantizedTensor):
 
         # get scales for each block
         block_input = input.view(-1, block_size)
-        scales = scale_quant_maxbound / reduce_amax(block_input, -1)
+        amax = reduce_amax(block_input, -1)
+        # FP16 cannot represent reciprocal scales for small nonzero blocks.
+        if amax.dtype == torch.float16:
+            amax = amax.float()
+        scales = scale_quant_maxbound / amax
         # expand scalers to match shape of input
         scales = scales.view(block_input.shape[0], -1)  # shape: (block_input.shape[0], 1)
 
