@@ -398,6 +398,28 @@ class TestQTensor:
         assert torch.allclose(deq_x, x, rtol=2e-1, atol=2e-1)
 
     @pytest.mark.parametrize("device", ["cuda"])
+    def test_nvfp4_dynamic_export_fp8_scale_no_nan_when_scale_exceeds_fp8(self, device):
+        """Regression: dynamic NVFP4 export must not emit fp8 NaN scale bytes."""
+        block_size = 16
+        weight = torch.ones(1, block_size, device=device, dtype=torch.bfloat16)
+
+        # Force per_block_scale = per_block_amax / (6 * scale_2) = 1000.
+        # torch.float8_e4m3fn has no Inf; casting 1000 directly would produce
+        # the NaN byte 0x7F. Export should instead saturate to 448 (0x7E).
+        weights_scaling_factor_2 = torch.tensor(
+            1.0 / (6.0 * 1000.0), device=device, dtype=torch.float32
+        )
+        weight_scale, _ = NVFP4QTensor.get_weights_scaling_factor(
+            weight, block_size, weights_scaling_factor_2=weights_scaling_factor_2
+        )
+
+        assert weight_scale.dtype == torch.float8_e4m3fn
+        raw = weight_scale.view(torch.uint8)
+        n_nan = ((raw & 0x7F) == 0x7F).sum().item()
+        assert n_nan == 0, f"fp8 weight_scale contains {n_nan} NaN byte(s)"
+        assert raw.flatten()[0].item() == 0x7E
+
+    @pytest.mark.parametrize("device", ["cuda"])
     @pytest.mark.parametrize(
         "test_input",
         [
