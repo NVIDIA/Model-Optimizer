@@ -183,6 +183,7 @@ def test_state_qat_requires_serving_policy(mixin):
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
+        ({"rounding": "stochastic"}, "supports rounding"),
         ({"pass_through_bwd": False}, "supports only"),
         ({"type": "static"}, "supports only"),
         (

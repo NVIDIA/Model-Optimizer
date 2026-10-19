@@ -34,6 +34,52 @@ from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 class TensorQuantizerTester:
     device = None
 
+    @pytest.mark.parametrize(
+        ("bits", "grouping"),
+        [
+            (bits, grouping)
+            for bits in (8, (4, 3))
+            for grouping in ({}, {"axis": 0}, {"block_sizes": {-1: 32}})
+        ]
+        + [((2, 1), {"block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)}})],
+    )
+    def test_stochastic_rounding(self, bits, grouping):
+        maximum, gap = {8: (127.0, 1.0), (4, 3): (448.0, 0.125), (2, 1): (6.0, 0.5)}[bits]
+        # Known adjacent codes test the rounding distribution independently of its implementation.
+        tiny = {8: 1.0, (4, 3): 2.0**-9, (2, 1): 0.5}[bits]
+        lower = torch.tensor([1.0, -1 - gap, 0.0, -tiny], device=self.device)
+        spacing = torch.tensor([gap, gap, tiny, tiny], device=self.device)
+        values = lower + spacing * torch.tensor([0.25, 0.75, 0.25, 0.75], device=self.device)
+        row = torch.cat([values, torch.zeros(27, device=self.device), values.new_tensor([maximum])])
+        if bits == (2, 1):
+            row[15] = maximum  # Both block scales are exactly 448; the effective scale is 1.
+        x = row.repeat(4096, 1).requires_grad_()
+        quantizer = TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits=bits, type="dynamic", rounding="stochastic", **grouping
+            )
+        ).to(self.device)
+        devices = [torch.cuda.current_device()] if self.device == "cuda" else []
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(31)
+            actual = quantizer(x)
+            torch.manual_seed(31)
+            torch.testing.assert_close(actual, quantizer(x), rtol=0, atol=0)
+            torch.manual_seed(32)
+            assert not torch.equal(actual, quantizer(x))
+            rng_state = torch.cuda.get_rng_state() if devices else torch.get_rng_state()
+            actual.sum().backward()
+            torch.testing.assert_close(
+                rng_state, torch.cuda.get_rng_state() if devices else torch.get_rng_state()
+            )
+        assert ((actual[:, :4] == lower) | (actual[:, :4] == lower + spacing)).all()
+        # More than six standard errors of the Bernoulli mean, including FP8 subnormals.
+        assert ((actual[:, :4].mean(0) - values).abs() <= 0.05 * spacing).all()
+        torch.testing.assert_close(actual[:, 4:], x[:, 4:], rtol=0, atol=0)
+        torch.testing.assert_close(x.grad, torch.ones_like(x))
+        quantizer.disable()
+        torch.testing.assert_close(quantizer(x), x, rtol=0, atol=0)
+
     def test_simple_run(self):
         """Quantizer calls fake_tensor_quant by default"""
         x = torch.randn(3, 7).to(self.device)

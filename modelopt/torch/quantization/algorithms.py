@@ -144,6 +144,7 @@ def _tensor_quantizer_format_signature(quantizer: TensorQuantizer) -> tuple:
         repr(quantizer.block_sizes),
         getattr(quantizer, "_dynamic", False),
         quantizer.fake_quant,
+        quantizer.rounding,
         quantizer.backend,
         repr(quantizer.backend_extra_args),
     )

@@ -246,6 +246,10 @@ class _QuantAttention(QuantModule):
                     original_attention_interface, query_states, key_states, value_states, **kwargs
                 )
             if self.p_bmm_quantizer._if_quant:
+                if self.p_bmm_quantizer.rounding != "nearest":
+                    raise NotImplementedError(
+                        "Fused attention does not support stochastic rounding"
+                    )
                 return self._triton_qdq_attention(
                     p_qdq, query_states, key_states, value_states, **kwargs
                 )

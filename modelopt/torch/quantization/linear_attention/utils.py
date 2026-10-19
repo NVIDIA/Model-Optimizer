@@ -76,6 +76,7 @@ def validate_gdn_quantizer(
     name: str,
     num_bits: tuple[int | tuple[int, int], ...] = ((4, 3),),
     block_sizes: tuple[int, ...] = (),
+    rounding: tuple[str, ...] = ("nearest",),
 ) -> None:
     """Check supported formats and the custom backward's identity STE."""
     # Numerical helpers load while QuantizeConfig initializes; defer the quantizer import.
@@ -83,6 +84,8 @@ def validate_gdn_quantizer(
 
     if not isinstance(quantizer, TensorQuantizer):
         raise ValueError(f"{name} requires a single TensorQuantizer")
+    if quantizer.rounding not in rounding:
+        raise ValueError(f"{name} supports rounding in {rounding}; got {quantizer.rounding}")
     nvfp4 = (
         quantizer.is_nvfp4_dynamic
         and quantizer.block_sizes.get(-1) == 16
