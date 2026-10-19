@@ -27,9 +27,9 @@ Load out-of-tree:
      "kv_role":"kv_producer",
      "kv_connector_extra_config":{"sidecar_port":"18999","pool_slots":"64","max_tokens":"512"}}'
 
-Scope: TP>=1 using vLLM's LBHNC cache layout (the connector receives each layer
-as a BHNC view). Hidden states are replicated across TP ranks; only rank 0 owns the
-pool + sidecar and serves them. Uses host-pinned memory (container UCX has no CUDA),
+Scope: TP>=1 using vLLM's BHNC or BNHC per-layer cache views. Hidden states are
+replicated across TP ranks; only rank 0 owns the pool + sidecar and serves them.
+Uses host-pinned memory (container UCX has no CUDA),
 ring-slot reuse (fine when in-flight requests < pool_slots; no credit protocol yet).
 PP>1 is not supported (the capture layer lives on one PP rank; owner election only
 covers TP). The sidecar is unauthenticated and binds all interfaces, so it assumes a
@@ -44,7 +44,6 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from math import prod
 from typing import Any, ClassVar
 from urllib.parse import parse_qs, urlparse
 
@@ -55,34 +54,56 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     SupportsHMA,
 )
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
+from vllm.model_executor.models.extract_hidden_states import (
+    CacheOnlyAttentionLayer,
+    CacheOnlyAttentionMetadata,
+)
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
 
 from modelopt.torch.speculative.plugins.hf_streaming_dataset import nixl_backends_from_env
 
 logger = init_logger(__name__)
 
 
-def extract_from_kv_cache(kv_cache, slot_mapping, num_tokens):
-    """Gather hidden states from vLLM's per-layer ``[B, H, N, C]`` cache view.
-
-    ``H`` is the number of requested capture planes and ``N`` is the KV-cache
-    block size. Keeping those axes distinct is essential: treating ``N`` as the
-    feature axis turns a six-plane capture into sixteen planes at block size 16.
-    """
+def get_cache_layout(kv_cache, num_capture_planes):
+    """Identify the capture plane axis in a BHNC or BNHC cache tensor."""
     if kv_cache.ndim != 4:
         raise ValueError(
-            "RdmaHiddenStatesConnector expected a [blocks, heads, block_size, head_size] "
-            f"cache tensor, got shape {tuple(kv_cache.shape)}."
+            "RdmaHiddenStatesConnector expected a BHNC or BNHC cache tensor, "
+            f"got shape {tuple(kv_cache.shape)}."
         )
-    block_size = kv_cache.shape[2]
+    if num_capture_planes <= 0:
+        raise ValueError("RDMA capture requires nonempty EAGLE hidden-state layer IDs")
+    plane_axes = [axis for axis in (1, 2) if kv_cache.shape[axis] == num_capture_planes]
+    if len(plane_axes) != 1:
+        raise ValueError(
+            f"Cannot identify the hidden-state plane axis in cache shape {tuple(kv_cache.shape)} "
+            f"with {num_capture_planes} EAGLE layer IDs: exactly one of axes 1 and 2 must match."
+        )
+    plane_axis = plane_axes[0]
+    block_size = kv_cache.shape[3 - plane_axis]
+    if block_size <= 0:
+        raise ValueError("Hidden-state cache block size must be positive")
+    return plane_axis, block_size
+
+
+def extract_from_kv_cache(kv_cache, slot_mapping, num_tokens, num_capture_planes):
+    """Gather hidden states in token, capture plane, and channel order."""
+    plane_axis, block_size = get_cache_layout(kv_cache, num_capture_planes)
     block_ids = slot_mapping[:num_tokens] // block_size
     block_offsets = slot_mapping[:num_tokens] % block_size
-    return kv_cache[block_ids, :, block_offsets, :]
+    if plane_axis == 1:
+        return kv_cache[block_ids, :, block_offsets, :]
+    return kv_cache[block_ids, block_offsets, :, :]
 
 
-def build_request_slot_mapping(block_ids, num_tokens, block_size, device):
+def build_request_slot_mapping(block_ids, num_tokens, block_size, device, num_blocks):
     """Map one request's logical token positions to its allocated cache blocks."""
+    if any(block_id < 0 or block_id >= num_blocks for block_id in block_ids):
+        raise ValueError(f"Hidden-state cache block IDs must be in [0, {num_blocks})")
     if len(block_ids) * block_size < num_tokens:
         raise ValueError("Hidden-state cache blocks do not cover the prompt")
     blocks = torch.as_tensor(block_ids, device=device, dtype=torch.long)
@@ -189,8 +210,6 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         """Read pool/sidecar config from ``kv_connector_extra_config`` and init state."""
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self._role = role
-        from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
-
         groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else []
         capture_groups = [
             index
@@ -244,9 +263,8 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     # ---------- worker ----------
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Elect the TP-rank-0 owner and (owner only) register the pinned NIXL pool."""
+        # NIXL is optional and is needed only when the worker registers its pool.
         from nixl._api import nixl_agent, nixl_agent_config
-        from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
-        from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 
         # TP: the captured hidden states are REPLICATED across TP ranks
         # (CacheOnlyAttentionLayer is sized to the full hidden_size, never
@@ -270,22 +288,14 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             )
             return
         kv = kv_caches[self.cache_layers[0]]
-        if kv.ndim != 4:
-            raise ValueError(
-                "RdmaHiddenStatesConnector expected vLLM's per-layer [B, H, N, C] "
-                f"cache view, got shape {tuple(kv.shape)}."
-            )
         hf_config = self._vllm_config.speculative_config.draft_model_config.hf_config
-        capture_ids = getattr(hf_config, "eagle_aux_hidden_state_layer_ids", ())
-        if kv.shape[1] != len(capture_ids):
-            raise ValueError(
-                f"RdmaHiddenStatesConnector cache exposes {kv.shape[1]} hidden-state planes "
-                f"but EAGLE requested {len(capture_ids)} ids: {list(capture_ids)}."
-            )
-        # Per-token feature is [capture_planes, hidden_size]. The cache's third
-        # dimension is its block size and must not leak into the transferred shape.
-        self._per_token_elems = int(kv.shape[1] * prod(kv.shape[3:]))
-        self._feat_shape = (kv.shape[1], *kv.shape[3:])
+        capture_ids = getattr(hf_config, "eagle_aux_hidden_state_layer_ids", None)
+        if not capture_ids:
+            raise ValueError("RDMA capture requires nonempty EAGLE hidden-state layer IDs")
+        self._num_capture_planes = len(capture_ids)
+        get_cache_layout(kv, self._num_capture_planes)
+        self._feat_shape = (self._num_capture_planes, kv.shape[3])
+        self._per_token_elems = self._num_capture_planes * kv.shape[3]
         self._dtype = kv.dtype
         self._slot_elems = self._max_tokens * self._per_token_elems
 
@@ -354,11 +364,10 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             return  # non-owner TP ranks hold an identical copy; rank 0 serves it
         if layer_name not in self.cache_layers:
             return
-        from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionMetadata
-
         assert isinstance(attn_metadata, CacheOnlyAttentionMetadata)
         md = self._get_connector_metadata()
         assert isinstance(md, RdmaConnMeta)
+        _, block_size = get_cache_layout(kv_layer, self._num_capture_planes)
         cs = self._cs()
         ready = torch.cuda.Event()
         ready.record()
@@ -387,9 +396,9 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                 # The runner can reorder requests independently of scheduler metadata.
                 # Address this request's allocated cache blocks, not batch offsets.
                 rsm = build_request_slot_mapping(
-                    req.block_ids, n, kv_layer.shape[2], kv_layer.device
+                    req.block_ids, n, block_size, kv_layer.device, kv_layer.shape[0]
                 )
-                hs_gpu = extract_from_kv_cache(kv_layer, rsm, n)  # [n, *feat]
+                hs_gpu = extract_from_kv_cache(kv_layer, rsm, n, self._num_capture_planes)
                 # copy into the pre-registered pool slot (flattened)
                 self._pool[slot, :nelems].copy_(hs_gpu.reshape(-1), non_blocking=True)
             ev = torch.cuda.Event()
@@ -488,7 +497,5 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config):
-        """Use vLLM's layer/block/head/token/channel cache layout."""
-        if cls is KVConnectorBase_V1:
-            raise TypeError("not on base class")
-        return "LBHNC"
+        """Accept the cache layout selected by vLLM's attention backend."""
+        return None
