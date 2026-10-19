@@ -327,7 +327,8 @@ class ModelLikeModule(nn.Module):
     def init_modellike(self) -> nn.Module:
         """Initialize the modellike to be an actual model."""
         model = init_model_from_model_like(self.modellike)
-        ModeloptStateManager.transfer_state_dict(self, model)
+        if ModeloptStateManager.is_converted(self):
+            ModeloptStateManager.transfer_state_dict(self, model)
         return model
 
 
