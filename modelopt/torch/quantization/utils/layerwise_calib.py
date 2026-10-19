@@ -348,6 +348,9 @@ class LayerActivationCollector:
                 )
                 bind_forward_method(layer, _patched_forward, "_original_forward")
 
+            # A VLM wrapper and its language model are both patched, and the wrapper's forward calls the
+            # language model's. Only the outermost call may turn the stop into ``None``: if the inner one
+            # did, the wrapper would go on running its own code on a ``None`` output.
             depth = [0]
 
             def _early_stop_forward(module_self, *args, **kwargs):
@@ -355,7 +358,7 @@ class LayerActivationCollector:
                 try:
                     return module_self._original_forward(*args, **kwargs)
                 except _EarlyStopForwardError:
-                    if depth[0] > 1:  # the outermost patched forward stops the pass
+                    if depth[0] > 1:
                         raise
                     return None
                 except RuntimeError as e:

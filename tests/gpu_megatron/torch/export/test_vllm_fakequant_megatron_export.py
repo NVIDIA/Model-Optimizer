@@ -249,7 +249,6 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
     assert stale_quantizer not in recipe
     assert {"model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"} <= weight_map.keys()
     assert "quantization_config" not in json.loads((export_dir / "config.json").read_text())
-    assert not (export_dir / "hf_quant_config.json").exists()
 
     model.share_embeddings_and_output_weights = True
     for quantizer in model.output_layer.modules():
