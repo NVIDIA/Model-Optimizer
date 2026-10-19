@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Recipe for zai-org/GLM-5.3-Flash-BF16 with Megatron-Bridge: GGML IQ2_S on all routed-expert projections and
+# Q8_0 on the shared experts and the dense MLP of layers 0-2, calibrated with layerwise GPTQ. Both attention
+# families (KDA and sparse MLA), the router, the vision tower, the MTP layer, embeddings and lm_head stay BF16.
+#
+# Run quantize.py, distill.py and export with --no_moe_grouped_gemm: GPTQ and the GGML export
+# only handle per-expert linears. vLLM has no IQ2 kernels, so evaluate an export made with
+# --vllm_fakequant_export, which folds the IQ2 weights into BF16.
+#
+# Every quantized linear's input width is a multiple of the 256-weight GGML block
+# (hidden 4096, dense MLP 12288, experts 2048).
+
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  iq2_s: configs/numerics/iq2_s
+  q8_0: configs/numerics/q8_0
+
+metadata:
+  description: >-
+    GLM-5.3-Flash-BF16 (Megatron-Bridge): GGML IQ2_S on the routed experts and Q8_0 on the shared experts and
+    dense MLP, calibrated with layerwise GPTQ. Attention, router, vision tower, MTP layer, embeddings and
+    lm_head stay BF16. Requires calibration data.
+quantize:
+  algorithm:
+    method: gptq
+    # GGML encodes 256-weight blocks jointly, so GPTQ updates one block at a time.
+    block_size: 256
+    perc_damp: 0.3
+    importance_weighted: true
+    layerwise: {enable: true}
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*mlp*weight_quantizer'
+      cfg:
+        $import: iq2_s
+    # Every token runs through the shared experts and the dense MLP, and they are ~0.5% of the MLP
+    # weights, so Q8_0 there costs almost nothing in size.
+    - quantizer_name: '*mlp.shared_experts*weight_quantizer'
+      cfg:
+        $import: q8_0
+    - quantizer_name: '*mlp.linear_fc*weight_quantizer'
+      cfg:
+        $import: q8_0
+    - {quantizer_name: '*visual*', enable: false}
+    # Megatron-Bridge builds the MTP layer (HF does not); keep it BF16 like the HF export.
+    - {quantizer_name: '*mtp*', enable: false}

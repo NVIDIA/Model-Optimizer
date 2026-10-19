@@ -36,6 +36,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
 
 _RECIPE = "models/zai-org/GLM-5.3-Flash-BF16/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast"
+_IQ2_RECIPE = "models/zai-org/GLM-5.3-Flash-BF16/ptq/iq2_s_experts-q8_0_shared_dense-gptq"
 _H = 32
 
 
@@ -187,6 +188,35 @@ def test_glm_5_3_recipe_megatron_names():
         for proj in (mlp.linear_fc1, mlp.linear_fc2):
             assert proj.weight_quantizer.is_enabled is False
             assert proj.input_quantizer.is_enabled is False
+    vmlp = model.visual.blocks[0].mlp
+    for proj in (vmlp.gate_proj, vmlp.up_proj, vmlp.down_proj):
+        assert proj.weight_quantizer.is_enabled is False
+
+
+def test_glm_5_3_iq2_recipe_megatron_names():
+    model = _McoreGLM53Flash()
+    config = load_recipe(_IQ2_RECIPE).quantize.model_dump()
+    config["algorithm"] = None
+    mtq.quantize(model, config)
+
+    dense, sparse = (layer.inner_layer.mlp for layer in model.language_model.decoder.layers)
+    mtp = model.language_model.mtp.layers[0].inner_layer.mlp
+
+    # Routed experts -> IQ2_S; dense MLP and shared experts -> Q8_0; activations stay BF16.
+    for mlp, num_bits in [
+        *((expert, "iq2_s") for expert in sparse.experts.local_experts),
+        (dense, "q8_0"),
+        (sparse.shared_experts, "q8_0"),
+    ]:
+        for proj in (mlp.linear_fc1, mlp.linear_fc2):
+            assert proj.weight_quantizer.is_enabled
+            assert proj.weight_quantizer.num_bits == num_bits
+            assert proj.input_quantizer.is_enabled is False
+
+    # The MTP layer and the vision tower stay BF16.
+    for mlp in (mtp.shared_experts, *mtp.experts.local_experts):
+        for proj in (mlp.linear_fc1, mlp.linear_fc2):
+            assert proj.weight_quantizer.is_enabled is False
     vmlp = model.visual.blocks[0].mlp
     for proj in (vmlp.gate_proj, vmlp.up_proj, vmlp.down_proj):
         assert proj.weight_quantizer.is_enabled is False
