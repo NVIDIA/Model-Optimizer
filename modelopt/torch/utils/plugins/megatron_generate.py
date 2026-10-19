@@ -261,6 +261,10 @@ def megatron_prefill(
     if isinstance(output, (tuple, list)):
         output = output[0]
 
+    # Layerwise calibration ends the forward early at the layer being captured.
+    if output is None and skip_return_logits:
+        return None
+
     # For PP non-last stages, forward activations to the next stage and return early.
     if is_pp and not pp_last:
         pp_dtype = model.config.pipeline_dtype or (

@@ -182,6 +182,10 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
     (source / "quant_recipe.yaml").write_text(
         yaml.safe_dump({stale_quantizer: {"_disabled": True}})
     )
+    # A pre-quantized source (e.g. FP8) describes weights the BF16 export no longer has.
+    config = json.loads((source / "config.json").read_text())
+    config["quantization_config"] = {"quant_method": "fp8", "weight_block_size": [128, 128]}
+    (source / "config.json").write_text(json.dumps(config))
 
     export_dir = tmp_path / "vllm_export"
     exporter = VllmFqGPTModelExporter(model, source, dtype=torch.bfloat16)
@@ -241,6 +245,7 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
     assert stale_quantizer + "._amax" not in state
     assert stale_quantizer not in recipe
     assert {"model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"} <= weight_map.keys()
+    assert "quantization_config" not in json.loads((export_dir / "config.json").read_text())
 
     model.share_embeddings_and_output_weights = True
     for quantizer in model.output_layer.modules():
