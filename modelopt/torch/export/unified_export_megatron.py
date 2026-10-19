@@ -97,6 +97,7 @@ with import_plugin("megatron"):
         get_expert_model_parallel_group,
         get_expert_model_parallel_rank,
         get_expert_model_parallel_world_size,
+        get_expert_tensor_parallel_rank,
         get_pipeline_model_parallel_rank,
         get_pipeline_model_parallel_world_size,
         get_tensor_model_parallel_rank,
@@ -501,17 +502,20 @@ class GPTModelExporter:
         torch.distributed.barrier()
 
         # SequentialMLP experts are not gathered: each other EP rank writes its own to extra shards.
+        # Expert ownership follows the expert grid (EP x ETP x expert-DP), not the dense TP rank.
         writes_own_experts = (
-            tp_rank == 0
+            get_expert_tensor_parallel_rank() == 0
             and get_expert_data_parallel_rank() == 0
             and ep_rank > 0
             and bool(self._local_expert_keys)
         )
         name_template = "model-{:05d}-of-{:05d}"
         if writes_own_experts:
+            # Layers without local experts (e.g. dense ones) would write empty shards.
             layer_state_dicts = {
-                i: {k: v for k, v in sd.items() if k in self._local_expert_keys}
+                i: experts
                 for i, sd in layer_state_dicts.items()
+                if (experts := {k: v for k, v in sd.items() if k in self._local_expert_keys})
             }
             name_template += f"-ep{ep_rank:03d}"
         save_safetensors_by_layer_index(
