@@ -186,6 +186,9 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
     config = json.loads((source / "config.json").read_text())
     config["quantization_config"] = {"quant_method": "fp8", "weight_block_size": [128, 128]}
     (source / "config.json").write_text(json.dumps(config))
+    (source / "hf_quant_config.json").write_text(
+        json.dumps({"quantization": {"quant_algo": "FP8"}})
+    )
 
     export_dir = tmp_path / "vllm_export"
     exporter = VllmFqGPTModelExporter(model, source, dtype=torch.bfloat16)
@@ -246,6 +249,7 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
     assert stale_quantizer not in recipe
     assert {"model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"} <= weight_map.keys()
     assert "quantization_config" not in json.loads((export_dir / "config.json").read_text())
+    assert not (export_dir / "hf_quant_config.json").exists()
 
     model.share_embeddings_and_output_weights = True
     for quantizer in model.output_layer.modules():

@@ -395,7 +395,12 @@ def _test_sequential_experts_export_at_ep(model_dir, tmp_path, rank, size):
         moe_grouped_gemm=False,
     ).cuda()
     export_dir = tmp_path / "export"
+    stale = export_dir / "model-00001-of-00002-ep007.json"  # left by an export at a larger EP
+    if rank == 0:
+        export_dir.mkdir()
+        stale.write_text('{"metadata": {"total_size": 0}, "weight_map": {}}')
     export_mcore_gpt_to_hf(model, model_dir, dtype=torch.bfloat16, export_dir=str(export_dir))
+    assert not stale.exists()
 
     # Each rank's experts must land under their global ids, from whichever shard holds them.
     weight_map = json.loads((export_dir / "model.safetensors.index.json").read_text())["weight_map"]

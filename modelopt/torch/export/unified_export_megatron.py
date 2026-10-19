@@ -490,6 +490,10 @@ class GPTModelExporter:
         # Bracket the writer's config.json read-modify-write with barriers so peers
         # never observe a truncated file (also ensures export_dir exists).
         torch.distributed.barrier()
+        if is_writer_rank:
+            # Expert shards left by an earlier export at a larger EP would enter the index.
+            for stale in Path(save_directory).glob("model-*-of-*-ep*.*"):
+                stale.unlink()
         config_json_file = save_directory + "/config.json"
         if is_writer_rank and self._hf_quant_config and os.path.exists(config_json_file):
             with open(config_json_file) as f:
