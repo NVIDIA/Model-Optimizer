@@ -6,6 +6,10 @@ Changelog
 
 **New Features**
 
+*Sparsity*
+
+- Add the training-free Sol-Attn sparse attention method (``method: "sol_attn"``, ``mtsa.SOL_ATTN_DEFAULT``) for image and video diffusion models. It replaces eligible BF16, head-dim-128 self-attention SDPA calls on SM80+ GPUs and requires the external ``sol_attn`` kernel package; see ``examples/diffusers/sparsity/wan22_sol_attn.py``.
+
 *Quantization*
 
 - On Linux x86-64 with Python 3.11 and later, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; Python 3.10 and other platforms retain their existing dependency selections.
@@ -21,6 +25,8 @@ Changelog
 **Deprecations**
 
 **Bug Fixes**
+
+- Fix VSA (and other sparse attention methods that replace ``F.scaled_dot_product_attention``) leaving SDPA patched globally after an exception inside the attention forward, e.g. a missing kernel package.
 
 - Fix PTQ of native Transformers FP8 experts to apply source weight scales during calibration and export. Re-quantize affected checkpoints from the original FP8 source.
 
