@@ -26,6 +26,7 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.quantization import QuantModuleRegistry, tensor_quant
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, RotateConfig
+from modelopt.torch.quantization.conversion import create_and_replace_svdquant_linear_on_the_fly
 from modelopt.torch.quantization.nn import (
     SequentialQuantizer,
     TensorQuantizer,
@@ -401,6 +402,28 @@ def test_fold_weight_keep_attrs_keeps_calibration_attrs_inactive(monkeypatch):
         assert torch.allclose(qlinear(inputs), output_before)
     finally:
         unregister_quant_backend(backend_name)
+
+
+def test_fold_weight_folds_svdquant_lora():
+    model = torch.nn.Sequential(torch.nn.Linear(4, 3))
+    inputs = torch.randn(2, 4)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, config, lambda m: m(inputs))
+    create_and_replace_svdquant_linear_on_the_fly(model)
+    model[0].weight_quantizer.svdquant_lora_a = torch.randn(2, 4)
+    model[0].weight_quantizer.svdquant_lora_b = torch.randn(3, 2)
+    output_before = model(inputs)
+
+    mtq.fold_weight(model)
+
+    assert not hasattr(model[0].weight_quantizer, "_svdquant_lora_a")
+    assert torch.allclose(model(inputs), output_before, atol=1e-6)
 
 
 def test_temporarily_fold_weights_restores_after_exception(monkeypatch):
