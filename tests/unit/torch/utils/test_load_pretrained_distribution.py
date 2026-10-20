@@ -170,19 +170,26 @@ def test_a_replicated_plan_loads_the_whole_model_on_every_rank(
 
 
 def test_an_fsdp_plan_loads_through_the_parallel_fsdp2_loader(
-    run_as, serve, loaders, process_group, tmp_path
+    run_as, loaders, process_group, monkeypatch, tmp_path
 ):
-    """FSDP2 shards over the process group it reads its rank and GPU from."""
+    """FSDP2 shards over the process group it reads its rank and GPU from, by a config read with
+    the Hub options the load was given (custom code an ``auto_map`` names in another repo)."""
     run_as(2, rank=1)
-    served = serve(LlamaConfig(**_TINY))
+    served, reads = LlamaConfig(**_TINY), []
+    monkeypatch.setattr(
+        transformers.AutoConfig, "from_pretrained", lambda *a, **k: reads.append(k) or served
+    )
     plan = DistributionPlan(2, dense="fsdp")
 
-    model = load_pretrained(str(tmp_path), distribution=plan, cpu_offload=True, dtype="auto")
+    model = load_pretrained(
+        str(tmp_path), distribution=plan, cpu_offload=True, dtype="auto", local_files_only=True
+    )
 
     call = loaders.pop("fsdp2")
     assert (call["device"], call["rank"], call["world_size"]) == (torch.device("cuda:1"), 1, 2)
     assert call["cpu_offload"] is True
     assert call["hf_config"] is served
+    assert reads and all(read.get("local_files_only") is True for read in reads)
     assert distribution_plan(model) == plan
     assert loaders == {}
 
