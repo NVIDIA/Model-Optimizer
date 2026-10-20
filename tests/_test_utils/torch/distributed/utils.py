@@ -132,7 +132,7 @@ class DistributedWorkerPool:
     """
 
     def __init__(
-        self, world_size, backend="nccl", teardown_fn=default_worker_teardown, ready_timeout=120
+        self, world_size, backend="nccl", teardown_fn=default_worker_teardown, ready_timeout=300
     ):
         assert world_size > 0, "World size must be greater than 0"
         self.world_size = world_size
@@ -162,6 +162,8 @@ class DistributedWorkerPool:
             p.start()
             self._processes.append(p)
 
+        # ready_timeout is 300 s: cold imports of the Megatron/TE/modelopt stack take 75-100 s
+        # under coverage in CI
         try:
             for _ in range(world_size):
                 msg = self._get(ready_timeout)
