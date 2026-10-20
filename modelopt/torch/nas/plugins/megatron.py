@@ -1100,6 +1100,9 @@ class MambaDInnerHp(TracedHp):
         raise NotImplementedError("MambaDInnerHp does not support `_resolve_dependencies`!")
 
 
+torch.serialization.add_safe_globals([NumAttentionHeadsHp, MambaNumHeadsHp, MambaDInnerHp])
+
+
 class _DynamicExtendedRMSNorm(DynamicModule):
     """An ExtendedRMSNorm (GroupNorm) layer with dynamic hyperparams.
 

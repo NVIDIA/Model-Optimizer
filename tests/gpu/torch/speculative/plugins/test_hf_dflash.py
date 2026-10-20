@@ -287,20 +287,20 @@ class TestShardedBaseGeneration:
         model._base_model.forward = sharded_forward
 
     def test_generate_gathers_sharded_hidden_states(self):
-        model = get_tiny_llama(num_hidden_layers=4)
+        # 8 layers so the default target_layer_ids ([1, 5]) straddle the split; 4 gives [1, 1].
+        model = get_tiny_llama(num_hidden_layers=8)
         mtsp.convert(model, [("dflash", get_dflash_config(block_size=4))])
         model = model.to("cuda:1").eval()
-
-        # The fix is only exercised if the split actually separates two target layers.
-        assert (
-            min(model.target_layer_ids)
-            < len(model._base_model.layers) // 2
-            <= max(model.target_layer_ids)
-        ), model.target_layer_ids
 
         self._shard_hidden_states(model, spare_device=torch.device("cuda:0"))
 
         input_ids = torch.tensor([[1, 2, 3, 4]], device="cuda:0")
+        # The fix is only exercised if the selected hidden states really sit on different devices.
+        with torch.no_grad():
+            hidden = model._base_model(input_ids=input_ids, output_hidden_states=True).hidden_states
+        devices = {hidden[lid + 1].device for lid in model.target_layer_ids}
+        assert len(devices) > 1, (model.target_layer_ids, devices)
+
         with torch.no_grad():
             base_token, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=2)
 

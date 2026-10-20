@@ -93,8 +93,8 @@ from .modeling_dflash import (  # noqa: F401
 from .modeling_fakebase import (
     _BASE_MODEL_PATHS,
     _EMBED_TOKENS_PATHS,
-    _FINAL_NORM_PATHS,
     _LM_HEAD_PATHS,
+    find_final_norm_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -250,14 +250,7 @@ class HFDFlashModel(DFlashModel):
                 raise ValueError(f"Part {name} not found in model")
         # Final pre-lm_head norm is OPTIONAL (set None if absent): used to re-normalize the
         # un-normed final hidden collect by vllm.
-        self.base_model_norm_path = None
-        for path in _FINAL_NORM_PATHS:
-            try:
-                assert isinstance(self.get_submodule(path), torch.nn.Module)
-                self.base_model_norm_path = path
-                break
-            except Exception:
-                continue
+        self.base_model_norm_path = find_final_norm_path(self)
 
     def modify(self, config):
         """Initialize DFlash draft module."""

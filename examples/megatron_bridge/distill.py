@@ -178,6 +178,15 @@ def get_args():
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--cp_size", type=int, default=1, help="Context parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
+    parser.add_argument(
+        "--dsa_kernel_backend",
+        choices=["none", "tilelang", "cudnn"],
+        default=None,
+        help=(
+            "Fused kernels for DeepSeek sparse attention (e.g. GLM-5.x). The unfused fallback "
+            "builds dense [seq, seq] scores per head, which does not fit at long sequence lengths."
+        ),
+    )
 
     # Dataset arguments
     parser.add_argument(
@@ -238,6 +247,13 @@ def get_args():
         "or the whole conversation. Multi-turn records train all of their responses under "
         "'assistant'.",
     )
+    parser.add_argument(
+        "--sft_in_batch_packing",
+        action="store_true",
+        help="Pack each micro-batch's --sft_hf_dataset conversations into one THD sequence (attention "
+        "restarts per conversation) instead of padding every conversation to --seq_length. --mbs "
+        "then sets the conversations per pack.",
+    )
     # Training & Eval arguments
     parser.add_argument(
         "--output_dir", type=str, required=True, help="Folder for logging and checkpoint saving"
@@ -263,6 +279,13 @@ def get_args():
         "--freeze_mtp",
         action="store_true",
         help="Keep the student's MTP head at its input weights: skip its loss and freeze it.",
+    )
+    parser.add_argument(
+        "--moe_aux_loss_coeff",
+        type=float,
+        default=None,
+        help="Override the MoE load-balancing loss weight (e.g. 0 to drop it). It is computed over every "
+        "token, so with --sft padding it also sends gradient into the padded positions.",
     )
     parser.add_argument(
         "--no_async_save",
@@ -421,8 +444,10 @@ def get_args():
             )
         if args.eval_iters > 0 and not args.sft_hf_validation:
             raise ValueError("--sft_hf_dataset with --eval_iters > 0 needs --sft_hf_validation.")
-    elif args.sft_hf_validation or args.sft_loss_mode != "assistant":
-        raise ValueError("--sft_hf_validation / --sft_loss_mode require --sft_hf_dataset.")
+    elif args.sft_hf_validation or args.sft_loss_mode != "assistant" or args.sft_in_batch_packing:
+        raise ValueError(
+            "--sft_hf_validation / --sft_loss_mode / --sft_in_batch_packing require --sft_hf_dataset."
+        )
     if args.sft and (args.data_paths or args.use_mock_data):
         raise ValueError(
             "--sft is mutually exclusive with --data_paths / --use_mock_data: the SFT branch wins "
@@ -508,7 +533,11 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         provider.expert_model_parallel_size = args.ep_size
         provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
+        if args.dsa_kernel_backend is not None:
+            provider.dsa_kernel_backend = args.dsa_kernel_backend
         set_moe_expert_layout(provider, moe_grouped_gemm)
+        if args.moe_aux_loss_coeff is not None:
+            provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
         if per_token_loss:
             provider.calculate_per_token_loss = True
         if args.recompute_granularity is not None:
@@ -632,9 +661,14 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
                 _hf_source(args.sft_hf_validation) if args.sft_hf_validation else None
             ),
             preprocessing=ChatSFTPreprocessingConfig(loss_mode=args.sft_loss_mode),
-            dataloader_type="batch",
+            # "batch" collates a rank's whole global batch at once and then splits it into
+            # micro-batches, which a packed THD batch cannot be; packing collates per micro-batch.
+            dataloader_type="single" if args.sft_in_batch_packing else "batch",
             do_validation=args.eval_iters > 0,
             do_test=False,
+            enable_in_batch_packing=args.sft_in_batch_packing,
+            # Each packed conversation must split evenly across the 2 * CP context-parallel chunks.
+            in_batch_packing_pad_to_multiple_of=2 * args.cp_size if args.cp_size > 1 else 1,
         )
     elif args.sft:
         # SFT-masked distillation via Bridge's FinetuningDatasetConfig -> NeMo-style GPTSFTDataset,

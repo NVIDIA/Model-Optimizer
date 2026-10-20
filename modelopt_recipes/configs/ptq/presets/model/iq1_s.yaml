@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# QuantizeConfig preset for IQ1_S weight-only quantization of MLP/MoE layers with GPTQ.
+# QuantizeConfig preset for IQ1_S weight-only quantization of MLP/MoE layers with GPTQ,
+# and imatrix for the fused MoE experts GPTQ does not reach.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:
@@ -22,15 +23,18 @@ imports:
   iq1_s: configs/numerics/iq1_s
 
 algorithm:
-  method: gptq
-  # GGML encodes 256-weight blocks jointly, so GPTQ updates one block at a time.
-  block_size: 256
-  # Heavier than GPTQ's usual 0.01: low damping overfits the calibration Hessian at these bit widths.
-  perc_damp: 0.3
-  # Weight each block's codebook search by the square root of the Hessian diagonal.
-  importance_weighted: true
-  layerwise:
-    enable: true
+  - method: gptq
+    # GGML encodes 256-weight blocks jointly, so GPTQ updates one block at a time.
+    block_size: 256
+    # Heavier than GPTQ's usual 0.01: low damping overfits the calibration Hessian at these bit widths.
+    perc_damp: 0.3
+    # Weight each block's codebook search by the square root of the Hessian diagonal.
+    importance_weighted: true
+    layerwise:
+      enable: true
+  # GPTQ only reaches 2-D linears; imatrix encodes the fused MoE experts it leaves, and skips the
+  # weights GPTQ already encoded. It collects its statistics in a single forward pass.
+  - method: imatrix
 quant_cfg:
   - $import: base_disable_all
   - quantizer_name: '*mlp*weight_quantizer'

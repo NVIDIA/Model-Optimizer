@@ -14,8 +14,11 @@
 # limitations under the License.
 
 import copy
+import inspect
 import json
+from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -24,12 +27,23 @@ from _test_utils.torch.diffusers_models import (
     get_tiny_flux,
     get_tiny_flux2,
     get_tiny_unet,
+    get_tiny_wan22_transformer,
+    get_tiny_wan22_vae,
 )
 
 pytest.importorskip("diffusers")
+pytest.importorskip("transformers")
 
+import diffusers
 from safetensors import safe_open
 from safetensors.torch import save_file
+from transformers import (
+    CLIPTextConfig,
+    CLIPTextModel,
+    CLIPTextModelWithProjection,
+    UMT5Config,
+    UMT5EncoderModel,
+)
 
 import modelopt.torch.export.unified_export_hf as unified_export_hf
 import modelopt.torch.quantization as mtq
@@ -86,6 +100,119 @@ def test_export_diffusers_models_non_quantized(tmp_path, model_factory):
 
     config_data = _load_config(config_path)
     assert "quantization_config" not in config_data
+
+
+@pytest.fixture
+def tiny_pipeline(request, tmp_path, tiny_tokenizer):
+    """Build and reload a tiny pipeline without accessing the Hugging Face Hub."""
+    if request.param == "wan22":
+        wan_pipeline = getattr(diffusers, "WanPipeline", None)
+        if (
+            wan_pipeline is None
+            or "boundary_ratio" not in inspect.signature(wan_pipeline.__init__).parameters
+        ):
+            pytest.skip("Requires a Diffusers version with Wan 2.2 support")
+        text_encoder = UMT5EncoderModel(
+            UMT5Config(
+                vocab_size=len(tiny_tokenizer),
+                d_model=32,
+                d_kv=8,
+                d_ff=32,
+                num_layers=1,
+                num_heads=4,
+            )
+        )
+        pipe = wan_pipeline(
+            tokenizer=tiny_tokenizer,
+            text_encoder=text_encoder,
+            vae=get_tiny_wan22_vae(),
+            scheduler=diffusers.UniPCMultistepScheduler(
+                prediction_type="flow_prediction", use_flow_sigmas=True, flow_shift=3.0
+            ),
+            transformer=get_tiny_wan22_transformer(),
+            transformer_2=get_tiny_wan22_transformer(),
+            boundary_ratio=0.875,
+        )
+        settings = ("boundary_ratio", "expand_timesteps")
+    else:
+        text_config = CLIPTextConfig(
+            vocab_size=len(tiny_tokenizer),
+            hidden_size=32,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            projection_dim=32,
+        )
+        pipe = diffusers.StableDiffusionXLPipeline(
+            vae=diffusers.AutoencoderKL(block_out_channels=(32,), norm_num_groups=8),
+            text_encoder=CLIPTextModel(text_config),
+            text_encoder_2=CLIPTextModelWithProjection(text_config),
+            tokenizer=tiny_tokenizer,
+            tokenizer_2=tiny_tokenizer,
+            unet=get_tiny_unet(in_channels=4, out_channels=4, cross_attention_dim=64),
+            scheduler=diffusers.DDIMScheduler(),
+            # Use a non-default value so reload cannot hide a missing setting.
+            force_zeros_for_empty_prompt=False,
+            add_watermarker=False,
+        )
+        settings = ("force_zeros_for_empty_prompt",)
+    source_dir = tmp_path / "source_pipeline"
+    pipe.save_pretrained(source_dir)
+    return type(pipe).from_pretrained(source_dir), settings
+
+
+@pytest.mark.parametrize(
+    ("tiny_pipeline", "selection"),
+    [("wan22", "default"), ("wan22", "all"), ("wan22", "transformer_2"), ("sdxl", "all")],
+    indirect=["tiny_pipeline"],
+)
+def test_export_diffusers_pipeline_config(tmp_path, tiny_pipeline, selection):
+    pipe, settings = tiny_pipeline
+    component_names = {name for name, component in pipe.components.items() if component is not None}
+    components = None if selection == "default" else sorted(component_names)
+    if selection == "transformer_2":
+        components = [selection]
+    expected_components = component_names if components is None else set(components)
+    export_dir = tmp_path / "export_pipeline"
+
+    export_hf_checkpoint(pipe, export_dir=export_dir, components=components)
+
+    model_index = _load_config(export_dir / "model_index.json")
+    for setting in settings:
+        assert model_index[setting] == pipe.config[setting]
+    assert set(model_index) & set(pipe.components) == expected_components
+    assert {path.name for path in export_dir.iterdir() if path.is_dir()} == expected_components
+
+    # Loading the export must restore the settings; pass in the components it omits.
+    omitted = {name: pipe.components[name] for name in component_names - expected_components}
+    reloaded = type(pipe).from_pretrained(export_dir, **omitted)
+    for setting in settings:
+        assert reloaded.config[setting] == pipe.config[setting]
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected"),
+    [
+        pytest.param(Path("settings") / "config.json", "settings/config.json", id="path"),
+        pytest.param(np.array([1, 2, 3]), [1, 2, 3], id="ndarray"),
+    ],
+)
+def test_export_diffusers_pipeline_config_serialization(tmp_path, setting, expected):
+    class ConfigPipeline(diffusers.DiffusionPipeline):
+        def __init__(self, unet, scheduler, setting=None):
+            super().__init__()
+            self.register_modules(unet=unet, scheduler=scheduler)
+            self.register_to_config(setting=setting)
+
+    pipe = ConfigPipeline(get_tiny_unet(), diffusers.DDIMScheduler(), setting=setting)
+    export_dir = tmp_path / "export_pipeline"
+
+    export_hf_checkpoint(pipe, export_dir=export_dir, components=["unet"])
+
+    model_index = _load_config(export_dir / "model_index.json")
+    assert model_index["setting"] == expected
+    assert set(model_index) & set(pipe.components) == {"unet"}
+    assert {path.name for path in export_dir.iterdir() if path.is_dir()} == {"unet"}
 
 
 def test_export_diffusers_unet_quantized_matches_llm_config(tmp_path, monkeypatch):

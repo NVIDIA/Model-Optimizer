@@ -43,8 +43,8 @@ from .modeling_eagle import EagleBaseModelOutput, EagleModule
 from .modeling_fakebase import (
     _BASE_MODEL_PATHS,
     _EMBED_TOKENS_PATHS,
-    _FINAL_NORM_PATHS,
     _LM_HEAD_PATHS,
+    find_final_norm_path,
 )
 from .modeling_final_norm import _maybe_apply_base_final_norm
 
@@ -138,14 +138,7 @@ class HFEagleModel(EagleModel):
 
         # Final pre-lm_head norm is OPTIONAL (set None if absent): used to re-normalize the
         # un-normed final hidden captured by vLLM in the offline/streaming path.
-        self.base_model_norm_path = None
-        for path in _FINAL_NORM_PATHS:
-            try:
-                assert isinstance(self.get_submodule(path), torch.nn.Module)
-                self.base_model_norm_path = path
-                break
-            except Exception:
-                continue
+        self.base_model_norm_path = find_final_norm_path(self)
 
     def _activate_torch_compile(self):
         import torch._dynamo

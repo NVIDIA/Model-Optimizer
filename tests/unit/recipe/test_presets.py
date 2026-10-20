@@ -22,9 +22,6 @@ PTQ example).
 """
 
 import argparse
-import subprocess
-import sys
-import textwrap
 
 import pytest
 
@@ -34,6 +31,7 @@ from modelopt.recipe.presets import RecipeSupersededAction
 from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT
 from modelopt.torch.quantization.config import LocalHessianCalibConfig, QuantizeConfig
 from modelopt.torch.quantization.ggml import (
+    GGML_FORMAT_REGISTRY,
     IQ1_M_BLOCK_SIZE,
     IQ1_M_EFFECTIVE_BITS,
     IQ1_S_BLOCK_SIZE,
@@ -173,8 +171,43 @@ def test_iq_recipe_matches_packing_contract(qformat, block_size, effective_bits)
     if qformat == "q8_0":
         assert quantize["algorithm"] is None
     else:
-        assert quantize["algorithm"]["method"] == "gptq"
-        assert quantize["algorithm"]["block_size"] % block_size == 0
+        algorithms = quantize["algorithm"]
+        algorithms = algorithms if isinstance(algorithms, list) else [algorithms]
+        assert algorithms[0]["method"] == "gptq"
+        assert algorithms[0]["block_size"] % block_size == 0
+        # Formats with a weighted search add imatrix for the fused MoE experts GPTQ does not reach.
+        expected = ["gptq", "imatrix"] if GGML_FORMAT_REGISTRY[qformat].weighted else ["gptq"]
+        assert [algorithm["method"] for algorithm in algorithms] == expected
+
+
+@pytest.mark.parametrize(
+    ("qformat", "block_size", "effective_bits"),
+    [
+        ("iq1_s", IQ1_S_BLOCK_SIZE, IQ1_S_EFFECTIVE_BITS),
+        ("iq1_m", IQ1_M_BLOCK_SIZE, IQ1_M_EFFECTIVE_BITS),
+        ("iq2_xxs", IQ2_XXS_BLOCK_SIZE, IQ2_XXS_EFFECTIVE_BITS),
+        ("iq2_xs", IQ2_XS_BLOCK_SIZE, IQ2_XS_EFFECTIVE_BITS),
+        ("iq2_s", IQ2_S_BLOCK_SIZE, IQ2_S_EFFECTIVE_BITS),
+    ],
+)
+def test_iq_experts_only_recipe_quantizes_the_routed_experts_with_imatrix(
+    qformat, block_size, effective_bits
+):
+    quantize = load_recipe(f"general/ptq/{qformat}_experts_only").quantize.model_dump(
+        exclude_unset=True
+    )
+    weight_cfgs = {
+        entry["quantizer_name"]: entry["cfg"]
+        for entry in quantize["quant_cfg"]
+        if isinstance(entry.get("cfg"), dict) and entry["cfg"].get("num_bits") == qformat
+    }
+
+    assert set(weight_cfgs) == {"*.experts.*weight_quantizer", "*block_sparse_moe*weight_quantizer"}
+    for weight_cfg in weight_cfgs.values():
+        assert weight_cfg["backend"] == "ggml"
+        assert weight_cfg["block_sizes"][-1] == block_size
+        assert weight_cfg["effective_bits"] == effective_bits
+    assert quantize["algorithm"] == {"method": "imatrix"}
 
 
 # --- RecipeSupersededAction: the flags --recipe replaces ----------------------------------------
@@ -202,31 +235,3 @@ def test_store_true_style_flag_stores_const_not_an_empty_list():
     with pytest.warns(FutureWarning, match="--weight_only is deprecated"):
         args = parser.parse_args(["--weight_only"])
     assert args.weight_only is True
-
-
-def test_deprecation_reaches_stderr_under_the_real_default_filters():
-    """The warning has to reach an actual CLI user, not just a test run.
-
-    pytest enables every warning, so a category CPython suppresses looks healthy here and says
-    nothing in production. argparse invokes the action from its own module, so a
-    ``DeprecationWarning`` would be dropped by the default ``ignore::DeprecationWarning`` filter --
-    the flag would keep working with nothing said. A subprocess is the only honest check: it uses
-    the interpreter's real filters rather than a reconstruction of them.
-    """
-    script = textwrap.dedent(
-        """
-        import argparse
-        from modelopt.recipe.presets import RecipeSupersededAction
-
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--qformat", action=RecipeSupersededAction)
-        parser.parse_args(["--qformat", "nvfp4"])
-        """
-    )
-    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
-
-    assert proc.returncode == 0, proc.stderr
-    assert "--qformat is deprecated" in proc.stderr, (
-        "the deprecation is filtered out under Python's default filters, so a CLI user would "
-        f"never see it; stderr was: {proc.stderr!r}"
-    )

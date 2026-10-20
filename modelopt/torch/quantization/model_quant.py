@@ -232,13 +232,20 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
     )
 
 
+_INDEXER_UNITS = "the configs/ptq/units/indexer_*_nvfp4 recipe units"
+_MOE_COMM_UNITS = "the configs/ptq/units/moe_*_nvfp4 recipe units"
 # Quantizers that only framework plugins add: (class-name patterns of the modules they belong on,
-# what those modules are, recipe units listing the supported models).
+# what those modules are, where the supported models are listed).
 _PLUGIN_QUANTIZERS = {
-    "indexer_q_quantizer": (("*Indexer",), "sparse-attention indexer", "indexer_*_nvfp4"),
-    "indexer_k_quantizer": (("*Indexer",), "sparse-attention indexer", "indexer_*_nvfp4"),
-    "dispatch_quantizer": (("*Experts*", "*FusedMoE"), "MoE experts module", "moe_*_nvfp4"),
-    "combine_quantizer": (("*Experts*", "*FusedMoE"), "MoE experts module", "moe_*_nvfp4"),
+    "indexer_q_quantizer": (("*Indexer",), "sparse-attention indexer", _INDEXER_UNITS),
+    "indexer_k_quantizer": (("*Indexer",), "sparse-attention indexer", _INDEXER_UNITS),
+    "indexer_scorer_kwargs_quantizer": (
+        ("*Indexer",),
+        "sparse-attention indexer",
+        'the "Indexer scorer kernel arguments" section of examples/vllm_serve/README.md',
+    ),
+    "dispatch_quantizer": (("*Experts*", "*FusedMoE"), "MoE experts module", _MOE_COMM_UNITS),
+    "combine_quantizer": (("*Experts*", "*FusedMoE"), "MoE experts module", _MOE_COMM_UNITS),
 }
 
 
@@ -256,7 +263,7 @@ def _check_plugin_quantization_took_effect(model: nn.Module, config: QuantizeCon
     some waiting in calibration for the others.
     """
     last_entry_per_pattern = {entry.quantizer_name: entry for entry in config.quant_cfg}
-    for quantizer_name, (owner_patterns, owner_kind, units) in _PLUGIN_QUANTIZERS.items():
+    for quantizer_name, (owner_patterns, owner_kind, supported) in _PLUGIN_QUANTIZERS.items():
         if not any(
             entry.enable and quantizer_name in pattern
             for pattern, entry in last_entry_per_pattern.items()
@@ -290,7 +297,7 @@ def _check_plugin_quantization_took_effect(model: nn.Module, config: QuantizeCon
                 f"The quantization config enables {quantizer_name}, but no {owner_kind} of this "
                 f"model ({', '.join(unsupported)}) has one: the ModelOpt plugins do not support "
                 "this model, its runtime backend or the installed vLLM / Megatron-Core version "
-                f"(supported models: see the configs/ptq/units/{units} recipe units)."
+                f"(supported models: see {supported})."
             )
         if any(has for _, has, _ in per_rank) and not any(on for _, _, on in per_rank):
             raise RuntimeError(

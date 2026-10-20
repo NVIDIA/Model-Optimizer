@@ -185,6 +185,16 @@ nox -s "unit-3.12(torch_211, tf_latest)"
   keeping CI/CD fast and lean. Default to one test per behavior: use `@pytest.mark.parametrize` instead of
   near-duplicate test functions, and don't add a per-branch test for a helper that a higher-level test already
   exercises. More tests is not better coverage — every checked-in test is CI time and maintenance forever.
+  Before adding a test, check whether an existing unit, GPU, or example test already exercises the path; if so,
+  extend it instead. Do not add tests that only restate the implementation, assert on mocks, pin log/warning
+  wording, or re-cover a branch of a helper whose caller is tested. A PR that adds many tests should be able to
+  say what regression each one catches.
+- **Keep `tests/unit` fast — the `linux` job has a hard 20-minute limit** and runs the whole suite serially.
+  A unit test should take well under 5s (check with `pytest --durations=20`). Tests that spawn processes or
+  subprocesses (`spawn_multiprocess_job`, `subprocess.run` importing torch), train for many steps, or build
+  real-size models belong in `tests/gpu*`; batch several cases into one spawn rather than one spawn per case,
+  or reuse the session-scoped `cpu_dist_workers` fixture for multi-rank CPU tests.
+  Slow tests for features without active maintenance (e.g. AutoNAS) should be `@pytest.mark.manual` or nightly-only.
 - **Exercise the behavior a test claims to validate.** Mocks are useful for focused interface and wiring coverage, but
   replacing the implementation under test does not validate its real behavior. Include an end-to-end test that runs
   the actual implementation whenever the test claims backend or runtime behavior. For example, a test of
@@ -272,6 +282,14 @@ nox -s "unit-3.12(torch_211, tf_latest)"
 - **Contributors without write access:** When GitHub requests workflow approval, a reviewer with write permission
   must select **Approve and run workflows** to start GitHub Actions CI.
 - If any CI/CD checks fail, fix the issues and push again.
+- **Stacked PRs:** GPU, example and regression tests run only for PRs that target `main`, `release/*`
+  or `feature/*`, the same branches the unit tests run for. A PR based on another PR's branch gets
+  failing `*-pr-required-check`s that say the tests are deferred; once it targets `main`, push or use
+  **Re-run all jobs** to run them. To test a stacked PR before then, run the tests on its branch by
+  hand: in the repo's **Actions** tab, open **GPU tests** (or **Example tests** / **Regression
+  tests**), click **Run workflow** and pick your branch, or run
+  `gh workflow run gpu_tests.yml --ref <your-branch>`. This runs every test in that workflow, and only
+  works for branches in this repo, not forks.
 - Once your PR is approved and all checks pass, one of the reviewers will merge the PR.
 - If your PR is a bug fix that should also land in an ongoing release branch, add the
   `cherry-pick-<X.Y.Z>` label (e.g. `cherry-pick-0.47.0`) matching that release. Labeled PRs are

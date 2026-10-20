@@ -15,12 +15,10 @@ This directory contains examples of using Model Optimizer with the [NeMo Megatro
 
 </div>
 
+This README is the getting-started guide, with each workflow shown on small models (mostly Qwen3-8B).
+
 > [!TIP]
-> Checkout the [Nemotron-3-Nano-30B-A3B pruning + distillation (with data blend prep) + quantization tutorial](tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) for a complete end-to-end workflow using Megatron-Bridge!
->
-> Or the [Qwen3.6-35B-A3B W4A4 NVFP4 + QAD tutorial](tutorials/Qwen3.6-35B-A3B/README.md) for an end-to-end quantization-aware distillation workflow.
->
-> Or the [NemotronH omni VL W4A4 + QAD tutorial](tutorials/NemotronH-Omni-W4A4-QAD/README.md) for a Mamba-Transformer MoE vision-language model.
+> For complete end-to-end workflows on larger models, see the [tutorials](tutorials/README.md): [Nemotron-3-Nano-30B-A3B](tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) pruning + distillation + quantization, [Qwen3.6-35B-A3B](tutorials/Qwen3.6-35B-A3B/README.md) W4A4 NVFP4 + QAD, and [NemotronH omni VL](tutorials/NemotronH-Omni-W4A4-QAD/README.md) W4A4 + QAD.
 
 ## Pre-Requisites
 

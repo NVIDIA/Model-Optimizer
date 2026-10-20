@@ -14,11 +14,17 @@
 # limitations under the License.
 
 
-# NemotronH -- aggressive NVFP4 tier, weight-MSE calibration.
+# NVIDIA Nemotron 3.5 Super VL -- NVFP4, weight-MSE calibration.
 #
-# For hybrid Mamba-MoE NemotronH checkpoints, including the omni VL wrappers. Broader FP8 weight
-# coverage than the conservative tier; the MTP rules apply only when the checkpoint carries an
-# MTP tail and are inert otherwise.
+# The PTQ stage for NVIDIA Nemotron 3.5 Super VL, keyed to the BF16 source checkpoint it runs
+# on: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16. It reproduces the released precision
+# assignment, not the released weights -- the published
+# nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4 is refined by quantization-aware
+# distillation after this stage, which no PTQ recipe performs.
+#
+# The model is a hybrid Mamba-MoE NemotronH omni checkpoint, and nothing here is specific to
+# this release beyond the calibration choices, so the rules apply to NemotronH hybrids
+# generally. The MTP rules are inert on a checkpoint with no MTP tail.
 #
 #   MoE routed + shared experts   NVFP4 W4A4, static weight scales
 #   attention q/k/v/o, Mamba in/out_proj, lm_head   FP8
@@ -34,18 +40,21 @@
 # names. Where the two differ -- attention, lm_head and the MTP block -- both spellings are
 # listed; each is inert on the other framework's model.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   nvfp4: configs/numerics/nvfp4
   nvfp4_static: configs/numerics/nvfp4_static
   fp8: configs/numerics/fp8
 
 metadata:
-  recipe_type: ptq
   description: >-
-    NemotronH aggressive tier, weight-MSE calibrated: NVFP4 routed and shared MoE experts with
-    static weight scales and dynamic NVFP4 activations, the same for the MTP block-1 experts;
-    FP8 attention projections, Mamba in/out_proj and lm_head; BF16 latent MoE and vision tower.
-    FP8 KV cache, with the backbone cast at a fixed range and MTP calibrated.
+    PTQ stage for NVIDIA Nemotron 3.5 Super VL, run on
+    nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 and weight-MSE calibrated: NVFP4 routed
+    and shared MoE experts with static weight scales and dynamic NVFP4 activations, the same for
+    the MTP block-1 experts; FP8 attention projections, Mamba in/out_proj and lm_head; BF16
+    latent MoE, router, embeddings and vision stack. FP8 KV cache, with the backbone cast at a
+    fixed range and MTP calibrated. The released NVFP4 checkpoint adds quantization-aware
+    distillation on top of this stage.
 quantize:
   algorithm:
     method: mse

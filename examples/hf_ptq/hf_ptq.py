@@ -286,11 +286,15 @@ def _validate_recipe_calibration(args: argparse.Namespace, recipe) -> None:
     if not isinstance(recipe, ModelOptPTQRecipe) or args.calib_with_images:
         return
 
+    visual_input_names = {
+        "*visual.*input_quantizer",
+        "*visual.*merger*.input_quantizer",
+    }
     visual_input_entry = next(
         (
             entry
             for entry in reversed(recipe.quantize.quant_cfg)
-            if entry.quantizer_name == "*visual.*input_quantizer"
+            if entry.quantizer_name in visual_input_names
         ),
         None,
     )

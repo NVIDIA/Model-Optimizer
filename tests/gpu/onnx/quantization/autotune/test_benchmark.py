@@ -31,9 +31,11 @@ import tempfile
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import onnx
 import pytest
 import torch
 from _test_utils.onnx.quantization.autotune.models import _create_simple_conv_onnx_model
+from onnx import TensorProto, helper
 
 import modelopt.onnx.quantization.autotune.benchmark as bm
 from modelopt.onnx.quantization.autotune import TensorRTPyBenchmark, TrtExecBenchmark
@@ -345,9 +347,49 @@ class TestTensorRTPyBenchmark:
 
     @pytest.fixture(autouse=True)
     def _require_tensorrt_and_torch_cuda(self):
+        """Skip benchmark integration tests when TensorRT or CUDA is unavailable."""
         pytest.importorskip("tensorrt")
         if not bm.TORCH_CUDA_AVAILABLE:
             pytest.skip("CUDA not available")
+
+    @pytest.mark.parametrize("quant_type", [TensorProto.INT8, TensorProto.FLOAT8E4M3FN])
+    def test_run_quantized_model(self, quant_type):
+        """Quantized candidates build and run with strongly typed networks."""
+        if quant_type == TensorProto.FLOAT8E4M3FN and torch.cuda.get_device_capability() < (8, 9):
+            pytest.skip("FP8 requires SM89 or newer")
+
+        nodes = []
+        for name in ("input", "weight"):
+            nodes.extend(
+                [
+                    helper.make_node(
+                        "QuantizeLinear", [name, "scale", "zero_point"], [f"{name}_q"]
+                    ),
+                    helper.make_node(
+                        "DequantizeLinear", [f"{name}_q", "scale", "zero_point"], [f"{name}_dq"]
+                    ),
+                ]
+            )
+        nodes.append(helper.make_node("MatMul", ["input_dq", "weight_dq"], ["output"]))
+        graph = helper.make_graph(
+            nodes,
+            "quantized_matmul",
+            [helper.make_tensor_value_info("input", TensorProto.FLOAT, [16, 16])],
+            [helper.make_tensor_value_info("output", TensorProto.FLOAT, [16, 16])],
+            initializer=[
+                helper.make_tensor("weight", TensorProto.FLOAT, [16, 16], [0.1] * 256),
+                helper.make_tensor("scale", TensorProto.FLOAT, [], [0.1]),
+                helper.make_tensor("zero_point", quant_type, [], [0]),
+            ],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 19)], ir_version=9)
+        onnx.checker.check_model(model)
+
+        benchmark = TensorRTPyBenchmark(warmup_runs=1, timing_runs=2)
+        network = benchmark.builder.create_network(benchmark.network_flags)
+        assert network.get_flag(bm.trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+        latency_ms = benchmark.run(model.SerializeToString())
+        assert np.isfinite(latency_ms) and latency_ms > 0
 
     def test_run_with_bytes(self, simple_conv_model_bytes):
         """TensorRTPyBenchmark accepts model bytes and returns finite latency."""
