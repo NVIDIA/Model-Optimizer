@@ -305,12 +305,16 @@ def test_an_expert_parallel_plan_loads_through_the_ep_loader(
     ids=["decided_by_the_load", "planned", "planned_with_its_config"],
 )
 def test_a_load_prepares_its_config_once(
-    run_as, serve, loaders, monkeypatch, tmp_path, planned, given_config, preparations
+    run_as, loaders, monkeypatch, tmp_path, planned, given_config, preparations
 ):
     """A model's EP preparation can patch its modeling code, so a load runs it once, and not at all
-    when handed the config resolve_distribution_plan prepared."""
+    when handed the config resolve_distribution_plan prepared. Every config it reads takes the Hub
+    options the load was given (custom code an ``auto_map`` names in another repo)."""
     run_as(4)
-    config = serve(_deepseek_v3(n_routed_experts=8))
+    config, reads = _deepseek_v3(n_routed_experts=8), []
+    monkeypatch.setattr(
+        transformers.AutoConfig, "from_pretrained", lambda *a, **k: reads.append(k) or config
+    )
     prepared = []
 
     def apply_distributed_support(model_type, hf_config, **kwargs):
@@ -323,10 +327,11 @@ def test_a_load_prepares_its_config_once(
     if given_config:
         kwargs["hf_config"] = config
 
-    load_pretrained(str(tmp_path), **kwargs)
+    load_pretrained(str(tmp_path), local_files_only=True, **kwargs)
 
     assert len(prepared) == preparations
     assert loaders["ep"]["hf_config"] is config
+    assert all(read.get("local_files_only") is True for read in reads)
 
 
 def _every_rank_loads_rank0s_plan_job(rank, size, ckpt):

@@ -466,7 +466,9 @@ def _load_sharded(route, plan, ckpt_path, auto_class, model_type, kwargs, hub_op
         if hf_config is None:
             hf_config = apply_distributed_support(
                 model_type,
-                AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code),
+                AutoConfig.from_pretrained(
+                    ckpt_path, trust_remote_code=trust_remote_code, **hub_options
+                ),
                 ckpt_path=ckpt_path,
                 trust_remote_code=trust_remote_code,
             )
