@@ -30,10 +30,13 @@ from torch import nn
 
 pytest.importorskip("transformers")
 
-from transformers import FineGrainedFP8Config
+from transformers import AutoConfig, FineGrainedFP8Config
 
+import modelopt.torch.utils.distributed as dist
+from modelopt.torch.utils import moe
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 from modelopt.torch.utils.moe import expert_parallel_mesh
+from modelopt.torch.utils.plugins import model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import (
     _ckpt_quant_method,
     _experts_sharded_over,
@@ -116,6 +119,36 @@ def test_the_loader_refuses_a_plan_it_cannot_load_by(plan, error, match):
 def test_the_loader_refuses_a_plan_for_another_world(gloo_world_of_one):
     with pytest.raises(ValueError, match="is for 2 ranks, but this run has 1"):
         load_and_prepare_ep("unused", DistributionPlan(2, ep_size=2))
+
+
+def test_a_hub_id_is_made_local_before_anything_reads_it(monkeypatch, tmp_path):
+    """The export reads the tensors the load could not place back from the checkpoint it records,
+    which must be a local directory: a Hub ID there leaves the export nothing to read."""
+
+    class _ReadError(Exception):
+        """Stops the load at its first read of the checkpoint."""
+
+    reads = []
+
+    def read(path, **kwargs):
+        reads.append(path)
+        raise _ReadError
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "size", lambda group=None: 2)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
+    monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
+    monkeypatch.setattr(
+        model_load_utils,
+        "_resolve_checkpoint_dir",
+        lambda path, rank: str(tmp_path) if path == "org/model" else path,
+    )
+    monkeypatch.setattr(AutoConfig, "from_pretrained", read)
+
+    with pytest.raises(_ReadError):
+        load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2))
+
+    assert reads == [str(tmp_path)]
 
 
 # ------------------------------------------------------------------------ quant wrappers

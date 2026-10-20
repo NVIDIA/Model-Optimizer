@@ -1407,6 +1407,9 @@ def load_and_prepare_ep(
     require_transformers(
         "5.6", "ModelOpt DP=EP expert-parallel PTQ (transformers MoE EP framework)"
     )
+    # The loads below, and the checkpoint recorded for the export to read the unplaced tensors back
+    # from, take the local snapshot: a Hub ID recorded there would leave the export nothing to read.
+    ckpt_path = _resolve_checkpoint_dir(ckpt_path, torch.distributed.get_rank())
     from torch.distributed.device_mesh import init_device_mesh
     from transformers import AutoConfig
     from transformers.distributed import DistributedConfig
