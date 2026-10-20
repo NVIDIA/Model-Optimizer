@@ -148,10 +148,10 @@ def test_llama_eagle3(tiny_llama_path,
     ]
 
     env = None
-    if cp_size == 1 and not mix_hidden_states:
+    if num_gpus == 1 and not mix_hidden_states:
         # The 1-GPU PR smoke compiles with mode="max-autotune"; benchmarking Triton GEMM templates
         # is a large share of that on a tiny model and the test only needs the compiled path to
-        # run. [2-False] (2 GPUs, nightly) keeps the full autotune.
+        # run. Runs on more GPUs (the nightly) keep the full autotune.
         env = {**os.environ, "TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS": "ATEN"}
 
     run_example_command(
