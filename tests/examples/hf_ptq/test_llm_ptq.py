@@ -99,16 +99,29 @@ def test_ptq_llama(command):
 
 @minimum_gpu(2)
 @pytest.mark.usefixtures("exclusive_gpu")
-def test_ptq_qwen3_moe_expert_parallel(tmp_path):
-    """A torchrun launch shards a tiny Qwen3-MoE's experts over two ranks, calibrates and exports.
+@pytest.mark.parametrize(
+    ("launch_args", "launch_env", "min_transformers"),
+    [
+        # qwen3_moe's base_model_ep_plan ships in transformers 5.7.
+        ([], {"MODELOPT_EP_DEGREE": "2"}, "5.7"),
+        (["--use_fsdp2"], {}, None),
+    ],
+    ids=["expert_parallel", "fsdp2"],
+)
+def test_ptq_qwen3_moe_sharded(tmp_path, launch_args, launch_env, min_transformers):
+    """A torchrun launch shards a tiny Qwen3-MoE over two ranks, previews, calibrates and exports.
 
-    Each rank holds and writes only its own experts, so every expert of every layer must come out
-    FP8-quantized: a rank whose share is lost, or written under the wrong expert index, fails it.
+    The model's experts are sharded over the ranks, or the whole model is with FSDP2. Each rank holds
+    and writes only its own share, so every expert of every layer must come out FP8-quantized: a rank
+    whose share is lost, or written under the wrong expert index, fails it. The previews generate
+    before and after calibration: a sharded preview broke in three ways (ranks finishing at different
+    steps hung in a collective, Transformers refused an FSDP2-wrapped class's experts switch, and the
+    switch decoded unquantized experts), and only a real launch reaches it.
     """
     if torch.cuda.get_device_capability() < (8, 9):
         pytest.skip("Requires sm89 or higher")
-    if Version(transformers.__version__) < Version("5.7"):
-        pytest.skip("qwen3_moe's base_model_ep_plan ships in transformers 5.7")
+    if min_transformers and Version(transformers.__version__) < Version(min_transformers):
+        pytest.skip(f"Requires transformers {min_transformers}")
     num_layers, num_experts = 2, 4
     model_dir = create_tiny_qwen3_moe_dir(
         tmp_path,
@@ -151,13 +164,13 @@ def test_ptq_qwen3_moe_expert_parallel(tmp_path):
             "2",
             "--calib_seq",
             "64",
-            "--skip_generate",
             "--no-verbose",
             "--export_path",
             str(export_dir),
+            *launch_args,
         ],
         "hf_ptq",
-        env={**os.environ, "MODELOPT_EP_DEGREE": "2"},
+        env={**os.environ, **launch_env},
     )
 
     config = json.loads((export_dir / "config.json").read_text())
