@@ -132,7 +132,7 @@ python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
 - `--sft --sft_hf_dataset ... --sft_loss_mode assistant` renders each conversation with the model's chat template and computes the loss on assistant tokens only.
 - `--seq_length 32768 --gbs 64`: 600 iterations cover 38,400 records, about 1.07 epochs of the 35,800-record training split.
 - `--recompute_*` and `--no_async_save` are needed to fit: the async-save worker needs its own CUDA context and runs out of memory next to the resident teacher.
-- `--freeze_mtp` keeps the MTP head out of training: its loss is skipped and its parameters are frozen, so the exported MTP head keeps its PTQ weights. Without it, the quantized MTP head's cross-entropy loss trains the head and, through the hidden states, embeddings and output layer it shares, the rest of the student too.
+- `--freeze_mtp` bypasses teacher/student MTP forward, loss, and activation recomputation while preserving the frozen MTP weights in checkpoints and exports. Without it, the quantized MTP head's cross-entropy loss trains the head and, through the hidden states, embeddings and output layer it shares, the rest of the student too.
 - Each saved iteration is about 1.6 TB; size `--save_interval` and `--checkpoint_keep_last` to your storage.
 
 </details>

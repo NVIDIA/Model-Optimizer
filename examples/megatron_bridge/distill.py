@@ -278,7 +278,7 @@ def get_args():
     parser.add_argument(
         "--freeze_mtp",
         action="store_true",
-        help="Keep the student's MTP head at its input weights: skip its loss and freeze it.",
+        help="Freeze the student's MTP weights and bypass teacher/student MTP forward and loss.",
     )
     parser.add_argument(
         "--moe_aux_loss_coeff",

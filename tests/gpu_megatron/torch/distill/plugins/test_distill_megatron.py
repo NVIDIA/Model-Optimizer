@@ -17,6 +17,7 @@ import dataclasses
 import warnings
 from functools import partial
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -333,17 +334,17 @@ def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, freeze_mtp, rank, size)
 
     distillation_model(prompt_tokens, position_ids, attention_mask, labels=labels)
 
-    # Expect mtp_num_layers + 1 total calls: first mtp_num_layers are MTP heads,
-    # the last one is the main LM head.
-    assert len(recorded_losses) == mtp_num_layers + 1, (
-        f"Expected {mtp_num_layers + 1} loss calls, got {len(recorded_losses)}"
+    # Frozen MTP does not enter the forward/loss path; otherwise its heads precede the main LM.
+    expected_calls = 1 if freeze_mtp else mtp_num_layers + 1
+    assert len(recorded_losses) == expected_calls, (
+        f"Expected {expected_calls} loss calls, got {len(recorded_losses)}"
     )
     for i, loss in enumerate(recorded_losses[:-1]):
         assert loss.any() != mtp_skipped, f"MTP head {i} loss should be zero iff MTP is skipped"
     assert recorded_losses[-1].any() != skip_lm_loss, "Main LM head loss is zero iff skip_lm_loss"
 
 
-def _test_freeze_mtp_with_quantized_mtp(freeze_mtp, kd_loss_alpha, rank, size):
+def _test_freeze_mtp_with_quantized_mtp(freeze_mtp, kd_loss_alpha, moe, rank, size):
     """With the MTP head quantized too, only ``freeze_mtp`` keeps it out of a training step."""
     set_seed(SEED)
 
@@ -362,7 +363,17 @@ def _test_freeze_mtp_with_quantized_mtp(freeze_mtp, kd_loss_alpha, rank, size):
         "vocab_size": vocab_size,
         "activation_func": "squared_relu",
         "mtp_num_layers": 1,
+        "recompute_granularity": "full",
+        "recompute_method": "uniform",
+        "recompute_num_layers": 1,
     }
+    if moe:
+        model_kwargs.update(
+            sequence_parallel=size > 1,
+            num_moe_experts=4,
+            moe_router_load_balancing_type="global_aux_loss",
+            moe_aux_loss_coeff=1e-3,
+        )
     teacher_model = get_mcore_gpt_model(initialize_megatron=True, **model_kwargs).cuda()
     student_model = get_mcore_gpt_model(initialize_megatron=False, **model_kwargs).cuda()
     # A recipe that quantizes the MTP head as well as the body.
@@ -394,6 +405,16 @@ def _test_freeze_mtp_with_quantized_mtp(freeze_mtp, kd_loss_alpha, rank, size):
     body_params = {n: p for n, p in named_params.items() if n.startswith("decoder.")}
     assert mtp_params and body_params
     mtp_before = {n: p.detach().clone() for n, p in mtp_params.items()}
+
+    def reject_frozen_mtp(module, args):
+        assert not freeze_mtp, "Frozen MTP must not execute forward or recomputation"
+
+    # Checkpoint recomputation can call the inner transformer layer directly.
+    handles = [
+        module.register_forward_pre_hook(reject_frozen_mtp)
+        for lm in (distillation_model, distillation_model.teacher_model)
+        for module in lm.mtp.modules()
+    ]
     optimizer = torch.optim.AdamW(
         [p for p in named_params.values() if p.requires_grad], lr=1e-2, weight_decay=0.1
     )
@@ -428,6 +449,17 @@ def _test_freeze_mtp_with_quantized_mtp(freeze_mtp, kd_loss_alpha, rank, size):
     assert mtp_trained != freeze_mtp
     if freeze_mtp:
         assert all(torch.equal(p, mtp_before[n]) for n, p in mtp_params.items())
+        assert any(name.startswith("mtp.") for name in distillation_model.sharded_state_dict())
+        with (
+            patch.object(distillation_model.decoder, "forward", side_effect=RuntimeError("probe")),
+            pytest.raises(RuntimeError, match="probe"),
+        ):
+            distillation_model(prompt_tokens, position_ids, attention_mask, labels=labels)
+    for lm in (distillation_model, distillation_model.teacher_model):
+        assert lm.mtp_process and lm.config.mtp_num_layers == 1
+        assert lm.config is lm.decoder.config
+    for handle in handles:
+        handle.remove()
 
 
 def test_logits_kl_loss(dist_workers):
@@ -568,9 +600,10 @@ def test_skip_lm_loss_with_mtp(dist_workers, quantized, skip_lm_loss, freeze_mtp
 
 
 @pytest.mark.parametrize(("freeze_mtp", "kd_loss_alpha"), [(True, 1.0), (True, 0.5), (False, 1.0)])
-def test_freeze_mtp_with_quantized_mtp(dist_workers, freeze_mtp, kd_loss_alpha):
+@pytest.mark.parametrize("moe", [False, True])
+def test_freeze_mtp_with_quantized_mtp(dist_workers, freeze_mtp, kd_loss_alpha, moe):
     """With the MTP head quantized too, only ``freeze_mtp`` keeps it out of a training step."""
-    dist_workers.run(partial(_test_freeze_mtp_with_quantized_mtp, freeze_mtp, kd_loss_alpha))
+    dist_workers.run(partial(_test_freeze_mtp_with_quantized_mtp, freeze_mtp, kd_loss_alpha, moe))
 
 
 def test_mtp_excluded_from_quantization():
