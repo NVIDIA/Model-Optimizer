@@ -145,17 +145,25 @@ def _check_compatibility(draft, target, problems, notes):
 
 
 def evaluate_training(
-    regression, export_config, export_weights, target_config, algorithm, expect_architecture=None
+    regression,
+    export_config,
+    export_weights,
+    target_config,
+    algorithm,
+    expect_architecture=None,
+    export_only=False,
 ):
     """Decide whether training ran cleanly and the export fits the target.
 
     Args:
         regression: dict from regression_check.json, or None if the file is absent.
+            Ignored when ``export_only``.
         export_config: dict from the export's config.json, or None if absent or unreadable.
         export_weights: list of (filename, size_bytes) for the export's *.safetensors.
         target_config: dict from the target's config.json.
         algorithm: drafter algorithm (key of ``_ARCHITECTURES``), case-insensitive.
         expect_architecture: required when ``algorithm`` is not in ``_ARCHITECTURES``.
+        export_only: check only the export, for a drafter trained outside this run.
 
     Returns:
         dict ``{pass, failure_class, detail, notes, recipe_thresholds, metrics}``.
@@ -172,7 +180,10 @@ def evaluate_training(
             )
         )
 
-    if regression is None:
+    if export_only:
+        notes.append("training not checked (--export-only)")
+        regression = {}
+    elif regression is None:
         problems.append(("METRICS_MISSING", "no regression_check.json"))
         regression = {}
     elif not isinstance(regression, dict) or not regression:
@@ -238,7 +249,7 @@ def evaluate_training(
         return {
             "pass": True,
             "failure_class": None,
-            "detail": "training and export valid",
+            "detail": "export valid" if export_only else "training and export valid",
             **result,
         }
     fc = min((c for c, _ in problems), key=_RANKING.index)
@@ -268,7 +279,11 @@ def _load_object(path):
 def main(argv=None):
     """CLI entry point: read the training artifacts and print the verdict."""
     p = argparse.ArgumentParser(description="Spec-dec training gate")
-    p.add_argument("--regression", required=True, help="regression_check.json")
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--regression", help="regression_check.json")
+    source.add_argument(
+        "--export-only", action="store_true", help="drafter trained elsewhere: check the export"
+    )
     p.add_argument("--export", required=True, help="exported drafter directory")
     p.add_argument("--target-config", required=True, help="target model config.json")
     p.add_argument("--algorithm", required=True, help=f"one of {sorted(_ARCHITECTURES)}")
@@ -284,6 +299,8 @@ def main(argv=None):
     # run leaves behind; a missing output dir is a mistyped path, and "re-run training" is
     # the wrong advice for a typo.
     for flag, path in (("--export", args.export), ("--regression", args.regression)):
+        if path is None:
+            continue
         parent = os.path.dirname(os.path.abspath(path))
         if not os.path.isdir(parent):
             error = {
@@ -295,7 +312,7 @@ def main(argv=None):
             return 2
     try:
         target = _load_object(args.target_config)
-        regression = _load_json(args.regression, missing_ok=True)
+        regression = None if args.export_only else _load_json(args.regression, missing_ok=True)
     except (OSError, ValueError) as e:
         error = {"pass": False, "failure_class": "USER_CONFIG_ERROR", "detail": str(e)}
         print(json.dumps({**error, "notes": [], "inputs": inputs}, indent=2))
@@ -313,7 +330,13 @@ def main(argv=None):
     ]
 
     result = evaluate_training(
-        regression, export_config, weights, target, args.algorithm, args.expect_architecture
+        regression,
+        export_config,
+        weights,
+        target,
+        args.algorithm,
+        args.expect_architecture,
+        export_only=args.export_only,
     )
     result["inputs"] = inputs
     print(json.dumps(result, indent=2))
