@@ -200,6 +200,18 @@ class GatedDeltaNetSlicing(CustomModuleMapping):
         )
 
 
+class KimiDeltaAttentionSlicing(CustomModuleMapping):
+    """A custom module mapping that splits KDA's fused q|k|v ``in_proj`` and ``conv1d``."""
+
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+        """Create a custom module mapping that splits the fused KDA projections."""
+        super().__init__(
+            func_name="kda_slicing",
+            target_name_or_prefix=target_name_or_prefix,
+            func_kwargs=func_kwargs,
+        )
+
+
 class PackNameRemapping(CustomModuleMapping):
     """A custom module mapping that packs module after name remapping."""
 

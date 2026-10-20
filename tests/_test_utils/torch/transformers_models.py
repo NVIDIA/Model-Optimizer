@@ -639,6 +639,56 @@ def create_tiny_deepseek_v3_dir(
     )
 
 
+##### GLM-5.3-FLASH #####
+def get_tiny_glm5_next(**text_config_kwargs) -> PreTrainedModel:
+    """Tiny GLM-5.3-Flash VLM: one KDA + dense-MLP layer, one sparse-MLA + MoE layer, one vision block."""
+    set_seed(SEED)
+
+    # Lazy import — glm5_next is native only from transformers 5.16.1.
+    from transformers import Glm5NextConfig
+
+    text_kwargs = {
+        "vocab_size": 128,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "moe_intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "layer_types": ["linear_attention", "indexed_attention"],
+        "mlp_layer_types": ["dense", "sparse"],
+        "indexer_types": ["full", "full"],
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "q_lora_rank": 32,
+        "kv_lora_rank": 16,
+        "qk_nope_head_dim": 16,
+        "v_head_dim": 16,
+        "linear_num_heads": 4,
+        "linear_head_dim": 16,
+        "index_n_heads": 2,
+        "index_head_dim": 16,
+        "index_topk": 8,
+        "index_kpool": 4,
+        "n_routed_experts": 4,
+        "num_experts_per_tok": 2,
+        "n_shared_experts": 1,
+        "max_position_embeddings": 64,
+        "pad_token_id": 0,
+    }
+    text_kwargs.update(text_config_kwargs)
+    vision_kwargs = {
+        "depth": 1,
+        "hidden_size": 32,
+        "intermediate_size": 64,
+        "num_heads": 2,
+        "image_size": 28,
+        "patch_size": 14,
+        "out_hidden_size": text_kwargs["hidden_size"],
+        "projection_intermediate_size": 64,
+    }
+    cfg = Glm5NextConfig(text_config=text_kwargs, vision_config=vision_kwargs)
+    return AutoModelForImageTextToText.from_config(cfg, dtype=torch.bfloat16)
+
+
 ##### GLM-5.3-FLASH / DEEPSEEK-V4 (config-only, for vLLM ``load_format="dummy"``) #####
 def _write_config_dir(dir_path: Path, config: dict) -> Path:
     dir_path.mkdir(parents=True, exist_ok=True)
