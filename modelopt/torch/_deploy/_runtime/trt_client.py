@@ -142,65 +142,129 @@ class TRTLocalClient(RuntimeClient):
             self.engine = trt_runtime.deserialize_cuda_engine(compiled_model)
             assert self.engine is not None, "Engine deserialization failed."
             self.execution_context = self.engine.create_execution_context()
+            assert self.execution_context is not None, "Execution context creation failed."
             self.stream = stream
             self.device = device
             self.io_shapes = io_shapes
+            self.input_names = []
+            self.output_names = []
+            for idx in range(self.engine.num_io_tensors):
+                name = self.engine.get_tensor_name(idx)
+                names = (
+                    self.input_names
+                    if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT
+                    else self.output_names
+                )
+                names.append(name)
+            self.has_shape_inputs = any(
+                self.engine.is_shape_inference_io(name) for name in self.input_names
+            )
             self.input_tensors, self.output_tensors = self.initialize_input_output_tensors(
                 self.engine
             )
 
-        def initialize_input_output_tensors(self, engine):
-            # Allocate torch tensors for inputs and outputs
-            input_tensors = []
-            output_tensors = []
-            for idx in range(engine.num_io_tensors):
-                tensor_name = engine.get_tensor_name(idx)
-                if tensor_name not in self.io_shapes:
-                    try:
-                        tensor_shape = engine.get_tensor_profile_shape(tensor_name, 0)[0]
-                    except Exception as e:
-                        raise ValueError(
-                            f"Shape for tensor {tensor_name} is not specified. "
-                            f"Please provide the shape with the io_shapes input. Error: {e}"
-                        )
-
-                else:
-                    tensor_shape = trt.Dims(self.io_shapes[tensor_name])
-                tensor_dtype = convert_trt_dtype_to_torch(engine.get_tensor_dtype(tensor_name))
-                torch_tensor = torch.empty(tuple(tensor_shape), dtype=tensor_dtype, device="cuda")
-                if engine.get_tensor_mode(tensor_name) == trt.TensorIOMode.INPUT:
-                    input_tensors.append(torch_tensor)
-                    self.execution_context.set_tensor_address(
-                        tensor_name, input_tensors[idx].data_ptr()
-                    )
-                    self.execution_context.set_input_shape(tensor_name, tensor_shape)
-                else:
-                    output_tensors.append(torch_tensor)
-                    self.execution_context.set_tensor_address(
-                        tensor_name,
-                        output_tensors[idx - len(input_tensors)].data_ptr(),
-                    )
-            assert self.execution_context.all_shape_inputs_specified, (
-                "Not all shape inputs are specified."
+        def _allocate_tensor(self, name, shape):
+            dtype = convert_trt_dtype_to_torch(self.engine.get_tensor_dtype(name))
+            device = (
+                "cpu"
+                if self.engine.get_tensor_location(name) == trt.TensorLocation.HOST
+                else self.stream.device
             )
-
-            # Set selected profile idx
-            self.execution_context.set_optimization_profile_async(0, self.stream.cuda_stream)
-
-            # Assertion: to ensure all the shapes can be inferred when user does not provide them
-            if self.io_shapes == {}:
-                assert len(self.execution_context.infer_shapes()) == 0, (
-                    "Shapes of all the bindings cannot be inferred."
+            with torch.cuda.stream(self.stream):
+                return torch.empty(
+                    tuple(shape), dtype=dtype, device=device, pin_memory=device == "cpu"
                 )
 
-            return input_tensors, output_tensors
+        def initialize_input_output_tensors(self, engine):
+            # Select the profile before setting any dynamic input dimensions.
+            if not self.execution_context.set_optimization_profile_async(
+                0, self.stream.cuda_stream
+            ):
+                raise RuntimeError("Failed to select TensorRT optimization profile 0.")
+            input_tensors = []
+            for name in self.input_names:
+                shape = tuple(engine.get_tensor_shape(name))
+                if any(dim < 0 for dim in shape):
+                    minimum, _, maximum = engine.get_tensor_profile_shape(name, 0)
+                    shape = tuple(self.io_shapes.get(name, minimum))
+                    if len(shape) != len(minimum) or any(
+                        dim < low or dim > high for dim, low, high in zip(shape, minimum, maximum)
+                    ):
+                        raise ValueError(
+                            f"Input shape {shape} for {name} is outside optimization profile 0."
+                        )
+                else:
+                    shape = tuple(self.io_shapes.get(name, shape))
+                if not self.execution_context.set_input_shape(name, shape):
+                    raise ValueError(f"Invalid TensorRT input shape {shape} for {name}.")
+                tensor = self._allocate_tensor(name, shape)
+                if not self.execution_context.set_tensor_address(name, tensor.data_ptr()):
+                    raise RuntimeError(f"Failed to bind TensorRT input {name}.")
+                input_tensors.append(tensor)
+
+            # Output shapes may depend on shape-tensor values, supplied by run().
+            return input_tensors, []
+
+        def _infer_shapes(self):
+            missing = self.execution_context.infer_shapes()
+            if missing:
+                raise ValueError(f"Insufficiently specified TensorRT inputs: {missing}.")
+
+        def _update_output_tensors(self):
+            shape_outputs = [
+                name for name in self.output_names if self.engine.is_shape_inference_io(name)
+            ]
+            # infer_shapes() can write shape outputs; do not use a previous call's allocation.
+            for name in shape_outputs:
+                if not self.execution_context.set_tensor_address(name, 0):
+                    raise RuntimeError(f"Failed to clear TensorRT shape output {name}.")
+            self._infer_shapes()
+            output_tensors = []
+            for index, name in enumerate(self.output_names):
+                inferred = tuple(self.execution_context.get_tensor_shape(name))
+                shape = tuple(self.io_shapes.get(name, inferred))
+                if any(dim < 0 for dim in shape):
+                    raise ValueError(
+                        f"Shape for output {name} cannot be inferred: {inferred}. "
+                        "Please provide the shape with io_shapes."
+                    )
+                if len(shape) != len(inferred) or any(
+                    known >= 0 and dim != known for dim, known in zip(shape, inferred)
+                ):
+                    raise ValueError(
+                        f"Output shape {shape} for {name} does not match inferred shape {inferred}."
+                    )
+                tensor = (
+                    self.output_tensors[index]
+                    if index < len(self.output_tensors)
+                    and tuple(self.output_tensors[index].shape) == shape
+                    else self._allocate_tensor(name, shape)
+                )
+                if not self.execution_context.set_tensor_address(name, tensor.data_ptr()):
+                    raise RuntimeError(f"Failed to bind TensorRT output {name}.")
+                output_tensors.append(tensor)
+            self.output_tensors = output_tensors
+            if shape_outputs:
+                self._infer_shapes()
 
         def run(self, inputs):
             assert self.engine is not None, "Engine is not set."
+            if len(inputs) != len(self.input_tensors):
+                raise ValueError(
+                    f"Expected {len(self.input_tensors)} TensorRT inputs, got {len(inputs)}."
+                )
 
-            # Copy inputs to GPU
+            # Retain fixed-buffer padding for incomplete evaluation batches.
+            self.stream.wait_stream(torch.cuda.current_stream(self.stream.device))
             with torch.cuda.stream(self.stream):
                 for i, input_t in enumerate(inputs):
+                    if input_t.ndim != self.input_tensors[i].ndim or any(
+                        dim > size for dim, size in zip(input_t.shape, self.input_tensors[i].shape)
+                    ):
+                        raise ValueError(
+                            f"Input {self.input_names[i]} shape {tuple(input_t.shape)} exceeds "
+                            f"buffer shape {tuple(self.input_tensors[i].shape)}."
+                        )
                     if self.input_tensors[i].shape == input_t.shape:
                         self.input_tensors[i].copy_(input_t, non_blocking=True)
                     else:
@@ -213,8 +277,13 @@ class TRTLocalClient(RuntimeClient):
                         # Assign the portion of input_t to the self.input_tensor[i]
                         self.input_tensors[i][slices] = input_t
 
-            # Run inference
-            self.execution_context.execute_async_v3(stream_handle=self.stream.cuda_stream)
+            # Shape inference has no stream argument and needs completed shape-input copies.
+            if self.has_shape_inputs:
+                self.stream.synchronize()
+            if not self.output_tensors or self.has_shape_inputs:
+                self._update_output_tensors()
+            if not self.execution_context.execute_async_v3(stream_handle=self.stream.cuda_stream):
+                raise RuntimeError("TensorRT inference execution failed.")
 
             self.stream.synchronize()
 
