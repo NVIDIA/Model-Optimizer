@@ -70,15 +70,20 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
         ),
     ],
 )
-def test_prune_minitron(tmp_path, num_gpus, create_teacher, expected_pruned_config):
+def test_prune_minitron(
+    tmp_path, num_gpus, create_teacher, expected_pruned_config, fake_hub_checkpoint
+):
+    """The teacher is passed as a Hub ID (see ``fake_hub_checkpoint``): it is pruned from its local
+    copy, and the HF output carries that copy's non-model files."""
     teacher_hf_path, teacher_model = create_teacher(tmp_path, num_gpus)
+    teacher_arg = fake_hub_checkpoint.serve(teacher_hf_path, "prune_minitron.py", nproc=num_gpus)
     teacher_params = sum(p.numel() for p in teacher_model.parameters())
     prune_target_params = int(teacher_params * 0.8)
 
     pruned_path = tmp_path / "pruned"
     prune_command_parts = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py"],
-        hf_model_name_or_path=teacher_hf_path,
+        hf_model_name_or_path=teacher_arg,
         output_hf_path=pruned_path,
         pp_size=num_gpus,
         calib_dataset_name="cnn_dailymail",
@@ -94,46 +99,12 @@ def test_prune_minitron(tmp_path, num_gpus, create_teacher, expected_pruned_conf
     run_example_command(prune_command_parts, example_path="megatron_bridge")
 
     assert (pruned_path / "config.json").exists()
+    if fake_hub_checkpoint.active:
+        assert (pruned_path / fake_hub_checkpoint.marker).exists()
     pruned_model = AutoModelForCausalLM.from_pretrained(pruned_path)
     assert sum(p.numel() for p in pruned_model.parameters()) <= prune_target_params
     for field, expected in expected_pruned_config.items():
         assert getattr(pruned_model.config, field) == expected
-
-
-@pytest.mark.parametrize("output", ["megatron", "hf"])
-def test_prune_minitron_a_hub_model_id(tmp_path, fake_hub_checkpoint, output):
-    """A Hub ID is pruned from its local copy: the HF output carries that copy's non-model files,
-    and the Megatron output records the Hub ID as its tokenizer so it stays valid on other hosts."""
-    teacher_hf_path, teacher_model = create_tiny_qwen3_dir(
-        tmp_path, with_tokenizer=True, return_model=True, num_hidden_layers=1
-    )
-    fake_hub_checkpoint.serve(teacher_hf_path, "prune_minitron.py")
-    pruned_path = tmp_path / "pruned"
-    prune_command_parts = extend_cmd_parts(
-        ["torchrun", "--nproc_per_node=1", "prune_minitron.py"],
-        hf_model_name_or_path=fake_hub_checkpoint.hub_model_id,
-        **{f"output_{output}_path": pruned_path},
-        pp_size=1,
-        calib_dataset_name="cnn_dailymail",
-        calib_num_samples=8,
-        seq_length=16,
-        prune_target_params=int(sum(p.numel() for p in teacher_model.parameters()) * 0.8),
-        prune_score_func="mmlu_1pct_bs32",
-        score_lower_bound=0.0,
-        ss_channel_divisor=4,
-        hparams_to_skip="num_attention_heads",
-        top_k=1,
-    )
-    run_example_command(prune_command_parts, example_path="megatron_bridge")
-
-    if output == "megatron":
-        assert (
-            fake_hub_checkpoint.saved_tokenizer_model(pruned_path)
-            == fake_hub_checkpoint.hub_model_id
-        )
-    else:
-        assert (pruned_path / "config.json").exists()
-        assert (pruned_path / fake_hub_checkpoint.marker).exists()
 
 
 @pytest.mark.parametrize(

@@ -16,13 +16,11 @@
 
 import argparse
 import json
-import shutil
 import sys
 from pathlib import Path
 
 import pytest
 import torch
-from _test_utils.examples.megatron_example_runner import _load_example_module
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model
 from _test_utils.torch.transformers_models import (
@@ -42,9 +40,17 @@ from export_distilled_megatron_to_hf import _get_checkpoint_export_paths
 
 
 @pytest.mark.timeout(360)  # distill + inline HF export + export of every iteration
-def test_distill_llm_hf_export(tmp_path, num_gpus):
-    """Distill with an inline HF export, then re-export every saved iteration standalone."""
+def test_distill_llm_hf_export(tmp_path, num_gpus, fake_hub_checkpoint):
+    """Distill with an inline HF export, then re-export every saved iteration standalone.
+
+    Both exports read the student from the copy ``ensure_local_checkpoint`` resolved (see
+    ``fake_hub_checkpoint``). distill.py keeps the local path on its command line, since get_args()
+    loads the tokenizer from it; the standalone export is passed the Hub ID.
+    """
     teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+    student_export_arg = fake_hub_checkpoint.serve(
+        teacher_hf_path, "distill.py", "export_distilled_megatron_to_hf.py", nproc=num_gpus
+    )
     train_iters = 2
     distill_output_dir = tmp_path / "distill_output"
     distilled_hf_path = tmp_path / "distilled_hf"
@@ -72,11 +78,13 @@ def test_distill_llm_hf_export(tmp_path, num_gpus):
     checkpoint_root = distill_output_dir / "checkpoints"
     assert (checkpoint_root / f"iter_{train_iters:07d}").exists()
     assert (distilled_hf_path / "config.json").exists()
+    if fake_hub_checkpoint.active:
+        assert (distilled_hf_path / fake_hub_checkpoint.marker).exists()
 
     # export_distilled_megatron_to_hf.py converts any saved iteration, not just the final one.
     all_export_cmd_parts = extend_cmd_parts(
         ["torchrun", "--nproc_per_node=1", "export_distilled_megatron_to_hf.py"],
-        student_hf_path=teacher_hf_path,
+        student_hf_path=student_export_arg,
         megatron_path=checkpoint_root,
         hf_export_path=all_exports,
         export_iterations="all",
@@ -85,6 +93,8 @@ def test_distill_llm_hf_export(tmp_path, num_gpus):
 
     for it in range(1, train_iters + 1):
         assert (all_exports / f"iter_{it:07d}/config.json").exists()
+        if fake_hub_checkpoint.active:
+            assert (all_exports / f"iter_{it:07d}" / fake_hub_checkpoint.marker).exists()
 
 
 def test_distill_llm_sft(tmp_path, num_gpus):
@@ -241,61 +251,9 @@ def test_distill_validate_only(tmp_path, num_gpus):
     assert not (hf_export_path / "config.json").exists()
 
 
-@pytest.mark.parametrize("model", ["llm", "vlm"])
-@pytest.mark.timeout(420)
-def test_distill_hf_export_reads_the_resolved_local_checkpoint(tmp_path, monkeypatch, model):
-    """The inline HF export reads the student from the copy ensure_local_checkpoint resolved.
-
-    A Hub ID cannot run end to end here (get_args() loads the tokenizers from --student_hf_path),
-    so the resolver reports a Hub ID and returns a different local copy holding a marker file: the
-    marker reaching the export shows which copy the export read. One rank, so the step runs in
-    this process, on the module the runner caches -- the one patched here.
-    """
-    if model == "llm":
-        student_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
-    else:
-        student_hf_path = create_tiny_qwen3_5_vl_dir(
-            tmp_path, with_tokenizer=True, num_hidden_layers=2, intermediate_size=128
-        )
-    resolved = tmp_path / "resolved"
-    shutil.copytree(student_hf_path, resolved)
-    (resolved / "resolved_only.md").write_text("from the resolved copy\n")
-    resolved_from = []
-
-    def ensure_local_checkpoint(model_name_or_path, group=None):
-        resolved_from.append(str(model_name_or_path))
-        return "org/tiny-student", str(resolved)
-
-    distill = _load_example_module("distill.py", "megatron_bridge")
-    monkeypatch.setattr(distill, "ensure_local_checkpoint", ensure_local_checkpoint)
-    distilled_hf_path = tmp_path / "distilled_hf"
-    distill_cmd_parts = extend_cmd_parts(
-        ["torchrun", "--nproc_per_node=1", "distill.py", "--use_mock_data"],
-        student_hf_path=student_hf_path,
-        teacher_hf_path=student_hf_path,
-        output_dir=tmp_path / "distill_output",
-        tp_size=1,
-        pp_size=1,
-        seq_length=16,
-        mbs=1,
-        gbs=4,
-        train_iters=1,
-        lr_warmup_iters=1,
-        eval_interval=1,
-        eval_iters=1,
-        log_interval=1,
-        hf_export_path=distilled_hf_path,
-    )
-    run_example_command(distill_cmd_parts, example_path="megatron_bridge")
-
-    assert resolved_from == [str(student_hf_path)]
-    assert (distilled_hf_path / "config.json").exists()
-    assert (distilled_hf_path / "resolved_only.md").read_text() == "from the resolved copy\n"
-
-
 # NOTE: Qwen3.5-VL-MoE covered by test_qad.py
 @pytest.mark.timeout(420)  # sometimes times out in CI env with default 300s timeout
-def test_distill_vlm(tmp_path, num_gpus):
+def test_distill_vlm(tmp_path, num_gpus, fake_hub_checkpoint):
     # Self-distillation of a tiny VLM: only the language model is distilled; the vision tower and the
     # vision->language projector must be left byte-for-byte untouched.
     tp_size = num_gpus
@@ -347,10 +305,14 @@ def test_distill_vlm(tmp_path, num_gpus):
     megatron_ckpt = distill_output_dir / f"checkpoints/iter_{train_iters:07d}"
     assert megatron_ckpt.exists()
 
-    # Separately convert the distilled Megatron checkpoint to HF with the standalone export script
+    # Separately convert the distilled Megatron checkpoint to HF with the standalone export script,
+    # passing the student as a Hub ID (see ``fake_hub_checkpoint``).
+    student_export_arg = fake_hub_checkpoint.serve(
+        vlm_hf_path, "export_distilled_megatron_to_hf.py", nproc=num_gpus
+    )
     export_cmd_parts = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "export_distilled_megatron_to_hf.py"],
-        student_hf_path=vlm_hf_path,
+        student_hf_path=student_export_arg,
         megatron_path=megatron_ckpt,
         hf_export_path=distilled_hf_path,
         tp_size=tp_size,
@@ -359,6 +321,8 @@ def test_distill_vlm(tmp_path, num_gpus):
     run_example_command(export_cmd_parts, example_path="megatron_bridge")
 
     assert (distilled_hf_path / "config.json").exists()
+    if fake_hub_checkpoint.active:
+        assert (distilled_hf_path / fake_hub_checkpoint.marker).exists()
 
     # from_pretrained (default strict load) verifies the saved weights match the (unchanged) config.
     distilled_model = AutoModelForImageTextToText.from_pretrained(distilled_hf_path)
