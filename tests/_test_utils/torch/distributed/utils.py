@@ -261,7 +261,12 @@ class DistributedWorkerPool:
                 q.put((fn, args, kwargs))
             for _ in range(self.world_size):
                 timeout = self.job_timeout if deadline is None else deadline - time.monotonic()
-                status, rank, tb = self._get(max(timeout, 0))
+                try:
+                    status, rank, tb = self._get(max(timeout, 0))
+                except RuntimeError as e:  # a worker died: keep what the other ranks reported
+                    if errors:
+                        raise RuntimeError(f"{e}\n" + "\n".join(errors)) from None
+                    raise
                 if status == "error":
                     errors.append(f"--- Rank {rank} ---\n{tb}")
                     deadline = deadline or time.monotonic() + self.failure_grace

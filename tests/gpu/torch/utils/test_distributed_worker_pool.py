@@ -43,6 +43,13 @@ def _teardown_barrier(rank, size):
     dist.barrier()  # like megatron_worker_teardown: blocks while a peer is still in the job
 
 
+def _rank_0_fails_and_rank_1_dies_later(rank, size):
+    if rank == 0:
+        raise ValueError("rank 0 failed")
+    time.sleep(2)  # rank 0 has reported by then
+    os._exit(13)
+
+
 def _rank_0_dies_and_rank_1_waits_for_it(rank, size):
     if rank == 0:
         os._exit(13)  # what an illegal memory access or an OOM kill does: no exception, no result
@@ -93,13 +100,21 @@ def test_a_failed_job_retires_the_pool_even_when_every_rank_replied():
         pool.shutdown()
 
 
-def test_a_dead_worker_fails_the_run_at_once_and_kills_its_peers():
+@pytest.mark.parametrize(
+    ("job", "message"),
+    [
+        (_rank_0_dies_and_rank_1_waits_for_it, r"died.*13"),
+        # The error a rank reported before the death is kept in the message
+        (_rank_0_fails_and_rank_1_dies_later, r"(?s)died.*13.*rank 0 failed"),
+    ],
+)
+def test_a_dead_worker_fails_the_run_at_once_and_kills_its_peers(job, message):
     pool = DistributedWorkerPool(world_size=2, backend="gloo", teardown_fn=None)
     try:
         pool.job_timeout = 30  # a run that misses the death fails here, not at the test's own cap
         start = time.monotonic()
-        with pytest.raises(RuntimeError, match=r"died.*13"):
-            pool.run(_rank_0_dies_and_rank_1_waits_for_it)
+        with pytest.raises(RuntimeError, match=message):
+            pool.run(job)
 
         assert time.monotonic() - start < 20  # not the 600 s job timeout
         assert pool.broken
