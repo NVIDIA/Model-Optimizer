@@ -17,7 +17,6 @@ import os
 import pytest
 import torch
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
-from _test_utils.torch.calib_data import write_calib_jsonl
 from _test_utils.torch.transformers_models import (
     create_tiny_gpt_oss_dir,
     create_tiny_llama_dir,
@@ -25,12 +24,6 @@ from _test_utils.torch.transformers_models import (
     create_tiny_t5_dir,
 )
 from safetensors import safe_open
-
-
-@pytest.fixture(scope="module")
-def calib_jsonl(tmp_path_factory):
-    """Local calibration texts; the test checks the exported structure, so it needs no Hub dataset."""
-    return write_calib_jsonl(tmp_path_factory.mktemp("calib") / "calib.jsonl")
 
 
 # Here we map each qformat -> the suffix we expect in the generated safetensors directory
