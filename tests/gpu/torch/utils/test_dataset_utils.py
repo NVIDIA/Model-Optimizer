@@ -42,7 +42,7 @@ def qwen3_tokenizer():
     return tokenizer
 
 
-@pytest.mark.release(
+@pytest.mark.manual(
     reason="Streams the 7 gated Nemotron v3 datasets; runs on the nightly schedule."
 )
 def test_get_dataset_dataloader_nemotron_v3_chat_template(qwen3_tokenizer):

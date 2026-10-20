@@ -64,8 +64,8 @@ def _test_megatron_generate_and_mmlu(rank, size, parallelism):
     assert 0.36 < megatron_mmlu(model, tokenizer, fraction=0.1, batch_size=16) < 0.39
 
 
-@pytest.mark.release(
-    reason="Real Qwen3-0.6B weights and a 1.2-1.5 GB download; run with --run-release."
+@pytest.mark.manual(
+    reason="Real Qwen3-0.6B weights and a 1.2-1.5 GB download; run with --run-manual."
 )
 @pytest.mark.parametrize("parallelism", ["tp", "pp", "cp", "dp"])
 def test_megatron_generate_and_mmlu(dist_workers, parallelism, num_gpus):
