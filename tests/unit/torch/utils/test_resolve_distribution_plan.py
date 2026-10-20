@@ -335,6 +335,30 @@ def test_a_single_process_holds_the_whole_model(
     )
 
 
+def test_the_hub_options_reach_the_plans_checkpoint_read(monkeypatch, tmp_path):
+    """The plan's read resolves a Hub ID and loads its config with the options it was given: the
+    config reaches the Hub for the custom code its ``auto_map`` names in another repo."""
+    options = {"token": "secret", "cache_dir": str(tmp_path), "local_files_only": True}
+    calls = []
+    monkeypatch.setattr(
+        model_load_utils,
+        "ensure_local_checkpoint",
+        lambda path, **kwargs: calls.append(("resolve", path, kwargs)) or (path, str(tmp_path)),
+    )
+    monkeypatch.setattr(
+        transformers.AutoConfig,
+        "from_pretrained",
+        lambda path, **kwargs: calls.append(("config", path, kwargs)) or _qwen3_moe(),
+    )
+
+    resolve_distribution_plan("org/model", **options)
+
+    assert calls == [
+        ("resolve", "org/model", options),
+        ("config", str(tmp_path), {"trust_remote_code": False, **options}),
+    ]
+
+
 @needs_qwen3_moe_ep_plan
 @pytest.mark.parametrize("rank", [0, 1])
 def test_an_ep_capable_moe_is_planned_expert_parallel(run_as, serve, tmp_path, capsys, rank):
