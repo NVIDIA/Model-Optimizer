@@ -34,7 +34,7 @@ from modelopt.torch.quantization.qtensor import (
 )
 from modelopt.torch.quantization.utils import quantizer_attr_names, representative_weight_quantizer
 
-from ..quantization.nn import SequentialQuantizer, TensorQuantizer
+from ..quantization.nn import ResidueQuantLinear, SequentialQuantizer, TensorQuantizer
 from .convert_hf_config import convert_hf_quant_config_format
 from .quant_format import (
     QUANTIZATION_FP8,
@@ -323,6 +323,11 @@ def _resolve_quantized_weight_export_inputs(
     ]
     | None
 ):
+    if isinstance(module, ResidueQuantLinear):
+        raise NotImplementedError(
+            "Residue deployment export is not supported. Use modelopt.torch.opt.save "
+            "for a checkpoint that preserves residue QDQ."
+        )
     weight = getattr(module, weight_name)
     if isinstance(weight, QTensorWrapper):
         raise NotImplementedError("Functional export requires an uncompressed source weight")

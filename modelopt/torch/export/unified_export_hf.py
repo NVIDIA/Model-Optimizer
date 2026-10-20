@@ -69,7 +69,7 @@ from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
-from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import ResidueQuantLinear, SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
@@ -977,12 +977,31 @@ def _process_quantized_modules(
         _dispatch_export_handler(name, sub_module, ctx)
 
 
+def _check_residue_export(model, components=None):
+    """Reject residue layers before export changes weights or writes files."""
+    if isinstance(model, nn.Module):
+        modules = [model]
+    elif HAS_DIFFUSERS and is_diffusers_object(model):
+        modules = get_diffusion_components(model, components).values()
+    else:
+        return
+    for module in modules:
+        if isinstance(module, nn.Module) and any(
+            isinstance(child, ResidueQuantLinear) for child in module.modules()
+        ):
+            raise NotImplementedError(
+                "Residue deployment export is not supported. Use modelopt.torch.opt.save "
+                "for a checkpoint that preserves residue QDQ."
+            )
+
+
 def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
     """Run the shared export setup. Packing the weights is a separate step.
 
     Both export paths call this so they cannot drift. Returns the dtype, the tied-weight map and
     the quant config.
     """
+    _check_residue_export(model)
     dtype = _resolve_export_dtype(model, dtype)
     # One tied-weight map for the whole export (amax sync + final dedup in postprocess_state_dict).
     # Sourced from HF's name-based all_tied_weights_keys, so it is correct even under FSDP/offload.
@@ -1262,6 +1281,7 @@ def _export_diffusers_checkpoint(
         **kwargs: Runtime-specific post-processing options forwarded to
             :func:`_postprocess_safetensors`. See its docstring for details.
     """
+    _check_residue_export(pipe, components)
     export_dir = Path(export_dir)
 
     # Get all pipeline components (nn.Module, tokenizers, schedulers, etc.)
@@ -1899,6 +1919,7 @@ def export_hf_checkpoint(
             :func:`_postprocess_safetensors` for diffusion model exports.
             See its docstring for supported keys.
     """
+    _check_residue_export(model, components)
     # Weights the model never loaded (MTP head, auxiliary tower, ...) are copied straight from the
     # source so the exported checkpoint is the complete model. Merged here, ahead of the path
     # dispatch, so the gather and no-gather writers behave identically. An explicit extra_state_dict
