@@ -754,7 +754,8 @@ class HFEagleModel(EagleModel):
                 base_outputs,
             )
 
-        # Init rotary_emb outside _eagle_forward so inv_freq is not captured by CUDAGraph.
+        # Init rotary_emb outside _eagle_forward so inv_freq is not captured by CUDAGraph. Capture is
+        # off for now (see _activate_torch_compile); this keeps re-enabling it safe.
         self.eagle_module._maybe_init_rope(device=eagle_input_hiddens.device)
 
         # ====Run eagle forward with extra training-time-test steps====
@@ -902,7 +903,8 @@ class HFEagleModel(EagleModel):
         else:
             eagle_input_hidden_states = base_model_hidden_states
 
-        # Init rotary_emb outside _eagle_forward so inv_freq is not captured by CUDAGraph.
+        # Init rotary_emb outside _eagle_forward so inv_freq is not captured by CUDAGraph. Capture is
+        # off for now (see _activate_torch_compile); this keeps re-enabling it safe.
         self.eagle_module._maybe_init_rope(device=eagle_input_hidden_states.device)
 
         draft_tokens = []
