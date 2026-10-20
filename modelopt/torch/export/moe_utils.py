@@ -47,6 +47,20 @@ def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
             delattr(module, attr)
 
 
+def _uncalibrated_weight_amax(weight: torch.Tensor, quantizer) -> torch.Tensor:
+    """Amax fallback for never-calibrated weight quantizers, in the quantizer's amax layout.
+
+    Static block-scale quantizers (NVFP4/MXFP4) store one amax per block, row-major
+    along the last dim; a scalar fallback would flow into the per-block scale path
+    with the wrong shape. Dynamic and per-tensor quantizers keep the scalar fallback.
+    """
+    block_sizes = getattr(quantizer, "block_sizes", None)
+    block_size = block_sizes.get(-1) if block_sizes else None
+    if block_size and block_sizes.get("type", "dynamic") != "dynamic":
+        return weight.abs().float().reshape(-1, block_size).amax(dim=-1)
+    return weight.abs().amax().to(torch.float32)
+
+
 def _export_fused_experts(
     module: nn.Module,
     dtype: torch.dtype,
@@ -122,7 +136,7 @@ def _export_fused_experts(
         ):
             set_weight_amax_for_export(
                 first_proj_q,
-                first_proj[idx].abs().amax().to(torch.float32),
+                _uncalibrated_weight_amax(first_proj[idx], first_proj_q),
             )
             warnings.warn(
                 f"Expert {idx} gate_up_proj weight quantizer was not calibrated "
@@ -196,7 +210,7 @@ def _export_fused_experts(
             ):
                 set_weight_amax_for_export(
                     w_quantizer,
-                    weight_slice.abs().amax().to(torch.float32),
+                    _uncalibrated_weight_amax(weight_slice, w_quantizer),
                 )
                 warnings.warn(
                     f"Expert {idx} {proj_name} weight quantizer was not calibrated "

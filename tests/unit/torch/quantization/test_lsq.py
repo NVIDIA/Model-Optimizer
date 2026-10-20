@@ -294,6 +294,14 @@ class TestMXFP4EnableLSQ:
         with pytest.raises(ValueError, match="MXFP4 LSQ requires"):
             q.enable_lsq(learnable_amax=learnable_amax, tied_amax=tied_amax)
 
+    @pytest.mark.parametrize("kwargs", [{"quantize_scales": False}, {"quantize_pre_scale": False}])
+    def test_unquantized_scale_configuration_raises(self, kwargs):
+        """Training with unquantized scales would diverge from the E8M0 scales used at export."""
+        q = _make_mxfp4_static_quantizer()
+
+        with pytest.raises(ValueError, match="quantize_scales=True and quantize_pre_scale=True"):
+            q.enable_lsq(learnable_amax=["pre", "post"], tied_amax=True, **kwargs)
+
     def test_e8m0_scale_projection_preserves_gradient(self):
         q = _make_mxfp4_static_quantizer()
         q.enable_lsq(learnable_amax=["pre", "post"], tied_amax=True)

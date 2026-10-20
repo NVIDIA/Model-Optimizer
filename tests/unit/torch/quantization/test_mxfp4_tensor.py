@@ -18,6 +18,8 @@
 import pytest
 import torch
 
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.nn import StaticBlockScaleQuantizer
 from modelopt.torch.quantization.qtensor import MXFP4QTensor
 
 
@@ -86,3 +88,52 @@ def test_quantize_with_scale_rejects_partial_last_dimension():
 def test_quantize_with_scale_rejects_non_e8m0_scale():
     with pytest.raises(ValueError, match=r"torch\.uint8"):
         MXFP4QTensor.quantize_with_scale(torch.zeros(1, 32), torch.ones(1), block_size=32)
+
+
+def _make_static_mxfp4_quantizer(amax: torch.Tensor) -> StaticBlockScaleQuantizer:
+    cfg = QuantizerAttributeConfig(
+        num_bits=(2, 1),
+        block_sizes={-1: 32, "type": "static", "scale_bits": (8, 0)},
+    )
+    q = StaticBlockScaleQuantizer(quant_attribute_cfg=cfg)
+    q.amax = amax
+    return q
+
+
+def test_real_quantize_static_mxfp4_uses_calibrated_scales():
+    """_real_quantize must pack static MXFP4 via MXFP4QTensor with the calibrated
+    E8M0 scales instead of falling through to INT4 packing with recomputed scales."""
+    weight = torch.linspace(0.25, 3.0, 128).reshape(2, 64)  # absmax 3.0 -> scale < 1
+    amax = torch.full((4,), 12.0)  # calibrated amax, deliberately != weight-derived
+    q = _make_static_mxfp4_quantizer(amax)
+
+    packed = q._real_quantize(weight)
+
+    expected_scales = MXFP4QTensor.encode_e8m0_scale(amax / MXFP4QTensor.E2M1_max)
+    expected_packed = MXFP4QTensor.quantize_with_scale(weight, expected_scales, block_size=32)
+    assert isinstance(packed, MXFP4QTensor)
+    assert torch.equal(q._scale, expected_scales)
+    assert not torch.equal(
+        q._scale,
+        MXFP4QTensor.encode_e8m0_scale(
+            weight.abs().reshape(-1, 32).amax(dim=-1) / MXFP4QTensor.E2M1_max
+        ),
+    )
+    assert torch.equal(packed._quantized_data, expected_packed._quantized_data)
+
+
+def test_real_quantize_static_mxfp4_uses_lsq_post_amax():
+    """After LSQ, _real_quantize must pack with the learned post amax, not the
+    scales recomputed from the weights."""
+    weight = torch.linspace(0.25, 3.0, 128).reshape(2, 64)
+    q = _make_static_mxfp4_quantizer(torch.ones(4) * 6.0)
+    q.enable_lsq(learnable_amax=["pre", "post"], tied_amax=True)
+    with torch.no_grad():
+        q._amax_post.mul_(2.0)  # learned amax drifts from the calibrated value
+
+    packed = q._real_quantize(weight)
+
+    learned_scales = MXFP4QTensor.encode_e8m0_scale(q._amax_post.detach() / MXFP4QTensor.E2M1_max)
+    expected_packed = MXFP4QTensor.quantize_with_scale(weight, learned_scales, block_size=32)
+    assert torch.equal(q._scale, learned_scales)
+    assert torch.equal(packed._quantized_data, expected_packed._quantized_data)

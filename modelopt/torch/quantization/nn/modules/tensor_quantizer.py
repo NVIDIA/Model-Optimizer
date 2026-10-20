@@ -812,7 +812,25 @@ class TensorQuantizer(nn.Module):
 
         buffer_to_register = {}
         # Check MX formats first (before FP8) since MXFP8 also has num_bits=(4,3)
+        # Static MXFP4 is matched on raw config (not is_mxfp4_static) because the
+        # is_*_static properties require fake-quant mode, which is off here.
         if (
+            self._block_sizes
+            and self._num_bits == (2, 1)
+            and self._block_sizes.get("scale_bits") == (8, 0)
+            and self._block_sizes.get("type", "dynamic") != "dynamic"
+        ):
+            # Static MXFP4: pack with the quantizer's effective (learned) E8M0 scales
+            # instead of falling through to INT4 packing, which would recompute
+            # scales from the weights and silently drop the trained scales.
+            amax = _to_local(self.amax)
+            assert amax is not None, "Static MXFP4 real quantization requires a calibrated amax."
+            scales = MXFP4QTensor.encode_e8m0_scale(
+                _amax_to_scale(amax, self.maxbound, 2.0**MXFP4QTensor.E8M0_MIN_EXPONENT)
+            )
+            outputs = MXFP4QTensor.quantize_with_scale(inputs, scales, self._block_sizes[-1])
+            buffer_to_register["_scale"] = scales
+        elif (
             self._block_sizes
             and self._block_sizes.get("scale_bits") == (8, 0)
             and self._block_sizes.get("type") == "dynamic"
@@ -1709,6 +1727,11 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
             raise ValueError(
                 "MXFP4 LSQ requires tied_amax=True and learnable_amax=[] or ['pre', 'post'] "
                 "because the deployed format stores one E8M0 scale per block."
+            )
+        if self.is_mxfp4_static and not (quantize_scales and quantize_pre_scale):
+            raise ValueError(
+                "MXFP4 LSQ requires quantize_scales=True and quantize_pre_scale=True: training "
+                "with unquantized scales would not match the E8M0 scales used at deployment."
             )
         if quantize_scales and not self.is_mxfp4_static:
             assert self.global_amax is not None, (

@@ -27,7 +27,7 @@ from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_par
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.export.model_utils import _release_exported_tensors
-from modelopt.torch.export.moe_utils import _export_fused_experts
+from modelopt.torch.export.moe_utils import _export_fused_experts, _uncalibrated_weight_amax
 from modelopt.torch.export.quant_utils import (
     get_quant_config,
     get_quantization_format,
@@ -709,6 +709,108 @@ class TestExportFusedExperts:
                     f"Expert {idx} up amax[0,0] should be 101.0 (up row 0 marker), "
                     f"got {u_amax.flatten()[0].item()} — slice probably didn't separate gate from up"
                 )
+        finally:
+            if QuantModuleRegistry.get(expert_type) is not None:
+                QuantModuleRegistry.unregister(expert_type)
+
+    def test_uncalibrated_weight_amax_matches_quantizer_layout(self):
+        """The fallback must keep the quantizer's amax layout: scalar for per-tensor
+        quantizers, flat per-block (row-major) for static block-scale quantizers."""
+        weight = (torch.arange(64, dtype=torch.float32) + 1).reshape(2, 32)
+
+        per_tensor = TensorQuantizer()
+        scalar = _uncalibrated_weight_amax(weight, per_tensor)
+        assert scalar.shape == ()
+        assert scalar.item() == 64.0
+
+        static = TensorQuantizer()
+        static._num_bits = (2, 1)
+        static._block_sizes = {-1: 32, "type": "static", "scale_bits": (8, 0)}
+        blocks = _uncalibrated_weight_amax(weight, static)
+        assert blocks.shape == (2,)
+        assert blocks.tolist() == [32.0, 64.0]
+
+        dynamic = TensorQuantizer()
+        dynamic._num_bits = (2, 1)
+        dynamic._block_sizes = {-1: 32, "type": "dynamic", "scale_bits": (8, 0)}
+        assert _uncalibrated_weight_amax(weight, dynamic).shape == ()
+
+    def test_uncalibrated_experts_get_per_block_amax_fallback(self, monkeypatch):
+        """Never-calibrated static block-scale experts must get per-block amax
+        fallbacks: gate/up derived once from the FUSED weight (so they stay
+        aligned through slicing), down from its own per-projection slice.
+
+        Regression for the scalar fallback, which produced a 0-dim amax that
+        breaks the per-block scale path at export.
+        """
+        block = 16  # HIDDEN_DIM 32 -> 2 blocks/row so the reshape+slice branch runs
+        experts = _SyntheticFusedExperts()
+        expert_type = type(experts)
+        if QuantModuleRegistry.get(expert_type) is None:
+            QuantModuleRegistry.register({expert_type: "test.SyntheticFusedExperts"})(
+                _QuantFusedExperts
+            )
+        try:
+            converted = QuantModuleRegistry.convert(experts)
+            for idx in range(NUM_EXPERTS):
+                for q in (
+                    converted.gate_up_proj_weight_quantizers[idx],
+                    converted.down_proj_weight_quantizers[idx],
+                ):
+                    q._disabled = False
+                    q._num_bits = (2, 1)
+                    q._block_sizes = {-1: block, "type": "static", "scale_bits": (4, 3)}
+
+            seen = {}
+
+            def _spy_export(wrapper, dtype, **_kwargs):
+                w = wrapper.weight.data
+                wq = wrapper.weight_quantizer
+                export_amax = get_weight_amax_for_export(wq)
+                amax = export_amax.detach().clone() if export_amax is not None else None
+                for idx in range(NUM_EXPERTS):
+                    slices = {
+                        "gate_proj": converted.gate_up_proj.data[idx, :INTERMEDIATE_DIM, :],
+                        "up_proj": converted.gate_up_proj.data[idx, INTERMEDIATE_DIM:, :],
+                        "down_proj": converted.down_proj.data[idx],
+                    }
+                    for proj, ref in slices.items():
+                        if w.shape == ref.shape and torch.equal(w, ref):
+                            seen[(idx, proj)] = amax
+                            return
+
+            monkeypatch.setattr(
+                "modelopt.torch.export.unified_export_hf._export_quantized_weight",
+                _spy_export,
+            )
+
+            # Snapshot sources: _export_fused_experts deletes the fused params at the end.
+            fused_per_expert = [
+                converted.gate_up_proj.data[idx].clone() for idx in range(NUM_EXPERTS)
+            ]
+            down_per_expert = [converted.down_proj.data[idx].clone() for idx in range(NUM_EXPERTS)]
+
+            _export_fused_experts(converted, torch.float16)
+
+            for idx in range(NUM_EXPERTS):
+                fused = fused_per_expert[idx]
+                expected = {
+                    "gate_proj": fused[:INTERMEDIATE_DIM],
+                    "up_proj": fused[INTERMEDIATE_DIM:],
+                    "down_proj": down_per_expert[idx],
+                }
+                for proj, source in expected.items():
+                    amax = seen.get((idx, proj))
+                    assert amax is not None, f"Expert {idx} {proj}: missing recorded amax"
+                    per_block = source.abs().float().reshape(-1, block).amax(dim=-1)
+                    assert amax.numel() == per_block.numel(), (
+                        f"Expert {idx} {proj}: expected per-block amax with "
+                        f"{per_block.numel()} blocks, got shape {tuple(amax.shape)}"
+                    )
+                    assert torch.equal(amax.reshape(-1), per_block), (
+                        f"Expert {idx} {proj}: amax fallback does not match the "
+                        f"row-major per-block absmax of its source weight"
+                    )
         finally:
             if QuantModuleRegistry.get(expert_type) is not None:
                 QuantModuleRegistry.unregister(expert_type)
