@@ -24,7 +24,7 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.inputs import TokensPrompt
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export import convert_ggml_export_to_int8, export_hf_checkpoint
+from modelopt.torch.export import export_hf_ggml_int8_checkpoint
 
 
 @pytest.fixture(scope="module")
@@ -65,8 +65,7 @@ def int8_export_in_vllm(tmp_path_factory):
     expected = logits.log_softmax(-1).gather(-1, token_ids[0, 1:, None])[:, 0]
 
     export_dir = tmp_path / "export"
-    export_hf_checkpoint(model, export_dir=export_dir)
-    convert_ggml_export_to_int8(export_dir)
+    export_hf_ggml_int8_checkpoint(model, export_dir)
 
     llm = LLM(
         model=str(export_dir),
