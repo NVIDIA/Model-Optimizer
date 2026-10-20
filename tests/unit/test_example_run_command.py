@@ -23,6 +23,37 @@ import pytest
 from _test_utils.examples import run_command
 
 
+@pytest.mark.parametrize(
+    ("error", "attempts"),
+    [
+        ("HfHubHTTPError: 503 Server Error: Service Unavailable", 2),
+        ("DistNetworkError: port: 38789, name: EADDRINUSE, message: address already in use", 2),
+        ("AssertionError: the quantized model diverged", 1),
+    ],
+)
+def test_run_example_command_retries_only_transient_errors(monkeypatch, error, attempts):
+    calls = []
+
+    def step_failing_once(cmd_parts, example_path):
+        calls.append(cmd_parts)
+        if len(calls) == 1:
+            raise RuntimeError(error)
+        return "output"
+
+    def run():
+        return run_command.run_example_command(
+            ["torchrun", "step.py"], "hf_ptq", hf_retry_delay_s=0
+        )
+
+    monkeypatch.setattr(run_command, "_in_process_runner", step_failing_once)
+    if attempts == 1:
+        with pytest.raises(RuntimeError, match="diverged"):
+            run()
+    else:
+        assert run() == "output"
+    assert len(calls) == attempts
+
+
 def test_run_capturing_does_not_block_on_a_survivor_holding_the_pipe(
     skip_on_windows, monkeypatch, tmp_path
 ):

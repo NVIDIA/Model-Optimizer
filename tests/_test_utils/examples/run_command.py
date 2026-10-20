@@ -28,8 +28,9 @@ from _test_utils.torch.distributed.utils import get_free_port
 
 MODELOPT_ROOT = Path(__file__).parents[3]
 
-# Substrings that identify a *transient* HuggingFace Hub / dataset access failure
-_HF_TRANSIENT_MARKERS = (
+# Substrings that identify a *transient* failure a rerun clears: a HuggingFace Hub / dataset access
+# error, or a rendezvous port that another process bound between its selection and its use
+_TRANSIENT_MARKERS = (
     "HfHubHTTPError",
     "Too Many Requests",
     "500 Server Error",
@@ -51,6 +52,8 @@ _HF_TRANSIENT_MARKERS = (
     "Couldn't reach",  # datasets: "Couldn't reach <repo> on the Hub"
     "Temporary failure in name resolution",  # transient DNS
     "Name or service not known",  # transient DNS
+    "EADDRINUSE",  # torch.distributed's TCPStore: "name: EADDRINUSE, message: address already in use"
+    "Address already in use",  # the same from Python's OSError, gloo and NCCL
 )
 _HF_MAX_RETRIES = 1
 _HF_RETRY_DELAY_S = 10
@@ -156,7 +159,7 @@ def run_example_command(
     hf_max_retries: int = _HF_MAX_RETRIES,
     hf_retry_delay_s: int = _HF_RETRY_DELAY_S,
 ) -> str | None:
-    """Run an example command, retrying transient HuggingFace access errors."""
+    """Run an example command, retrying transient errors (see ``_TRANSIENT_MARKERS``) once."""
     print(f"[{example_path}] Running command: {cmd_parts}")
     in_process = _in_process_runner if env is None else None
     if _in_process_runner is not None and env is not None:
@@ -172,8 +175,8 @@ def run_example_command(
             # copy it never sees.
             env["MASTER_PORT"] = str(get_free_port())  # fresh port per attempt
         if in_process is not None:
-            # Inside the loop so in-process steps get the same transient-HuggingFace retries;
-            # these tests do hit the Hub (e.g. calib_dataset_name="cnn_dailymail").
+            # Inside the loop so in-process steps get the same transient-error retries; these
+            # tests do hit the Hub (e.g. calib_dataset_name="cnn_dailymail").
             try:
                 result = in_process(cmd_parts, example_path)
             except Exception as e:
@@ -186,7 +189,7 @@ def run_example_command(
                 captured = getattr(e, "captured_output", "")
                 text = f"{traceback.format_exc()}\n{captured}"
                 if attempt == hf_max_retries or not any(
-                    marker in text for marker in _HF_TRANSIENT_MARKERS
+                    marker in text for marker in _TRANSIENT_MARKERS
                 ):
                     raise
                 returncode, output = 1, text
@@ -197,11 +200,11 @@ def run_example_command(
             returncode, output = _run_capturing(cmd_parts, cwd, env)
         if returncode == 0:
             return output
-        transient = any(marker in output for marker in _HF_TRANSIENT_MARKERS)
+        transient = any(marker in output for marker in _TRANSIENT_MARKERS)
         if not transient or attempt == hf_max_retries:
             raise subprocess.CalledProcessError(returncode, cmd_parts, output=output)
         warnings.warn(
-            f"[{example_path}] transient HuggingFace access error; retrying in "
+            f"[{example_path}] transient error; retrying in "
             f"{hf_retry_delay_s}s (attempt {attempt + 1}/{hf_max_retries})"
         )
         time.sleep(hf_retry_delay_s)
