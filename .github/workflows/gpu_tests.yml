@@ -59,6 +59,7 @@ jobs:
     timeout-minutes: ${{ matrix.timeout }}
     container:
       image: ${{ matrix.container_image }}
+      options: --shm-size=2gb # vLLM TP>1 tests on the 2-GPU runner need more than the default 64 MB
       env:
         GIT_DEPTH: 1000 # For correct version
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages

@@ -130,7 +130,11 @@ def test_distill_llm_sft_hf_chat(tmp_path, num_gpus, packed):
     ``packed`` runs an MoE student with conversations packed per micro-batch and the aux loss off.
     """
     create_dir = create_tiny_qwen3_moe_dir if packed else create_tiny_qwen3_dir
-    teacher_hf_path = create_dir(tmp_path, with_tokenizer=True)
+    # The default head_dim=2 leaves only TE's unfused attention, which the 2-GPU sm_120 runner
+    # rejects for packed (THD) input; head_dim=8 also qualifies the flash and cuDNN backends.
+    teacher_hf_path = create_dir(
+        tmp_path, with_tokenizer=True, **({"head_dim": 8} if packed else {})
+    )
     train_iters = 2
     gbs = 4
     # More records than train_iters * gbs so the sampler does not run dry; every 4th is multi-turn.
