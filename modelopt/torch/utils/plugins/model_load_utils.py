@@ -411,7 +411,7 @@ def _route(plan: DistributionPlan) -> str | None:
     return _FSDP2 if plan.is_fsdp_dense else None
 
 
-def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs) -> nn.Module:
+def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options) -> nn.Module:
     """The sharded load ``route`` names, refusing what it cannot honor before it starts."""
     from modelopt.torch.models.hf import checkpoint_has_mtp
     from modelopt.torch.utils import distributed as dist
@@ -440,7 +440,9 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs) -> nn.Module
     trust_remote_code = kwargs.pop("trust_remote_code", False)
     hf_config = kwargs.pop("hf_config", None)
     if hf_config is None:
-        hf_config = AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
+        hf_config = AutoConfig.from_pretrained(
+            ckpt_path, trust_remote_code=trust_remote_code, **hub_options
+        )
     if getattr(hf_config, "quantization_config", None) is not None:
         # It reads the tensors as stored: quantized weights would load as if they were not.
         raise NotImplementedError(
@@ -566,7 +568,7 @@ def load_pretrained(
             ).model_type
         )
     if route is not None:
-        model = _load_sharded(route, ckpt_path, auto_class, model_type, kwargs)
+        model = _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
         # A sharded load finds the unplaced keys while it places the weights.
         keys = model._modelopt_unplaced_source_keys
     else:
