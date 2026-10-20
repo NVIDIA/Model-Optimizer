@@ -355,7 +355,8 @@ class TestDFlash2Forward:
         Guards the target/predecessor alignment: a misaligned selector objective still
         produces a finite decreasing loss, but its accuracy does not reach 1.
         """
-        model = get_tiny_llama(num_hidden_layers=4)
+        # float32: CPU bf16 matmuls are emulated (~8x slower); this tiny model does not need bf16
+        model = get_tiny_llama(num_hidden_layers=4, dtype=torch.float32)
         mtsp.convert(model, [("dflash", _get_dflash2_config())])
         model.train()
 
