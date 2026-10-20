@@ -361,7 +361,7 @@ class TestDFlash2Forward:
 
         input_ids, attention_mask, labels = _make_batch(model.dflash_config.vocab_size)
         optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=5e-3)
-        for _ in range(60):
+        for _ in range(30):  # both accuracies pass 0.9 by step ~21
             out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             optimizer.zero_grad()
             out.loss.backward()
