@@ -59,6 +59,15 @@ def _cache_signature(files: list[str]) -> list[list]:
     return [[str(f), os.path.getsize(f), int(os.path.getmtime(f))] for f in files]
 
 
+def _cache_matches(meta: dict, files: list[str], top_k: int | None) -> bool:
+    """Whether a published cache serves this request; an explicit ``top_k`` must match too."""
+    return (
+        meta.get("version") == CACHE_VERSION
+        and meta.get("sources") == _cache_signature(files)
+        and (top_k is None or meta.get("top_k") == top_k)
+    )
+
+
 def discover_shards(root) -> list[str]:
     """Every sparse-policy shard under ``root``, in the order the cache is keyed on.
 
@@ -98,7 +107,9 @@ def _builder_progress(cache: Path) -> tuple[int, int]:
     return total, newest
 
 
-def _wait_for_cache(cache: Path, files: list[str], stall_s: float = 1800.0) -> None:
+def _wait_for_cache(
+    cache: Path, files: list[str], top_k: int | None = None, stall_s: float = 1800.0
+) -> None:
     """Block until rank 0 publishes a cache built from ``files``, without a collective.
 
     Waiting on mere existence is not enough. The only way to reach this with a cache
@@ -113,13 +124,12 @@ def _wait_for_cache(cache: Path, files: list[str], stall_s: float = 1800.0) -> N
     temporary directory grows while it works, so a wait that watches it can be patient
     with a slow build and still fail promptly on a dead builder.
     """
-    want = _cache_signature(files)
     last_progress = _builder_progress(cache)
     deadline = time.monotonic() + stall_s
     while True:
         try:
             meta = json.loads((cache / "meta.json").read_text())
-            if meta.get("version") == CACHE_VERSION and meta.get("sources") == want:
+            if _cache_matches(meta, files, top_k):
                 return
         except (OSError, ValueError):
             # Absent, or caught mid-publish; either way it is not ours yet.
@@ -374,9 +384,10 @@ class SparsePolicyDataset(torch.utils.data.Dataset):
     ):
         """Open (building if needed) the memmapped cache for these shards.
 
-        ``top_k`` defaults to the width found in the data. A narrower value
-        truncates the teacher policy and a wider one pads it with zero-probability
-        entries; both change the objective silently.
+        ``top_k`` defaults to the width found in the data. A wider value pads the
+        stored policy with zero-probability entries, which changes the objective
+        silently; a narrower one would drop teacher mass and is refused by the
+        builder instead.
 
         ``source_weights`` maps a record's ``source`` field to a sampling weight,
         oversampling under-represented sources by repeating their index entries.
@@ -392,10 +403,8 @@ class SparsePolicyDataset(torch.utils.data.Dataset):
 
         stale = True
         if (cache / "meta.json").exists():
-            meta = json.loads((cache / "meta.json").read_text())
-            stale = meta.get("version") != CACHE_VERSION or meta.get("sources") != (
-                _cache_signature(files)
-            )
+            # An explicit top_k is part of the request: it truncates or pads the policy.
+            stale = not _cache_matches(json.loads((cache / "meta.json").read_text()), files, top_k)
 
         if stale:
             # Under DDP every rank sees the same shards; one builds and the rest wait on
@@ -413,7 +422,7 @@ class SparsePolicyDataset(torch.utils.data.Dataset):
             if rank == 0:
                 _build_cache(cache, files, top_k)
             else:
-                _wait_for_cache(cache, files)
+                _wait_for_cache(cache, files, top_k)
 
         meta = json.loads((cache / "meta.json").read_text())
         # Re-check rather than trust the build. Two jobs reading different subsets of one
@@ -421,7 +430,7 @@ class SparsePolicyDataset(torch.utils.data.Dataset):
         # the publish rename returns from _build_cache normally having adopted the
         # winner's cache -- which it never compared against its own shards. The waiting
         # ranks are covered by _wait_for_cache; this covers the builder.
-        if meta.get("version") != CACHE_VERSION or meta.get("sources") != _cache_signature(files):
+        if not _cache_matches(meta, files, top_k):
             raise RuntimeError(
                 f"the sparse cache at {cache} was published by a concurrent job from "
                 "different shards; give this run its own cache_dir."
