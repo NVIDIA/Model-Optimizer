@@ -2,7 +2,8 @@
 name: qad
 description: >-
   Run explicitly requested ModelOpt Quantization-Aware Distillation (QAD) on
-  Slurm through Megatron Bridge to recover a measured BF16-to-PTQ accuracy gap.
+  Slurm through Megatron Bridge (recommended) or Hugging Face Transformers to
+  recover a measured BF16-to-PTQ accuracy gap.
   Use only when the user explicitly asks for QAD, including its topology, data
   preparation, Slurm launch, resume, checkpoint export, or recovery decisions.
 ---
@@ -15,7 +16,13 @@ request alone is not authorization to start QAD.
 
 ## Follow the supported workflow
 
-Before constructing commands, read:
+Read `docs/source/guides/quantization_aware_training_and_distillation.rst`
+for QAD background and framework selection (the source of the published HTML guide).
+Recommend Megatron Bridge for scalable training and its model-specific tutorials.
+Choose the applicable tutorial from `examples/megatron_bridge/tutorials/README.md`.
+Honor an explicit HF choice.
+
+For Megatron Bridge, before constructing commands, read:
 
 - `examples/megatron_bridge/README.md`, especially PTQ, data preparation, QAD,
   export, and Slurm usage
@@ -26,7 +33,19 @@ Before constructing commands, read:
 Treat the example README and `--help` output as authoritative for mutable flags,
 commands, containers, and checkpoint formats. This skill supports Slurm only.
 
-## Execute in this order
+For Hugging Face, use the same common setup guidance, but replace the
+Bridge-specific reading above with
+`examples/llm_qat/README.md`, its `ARGUMENTS.md`, selected training/dataset/
+Accelerate configs, and `{quantize.py,train.py,export.py} --help`.
+Follow its quantize → distill → export flow: the PTQ checkpoint is the student;
+the original unquantized model is the teacher. Adapt the QAD training and
+Accelerate configs to the model and budget.
+Resolve tutorial-relative commands and config paths from `examples/llm_qat/`.
+Use the HF tutorial's evaluation and checkpoint resume guidance.
+
+## Megatron Bridge execution and training policy
+
+### Execute in this order
 
 1. **Confirm the gap.** Reuse only validated, comparable BF16/PTQ results and
    the exact benchmark configuration from preceding evaluation or recipe
@@ -64,7 +83,7 @@ commands, containers, and checkpoint formats. This skill supports Slurm only.
    recovery iterations. Let training continue while evaluating saved
    checkpoints, and cancel it when a stop condition below is met.
 
-## Default training policy
+### Default training policy
 
 | Setting | Default |
 | --- | --- |
@@ -81,7 +100,7 @@ commands, containers, and checkpoint formats. This skill supports Slurm only.
 | Recovery benchmark | 150, then every 100 iterations while training runs |
 | Slurm duration exit | 220 minutes for a 4-hour allocation |
 
-## Run policy
+### Run policy
 
 - Keep `train_iters=1000` and leave `exit_interval` unset.
 - From initial step timing, submit only enough sequential jobs to reach
