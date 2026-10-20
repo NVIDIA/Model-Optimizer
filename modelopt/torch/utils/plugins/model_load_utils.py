@@ -590,7 +590,9 @@ def load_pretrained(
     trust_remote_code = kwargs.get("trust_remote_code", False)
     hf_config = kwargs.get("hf_config")
     if distribution is None:
-        plan, hf_config = resolve_distribution_plan(ckpt_path, trust_remote_code=trust_remote_code)
+        plan, hf_config = resolve_distribution_plan(
+            ckpt_path, trust_remote_code=trust_remote_code, **hub_options
+        )
         if _route(plan) is not None:
             kwargs.setdefault("hf_config", hf_config)
     elif isinstance(distribution, DistributionPlan):
