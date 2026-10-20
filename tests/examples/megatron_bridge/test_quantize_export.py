@@ -160,9 +160,11 @@ def test_quantize_and_export(
             ),
             "ep_size",
         ),
+        # Per-expert HF names with SequentialMLP experts: each EP rank owns some of the names.
+        (partial(create_tiny_qwen3_moe_dir, with_tokenizer=True), "ep_size"),
         (partial(create_tiny_nemotron_h_dir, with_tokenizer=True), "pp_size"),
     ],
-    ids=["qwen3_5_moe_vl", "nemotron_h"],
+    ids=["qwen3_5_moe_vl", "qwen3_moe", "nemotron_h"],
 )
 @pytest.mark.timeout(480)
 def test_quantize_and_vllm_fakequant_export(
