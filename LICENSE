@@ -222,6 +222,7 @@ the following copyright holders, licensed under the Apache License, Version 2.0
   Copyright 2022 EleutherAI and the HuggingFace Inc. team
   Copyright 2023 Rohan Taori, Ishaan Gulrajani, Tianyi Zhang, Yann Dubois, Xuechen Li
   Copyright (c) 2024 Heming Xia
+  Copyright (c) 2025 Rong Shuo (ResInfer residue quantization)
   Copyright 2025 Qwen-Image Team, The HuggingFace Team. All rights reserved.
   Copyright 2025 The Qwen team, Alibaba Group and the HuggingFace Inc. team
   Copyright (c) OpenMMLab. All rights reserved.
@@ -249,6 +250,7 @@ the following copyright holders, licensed under the MIT License:
   Copyright (c) 2020 Dan Hendrycks
   Copyright (c) 2023 Deep Cognition and Language Research (DeCLaRe) Lab
   Copyright (c) 2023 DeepSeek
+  Copyright (c) 2023 MIT HAN Lab (activation statistics adapted through ResInfer)
   Copyright (c) 2025 sgl-project
   Copyright (c) 2026 The DeepSpec Authors
   Copyright (c) 2023-2026 The ggml authors

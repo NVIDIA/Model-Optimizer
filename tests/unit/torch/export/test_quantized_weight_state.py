@@ -43,6 +43,28 @@ def _fp8_linear() -> nn.Linear:
     return mtq.quantize(module, copy.deepcopy(mtq.FP8_DEFAULT_CFG), lambda m: m(torch.ones(2, 4)))
 
 
+@pytest.mark.parametrize("fmt", ["NVFP4", "MXFP4"])
+@pytest.mark.parametrize("materialized", [False, True])
+@pytest.mark.parametrize(
+    "resolve", [get_quantized_weight_export_spec, capture_quantized_weight_export_state]
+)
+def test_residue_export_state_and_spec_rejected_without_mutation(fmt, materialized, resolve):
+    config = copy.deepcopy(getattr(mtq, f"{fmt}_DEFAULT_CFG"))
+    config["algorithm"] = {"method": "residue_max"}
+    module = mtq.quantize(nn.Linear(64, 8), config, lambda m: m(torch.ones(2, 64)))
+    if materialized:
+        module.materialize_residue_weight()
+    before = copy.deepcopy(module.state_dict())
+    parameter = module.weight
+
+    with pytest.raises(NotImplementedError):
+        resolve(module)
+    assert module.weight is parameter
+    assert module.state_dict().keys() == before.keys()
+    for key, value in before.items():
+        torch.testing.assert_close(module.state_dict()[key], value, rtol=0, atol=0)
+
+
 def _static_w4a16_linear(
     weight: torch.Tensor,
     per_block_amax: torch.Tensor,
