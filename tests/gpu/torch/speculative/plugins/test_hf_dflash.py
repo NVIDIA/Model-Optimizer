@@ -24,6 +24,7 @@ from _test_utils.torch.speculative.dflash import get_dflash_config
 from _test_utils.torch.transformers_models import get_tiny_llama
 
 import modelopt.torch.speculative as mtsp
+from modelopt.torch.speculative.plugins.dflash_flex_attention import is_block_mask
 
 BLOCK_SIZE = 4
 NUM_DRAFT_LAYERS = 2
@@ -337,9 +338,6 @@ class TestDFlashFlexAttentionGPU:
 
     def test_mask_builder_returns_block_mask(self):
         """With the flag on, the mask builder hands back a BlockMask, not a dense tensor."""
-        pytest.importorskip("torch.nn.attention.flex_attention")
-        from modelopt.torch.speculative.plugins.dflash_flex_attention import is_block_mask
-
         model = self._model(dflash_use_flex_attention=True)
         mask = model._build_draft_attention_mask(
             self.SEQ,
@@ -356,7 +354,6 @@ class TestDFlashFlexAttentionGPU:
     @pytest.mark.parametrize("window", [None, 8])
     def test_matches_dense_mask_path(self, window):
         """Loss agrees with the dense path to bf16 tolerance, with and without SWA."""
-        pytest.importorskip("torch.nn.attention.flex_attention")
         overrides = {} if window is None else {"dflash_swa_window_size": window}
         dense, flex = self._pair(**overrides)
         input_ids, attention_mask = self._inputs()
@@ -371,7 +368,6 @@ class TestDFlashFlexAttentionGPU:
 
     def test_matches_dense_mask_path_with_invalid_blocks(self):
         """Fully-masked query rows (invalid blocks), a softmax over nothing, match too."""
-        pytest.importorskip("torch.nn.attention.flex_attention")
         dense, flex = self._pair()
         input_ids, attention_mask = self._inputs()
         # Row 1 has few supervised positions, so its trailing blocks are invalid.
@@ -388,7 +384,6 @@ class TestDFlashFlexAttentionGPU:
 
     def test_backward_produces_finite_grads(self):
         """The flex path is differentiable and its grads are finite."""
-        pytest.importorskip("torch.nn.attention.flex_attention")
         flex = self._model(dflash_use_flex_attention=True)
         input_ids, attention_mask = self._inputs()
 

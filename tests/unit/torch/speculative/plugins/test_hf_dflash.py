@@ -31,6 +31,7 @@ from _test_utils.torch.transformers_models import (
     get_tiny_llama,
     tf_modelopt_state_and_output_tester,
 )
+from torch.nn.attention.flex_attention import create_mask
 from transformers import AutoModelForCausalLM
 from transformers.modeling_layers import GradientCheckpointingLayer
 
@@ -537,8 +538,6 @@ class TestDraftMaskRule:
     @pytest.mark.parametrize("window", [None, 6])
     def test_dense_mask_matches_the_vmapped_rule(self, attention, window):
         """Broadcast evaluation (dense) and vmap evaluation (flex) of the rule agree."""
-        from torch.nn.attention.flex_attention import create_mask
-
         anchors = torch.tensor([[2, 7, 11], [5, 0, 9]])
         keep = torch.tensor([[True, True, False], [True, False, True]])
         mask_mod = hf_dflash._draft_mask_mod(
@@ -548,6 +547,19 @@ class TestDraftMaskRule:
         vmapped = create_mask(mask_mod, 2, 1, q_len, self.SEQ_LEN + q_len, device="cpu")
         dense = self._visible(self._model(attention), anchors, keep, window)
         assert torch.equal(dense, vmapped)
+
+    def test_padded_query_rows_index_in_bounds(self):
+        """torch 2.8's flex backward also evaluates the rule on padded rows, q_idx >= Q_LEN."""
+        anchors = torch.tensor([[2, 7, 11]])
+        keep = torch.ones_like(anchors, dtype=torch.bool)
+        mask_mod = hf_dflash._draft_mask_mod(
+            self.SEQ_LEN, anchors, keep, self.BLOCK_SIZE, None, causal=False
+        )
+        q_len = anchors.shape[1] * self.BLOCK_SIZE
+        padded_q = torch.arange(q_len, q_len + 2 * self.BLOCK_SIZE).view(-1, 1)
+        kv = torch.arange(self.SEQ_LEN + q_len).view(1, -1)
+        visible = mask_mod(torch.tensor(0), None, padded_q, kv)
+        assert visible.shape == (padded_q.numel(), kv.numel())
 
 
 class TestDFlashSwaMask:

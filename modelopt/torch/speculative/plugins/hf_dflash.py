@@ -142,9 +142,11 @@ def _draft_mask_mod(seq_len, anchor_positions, block_keep_mask, block_size, wind
     # Indexed inside mask_mod, which create_block_mask runs under vmap: keep them integral.
     anchors = anchor_positions.to(torch.int32)
     keep = block_keep_mask.to(torch.bool)
+    last_block = anchors.shape[1] - 1
 
     def mask_mod(b, h, q_idx, kv_idx):
-        q_block = q_idx // block_size
+        # torch 2.8's flex backward also passes padded rows (q_idx >= Q_LEN): keep reads in bounds.
+        q_block = (q_idx // block_size).clamp(max=last_block)
         anchor = anchors[b, q_block]
         is_ctx = kv_idx < seq_len
         ctx_ok = is_ctx & (kv_idx < anchor)
