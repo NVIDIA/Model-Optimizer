@@ -282,6 +282,14 @@ nox -s "unit-3.12(torch_211, tf_latest)"
 - **Contributors without write access:** When GitHub requests workflow approval, a reviewer with write permission
   must select **Approve and run workflows** to start GitHub Actions CI.
 - If any CI/CD checks fail, fix the issues and push again.
+- **Stacked PRs:** GPU, example and regression tests run only for PRs that target `main`, `release/*`
+  or `feature/*`, the same branches the unit tests run for. A PR based on another PR's branch gets
+  failing `*-pr-required-check`s that say the tests are deferred; once it targets `main`, push or use
+  **Re-run all jobs** to run them. To test a stacked PR before then, run the tests on its branch by
+  hand: in the repo's **Actions** tab, open **GPU tests** (or **Example tests** / **Regression
+  tests**), click **Run workflow** and pick your branch, or run
+  `gh workflow run gpu_tests.yml --ref <your-branch>`. This runs every test in that workflow, and only
+  works for branches in this repo, not forks.
 - Once your PR is approved and all checks pass, one of the reviewers will merge the PR.
 - If your PR is a bug fix that should also land in an ongoing release branch, add the
   `cherry-pick-<X.Y.Z>` label (e.g. `cherry-pick-0.47.0`) matching that release. Labeled PRs are

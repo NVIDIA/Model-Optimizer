@@ -16,14 +16,24 @@ Changelog
 
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
 
+*Megatron Framework (M-LM / M-Bridge)*
+
+- Add ``--sft_in_batch_packing``, ``--moe_aux_loss_coeff`` and ``--dsa_kernel_backend`` to ``examples/megatron_bridge/distill.py`` (``--dsa_kernel_backend`` also to ``quantize.py``): pack ``--sft_hf_dataset`` conversations per micro-batch instead of padding each to ``--seq_length``, override the MoE load-balancing loss weight (e.g. 0 for padded SFT data), and select fused DeepSeek sparse-attention kernels for long sequences.
+- Add ``--vllm_fakequant_export`` to ``examples/megatron_bridge/export_quantized_megatron_to_hf.py`` to evaluate formats vLLM has no kernels for (e.g. GGML IQ) as BF16 fake-quant checkpoints, and allow ``--ep_size`` > 1 for checkpoints built with ``--no_moe_grouped_gemm``.
+- GGML GPTQ checkpoints from ``examples/megatron_bridge`` keep their calibrated codes when the Megatron checkpoint is reloaded for QAD or export, and layerwise calibration now runs on Megatron vision-language models.
+
+*Misc*
+
+- The ``evaluation`` agent skill can stop looping ("doom loop") reasoning early: ask it to avoid doom loops and it adds vLLM's ``repetition_detection`` request field (vLLM 0.17.0 or later) to every task, ending a request once its output repeats. Use the same setting for baseline and candidate runs.
+
 **Backward Breaking Changes**
 
 **Deprecations**
 
 **Bug Fixes**
 
+- Fix ONNX quantization placing a per-tensor Q/DQ pair on a rank-0 (scalar) constant input, which TensorRT's ONNX parser rejects (``convertAxis`` asserts the quantization axis lies in ``[0, nbDims]`` but ``nbDims == 0``). Rank-0 constant operands are now kept unquantized in the int8, fp8, and autotune export paths; the existing single-element Mul/Div/Pad stripping stays gated under ``target_dla``.
 - Fix PTQ of native Transformers FP8 experts to apply source weight scales during calibration and export. Re-quantize affected checkpoints from the original FP8 source.
-
 - Fix ONNX preprocessing with custom TensorRT plugin libraries on TensorRT 11.
 - Fix ``INT8_DEFAULT_CFG``, ``FP8_DEFAULT_CFG``, ``NVFP4_DEFAULT_CFG`` and the other presets and recipes that import ``configs/ptq/units/default_disabled_quantizers`` and enable ``*input_quantizer``: since 0.44 they also quantized ``nn.LayerNorm`` inputs, which adds quantization error to the residual stream of models built on ``nn.LayerNorm`` such as BERT-style encoders. Re-quantize affected models; a recipe that wants ``nn.LayerNorm`` quantizers must enable them after importing that unit.
 - Fix ONNX quantization with the default ``concat_elimination`` pass crashing in calibration with ``KeyError: '<tensor>_ReduceMin'`` when a ``Concat`` input is a constant, such as the class token of a ViT.
@@ -35,12 +45,13 @@ Changelog
 
 *Sparsity*
 
-- Add skip-softmax threshold calibration through vLLM for FlashAttention and FlashInfer, exporting prefill and decode fits as ``sparse_attention_config``. Skip-softmax serving keeps the calibrated 128-token KV-tile granularity (and 128-row prefill Q tiles), autotunes only its execution schedule, and uses a smaller Q tile for one-token decode.
+- Add skip-softmax calibration through vLLM for FlashAttention and FlashInfer, requiring ``--validation_prompts_file`` and validating serving sparsity on calibration and held-out prompts before exporting prefill/decode fits and their validation scope as ``sparse_attention_config``. Calibration uses single-sequence, unchunked eager execution; serving preserves the calibrated 128-token KV-tile granularity and 128-row prefill Q tiles, autotunes only its execution schedule, and uses a smaller Q tile for one-token decode.
 - Sparse-only vLLM installs now reject unsupported DCP, DBO/ubatching, speculative decoding, and FULL mixed-batch CUDA graphs; calibrated decode also rejects FULL decode graphs.
 
 *Quantization*
 
 - Add metadata-only export specifications and non-mutating per-weight quantizer-state capture.
+- Add functional quantized-weight packing, topology-aligned state merge/select and transport APIs, and canonical Hugging Face quantization-config construction.
 - HF export records canonical activation schemes, group/block sizes and weight-only MXFP4 metadata; mixed-format exports retain unquantized-layer exclusions, and non-square FP8 block layouts are rejected.
 - Add Q8_0 weight-only quantization with 32-value GGML blocks, packed unified HF and Megatron export, and a built-in ``q8_0`` PTQ recipe.
 - Add Hugging Face PTQ calibration and export support for Nemotron-H MTP modules, preserving calibrated expert input scales.
@@ -165,6 +176,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix ``import modelopt.torch`` failing with ``ModuleNotFoundError`` for ``requests`` or ``huggingface_hub`` when ``nvidia-modelopt`` is installed without the ``[hf]`` extra.
 - Harden the distributed object broadcast/allgather helpers and the Megatron expert-parallel export gather so a compromised peer rank can no longer execute code through a crafted pickle payload: payloads load with ``weights_only=True`` and the export gathers raw bytes instead of pickled objects.
 - Fix LSQ clamping small, representable FP8 block scales too aggressively, which could zero quantized values and suppress scale gradients.
 - Fix ONNX AutoTune benchmark initialization with TensorRT 11 while preserving strongly typed networks on TensorRT 10.

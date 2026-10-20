@@ -82,6 +82,10 @@ from modelopt.torch.quantization.plugins.vllm_indexer import (
     _QuantVLLMGlm5NextIndexer,
     _QuantVLLMIndexerBase,
 )
+from modelopt.torch.quantization.utils import (
+    is_quantized_column_parallel_linear,
+    is_quantized_row_parallel_linear,
+)
 
 
 def _load_example_module(name: str):
@@ -644,6 +648,43 @@ def test_unregistered_unquantized_subclass_is_unsupported():
     assert not vllm_plugin._supports_fake_quant_linear(linear)
 
 
+@pytest.mark.parametrize(
+    ("nn_cls", "row_parallel"),
+    [
+        (vllm_plugin.vllm_linear.RowParallelLinear, True),
+        (vllm_plugin.vllm_linear.ColumnParallelLinear, False),
+        (vllm_plugin.vllm_linear.MergedColumnParallelLinear, False),
+        (vllm_plugin.vllm_linear.QKVParallelLinear, False),
+    ],
+)
+@pytest.mark.parametrize(
+    ("tp_size", "weight_shape", "tp_shard"),
+    [(2, (4, 4), True), (1, (4, 4), False), (2, (4, 1, 4), False)],
+    ids=["tp_shard", "disable_tp_replica", "conv1d_weight"],
+)
+def test_vllm_linears_sync_amax_across_tp_and_not_ep(
+    monkeypatch, nn_cls, row_parallel, tp_size, weight_shape, tp_shard
+):
+    """max_calibrate syncs a TP shard's amax across TP by its parallel kind, and not across vLLM's
+    EP group, which spans the TP ranks. Replicas and non-2-D weights keep their groups. The layers
+    go through the registry, so they get the same quant class as real layers."""
+    dp, tp, ep = object(), object(), object()
+    monkeypatch.setattr(
+        vllm_plugin, "create_parallel_state", lambda: vllm_plugin.ParallelState(dp, tp, ep)
+    )
+    linear = _new_attention(nn_cls)
+    linear.tp_size = tp_size
+    linear.weight = torch.nn.Parameter(torch.empty(weight_shape))
+    linear.quant_method = vllm_plugin.vllm_linear.UnquantizedLinearMethod()
+    linear = vllm_plugin.QuantModuleRegistry.convert(linear)
+
+    assert is_quantized_row_parallel_linear(linear) == (tp_shard and row_parallel)
+    assert is_quantized_column_parallel_linear(linear) == (tp_shard and not row_parallel)
+    assert linear.parallel_state.data_parallel_group.group is dp
+    assert linear.parallel_state.tensor_parallel_group.group is tp
+    assert linear.parallel_state.expert_model_parallel_group.group == (-1 if tp_shard else ep)
+
+
 def test_prequantized_fused_moe_passes_through(monkeypatch):
     moe = _prequantized_module(
         monkeypatch,
@@ -1110,8 +1151,7 @@ def _shutdown_llm(llm):
     cleanup_dist_env_and_memory(shutdown_ray=False)
 
 
-@pytest.fixture
-def tiny_llama_llm(tmp_path_factory):
+def _tiny_llama_llm(tmp_path_factory, **extra):
     tmp = tmp_path_factory.mktemp("tiny_llama")
     # Helper default ``max_position_embeddings=32`` would clash with vLLM's ``max_model_len=64`` set in ``_boot_llm``.
     # head_dim=64 with num_attention_heads=2 is broadly supported by vLLM's attention backends.
@@ -1124,14 +1164,24 @@ def tiny_llama_llm(tmp_path_factory):
         max_position_embeddings=64,
         head_dim=64,
     )
-    llm = _boot_llm(model_dir)
+    llm = _boot_llm(model_dir, **extra)
     try:
         yield llm
     finally:
         _shutdown_llm(llm)
 
 
-def _tiny_moe_llm(tmp_path_factory, model_type):
+@pytest.fixture
+def tiny_llama_llm(tmp_path_factory):
+    yield from _tiny_llama_llm(tmp_path_factory)
+
+
+@pytest.fixture
+def tiny_llama_tp2_llm(need_2_gpus, tmp_path_factory):
+    yield from _tiny_llama_llm(tmp_path_factory, tensor_parallel_size=2)
+
+
+def _tiny_moe_llm(tmp_path_factory, model_type, **extra):
     tmp = tmp_path_factory.mktemp(model_type)
     create_model = (
         create_tiny_qwen3_moe_dir if model_type == "qwen3_moe" else create_tiny_gpt_oss_dir
@@ -1154,7 +1204,7 @@ def _tiny_moe_llm(tmp_path_factory, model_type):
         num_experts_per_tok=2,
         **expert_config,
     )
-    llm = _boot_llm(model_dir, moe_backend="triton", enable_expert_parallel=True)
+    llm = _boot_llm(model_dir, moe_backend="triton", enable_expert_parallel=True, **extra)
     try:
         yield llm
     finally:
@@ -1164,6 +1214,11 @@ def _tiny_moe_llm(tmp_path_factory, model_type):
 @pytest.fixture
 def tiny_qwen3_moe_llm(tmp_path_factory):
     yield from _tiny_moe_llm(tmp_path_factory, "qwen3_moe")
+
+
+@pytest.fixture
+def tiny_qwen3_moe_tp2_llm(need_2_gpus, tmp_path_factory):
+    yield from _tiny_moe_llm(tmp_path_factory, "qwen3_moe", tensor_parallel_size=2)
 
 
 @pytest.fixture(params=["qwen3_moe", "gpt_oss"])
@@ -1572,6 +1627,55 @@ def test_tiny_moe_quantize(tiny_moe_llm, tmp_path):
     path.write_text(yaml.safe_dump(recipe))
     errors = tiny_moe_llm.collective_rpc(_check_unmatched_recipe, args=(str(path),))
     assert all("model.layers.0.mlp.missing.input_quantizer" in error for error in errors)
+
+
+def _calibrate_linears(self, quant_cfg):
+    """Run on each TP worker: calibrate, then return the linears' amax and local weight row amax."""
+    model = self.get_model()
+    with disable_compilation(model):
+        mtq.quantize(model, quant_cfg, forward_loop=lambda _: self.model_runner._dummy_run(1))
+    amaxes = {}
+    for name, module in model.named_modules():
+        if isinstance(module, _VLLMParallelLinear):
+            for quantizer in ("input_quantizer", "weight_quantizer"):
+                if (amax := getattr(module, quantizer).amax) is not None:
+                    amaxes[f"{name}.{quantizer}"] = amax.float().cpu()
+            amaxes[f"{name}.weight_row_amax"] = module.weight.float().abs().amax(dim=1).cpu()
+    return amaxes
+
+
+def test_tp2_linear_amax_is_synced_across_tp(tiny_llama_tp2_llm):
+    """Per-tensor ranges match on both TP ranks, also those of the row-parallel inputs and of the
+    weights, which each rank holds a shard of."""
+    rank0, rank1 = tiny_llama_tp2_llm.collective_rpc(
+        _calibrate_linears, args=(mtq.NVFP4_DEFAULT_CFG,)
+    )
+    names = [name for name in rank0 if name.endswith("_quantizer")]
+    for linear in ("qkv_proj", "o_proj", "gate_up_proj", "down_proj"):
+        for quantizer in ("input_quantizer", "weight_quantizer"):
+            assert any(name.endswith(f"{linear}.{quantizer}") for name in names), names
+    mismatched = [name for name in names if not torch.equal(rank0[name], rank1[name])]
+    assert not mismatched, mismatched
+
+
+def test_tp2_moe_column_parallel_channel_amax_stays_per_rank(tiny_qwen3_moe_tp2_llm):
+    """vLLM's EP group spans the TP ranks; a max over it would mix the per-channel ranges of the
+    different output channels that each column-parallel rank holds."""
+    per_channel_weights = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*proj.weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        ],
+        "algorithm": "max",
+    }
+    for amaxes in tiny_qwen3_moe_tp2_llm.collective_rpc(
+        _calibrate_linears, args=(per_channel_weights,)
+    ):
+        names = [name for name in amaxes if name.endswith("qkv_proj.weight_quantizer")]
+        assert names, list(amaxes)
+        for name in names:
+            row_amax = amaxes[name.replace("weight_quantizer", "weight_row_amax")]
+            assert torch.equal(amaxes[name].flatten(), row_amax), name
 
 
 def _check_missing_range(self, quantizer_path):

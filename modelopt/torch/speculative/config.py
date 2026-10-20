@@ -477,16 +477,37 @@ class ExternalDraftConfig(ModeloptBaseConfig):
     hidden states, projected by the base lm_head to obtain teacher logits.
     """
 
-    external_loss: Literal["soft_ce", "tvd", "tvd_deploy"] = ModeloptField(
+    external_loss: Literal["soft_ce", "tvd", "tvd_deploy", "tvd_ce"] = ModeloptField(
         default="tvd",
         description=(
             "Training objective. ``soft_ce`` matches the Eagle offline objective. "
             "``tvd`` is total-variation distance between the two untruncated "
             "distributions. ``tvd_deploy`` puts both through the serving filter first "
             "(``external_top_k`` then ``external_top_p``), making it the acceptance the "
-            "deployed pair will see: ``alpha = 1 - TVD``. Sparse data requires one of the "
-            "TVD objectives, since the dump is already a truncated policy and "
-            "``soft_ce`` needs full base logits."
+            "deployed pair will see: ``alpha = 1 - TVD``. ``tvd_ce`` adds a cross-entropy "
+            "term. Sparse data requires one of the TVD objectives, since the dump is "
+            "already a truncated policy and ``soft_ce`` needs full base logits."
+        ),
+    )
+
+    external_tvd_alpha: float = ModeloptField(
+        default=0.9,
+        ge=0.0,
+        description=(
+            "Weight on the TVD term when ``external_loss='tvd_ce'``. The two weights "
+            "are not normalised: they scale the loss as given, so 0.9/0.1 is a "
+            "convention rather than a constraint, and setting only one of them moves "
+            "the overall gradient magnitude as well as the ratio."
+        ),
+    )
+
+    external_ce_alpha: float = ModeloptField(
+        default=0.1,
+        ge=0.0,
+        description=(
+            "Weight on the cross-entropy term when ``external_loss='tvd_ce'``. CE is "
+            "added because TVD is bounded and so discriminates weakly between tokens "
+            "inside the base's support."
         ),
     )
 

@@ -154,8 +154,12 @@ def pinned_packed_weight(quantizer, format_name: str) -> torch.Tensor | None:
     return getattr(quantizer, _pin_name(format_name), None)
 
 
+# Prefix of the buffer holding a pinned payload; checkpoint code keeps buffers with it.
+PINNED_PAYLOAD_PREFIX = "_ggml_pinned_"
+
+
 def _pin_name(format_name: str) -> str:
-    return f"_ggml_pinned_{format_name}"
+    return f"{PINNED_PAYLOAD_PREFIX}{format_name}"
 
 
 def _matching_rows(table: torch.Tensor, rows: torch.Tensor) -> torch.Tensor | None:

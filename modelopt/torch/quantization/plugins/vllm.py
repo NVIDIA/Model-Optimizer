@@ -549,6 +549,10 @@ def _check_unsupported_quantizers_disabled(module: torch.nn.Module, names) -> No
 
 class _VLLMParallelLinear(QuantModule):
     _QUANTIZER_NAMES = ("input_quantizer", "weight_quantizer", "output_quantizer")
+    # The parallel kind tells max_calibrate which amax to sync across TP ranks. Subclasses set it;
+    # _setup turns it off on layers that are not TP shards.
+    _is_column_parallel = False
+    _is_row_parallel = False
 
     def _setup(self):
         self.input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
@@ -561,7 +565,25 @@ class _VLLMParallelLinear(QuantModule):
             _supports_fake_quant_linear(self) or kimi_mlp_fake_quant_supported
         )
         self.fake_quant_method = FakeQuantMethod(self.quant_method)
-        self.parallel_state = create_parallel_state()
+        parallel_state = create_parallel_state()
+        weight = getattr(self, "weight", None)
+        if (
+            getattr(self, "tp_size", 1) > 1
+            and isinstance(weight, torch.Tensor)
+            and weight.dim() == 2
+        ):
+            # A TP shard: max_calibrate syncs its amax across TP by quantizer axis. Drop vLLM's EP
+            # group, like Megatron's non-expert linears: it spans the TP ranks, so its blind max
+            # would mix the per-channel or per-block amax of the shards.
+            parallel_state = ParallelState(
+                parallel_state.data_parallel_group.group,
+                parallel_state.tensor_parallel_group.group,
+            )
+        else:
+            # Replicas (disable_tp, e.g. a data-parallel vision encoder that may not run on every
+            # rank) and non-2-D weights (KDA conv1d) are not TP shards: no TP sync.
+            self._is_row_parallel = self._is_column_parallel = False
+        self.parallel_state = parallel_state
 
     def iter_weights_for_calibration(self):
         if self._fake_quant_supported:
@@ -669,23 +691,25 @@ def post_restore_vllm_parallel_linears(model: torch.nn.Module) -> None:
 
 @QuantModuleRegistry.register({vllm_linear.RowParallelLinear: "vllm_RowParallelLinear"})
 class _QuantVLLMRowParallelLinear(_VLLMParallelLinear):
-    pass
+    _is_row_parallel = True
 
 
 @QuantModuleRegistry.register({vllm_linear.ColumnParallelLinear: "vllm_ColumnParallelLinear"})
 class _QuantVLLMColumnParallelLinear(_VLLMParallelLinear):
-    pass
+    _is_column_parallel = True
 
 
+# vLLM's merged and QKV layers use ColumnParallelLinear's forward, so the registry gives them the
+# class above, which is registered first. Subclassing it keeps them the same if that order changes.
 @QuantModuleRegistry.register(
     {vllm_linear.MergedColumnParallelLinear: "vllm_MergedColumnParallelLinear"}
 )
-class _QuantVLLMMergedColumnParallelLinear(_VLLMParallelLinear):
+class _QuantVLLMMergedColumnParallelLinear(_QuantVLLMColumnParallelLinear):
     pass
 
 
 @QuantModuleRegistry.register({vllm_linear.QKVParallelLinear: "vllm_QKVParallelLinear"})
-class _QuantVLLMQKVParallelLinear(_VLLMParallelLinear):
+class _QuantVLLMQKVParallelLinear(_QuantVLLMColumnParallelLinear):
     pass
 
 

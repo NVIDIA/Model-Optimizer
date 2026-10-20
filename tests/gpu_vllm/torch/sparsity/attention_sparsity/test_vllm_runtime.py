@@ -28,6 +28,10 @@ from vllm.v1.attention.backends.flashinfer import FlashInferImpl
 
 from modelopt.torch.quantization.plugins import vllm as quant_plugin
 from modelopt.torch.sparsity.attention_sparsity.plugins import vllm_runtime
+from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_calibration import (
+    build_sparse_attention_config,
+    summarize_validation,
+)
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     ModelOptSparseAttentionImpl,
     get_flashinfer_sparse_impl_cls,
@@ -78,6 +82,84 @@ def _model_runner(model, *, sparse_metadata=None):
             speculative_config=None,
         ),
     )
+
+
+@pytest.mark.parametrize("fault", [None, "lost_ignore", "missing_counter"])
+def test_calibration_validation_preserves_resolved_policy_and_covers_selected_layers(fault):
+    model = nn.ModuleDict(
+        {name: _bare_attention() for name in ("a_attn", "b_attn", "ignored_attn")}
+    )
+    metadata = {
+        "config_groups": {
+            "group_0": {"algorithm": "skip_softmax", "ignore": ["ignored_attn"]},
+            "group_1": {"algorithm": "sparse_softmax", "sparsity_n": 1, "sparsity_m": 4},
+        }
+    }
+    runner = _model_runner(model, sparse_metadata=metadata)
+    # Resolved metadata is authoritative even without a local checkpoint file.
+    runner.model_config.model = "org/hub-checkpoint"
+    report = vllm_runtime.install_vllm_skip_softmax_calibration(runner)
+    assert report.installed_layers == ("a_attn", "b_attn")
+    ignored_impl = model["ignored_attn"].impl
+    resolved_metadata = vllm_runtime.get_sparse_attention_metadata(runner)
+    assert resolved_metadata == metadata and resolved_metadata is not metadata
+    candidate = build_sparse_attention_config(
+        {"prefill": {"a": 4.0, "b": 0.0}}, 0.5, existing_config=resolved_metadata
+    )
+    impls = list(vllm_runtime.attention_plugin.iter_sparse_impls(model))
+    vllm_runtime.attention_plugin.enable_calibration(impls, [0.01, 0.1])
+    if fault == "lost_ignore":
+        candidate["config_groups"]["group_0"].pop("ignore")
+        with pytest.raises(ValueError, match="without calibration adapters: ignored_attn"):
+            vllm_runtime.enable_sparse_validation(runner, candidate)
+        assert all(impl._calibrate and impl.sparse_kw == {} for impl in impls)
+        assert model["ignored_attn"].impl is ignored_impl
+        return
+
+    assert vllm_runtime.enable_sparse_validation(runner, candidate) == 2
+    assert all(not impl._calibrate and impl.sparse_kw["sparsity_n"] == 1 for impl in impls)
+    for impl in impls[:1] if fault == "missing_counter" else impls:
+        vllm_runtime.attention_plugin._record_sparse_validation(
+            impl, "prefill", SimpleNamespace(_sparsity_total=100, _sparsity_skipped=50), 1024
+        )
+    counters = vllm_runtime.collect_sparse_validation(runner)
+    stats = summarize_validation([counters], 0.5, 0.02, ("prefill",))
+    assert stats["prefill"]["passed"] is (fault is None)
+    assert counters["prefill"]["unmeasured_launches"] == int(fault == "missing_counter")
+    assert all(impl._sparse_validation_stats is None for impl in impls)
+    assert model["ignored_attn"].impl is ignored_impl
+    # A fresh serving install must select exactly the layers that were measured.
+    fresh_model = nn.ModuleDict({name: _bare_attention() for name in model})
+    serving = vllm_runtime.install_vllm_sparse_attention_from_checkpoint(
+        _model_runner(fresh_model, sparse_metadata=candidate)
+    )
+    assert serving.sparse_layers == report.installed_layers
+
+
+@pytest.mark.parametrize("mismatched_phase", [None, "prefill", "decode"])
+def test_tp_validation_requires_matching_rank_launches(mismatched_phase):
+    candidate = build_sparse_attention_config(
+        {phase: {"a": 4.0, "b": 0.0} for phase in ("prefill", "decode")}, 0.5
+    )
+    workers = []
+    for rank in range(2):
+        model = nn.ModuleDict({"self_attn": _bare_attention()})
+        runner = _model_runner(model)
+        runner.vllm_config.parallel_config.tensor_parallel_size = 2
+        vllm_runtime.install_vllm_skip_softmax_calibration(runner)
+        vllm_runtime.enable_sparse_validation(runner, candidate)
+        impl = model["self_attn"].impl
+        for phase in ("prefill", "decode"):
+            for _ in range(2 if rank == 1 and phase == mismatched_phase else 1):
+                vllm_runtime.attention_plugin._record_sparse_validation(
+                    impl, phase, SimpleNamespace(_sparsity_total=100, _sparsity_skipped=50), 1024
+                )
+        workers.append(vllm_runtime.collect_sparse_validation(runner))
+        assert impl._sparse_validation_stats is None
+    stats = summarize_validation(workers, 0.5, 0.02)
+    for phase in ("prefill", "decode"):
+        assert stats[phase]["complete"] is (phase != mismatched_phase)
+        assert stats[phase]["passed"] is (phase != mismatched_phase)
 
 
 def test_sparse_install_from_checkpoint_is_validation_atomic():

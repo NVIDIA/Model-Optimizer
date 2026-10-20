@@ -106,10 +106,9 @@ def test_dataset_masks_response_positions_and_pads_to_train_len(tmp_path):
     assert batch["teacher_topk_prob"].shape == (3, 16, TOPK)
 
 
-# The pure-TVD objectives, named rather than taken from SPARSE_CAPABLE_LOSSES: the
-# reference below is the TVD formula, and a later objective that adds a term to it
-# would silently join this parametrization and fail against the wrong reference.
-@pytest.mark.parametrize("loss_fn", ["tvd", "tvd_deploy"])
+# Named rather than taken from SPARSE_CAPABLE_LOSSES, so a later objective cannot
+# silently join this parametrization and be scored against the wrong reference.
+@pytest.mark.parametrize("loss_fn", ["tvd", "tvd_deploy", "tvd_ce"])
 def test_sparse_tvd_matches_one_minus_acceptance(loss_fn):
     """The sparse path must compute the same acceptance objective as the dense one.
 
@@ -140,8 +139,13 @@ def test_sparse_tvd_matches_one_minus_acceptance(loss_fn):
         else torch.softmax(draft_logits[:, :-1].float(), dim=-1)
     )
     q = q_full.gather(-1, tok[:, 1:])
-    expected = 0.5 * ((p - q).abs().sum(-1) + (1.0 - q.sum(-1)).clamp_min(0.0))
-    assert torch.allclose(loss, expected.mean(), atol=1e-5)
+    expected = 0.5 * ((p - q).abs().sum(-1) + (1.0 - q.sum(-1)).clamp_min(0.0)).mean()
+    if loss_fn == "tvd_ce":
+        # one assertion pins the CE target, the shift and both weights
+        top1 = tok[:, 1:].gather(-1, prob[:, 1:].argmax(-1, keepdim=True)).squeeze(-1)
+        ce = torch.nn.functional.cross_entropy(draft_logits[0, :-1], top1[0])
+        expected = model.external_tvd_alpha * expected + model.external_ce_alpha * ce
+    assert torch.allclose(loss, expected, atol=1e-5)
 
 
 def test_every_sparse_capable_loss_runs_and_backprops(tmp_path):
@@ -403,6 +407,38 @@ def test_warns_when_stored_policy_is_a_truncated_nucleus(tmp_path):
         )
     with pytest.warns(UserWarning, match="stored teacher policy sums to"):
         SparsePolicyDataset([str(p)], max_length=32)
+
+
+def test_tvd_ce_ignores_rows_the_dump_left_empty():
+    """An empty policy row has no argmax; CE must not read that as a target of id 0.
+
+    The ragged fallback zero-fills a short row while ``__getitem__`` still scores the
+    position, and TVD only degrades to its bounded out-of-support term there. CE's
+    penalty is unbounded, so an unguarded target would drag the draft toward token 0.
+    """
+    torch.manual_seed(0)
+    seq = 4
+    tok = torch.randint(1, VOCAB, (1, seq, TOPK))
+    prob = torch.rand(1, seq, TOPK).softmax(-1)
+    prob[0, 2] = 0.0  # the row the dump never filled
+    tok[0, 2] = 0
+    mask = torch.ones(1, seq)
+    m = _draft(external_loss="tvd_ce")
+
+    # neither the loss nor the accuracy may depend on what the draft predicts there.
+    # b spikes on a different id: with both uniform their argmax is also id 0, so the
+    # accuracies would agree even with the guard removed.
+    logits = torch.randn(1, seq, VOCAB)
+    a = logits.clone()
+    a[0, 1] = torch.full((VOCAB,), -30.0).scatter(-1, torch.tensor([0]), 30.0)
+    b = logits.clone()
+    b[0, 1] = torch.full((VOCAB,), -30.0).scatter(-1, torch.tensor([1]), 30.0)
+    # shift: position 2 of the policy is scored against draft position 1
+    la, acc_a = m.compute_sparse_loss(a, tok, prob, mask)
+    lb, acc_b = m.compute_sparse_loss(b, tok, prob, mask)
+    assert torch.allclose(la, lb), f"empty row still steers the CE term: {la} vs {lb}"
+    assert acc_a == acc_b, "empty row still counts toward accuracy"
+    assert torch.isfinite(la)
 
 
 def _write_sourced(path, sources):

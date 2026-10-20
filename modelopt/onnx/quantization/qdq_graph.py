@@ -18,6 +18,7 @@
 import re
 from typing import Any, cast
 
+import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
 from onnx_graphsurgeon.ir.graph import Graph
@@ -50,8 +51,8 @@ __all__ = [
     "get_layer_precision_mapping",
     "get_resize_scales",
     "print_stat",
-    "remove_dla_scalar_input_qdq",
     "remove_partial_input_qdq",
+    "remove_scalar_input_qdq",
     "should_quantize_to_8bit",
     "validate_8bit_layers",
 ]
@@ -387,19 +388,49 @@ def build_non_residual_input_map(
     return non_residual_inputs, no_quantize_inputs
 
 
-def remove_dla_scalar_input_qdq(graph: Graph) -> None:
-    """Keep scalar Mul/Div coefficients and Pad fill values constant for DLA.
+def _scalar_from_constant_node(constant: Node, name: str) -> gs.Constant | None:
+    """Resolve a ``Constant`` node's value to a ``gs.Constant`` across attribute forms.
 
-    Q/DQ turns these constants into tensor inputs, preventing DLA from evaluating
-    Pad's fill value or broadcasting a scalar coefficient. Bypass only the
-    relevant consumer edge so shared Conv weights and activation Q/DQ stay intact.
+    GraphSurgeon imports ``Constant(value=...)`` as a ``gs.Constant`` tensor, but the
+    scalar/list attribute forms (``value_float``, ``value_int``, ``value_floats``,
+    ``value_ints``) arrive as plain Python attributes. Convert those into a scalar
+    ``gs.Constant`` too, so the size/rank check below still catches them.
     """
-    scalar_input_indices = {"Mul": (0, 1), "Div": (1,), "Pad": (2,)}
+    value = constant.attrs.get("value")
+    if isinstance(value, gs.Constant):
+        return value
+    for attr, dtype in (
+        ("value_float", np.float32),
+        ("value_floats", np.float32),
+        ("value_int", np.int64),
+        ("value_ints", np.int64),
+    ):
+        if attr in constant.attrs:
+            return gs.Constant(name, values=np.asarray(constant.attrs[attr], dtype=dtype))
+    return None
+
+
+def remove_scalar_input_qdq(graph: Graph, target_dla: bool = False) -> None:
+    """Keep single-element (scalar) constant inputs unquantized.
+
+    A per-tensor Q/DQ on a rank-0 (0-D) constant breaks TensorRT's ONNX parser
+    (``convertAxis`` asserts the axis lies in ``[0, nbDims]`` but ``nbDims == 0``),
+    so rank-0 constant operands are always kept unquantized for every op.
+
+    When ``target_dla`` is set, single-element Mul/Div coefficients and Pad fill
+    values are also kept constant: Q/DQ turns these constants into tensor inputs,
+    preventing DLA from evaluating Pad's fill value or broadcasting a scalar
+    coefficient. Only the relevant consumer edge is bypassed so shared Conv
+    weights and activation Q/DQ stay intact.
+    """
+    dla_scalar_indices = {"Mul": (0, 1), "Div": (1,), "Pad": (2,)}
     for node in graph.nodes:
-        for index in scalar_input_indices.get(node.op, ()):
-            if index >= len(node.inputs) or not node.inputs[index].inputs:
+        if node.op in ("QuantizeLinear", "DequantizeLinear"):
+            continue
+        for index, tensor in enumerate(node.inputs):
+            if not tensor.inputs:
                 continue
-            dequantize = node.inputs[index].inputs[0]
+            dequantize = tensor.inputs[0]
             if dequantize.op != "DequantizeLinear" or not dequantize.inputs[0].inputs:
                 continue
             quantize = dequantize.inputs[0].inputs[0]
@@ -408,8 +439,15 @@ def remove_dla_scalar_input_qdq(graph: Graph) -> None:
             source = quantize.inputs[0]
             value = source
             if source.inputs and source.inputs[0].op == "Constant":
-                value = source.inputs[0].attrs.get("value")
-            if isinstance(value, gs.Constant) and value.values.size == 1:
+                value = _scalar_from_constant_node(source.inputs[0], source.name)
+            if not isinstance(value, gs.Constant) or value.values.size != 1:
+                continue
+            # A per-tensor Q/DQ on a rank-0 constant breaks the TensorRT parser,
+            # so strip it for any op. Under target_dla, also keep single-element
+            # Mul/Div coefficients and Pad fill values foldable.
+            if value.values.ndim == 0 or (
+                target_dla and index in dla_scalar_indices.get(node.op, ())
+            ):
                 node.inputs[index] = source
     graph.cleanup().toposort()
 

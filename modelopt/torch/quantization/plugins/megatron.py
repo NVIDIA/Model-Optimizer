@@ -58,6 +58,7 @@ from modelopt.torch.utils.distributed import ParallelState
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import maybe_promote_nvfp4_static_quantizer
+from ..ggml.common import PINNED_PAYLOAD_PREFIX
 from ..nn import (
     GroupedQuantizer,
     QuantModule,
@@ -564,7 +565,7 @@ class _MegatronParallelLinear(_ParallelLinear):
                 self._process_quantizer_amax(k, v, quantizer_state_dict)
             elif k == "input_quantizer._pre_quant_scale":
                 self._process_activation_quantizer_pre_quant_scale(k, v, quantizer_state_dict)
-            elif self._parameter_to_keep_in_quantizer_state_dict(k):
+            elif self._parameter_to_keep_in_quantizer_state_dict(k) or PINNED_PAYLOAD_PREFIX in k:
                 quantizer_state_dict[k] = v
             elif "quantizer" in k:
                 warn_rank_0(
@@ -616,7 +617,8 @@ class _MegatronColumnParallelLinear(_MegatronParallelLinear):
                 continue
             if "weight_quantizer." in k:
                 weight_quantizer_axis = self.get_submodule(k.rsplit(".", 1)[0]).axis
-                if weight_quantizer_axis is not None:
+                # GGML payloads are ``[out_features, in_features / block, block_bytes]``.
+                if weight_quantizer_axis is not None or PINNED_PAYLOAD_PREFIX in k:
                     shard_axis_dict[k] = 0
         return shard_axis_dict
 
@@ -654,7 +656,7 @@ class _MegatronRowParallelLinear(_MegatronParallelLinear):
                     weight_quantizer_axis = self.weight_quantizer[0].axis
                 elif "weight_quantizer.1." in k:
                     weight_quantizer_axis = self.weight_quantizer[1].axis
-                if isinstance(weight_quantizer_axis, tuple):
+                if isinstance(weight_quantizer_axis, tuple) or PINNED_PAYLOAD_PREFIX in k:
                     shard_axis_dict[k] = 1
             if k == "input_quantizer._pre_quant_scale":
                 shard_axis_dict[k] = 0
@@ -1190,6 +1192,11 @@ AutoQuantizeGradientSearcher.register_custom_support(
 def get_mcore_layerwise_calibration_layers(
     model: torch.nn.Module,
 ) -> list[torch.nn.Module] | torch.nn.ModuleList | None:
+    # VLM wrappers (e.g. GLM-5.3-Flash) keep the decoder only on their language model.
+    if not hasattr(model, "decoder") and isinstance(
+        getattr(model, "language_model", None), MegatronModule
+    ):
+        model = model.language_model
     if not hasattr(model, "decoder") or not hasattr(model.decoder, "layers"):
         return None
     decoder_layers = model.decoder.layers

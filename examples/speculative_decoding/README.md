@@ -165,6 +165,7 @@ torchrun --nproc_per_node 8 main.py \
 | `soft_ce` | cross-entropy against the base's soft distribution (the EAGLE offline objective) |
 | `tvd` | total-variation distance between the two full distributions |
 | `tvd_deploy` | the same, with both sides put through the serving filter (`external_top_k`, then `external_top_p`) first, so the loss is the acceptance the deployed pair sees |
+| `tvd_ce` | `tvd` plus a cross-entropy term on the base's argmax token, weighted by `external_tvd_alpha` / `external_ce_alpha` (default 0.9 / 0.1). TVD is bounded and so ranks weakly among tokens inside the base's support; CE's log penalty does not |
 
 Under rejection sampling the acceptance probability is exactly `sum(min(p, q))`,
 so `tvd_deploy` is `1 - acceptance` — the deployment metric itself rather than a
