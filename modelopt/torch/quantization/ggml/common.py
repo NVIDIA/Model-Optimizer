@@ -152,9 +152,9 @@ def _matching_cache(
     """The quantizer's cached payload if it was packed from ``inputs``, else None.
 
     It matches only while the weight is unchanged since it was packed: the key carries the
-    tensor's version counter, so an in-place update misses. For trainable weights under grad,
-    it additionally compares a device-resident content fingerprint because optimizers may update
-    them without incrementing that counter. With ``any_contiguous_view`` it also matches another
+    tensor's version counter, so an in-place update misses. For trainable weights, it additionally
+    compares a device-resident content fingerprint because optimizers may update them without
+    incrementing that counter. With ``any_contiguous_view`` it also matches another
     contiguous view of the same values: TensorQuantizer hands fake quant the weight reshaped into
     256-value blocks, so export, which holds the weight itself, sees a different shape over the
     same elements in the same order, and so the same GGML blocks.
@@ -168,7 +168,9 @@ def _matching_cache(
         and cache.format_name == format_name
     ):
         return None
-    trainable_weight = inputs.requires_grad
+    # ``inputs`` is often a view created in the forward; under no_grad its requires_grad is False
+    # even for a trainable parameter, so read it from the parameter itself.
+    trainable_weight = _cache_base(inputs).requires_grad
     if (
         (
             trainable_weight
