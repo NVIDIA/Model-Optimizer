@@ -691,7 +691,6 @@ def _test_fp8_real_quantize_helper(rank, size):
     assert real_quant_mem < cur_mem
 
 
-@skip_flaky_on_blackwell
 def test_fp8_real_quantize(dist_workers):
     dist_workers.run(_test_fp8_real_quantize_helper)
 
@@ -1726,7 +1725,6 @@ def _test_layerwise_calibrate_vlm_text_forward_loop(drive_wrapper, rank, size):
     assert all(m.input_quantizer.amax is not None for m in calibrated)
 
 
-@skip_flaky_on_blackwell
 @pytest.mark.parametrize("drive_wrapper", [False, True])
 def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1, drive_wrapper):
     dist_workers_size_1.run(partial(_test_layerwise_calibrate_vlm_text_forward_loop, drive_wrapper))

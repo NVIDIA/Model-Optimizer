@@ -79,12 +79,6 @@ def megatron_worker_teardown(rank, world_size):
             apex_destroy()
         except Exception as e:
             print(f"Error destroying model parallel with Apex: {e}")
-    # destroy_model_parallel() only drops Megatron's references to its NCCL groups, so every test's
-    # communicators (and their GPU buffers) piled up in the persistent workers (~20 groups and
-    # ~0.4 GiB per test), slowing later tests until they timed out. Destroy all but the default.
-    for group in list(torch.distributed.distributed_c10d._world.pg_map):
-        if group is not torch.distributed.GroupMember.WORLD:
-            torch.distributed.destroy_process_group(group)
     torch.cuda.empty_cache()
 
 
