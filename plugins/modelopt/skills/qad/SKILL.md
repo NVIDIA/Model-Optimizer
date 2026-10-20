@@ -1,11 +1,11 @@
 ---
 name: qad
 description: >-
-  Run explicitly requested ModelOpt Quantization-Aware Distillation (QAD) on
-  Slurm through Megatron Bridge (recommended) or Hugging Face Transformers to
+  Run explicitly requested ModelOpt Quantization-Aware Distillation (QAD) through
+  Megatron Bridge (recommended) or Hugging Face Transformers to
   recover a measured BF16-to-PTQ accuracy gap.
   Use only when the user explicitly asks for QAD, including its topology, data
-  preparation, Slurm launch, resume, checkpoint export, or recovery decisions.
+  preparation, launch, resume, checkpoint export, or recovery decisions.
 ---
 
 # ModelOpt Quantization-Aware Distillation
@@ -27,11 +27,12 @@ For Megatron Bridge, before constructing commands, read:
 - `examples/megatron_bridge/README.md`, especially PTQ, data preparation, QAD,
   export, and Slurm usage
 - `examples/megatron_bridge/{quantize.py,distill.py}` via `--help`
-- the common skill's `environment-setup.md`, `workspace-management.md`, and
-  `slurm-setup.md`; also its `remote-execution.md` for remote Slurm
+- the common skill's `environment-setup.md` and `workspace-management.md`;
+  for Slurm, also read `slurm-setup.md` and, when remote, `remote-execution.md`
 
 Treat the example README and `--help` output as authoritative for mutable flags,
-commands, containers, and checkpoint formats. This skill supports Slurm only.
+commands, containers, and checkpoint formats. Both frameworks can run on local
+GPUs or Slurm; use the user's requested environment.
 
 For Hugging Face, use the same common setup guidance, but replace the
 Bridge-specific reading above with
@@ -98,17 +99,17 @@ Use the HF tutorial's evaluation and checkpoint resume guidance.
 | Checkpoint interval | 50 iterations |
 | Loss logging | every 10 iterations |
 | Recovery benchmark | 150, then every 100 iterations while training runs |
-| Slurm duration exit | 220 minutes for a 4-hour allocation |
+| Slurm duration exit | When using Slurm: 220 minutes for a 4-hour allocation |
 
 ### Run policy
 
 - Keep `train_iters=1000` and leave `exit_interval` unset.
-- From initial step timing, submit only enough sequential jobs to reach
+- On Slurm, use initial step timing to submit only enough sequential jobs to reach
   checkpoint 150; never submit through iteration 1000 upfront. At each recovery
   checkpoint, submit to the next only after its targeted evaluation and any
   triggered full suite, and only if the BF16 gap remains at least 1% and
   recovery has neither plateaued nor regressed.
-- Give all training jobs the same run-specific job name and
+- On Slurm, give all training jobs the same run-specific job name and
   `--dependency=singleton`; record job IDs and, on any stop, cancel pending jobs
   before the active job.
 - Cancel on non-finite loss, repeated skipped iterations, or a sustained spike.
@@ -121,5 +122,5 @@ Use the HF tutorial's evaluation and checkpoint resume guidance.
 - After a duration exit, resume the latest QAD checkpoint in the same output
   directory with unchanged prepared data paths/cache, seed, topology, optimizer,
   scheduler, iteration, and consumed-sample state; do not restart from PTQ.
-- Report the PTQ recipe, data sample, Slurm topology, loss/state, checkpoints,
+- Report the PTQ recipe, data sample, training topology, loss/state, checkpoints,
   and comparable BF16/PTQ/QAD results.
