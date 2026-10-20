@@ -1407,9 +1407,6 @@ def load_and_prepare_ep(
     require_transformers(
         "5.6", "ModelOpt DP=EP expert-parallel PTQ (transformers MoE EP framework)"
     )
-    # The loads below, and the checkpoint recorded for the export to read the unplaced tensors back
-    # from, take the local snapshot: a Hub ID recorded there would leave the export nothing to read.
-    ckpt_path = _resolve_checkpoint_dir(ckpt_path, torch.distributed.get_rank())
     from torch.distributed.device_mesh import init_device_mesh
     from transformers import AutoConfig
     from transformers.distributed import DistributedConfig
@@ -1421,6 +1418,10 @@ def load_and_prepare_ep(
             config_kwargs["attn_implementation"] = attn_implementation
         hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
     dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
+    # The weights load, and the checkpoint recorded for the export to read the unplaced tensors back
+    # from, take the local snapshot: a Hub ID recorded there would leave the export nothing to read.
+    # Resolved once the plan and the config pass, so a refused load downloads nothing.
+    ckpt_path = _resolve_checkpoint_dir(ckpt_path, torch.distributed.get_rank())
 
     # Two INDEPENDENT meshes (NeMo-AutoModel style), named by the model part they govern -- two
     # factorizations of the same world:

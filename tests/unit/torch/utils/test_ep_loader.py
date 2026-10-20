@@ -30,7 +30,7 @@ from torch import nn
 
 pytest.importorskip("transformers")
 
-from transformers import AutoConfig, FineGrainedFP8Config
+from transformers import FineGrainedFP8Config
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils import moe
@@ -121,34 +121,32 @@ def test_the_loader_refuses_a_plan_for_another_world(gloo_world_of_one):
         load_and_prepare_ep("unused", DistributionPlan(2, ep_size=2))
 
 
-def test_a_hub_id_is_made_local_before_anything_reads_it(monkeypatch, tmp_path):
+def test_a_hub_id_is_made_local_before_the_weights_load(monkeypatch):
     """The export reads the tensors the load could not place back from the checkpoint it records,
-    which must be a local directory: a Hub ID there leaves the export nothing to read."""
+    which must be a local directory: a Hub ID there leaves the export nothing to read. The load
+    resolves it once the plan and the config pass, before anything reads a weight."""
 
-    class _ReadError(Exception):
-        """Stops the load at its first read of the checkpoint."""
+    class _ResolvedError(Exception):
+        """Stops the load where it resolves the checkpoint."""
 
-    reads = []
+    resolved = []
 
-    def read(path, **kwargs):
-        reads.append(path)
-        raise _ReadError
+    def resolve(path, rank):
+        resolved.append(path)
+        raise _ResolvedError
 
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(dist, "size", lambda group=None: 2)
     monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
     monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
-    monkeypatch.setattr(
-        model_load_utils,
-        "_resolve_checkpoint_dir",
-        lambda path, rank: str(tmp_path) if path == "org/model" else path,
-    )
-    monkeypatch.setattr(AutoConfig, "from_pretrained", read)
+    monkeypatch.setattr(model_load_utils, "_resolve_checkpoint_dir", resolve)
 
-    with pytest.raises(_ReadError):
-        load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2))
+    with pytest.raises(_ResolvedError):
+        load_and_prepare_ep(
+            "org/model", DistributionPlan(2, ep_size=2), hf_config=SimpleNamespace()
+        )
 
-    assert reads == [str(tmp_path)]
+    assert resolved == ["org/model"]
 
 
 # ------------------------------------------------------------------------ quant wrappers
