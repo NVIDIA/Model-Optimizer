@@ -538,7 +538,9 @@ def load_pretrained(
     trust_remote_code = kwargs.get("trust_remote_code", False)
     hf_config = kwargs.get("hf_config")
     if distribution is None:
-        plan, hf_config = resolve_distribution_plan(ckpt_path, trust_remote_code=trust_remote_code)
+        plan, hf_config = resolve_distribution_plan(
+            ckpt_path, trust_remote_code=trust_remote_code, **hub_options
+        )
         if _route(plan) is not None:
             kwargs.setdefault("hf_config", hf_config)
     elif isinstance(distribution, DistributionPlan):
@@ -886,6 +888,9 @@ def resolve_distribution_plan(
     trust_remote_code: bool = False,
     ep_size: int | str | None = None,
     dense: str | None = None,
+    token: str | bool | None = None,
+    cache_dir: str | os.PathLike | None = None,
+    local_files_only: bool = False,
 ) -> tuple[DistributionPlan, PretrainedConfig]:
     """Decide how this run distributes ``ckpt_path``'s model over its ranks.
 
@@ -911,6 +916,10 @@ def resolve_distribution_plan(
     or the world size as a number, shards) from rank 0's environment, both defaulting to
     ``"auto"``. A single process reads neither and holds the whole model, unless ``dense="fsdp"``
     asks for FSDP2 on one rank.
+
+    ``token``, ``cache_dir`` and ``local_files_only`` are what resolving a Hub model ID
+    (:func:`ensure_local_checkpoint`) and reading the config take, the config for custom code its
+    ``auto_map`` names in another Hub repo.
     """
     from modelopt.torch.utils import distributed as dist
 
@@ -919,8 +928,16 @@ def resolve_distribution_plan(
     read: list[tuple[str, PretrainedConfig]] = []
 
     def checkpoint_read() -> bool:
-        _, local_path = ensure_local_checkpoint(ckpt_path)
-        config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        _, local_path = ensure_local_checkpoint(
+            ckpt_path, token=token, cache_dir=cache_dir, local_files_only=local_files_only
+        )
+        config = AutoConfig.from_pretrained(
+            local_path,
+            trust_remote_code=trust_remote_code,
+            token=token,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+        )
         read.append((local_path, config))
         return True
 
