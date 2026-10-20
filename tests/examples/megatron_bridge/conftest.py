@@ -18,6 +18,7 @@ import os
 import shutil
 
 import pytest
+import transformers
 import yaml
 from _test_utils.examples.megatron_example_runner import (
     _load_example_module,
@@ -68,7 +69,9 @@ class FakeHubCheckpoint:
     ``checkpoint`` itself, for a script that must read its argument before resolving it) to a copy
     of ``checkpoint`` holding the file ``marker``, and returns ``hub_model_id`` to pass on the
     command line: a step that read it without resolving it fails, and ``marker`` reaching an
-    export shows the export read the resolved copy. Only a single-rank step runs in this process
+    export shows the export read the resolved copy. Like the Hugging Face cache would for a real Hub
+    ID, ``AutoTokenizer.from_pretrained(hub_model_id)`` loads the copy's tokenizer: Megatron-Bridge
+    loads the tokenizer a checkpoint records. Only a single-rank step runs in this process
     and sees the patch, so with ``nproc > 1`` nothing is patched, ``checkpoint`` is returned
     unchanged and ``active`` is False: check the marker and the Hub ID only when it is True.
     """
@@ -95,6 +98,15 @@ class FakeHubCheckpoint:
         for script in scripts:
             module = _load_example_module(script, "megatron_bridge")
             self._monkeypatch.setattr(module, "ensure_local_checkpoint", ensure_local_checkpoint)
+
+        load_tokenizer = transformers.AutoTokenizer.from_pretrained
+
+        def from_pretrained(name, *args, **kwargs):
+            if str(name) == self.hub_model_id:
+                name = str(self._resolved)
+            return load_tokenizer(name, *args, **kwargs)
+
+        self._monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", from_pretrained)
         return self.hub_model_id
 
     @staticmethod
