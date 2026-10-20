@@ -111,9 +111,11 @@ class RuntimeClient(ABC):
         Args:
             compiled_model: Compiled device model from compilation service.
             inputs: Inputs to do inference on server.
-            io_shapes: Defines the input and output shapes of the model. These shapes must be provided by the user
-            when TensorRT cannot automatically infer them, such as in cases where dynamic dimensions are used for
-            model outputs. To specify the shapes, use the following format:
+            io_shapes: Optional input buffer shapes and output shapes. TensorRT uses the current dynamic
+            input dimensions in profile 0, padding smaller inputs to fixed or profile-minimum dimensions.
+            Supply correct output shapes when they cannot be inferred. Explicit output shapes are checked
+            against inferred dimensions when available.
+            For example:
                 io_shapes = {"out.0": [2, 4, 64, 64]}
 
         Returns:
