@@ -150,6 +150,9 @@ class TRTLocalClient(RuntimeClient):
             )
 
         def initialize_input_output_tensors(self, engine):
+            # Set selected profile idx
+            self.execution_context.set_optimization_profile_async(0, self.stream.cuda_stream)
+
             # Allocate torch tensors for inputs and outputs
             input_tensors = []
             output_tensors = []
@@ -157,7 +160,12 @@ class TRTLocalClient(RuntimeClient):
                 tensor_name = engine.get_tensor_name(idx)
                 if tensor_name not in self.io_shapes:
                     try:
-                        tensor_shape = engine.get_tensor_profile_shape(tensor_name, 0)[0]
+                        tensor_shape = engine.get_tensor_shape(tensor_name)
+                        if any(dim < 0 for dim in tensor_shape):
+                            if engine.get_tensor_mode(tensor_name) == trt.TensorIOMode.INPUT:
+                                tensor_shape = engine.get_tensor_profile_shape(tensor_name, 0)[0]
+                            else:
+                                tensor_shape = self.execution_context.get_tensor_shape(tensor_name)
                     except Exception as e:
                         raise ValueError(
                             f"Shape for tensor {tensor_name} is not specified. "
@@ -180,18 +188,9 @@ class TRTLocalClient(RuntimeClient):
                         tensor_name,
                         output_tensors[idx - len(input_tensors)].data_ptr(),
                     )
-            assert self.execution_context.all_shape_inputs_specified, (
-                "Not all shape inputs are specified."
-            )
 
-            # Set selected profile idx
-            self.execution_context.set_optimization_profile_async(0, self.stream.cuda_stream)
-
-            # Assertion: to ensure all the shapes can be inferred when user does not provide them
-            if self.io_shapes == {}:
-                assert len(self.execution_context.infer_shapes()) == 0, (
-                    "Shapes of all the bindings cannot be inferred."
-                )
+            missing = self.execution_context.infer_shapes()
+            assert not missing, f"Shapes cannot be inferred for inputs: {missing}."
 
             return input_tensors, output_tensors
 
