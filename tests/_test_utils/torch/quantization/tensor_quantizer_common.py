@@ -523,6 +523,32 @@ class TensorQuantizerTester:
 class BlockQuantTester:
     device = None
 
+    @pytest.mark.parametrize(
+        "block_sizes",
+        [
+            {0: None, -1: 128},
+            {-2: None, 1: 128},
+            {0: 2, -1: None},
+            {-2: 2, 1: None},
+        ],
+    )
+    def test_full_dimension_block_sizes(self, block_sizes):
+        inputs = torch.stack([torch.full((128,), 127.0), torch.full((128,), 0.125)]).to(self.device)
+        quantizer = TensorQuantizer(
+            QuantizerAttributeConfig(num_bits=8, block_sizes=block_sizes),
+            if_quant=False,
+            if_calib=True,
+        )
+        quantizer(inputs)
+        quantizer.load_calib_amax()
+        quantizer.disable_calib()
+        quantizer.enable_quant()
+
+        assert quantizer.amax.numel() == 1
+        assert quantizer.amax.item() == 127.0
+        expected = torch.stack([inputs[0], torch.zeros_like(inputs[1])])
+        assert torch.equal(quantizer(inputs), expected)
+
     def test_simple(self):
         a = torch.randn(8, 4).to(self.device)
         amax_ref = a.view(-1, 2).abs().amax(dim=-1, keepdim=True)
