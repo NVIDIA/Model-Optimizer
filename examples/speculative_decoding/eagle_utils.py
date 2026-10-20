@@ -74,6 +74,14 @@ def make_speculative_data_module(
         aux_hidden_states_optional: accept dumps written with ``--no-aux-hidden-states``.
             Only modes that never read the aux planes may set this.
     """
+
+    # Validated once for every mode: each branch consumes sample_size differently
+    # (row select, shard slice, dataset limit) but the contract is the same.
+    # getattr: data_args is duck-typed across callers and some supply only the fields
+    # their own mode reads, so a hoisted check must not demand one they never set.
+    sample_size = getattr(data_args, "sample_size", -1)
+    if sample_size == 0 or sample_size < -1:
+        raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
     # Load chat template from file if provided
     chat_template = None
     if getattr(data_args, "chat_template", None):
@@ -155,6 +163,41 @@ def make_speculative_data_module(
                 chat_template=chat_template,
             )
 
+    elif mode == "sparse":
+        # Sparse teacher policy: the dump stores the base's top-k deployment
+        # distribution per response token instead of its hidden states, so no base
+        # forward (and no base lm_head) is needed at train time. Only the TVD
+        # objectives can consume it -- soft_ce wants full logits.
+        # Imported here, like the streaming dataset above, so the other modes do not
+        # pay for a module only this branch uses.
+        from modelopt.torch.speculative.external.sparse_data import (
+            SparsePolicyCollator,
+            SparsePolicyDataset,
+            discover_shards,
+        )
+
+        print_rank_0("Loading sparse teacher-policy data for external draft training...")
+        assert not data_args.vlm_processor, "Sparse data is not supported for VLM."
+        # Shared with the pre-build instructions: a hand-built cache is only reused if it
+        # was keyed on the same shard list, so discovery lives in one place.
+        files = discover_shards(data_args.sparse_data_path)
+        if not files:
+            raise ValueError(f"No .jsonl.gz or .jsonl files found in {data_args.sparse_data_path}")
+        train_dataset = SparsePolicyDataset(
+            files,
+            max_length=train_len,
+            limit=data_args.sample_size if data_args.sample_size > 0 else None,
+            source_weights=data_args.sparse_source_weights,
+            cache_dir=data_args.sparse_cache_dir,
+        )
+        print_rank_0(
+            f"Loaded {len(train_dataset)} records from {len(files)} shard(s), "
+            f"teacher top-k={train_dataset.top_k}"
+        )
+        if data_args.sparse_source_weights:
+            print_rank_0(f"[sparse] source weights applied: {data_args.sparse_source_weights}")
+        data_collator = SparsePolicyCollator(train_len=train_len)
+
     else:
         print_rank_0("Loading pre-processed data for offline training...")
         assert not data_args.vlm_processor, "Offline data is not supported for VLM."
@@ -165,8 +208,6 @@ def make_speculative_data_module(
             raise ValueError(f"No .pt files found in {data_args.offline_data_path}")
 
         # sample_size=-1 means use all samples; positive integer selects that many
-        if data_args.sample_size == 0 or data_args.sample_size < -1:
-            raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
         if data_args.sample_size > 0:
             dumped_files = dumped_files[: data_args.sample_size]
         train_dataset = OfflineSupervisedDataset(

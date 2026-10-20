@@ -45,9 +45,7 @@ jobs:
         include:
           - example: gpu
             timeout: 60
-            # Pinned to 26.05: benchmark.py uses trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH,
-            # which newer TensorRT (26.06) removed. Bump once the source is updated for TensorRT 10.
-            container_image: nvcr.io/nvidia/pytorch:26.05-py3
+            container_image: nvcr.io/nvidia/pytorch:26.07-py3
           - example: gpu_megatron
             timeout: 60
             container_image: nvcr.io/nvidia/nemo:26.08
@@ -108,6 +106,11 @@ jobs:
     needs: [pr-gate, gpu-tests]
     runs-on: ubuntu-latest
     steps:
+      - name: Stacked PR, GPU tests deferred
+        if: needs.pr-gate.outputs.stacked == 'true'
+        run: |
+          echo "::error::This PR targets another PR's branch, so GPU tests are deferred until it targets main. After retargeting, push or use 'Re-run all jobs'."
+          exit 1
       - name: Required GPU tests did not succeed
         if: ${{ needs.pr-gate.result != 'success' || (needs.pr-gate.outputs.any_changed == 'true' && needs.gpu-tests.result != 'success') }}
         run: exit 1

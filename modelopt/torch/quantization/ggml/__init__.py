@@ -15,9 +15,11 @@
 
 """GGML-compatible block quantization formats."""
 
-# Importing these installs the TensorQuantizer dispatch entry and the GPTQ helper.
+# Importing these installs the TensorQuantizer dispatch entry, the GPTQ helper and the imatrix
+# encoder.
 from . import backend as _backend
 from . import gptq as _gptq
+from . import imatrix as _imatrix
 from .iq1_m import *
 from .iq1_m import __all__ as _iq1_m_all
 from .iq1_s import *

@@ -15,15 +15,29 @@
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import DistributedWorkerPool, default_worker_teardown
+from _test_utils.torch.distributed.utils import (
+    DistributedWorkerPool,
+    default_worker_teardown,
+    get_live_pool,
+)
 
 
 @pytest.fixture(scope="session")
-def dist_workers():
-    pool = DistributedWorkerPool(
-        world_size=torch.cuda.device_count(),
-        backend="nccl",
-        teardown_fn=default_worker_teardown,
+def _dist_pools():
+    pools = {}
+    yield pools
+    for pool in pools.values():
+        pool.shutdown()
+
+
+@pytest.fixture
+def dist_workers(_dist_pools):
+    """The session-wide pool; replaced if an earlier test hung and killed it."""
+    world_size = torch.cuda.device_count()
+    return get_live_pool(
+        _dist_pools,
+        world_size,
+        lambda: DistributedWorkerPool(
+            world_size=world_size, backend="nccl", teardown_fn=default_worker_teardown
+        ),
     )
-    yield pool
-    pool.shutdown()

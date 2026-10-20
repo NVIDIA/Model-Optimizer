@@ -25,6 +25,7 @@ from specdec_bench.utils import (
     get_tokenizer,
     postprocess_base,
     postprocess_gptoss,
+    stop_runner,
 )
 from tqdm.asyncio import tqdm
 
@@ -226,22 +227,24 @@ def run_simple(args):
 
     end_id = tokenizer.eos_token_id if not args.ignore_eos else -1
 
-    asyncio.run(
-        run_loop(
-            runner,
-            dataset,
-            tokenizer,
-            args.output_length,
-            postprocess,
-            args.concurrency,
-            end_id,
-            args.show_progress,
-            args.completions,
-            chat_template_args,
+    try:
+        asyncio.run(
+            run_loop(
+                runner,
+                dataset,
+                tokenizer,
+                args.output_length,
+                postprocess,
+                args.concurrency,
+                end_id,
+                args.show_progress,
+                args.completions,
+                chat_template_args,
+            )
         )
-    )
-
-    runner.clear_metrics()
+        runner.clear_metrics()
+    finally:
+        stop_runner(runner)
 
 
 if __name__ == "__main__":

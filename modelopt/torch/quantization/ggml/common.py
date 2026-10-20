@@ -154,8 +154,12 @@ def pinned_packed_weight(quantizer, format_name: str) -> torch.Tensor | None:
     return getattr(quantizer, _pin_name(format_name), None)
 
 
+# Prefix of the buffer holding a pinned payload; checkpoint code keeps buffers with it.
+PINNED_PAYLOAD_PREFIX = "_ggml_pinned_"
+
+
 def _pin_name(format_name: str) -> str:
-    return f"_ggml_pinned_{format_name}"
+    return f"{PINNED_PAYLOAD_PREFIX}{format_name}"
 
 
 def _matching_rows(table: torch.Tensor, rows: torch.Tensor) -> torch.Tensor | None:
@@ -381,6 +385,27 @@ def validate_weight(
         )
     if not weight.is_floating_point():
         raise TypeError(f"{format_name} requires a floating-point weight, got {weight.dtype}")
+
+
+# Floor on the per-column second moments, relative to their mean, so a column calibration never
+# activated still has some weight in the search.
+_IMPORTANCE_FLOOR = 1e-4
+
+
+def floored_second_moments(second_moments: torch.Tensor | None) -> torch.Tensor | None:
+    """The per-input-column ``E[x_j^2]``, floored at 1e-4 of its mean.
+
+    ``None`` when there is no statistic or it has no positive mean: a module no calibration token
+    reached (an idle MoE expert) would make every code score zero error, so it keeps the plain
+    search.
+    """
+    if second_moments is None:
+        return None
+    second_moments = second_moments.float()
+    mean = second_moments.mean()
+    if not mean > 0:
+        return None
+    return second_moments.clamp_min(_IMPORTANCE_FLOOR * mean)
 
 
 def importance_blocks(

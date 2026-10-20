@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Effective quantizer selection for ``model_type/nemotron_h/ptq/nvfp4-aggressive-mse``.
+"""Effective quantizer selection for ``models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/ptq/nvfp4-mse``.
 
 The recipe's ``quant_cfg`` is ordered and last-match-wins, so what a module ends up with
 depends on rule order as much as on rule content. The KV asymmetry in particular is load
@@ -32,7 +32,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
 from modelopt.torch.quantization.nn import QuantModule, QuantModuleRegistry, TensorQuantizer
 
-_RECIPE = "model_type/nemotron_h/ptq/nvfp4-aggressive-mse"
+_RECIPE = "models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/ptq/nvfp4-mse"
 _WIDTH = 32
 
 

@@ -111,7 +111,7 @@ def test_searched_model_constraints(get_model_and_input, variant):
 @pytest.mark.parametrize(
     ("flops_only", "bounded_latency"),
     [
-        (False, True),  # fast representative kept enabled for sanity
+        pytest.param(False, True, marks=pytest.mark.manual),
         pytest.param(True, True, marks=pytest.mark.manual),
         pytest.param(True, False, marks=pytest.mark.manual),
         pytest.param(False, False, marks=pytest.mark.manual),

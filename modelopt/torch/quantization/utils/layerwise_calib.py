@@ -348,10 +348,18 @@ class LayerActivationCollector:
                 )
                 bind_forward_method(layer, _patched_forward, "_original_forward")
 
+            # A VLM wrapper and its language model are both patched, and the wrapper's forward calls the
+            # language model's. Only the outermost call may turn the stop into ``None``: if the inner one
+            # did, the wrapper would go on running its own code on a ``None`` output.
+            depth = [0]
+
             def _early_stop_forward(module_self, *args, **kwargs):
+                depth[0] += 1
                 try:
                     return module_self._original_forward(*args, **kwargs)
                 except _EarlyStopForwardError:
+                    if depth[0] > 1:
+                        raise
                     return None
                 except RuntimeError as e:
                     if "meta" not in str(e).lower():
@@ -363,13 +371,31 @@ class LayerActivationCollector:
                         "decoder blocks. Use non-layerwise calibration for this "
                         "architecture."
                     ) from e
+                finally:
+                    depth[0] -= 1
 
-            bind_forward_method(self.model, _early_stop_forward, "_original_forward")
+            for root in self._early_stop_roots():
+                bind_forward_method(root, _early_stop_forward, "_original_forward")
         except Exception:
             self._cleanup_layers()
             raise
 
         self._patched = True
+
+    def _early_stop_roots(self) -> list[nn.Module]:
+        """Modules whose forward ends the pass early.
+
+        The model, plus the language model of a VLM wrapper, which text calibration drives directly.
+        """
+        roots = [self.model]
+        lm = getattr(self.model, "language_model", None)
+        if (
+            isinstance(lm, nn.Module)
+            and self._decoder_layers
+            and any(m is self._decoder_layers[0] for m in lm.modules())
+        ):
+            roots.append(lm)
+        return roots
 
     def _cleanup_layers(self):
         """Best-effort cleanup of any patched layers and model forward."""
@@ -378,8 +404,9 @@ class LayerActivationCollector:
                 if isinstance(layer, _SkipLayer):
                     self._decoder_layers[idx] = layer._original
 
-        if hasattr(self.model, "_original_forward"):
-            unpatch_forward_method(self.model, "_original_forward")
+        for root in self._early_stop_roots():
+            if hasattr(root, "_original_forward"):
+                unpatch_forward_method(root, "_original_forward")
 
         if self._decoder_layers is not None:
             for layer in self._decoder_layers:

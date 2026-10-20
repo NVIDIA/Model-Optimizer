@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Dense Qwen3.5 Vision Encoder and language model FP8 with FP8 KV-cache cast.
+# Dense Qwen3.5 vision-merger and language-model FP8 with FP8 KV-cache cast.
 
 # modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
@@ -25,9 +25,9 @@ imports:
 
 metadata:
   description: >-
-    W8A8 FP8 quantization of dense Qwen3.5 Vision Encoder and language-model Linear layers,
-    including any merger Linears, with FP8 KV-cache cast; patch embedding and vision-attention
-    operands remain in high precision.
+    W8A8 FP8 quantization of dense Qwen3.5 vision-merger and language-model Linears, with FP8
+    KV-cache cast; vision blocks and patch embedding remain in high precision for vLLM
+    compatibility.
 
 quantize:
   algorithm: max
@@ -36,6 +36,6 @@ quantize:
     - $import: w8a8_fp8_fp8
     - $import: kv_fp8_cast
     - $import: default_disabled_quantizers
-    # Re-enable visual Linears after the standard vision exclusion. The imported snippet also
+    # Re-enable merger Linears after the standard vision exclusion. The imported snippet also
     # keeps vision-attention BMM quantizers disabled as a final defense-in-depth rule.
     - $import: vision_fp8

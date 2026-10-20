@@ -34,17 +34,12 @@ import torch
 from common import (
     add_answer_only_loss_args,
     add_aux_layers_args,
-    load_chat_template,
+    load_conversations,
+    load_tokenizer,
     tokenize_with_loss_mask,
-    verify_generation_tags,
 )
-from datasets import load_dataset
 from tqdm import tqdm
-from transformers import AutoConfig, AutoTokenizer
-
-REMOVE_THINK_CHAT_TEMPLATE = (
-    "{% if '</think>' in content %}{% set content = content.split('</think>')[-1] %}{% endif %}"
-)
+from transformers import AutoConfig
 
 
 def _resolve_aux_layers_standalone(
@@ -194,19 +189,7 @@ def main(args: argparse.Namespace) -> None:
     from vllm.inputs import TokensPrompt
 
     # Load conversations
-    if args.input_data.is_file() and str(args.input_data).endswith(".jsonl"):
-        dataset = load_dataset("json", data_files=str(args.input_data), split="train")
-    elif args.input_data.is_dir():
-        dataset = load_dataset(
-            "json", data_files={"train": f"{args.input_data}/*.jsonl"}, split="train"
-        )
-    else:
-        raise ValueError(f"input_data must be a .jsonl file or directory, got: {args.input_data}")
-    print(f"Loaded {len(dataset)} conversations from {args.input_data}")
-
-    # Shard data
-    if args.dp_world_size > 1:
-        dataset = dataset.shard(num_shards=args.dp_world_size, index=args.dp_rank)
+    dataset = load_conversations(args.input_data, args.dp_rank, args.dp_world_size)
     print(f"Sharded to {len(dataset)} conversations for DP#{args.dp_rank}/{args.dp_world_size}")
 
     # Remove already dumped conversations
@@ -243,16 +226,7 @@ def main(args: argparse.Namespace) -> None:
     print(f"Extracting hidden states from layers {extract_layer_ids} (last = final output)")
 
     # Tokenize conversations
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    override_template = load_chat_template(args.chat_template)
-    if override_template is not None:
-        tokenizer.chat_template = override_template
-    if tokenizer.chat_template is not None:
-        tokenizer.chat_template = tokenizer.chat_template.replace(REMOVE_THINK_CHAT_TEMPLATE, "")
-    if args.answer_only_loss:
-        verify_generation_tags(tokenizer.chat_template)
+    tokenizer = load_tokenizer(args)
 
     # Prepare prompts for vLLM
     prompts = []

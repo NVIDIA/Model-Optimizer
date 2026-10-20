@@ -19,6 +19,7 @@ This example focuses on training with Hugging Face. To train with Megatron‑LM,
 | Online Training | Train draft model alongside base model in GPU memory | \[[Link](#training-draft-model-with-online-base-model)\] |
 | Offline Training | Train draft model using pre-computed hidden states | \[[Link](#training-draft-model-with-offline-base-model)\] |
 | Streaming Training | Train draft on hidden states streamed from a live vLLM serve (no disk dump) | \[[Link](#training-draft-model-with-streaming-base-model)\] |
+| External Draft Training | Train a standalone pretrained LM as the draft, not a grafted head | \[[Link](#training-a-standalone-external-draft-model)\] |
 | After Training | Evaluation, export and deployment | \[[Link](#model-validation)\] |
 | Advanced Usage | Data synthesis, vocab compression, and configuration | \[[Link](#advanced-usage)\] |
 | Support Matrix | Supported models for speculative decoding training | \[[Link](#support-matrix)\] |
@@ -131,6 +132,74 @@ Once we finish dumping hidden states, launch offline training pointing to the hi
 ## Training Draft Model with Streaming Base Model
 
 For large base models, you can stream hidden states from a live `vllm serve` instead of dumping them to disk: a co-located server produces the base-model hidden states on the fly and sends them to the trainer over NIXL RDMA, scaling to multiple nodes (dedicated serve replicas + DDP trainers). See the launcher examples, e.g. [Kimi-K2.5 streaming EAGLE3](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_eagle3_multi_node.yaml) and [streaming DFlash](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_dflash_multi_node.yaml).
+
+## Training a Standalone (External) Draft Model
+
+The modes above graft a draft head onto the target. The `external` mode instead
+trains an ordinary pretrained causal LM as the draft: it keeps its own embeddings
+and lm_head, the target is never modified, and the result exports as a plain HF
+checkpoint that TRT-LLM, vLLM and SGLang load with no mode-specific support. The
+draft must index the same vocabulary as the target.
+
+Training consumes dumped base hidden states, as in the offline flow above. Pass
+`--no-aux-hidden-states` when dumping: this mode never reads them and they
+dominate the dump size. Streaming feeds the same hidden states from a live
+`vllm serve` and is accepted here, though it has not been exercised for this
+mode. Online training is rejected: it produces no cached base outputs for the
+draft to be scored against.
+
+The TVD objectives only ever need the base's *truncated* next-token distribution,
+not a full hidden state, so they can instead read a much smaller dump of the
+base's top-k deployment policy. Produce one with:
+
+```bash
+python collect_hidden_states/compute_sparse_policy_hf.py \
+  --model $BASE_MODEL --input-data $CONVERSATIONS --output-dir $POLICY_DIR \
+  --top-k 20 --top-p 0.95 --answer-only-loss
+```
+
+and train against it with `data.sparse_data_path=$POLICY_DIR` in place of
+`data.offline_data_path` — the two are alternatives, not a pair:
+
+```bash
+torchrun --nproc_per_node 8 main.py \
+  --config ../../modelopt_recipes/general/speculative_decoding/external_draft.yaml \
+  model.model_name_or_path=$BASE_MODEL \
+  draft_model_name_or_path=$DRAFT_MODEL \
+  data.sparse_data_path=$POLICY_DIR \
+  external.external_loss=tvd \
+  external.external_top_k=20 external.external_top_p=0.95 \
+  training.output_dir=$OUTPUT_DIR
+```
+
+Keep `--top-k` / `--top-p` equal to `external.external_top_k` /
+`external.external_top_p`: the stored policy *is* the teacher distribution, so a dump
+narrower than the objective expects charges the draft for mass on tokens the teacher
+actually supported. A top-k mismatch draws a warning under `tvd_deploy`; the dump does not
+record its top-p, so a top-p mismatch goes undetected, and only a stored row that does not
+sum to 1 draws a warning. This dump
+also requires a TVD objective; `soft_ce` needs the full base distribution and is
+rejected against `sparse_data_path`.
+
+Only `tvd_deploy` puts the draft through the same nucleus the dump was written with.
+Under `tvd` and `tvd_ce` the draft side is an untruncated softmax, so the
+out-of-support term charges it for the mass the dump itself discarded. That is the
+same asymmetry dense `tvd` has against a full teacher, and it is intended, but it
+means `--top-p` is only symmetric between the two sides under `tvd_deploy`.
+
+`external.external_loss` selects the objective:
+
+| value | what it scores |
+|---|---|
+| `soft_ce` | cross-entropy against the base's soft distribution (the EAGLE offline objective) |
+| `tvd` | total-variation distance between the two full distributions |
+| `tvd_deploy` | the same, with both sides put through the serving filter (`external_top_k`, then `external_top_p`) first, so the loss is the acceptance the deployed pair sees |
+| `tvd_ce` | `tvd` plus a cross-entropy term on the base's argmax token, weighted by `external_tvd_alpha` / `external_ce_alpha` (default 0.9 / 0.1). TVD is bounded and so ranks weakly among tokens inside the base's support; CE's log penalty does not |
+
+Under rejection sampling the acceptance probability is exactly `sum(min(p, q))`,
+so `tvd_deploy` is `1 - acceptance` — the deployment metric itself rather than a
+proxy for it. Report which truncation you trained under, since `top_k` and
+`top_p` settings are not interchangeable.
 
 ## Model Validation
 
