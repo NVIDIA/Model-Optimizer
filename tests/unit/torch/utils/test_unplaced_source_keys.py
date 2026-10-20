@@ -42,7 +42,10 @@ from transformers import (
 )
 
 from modelopt.torch.utils.plugins import model_load_utils
-from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
+from modelopt.torch.utils.plugins.model_load_utils import (
+    load_pretrained,
+    parallel_load_and_prepare_fsdp2,
+)
 
 # A layer past ``num_hidden_layers``: genuinely stray, so it must always be recorded.
 STRAY = "model.layers.1.input_layernorm.weight"
@@ -147,6 +150,31 @@ def test_the_hub_options_pick_the_snapshot_and_reach_the_loads_from_it(tmp_path,
     assert len(loads) == 2
     assert all({k: load[k] for k in hub_kwargs if k in load} == code_options for load in loads)
     assert model._modelopt_source_checkpoint == str(tmp_path)
+
+
+def test_a_tied_name_the_checkpoint_stores_is_placed(tmp_path):
+    """Qwen3-0.6B stores lm_head.weight beside the embedding it is tied to. named_parameters()
+    lists a tied parameter under its first name only, but the other name is the model's own
+    parameter too: neither the whole-model nor the FSDP2 load may record it for the export to carry
+    over beside the weight it is."""
+    config = _tiny_llama_config(tie_word_embeddings=True)
+    _save(
+        tmp_path, config, {k: v.clone() for k, v in LlamaForCausalLM(config).state_dict().items()}
+    )
+    assert "lm_head.weight" in load_file(str(tmp_path / "model.safetensors"))
+
+    assert _load(tmp_path)._modelopt_unplaced_source_keys == []
+    owns_group = not torch.distributed.is_initialized()
+    if owns_group:
+        torch.distributed.init_process_group(
+            "gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'group'}"
+        )
+    try:
+        sharded = parallel_load_and_prepare_fsdp2(str(tmp_path), torch.device("cpu"), 0, 1)
+    finally:
+        if owns_group:
+            torch.distributed.destroy_process_group()
+    assert sharded._modelopt_unplaced_source_keys == []
 
 
 def test_output_loading_info_is_refused_before_anything_loads():

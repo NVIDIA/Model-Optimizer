@@ -336,7 +336,15 @@ def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
     tensor_files = checkpoint_tensor_files(ckpt_path)
     if not tensor_files:
         return []
-    model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
+    # Every name of a tied parameter: a checkpoint can store the one named_parameters() drops by
+    # default (Qwen3-0.6B stores lm_head.weight beside the embedding it is tied to).
+    model_param_names = {
+        n
+        for n, _ in chain(
+            model.named_parameters(remove_duplicate=False),
+            model.named_buffers(remove_duplicate=False),
+        )
+    }
     plans = _conversion_plans(model)
     # A key that already names a parameter is placed as it is: a registered Qwen VLM's checkpoint
     # uses the model's own names, which its stock mapping would rename away.
