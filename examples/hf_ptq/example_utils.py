@@ -22,7 +22,7 @@ import logging
 import os
 import warnings
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +92,28 @@ def preview_generate_kwargs(model) -> dict[str, Any]:
     return {"synced_gpus": True} if sharded else {}
 
 
+@contextmanager
+def keep_the_experts_implementation(model) -> Iterator[None]:
+    """Keep ``generate`` from switching a MoE's experts to ``batched_mm`` while it decodes.
+
+    On a GPU, ``generate`` runs the experts of a ``grouped_mm`` MoE on ``batched_mm`` for the
+    decoding stage and switches them back (``_optimize_model_for_decode``, Transformers 5.0 and
+    later). Two things follow. ModelOpt's quantizers sit on the ``eager``, ``grouped_mm`` and
+    ``torch_a2a`` forwards, which ``batched_mm`` bypasses, so the preview after PTQ would decode on
+    unquantized experts. And Transformers refuses the switch for an FSDP2-wrapped model, whose class
+    is a subclass built outside its modeling module: ``FSDPQwen3MoeForCausalLM does not support
+    setting experts implementation``. A model without the hook is left alone.
+    """
+    if not hasattr(model, "_optimize_model_for_decode"):
+        yield
+        return
+    model._optimize_model_for_decode = nullcontext
+    try:
+        yield
+    finally:
+        del model._optimize_model_for_decode
+
+
 def run_nemotron_vl_preview(
     full_model,
     tokenizer,
@@ -116,36 +138,37 @@ def run_nemotron_vl_preview(
     """
     from vlm_utils import run_text_only_generation, run_vl_preview_generation
 
-    print(f"Running text-only preview generation for Nemotron VL model ({stage_name})...")
-    question = tokenizer.decode(input_ids[0], skip_special_tokens=True)
-    lockstep = preview_generate_kwargs(full_model)
-    generation_config = {
-        "max_new_tokens": 100,
-        "do_sample": False,
-        "eos_token_id": tokenizer.eos_token_id,
-        **lockstep,
-    }
+    with keep_the_experts_implementation(full_model):
+        print(f"Running text-only preview generation for Nemotron VL model ({stage_name})...")
+        question = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+        lockstep = preview_generate_kwargs(full_model)
+        generation_config = {
+            "max_new_tokens": 100,
+            "do_sample": False,
+            "eos_token_id": tokenizer.eos_token_id,
+            **lockstep,
+        }
 
-    # Try text-only generation (may fail for encoder-decoder models like Nemotron-Parse)
-    text_response = run_text_only_generation(
-        full_model, tokenizer, question, generation_config, pyt_ckpt_path, trust_remote_code
-    )
+        # Try text-only generation (may fail for encoder-decoder models like Nemotron-Parse)
+        text_response = run_text_only_generation(
+            full_model, tokenizer, question, generation_config, pyt_ckpt_path, trust_remote_code
+        )
 
-    generated_ids = None
-    if text_response is not None:
-        print(f"✅ Text-only generation successful: {text_response[:100]}...")
-        generated_ids = text_response
-    elif allow_fallback:
-        print("Text-only generation failed, falling back to standard generate...")
-        generated_ids = full_model.generate(input_ids, max_new_tokens=100, **lockstep)
+        generated_ids = None
+        if text_response is not None:
+            print(f"✅ Text-only generation successful: {text_response[:100]}...")
+            generated_ids = text_response
+        elif allow_fallback:
+            print("Text-only generation failed, falling back to standard generate...")
+            generated_ids = full_model.generate(input_ids, max_new_tokens=100, **lockstep)
 
-    # Run additional VL test with images
-    print(f"Running additional VL test with images ({stage_name})...")
-    run_vl_preview_generation(
-        full_model, tokenizer, pyt_ckpt_path, stage_name, trust_remote_code, lockstep
-    )
+        # Run additional VL test with images
+        print(f"Running additional VL test with images ({stage_name})...")
+        run_vl_preview_generation(
+            full_model, tokenizer, pyt_ckpt_path, stage_name, trust_remote_code, lockstep
+        )
 
-    return generated_ids
+        return generated_ids
 
 
 def _is_multimodal_config(config):

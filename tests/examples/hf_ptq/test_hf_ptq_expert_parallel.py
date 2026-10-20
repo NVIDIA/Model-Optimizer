@@ -506,18 +506,26 @@ def test_only_an_expert_parallel_run_calibrates_through_the_distributed_forward_
 
 
 class _PreviewModel(torch.nn.Module):
-    """A model whose ``generate`` records the kwargs each preview passes it."""
+    """A model whose ``generate`` records the kwargs each preview passes it, and how often it entered
+    the decode hook that Transformers' ``generate`` enters to switch a MoE's experts."""
 
     def __init__(self, plan=None):
         super().__init__()
         self.config = SimpleNamespace(is_encoder_decoder=False, model_type="qwen3_moe")
         self.calls = []
+        self.switches = 0
         if plan is not None:
             set_distribution_plan(self, plan)
 
+    @contextlib.contextmanager
+    def _optimize_model_for_decode(self):
+        self.switches += 1
+        yield
+
     def generate(self, input_ids, **kwargs):
         self.calls.append(kwargs)
-        return torch.cat([input_ids, input_ids[:, :1]], dim=1)
+        with self._optimize_model_for_decode():
+            return torch.cat([input_ids, input_ids[:, :1]], dim=1)
 
 
 _PREVIEW_PLANS = pytest.mark.parametrize(
@@ -568,6 +576,7 @@ def test_a_sharded_model_previews_in_lockstep(hf_ptq, monkeypatch, plan, lockste
 
     synced = [call.get("synced_gpus", False) for call in model.calls]
     assert synced == [lockstep, lockstep]  # before and after quantization
+    assert model.switches == 0  # neither preview lets generate move the experts off their backend
 
 
 @_PREVIEW_PLANS
@@ -575,12 +584,13 @@ def test_a_sharded_nemotron_vl_model_previews_in_lockstep(monkeypatch, plan, loc
     """The Nemotron-VL preview's text, fallback and image generations keep a sharded model's ranks
     decoding together too."""
     recorded = {}
+    keeps = lambda model: "_optimize_model_for_decode" in vars(model)  # noqa: E731
     vlm_utils = SimpleNamespace(
         run_text_only_generation=lambda model, tokenizer, question, config, *args: recorded.update(
-            text=config
+            text=config, text_keeps_the_experts=keeps(model)
         ),
         run_vl_preview_generation=lambda model, tokenizer, path, stage, trust, kwargs: (
-            recorded.update(image=kwargs)
+            recorded.update(image=kwargs, image_keeps_the_experts=keeps(model))
         ),
     )
     monkeypatch.setitem(sys.modules, "vlm_utils", vlm_utils)
@@ -593,6 +603,8 @@ def test_a_sharded_nemotron_vl_model_previews_in_lockstep(monkeypatch, plan, loc
     expected = {"synced_gpus": True} if lockstep else {}
     assert recorded["text"].get("synced_gpus", False) == lockstep
     assert recorded["image"] == expected
+    assert recorded["text_keeps_the_experts"] and recorded["image_keeps_the_experts"]
+    assert "_optimize_model_for_decode" not in vars(model)
     assert model.calls[0].get("synced_gpus", False) == lockstep  # the fallback generate
 
 
