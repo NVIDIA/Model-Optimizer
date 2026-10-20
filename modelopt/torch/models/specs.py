@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     import torch.nn as nn
 
 __all__ = [
+    "EPSpec",
     "ExportSpec",
     "MoESpec",
     "ModelSpec",
