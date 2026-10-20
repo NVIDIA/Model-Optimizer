@@ -89,7 +89,7 @@ def _no_distribution_knobs(monkeypatch):
 def _checkpoint_is_local(monkeypatch):
     """The checkpoint path names no files; resolving it must not reach the Hub."""
     monkeypatch.setattr(
-        model_load_utils, "ensure_local_checkpoint", lambda path, group=None: (None, path)
+        model_load_utils, "ensure_local_checkpoint", lambda path, group=None, **_: (None, path)
     )
 
 
