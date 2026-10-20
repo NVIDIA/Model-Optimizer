@@ -379,7 +379,9 @@ def load_pretrained(
 
     * A Hub model ID is made local first (:func:`ensure_local_checkpoint`, which takes the
       ``revision``, ``token``, ``cache_dir`` and ``local_files_only`` ``kwargs``): the export reads
-      the source checkpoint from disk. Under ``torch.distributed`` every rank must call this.
+      the source checkpoint from disk. Under ``torch.distributed`` every rank must call this. A
+      ``subfolder`` is part of where the checkpoint is: the config, the loading hook and the
+      record below read it, as the load does.
     * The model type's loading hook runs
       (:func:`~modelopt.torch.models.hf.prepare_model_for_loading`), e.g. to keep the MTP head a
       Nemotron-H checkpoint carries. ``model_type`` selects it, read from the checkpoint's config
@@ -406,6 +408,9 @@ def load_pretrained(
             if k in kwargs
         },
     )
+    subfolder = kwargs.pop("subfolder", None)
+    if subfolder:
+        ckpt_path = os.path.join(ckpt_path, subfolder)
     trust_remote_code = kwargs.get("trust_remote_code", False)
     if model_type is None:
         model_type = AutoConfig.from_pretrained(

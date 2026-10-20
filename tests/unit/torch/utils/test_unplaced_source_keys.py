@@ -78,22 +78,29 @@ def _load(path, auto_class=None, **kwargs):
     return model
 
 
+_MTP_AND_AUX = {"mtp.fc.weight": torch.ones(2), "aux_tower.blocks.0.weight": torch.ones(2)}
+
+
 @pytest.mark.parametrize(
-    "extra",
-    [{}, {"mtp.fc.weight": torch.ones(2), "aux_tower.blocks.0.weight": torch.ones(2)}],
-    ids=["nothing-stray", "mtp-and-aux-tower"],
+    ("extra", "subfolder"),
+    [({}, None), (_MTP_AND_AUX, None), (_MTP_AND_AUX, "nested")],
+    ids=["nothing-stray", "mtp-and-aux-tower", "in-a-subfolder"],
 )
-def test_records_the_stray_tensors_and_the_checkpoint(tmp_path, extra):
+def test_records_the_stray_tensors_and_the_checkpoint(tmp_path, extra, subfolder):
     """Nothing keys off a name such as 'mtp': an auxiliary tower is recorded by the same rule. An
-    empty record is an answer too, so the export does not derive the list again."""
+    empty record is an answer too, so the export does not derive the list again. A subfolder is
+    where the checkpoint is: the config and the record come from it, as the weights do."""
     config = _tiny_llama_config()
     state = LlamaForCausalLM(config).to(torch.bfloat16).state_dict()
-    _save(tmp_path, config, {**state, **extra})
+    checkpoint = tmp_path / subfolder if subfolder else tmp_path
+    checkpoint.mkdir(exist_ok=True)
+    _save(checkpoint, config, {**state, **extra})
 
-    model = _load(tmp_path, dtype=torch.bfloat16)
+    options = {"subfolder": subfolder} if subfolder else {}
+    model = _load(tmp_path, dtype=torch.bfloat16, **options)
 
     assert model._modelopt_unplaced_source_keys == sorted(extra), "sorted, for a stable export"
-    assert model._modelopt_source_checkpoint == str(tmp_path)
+    assert model._modelopt_source_checkpoint == str(checkpoint)
     assert model.dtype == torch.bfloat16, "from_pretrained kwargs must pass through"
 
 
