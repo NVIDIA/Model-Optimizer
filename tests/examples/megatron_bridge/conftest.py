@@ -101,10 +101,13 @@ class FakeHubCheckpoint:
 
         load_tokenizer = transformers.AutoTokenizer.from_pretrained
 
-        def from_pretrained(name, *args, **kwargs):
-            if str(name) == self.hub_model_id:
-                name = str(self._resolved)
-            return load_tokenizer(name, *args, **kwargs)
+        def from_pretrained(*args, **kwargs):
+            # Megatron-LM passes the name as pretrained_model_name_or_path=.
+            if args and str(args[0]) == self.hub_model_id:
+                args = (str(self._resolved), *args[1:])
+            if str(kwargs.get("pretrained_model_name_or_path")) == self.hub_model_id:
+                kwargs["pretrained_model_name_or_path"] = str(self._resolved)
+            return load_tokenizer(*args, **kwargs)
 
         self._monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", from_pretrained)
         return self.hub_model_id
