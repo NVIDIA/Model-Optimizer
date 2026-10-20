@@ -24,6 +24,7 @@ import torch
 from ..extensions import get_cuda_ext_ggml
 from .common import (
     GGMLFormat,
+    dequantize_blocks,
     narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
@@ -127,14 +128,20 @@ def dequantize_q8_0(
     validate_block_chunk_size(block_chunk_size)
 
     blocks = packed_weights.contiguous().reshape(-1, Q8_0_BLOCK_BYTES)
-    decoded = torch.empty((blocks.shape[0], Q8_0_BLOCK_SIZE), dtype=dtype, device=blocks.device)
-    for start in range(0, blocks.shape[0], block_chunk_size):
-        stop = min(start + block_chunk_size, blocks.shape[0])
-        block_chunk = blocks[start:stop]
-        d = block_chunk[:, :2].contiguous().view(torch.float16).reshape(-1).float()
-        quants = block_chunk[:, 2:].contiguous().view(torch.int8).float()
-        decoded[start:stop] = (d.unsqueeze(1) * quants).to(dtype)
-    return decoded.reshape(shape)
+    return dequantize_blocks(
+        blocks,
+        _unpack_int8,
+        block_size=Q8_0_BLOCK_SIZE,
+        group_size=Q8_0_BLOCK_SIZE,
+        dtype=dtype,
+        block_chunk_size=block_chunk_size,
+    ).reshape(shape)
+
+
+def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """The stored quants and each block's scale."""
+    d = blocks[:, :2].contiguous().view(torch.float16).float()
+    return blocks[:, 2:].contiguous().view(torch.int8).float(), d
 
 
 Q8_0_FORMAT = GGMLFormat(
@@ -145,6 +152,8 @@ Q8_0_FORMAT = GGMLFormat(
     dequantize=dequantize_q8_0,
     block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
     decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+    int8_group_size=Q8_0_BLOCK_SIZE,
+    unpack_int8=_unpack_int8,
 )
 
 # Keep the public per-format entry point on the same record used by backend dispatch.

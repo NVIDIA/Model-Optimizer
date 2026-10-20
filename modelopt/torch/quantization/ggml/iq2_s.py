@@ -43,6 +43,7 @@ from .common import (
     GGML_BLOCK_SIZE,
     GGMLFormat,
     chunk_importance,
+    dequantize_blocks,
     importance_blocks,
     iq2_tile_terms,
     narrow_to_float32,
@@ -68,6 +69,7 @@ _IQ2_S_GRID_ENTRIES = 1024
 _IQ2_S_LOCAL_SCALES = 16
 _IQ2_S_GROUPS = 32
 _IQ2_S_SUBBLOCKS = 8
+_IQ2_S_INT8_GROUP_SIZE = 16
 _IQ2_S_NATIVE_MAX = 43 * 31 / 8
 _IQ2_S_SCALE_ANCHOR_MIN = 0.65
 _IQ2_S_SCALE_ANCHOR_MAX = 0.92
@@ -227,30 +229,35 @@ def dequantize_iq2_s(
         if extension is not None:
             grid = iq2_s_grid(blocks.device)
             return extension.iq2_s_unpack(blocks, grid, dtype).reshape(shape)
+    return dequantize_blocks(
+        blocks,
+        _unpack_int8,
+        block_size=IQ2_S_BLOCK_SIZE,
+        group_size=_IQ2_S_INT8_GROUP_SIZE,
+        dtype=dtype,
+        block_chunk_size=block_chunk_size,
+    ).reshape(shape)
+
+
+def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Signed grid levels (±8, ±25, ±43) and the step of each 16-value half sub-block."""
+    count = blocks.shape[0]
     bit_positions = torch.arange(8, dtype=torch.int64, device=blocks.device)
     high_shifts = torch.tensor([0, 2, 4, 6], dtype=torch.int64, device=blocks.device)
-    grid = iq2_s_grid(blocks.device)
-    decoded = torch.empty((blocks.shape[0], IQ2_S_BLOCK_SIZE), dtype=dtype, device=blocks.device)
-    for start in range(0, blocks.shape[0], block_chunk_size):
-        stop = min(start + block_chunk_size, blocks.shape[0])
-        block_chunk = blocks[start:stop]
-        count = block_chunk.shape[0]
-        d = block_chunk[:, :2].contiguous().view(torch.float16).reshape(-1).float()
-        low = block_chunk[:, 2:34].to(torch.int64).reshape(count, _IQ2_S_SUBBLOCKS, 4)
-        sign_mask = block_chunk[:, 34:66].to(torch.int64).reshape(count, _IQ2_S_SUBBLOCKS, 4)
-        qh = block_chunk[:, 66:74].to(torch.int64).reshape(count, _IQ2_S_SUBBLOCKS)
-        scale_bytes = block_chunk[:, 74:].to(torch.int64)
+    d = blocks[:, :2].contiguous().view(torch.float16).reshape(-1).float()
+    low = blocks[:, 2:34].to(torch.int64).reshape(count, _IQ2_S_SUBBLOCKS, 4)
+    sign_mask = blocks[:, 34:66].to(torch.int64).reshape(count, _IQ2_S_SUBBLOCKS, 4)
+    qh = blocks[:, 66:74].to(torch.int64).reshape(count, _IQ2_S_SUBBLOCKS)
+    scale_bytes = blocks[:, 74:].to(torch.int64)
 
-        entries = low | (((qh.unsqueeze(-1) >> high_shifts) & 0x3) << 8)
-        local = torch.empty((count, 16), dtype=torch.int64, device=blocks.device)
-        local[:, 0::2] = scale_bytes & 0x0F
-        local[:, 1::2] = scale_bytes >> 4
-        scales = d.unsqueeze(-1) * (0.5 + local.float()) * 0.25
-        signs = 1.0 - 2.0 * ((sign_mask.unsqueeze(-1) >> bit_positions) & 1).float()
-        values = grid[entries] * signs
-        chunk_decoded = values.reshape(count, 16, 2, 8) * scales.unsqueeze(-1).unsqueeze(-1)
-        decoded[start:stop] = chunk_decoded.reshape(-1, IQ2_S_BLOCK_SIZE)
-    return decoded.reshape(shape)
+    entries = low | (((qh.unsqueeze(-1) >> high_shifts) & 0x3) << 8)
+    local = torch.empty((count, 16), dtype=torch.int64, device=blocks.device)
+    local[:, 0::2] = scale_bytes & 0x0F
+    local[:, 1::2] = scale_bytes >> 4
+    steps = d.unsqueeze(-1) * (0.5 + local.float()) * 0.25
+    signs = 1.0 - 2.0 * ((sign_mask.unsqueeze(-1) >> bit_positions) & 1).float()
+    levels = iq2_s_grid(blocks.device)[entries] * signs
+    return levels.reshape(count, IQ2_S_BLOCK_SIZE), steps
 
 
 IQ2_S_FORMAT = GGMLFormat(
@@ -261,6 +268,8 @@ IQ2_S_FORMAT = GGMLFormat(
     dequantize=dequantize_iq2_s,
     block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
     decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+    int8_group_size=_IQ2_S_INT8_GROUP_SIZE,
+    unpack_int8=_unpack_int8,
     weighted=True,
 )
 

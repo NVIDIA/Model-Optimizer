@@ -74,6 +74,7 @@ from modelopt.recipe.presets import (
     RecipeSupersededAction,
 )
 from modelopt.torch.export import (
+    convert_ggml_export_to_int8,
     export_hf_checkpoint,
     export_hf_vllm_fq_checkpoint,
     export_speculative_decoding,
@@ -728,6 +729,8 @@ def export_quantized(
                         "vLLM deployment support is in progress."
                     )
 
+        if args.export_ggml_as_int8 and args.dist_state.is_main:
+            convert_ggml_export_to_int8(export_path)
         args.checkpoint_exported = True
         end_time = time.time()
         print_rank_0(
@@ -1358,6 +1361,17 @@ def parse_args() -> argparse.Namespace:
         "for use with vllm_serve_fakequant.py).",
     )
     parser.add_argument(
+        "--export_ggml_as_int8",
+        default=False,
+        action="store_true",
+        help=(
+            "Export GGML-quantized layers (IQ1/IQ2 formats, Q8_0) as an INT8 weight-only "
+            "compressed-tensors checkpoint that vLLM serves with its integer kernels. Each weight "
+            "keeps its GGML integer level and sub-block scale, so this reproduces the GGML "
+            "weights up to rounding the scales to the model dtype."
+        ),
+    )
+    parser.add_argument(
         "--cast_mxfp4_to_nvfp4",
         action="store_true",
         default=False,
@@ -1437,6 +1451,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--cpu_offload requires --use_fsdp2")
     if args.use_fsdp2 and args.sparsity_fmt != "dense":
         parser.error(f"--use_fsdp2 does not support --sparsity_fmt {args.sparsity_fmt}.")
+    if args.export_ggml_as_int8 and args.vllm_fakequant_export:
+        parser.error("--export_ggml_as_int8 and --vllm_fakequant_export are separate exports.")
     if args.use_fsdp2 and args.vllm_fakequant_export:
         parser.error("--use_fsdp2 does not support --vllm_fakequant_export.")
     if args.use_fsdp2 and args.cast_mxfp4_to_nvfp4:

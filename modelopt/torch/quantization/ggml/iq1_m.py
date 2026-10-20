@@ -45,6 +45,7 @@ from .common import (
     GGML_BLOCK_SIZE,
     GGMLFormat,
     chunk_importance,
+    dequantize_blocks,
     importance_blocks,
     narrow_to_float32,
     validate_block_chunk_size,
@@ -67,6 +68,7 @@ IQ1_M_BLOCK_SIZE = GGML_BLOCK_SIZE
 IQ1_M_BLOCK_BYTES = 56
 IQ1_M_EFFECTIVE_BITS = IQ1_M_BLOCK_BYTES * 8 / IQ1_M_BLOCK_SIZE
 _IQ1_M_DELTA = 0.125
+_IQ1_M_INT8_GROUP_SIZE = 16
 # Largest representable magnitude: (1 + delta) at local scale 7 -> 15 * 1.125.
 _IQ1_M_NATIVE_MAX = 16.875
 # IQ1_M anchors differently from IQ1_S: the ratio rises with a block's peak-to-RMS
@@ -213,45 +215,46 @@ def dequantize_iq1_m(
         if extension is not None:
             grid = iq1_s_grid(blocks.device)
             return extension.iq1_m_unpack(blocks, grid, dtype).reshape(shape)
-    grid = iq1_s_grid(blocks.device)
+    return dequantize_blocks(
+        blocks,
+        _unpack_int8,
+        block_size=IQ1_M_BLOCK_SIZE,
+        group_size=_IQ1_M_INT8_GROUP_SIZE,
+        dtype=dtype,
+        block_chunk_size=block_chunk_size,
+    ).reshape(shape)
+
+
+def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Levels in eighths of a grid step (±1, ±7, ±9) and the step of each 16-value half."""
+    count = blocks.shape[0]
     scale_shifts = torch.tensor([0, 3, 6, 9], dtype=torch.int64, device=blocks.device)
-    decoded = torch.empty((blocks.shape[0], IQ1_M_BLOCK_SIZE), dtype=dtype, device=blocks.device)
-    for start in range(0, blocks.shape[0], block_chunk_size):
-        stop = min(start + block_chunk_size, blocks.shape[0])
-        block_chunk = blocks[start:stop]
-        count = block_chunk.shape[0]
-        low = block_chunk[:, :32].to(torch.int64).reshape(count, _IQ1_M_SUBBLOCKS, 4)
-        qh = block_chunk[:, 32:48].to(torch.int64).reshape(count, _IQ1_M_SUBBLOCKS, 2)
-        words = block_chunk[:, 48:56:2].to(torch.int64) | (
-            block_chunk[:, 49:56:2].to(torch.int64) << 8
-        )
+    low = blocks[:, :32].to(torch.int64).reshape(count, _IQ1_M_SUBBLOCKS, 4)
+    qh = blocks[:, 32:48].to(torch.int64).reshape(count, _IQ1_M_SUBBLOCKS, 2)
+    words = blocks[:, 48:56:2].to(torch.int64) | (blocks[:, 49:56:2].to(torch.int64) << 8)
 
-        # The FP16 super-block scale is the four words' top nibbles, low word first.
-        d_bits = (
-            (words[:, 0] >> 12)
-            | ((words[:, 1] >> 8) & 0x00F0)
-            | ((words[:, 2] >> 4) & 0x0F00)
-            | (words[:, 3] & 0xF000)
-        )
-        d = d_bits.to(torch.int16).view(torch.float16).float()
+    # The FP16 super-block scale is the four words' top nibbles, low word first.
+    d_bits = (
+        (words[:, 0] >> 12)
+        | ((words[:, 1] >> 8) & 0x00F0)
+        | ((words[:, 2] >> 4) & 0x0F00)
+        | (words[:, 3] & 0xF000)
+    )
+    d = d_bits.to(torch.int16).view(torch.float16).float()
 
-        # Each qh byte carries two groups, low nibble first: three high index bits and a delta sign.
-        nibbles = torch.stack((qh & 0xF, qh >> 4), dim=-1).reshape(count, _IQ1_M_SUBBLOCKS, 4)
-        entries = low | ((nibbles & 0x7) << 8)
-        deltas = torch.where((nibbles & 0x8).bool(), -_IQ1_M_DELTA, _IQ1_M_DELTA)
+    # Each qh byte carries two groups, low nibble first: three high index bits and a delta sign.
+    nibbles = torch.stack((qh & 0xF, qh >> 4), dim=-1).reshape(count, _IQ1_M_SUBBLOCKS, 4)
+    entries = low | ((nibbles & 0x7) << 8)
+    delta_sign = torch.where((nibbles & 0x8).bool(), -1.0, 1.0).unsqueeze(-1)
 
-        # Each word packs four 3-bit local scales below its nibble of d: two sub-blocks, two
-        # halves each, so word w, slot k is sub-block 2 * w + k // 2, half k % 2.
-        local = ((words.unsqueeze(-1) >> scale_shifts) & 0x7).reshape(count, _IQ1_M_SUBBLOCKS, 2)
-        scales = d.unsqueeze(-1).unsqueeze(-1) * (2 * local + 1).float()
+    # Each word packs four 3-bit local scales below its nibble of d: two sub-blocks, two
+    # halves each, so word w, slot k is sub-block 2 * w + k // 2, half k % 2. Groups 0,1 take
+    # the first half's scale and groups 2,3 the second, which is the order the steps flatten in.
+    local = ((words.unsqueeze(-1) >> scale_shifts) & 0x7).reshape(count, _IQ1_M_SUBBLOCKS * 2)
+    steps = d.unsqueeze(-1) * (2 * local + 1).float() * _IQ1_M_DELTA
 
-        values = grid[entries] + deltas.unsqueeze(-1)
-        # Groups 0,1 take the first local scale and groups 2,3 the second, so the repeat
-        # runs along the half axis: [h0, h0, h1, h1], not [h0, h1, h0, h1].
-        group_scale = scales.repeat_interleave(2, dim=2)
-        chunk_decoded = values * group_scale.unsqueeze(-1)
-        decoded[start:stop] = chunk_decoded.reshape(-1, IQ1_M_BLOCK_SIZE)
-    return decoded.reshape(shape)
+    levels = iq1_s_grid(blocks.device)[entries] / _IQ1_M_DELTA + delta_sign
+    return levels.reshape(count, IQ1_M_BLOCK_SIZE), steps
 
 
 IQ1_M_FORMAT = GGMLFormat(
@@ -262,6 +265,8 @@ IQ1_M_FORMAT = GGMLFormat(
     dequantize=dequantize_iq1_m,
     block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
     decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+    int8_group_size=_IQ1_M_INT8_GROUP_SIZE,
+    unpack_int8=_unpack_int8,
     weighted=True,
 )
 
