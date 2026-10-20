@@ -20,6 +20,7 @@ import copy
 import importlib.util
 import os
 import sys
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -979,6 +980,21 @@ def test_recipe_metadata_and_tensor_reload_share_module_mapping(
         hf_state, model.hf_to_vllm_mapper.apply_dict
     )
     assert converted["modelopt_state_dict"][0][1]["metadata"]["quantizer_state"].keys() == expected
+
+
+def test_aliased_quantizer_keeps_the_loaded_range(reload_utils, tmp_path):
+    # vLLM's MoE runner also registers the shared expert as ``experts._shared_experts._layer``.
+    model = torch.nn.Module()
+    model.shared_expert = torch.nn.Module()
+    model.shared_expert.input_quantizer = TensorQuantizer(amax=9.0)
+    model.experts = torch.nn.Module()
+    model.experts.shared = model.shared_expert
+    path = tmp_path / "quantizer_state.pth"
+    torch.save({"shared_expert.input_quantizer._amax": torch.tensor(1.001)}, path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        model.load_state_dict(reload_utils.load_state_dict_from_path(str(path), model))
+    assert torch.equal(model.shared_expert.input_quantizer.amax, torch.tensor(1.001))
 
 
 def test_constant_amax_kv_recipe_reloads_without_calibration_buffers(reload_utils, tmp_path):

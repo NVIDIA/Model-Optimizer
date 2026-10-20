@@ -674,6 +674,26 @@ def _validate_quantizer_ranges(model, saved_quant_dict, current_state_dict) -> N
         )
 
 
+def _alias_state_dict_keys(model: Any, state_dict: dict[str, Any]) -> dict[str, str]:
+    """Map state-dict keys of a module registered under several names to its first name's key.
+
+    vLLM can register one module under two names (e.g. the MoE runner also holds the shared expert
+    as ``experts._shared_experts._layer``), so the state dict lists its tensors once per name.
+    """
+    first_names = {}
+    aliases = {}
+    for name, module in model.named_modules(remove_duplicate=False):
+        first = first_names.setdefault(module, name)
+        if first != name:
+            aliases[name] = first
+    alias_keys = {}
+    for key in state_dict:
+        module_name, _, attr = key.rpartition(".")
+        if module_name in aliases:
+            alias_keys[key] = f"{aliases[module_name]}.{attr}"
+    return alias_keys
+
+
 def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str, Any]:
     """Overlay mapped, TP-sharded quantizer tensors on the model's state dict."""
     # Load on CPU to avoid failures when the checkpoint was saved from a different GPU mapping.
@@ -688,6 +708,7 @@ def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str,
     saved_quant_dict = convert_dict_to_vllm(saved_quant_dict, map_fun=map_fun)
 
     current_state_dict = model.state_dict()
+    alias_keys = _alias_state_dict_keys(model, current_state_dict)
     _validate_quantizer_ranges(model, saved_quant_dict, current_state_dict)
     checkpoint_quant_keys = [key for key in saved_quant_dict if "quantizer" in key]
     local_checkpoint_quantizers = {
@@ -699,7 +720,10 @@ def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str,
     global_missing_non_wq = [
         key
         for key in current_state_dict
-        if "quantizer" in key and "weight_quantizer" not in key and key not in global_ckpt_key_set
+        if "quantizer" in key
+        and "weight_quantizer" not in key
+        and key not in global_ckpt_key_set
+        and key not in alias_keys
     ]
 
     if global_missing_non_wq:
@@ -729,4 +753,8 @@ def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str,
                 # Calibration buffers may be BF16; keep the saved range's precision on reload.
                 model.get_submodule(key.removesuffix("._amax")).register_buffer("_amax", value)
             current_state_dict[key] = value
+    # Otherwise an alias's stale entry would overwrite the loaded value in ``model.load_state_dict``.
+    for alias, key in alias_keys.items():
+        if key in saved_quant_dict:
+            current_state_dict[alias] = current_state_dict[key]
     return current_state_dict
