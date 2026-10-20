@@ -152,6 +152,15 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
     parser.add_argument("--cp_size", type=int, default=1, help="Context parallel size")
+    parser.add_argument(
+        "--dsa_kernel_backend",
+        choices=["none", "tilelang", "cudnn"],
+        default=None,
+        help=(
+            "Fused kernels for DeepSeek sparse attention (e.g. GLM-5.x). The unfused fallback "
+            "builds dense [seq, seq] scores per head, which does not fit at long sequence lengths."
+        ),
+    )
 
     # Quantization arguments
     parser.add_argument(
@@ -345,6 +354,11 @@ def main(args: argparse.Namespace):
             "pipeline_dtype": torch.bfloat16,
             "seq_length": args.seq_length,
             "gradient_accumulation_fusion": False,  # not supported
+            **(
+                {"dsa_kernel_backend": args.dsa_kernel_backend}
+                if args.dsa_kernel_backend is not None
+                else {}
+            ),
         },
         init_model_parallel=True,
     )

@@ -322,7 +322,15 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             index: self._get_quantizer_state(state_dict)
             for index, state_dict in enumerate([*self.layer_state_dicts.values(), self._state_dict])
         }
+
+        # The weights are written in BF16, so a source checkpoint's own quantization (e.g. FP8)
+        # no longer describes them.
+        if hasattr(self._hf_config, "quantization_config"):
+            del self._hf_config.quantization_config
+
         super().save_pretrained(save_directory, pretrained_model_name_or_path)
+        # The base exporter copies a pre-quantized source's hf_quant_config.json along with it.
+        (Path(save_directory) / "hf_quant_config.json").unlink(missing_ok=True)
 
         # Save fresh quantizer files after the base exporter copies source files.
         recipe = self._extract_quantizer_recipe_markers(quantizer_state_dicts)

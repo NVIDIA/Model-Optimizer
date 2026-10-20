@@ -26,6 +26,7 @@ from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model
 from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_5_vl_dir,
     create_tiny_qwen3_dir,
+    create_tiny_qwen3_moe_dir,
     get_tiny_tokenizer,
 )
 from transformers import AutoModelForImageTextToText
@@ -122,9 +123,14 @@ def test_distill_llm_sft(tmp_path, num_gpus):
 
 
 @pytest.mark.skipif(not HAS_DIRECT_HF_SFT, reason="Megatron-Bridge lacks DirectHFSFTDatasetConfig")
-def test_distill_llm_sft_hf_chat(tmp_path, num_gpus):
-    """--sft_hf_dataset distills on chat jsonl rendered by the model's chat template."""
-    teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+@pytest.mark.parametrize("packed", [False, True])
+def test_distill_llm_sft_hf_chat(tmp_path, num_gpus, packed):
+    """--sft_hf_dataset distills on chat jsonl rendered by the model's chat template.
+
+    ``packed`` runs an MoE student with conversations packed per micro-batch and the aux loss off.
+    """
+    create_dir = create_tiny_qwen3_moe_dir if packed else create_tiny_qwen3_dir
+    teacher_hf_path = create_dir(tmp_path, with_tokenizer=True)
     train_iters = 2
     gbs = 4
     # More records than train_iters * gbs so the sampler does not run dry; every 4th is multi-turn.
@@ -146,8 +152,10 @@ def test_distill_llm_sft_hf_chat(tmp_path, num_gpus):
         data_files[split].write_text("\n".join(json.dumps(r) for r in records) + "\n")
 
     distill_output_dir = tmp_path / "distill_output"
+    packing = {"moe_aux_loss_coeff": 0} if packed else {}
     distill_cmd_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--sft"],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--sft"]
+        + (["--sft_in_batch_packing"] if packed else []),
         student_hf_path=teacher_hf_path,
         teacher_hf_path=teacher_hf_path,
         sft_hf_dataset=data_files["train"],
@@ -156,7 +164,8 @@ def test_distill_llm_sft_hf_chat(tmp_path, num_gpus):
         tp_size=num_gpus,
         pp_size=1,
         seq_length=64,
-        mbs=1,
+        mbs=2 if packed else 1,
+        **packing,
         gbs=gbs,
         train_iters=train_iters,
         lr_warmup_iters=1,

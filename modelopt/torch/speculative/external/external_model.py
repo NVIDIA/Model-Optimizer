@@ -32,6 +32,8 @@ class ExternalDraftModel(DynamicModule):
     def _setup(self):
         self._register_temp_attribute("external_loss", "tvd")
         self._register_temp_attribute("external_report_acc", True)
+        self._register_temp_attribute("external_tvd_alpha", 0.9)
+        self._register_temp_attribute("external_ce_alpha", 0.1)
         self._register_temp_attribute("external_top_k", 20)
         self._register_temp_attribute("external_top_p", 0.95)
 
@@ -39,5 +41,7 @@ class ExternalDraftModel(DynamicModule):
         """Base external draft modify function. Child class should implement the details."""
         self.external_loss = config.external_loss
         self.external_report_acc = config.external_report_acc
+        self.external_tvd_alpha = config.external_tvd_alpha
+        self.external_ce_alpha = config.external_ce_alpha
         self.external_top_k = config.external_top_k
         self.external_top_p = config.external_top_p

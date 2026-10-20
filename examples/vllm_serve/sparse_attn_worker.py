@@ -27,6 +27,9 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     iter_sparse_impls,
 )
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm_runtime import (
+    collect_sparse_validation,
+    enable_sparse_validation,
+    get_sparse_attention_metadata,
     install_vllm_nvfp4_attention,
     install_vllm_skip_softmax_calibration,
     install_vllm_sparse_attention_from_checkpoint,
@@ -121,6 +124,7 @@ class SkipSoftmaxCalibWorker(BaseWorker):
             "impl_types": impl_types,
             "calibrating": any(getattr(impl, "_calibrate", False) for impl in impls),
             "total_records": total_records,
+            "sparse_attention_config": get_sparse_attention_metadata(self.model_runner),
         }
 
     def sparse_calib_counts(self) -> dict[str, list[dict]]:
@@ -128,6 +132,14 @@ class SkipSoftmaxCalibWorker(BaseWorker):
         model = _unwrapped_model(self)
         disable_calibration(list(iter_sparse_impls(model)))
         return collect_calibration_counts(model)
+
+    def sparse_validation_enable(self, sparse_config: dict) -> int:
+        """Apply the candidate through the serving loader and reset tile counters."""
+        return enable_sparse_validation(self.model_runner, sparse_config)
+
+    def sparse_validation_collect(self) -> dict[str, dict[str, int]]:
+        """Collect counters for every selected layer and requested phase."""
+        return collect_sparse_validation(self.model_runner)
 
 
 class QuantSparseAttnWorker(BaseWorker):

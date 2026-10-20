@@ -18,7 +18,6 @@
 
 """Code that export quantized Megatron Core models for deployment."""
 
-import io
 import json
 import os
 import re
@@ -38,6 +37,7 @@ from modelopt import __version__
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 from modelopt.torch.utils import import_plugin, warn_rank_0
+from modelopt.torch.utils.distributed import gather_state_dicts
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_hf_ckpt_remote_code,
     copy_non_safetensor_files_from_ckpt,
@@ -65,6 +65,7 @@ from .quant_format import (
     QUANTIZATION_FP8_PB_WO,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
+    QUANTIZATION_W4A16_MXFP4,
     QUANTIZATION_W4A16_NVFP4,
 )
 from .quant_utils import (
@@ -92,9 +93,11 @@ with import_plugin("megatron"):
     from megatron.core.models.multimodal.llava_model import LLaVAModel
     from megatron.core.parallel_state import (
         get_data_parallel_rank,
+        get_expert_data_parallel_rank,
         get_expert_model_parallel_group,
         get_expert_model_parallel_rank,
         get_expert_model_parallel_world_size,
+        get_expert_tensor_parallel_rank,
         get_pipeline_model_parallel_rank,
         get_pipeline_model_parallel_world_size,
         get_tensor_model_parallel_rank,
@@ -160,6 +163,8 @@ class GPTModelExporter:
 
         self._state_dict = OrderedDict()
         self._layer_state_dicts = OrderedDict()
+        # Keys of the SequentialMLP experts held by this rank (all ranks' differ at EP>1).
+        self._local_expert_keys: set[str] = set()
         self._hf_pretrained_model_name = pretrained_model_name_or_path
         self._hf_config = transformers.AutoConfig.from_pretrained(
             pretrained_model_name_or_path, trust_remote_code=trust_remote_code
@@ -345,24 +350,24 @@ class GPTModelExporter:
                 raise NotImplementedError(
                     "Megatron GGML unified export currently requires pipeline model parallel size 1"
                 )
-        # SequentialMLP rules index experts by local position, so EP>1 would collide. Agreed across
-        # ranks so that stages without such experts don't block in the collectives below.
+        # Packed local-expert rules hand over all of a rank's experts as one, so EP>1 would collide.
+        # Agreed across ranks so that stages without such experts don't block in the collectives below.
         if (
             torch.distributed.is_initialized()
             and get_expert_model_parallel_world_size() > 1
+            and self.rules.get("use_packed_local_experts", False)
             and self._any_rank(any(hasattr(m, "local_experts") for m in self.model.modules()))
         ):
             raise NotImplementedError(
-                "Export at expert parallel size > 1 needs grouped-GEMM experts; "
-                "export SequentialMLP (--no_moe_grouped_gemm) checkpoints at EP=1."
+                "Export at expert parallel size > 1 does not support packed local experts; "
+                "export at EP=1."
             )
         # One layer-shard writer per pipeline stage: other TP / DP / EP ranks hold the same layers
         # (EP>1 ranks hold no gathered experts at all), and writing them too would race on the same
         # files. Unlike is_writer_rank (one global writer of save_directory metadata), this has no
         # PP term on purpose: each stage owns a disjoint slice of the layer shards.
-        is_stage_layer_writer = (
-            tp_rank == 0 and get_data_parallel_rank() == 0 and get_expert_model_parallel_rank() == 0
-        )
+        ep_rank = get_expert_model_parallel_rank()
+        is_stage_layer_writer = tp_rank == 0 and get_data_parallel_rank() == 0 and ep_rank == 0
 
         # Main export process
         layer_state_dicts = self.layer_state_dicts
@@ -379,6 +384,8 @@ class GPTModelExporter:
             quantization = "NVFP4"
         elif quantization_format == QUANTIZATION_W4A16_NVFP4:
             quantization = "W4A16_NVFP4"
+        elif quantization_format == QUANTIZATION_W4A16_MXFP4:
+            quantization = "W4A16_MXFP4"
         elif quantization_format in GGML_FORMATS:
             quantization = quantization_format.upper()
 
@@ -483,6 +490,10 @@ class GPTModelExporter:
         # Bracket the writer's config.json read-modify-write with barriers so peers
         # never observe a truncated file (also ensures export_dir exists).
         torch.distributed.barrier()
+        if is_writer_rank:
+            # Expert shards left by an earlier export at a larger EP would enter the index.
+            for stale in Path(save_directory).glob("model-*-of-*-ep*.*"):
+                stale.unlink()
         config_json_file = save_directory + "/config.json"
         if is_writer_rank and self._hf_quant_config and os.path.exists(config_json_file):
             with open(config_json_file) as f:
@@ -494,11 +505,30 @@ class GPTModelExporter:
                 json.dump(config_dict, f, indent=4)
         torch.distributed.barrier()
 
+        # SequentialMLP experts are not gathered: each other EP rank writes its own to extra shards.
+        # Expert ownership follows the expert grid (EP x ETP x expert-DP), not the dense TP rank.
+        writes_own_experts = (
+            get_expert_tensor_parallel_rank() == 0
+            and get_expert_data_parallel_rank() == 0
+            and ep_rank > 0
+            and bool(self._local_expert_keys)
+        )
+        name_template = "model-{:05d}-of-{:05d}"
+        if writes_own_experts:
+            # Layers without local experts (e.g. dense ones) would write empty shards.
+            layer_state_dicts = {
+                i: experts
+                for i, sd in layer_state_dicts.items()
+                if (experts := {k: v for k, v in sd.items() if k in self._local_expert_keys})
+            }
+            name_template += f"-ep{ep_rank:03d}"
         save_safetensors_by_layer_index(
-            layer_state_dicts=layer_state_dicts if is_stage_layer_writer else {},
+            layer_state_dicts=layer_state_dicts
+            if is_stage_layer_writer or writes_own_experts
+            else {},
             total_layers=self.model.config.num_layers,
             save_directory=save_directory,
-            name_template="model-{:05d}-of-{:05d}",
+            name_template=name_template,
         )
 
         # Every rank has written its shards; one rank now checks nothing was dropped. The result is
@@ -782,13 +812,18 @@ class GPTModelExporter:
                         )
                 if hasattr(layer.mlp.experts, "local_experts"):
                     if not self.rules.get("use_packed_local_experts", False):
-                        for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
+                        keys_before = set(self._state_dict)
+                        # Global ids: at EP>1 each rank holds a different slice of the experts.
+                        for expert_id, expert in zip(
+                            layer.mlp.local_expert_indices, layer.mlp.experts.local_experts
+                        ):
                             self.rules["local_experts.linear_fc1"](
                                 expert.linear_fc1, layer_id, expert_id, is_mtp=is_mtp
                             )
                             self.rules["local_experts.linear_fc2"](
                                 expert.linear_fc2, layer_id, expert_id, is_mtp=is_mtp
                             )
+                        self._local_expert_keys |= set(self._state_dict) - keys_before
                     else:
                         # For llama 4, in hf unified checkpoint, all local experts share one scale
                         self.rules["local_experts.linear_fc1"](
@@ -1713,29 +1748,14 @@ class GPTModelExporter:
                     self._record_layer_quant_config(expert_prefix, seen_qformat, seen_block_size)
 
         if ep_size > 1:
-            # all_gather_object pickles trip on quantized uint8 tensors whose
-            # UntypedStorage has no dtype attr -- round-trip through torch.save bytes.
-            _buf = io.BytesIO()
-            torch.save(local_expert_state, _buf)
-            local_bytes = _buf.getvalue()
-            del _buf
             # Gather to EP rank 0 only, which writes the shards: holding every expert on every EP
             # rank multiplies host memory by EP (a full GLM-5.3-Flash export OOMs at EP4).
+            # Quantized uint8 tensors trip all_gather_object pickles, so go through torch.save bytes.
             ep_group = get_expert_model_parallel_group()
-            gathered_bytes: list | None = [None] * ep_size if ep_rank == 0 else None
-            torch.distributed.gather_object(
-                local_bytes,
-                gathered_bytes,
-                dst=torch.distributed.get_global_rank(ep_group, 0),
-                group=ep_group,
-            )
-            del local_bytes
-            for b in gathered_bytes or ():
-                # weights_only=False: our own torch.save output from a sibling EP rank
-                # in this job's collective, not user-supplied.
-                s_loaded = torch.load(io.BytesIO(b), map_location="cpu", weights_only=False)
+            for s_loaded in gather_state_dicts(
+                local_expert_state, torch.distributed.get_global_rank(ep_group, 0), ep_group
+            ):
                 self._state_dict.update(s_loaded)
-            del gathered_bytes
         else:
             self._state_dict.update(local_expert_state)
 

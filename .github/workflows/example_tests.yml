@@ -27,6 +27,7 @@ jobs:
       contents: read
     outputs:
       any_changed: ${{ steps.lanes.outputs.any_changed }}
+      stacked: ${{ steps.base.outputs.stacked == 'true' }}
       torch: ${{ steps.lanes.outputs.torch }}
       vllm: ${{ steps.lanes.outputs.vllm }}
       trtllm: ${{ steps.lanes.outputs.trtllm }}
@@ -88,6 +89,8 @@ jobs:
         env:
           # Nightly and on-demand runs have no diff to inspect, so they run everything.
           NON_PR: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
+          # Stacked PRs (base is another PR's branch) skip GPU tests; only the bottom PR runs them.
+          STACKED: ${{ steps.base.outputs.stacked }}
           COMMON: ${{ steps.changed.outputs.common_any_modified }}
           TORCH: ${{ steps.changed.outputs.torch_any_modified }}
           VLLM: ${{ steps.changed.outputs.vllm_any_modified }}
@@ -98,7 +101,7 @@ jobs:
         run: |
           any=false
           for lane in TORCH VLLM TRTLLM MEGATRON DIFFUSERS ONNX; do
-            if [[ "$NON_PR" == "true" || "$COMMON" == "true" || "${!lane}" == "true" ]]; then
+            if [[ "$STACKED" != "true" && ( "$NON_PR" == "true" || "$COMMON" == "true" || "${!lane}" == "true" ) ]]; then
               run=true
               any=true
             else
@@ -239,6 +242,11 @@ jobs:
     needs: [pr-gate, torch, vllm, trtllm, megatron, diffusers, onnx]
     runs-on: ubuntu-latest
     steps:
+      - name: Stacked PR, example tests deferred
+        if: needs.pr-gate.outputs.stacked == 'true'
+        run: |
+          echo "::error::This PR targets another PR's branch, so example tests are deferred until it targets main. After retargeting, push or use 'Re-run all jobs'."
+          exit 1
       - name: Required example tests did not succeed
         if: |
           needs.pr-gate.result != 'success' ||

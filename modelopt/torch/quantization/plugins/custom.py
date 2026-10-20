@@ -24,6 +24,7 @@ import torch
 
 from modelopt.torch.utils.distributed import ParallelState
 
+from ..ggml.common import PINNED_PAYLOAD_PREFIX
 from ..nn import (
     GroupedQuantizer,
     NVFP4StaticQuantizer,
@@ -132,7 +133,10 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
 
         def _check_unsupported_states(quantizer: TensorQuantizer):
             for k in quantizer.state_dict():
-                if k not in ["_amax", "_pre_quant_scale", "_global_amax"]:
+                # GGML payloads pinned by GPTQ are loaded with the weights from the sharded checkpoint.
+                if k not in ["_amax", "_pre_quant_scale", "_global_amax"] and not k.startswith(
+                    PINNED_PAYLOAD_PREFIX
+                ):
                     warnings.warn(
                         f"Restore of {k} for {prefix} is not supported. The restore of this layer might be "
                         f"incorrect. Please implement a custom restore for {k}."
@@ -173,10 +177,15 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
             _check_unsupported_states(
                 quantizer if isinstance(quantizer, TensorQuantizer) else quantizer[0]
             )
+        # Grouped linears validate each expert against its corresponding weight in their
+        # override. Resetting the container here would clear every expert amax before this
+        # single-weight compatibility path recalibrates only the representative quantizer.
         # Skip max_calibrate when saved static NVFP4 state is intact; else MSE scales get overwritten.
-        if _has_state(
-            self.weight_quantizer, "_amax"
-        ) and not _has_complete_static_nvfp4_weight_state(self.weight_quantizer, self.weight):
+        if (
+            not isinstance(self.weight_quantizer, GroupedQuantizer)
+            and _has_state(self.weight_quantizer, "_amax")
+            and not _has_complete_static_nvfp4_weight_state(self.weight_quantizer, self.weight)
+        ):
             self.weight_quantizer.reset_amax()
             max_calibrate(self.weight_quantizer, lambda wq: wq(self.weight), distributed_sync=False)
         if _has_state(self.input_quantizer, "_pre_quant_scale"):
