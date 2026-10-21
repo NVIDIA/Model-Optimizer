@@ -302,7 +302,11 @@ def test_chat_blend_reselects_after_a_selection_change(chat_blend, first, second
         ({"sources": [_source("a", weight=-1)]}, "nonnegative"),
         ({"sources": [_source("a", weight=0)]}, "not all zero"),
         ({"sources": [_source("a", weight=float("inf"))]}, "finite"),
-        ({"tokenizer": "x"}, "does not use"),
+        ({"tokenizer": "x"}, "both tokenizer and max_length"),
+        ({"max_length": 64}, "both tokenizer and max_length"),
+        ({"pack_max_tokens": 64}, "pack_max_tokens needs tokenizer and max_length"),
+        ({"tokenizer": "x", "max_length": 0}, "max_length must be a positive integer"),
+        ({"tokenizer": "x", "max_length": 64, "loss_mode": "last"}, "loss_mode must be"),
         ({"target_tokens": 1000}, "does not use"),
         ({"reasoning_content": "drop"}, "reasoning_content must be one of"),
         # A row with both columns must not silently be read from ``text``.
@@ -379,3 +383,43 @@ def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch):
     assert sorted(r["messages"][0]["content"] for r in rows) == sorted(f"q{i}" for i in range(40))
     # The part is named after its first file.
     assert len(list((out / "parts").glob("org--a_a_*.jsonl"))) == 1
+
+
+def test_chat_blend_drops_untrainable_rows_and_pairs_the_rest(
+    tiny_tokenizer_path: str, tmp_path: Path, chat_blend, monkeypatch
+):
+    def iter_rows(source, output_dir, shuffle, seed):
+        # Prompts of 0..99 words; past max_length the truncation leaves no assistant token.
+        yield from (
+            {
+                "messages": [
+                    {"role": "user", "content": "w " * i},
+                    {"role": "assistant", "content": "a"},
+                ]
+            }
+            for i in range(100)
+        )
+
+    monkeypatch.setattr(blend_module, "_iter_rows", iter_rows)
+    write_config, _ = chat_blend
+    config = {"tokenizer": tiny_tokenizer_path, "max_length": 64, "num_workers": 1}
+    sizes = blend_module.prepare_chat_data_blend(write_config(**config))
+    out = tmp_path / "blend"
+    blend_module._init_sft_tokenizer(tiny_tokenizer_path, 64, "assistant")
+    rows = _read_jsonl(out / "train.jsonl") + _read_jsonl(out / "validation.jsonl")
+    assert 40 < len(rows) < 100  # the 50 + 50 selected rows, minus the long prompts
+    assert all(blend_module._sft_length(row) for row in rows)
+
+    # A cap of 2 * max_length fits any two rows, so only an odd row per split is left out.
+    paired = blend_module.prepare_chat_data_blend(write_config(**config, pack_max_tokens=128))
+    assert paired == {split: n - n % 2 for split, n in sizes.items()}
+
+
+def test_pair_rows_pairs_long_with_short_under_the_cap():
+    lengths = {"a": 10, "b": 60, "c": 30, "d": 50, "e": 95, "f": 20}
+    rows = blend_module._pair_rows(list(lengths), list(lengths.values()), cap=80, seed=0)
+    # e fits with no row and c is left without a partner; rows (2k, 2k + 1) are a pack.
+    assert {frozenset(rows[k : k + 2]) for k in range(0, len(rows), 2)} == {
+        frozenset("ab"),
+        frozenset("df"),
+    }

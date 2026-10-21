@@ -57,6 +57,7 @@ try:
     HAS_DIRECT_HF_SFT = True
 except ImportError:
     HAS_DIRECT_HF_SFT = False
+from megatron.core.datasets.gpt_dataset import GPTDataset
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.utils import unwrap_model
@@ -200,6 +201,12 @@ def get_args():
         "--data_paths",
         nargs="+",
         help="List of tokenized data paths to load from (weight1 path1 weight2 path2 ...)",
+    )
+    parser.add_argument(
+        "--document_boundaries",
+        action="store_true",
+        help="Pre-tokenized data only: attend within each EOD-separated document of a sequence (THD "
+        "segments) instead of across the whole packed window. Needs --mbs 1 and --cp_size 1.",
     )
     parser.add_argument(
         "--data_path_to_cache", type=str, default=None, help="Path to cache the dataset indices"
@@ -449,6 +456,9 @@ def get_args():
         raise ValueError(
             "--sft_hf_validation / --sft_loss_mode / --sft_in_batch_packing require --sft_hf_dataset."
         )
+    if args.document_boundaries and (args.sft or args.mbs != 1 or args.cp_size != 1):
+        # Each window carries its own number of documents, so windows cannot be stacked.
+        raise ValueError("--document_boundaries needs pre-tokenized data, --mbs 1 and --cp_size 1.")
     if args.sft and (args.data_paths or args.use_mock_data):
         raise ValueError(
             "--sft is mutually exclusive with --data_paths / --use_mock_data: the SFT branch wins "
@@ -495,6 +505,25 @@ def _tokenizer_prepends_bos(args) -> bool:
     if not getattr(tokenizer, "bos_token", None):
         return False
     return tokenizer("x").input_ids[:1] == [tokenizer.bos_token_id]
+
+
+def _add_document_boundaries() -> None:
+    """Give each EOD-separated document of a pre-tokenized window its own THD segment."""
+    getitem = GPTDataset.__getitem__
+
+    def getitem_with_boundaries(self, idx):
+        sample = getitem(self, idx)
+        tokens = sample["tokens"]
+        n = tokens.numel()
+        ends = (tokens == self.config.tokenizer.eod).nonzero(as_tuple=True)[0] + 1
+        # On the tokens' (CPU) device: CUDA tensors from a dataloader worker are shared over IPC.
+        bounds = [tokens.new_zeros(1), ends[ends < n], tokens.new_tensor([n])]
+        cu_seqlens = torch.cat(bounds).to(torch.int32)
+        sample["cu_seqlens_q"] = cu_seqlens
+        sample["max_seqlen_q"] = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        return sample
+
+    GPTDataset.__getitem__ = getitem_with_boundaries
 
 
 def main(args: argparse.Namespace, owns_the_run: bool = True):
@@ -638,6 +667,8 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             return model_chunks
 
         distill_provider.register_pre_wrap_hook(_restore_student_hook, prepend=True)
+    if args.document_boundaries:
+        _add_document_boundaries()
 
     # Build optimizer and scheduler
     optimizer_config, scheduler_config = distributed_fused_adam_with_cosine_annealing(
@@ -653,7 +684,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         "path_to_cache": args.data_path_to_cache,
         "random_seed": args.seed,
         "reset_attention_mask": False,
-        "reset_position_ids": False,
+        "reset_position_ids": args.document_boundaries,
         "eod_mask_loss": False,
         "num_dataset_builder_threads": 1,
         "data_sharding": True,

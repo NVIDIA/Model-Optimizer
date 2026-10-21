@@ -97,6 +97,40 @@ def test_distill_llm_hf_export(tmp_path, num_gpus, fake_hub_checkpoint):
             assert (all_exports / f"iter_{it:07d}" / fake_hub_checkpoint.marker).exists()
 
 
+def test_distill_llm_document_boundaries(tmp_path, num_gpus):
+    """--document_boundaries trains each EOD-separated document of a window as its own THD segment."""
+    # head_dim=8: TE's unfused attention, the only backend for head_dim 2, rejects THD input.
+    hf_path = create_tiny_qwen3_dir(
+        tmp_path, with_tokenizer=True, head_dim=8, max_position_embeddings=2048
+    )
+    distill_output_dir = tmp_path / "distill_output"
+    distill_cmd_parts = extend_cmd_parts(
+        [
+            "torchrun",
+            f"--nproc_per_node={num_gpus}",
+            "distill.py",
+            "--use_mock_data",
+            "--document_boundaries",
+        ],
+        student_hf_path=hf_path,
+        teacher_hf_path=hf_path,
+        output_dir=distill_output_dir,
+        tp_size=num_gpus,
+        pp_size=1,
+        # Mock documents are 1-4095 tokens, so most of these windows span a document boundary.
+        seq_length=2048,
+        mbs=1,
+        gbs=4,
+        train_iters=2,
+        lr_warmup_iters=1,
+        eval_interval=2,
+        eval_iters=0,
+        log_interval=1,
+    )
+    run_example_command(distill_cmd_parts, example_path="megatron_bridge")
+    assert (distill_output_dir / "checkpoints/iter_0000002").exists()
+
+
 def test_distill_llm_sft(tmp_path, num_gpus):
     """--sft distills from prompt-completion jsonl instead of pre-tokenized --data_paths."""
     teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)

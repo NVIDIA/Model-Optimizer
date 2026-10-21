@@ -184,6 +184,23 @@ the last one (`last_turn`), or the whole conversation (`full`). With `--eval_ite
 `--sft_hf_validation` in the same format. This path needs a Megatron-Bridge with
 `DirectHFSFTDatasetConfig`.
 
+Megatron-Bridge pads every conversation to `--seq_length` when `--ep_size` > 1, so for MoE models
+add `--sft_in_batch_packing --mbs 2 --moe_aux_loss_coeff 0`: each micro-batch packs two
+conversations into one unpadded THD sequence, and the MoE load-balancing loss, which would also
+run over padding, is dropped. Order the rows as pairs that fit together with the chat-blend
+`pack_max_tokens` option ([Dataset Preparation README](../dataset/MEGATRON_DATA_PREP.md#chat-jsonl-blends-for-assistant-only-loss)).
+Megatron-Bridge holds every row in host memory on each rank, so keep `train.jsonl` to the rows
+the run needs.
+
+With pre-tokenized data, `--document_boundaries` (`--mbs 1`, `--cp_size 1`) restricts attention to
+each EOD-separated document of a window instead of the whole window.
+
+> [!IMPORTANT]
+> Packed training (`--sft_in_batch_packing` or `--document_boundaries`) of Gated DeltaNet models
+> (e.g. Qwen3.5 / Qwen3.6) needs `flash-linear-attention` >= 0.5.2: earlier versions compute the
+> packed linear attention wrongly. `nemo:26.08` ships 0.4.2, so run
+> `python -m pip install -r requirements.txt` in this directory first.
+
 Teacher and student must share a tokenizer — distillation scores the teacher on the student's
 token ids, and the KD losses compare the two models' logits elementwise over the vocab dimension.
 
