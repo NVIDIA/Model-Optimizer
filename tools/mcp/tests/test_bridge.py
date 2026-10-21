@@ -1667,25 +1667,50 @@ def test_read_cluster_artifact_rejects_unsafe_args(experiment_id, path, reason):
     assert result["reason"] == reason
 
 
-def test_read_cluster_artifact_path_is_one_shell_word(monkeypatch):
-    """Shell metacharacters in path reach `cat` as a literal filename, not as commands."""
+def _fake_artifact_tunnel(monkeypatch, symlinks=None):
+    """Install a fake nemo_run experiment whose tunnel resolves paths via ``symlinks``."""
     commands = []
 
     class FakeTunnel:
-        job_dir = "/remote/exp"
+        job_dir = "/remote/exp/cicd/cicd_42"
 
         def run(self, cmd, warn=False):
             commands.append(cmd)
-            return SimpleNamespace(stdout="content")
+            argv = shlex.split(cmd)
+            if argv[0] == "realpath":
+                return SimpleNamespace(
+                    stdout="\n".join((symlinks or {}).get(a, a) for a in argv[3:]), exited=0
+                )
+            return SimpleNamespace(stdout="content", exited=0)
 
-    exp = SimpleNamespace(tasks=[SimpleNamespace(executor=SimpleNamespace(tunnel=FakeTunnel()))])
+    # executor.job_dir is nemo_run's local copy and must not be used for the remote path.
+    executor = SimpleNamespace(tunnel=FakeTunnel(), job_dir="/local/exp/task")
+    exp = SimpleNamespace(tasks=[SimpleNamespace(executor=executor)])
     experiment_mod = SimpleNamespace(Experiment=SimpleNamespace(from_id=lambda _: exp))
     monkeypatch.setitem(sys.modules, "nemo_run.run.experiment", experiment_mod)
+    return commands
 
+
+def test_read_cluster_artifact_path_is_one_shell_word(monkeypatch):
+    """Shell metacharacters in path reach `cat` as a literal filename, not as commands."""
+    commands = _fake_artifact_tunnel(monkeypatch)
     path = "x; touch /tmp/pwned $(whoami) #"
     result = bridge.read_cluster_artifact_impl(experiment_id="cicd_42", path=path, job_idx=0)
     assert result["ok"] is True
-    assert shlex.split(commands[0]) == ["cat", f"/remote/exp/cicd_42/{path}"]
+    target = f"/remote/exp/cicd/cicd_42/{path}"
+    assert shlex.split(commands[0]) == ["realpath", "-e", "--", "/remote/exp/cicd/cicd_42", target]
+    assert shlex.split(commands[1]) == ["cat", "--", target]
+
+
+def test_read_cluster_artifact_rejects_symlink_escape(monkeypatch):
+    """A symlink inside the experiment dir that points outside it is not read."""
+    commands = _fake_artifact_tunnel(
+        monkeypatch, symlinks={"/remote/exp/cicd/cicd_42/link": "/home/user/.ssh/id_rsa"}
+    )
+    result = bridge.read_cluster_artifact_impl(experiment_id="cicd_42", path="link", job_idx=0)
+    assert result["ok"] is False
+    assert result["reason"] == "path_outside_experiment"
+    assert len(commands) == 1  # no cat issued
 
 
 # ---------------------------------------------------------------------------

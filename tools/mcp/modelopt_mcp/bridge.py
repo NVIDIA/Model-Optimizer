@@ -2234,25 +2234,46 @@ def read_cluster_artifact_impl(
             "diagnostic": "Experiment executor has no tunnel attribute.",
         }
 
-    # Resolve the remote path. The experiment dir on the cluster is
-    # exposed via tunnel.job_dir or executor.job_dir; for the launcher's
-    # SlurmExecutor, this is set at submit time.
-    remote_dir = getattr(executor, "job_dir", None) or getattr(tunnel, "job_dir", None)
+    # nemo_run sets tunnel.job_dir to the remote <base>/<title>/<experiment_id>
+    # at submit time; executor.job_dir is the local copy on this machine.
+    remote_dir = getattr(tunnel, "job_dir", None)
     if not remote_dir:
         return {
             "ok": False,
             "experiment_id": experiment_id,
             "reason": "no_remote_job_dir",
             "diagnostic": (
-                "Executor / tunnel metadata didn't carry a remote "
-                "job_dir, so the relative path cannot be resolved."
+                "Tunnel metadata didn't carry a remote job_dir, so the "
+                "relative path cannot be resolved."
             ),
         }
-    remote_path = f"{remote_dir}/{experiment_id}/{path}"
+    remote_path = f"{remote_dir}/{path}"
 
     try:
-        # tunnel.run hands the string to a shell, so the path must be quoted.
-        result = tunnel.run(f"cat {shlex.quote(remote_path)}", warn=True)
+        # tunnel.run hands the string to a shell, so quote every path. Resolve symlinks
+        # remotely first so the read cannot leave the experiment dir.
+        resolved = tunnel.run(
+            f"realpath -e -- {shlex.quote(remote_dir)} {shlex.quote(remote_path)}", warn=True
+        )
+        lines = (getattr(resolved, "stdout", "") or "").splitlines()
+        if getattr(resolved, "exited", 0) != 0 or len(lines) != 2:
+            return {
+                "ok": False,
+                "experiment_id": experiment_id,
+                "remote_path": remote_path,
+                "reason": "artifact_not_found",
+                "diagnostic": f"{remote_path} does not exist on the cluster.",
+            }
+        base, target = lines
+        if not target.startswith(base.rstrip("/") + "/"):
+            return {
+                "ok": False,
+                "experiment_id": experiment_id,
+                "remote_path": remote_path,
+                "reason": "path_outside_experiment",
+                "diagnostic": f"{remote_path} resolves outside the experiment dir.",
+            }
+        result = tunnel.run(f"cat -- {shlex.quote(target)}", warn=True)
     except Exception as e:
         return {
             "ok": False,
