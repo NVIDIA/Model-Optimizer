@@ -131,7 +131,9 @@ class DistributedWorkerPool:
         pool.shutdown()
     """
 
-    def __init__(self, world_size, backend="nccl", teardown_fn=default_worker_teardown):
+    def __init__(
+        self, world_size, backend="nccl", teardown_fn=default_worker_teardown, ready_timeout=120
+    ):
         assert world_size > 0, "World size must be greater than 0"
         self.world_size = world_size
         # Set once a job was interrupted: the workers are then killed, see ``run``.
@@ -160,9 +162,36 @@ class DistributedWorkerPool:
             p.start()
             self._processes.append(p)
 
-        for _ in range(world_size):
-            msg = self._result_queue.get(timeout=120)
-            assert msg == "ready", f"Worker failed to initialize: {msg}"
+        try:
+            for _ in range(world_size):
+                msg = self._get(ready_timeout)
+                assert msg == "ready", f"Worker failed to initialize: {msg}"
+        except BaseException:
+            self._abort()  # do not leave workers behind when the start fails
+            raise
+
+    def _get(self, timeout):
+        """Return the next message from the workers; fail within a second if a worker died.
+
+        A worker that exits (an illegal memory access aborts the process, an OOM kill) would
+        otherwise only be noticed when ``timeout`` runs out.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                return self._result_queue.get(
+                    timeout=max(0.01, min(1.0, deadline - time.monotonic()))
+                )
+            except queue.Empty:  # noqa: PERF203
+                dead = [
+                    (rank, p.exitcode) for rank, p in enumerate(self._processes) if not p.is_alive()
+                ]
+                if dead:
+                    raise RuntimeError(
+                        f"Worker process(es) died (rank, exit code): {dead}"
+                    ) from None
+                if time.monotonic() >= deadline:
+                    raise
 
     @staticmethod
     def _worker_loop(rank, world_size, backend, port, cmd_queue, result_queue, teardown_fn):
@@ -232,7 +261,7 @@ class DistributedWorkerPool:
                 q.put((fn, args, kwargs))
             for _ in range(self.world_size):
                 timeout = self.job_timeout if deadline is None else deadline - time.monotonic()
-                status, rank, tb = self._result_queue.get(timeout=max(timeout, 0))
+                status, rank, tb = self._get(max(timeout, 0))
                 if status == "error":
                     errors.append(f"--- Rank {rank} ---\n{tb}")
                     deadline = deadline or time.monotonic() + self.failure_grace
