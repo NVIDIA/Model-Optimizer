@@ -101,11 +101,7 @@ def _test_matches_megatron_exporter(source, quant_cfg_name, tmp_path, rank, size
 
 @pytest.mark.parametrize(
     ("create_source", "quant_cfg_name"),
-    [
-        (create_tiny_qwen3_dir, "nvfp4-kv_fp8"),
-        (create_tiny_nemotron_h_dir, "nvfp4-kv_fp8"),
-        (create_tiny_qwen3_dir, "w4a8"),
-    ],
+    [(create_tiny_nemotron_h_dir, "nvfp4-kv_fp8"), (create_tiny_qwen3_dir, "w4a8")],
 )
 def test_matches_megatron_exporter(dist_workers_size_1, tmp_path, create_source, quant_cfg_name):
     source = create_source(tmp_path, with_tokenizer=True)

@@ -250,9 +250,9 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
         # allow_unexpected waives the expert names wholesale; this re-tightens it.
         assert_per_expert_experts_complete(hf_export_path)
 
-    # Step 4: export for vLLM fake-quant evaluation. Megatron-Bridge writes the whole model, so
-    # a VLM's language-model-only QAD checkpoint must still come out with the original vision tower.
-    if HAS_BRIDGE_QUANTIZER_SIDECARS:
+    # Step 4: export for vLLM fake-quant evaluation (test_quantize_export.py covers the rest).
+    # Only QAD saves a VLM's language model alone; the export must still carry the vision tower.
+    if is_vlm and HAS_BRIDGE_QUANTIZER_SIDECARS:
         fakequant_path = tmp_path / "qad_vllm_fakequant"
         fakequant_cmd = extend_cmd_parts(
             [
@@ -271,7 +271,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
             fakequant_path,
             hf_model_path,
             check_values=False,
-            bit_exact_prefixes=("model.visual.",) if is_vlm else (),
+            bit_exact_prefixes=("model.visual.",),
         )
         recipe = yaml.safe_load((fakequant_path / "quant_recipe.yaml").read_text())
         state = torch.load(fakequant_path / "quantizer_state.pth", weights_only=True)

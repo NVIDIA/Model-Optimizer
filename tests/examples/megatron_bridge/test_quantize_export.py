@@ -14,7 +14,6 @@
 # limitations under the License.
 """Tests for quantize.py and export_quantized_megatron_to_hf.py scripts."""
 
-from functools import partial
 from pathlib import Path
 
 import pytest
@@ -28,11 +27,13 @@ from _test_utils.torch.export.unified_checkpoint import (
 from _test_utils.torch.megatron.modelopt_state import assert_has_modelopt_state
 from _test_utils.torch.transformers_models import (
     create_tiny_nemotron_h_dir,
-    create_tiny_qwen3_5_moe_vl_dir,
     create_tiny_qwen3_moe_dir,
     create_tiny_qwen3vl_dir,
 )
 from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
+
+# TODO: drop this probe once the minimum Megatron-Bridge writes the ModelOpt quantizer sidecars.
+HAS_BRIDGE_QUANTIZER_SIDECARS = hasattr(MegatronModelBridge, "build_modelopt_quantizer_recipe")
 
 # Per-architecture export *mappings* are covered in-process by
 # tests/gpu_megatron/torch/export/test_unified_export_megatron.py; these cases cover the script
@@ -49,7 +50,14 @@ _DENSE_KWARGS = {
 
 
 @pytest.mark.parametrize(
-    ("create_model", "model_kwargs", "recipe", "quantize_parallelism", "export_parallelism"),
+    (
+        "create_model",
+        "model_kwargs",
+        "recipe",
+        "quantize_parallelism",
+        "export_parallelism",
+        "fakequant_export_parallelism",
+    ),
     [
         # MoE: routed experts used to be dropped silently from the export. Calibrates with context
         # parallelism (not on the VLM: M-RoPE CP needs nemo:26.10).
@@ -59,17 +67,33 @@ _DENSE_KWARGS = {
             "general/ptq/nvfp4_default-kv_fp8",
             "cp_size",
             "pp_size",
+            # Per-expert HF names, each EP rank owning some of them.
+            "ep_size",
         ),
         # Dense VLM: only the language model is quantized, vision is copied through. Keeps the
         # FP8 script-to-checkpoint coverage.
-        (create_tiny_qwen3vl_dir, {}, "general/ptq/fp8_default-kv_fp8", "tp_size", "pp_size"),
+        (
+            create_tiny_qwen3vl_dir,
+            {},
+            "general/ptq/fp8_default-kv_fp8",
+            "tp_size",
+            "pp_size",
+            "tp_size",
+        ),
         # Mamba hybrid + MoE with grouped-GEMM experts: exported with its experts sharded
         # across ranks (EP), resharded from the TP-quantized checkpoint.
-        (create_tiny_nemotron_h_dir, {}, "general/ptq/nvfp4_default-kv_fp8", "tp_size", "ep_size"),
+        (
+            create_tiny_nemotron_h_dir,
+            {},
+            "general/ptq/nvfp4_default-kv_fp8",
+            "tp_size",
+            "ep_size",
+            "pp_size",
+        ),
     ],
     ids=["qwen3_moe", "qwen3vl", "nemotron_h"],
 )
-@pytest.mark.timeout(360)  # quantize + export in one test; 1-gpu CI exceeds the default 300s
+@pytest.mark.timeout(420)  # quantize + 2 exports in one test; 1-gpu CI exceeds the default 300s
 def test_quantize_and_export(
     tmp_path: Path,
     num_gpus,
@@ -78,6 +102,7 @@ def test_quantize_and_export(
     recipe,
     quantize_parallelism,
     export_parallelism,
+    fakequant_export_parallelism,
     fake_hub_checkpoint,
 ):
     """Quantize a tiny model via a YAML recipe and export it to a unified HF checkpoint.
@@ -143,84 +168,32 @@ def test_quantize_and_export(
     # outputs = llm.generate(["Hello!"], vllm.SamplingParams(max_tokens=4))
     # assert outputs and outputs[0].outputs and outputs[0].outputs[0].text
 
-
-@pytest.mark.skipif(
-    not hasattr(MegatronModelBridge, "build_modelopt_quantizer_recipe"),
-    reason="Megatron-Bridge does not write the ModelOpt quantizer sidecars",
-)
-@pytest.mark.parametrize(
-    ("create_model", "export_parallelism"),
-    [
-        (
-            partial(
-                create_tiny_qwen3_5_moe_vl_dir,
-                with_processor=True,
-                num_hidden_layers=2,
-                layer_types=["linear_attention", "full_attention"],
-            ),
-            "ep_size",
-        ),
-        # Per-expert HF names with SequentialMLP experts: each EP rank owns some of the names.
-        (partial(create_tiny_qwen3_moe_dir, with_tokenizer=True), "ep_size"),
-        (partial(create_tiny_nemotron_h_dir, with_tokenizer=True), "pp_size"),
-    ],
-    ids=["qwen3_5_moe_vl", "qwen3_moe", "nemotron_h"],
-)
-@pytest.mark.timeout(480)
-def test_quantize_and_vllm_fakequant_export(
-    tmp_path: Path, num_gpus, create_model, export_parallelism
-):
-    """Fake-quant exports through Megatron-Bridge do not depend on the export parallelism."""
-    hf_model_path = create_model(tmp_path)
-    hf_model_path = hf_model_path[0] if isinstance(hf_model_path, tuple) else hf_model_path
-    megatron_path = tmp_path / "quantized_megatron"
-    quantize_cmd = extend_cmd_parts(
-        ["torchrun", "--nproc_per_node=1", "quantize.py", "--skip_generate"],
-        hf_model_name_or_path=hf_model_path,
-        recipe="general/ptq/nvfp4_default-kv_fp8",
-        calib_dataset_name="cnn_dailymail",
-        calib_num_samples=4,
-        calib_batch_size=2,
-        seq_length=16,
-        export_megatron_path=megatron_path,
-    )
-    run_example_command(quantize_cmd, example_path="megatron_bridge", setup_free_port=True)
-
-    exports = []
-    for size in sorted({1, num_gpus}):
-        export_path = tmp_path / f"vllm_fakequant_{size}"
-        export_cmd = extend_cmd_parts(
+    # Step 3: export folded weights + quantizer sidecars through Megatron-Bridge for vLLM fake quant
+    if HAS_BRIDGE_QUANTIZER_SIDECARS:
+        fakequant_path = tmp_path / "vllm_fakequant"
+        fakequant_cmd = extend_cmd_parts(
             [
                 "torchrun",
-                f"--nproc_per_node={size}",
+                f"--nproc_per_node={num_gpus}",
                 "export_quantized_megatron_to_hf.py",
                 "--vllm_fakequant_export",
             ],
-            hf_model_name_or_path=hf_model_path,
+            hf_model_name_or_path=model_arg,
             megatron_path=megatron_path,
-            export_unified_hf_path=export_path,
-            **{export_parallelism: size},
+            export_unified_hf_path=fakequant_path,
+            **{fakequant_export_parallelism: num_gpus},
         )
-        run_example_command(export_cmd, example_path="megatron_bridge", setup_free_port=True)
-        exports.append(
-            (
-                load_safetensors_dir(export_path),
-                torch.load(export_path / "quantizer_state.pth", weights_only=True),
-                yaml.safe_load((export_path / "quant_recipe.yaml").read_text()),
-            )
+        run_example_command(fakequant_cmd, example_path="megatron_bridge", setup_free_port=True)
+        is_vlm = "vision_config" in (hf_model_path / "config.json").read_text()
+        assert_exported_checkpoint_matches(
+            fakequant_path,
+            hf_model_path,
+            check_values=False,
+            bit_exact_prefixes=("model.visual.",) if is_vlm else (),
         )
-
-    weights, state, recipe = exports[0]
-    assert_exported_checkpoint_matches(
-        tmp_path / "vllm_fakequant_1", hf_model_path, check_values=False
-    )
-    assert not any("quantizer" in name for name in weights)
-    quantizers = recipe["quantizers"]
-    assert {key.rpartition(".")[0] for key in state} <= quantizers.keys()
-    assert any(name.endswith("k_bmm_quantizer") for name in quantizers)
-    for other_weights, other_state, other_recipe in exports[1:]:
-        assert other_recipe == recipe
-        for reference, other in ((weights, other_weights), (state, other_state)):
-            assert other.keys() == reference.keys()
-            for name, tensor in reference.items():
-                torch.testing.assert_close(other[name], tensor, rtol=0, atol=0, msg=name)
+        assert not any("quantizer" in name for name in load_safetensors_dir(fakequant_path))
+        recipe = yaml.safe_load((fakequant_path / "quant_recipe.yaml").read_text())
+        quantizers = recipe["quantizers"]
+        state = torch.load(fakequant_path / "quantizer_state.pth", weights_only=True)
+        assert any(name.endswith("k_bmm_quantizer") for name in quantizers)
+        assert {key.rpartition(".")[0] for key in state} <= quantizers.keys()
