@@ -43,6 +43,12 @@ def test_trust_remote_code_is_opt_in(flag):
     assert args.trust_remote_code
 
 
+@pytest.mark.parametrize("alias", ["--model_name_or_path", "--model"])
+def test_an_alias_repeating_a_standard_flag_is_rejected(alias):
+    with pytest.raises(ValueError, match=alias):
+        _parser(aliases=(alias,))
+
+
 def test_model_is_required_unless_said_otherwise():
     with pytest.raises(SystemExit):
         _parser().parse_args([])

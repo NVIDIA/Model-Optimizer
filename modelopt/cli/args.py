@@ -63,6 +63,9 @@ def add_model_args(
     """
     dest = f"{role}_model_name_or_path" if role else "model_name_or_path"
     flags = [f"--{dest}", f"--{dest.replace('_', '-')}", *([] if role else ["--model"]), *aliases]
+    if repeated := sorted({flag for flag in flags if flags.count(flag) > 1}):
+        # argparse accepts the repeat silently, which hides a misspelled alias.
+        raise ValueError(f"aliases repeat flags add_model_args already adds: {repeated}")
     subject = f"The {role} model" if role else "The model"
     parser.add_argument(
         *flags,
