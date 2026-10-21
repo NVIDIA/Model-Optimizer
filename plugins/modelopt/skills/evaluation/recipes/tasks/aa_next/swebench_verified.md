@@ -13,9 +13,10 @@ ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 
 ## Output-token policy
 
-SWE-bench Verified / OpenHands configures **no per-response output cap**, overriding model-card
-budgets and fallbacks per [generation-policy precedence](../../../references/model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
-Keep `drop_params` stripping `max_tokens`/`max_completion_tokens`; remove numeric output caps from
+The canonical `drop_params` already strips `max_tokens`/`max_completion_tokens` (table below).
+ModelOpt's SWE-bench Verified / OpenHands protocol keeps **no configured per-response output cap**,
+overriding model-card budgets and fallbacks per [generation-policy precedence](../../../references/model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
+Preserve that existing stripping; remove numeric output caps from
 merged generation settings, `proxy.extra_body`, solver/agent/LLM kwargs, interceptors and CLI/server overrides.
 Check backend/version defaults and inherited `generation_config.json`; neutralize numeric `max_new_tokens`
 without resetting sampling or stop/EOS settings
