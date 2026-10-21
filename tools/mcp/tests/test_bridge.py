@@ -18,7 +18,10 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -1647,6 +1650,42 @@ def test_read_cluster_artifact_logs_mode_timeout(monkeypatch):
     )
     assert result["ok"] is False
     assert result["reason"] == "logs_fetch_timeout"
+
+
+@pytest.mark.parametrize(
+    ("experiment_id", "path", "reason"),
+    [
+        ("cicd_42; id", None, "invalid_experiment_id"),
+        ("cicd_42", "/etc/passwd", "invalid_path"),
+        ("cicd_42", "../../.ssh/id_rsa", "invalid_path"),
+    ],
+)
+def test_read_cluster_artifact_rejects_unsafe_args(experiment_id, path, reason):
+    """Non-token experiment ids, absolute paths and '..' are refused before any I/O."""
+    result = bridge.read_cluster_artifact_impl(experiment_id=experiment_id, path=path, job_idx=0)
+    assert result["ok"] is False
+    assert result["reason"] == reason
+
+
+def test_read_cluster_artifact_path_is_one_shell_word(monkeypatch):
+    """Shell metacharacters in path reach `cat` as a literal filename, not as commands."""
+    commands = []
+
+    class FakeTunnel:
+        job_dir = "/remote/exp"
+
+        def run(self, cmd, warn=False):
+            commands.append(cmd)
+            return SimpleNamespace(stdout="content")
+
+    exp = SimpleNamespace(tasks=[SimpleNamespace(executor=SimpleNamespace(tunnel=FakeTunnel()))])
+    experiment_mod = SimpleNamespace(Experiment=SimpleNamespace(from_id=lambda _: exp))
+    monkeypatch.setitem(sys.modules, "nemo_run.run.experiment", experiment_mod)
+
+    path = "x; touch /tmp/pwned $(whoami) #"
+    result = bridge.read_cluster_artifact_impl(experiment_id="cicd_42", path=path, job_idx=0)
+    assert result["ok"] is True
+    assert shlex.split(commands[0]) == ["cat", f"/remote/exp/cicd_42/{path}"]
 
 
 # ---------------------------------------------------------------------------

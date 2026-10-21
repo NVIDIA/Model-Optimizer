@@ -37,6 +37,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess  # nosec B404 - fixed-argv CLI probes are required; shell=True is not used.
 import tempfile
@@ -2109,6 +2110,16 @@ def read_cluster_artifact_impl(
     The tool returns ``{ok, content, ...}`` with the file content as a
     text string (8 KB max — same as the launcher's log_excerpt cap).
     """
+    invalid = _validate_experiment_id(experiment_id)
+    if invalid is not None:
+        return invalid
+    if path and (path.startswith("/") or ".." in Path(path).parts):
+        return {
+            "ok": False,
+            "experiment_id": experiment_id,
+            "reason": "invalid_path",
+            "diagnostic": "path must be relative to the experiment dir, without '..'.",
+        }
     if not path:
         # Mode 1: fetch log via `nemo experiment logs`. Subprocess
         # because the CLI handles tunnel auth and remote-path
@@ -2234,14 +2245,14 @@ def read_cluster_artifact_impl(
             "reason": "no_remote_job_dir",
             "diagnostic": (
                 "Executor / tunnel metadata didn't carry a remote "
-                "job_dir. Pass the full remote path as `path` instead "
-                "of a relative one."
+                "job_dir, so the relative path cannot be resolved."
             ),
         }
-    remote_path = path if path.startswith("/") else f"{remote_dir}/{experiment_id}/{path}"
+    remote_path = f"{remote_dir}/{experiment_id}/{path}"
 
     try:
-        result = tunnel.run(f"cat {remote_path}", warn=True)
+        # tunnel.run hands the string to a shell, so the path must be quoted.
+        result = tunnel.run(f"cat {shlex.quote(remote_path)}", warn=True)
     except Exception as e:
         return {
             "ok": False,
