@@ -20,7 +20,7 @@ When applying a model optimization algorithm, we usually need to modify the mode
 (class) to record and store state information in the model.
 
 On top of the state manager, this module provides utilities to save a history of these modifications
-("modelopt state dict") and restoring a unmodified model to the state indicated in the state dict.
+("modelopt state dict") and restoring an unmodified model to the state indicated in the state dict.
 """
 
 import copy
