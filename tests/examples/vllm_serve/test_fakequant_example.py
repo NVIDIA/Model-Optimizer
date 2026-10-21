@@ -247,21 +247,27 @@ def test_recipe_path_rejects_manual_quant_config(conflicting_field):
 
 
 @pytest.mark.parametrize(
-    ("contents", "error"),
+    ("contents", "error", "match"),
     [
-        ("", ValueError),
-        ("quantize: [", yaml.YAMLError),
-        ("- not\n- a mapping\n", ValueError),
-        ("format: modelopt_quantizer_recipe\nversion: 2\nquantizers: {}\n", ValueError),
+        ("", ValueError, None),
+        ("quantize: [", yaml.YAMLError, None),
+        ("- not\n- a mapping\n", ValueError, None),
+        ("format: modelopt_quantizer_recipe\nversion: 2\nquantizers: {}\n", ValueError, "version"),
+        # Rejected as a quantizer recipe, not handed to the PTQ recipe parser.
+        (
+            "format: modelopt_quantizer_recipe\nversion: 1\nquantizers: {}\n",
+            ValueError,
+            "quantizer names",
+        ),
     ],
 )
-def test_invalid_recipe_yaml_is_rejected(tmp_path, contents, error):
+def test_invalid_recipe_yaml_is_rejected(tmp_path, contents, error, match):
     ptq_utils = _load_example_module("vllm_ptq_utils")
     recipe_path = tmp_path / "recipe.yaml"
     recipe_path.write_text(contents)
     config = {"recipe_path": str(recipe_path), "quant_cfg": None, "kv_quant_cfg": None}
 
-    with pytest.raises(error):
+    with pytest.raises(error, match=match):
         ptq_utils.get_quant_config(config, model=None)
 
 
@@ -982,13 +988,18 @@ def test_recipe_metadata_and_tensor_reload_share_module_mapping(
     assert converted["modelopt_state_dict"][0][1]["metadata"]["quantizer_state"].keys() == expected
 
 
-def test_aliased_quantizer_keeps_the_loaded_range(reload_utils, tmp_path):
-    # vLLM's MoE runner also registers the shared expert as ``experts._shared_experts._layer``.
+@pytest.mark.parametrize("checkpoint_name_first", [True, False])
+def test_aliased_quantizer_keeps_the_loaded_range(reload_utils, tmp_path, checkpoint_name_first):
+    # vLLM's MoE runner also registers the shared expert as ``experts._shared_experts._layer``;
+    # either name may come first in ``named_modules``.
     model = torch.nn.Module()
-    model.shared_expert = torch.nn.Module()
-    model.shared_expert.input_quantizer = TensorQuantizer(amax=9.0)
+    shared_expert = torch.nn.Module()
+    shared_expert.input_quantizer = TensorQuantizer(amax=9.0)
+    if checkpoint_name_first:
+        model.shared_expert = shared_expert
     model.experts = torch.nn.Module()
-    model.experts.shared = model.shared_expert
+    model.experts.shared = shared_expert
+    model.shared_expert = shared_expert
     path = tmp_path / "quantizer_state.pth"
     torch.save({"shared_expert.input_quantizer._amax": torch.tensor(1.001)}, path)
     with warnings.catch_warnings():

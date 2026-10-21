@@ -345,6 +345,14 @@ def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]
                     f"expected {QUANTIZER_RECIPE_VERSION}"
                 )
             raw_recipe = raw_recipe.get("quantizers")
+            if not (
+                isinstance(raw_recipe, dict)
+                and raw_recipe
+                and all(isinstance(name, str) and "_quantizer" in name for name in raw_recipe)
+            ):
+                raise ValueError(
+                    f"'quantizers' of {recipe_path} must map quantizer names to states"
+                )
         if (
             isinstance(raw_recipe, dict)
             and raw_recipe
