@@ -2345,6 +2345,23 @@ def gptq(
         print_rank_0("No quantized linear layers or fused experts found, skipping GPTQ")
         return
 
+    # Every expert Hessian lives from now until its update; a whole large MoE's does not fit.
+    expert_hessian_bytes = 0
+    expert_devices = set()
+    for _, module in fused_experts:
+        for _, weight, quantizers, _ in _fused_expert_projections(module):
+            expert_hessian_bytes += (
+                4 * weight.shape[-1] ** 2 * sum(q.is_enabled for q in quantizers)
+            )
+            expert_devices.add(weight.device)
+    gpus = [d for d in expert_devices if d.type == "cuda"]
+    if gpus and expert_hessian_bytes > sum(torch.cuda.mem_get_info(d)[0] for d in gpus):
+        warn_rank_0(
+            f"GPTQ: the fused-MoE expert Hessians need {expert_hessian_bytes / 2**30:.1f} GiB, more "
+            "than the GPUs holding the experts have free, so they spill to host memory and can "
+            "exhaust it. Enable layerwise calibration to hold one layer's Hessians at a time."
+        )
+
     def _make_gptq_handle(name, m, weight_quantizer=None, weight=None):
         quantizer = m.weight_quantizer if weight_quantizer is None else weight_quantizer
         backend = getattr(quantizer, "backend", None)
@@ -2399,7 +2416,7 @@ def gptq(
 
     print_rank_0(
         f"Computing Hessians for {len(gptq_handles)} linear layers and "
-        f"{len(expert_handles)} fused-expert weights..."
+        f"{len(expert_handles)} fused-expert weights ({expert_hessian_bytes / 2**30:.1f} GiB)..."
     )
 
     try:

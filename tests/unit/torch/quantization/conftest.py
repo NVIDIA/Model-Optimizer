@@ -23,6 +23,7 @@ from modelopt.torch.quantization.nn import QuantModuleRegistry
 @pytest.fixture
 def moe():
     """A one-layer toy MoE with HF fused experts; unregisters its quantized expert class after."""
+    pytest.importorskip("transformers")  # the fused-experts quant wrapper is the HF plugin's
     torch.manual_seed(0)
     model = ToyMoE()
     yield model
