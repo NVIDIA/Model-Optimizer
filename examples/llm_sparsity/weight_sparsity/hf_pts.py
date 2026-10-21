@@ -24,6 +24,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, P
 
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity as mts
+from modelopt.cli import add_model_args
 from modelopt.torch.utils import get_dataset_dataloader
 
 DEFAULT_PAD_TOKEN = "[PAD]"
@@ -134,9 +135,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--model_name_or_path", help="Specify where the PyTorch checkpoint path is", required=True
-    )
+    add_model_args(parser, help_text="Specify where the PyTorch checkpoint path is")
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--dataset",
@@ -170,12 +169,6 @@ if __name__ == "__main__":
         help="Number of pipeline parallel groups for inference.",
         type=int,
         default=1,
-    )
-    parser.add_argument(
-        "--trust_remote_code",
-        help="Set trust_remote_code for Huggingface models and tokenizers",
-        default=False,
-        action="store_true",
     )
 
     args = parser.parse_args()

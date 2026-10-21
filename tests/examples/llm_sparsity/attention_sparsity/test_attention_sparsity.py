@@ -29,7 +29,7 @@ def run_attention_sparsity_command(*, model: str, method: str = "skip_softmax_ca
     """
     kwargs.update(
         {
-            "pyt_ckpt_path": model,
+            "model_name_or_path": model,
             "sparse_attn": method,
         }
     )

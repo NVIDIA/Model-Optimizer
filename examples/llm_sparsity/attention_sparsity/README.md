@@ -124,7 +124,7 @@ Apply sparse attention with a fixed threshold:
 
 ```bash
 python hf_sa.py \
-    --pyt_ckpt_path Qwen/Qwen3-8B \
+    --model_name_or_path Qwen/Qwen3-8B \
     --sparse_attn sparse_softmax
 ```
 
@@ -134,7 +134,7 @@ Apply sparse attention with calibrated thresholds for optimal sparsity:
 
 ```bash
 python hf_sa.py \
-    --pyt_ckpt_path Qwen/Qwen3-8B \
+    --model_name_or_path Qwen/Qwen3-8B \
     --sparse_attn skip_softmax_calib
 ```
 
@@ -151,7 +151,7 @@ both prefill and decode targets from the example script with `--target_sparse_ra
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--pyt_ckpt_path` | Required | HuggingFace model path or name |
+| `--model_name_or_path` | Required | HuggingFace model path or name |
 | `--sparse_attn` | `skip_softmax_calib` | Configuration: `skip_softmax_calib`, `sparse_softmax`, or `skip_softmax_calib_sparse24` |
 | `--backend` | selected config | Backend: `pytorch` (skip-softmax) or `triton` (N:M sparse softmax) |
 | `--seq_len` | `2048` | Maximum sequence length for input prompts |
@@ -174,7 +174,7 @@ Export the sparsified model to a HuggingFace checkpoint:
 
 ```bash
 python hf_sa.py \
-    --pyt_ckpt_path Qwen/Qwen3-8B \
+    --model_name_or_path Qwen/Qwen3-8B \
     --sparse_attn skip_softmax_calib \
     --export_dir ./exported_sparse_model
 ```
@@ -183,7 +183,7 @@ Export a 2:4 sparse-softmax checkpoint for vLLM restore:
 
 ```bash
 python hf_sa.py \
-    --pyt_ckpt_path Qwen/Qwen3-8B \
+    --model_name_or_path Qwen/Qwen3-8B \
     --sparse_attn sparse_softmax \
     --export_dir ./exported_sparse24_model
 ```
@@ -192,7 +192,7 @@ Export calibrated skip-softmax plus 2:4 sparse-softmax metadata for combined vLL
 
 ```bash
 python hf_sa.py \
-    --pyt_ckpt_path Qwen/Qwen3-8B \
+    --model_name_or_path Qwen/Qwen3-8B \
     --sparse_attn skip_softmax_calib_sparse24 \
     --export_dir ./exported_skip_sparse24_model
 ```
