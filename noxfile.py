@@ -25,6 +25,7 @@ Usage:
 
 import glob
 import os
+import re
 import shutil
 import tarfile
 import tempfile
@@ -133,6 +134,24 @@ _FORCE_BUILD = {
     "mamba_ssm": {"MAMBA_FORCE_BUILD": "TRUE"},
     "causal_conv1d": {"CAUSAL_CONV1D_FORCE_BUILD": "TRUE"},
 }
+# Their setup.py files hardcode one -gencode flag per architecture (nine with CUDA 13) and ignore TORCH_CUDA_ARCH_LIST.
+_GENCODE = re.compile(
+    r'^(?P<indent>[ \t]*)cc_flag\.append\("-gencode"\)\n[ \t]*cc_flag\.append\("arch=compute_(?P<arch>\d+),code=sm_\d+"\)',
+    re.MULTILINE,
+)
+
+
+def _only_runner_archs(setup_py):
+    """Drop the ``-gencode`` entries for the architectures not in TORCH_CUDA_ARCH_LIST, which CI sets to its GPU."""
+    archs = os.environ.get("TORCH_CUDA_ARCH_LIST")
+    if not archs:
+        return setup_py
+    keep = {re.sub(r"\D", "", arch) for arch in re.split(r"[;\s]+", archs)}
+    # ``pass`` keeps an ``if`` block valid when all of its entries are dropped
+    patched = _GENCODE.sub(lambda m: m[0] if m["arch"] in keep else f"{m['indent']}pass", setup_py)
+    if not _GENCODE.search(patched):
+        raise ValueError(f"No -gencode entry of setup.py matches TORCH_CUDA_ARCH_LIST={archs!r}")
+    return patched
 
 
 def _wheelhouse():
@@ -157,7 +176,7 @@ def _build_wheel(session, name, wheelhouse):
         source = sdist.removesuffix(".tar.gz")
         setup_py = os.path.join(source, "setup.py")
         with open(setup_py) as f:
-            patched = f.read().replace("-std=c++17", "-std=c++20")
+            patched = _only_runner_archs(f.read().replace("-std=c++17", "-std=c++20"))
         with open(setup_py, "w") as f:
             f.write(patched)
         session.run(*pip_wheel, source, env=_FORCE_BUILD[name])
