@@ -74,6 +74,7 @@ extensions = [
     "sphinx_copybutton",  # line numbers getting copied so cannot use `:linenos:`
     "sphinx_inline_tabs",
     "sphinx_togglebutton",
+    "sphinxext.rediraffe",  # redirect pages for moved docs, see rediraffe_redirects
     "sphinxcontrib.autodoc_pydantic",
     "modelopt_autodoc_pydantic",
 ]
@@ -217,9 +218,9 @@ class PatchedHTMLTranslator(HTML5Translator):
             self.body.append(("%s" + self.secnumber_suffix) % ".".join(map(str, node["secnumber"])))
 
 
-# Pages that moved, as {old path: new path} without ".html"; each old URL gets a redirect page.
-# Announcements gained a <yyyymmdd>- prefix so the source tree sorts by date.
-redirects = {
+# Pages that moved, as {old docname: new docname}; sphinxext-rediraffe writes a redirect page at
+# each old path. Announcements gained a <yyyymmdd>- prefix so the source tree sorts by date.
+rediraffe_redirects = {
     f"announcements/{slug}": f"announcements/{date}-{slug}"
     for date, slug in [
         ("20260713", "dspark-vs-domino"),
@@ -233,37 +234,7 @@ redirects = {
     ]
 }
 
-_REDIRECT_PAGE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Redirecting</title>
-<link rel="canonical" href="{target}">
-<meta http-equiv="refresh" content="0; url={target}">
-<script>location.replace("{target}" + location.hash);</script>
-</head>
-<body><p>This page moved to <a href="{target}">{target}</a>.</p></body>
-</html>
-"""
-
-
-def _write_redirect_pages(app: sphinx.application.Sphinx, exception: Exception | None) -> None:
-    """Write an HTML redirect page at each old path in ``redirects``."""
-    if exception is not None or app.builder.name != "html":
-        return
-    for old, new in redirects.items():
-        if os.path.exists(os.path.join(app.srcdir, old + ".rst")):
-            raise ValueError(f"Redirect source {old!r} is still a page in the docs source")
-        if not os.path.exists(os.path.join(app.outdir, new + ".html")):
-            raise ValueError(f"Redirect target {new!r} was not built")
-        target = os.path.relpath(new + ".html", os.path.dirname(old) or ".")
-        path = os.path.join(app.outdir, old + ".html")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(_REDIRECT_PAGE.format(target=target))
-
 
 def setup(app: sphinx.application.Sphinx) -> None:
     """Setup according to the Sphinx extension API."""
     app.set_translator("html", PatchedHTMLTranslator)
-    app.connect("build-finished", _write_redirect_pages)

@@ -120,6 +120,7 @@ dev-docs = [
     "sphinx-inline-tabs==2025.12.21.14; python_version >= '3.12'",
     "shibuya~=2026.7.0; python_version >= '3.12'",
     "sphinx-togglebutton~=0.4.0; python_version >= '3.12'",
+    "sphinxext-rediraffe~=0.3.0; python_version >= '3.12'",
 ]
 dev-test = [
     "coverage[toml]~=7.14.0", # a1_coverage.pth for subprocess tracking requires this
