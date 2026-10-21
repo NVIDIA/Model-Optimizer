@@ -57,6 +57,7 @@ Changelog
 - Launcher pipelines can prepare declared assets through an optional provider before submission, mount resolved inputs read-only, and record their versions in experiment metadata.
 - The ``evaluation`` agent skill can stop looping ("doom loop") reasoning early: ask it to avoid doom loops and it adds vLLM's ``repetition_detection`` request field (vLLM 0.17.0 or later) to every task, ending a request once its output repeats. Use the same setting for baseline and candidate runs.
 - ``modelopt.torch.utils.plugins.model_load_utils.load_pretrained`` now loads a model distributed under ``torchrun``, with an MoE's routed experts sharded across the ranks, FSDP2-sharded or whole on every rank, by the plan ``resolve_distribution_plan`` decides or one passed as its new ``distribution`` argument.
+- The ``hf_ptq``, ``megatron_bridge`` and ``llm_sparsity`` example scripts take the model as ``--model_name_or_path`` (``--student_model_name_or_path`` / ``--teacher_model_name_or_path`` for distillation), defined once in the new ``modelopt.cli.add_model_args``. Their old flags (``--pyt_ckpt_path``, ``--hf_model_name_or_path``, ``--student_hf_path``, ``--teacher_hf_path``) still work, but MLflow now records the model under the new names.
 
 **Backward Breaking Changes**
 
