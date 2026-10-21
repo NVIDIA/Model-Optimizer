@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import gc
+import sys
 
 import pytest
 import torch
@@ -37,8 +38,9 @@ def int8_export_in_vllm(tmp_path_factory):
     expected = logits.log_softmax(-1).gather(-1, token_ids[0, 1:, None])[:, 0]
 
     export_hf_checkpoint(model, export_dir=tmp_path / "ggml")
+    # The vLLM image has no `python` binary.
     run_example_command(
-        ["python", "convert_ggml_to_int8.py", str(tmp_path / "ggml"), str(tmp_path / "int8")],
+        [sys.executable, "convert_ggml_to_int8.py", str(tmp_path / "ggml"), str(tmp_path / "int8")],
         "hf_ptq",
     )
 
