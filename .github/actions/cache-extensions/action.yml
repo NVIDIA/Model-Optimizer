@@ -27,6 +27,7 @@ runs:
       run: |
         echo "TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions" >> "$GITHUB_ENV"
         echo "TRITON_CACHE_DIR=/root/.cache/triton" >> "$GITHUB_ENV"
+        echo "TRITON_CACHE_AUTOTUNING=1" >> "$GITHUB_ENV"
     - id: cache
       uses: actions/cache/restore@v6
       with:
