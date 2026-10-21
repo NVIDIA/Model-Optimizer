@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import gc
+import importlib.util
+from pathlib import Path
 
 import pytest
 import torch
@@ -24,7 +26,13 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.inputs import TokensPrompt
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export import convert_ggml_export_to_int8, export_hf_checkpoint
+from modelopt.torch.export import export_hf_checkpoint
+
+_SCRIPT = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq" / "convert_ggml_to_int8.py"
+_SPEC = importlib.util.spec_from_file_location("convert_ggml_to_int8", _SCRIPT)
+assert _SPEC is not None and _SPEC.loader is not None
+convert_ggml_to_int8 = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(convert_ggml_to_int8)
 
 
 @pytest.fixture(scope="module")
@@ -66,7 +74,7 @@ def int8_export_in_vllm(tmp_path_factory):
 
     export_hf_checkpoint(model, export_dir=tmp_path / "ggml")
     export_dir = tmp_path / "int8"
-    convert_ggml_export_to_int8(tmp_path / "ggml", export_dir)
+    convert_ggml_to_int8.convert_ggml_export_to_int8(tmp_path / "ggml", export_dir)
 
     llm = LLM(
         model=str(export_dir),
