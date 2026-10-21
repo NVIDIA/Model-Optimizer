@@ -11,6 +11,28 @@ ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 >
 > The sibling `bench_direct.yaml` is a different backend (Gym/opencode) — don't mix its values in.
 
+## Output-token policy
+
+ModelOpt's SWE-bench Verified / OpenHands protocol uses **no configured per-response
+output-token cap**, overriding model-card budgets and generic fallbacks per
+[generation-policy precedence](../../../references/model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
+Keep `drop_params` stripping `max_tokens`/`max_completion_tokens`; do not add
+`max_tokens: 65536` (or another numeric cap) back through service `generation`,
+`proxy.extra_body`, solver/agent/LLM kwargs, interceptors, or server overrides.
+Check the final merged config, including model fragments and CLI overrides, not
+just the incoming request: stripping does not neutralize later additions or
+inherited `generation_config.json`/backend defaults. Neutralize inherited numeric
+`max_new_tokens` for the backend/version (vLLM: `--override-generation-config
+'{"max_new_tokens":null}'` where supported), preserving sampling and stop/EOS settings.
+Never substitute the generic reasoning fallback. Continue model-card lookup for
+sampling/thinking; context limits and timeouts remain separate constraints.
+
+Validate config changes without launching jobs: inspect the selected solver's
+service and every cap-setting layer above after merging. A static pass establishes
+configured policy, not runtime behavior. For an authorized canary, inspect the
+final upstream request and effective backend defaults before claiming requests
+are uncapped; do not infer this from `drop_params` alone.
+
 ## Task-specific values (canonical `bench.yaml`)
 
 | Field | Value |
