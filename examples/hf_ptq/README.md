@@ -363,7 +363,7 @@ weight-only and weight & activation quantization) — the effective number of bi
 
 You may specify an `effective_bits` target such as 5.4 for mixed precision quantization using `NVFP4_DEFAULT_CFG` & `FP8_DEFAULT_CFG`.
 `AutoQuantize` will automatically quantize highly sensitive layers in `FP8_DEFAULT_CFG` while keeping less sensitive layers in `NVFP4_DEFAULT_CFG` (and even skip quantization for any extremely sensitive layers) so that
-the the final mixed precision quantized model has an effective quantized bits of 5.4. This model would give a better accuracy than the model quantized with vanilla `NVFP4_DEFAULT_CFG` configuration since the more aggressive `NVFP4_DEFAULT_CFG` quantization was not applied for the highly sensitive layers.
+the final mixed precision quantized model has an effective quantized bits of 5.4. This model would give a better accuracy than the model quantized with vanilla `NVFP4_DEFAULT_CFG` configuration since the more aggressive `NVFP4_DEFAULT_CFG` quantization was not applied for the highly sensitive layers.
 
 Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize) API for more details):
 

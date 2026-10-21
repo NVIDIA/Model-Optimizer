@@ -66,7 +66,7 @@ def _test_nas_search_multiprocess_job(
     )
 
     #
-    # Run the mnt.search() step
+    # Run the mtn.search() step
     #
     mtn.search(
         converted_model,

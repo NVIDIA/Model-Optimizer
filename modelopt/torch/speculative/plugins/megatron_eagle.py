@@ -368,11 +368,11 @@ class EagleTransformerBlock(TransformerBlock):
             )
 
             if num_layers > 1:
-                # For multi-layer EAGLE, we use heterogenuous distrubted checkpoint
+                # For multi-layer EAGLE, we use heterogeneous distributed checkpoint
                 sharded_prefix = state_dict_prefix
                 sharded_pp_offset = []
             else:
-                # For single EAGLE, we use homogenous distrubted checkpoint for backward compatibility
+                # For single EAGLE, we use homogeneous distributed checkpoint for backward compatibility
                 sharded_prefix = layer_prefix
                 sharded_pp_offset = [
                     (0, global_layer_offset, num_layers)
@@ -592,7 +592,7 @@ class EagleModule(MegatronModule):
         """Forward function."""
         # NOTE: Even if sequence_parallel is used, the rotary_seq_len must be in the original
         #       length. Since we get the seq_len from hidden_states.shape[0], we need to
-        #       multiply the the tp back.
+        #       multiply the tp back.
         #       Similarly, if context parallel is used, the rotary_seq_len must also be
         #       multiplied by context parallel size.
         rotary_seq_len = hidden_states.shape[0]
@@ -830,7 +830,7 @@ class _DynamicEagleGPTModel(EagleModel):
         ttt_step: int = 0,
     ):
         """Getting EAGLE module inputs."""
-        # gather_from_sequence_parallel_region gathers from the first dimention
+        # gather_from_sequence_parallel_region gathers from the first dimension
         # so we need to transpose input_ids first
         # [b,s] -> [s,b]
         input_ids = input_ids.clone().transpose(0, 1).contiguous()
