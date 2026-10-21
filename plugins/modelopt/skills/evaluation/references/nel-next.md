@@ -174,7 +174,12 @@ with its own `run_id`, copying the shared `services:` block.
   the agent timeout silently truncates long turns.
 - **`drop_params`** for harbor agentic benchmarks: `max_tokens`, `max_completion_tokens`,
   `max_input_tokens_per_task`, `no_rebuild`. The last two are sent by the 0.5.x eval image;
-  vLLM 400s on them if they aren't stripped.
+  vLLM 400s on them if they aren't stripped. For SWE-bench/OpenHands and
+  Terminal-Bench/Terminus-2, stripping output caps implements the task's uncapped
+  policy, not permission to replace agent limits with the generic reasoning fallback.
+  Keep caps out of service `generation` and `proxy.extra_body` too: endpoint extras
+  can restore a field after interceptors. Schema validation alone accepts numeric
+  caps; separately check the composed request settings against the task policy.
 - **`exclude_patterns`** = `["shard*", "model_traffic.jsonl"]` — **always required**, not only
   when `capture_request_body` is set. `model_traffic` capture is on by default
   (`capture_tool_calls`/`capture_reasoning`/`capture_messages` default `true`; only

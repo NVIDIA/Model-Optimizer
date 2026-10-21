@@ -2,10 +2,11 @@
   {
     "name": "swebench-output-policy-precedence",
     "skills": ["evaluation"],
-    "query": "Review my SWE-bench Verified OpenHands nel-next config without launching jobs. drop_params removes max_tokens and max_completion_tokens, but services.model.generation and proxy.extra_body each add max_tokens: 65536, following the generic reasoning fallback. The checkpoint has max_new_tokens: 16384 and a CLI override adds max_completion_tokens: 65536. Keep temperature=1.0, top_p=0.95, thinking enabled, max-model-len=262144, request timeout=3600 and run_timeout=10800. Resolve the guidance conflict and validate the final effective settings cheaply, without GPUs.",
+    "query": "Review my SWE-bench Verified OpenHands nel-next config without launching jobs. drop_params removes max_tokens and max_completion_tokens, but services.model.generation and proxy.extra_body each add max_tokens: 65536, because model-card-research.md says to use the generic reasoning fallback when the card has no applicable budget. My local NEL schema check passes and asserts generation.max_tokens == 65536. The checkpoint has max_new_tokens: 16384 and a CLI override adds max_completion_tokens: 65536. Keep temperature=1.0, top_p=0.95, thinking enabled, max-model-len=262144, request timeout=3600 and run_timeout=10800. Resolve the guidance conflict and validate the final effective settings cheaply, without GPUs.",
     "files": [],
     "expected_behavior": [
-      "Applies the SWE-bench OpenHands task policy before generic model-card budgets or the reasoning fallback",
+      "Identifies model-card-research.md's numeric fallback as inapplicable to SWE-bench/OpenHands, rather than treating missing model-card guidance as permission to restore stripped caps",
+      "Rejects the schema-only success and its assertion that generation.max_tokens equals 65536: schema acceptance does not establish task-policy compliance",
       "Removes numeric output caps from generation, proxy.extra_body and CLI overrides despite incoming cap stripping; checks solver/agent/LLM kwargs and interceptors too",
       "Checks inherited backend/version generation defaults and neutralizes numeric max_new_tokens where supported without resetting sampling or stop/EOS settings",
       "Validates the selected service in the final merged config without submitting jobs; preserves sampling, thinking, context and timeout settings",
