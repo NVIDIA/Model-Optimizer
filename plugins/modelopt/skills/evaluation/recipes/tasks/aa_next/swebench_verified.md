@@ -13,25 +13,18 @@ ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 
 ## Output-token policy
 
-ModelOpt's SWE-bench Verified / OpenHands protocol uses **no configured per-response
-output-token cap**, overriding model-card budgets and generic fallbacks per
-[generation-policy precedence](../../../references/model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
-Keep `drop_params` stripping `max_tokens`/`max_completion_tokens`; do not add
-`max_tokens: 65536` (or another numeric cap) back through service `generation`,
-`proxy.extra_body`, solver/agent/LLM kwargs, interceptors, or server overrides.
-Check the final merged config, including model fragments and CLI overrides, not
-just the incoming request: stripping does not neutralize later additions or
-inherited `generation_config.json`/backend defaults. Neutralize inherited numeric
-`max_new_tokens` for the backend/version (vLLM: `--override-generation-config
-'{"max_new_tokens":null}'` where supported), preserving sampling and stop/EOS settings.
-Never substitute the generic reasoning fallback. Continue model-card lookup for
-sampling/thinking; context limits and timeouts remain separate constraints.
-
-Validate config changes without launching jobs: inspect the selected solver's
-service and every cap-setting layer above after merging. A static pass establishes
-configured policy, not runtime behavior. For an authorized canary, inspect the
-final upstream request and effective backend defaults before claiming requests
-are uncapped; do not infer this from `drop_params` alone.
+ModelOpt's SWE-bench Verified / OpenHands protocol uses **no configured per-response output-token cap**,
+overriding model-card budgets and generic fallbacks per [generation-policy precedence](../../../references/model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
+Keep `drop_params` stripping `max_tokens`/`max_completion_tokens`. In the merged config
+(fragments plus CLI overrides), don't reintroduce a numeric cap via `services.<svc>.generation`,
+`proxy.extra_body`, solver/agent/LLM kwargs, interceptors, or server flags
+(`--override-generation-config`, `--max-new-tokens`, or backend equivalents).
+Stripping request fields doesn't remove inherited caps (`generation_config.json`, backend defaults).
+Check effective defaults for the backend/version and neutralize any numeric `max_new_tokens`
+(vLLM: `--override-generation-config '{"max_new_tokens":null}'` where supported) without changing
+sampling or stop/EOS settings. Never substitute a numeric fallback.
+Continue model-card lookup for sampling/thinking. Keep context limits (e.g. `--max-model-len`),
+agent/task timeouts and sandbox/SLURM lifetimes separate; record them for baseline/candidate comparison.
 
 ## Task-specific values (canonical `bench.yaml`)
 
