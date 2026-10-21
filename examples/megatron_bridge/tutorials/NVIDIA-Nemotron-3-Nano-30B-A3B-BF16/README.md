@@ -153,7 +153,7 @@ Run on **1 node with 8x H100** (~30 mins)
 
 ```bash
 torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/prune_minitron.py \
-  --hf_model_name_or_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+  --model_name_or_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
   --trust_remote_code \
   --pp_size 8 \
   --num_layers_in_first_pipeline_stage 5 \
@@ -279,8 +279,8 @@ Minimum hardware: **4 nodes × 8x H100 (32 GPUs)** for the 8K phase — required
 
 ```bash
 python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
-    --teacher_hf_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
-    --student_hf_path /path/to/Nemotron-3-Nano-30B-A3B-Pruned-A3.0B \
+    --teacher_model_name_or_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+    --student_model_name_or_path /path/to/Nemotron-3-Nano-30B-A3B-Pruned-A3.0B \
     --trust_remote_code \
     --tp_size 4 \
     --ep_size 8 \
@@ -344,8 +344,8 @@ Phase 2 is a **fresh run** with the Phase 1 final checkpoint as the new student.
 
 ```bash
 python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
-    --teacher_hf_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
-    --student_hf_path /path/to/distill_output_phase1_8k/checkpoints/hf_iter_0003200 \
+    --teacher_model_name_or_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+    --student_model_name_or_path /path/to/distill_output_phase1_8k/checkpoints/hf_iter_0003200 \
     --trust_remote_code \
     --tp_size 4 \
     --cp_size 2 \
@@ -370,7 +370,7 @@ python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
 
 Changed arguments from Phase 1:
 
-- `--student_hf_path` — points at the HF export of the Phase 1 final checkpoint
+- `--student_model_name_or_path` — points at the HF export of the Phase 1 final checkpoint
 - `--seq_length 32768` — long-context phase
 - `--gbs 768` — `seq_length × gbs` product unchanged, so each iter still processes the same number of tokens
 - `--cp_size 2` — context parallel is needed to fit the longer sequence; doubles the minimum-hardware footprint to 8 nodes
@@ -483,7 +483,7 @@ Quantization is a two-step flow: `quantize.py` calibrates and saves a Megatron c
 
 ```bash
 torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
-    --hf_model_name_or_path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800 \
+    --model_name_or_path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800 \
     --trust_remote_code \
     --tp_size 8 \
     --quant_cfg MAMBA_MOE_FP8_CONSERVATIVE_CFG \
@@ -502,7 +502,7 @@ torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/quanti
 
 ```bash
 torchrun --nproc_per_node 1 /opt/Model-Optimizer/examples/megatron_bridge/export_quantized_megatron_to_hf.py \
-    --hf_model_name_or_path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800 \
+    --model_name_or_path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800 \
     --megatron_path /path/to/distill_output_phase2_32k/checkpoints/iter_0000800_fp8_megatron \
     --trust_remote_code \
     --pp_size 1 \

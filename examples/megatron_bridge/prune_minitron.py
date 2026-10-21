@@ -26,7 +26,7 @@ while skipping pruning of num_attention_heads using following defaults:
     top-10 candidates are evaluated for MMLU score (10% sampled data) to select the best model.
 
     torchrun --nproc_per_node 2 prune_minitron.py \
-        --hf_model_name_or_path Qwen/Qwen3-8B \
+        --model_name_or_path Qwen/Qwen3-8B \
         --prune_target_params 6e9 \
         --hparams_to_skip num_attention_heads \
         --output_hf_path /tmp/Qwen3-8B-Pruned-6B
@@ -58,6 +58,7 @@ from transformers import (
 import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
 import modelopt.torch.utils.distributed as dist
+from modelopt.cli import add_model_args
 from modelopt.torch.export import copy_non_model_files, ensure_local_checkpoint
 from modelopt.torch.nas.plugins.megatron_model_stats import parse_main_layer_chars
 from modelopt.torch.utils import (
@@ -108,7 +109,7 @@ PRUNE = Tool(
     ),
     variant_help="the pruning target, or export_config",
     variant=_prune_variant,
-    model=lambda args: args.hf_model_name_or_path,
+    model=lambda args: args.model_name_or_path,
     # Exactly one: the parser makes the two output flags a required exclusive group.
     checkpoint=lambda args: args.output_megatron_path or args.output_hf_path,
     # Known only after the search, so main() stashes it on args.
@@ -148,8 +149,7 @@ def _is_deepseek_style_moe(text_cfg) -> bool:
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--hf_model_name_or_path", type=str, required=True)
-    parser.add_argument("--trust_remote_code", action="store_true")
+    add_model_args(parser, aliases=("--hf_model_name_or_path",))
     parser.add_argument(
         "--no_moe_grouped_gemm",
         action="store_true",
@@ -438,12 +438,10 @@ def main(args: argparse.Namespace):
         warn_rank_0(f"\nPruned model already exists at {args.output_hf_path}. Exiting...")
         return
 
-    # --hf_model_name_or_path stays as given. Later steps read the local copy of the whole
+    # --model_name_or_path stays as given. Later steps read the local copy of the whole
     # checkpoint in local_checkpoint_path, since exporters read the source's files from local disk
     # only; hub_model_id is the Hub ID, or None for a local path.
-    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
-        args.hf_model_name_or_path
-    )
+    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(args.model_name_or_path)
 
     bridge, provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(
         hf_model_name_or_path=args.local_checkpoint_path,
