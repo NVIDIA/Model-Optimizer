@@ -964,6 +964,22 @@ def _fused_expert_projections(module: nn.Module):
             yield weight_name, weight, quantizers, input_quantizer
 
 
+def _refuse_packed_fused_expert_weights(name, module, method, updates):
+    """Refuse fused experts that store a projection ``method`` updates in 8 bits.
+
+    Such experts (native FP8 experts) hand calibration dequantized copies of their weights, so an
+    in-place update would land in a temporary and be lost. ``updates(quantizer)`` says whether
+    ``method`` writes the weight that quantizer belongs to.
+    """
+    for weight_name, weight, quantizers, _ in _fused_expert_projections(module):
+        if weight.element_size() == 1 and any(updates(q) for q in quantizers):
+            raise ValueError(
+                f"{method} updates {name}.{weight_name} in place, but it is stored in 8 bits "
+                "(native FP8 experts), so the update would be lost. Call unpack_weight() on the "
+                "module before calibrating."
+            )
+
+
 class _WeightInputHook:
     """Identify active input collectors so auxiliary modules can request a calibration forward."""
 
@@ -2332,6 +2348,10 @@ def gptq(
     """
     total_start = time.time()
 
+    fused_experts = [(n, m) for n, m in model.named_modules() if _is_quant_fused_experts(m)]
+    for name, module in fused_experts:
+        _refuse_packed_fused_expert_weights(name, module, "GPTQ", lambda q: q.is_enabled)
+
     # TODO: Add support for other scale setting strateiges like weight-mse or local-hessian
     max_calibrate(model, forward_loop=forward_loop)
 
@@ -2340,7 +2360,6 @@ def gptq(
         for n, m in model.named_modules()
         if is_quantized_linear(m) and m.weight_quantizer.is_enabled
     ]
-    fused_experts = [(n, m) for n, m in model.named_modules() if _is_quant_fused_experts(m)]
     if not quantized_layers and not fused_experts:
         print_rank_0("No quantized linear layers or fused experts found, skipping GPTQ")
         return
@@ -2494,6 +2513,8 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
     # Refuse a weight the encoder cannot take before any forward or calibration state changes;
     # otherwise it would fail only after calibration, with the earlier weights already encoded.
     for name, module in target_modules:
+        if _is_quant_fused_experts(module):
+            _refuse_packed_fused_expert_weights(name, module, "imatrix", lambda q: id(q) in targets)
         for weight, quantizer in module.iter_weights_for_calibration():
             if id(quantizer) in targets:
                 try:

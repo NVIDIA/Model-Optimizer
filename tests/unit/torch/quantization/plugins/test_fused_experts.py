@@ -1983,3 +1983,53 @@ def test_native_fp8_experts_unpacked_temporary_fold(has_gate, exception, snapsho
     assert all(q.is_enabled for q in quantizers)
     torch.testing.assert_close(experts.state_dict(), state, rtol=0, atol=0)
     torch.testing.assert_close(experts(inputs, indices, routing), expected)
+
+
+@pytest.mark.parametrize(
+    ("cfg", "algorithm"),
+    [
+        ({"num_bits": 4, "block_sizes": {-1: 128}}, {"method": "gptq", "block_size": 128}),
+        ({"num_bits": "iq2_xxs", "block_sizes": {-1: 256}, "backend": "ggml"}, "imatrix"),
+    ],
+    ids=["gptq", "imatrix"],
+)
+def test_native_fp8_experts_reject_packed_weight_updates(cfg, algorithm):
+    # GPTQ and imatrix write the experts' weights in place; packed FP8 experts only hand them
+    # dequantized copies, so the update would be lost.
+    torch.manual_seed(42)
+    config = PretrainedConfig(
+        hidden_size=256, intermediate_size=256, num_experts=2, hidden_act="silu"
+    )
+    experts = FP8Experts(config, block_size=None, has_gate=True)
+    for name in ("gate_up_proj", "down_proj"):
+        weight = getattr(experts, name)
+        with torch.no_grad():
+            weight.copy_(torch.randn(weight.shape).to(weight.dtype))
+            getattr(experts, f"{name}_scale_inv").fill_(0.02)
+    quant_cfg = [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*weight_quantizer", "cfg": cfg},
+    ]
+    mtq.quantize(experts, {"quant_cfg": quant_cfg, "algorithm": "max"}, forward_loop=None)
+    inputs = torch.randn(64, 256)
+    indices = (torch.arange(64) % 2).unsqueeze(1)
+    routing = torch.ones(64, 1)
+    state = copy.deepcopy(experts.state_dict())
+
+    with pytest.raises(ValueError, match=r"Call unpack_weight\(\)"):
+        mtq.calibrate(experts, algorithm, forward_loop=lambda m: m(inputs, indices, routing))
+    # Compare FP8 payloads in FP32 because CPU close/equality kernels do not support FP8.
+    torch.testing.assert_close(
+        {name: value.float() for name, value in experts.state_dict().items()},
+        {name: value.float() for name, value in state.items()},
+        rtol=0,
+        atol=0,
+    )
+
+    experts.unpack_weight()
+    unpacked = {
+        name: getattr(experts, name).detach().clone() for name in ("gate_up_proj", "down_proj")
+    }
+    mtq.calibrate(experts, algorithm, forward_loop=lambda m: m(inputs, indices, routing))
+    for name, weight in unpacked.items():
+        assert not torch.equal(getattr(experts, name), weight)
