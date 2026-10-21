@@ -190,13 +190,17 @@ class GPTModelExporter:
         self._src_num_hidden_layers = self._hf_text_config.num_hidden_layers
         self._hf_text_config.num_hidden_layers = language_model.config.num_layers
         self._hf_text_config.hidden_size = language_model.config.hidden_size
-        # MLA's kv_channels is the V head dim, not HF's head_dim (e.g. glm5_next derives it from RoPE).
-        if not getattr(language_model.config, "multi_latent_attention", False):
+        is_deepseek_v4 = self._hf_config.architectures[0] == "DeepseekV4ForCausalLM"
+        # MLA/V4's kv_channels is not necessarily HF's native head dimension.
+        if not is_deepseek_v4 and not getattr(
+            language_model.config, "multi_latent_attention", False
+        ):
             self._hf_text_config.head_dim = language_model.config.kv_channels
         self._hf_text_config.num_attention_heads = language_model.config.num_attention_heads
-        self._hf_text_config.num_key_value_heads = language_model.config.num_query_groups
+        if not is_deepseek_v4:
+            self._hf_text_config.num_key_value_heads = language_model.config.num_query_groups
         self.is_multimodal = isinstance(model, LLaVAModel)
-        if not self.is_multimodal:
+        if not self.is_multimodal and not is_deepseek_v4:
             self._hf_text_config.intermediate_size = language_model.config.ffn_hidden_size
         self._hf_quant_config: dict = {}
         self._hf_extra_config = None
@@ -211,12 +215,14 @@ class GPTModelExporter:
             self.arch, LLAVA_VISION_PREFIXES if self.is_multimodal else None
         )
         # TODO: May modify this later according to what quantization exported ckpt is, currently only support BF16.
-        if self.arch == "GptOssForCausalLM":
+        if self.arch in ("GptOssForCausalLM", "DeepseekV4ForCausalLM"):
             if hasattr(self._hf_config, "quantization_config"):
                 del self._hf_config.quantization_config
         self.all_rules = self._populate_rule_book()
         self.rules = self.all_rules[self.arch]
         self.all_mcore_mappings = all_mcore_hf_export_mapping[self.arch]
+        if self.rules.get("deepseek_v4", False):
+            self._init_deepseek_v4_export()
         if self.rules.get("fold_attn_mlp_layer_pairs", False):
             # Each HF decoder layer is an attention and an MLP physical layer in Megatron.
             self._hf_text_config.num_hidden_layers = language_model.config.num_layers // 2
@@ -588,6 +594,32 @@ class GPTModelExporter:
         if not source:
             warn_rank_0(f"Export self-check skipped: no tensor index found in {source_dir}.")
             return
+        if self.rules.get("deepseek_v4", False):
+            # Raw V4 parameters have no trailing '.weight'; ancestor module checks below
+            # cannot detect a missing mHC parameter, compressor APE or hash-routing table.
+            raw_parameters = {
+                key
+                for key in source
+                if not key.startswith("mtp.")
+                and (
+                    key.startswith("hc_head_")
+                    or key.rsplit(".", 1)[-1]
+                    in (
+                        "hc_attn_fn",
+                        "hc_attn_base",
+                        "hc_attn_scale",
+                        "hc_ffn_fn",
+                        "hc_ffn_base",
+                        "hc_ffn_scale",
+                        "attn_sink",
+                        "ape",
+                        "tid2eid",
+                    )
+                )
+            }
+            missing_raw = raw_parameters - exported
+            if missing_raw:
+                raise RuntimeError(f"Export dropped V4 parameter(s): {sorted(missing_raw)[:8]}")
 
         # Narrow on purpose: compare module prefixes, not tensor names, since a quantized source
         # carries extras with no export counterpart, and only inside decoder layers, whose naming
@@ -609,7 +641,7 @@ class GPTModelExporter:
                 exported_modules.add(prefix)
         missing = set()
         for key in source:
-            layer = re.search(r"\.layers\.(\d+)\.", key)
+            layer = re.search(r"(?:^|\.)layers\.(\d+)\.", key)
             if layer is None:
                 continue  # see the note above: decoder layers only
             if int(layer.group(1)) >= hf_depth:
@@ -679,6 +711,12 @@ class GPTModelExporter:
         if hasattr(model.decoder, "final_norm") and model.decoder.final_norm:
             self.rules["final_norm"](model.decoder.final_norm)
 
+        if self.rules.get("deepseek_v4", False) and model.post_process:
+            for name in ("hc_head_fn", "hc_head_base", "hc_head_scale"):
+                value = getattr(model.decoder, name).detach()
+                # V4 stores every mHC control, including the head projection, in FP32.
+                self.rules[name](value.to(device="cpu", dtype=torch.float32))
+
         # Output layer
         if hasattr(model, "output_layer") and not model.share_embeddings_and_output_weights:
             self.rules["output_layer"](model.output_layer)
@@ -720,7 +758,9 @@ class GPTModelExporter:
         attention = getattr(layer.inner_layer, "self_attention", None)
         kind = "ffn" if attention is None or isinstance(attention, IdentityOp) else "attn"
         hc = layer.hyper_connection
-        self.rules["hc_fn"](hc.mapping_proj.weight.detach().to(self.dtype), layer_id, kind)
+        # Preserve V4's FP32 routing projections; other mHC exports retain their dtype policy.
+        dtype = torch.float32 if self.rules.get("deepseek_v4", False) else self.dtype
+        self.rules["hc_fn"](hc.mapping_proj.weight.detach().to(dtype), layer_id, kind)
         # The HF checkpoint keeps the mHC bias and alpha scales in FP32.
         self.rules["hc_base"](hc.bias.detach().float(), layer_id, kind)
         alphas = torch.cat([hc.alpha_pre, hc.alpha_post, hc.alpha_res]).detach().float()
@@ -742,7 +782,9 @@ class GPTModelExporter:
                 self.rules[fused_key](norm_weight, layer_id, is_mtp=is_mtp)
 
         if not isinstance(layer.self_attention, IdentityOp):
-            if "MLASelfAttention" in str(type(layer.self_attention)):
+            if self.rules.get("deepseek_v4", False):
+                self._get_deepseek_v4_attention_state_dict(layer.self_attention, layer_id)
+            elif "MLASelfAttention" in str(type(layer.self_attention)):
                 if hasattr(layer.self_attention, "linear_q_proj"):
                     self.rules["linear_q_proj"](
                         layer.self_attention.linear_q_proj, layer_id, is_mtp=is_mtp
@@ -815,9 +857,12 @@ class GPTModelExporter:
 
         if not isinstance(layer.mlp, IdentityOp):
             if "MoE" in str(type(layer.mlp)):
-                self.rules["router"](
-                    layer.mlp.router, layer_id, dtype=self.moe_router_dtype, is_mtp=is_mtp
-                )
+                if self.rules.get("deepseek_v4", False):
+                    self._get_deepseek_v4_router_state_dict(layer.mlp.router, layer_id)
+                else:
+                    self.rules["router"](
+                        layer.mlp.router, layer_id, dtype=self.moe_router_dtype, is_mtp=is_mtp
+                    )
                 if hasattr(layer.mlp, "fc1_latent_proj") and layer.mlp.fc1_latent_proj is not None:
                     self.rules["fc1_latent_proj"](
                         layer.mlp.fc1_latent_proj, layer_id, is_mtp=is_mtp
@@ -884,6 +929,80 @@ class GPTModelExporter:
             else:
                 self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id, is_mtp=is_mtp)
                 self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id, is_mtp=is_mtp)
+
+    def _init_deepseek_v4_export(self):
+        """Validate the main-only TP1/PP1 V4 path and read its native optional tensor names."""
+        if self.model.config.num_layers % 2:
+            raise ValueError("DeepSeek V4 export requires paired attention/MoE physical layers.")
+        if getattr(self.model.config, "mtp_num_layers", None) or getattr(
+            self._hf_text_config, "num_nextn_predict_layers", 0
+        ):
+            raise NotImplementedError(
+                "DeepSeek V4 export currently requires a main-only HF view (MTP=0)."
+            )
+        if torch.distributed.is_initialized() and (
+            get_tensor_model_parallel_world_size() != 1
+            or get_pipeline_model_parallel_world_size() != 1
+        ):
+            raise NotImplementedError(
+                "DeepSeek V4 export currently requires TP1 / PP1; EP is supported."
+            )
+        source = str(self._hf_pretrained_model_name)
+        self._deepseek_v4_source_keys = (
+            _read_checkpoint_keys(source)
+            if os.path.isdir(source)
+            else set(get_safetensors_metadata(source).weight_map)
+        )
+        if not self._deepseek_v4_source_keys:
+            raise ValueError("DeepSeek V4 export requires the source checkpoint tensor index.")
+
+    def _get_deepseek_v4_attention_state_dict(self, attention, layer_id):
+        """Export V4's shared-KV attention, optional compressor and CSA indexer."""
+        for rule, name in (
+            ("linear_q_down_proj", "linear_q_down_proj"),
+            ("linear_q_layernorm", "q_layernorm"),
+            ("linear_q_up_proj", "linear_q_up_proj"),
+            ("linear_kv_proj", "linear_kv_proj"),
+            ("linear_kv_layernorm", "kv_layernorm"),
+            ("linear_proj", "linear_proj"),
+        ):
+            self.rules[rule](getattr(attention, name), layer_id)
+        self.rules["linear_o_group_proj"](
+            attention.linear_o_group_proj.detach().to(device="cpu", dtype=self.dtype), layer_id
+        )
+        core = attention.core_attention
+        self.rules["attn_sink"](core.attn_sink.detach().float().cpu(), layer_id)
+        compressor = getattr(core, "compressor", None)
+        indexer = getattr(core, "indexer", None)
+        for prefix, module in (
+            ("compressor", compressor),
+            ("indexer.compressor", getattr(indexer, "compressor", None)),
+        ):
+            if module is not None:
+                for name in ("linear_wkv", "linear_wgate", "norm"):
+                    self.rules[f"{prefix}.{name}"](getattr(module, name), layer_id)
+                self.rules[f"{prefix}.ape"](module.ape.detach().float().cpu(), layer_id)
+        if indexer is not None:
+            self.rules["indexer.linear_wq_b"](indexer.linear_wq_b, layer_id)
+            self.rules["indexer.linear_weights_proj"](indexer.linear_weights_proj, layer_id)
+            # Bridge also accepts the released checkpoint's legacy flat scorer name.
+            native = f"layers.{layer_id}.attn.indexer.scorer.weights_proj.weight"
+            legacy = native.replace(".scorer.", ".")
+            if (
+                legacy in self._deepseek_v4_source_keys
+                and native not in self._deepseek_v4_source_keys
+            ):
+                self._state_dict[legacy] = self._state_dict.pop(native)
+
+    def _get_deepseek_v4_router_state_dict(self, router, layer_id):
+        """Keep hash-routing tables and omit bias buffers synthesized only during import."""
+        self.rules["router"](router, layer_id, dtype=self.moe_router_dtype)
+        prefix = f"layers.{layer_id}.ffn.gate."
+        if prefix + "bias" not in self._deepseek_v4_source_keys:
+            self._state_dict.pop(prefix + "bias", None)
+        tid2eid = getattr(router, "tid2eid", None)
+        if tid2eid is not None:
+            self._state_dict[prefix + "tid2eid"] = tid2eid.detach().cpu()
 
     def _get_mtp_state_dict(self, copy_from_pretrained: bool = True) -> dict[str, torch.Tensor]:
         """Export the live MTP module, or copy it from the pretrained model if absent (and allowed)."""
@@ -1541,22 +1660,14 @@ class GPTModelExporter:
         up_proj_weight = weight[ffn_hidden_size:, :]
 
         if qformat in GGML_FORMATS:
-            self._state_dict.update(
-                self._get_iq_weight_state(
-                    gate_proj_prefix + "weight",
-                    gate_proj_weight,
-                    qformat,
-                    getattr(module, "weight_quantizer", None),
-                )
+            # Match the fused linear's fake-quant forward before separating gate/up.
+            # Packing slices independently can reuse a GPTQ pin for an unchanged
+            # half even when the combined, QAD-updated weight must be re-encoded.
+            packed = self._pack_iq_weight(
+                weight, qformat, getattr(module, "weight_quantizer", None)
             )
-            self._state_dict.update(
-                self._get_iq_weight_state(
-                    up_proj_prefix + "weight",
-                    up_proj_weight,
-                    qformat,
-                    getattr(module, "weight_quantizer", None),
-                )
-            )
+            self._state_dict[gate_proj_prefix + "weight"] = packed[:ffn_hidden_size].clone()
+            self._state_dict[up_proj_prefix + "weight"] = packed[ffn_hidden_size:].clone()
         elif weight_scale is None:
             self._state_dict[gate_proj_prefix + "weight"] = gate_proj_weight
             self._state_dict[up_proj_prefix + "weight"] = up_proj_weight

@@ -18,6 +18,7 @@
 from typing import Any
 
 from .mcore_deepseek import deepseek_causal_lm_export, deepseek_causal_lm_import
+from .mcore_deepseek_v4 import deepseek_v4_causal_lm_export
 from .mcore_glm import (
     GLM5_NEXT_VISION_PREFIXES,
     glm5_next_causal_lm_export,
@@ -55,6 +56,7 @@ from .mcore_qwen35vl import QWEN3_5_VL_VISION_PREFIXES, qwen3_5_vl_causal_lm_exp
 all_mcore_hf_export_mapping: dict[str, Any] = {
     "DeepseekV2ForCausalLM": deepseek_causal_lm_export,
     "DeepseekV3ForCausalLM": deepseek_causal_lm_export,
+    "DeepseekV4ForCausalLM": deepseek_v4_causal_lm_export,
     "LlamaForCausalLM": llama_causal_lm_export,
     "Llama4ForConditionalGeneration": llama4_causal_lm_export,
     "NemotronForCausalLM": nemotron_causal_lm_export,

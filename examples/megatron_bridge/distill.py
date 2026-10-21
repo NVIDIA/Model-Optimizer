@@ -29,9 +29,6 @@ import torch
 from export_distilled_megatron_to_hf import export_llm_to_hf, save_vlm_to_hf
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.distillation_provider import convert_to_distillation_provider
-from megatron.bridge.recipes.utils.optimizer_utils import (
-    distributed_fused_adam_with_cosine_annealing,
-)
 from megatron.bridge.training.config import (
     CheckpointConfig,
     ConfigContainer,
@@ -39,7 +36,9 @@ from megatron.bridge.training.config import (
     GPTDatasetConfig,
     LoggerConfig,
     MockGPTDatasetConfig,
+    OptimizerConfig,
     RNGConfig,
+    SchedulerConfig,
     TokenizerConfig,
     TrainingConfig,
     ValidationConfig,
@@ -281,6 +280,23 @@ def get_args():
         help="Keep the student's MTP head at its input weights: skip its loss and freeze it.",
     )
     parser.add_argument(
+        "--deterministic_mode",
+        action="store_true",
+        help="Use Bridge/Core deterministic execution for exact training and resume checks.",
+    )
+    parser.add_argument(
+        "--mhc_fused_backend",
+        choices=["auto", "native", "triton", "cutile"],
+        default=None,
+        help="Select the existing Core mHC backend; use triton for matched exact-resume controls.",
+    )
+    parser.add_argument(
+        "--moe_router_bias_update_rate",
+        type=float,
+        default=None,
+        help="Override router expert-bias updates; set 0 to preserve the frozen router during adapter QAD.",
+    )
+    parser.add_argument(
         "--moe_aux_loss_coeff",
         type=float,
         default=None,
@@ -497,6 +513,11 @@ def _tokenizer_prepends_bos(args) -> bool:
 
 
 def main(args: argparse.Namespace, owns_the_run: bool = True):
+    if args.deterministic_mode:
+        # Set library requirements before any checkpoint import can run a CUDA kernel.
+        from megatron.training.determinism import apply_determinism_env
+
+        apply_determinism_env(os.environ)
     student_has_modelopt_state = args.student_megatron_path is not None and has_modelopt_state(
         args.student_megatron_path
     )
@@ -533,11 +554,20 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         provider.expert_model_parallel_size = args.ep_size
         provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
+        if args.mhc_fused_backend is not None:
+            provider.use_fused_mhc = True
+            provider.mhc_fused_backend = args.mhc_fused_backend
+        if args.deterministic_mode:
+            provider.deterministic_mode = True
+            provider.cross_entropy_loss_fusion = False
+            provider.moe_router_aux_loss_fusion = False
         if args.dsa_kernel_backend is not None:
             provider.dsa_kernel_backend = args.dsa_kernel_backend
         set_moe_expert_layout(provider, moe_grouped_gemm)
         if args.moe_aux_loss_coeff is not None:
             provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
+        if args.moe_router_bias_update_rate is not None:
+            provider.moe_router_bias_update_rate = args.moe_router_bias_update_rate
         if per_token_loss:
             provider.calculate_per_token_loss = True
         if args.recompute_granularity is not None:
@@ -631,11 +661,31 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         distill_provider.register_pre_wrap_hook(_restore_student_hook, prepend=True)
 
     # Build optimizer and scheduler
-    optimizer_config, scheduler_config = distributed_fused_adam_with_cosine_annealing(
-        lr_warmup_iters=args.lr_warmup_iters,
-        max_lr=args.lr,
-        min_lr=args.min_lr,
+    # Importing the recipe helper eagerly loads unrelated optional model dependencies.
+    optimizer_config = OptimizerConfig(
+        optimizer="adam",
+        lr=args.lr,
+        min_lr=args.min_lr if args.min_lr is not None else 0.1 * args.lr,
+        weight_decay=0.1,
+        bf16=True,
+        fp16=False,
+        adam_beta1=0.9,
         adam_beta2=0.95,
+        adam_eps=1e-8,
+        use_distributed_optimizer=True,
+        clip_grad=1.0,
+    )
+    scheduler_config = SchedulerConfig(
+        start_weight_decay=0.033,
+        end_weight_decay=0.033,
+        weight_decay_incr_style="constant",
+        lr_decay_style="cosine",
+        lr_wsd_decay_style="minus_sqrt",
+        lr_wsd_decay_iters=None,
+        lr_warmup_iters=args.lr_warmup_iters,
+        lr_warmup_init=0.0,
+        lr_decay_iters=None,
+        override_opt_param_scheduler=True,
     )
 
     # Build dataset config

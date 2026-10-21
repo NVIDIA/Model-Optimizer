@@ -35,8 +35,35 @@ from modelopt.torch.puzzletron.anymodel import convert_model
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "examples" / "megatron_bridge"))
 
-from distill import HAS_DIRECT_HF_SFT, _hf_source
+from distill import HAS_DIRECT_HF_SFT, _hf_source, get_args
 from export_distilled_megatron_to_hf import _get_checkpoint_export_paths
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_distill_qad_execution_options(monkeypatch, explicit):
+    command = [
+        "distill.py",
+        "--student_hf_path",
+        "student",
+        "--teacher_hf_path",
+        "teacher",
+        "--output_dir",
+        "output",
+        "--use_mock_data",
+    ]
+    if explicit:
+        command += [
+            "--deterministic_mode",
+            "--mhc_fused_backend",
+            "triton",
+            "--moe_router_bias_update_rate",
+            "0",
+        ]
+    monkeypatch.setattr(sys, "argv", command)
+    args = get_args()
+    assert args.deterministic_mode is explicit
+    assert args.mhc_fused_backend == ("triton" if explicit else None)
+    assert args.moe_router_bias_update_rate == (0.0 if explicit else None)
 
 
 @pytest.mark.timeout(360)  # distill + inline HF export + export of every iteration

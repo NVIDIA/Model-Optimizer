@@ -32,10 +32,19 @@ from ..lora import QuantLoRAInputRegistry, QuantLoRARegistry, _QuantLoRAInput, _
 from ..nn import QuantModuleRegistry
 from .megatron import _QuantMegatronMLP
 
+# HybridStack is optional for older Megatron-Core versions.
+try:
+    from megatron.core.models.hybrid.hybrid_block import HybridStack
+except ImportError:
+    HybridStack = None
+
 __all__ = []
 
 
-@QuantLoRAInputRegistry.register({TransformerBlock: "TransformerBlock"})
+@QuantLoRAInputRegistry.register(
+    {TransformerBlock: "TransformerBlock"}
+    | ({HybridStack: "HybridStack"} if HybridStack is not None else {})
+)
 class _MegatronQuantLoRATransformerBlock(_QuantLoRAInput):
     def forward(self, hidden_states, *args, **kwargs):
         # Reentrant checkpoints need a differentiable input even with frozen embeddings.

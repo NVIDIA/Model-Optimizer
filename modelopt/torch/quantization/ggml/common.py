@@ -30,6 +30,18 @@ _SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
 _ROW_KEY_CHUNK = 256
 
 
+class _ReconstructedWeightSTE(torch.autograd.Function):
+    """Preserve the decoder's exact forward values and pass the input gradient through."""
+
+    @staticmethod
+    def forward(ctx, inputs, reconstructed):
+        return reconstructed
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None
+
+
 class _CacheKey(NamedTuple):
     """What a cached payload was packed from; any change means it must be packed again."""
 
@@ -225,7 +237,7 @@ def fake_quantize_with_cache(
         dtype=inputs.dtype,
         block_chunk_size=decode_chunk_size,
     )
-    return inputs + (reconstructed - inputs).detach()
+    return _ReconstructedWeightSTE.apply(inputs, reconstructed)
 
 
 @dataclass(frozen=True)

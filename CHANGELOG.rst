@@ -18,6 +18,7 @@ Changelog
 
 *Megatron Framework (M-LM / M-Bridge)*
 
+- Add DeepSeek-V4-Flash routed-expert IQ2_XXS GPTQ and mergeable LoRA QAD through the standard Megatron-Bridge entry points, with packed IQ2 and folded BF16 HF export. The initial export path supports main-only models with TP1/PP1 and expert parallelism.
 - Add ``--sft_in_batch_packing``, ``--moe_aux_loss_coeff`` and ``--dsa_kernel_backend`` to ``examples/megatron_bridge/distill.py`` (``--dsa_kernel_backend`` also to ``quantize.py``): pack ``--sft_hf_dataset`` conversations per micro-batch instead of padding each to ``--seq_length``, override the MoE load-balancing loss weight (e.g. 0 for padded SFT data), and select fused DeepSeek sparse-attention kernels for long sequences.
 - Add ``--vllm_fakequant_export`` to ``examples/megatron_bridge/export_quantized_megatron_to_hf.py`` to evaluate formats vLLM has no kernels for (e.g. GGML IQ) as BF16 fake-quant checkpoints, and allow ``--ep_size`` > 1 for checkpoints built with ``--no_moe_grouped_gemm``.
 - GGML GPTQ checkpoints from ``examples/megatron_bridge`` keep their calibrated codes when the Megatron checkpoint is reloaded for QAD or export, and layerwise calibration now runs on Megatron vision-language models.

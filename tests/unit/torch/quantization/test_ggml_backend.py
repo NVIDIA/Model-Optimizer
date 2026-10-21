@@ -283,3 +283,22 @@ def test_format_fake_quant_rejects_another_formats_quantizer(num_bits):
         GGML_FORMAT_REGISTRY[num_bits].fake_quant(
             torch.ones(1, block_size), SimpleNamespace(num_bits=other)
         )
+
+
+@pytest.mark.parametrize("num_bits", FORMAT_NAMES)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_fake_quant_matches_packed_decode_exactly_and_preserves_gradient(num_bits, dtype):
+    """Subtract/add STE rounding must not change the values exported as packed weights."""
+    torch.manual_seed(6105)
+    weight = torch.randn(4, 256, dtype=dtype, requires_grad=True)
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=num_bits, block_sizes={-1: 256}, backend="ggml")
+    )
+    fmt = GGML_FORMAT_REGISTRY[num_bits]
+    actual = quantizer(weight)
+    packed = fmt.pack(weight, quantizer)
+    decoded = fmt.dequantize(packed, torch.tensor(weight.shape), dtype=dtype)
+    assert torch.equal(actual, decoded)
+    gradient = torch.randn_like(weight)
+    actual.backward(gradient)
+    assert torch.equal(weight.grad, gradient)
