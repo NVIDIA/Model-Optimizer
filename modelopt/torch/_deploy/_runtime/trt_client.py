@@ -53,8 +53,8 @@ class TRTLocalClient(RuntimeClient):
                 "stronglyTyped",
                 "best",
             ],
-            # Support ONNX opsets 13-21
-            "onnx_opset": [str(i) for i in range(13, 22)],
+            # Support ONNX opsets 13-24
+            "onnx_opset": [str(i) for i in range(13, 25)],
         }
 
     def __init__(self, deployment: Deployment):
@@ -74,7 +74,8 @@ class TRTLocalClient(RuntimeClient):
         Args:
             ir_bytes: The ONNX model bytes.
             compilation_args: A dictionary of compilation arguments.
-                The following arguments are supported: dynamic_shapes, plugin_config, engine_path, timing_cache_path.
+                The following arguments are supported: dynamic_shapes, decomposable_attentions,
+                plugin_config, engine_path, and timing_cache_path.
 
         Returns:
             The compiled TRT engine bytes.
@@ -85,6 +86,7 @@ class TRTLocalClient(RuntimeClient):
         engine_bytes, _ = build_engine(
             onnx_bytes,
             dynamic_shapes=compilation_args.get("dynamic_shapes"),  # type: ignore[union-attr]
+            decomposable_attentions=compilation_args.get("decomposable_attentions", False),  # type: ignore[union-attr]
             plugin_config=compilation_args.get("plugin_config"),  # type: ignore[union-attr]
             engine_path=compilation_args.get("engine_path"),  # type: ignore[union-attr]
             timing_cache_path=compilation_args.get("timing_cache_path"),  # type: ignore[union-attr]
@@ -180,7 +182,7 @@ class TRTLocalClient(RuntimeClient):
                         tensor_name,
                         output_tensors[idx - len(input_tensors)].data_ptr(),
                     )
-            assert self.execution_context.all_shape_inputs_specified, (
+            assert getattr(self.execution_context, "all_shape_inputs_specified", True), (
                 "Not all shape inputs are specified."
             )
 

@@ -64,8 +64,9 @@ def test_cpu_integer_carrier_strict_capture_preserves_custom_op(num_bits):
     torch.testing.assert_close(exported.module()(inputs, amax), expected)
 
 
-def test_cpu_fp8_quantizer_strict_capture_preserves_custom_op():
-    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3), narrow_range=False))
+@pytest.mark.parametrize("num_bits", [8, (4, 3)])
+def test_cpu_quantizer_strict_capture_preserves_custom_op(num_bits):
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=num_bits, narrow_range=False))
     quantizer.amax = torch.tensor(1.0)
     inputs = (torch.randn(4, 32),)
 
