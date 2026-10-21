@@ -40,15 +40,6 @@ def test_worker_context_falls_back_to_spawn_without_forkserver(monkeypatch):
     _prestart_forkserver()
 
 
-# Depends on the external HF datasets-server, which intermittently returns 5xx
-# (e.g. 503) on the /splits lookup. Allow-fail the transient outage while keeping
-# real assertion failures visible (raises=RuntimeError only, strict=False so a
-# normal pass doesn't xpass-fail). download_hf_dataset_as_jsonl already retries.
-@pytest.mark.xfail(
-    raises=RuntimeError,
-    strict=False,
-    reason="Flaky: transient HF datasets-server 5xx on the /splits lookup",
-)
 def test_megatron_preprocess_data_with_jsonl_path(tmp_path):
     input_jsonl = tmp_path / "minipile.jsonl"
     input_jsonl.write_text(
@@ -109,12 +100,6 @@ def test_megatron_preprocess_data_jsonl_stops_at_max_tokens(tmp_path):
     assert limited_size < full_size
 
 
-# Allow-fail transient HF datasets-server 5xx (see the /splits note above).
-@pytest.mark.xfail(
-    raises=RuntimeError,
-    strict=False,
-    reason="Flaky: transient HF datasets-server 5xx on the /splits lookup",
-)
 def test_megatron_preprocess_data_hf_split_stops_at_max_tokens(tmp_path):
     common_args = {
         "hf_dataset": "nanotron/minipile_100_samples",
@@ -141,12 +126,6 @@ def test_megatron_preprocess_data_hf_split_stops_at_max_tokens(tmp_path):
     assert limited_size < full_size
 
 
-# Allow-fail transient HF datasets-server 5xx (see the /splits note above).
-@pytest.mark.xfail(
-    raises=RuntimeError,
-    strict=False,
-    reason="Flaky: transient HF datasets-server 5xx on the /splits lookup",
-)
 def test_megatron_preprocess_data_hf_split_resume_uses_cached_token_count(tmp_path):
     args = {
         "hf_dataset": "nanotron/minipile_100_samples",
@@ -168,12 +147,6 @@ def test_megatron_preprocess_data_hf_split_resume_uses_cached_token_count(tmp_pa
     assert set(tmp_path.iterdir()) == cached_files
 
 
-# Allow-fail transient HF datasets-server 5xx (see the /splits note above).
-@pytest.mark.xfail(
-    raises=RuntimeError,
-    strict=False,
-    reason="Flaky: transient HF datasets-server 5xx on the /splits lookup",
-)
 @pytest.mark.parametrize(
     ("hf_dataset", "hf_split", "json_keys"),
     [
@@ -318,12 +291,6 @@ def test_megatron_preprocess_data_tool_calls_arguments_normalized(tmp_path):
     )
 
 
-# Allow-fail transient HF datasets-server 5xx (see the /splits note above).
-@pytest.mark.xfail(
-    raises=RuntimeError,
-    strict=False,
-    reason="Flaky: transient HF datasets-server 5xx on the /splits lookup",
-)
 def test_megatron_preprocess_data_hf_streaming_warning(tmp_path):
     # hf_streaming without hf_max_samples_per_split should warn and fall back to non-streaming
     with pytest.warns(UserWarning, match="hf_streaming"):
