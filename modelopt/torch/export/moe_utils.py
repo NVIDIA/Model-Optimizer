@@ -22,6 +22,8 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
+from .quant_utils import get_weight_amax_for_export, set_weight_amax_for_export
+
 
 def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
     """Remove the 3-D fused source params and per-expert quantizer ModuleLists.
@@ -64,7 +66,9 @@ def _tensor_quantizers(quantizer) -> list:
 
 
 def _is_uncalibrated(quantizer) -> bool:
-    amax = getattr(quantizer, "_amax", None)
+    # LSQ reparameterization keeps the effective amax in _amax_post; read through the
+    # export helper so LSQ quantizers are judged by their learned amax, not the deleted _amax.
+    amax = get_weight_amax_for_export(quantizer)
     return getattr(quantizer, "is_enabled", False) and (amax is None or bool(torch.all(amax == 0)))
 
 
@@ -73,14 +77,17 @@ def _fallback_amax(weight: torch.Tensor, quantizer) -> torch.Tensor:
 
     The amax setter rejects shape changes, and a block/channel-wise quantizer (e.g. the INT4
     stage of W4A8 AWQ) keeps a zero ``_amax`` of that shape, so a scalar fallback would raise.
-    A missing ``_amax`` on an INT4 block quantizer still needs per-block ``(rows, blocks)``.
+    A missing ``_amax`` on a static-block quantizer — INT4 stages and float-block formats
+    (NVFP4/MXFP4) alike — still needs per-block ``(rows, blocks)``.
     """
-    like = getattr(quantizer, "_amax", None)
+    like = get_weight_amax_for_export(quantizer)
     block_sizes = getattr(quantizer, "block_sizes", None)
     block = block_sizes.get(-1) if block_sizes and block_sizes.get("type") == "static" else None
-    # Integer static-block stages (INT4 of W4A8) need a per-block amax. Float-block formats
-    # (NVFP4) keep a per-tensor amax plus separate block scales, so they take the scalar path.
-    if like is None and isinstance(quantizer.num_bits, int) and block:
+    # Static-block quantizers without a recorded amax need a per-block fallback: integer
+    # stages of W4A8 and float-block formats (NVFP4/MXFP4), whose per-block scale path would
+    # otherwise receive a scalar. Dynamic and per-tensor quantizers take the scalar path.
+    float_block = block_sizes is not None and block_sizes.get("scale_bits") in {(4, 3), (8, 0)}
+    if like is None and block and (isinstance(quantizer.num_bits, int) or float_block):
         if weight.shape[-1] % block:
             raise ValueError(
                 f"Weight of shape {tuple(weight.shape)} is not divisible into blocks of {block}."
@@ -188,7 +195,7 @@ def _export_fused_experts(
             else []
         )
         for q in uncalibrated_stages:
-            q.amax = _fallback_amax(first_weight, q)
+            set_weight_amax_for_export(q, _fallback_amax(first_weight, q))
         if uncalibrated_stages:
             warnings.warn(
                 f"Expert {idx} gate_up_proj weight quantizer was not calibrated "
@@ -234,9 +241,9 @@ def _export_fused_experts(
             for stage in _tensor_quantizers(w_quantizer):
                 # For per-channel amax (dim >= 1), proportionally slice dim-0
                 # to match the split weight.
-                if getattr(stage, "_amax", None) is not None and stage._amax.numel() > 1:
-                    amax = stage._amax
-                    # Per-block _amax (NVFP4 static) collapses the row axis we want
+                amax = get_weight_amax_for_export(stage)
+                if amax is not None and amax.numel() > 1:
+                    # Per-block amax (NVFP4 static) collapses the row axis we want
                     # to slice on; restore it so dim-0 slicing splits gate/up.
                     if amax.numel() != fused_total and amax.numel() % fused_total == 0:
                         amax = amax.contiguous().view(fused_total, amax.numel() // fused_total)
@@ -245,9 +252,7 @@ def _export_fused_experts(
                         slice_start = fused_start * amax_dim0 // fused_total
                         slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
                         sliced = amax[slice_start:slice_end].contiguous()
-                        # The amax setter refuses shape changes; drop _amax first.
-                        delattr(stage, "_amax")
-                        stage.amax = sliced
+                        set_weight_amax_for_export(stage, sliced)
                         # Block-quant calibration recorded the fused amax's row count here, and
                         # export_amax() reshapes to it, undoing the slice.
                         export_shape = getattr(stage, "_amax_shape_for_export", None)
@@ -263,7 +268,7 @@ def _export_fused_experts(
 
                 # If the weight quantizer was never calibrated, compute amax from weights.
                 if _is_uncalibrated(stage):
-                    stage.amax = _fallback_amax(weight_slice, stage)
+                    set_weight_amax_for_export(stage, _fallback_amax(weight_slice, stage))
                     warnings.warn(
                         f"Expert {idx} {proj_name} weight quantizer was not calibrated "
                         f"(amax missing or zero). Using weight-derived amax as fallback. "
