@@ -131,7 +131,7 @@ jobs:
       contents: read
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/pytorch:26.07-py3"
+      docker_image: "nvcr.io/nvidia/pytorch:26.09-py3"
       example: ${{ matrix.example }}
       timeout_minutes: 30
       pip_install_extras: "[hf,dev-test]"
@@ -172,6 +172,8 @@ jobs:
       contents: read
     secrets: inherit
     with:
+      # Newer releases break quickstart_multimodal.py (test_qwen_vl): rc21-rc23 import MultimodalConfig,
+      # which tensorrt_llm.llmapi does not export yet, and rc24+ import `fla`, which the image lacks.
       docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"

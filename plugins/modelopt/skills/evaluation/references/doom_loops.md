@@ -28,25 +28,41 @@ AA-LCR loops restate paragraphs up to ~4K tokens long, so on `ns_aa_lcr` set onl
 `repetition_detection.max_pattern_size: 1024` at the same path in the task's
 `nemo_evaluator_config`. NEL deep-merges task config over the top level, so the
 other entries survive; check the dry-run's `config_ef.yaml` block. A hit ends the
-request with `finish_reason: "repetition"`, keeping the text so far; a loop inside
-the reasoning leaves no final answer.
+request with `finish_reason: "repetition"` (`length` on `ns_*`, see below), keeping
+the text so far; a loop inside the reasoning leaves no final answer.
 
 **Keep these values**; larger sizes add scheduler CPU (~1 ms per request per decode
 step at 4096) and cut more escaped-loop answers.
+
+**nemo-skills tasks (`ns_*`) need the hit reported as `length`.** Their litellm client
+rejects `"repetition"` (pydantic `literal_error`) and retries the request, resampling
+the loop away and inflating the score. Remap it in the serving container (append to
+any existing `deployment.pre_cmd`) and submit with `NEMO_EVALUATOR_TRUST_PRE_CMD=1`:
+
+```yaml
+deployment:
+  pre_cmd: |-
+    F=$(python3 -c 'import vllm; print(vllm.__path__[0])')/v1/engine/__init__.py
+    sed -i 's/"abort", "error", "repetition")/"abort", "error", "length")/' "$F"
+    grep -q '"error", "length")' "$F" || { echo "finish_reason remap failed"; exit 1; }
+```
+
+A hit then scores like a `max_new_tokens` truncation. Confirm the canary's client logs
+show no `literal_error`.
 
 ## Guards
 
 - **Backend.** vLLM < 0.17.0 silently ignores the field. Check the image's vLLM
   version; for an external endpoint, run this probe. `logit_bias` forces one token
-  every step, so the output repeats at once: `repetition` means the field works,
-  `length` means it was ignored.
+  every step, so the output repeats at once: `repetition_detected` means the field
+  works (remapped or not), `null` means it was ignored.
 
   ```bash
   curl -s "$BASE_URL/v1/completions" -H 'Content-Type: application/json' -d '{
     "model": "<served_model_name>", "prompt": "Hi", "max_tokens": 16,
     "temperature": 0, "logit_bias": {"1000": 100}, "repetition_detection":
       {"max_pattern_size": 4, "min_pattern_size": 1, "min_count": 2}}' \
-    | jq -r '.choices[0].finish_reason'
+    | jq -r '.choices[0].stop_reason'
   ```
 
   SGLang and TRT-LLM don't support it: tell the user and don't add the field.

@@ -47,10 +47,10 @@ def _prebuild_quant_cuda_extensions():
     extensions during session setup and let tests fall back to on-demand JIT if needed.
 
     Doing it here in session setup (``pyproject`` sets ``timeout_func_only``) keeps the
-    build off the per-test clock and, unlike the ``_extensions/test_torch_extensions.py``
-    prebuild tests, runs regardless of test selection/ordering (e.g. ``-k`` filters) and
-    is not itself capped by a per-test timeout. Worker subprocesses then load the cached
-    .so from the shared ``TORCH_EXTENSIONS_DIR``.
+    build off the per-test clock, runs regardless of test selection/ordering (e.g. ``-k``
+    filters) and is not itself capped by a per-test timeout. Worker subprocesses then load
+    the cached .so from the shared ``TORCH_EXTENSIONS_DIR``. (The extension tests themselves
+    live in ``tests/gpu/_extensions``.)
     """
     ext.precompile()
 
@@ -99,7 +99,9 @@ def _pool_cache():
     instead of spawning duplicates — e.g. on a 2-GPU runner ``dist_workers`` and
     ``dist_workers_size_2`` are both size 2. The cache is module-scoped and torn down at
     module end, so workers are never reused across modules (avoids cross-test
-    state contamination).
+    state contamination). The ``dist_workers*`` fixtures are deliberately function-scoped so
+    ``get_live_pool`` can swap in a new pool after one was killed; they therefore cannot be
+    requested from a module- or session-scoped fixture.
     """
     pools: dict[int, DistributedWorkerPool] = {}
     yield pools
