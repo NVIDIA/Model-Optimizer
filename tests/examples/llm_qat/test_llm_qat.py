@@ -15,6 +15,7 @@
 
 
 import json
+import os
 
 import pytest
 import torch
@@ -31,6 +32,14 @@ BACKEND_CONFIGS = {
 
 # Backends that need gradient checkpointing
 GRADIENT_CHECKPOINTING_BACKENDS = {"ddp", "deepspeed"}
+
+# PR runners have one GPU, so a backend case only exercises the wrapper and ModelOpt's patches, not
+# sharding. PRs run fsdp2 (the default, with the most ModelOpt-specific code); the other backends run
+# in the scheduled CI. QLoRA still trains on ddp on PRs.
+_PR_CI = os.environ.get("GITHUB_REF", "").startswith("refs/heads/pull-request/")
+_NIGHTLY_ONLY = pytest.mark.skipif(
+    _PR_CI, reason="Only fsdp2 runs on PRs; runs in the scheduled CI"
+)
 
 # Fast training overrides (short runs with frequent eval)
 FAST_TRAIN_ARGS = [
@@ -152,8 +161,8 @@ def test_dataset_utils_pretokenize(tiny_qwen3_path, tmp_path):
 
 @pytest.mark.parametrize("backend", [
     "fsdp2",
-    "deepspeed",
-    "ddp",
+    pytest.param("deepspeed", marks=_NIGHTLY_ONLY),
+    pytest.param("ddp", marks=_NIGHTLY_ONLY),
 ])
 def test_qwen3_qat_nvfp4(nvfp4_ptq_dir, dataset_cache_dir, tmp_path, backend):
     qat_output_dir = tmp_path / "qat"
@@ -227,7 +236,7 @@ def test_qwen3_lora_qat_nvfp4(tiny_qwen3_path, tmp_path):
 
 @pytest.mark.parametrize("backend", [
     "fsdp2",
-    "deepspeed",
+    pytest.param("deepspeed", marks=_NIGHTLY_ONLY),
 ])
 def test_qwen3_qad_nvfp4(tiny_qwen3_path, nvfp4_ptq_dir, dataset_cache_dir, tmp_path, backend):
     qad_output_dir = tmp_path / "qad"
