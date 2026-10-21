@@ -22,7 +22,6 @@ import pytest
 import torch
 import yaml
 from _test_utils.torch.transformers_models import create_tiny_nemotron_h_dir, create_tiny_qwen3_dir
-from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
 from megatron.core.utils import unwrap_model
 from safetensors.torch import load_file
 
@@ -39,11 +38,6 @@ from modelopt.torch.export.plugins.vllm_fakequant_megatron import (
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
 from modelopt.torch.utils.plugins.megatron_generate import megatron_prefill
-
-if not hasattr(MegatronModelBridge, "build_modelopt_quantizer_recipe"):
-    pytest.skip(
-        "Megatron-Bridge does not write the ModelOpt quantizer sidecars", allow_module_level=True
-    )
 
 
 def _load_export(export_dir: Path):

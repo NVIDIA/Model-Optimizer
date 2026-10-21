@@ -192,7 +192,8 @@ def export_vllm_fakequant(bridge, model: list, export_dir: str) -> None:
     if not hasattr(MegatronModelBridge, "build_modelopt_quantizer_recipe"):
         raise RuntimeError(
             "--vllm_fakequant_export needs a Megatron-Bridge that writes the quantizer sidecars "
-            "(quantizer_state.pth and quant_recipe.yaml); update Megatron-Bridge."
+            "(quantizer_state.pth and quant_recipe.yaml); see the Pre-Requisites in "
+            "examples/megatron_bridge/README.md."
         )
     for chunk in model:
         check_mcore_vllm_fakequant_quantizers(unwrap_model(chunk))

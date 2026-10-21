@@ -30,10 +30,6 @@ from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_moe_dir,
     create_tiny_qwen3vl_dir,
 )
-from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
-
-# TODO: drop this probe once the minimum Megatron-Bridge writes the ModelOpt quantizer sidecars.
-HAS_BRIDGE_QUANTIZER_SIDECARS = hasattr(MegatronModelBridge, "build_modelopt_quantizer_recipe")
 
 # Per-architecture export *mappings* are covered in-process by
 # tests/gpu_megatron/torch/export/test_unified_export_megatron.py; these cases cover the script
@@ -169,31 +165,30 @@ def test_quantize_and_export(
     # assert outputs and outputs[0].outputs and outputs[0].outputs[0].text
 
     # Step 3: export folded weights + quantizer sidecars through Megatron-Bridge for vLLM fake quant
-    if HAS_BRIDGE_QUANTIZER_SIDECARS:
-        fakequant_path = tmp_path / "vllm_fakequant"
-        fakequant_cmd = extend_cmd_parts(
-            [
-                "torchrun",
-                f"--nproc_per_node={num_gpus}",
-                "export_quantized_megatron_to_hf.py",
-                "--vllm_fakequant_export",
-            ],
-            hf_model_name_or_path=model_arg,
-            megatron_path=megatron_path,
-            export_unified_hf_path=fakequant_path,
-            **{fakequant_export_parallelism: num_gpus},
-        )
-        run_example_command(fakequant_cmd, example_path="megatron_bridge", setup_free_port=True)
-        is_vlm = "vision_config" in (hf_model_path / "config.json").read_text()
-        assert_exported_checkpoint_matches(
-            fakequant_path,
-            hf_model_path,
-            check_values=False,
-            bit_exact_prefixes=("model.visual.",) if is_vlm else (),
-        )
-        assert not any("quantizer" in name for name in load_safetensors_dir(fakequant_path))
-        recipe = yaml.safe_load((fakequant_path / "quant_recipe.yaml").read_text())
-        quantizers = recipe["quantizers"]
-        state = torch.load(fakequant_path / "quantizer_state.pth", weights_only=True)
-        assert any(name.endswith("k_bmm_quantizer") for name in quantizers)
-        assert {key.rpartition(".")[0] for key in state} <= quantizers.keys()
+    fakequant_path = tmp_path / "vllm_fakequant"
+    fakequant_cmd = extend_cmd_parts(
+        [
+            "torchrun",
+            f"--nproc_per_node={num_gpus}",
+            "export_quantized_megatron_to_hf.py",
+            "--vllm_fakequant_export",
+        ],
+        hf_model_name_or_path=model_arg,
+        megatron_path=megatron_path,
+        export_unified_hf_path=fakequant_path,
+        **{fakequant_export_parallelism: num_gpus},
+    )
+    run_example_command(fakequant_cmd, example_path="megatron_bridge", setup_free_port=True)
+    is_vlm = "vision_config" in (hf_model_path / "config.json").read_text()
+    assert_exported_checkpoint_matches(
+        fakequant_path,
+        hf_model_path,
+        check_values=False,
+        bit_exact_prefixes=("model.visual.",) if is_vlm else (),
+    )
+    assert not any("quantizer" in name for name in load_safetensors_dir(fakequant_path))
+    recipe = yaml.safe_load((fakequant_path / "quant_recipe.yaml").read_text())
+    quantizers = recipe["quantizers"]
+    state = torch.load(fakequant_path / "quantizer_state.pth", weights_only=True)
+    assert any(name.endswith("k_bmm_quantizer") for name in quantizers)
+    assert {key.rpartition(".")[0] for key in state} <= quantizers.keys()

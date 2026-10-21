@@ -35,11 +35,7 @@ from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_5_moe_vl_dir,
     create_tiny_qwen3_dir,
 )
-from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
 from torch.distributed.checkpoint import FileSystemReader
-
-# TODO: drop this probe once the minimum Megatron-Bridge writes the ModelOpt quantizer sidecars.
-HAS_BRIDGE_QUANTIZER_SIDECARS = hasattr(MegatronModelBridge, "build_modelopt_quantizer_recipe")
 
 # The fix ships in the nemo:26.10 container.
 # TODO(Megatron-Bridge#6243): drop this probe once the minimum Megatron-Bridge carries it.
@@ -252,7 +248,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
 
     # Step 4: export for vLLM fake-quant evaluation (test_quantize_export.py covers the rest).
     # Only QAD saves a VLM's language model alone; the export must still carry the vision tower.
-    if is_vlm and HAS_BRIDGE_QUANTIZER_SIDECARS:
+    if is_vlm:
         fakequant_path = tmp_path / "qad_vllm_fakequant"
         fakequant_cmd = extend_cmd_parts(
             [
