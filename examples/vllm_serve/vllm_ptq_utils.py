@@ -28,6 +28,10 @@ from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, Schedul
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+from modelopt.torch.export.plugins.vllm_fakequant_hf import (
+    QUANTIZER_RECIPE_FORMAT,
+    QUANTIZER_RECIPE_VERSION,
+)
 from modelopt.torch.quantization.plugins.vllm import VllmMLAAttention
 
 
@@ -316,12 +320,6 @@ def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: list) -> list:
     print(f"MLA detected: added {' and '.join(names)} config")
 
     return kv_quant_cfg
-
-
-# Header of a versioned exported quantizer recipe; its ``quantizers`` map HF quantizer names to
-# properties-only ModelOpt quantizer states.
-QUANTIZER_RECIPE_FORMAT = "modelopt_quantizer_recipe"
-QUANTIZER_RECIPE_VERSION = 1
 
 
 def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]:
