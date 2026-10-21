@@ -184,8 +184,7 @@ jobs:
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"
-          uv venv .venv
-          uv pip install -e . pytest
+          # No explicit install: `uv run` must install modelopt_launcher itself.
           uv run python3 -m pytest -v
   mcp:
     if: needs.check-file-changes.outputs.any_changed == 'true'

@@ -33,4 +33,4 @@ modelopt_launcher = [
 testpaths = ["tests"]
 
 [dependency-groups]
-dev = []
+dev = ["pytest"]
