@@ -43,7 +43,7 @@ jobs:
         uses: ./.github/actions/pr-merge-base
       - if: startsWith(github.ref, 'refs/heads/pull-request/')
         id: changed
-        uses: step-security/changed-files@v47.0.5
+        uses: step-security/changed-files@2e07db73e5ccdb319b9a6c7766bd46d39d304bad # v47.0.5
         with:
           base_sha: ${{ steps.base.outputs.merge_base }}
           sha: ${{ steps.base.outputs.head_sha }}
@@ -112,7 +112,7 @@ jobs:
           echo "any_changed=$any" | tee --append "$GITHUB_OUTPUT"
       - name: Wait for unit tests before spending GPU runners
         if: ${{ steps.lanes.outputs.any_changed == 'true' && startsWith(github.ref, 'refs/heads/pull-request/') }}
-        uses: poseidon/wait-for-status-checks@v0.7.0
+        uses: poseidon/wait-for-status-checks@e7e24423722c5b8e97a6dd5848827d2a412f812d # v0.7.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           match_pattern: "^linux$" # Wait for Unit tests / linux
@@ -151,8 +151,7 @@ jobs:
       contents: read
     secrets: inherit
     with:
-      docker_image: "vllm/vllm-openai:v0.30.0"
-      container_options: "--shm-size=2gb --user 0"
+      docker_image: "vllm/vllm-openai:v0.30.0@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90"
       example: ${{ matrix.example }}
       timeout_minutes: 30
       pip_install_extras: "[hf,dev-test]"

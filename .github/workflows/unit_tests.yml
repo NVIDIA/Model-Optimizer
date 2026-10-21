@@ -42,7 +42,7 @@ jobs:
       - if: github.event_name == 'pull_request'
         name: Check for changes in test-relevant paths
         id: changed
-        uses: step-security/changed-files@v47.0.5
+        uses: step-security/changed-files@2e07db73e5ccdb319b9a6c7766bd46d39d304bad # v47.0.5
         with:
           files: |
             .github/workflows/unit_tests.yml
@@ -75,7 +75,7 @@ jobs:
           OMP_NUM_THREADS: "1"
         run: pip install nox uv && nox -s "unit-3.12(torch_214, tf_latest)" -- $PYTEST_EXTRA
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: unit

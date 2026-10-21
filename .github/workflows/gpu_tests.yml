@@ -54,7 +54,7 @@ jobs:
             container_image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20
           - example: gpu_vllm
             timeout: 30
-            container_image: docker.io/vllm/vllm-openai:v0.30.0
+            container_image: docker.io/vllm/vllm-openai:v0.30.0@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
     runs-on: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
     timeout-minutes: ${{ matrix.timeout }}
     container:
@@ -73,7 +73,7 @@ jobs:
         if: matrix.example == 'gpu_vllm'
         run: apt-get update && apt-get install -y git
       - uses: actions/checkout@v6
-      - uses: nv-gha-runners/setup-proxy-cache@main
+      - uses: nv-gha-runners/setup-proxy-cache@eadc57871cde0c92a223d0f486ab669a2360f978 # main
       - uses: ./.github/actions/cache-extensions
         id: ext-cache
         with:
@@ -119,7 +119,7 @@ jobs:
           path: /root/.cache/wheelhouse
           key: wheelhouse-${{ matrix.container_image }}-${{ hashFiles('noxfile.py') }}
       - name: Upload GPU coverage to Codecov
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
