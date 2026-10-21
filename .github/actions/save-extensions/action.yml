@@ -12,8 +12,8 @@ inputs:
   triton-key:
     description: The `triton-key` output of ./.github/actions/cache-extensions.
     required: true
-  triton-count:
-    description: The `triton-count` output of ./.github/actions/cache-extensions.
+  triton-hit:
+    description: The `triton-hit` output of ./.github/actions/cache-extensions.
     required: true
 
 runs:
@@ -29,16 +29,10 @@ runs:
       with:
         path: /root/.cache/torch_extensions
         key: ${{ inputs.cache-key }}
-    # A saved Triton cache holds everything restored plus the new kernels, so save it only when
-    # a run compiled enough new ones, not on every run.
     - id: triton
       shell: bash
-      env:
-        RESTORED: ${{ inputs.triton-count }}
-      run: |
-        count=$( (find /root/.cache/triton -mindepth 1 -maxdepth 1 2>/dev/null || true) | wc -l)
-        if [ "$count" -ge $((${RESTORED:-0} + 20)) ]; then echo "new=true" >> "$GITHUB_OUTPUT"; fi
-    - if: steps.triton.outputs.new == 'true' && inputs.triton-key != ''
+      run: test -n "$(ls -A /root/.cache/triton 2>/dev/null)" && echo "any=true" >> "$GITHUB_OUTPUT" || true
+    - if: inputs.triton-hit != 'true' && steps.triton.outputs.any == 'true' && inputs.triton-key != ''
       uses: actions/cache/save@v6
       with:
         path: /root/.cache/triton

@@ -16,9 +16,9 @@ outputs:
   triton-key:
     description: The Triton key to pass to ./.github/actions/save-extensions.
     value: ${{ steps.triton.outputs.cache-primary-key }}
-  triton-count:
-    description: The number of Triton entries restored, to pass to ./.github/actions/save-extensions.
-    value: ${{ steps.triton-count.outputs.count }}
+  triton-hit:
+    description: Whether the Triton cache was restored from the exact key.
+    value: ${{ steps.triton.outputs.cache-hit }}
 
 runs:
   using: composite
@@ -40,14 +40,15 @@ runs:
     - if: steps.cache.outputs.cache-hit == 'true'
       shell: bash
       run: find modelopt/torch/kernels/quantization -exec touch -d '2000-01-01' {} +
-    # Triton entries are content-addressed and only ever added, so any older cache is safe to start from.
-    # The run-unique key never matches: restore-keys restores the newest cache of the lane.
+    - id: week
+      shell: bash
+      run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+    # Triton entries are content-addressed and only ever added, so any older cache is safe to start from:
+    # restore-keys takes the newest. The week and the kernel sources are in the exact key, so a new cache
+    # is saved once a week and when the kernels change, not on every run.
     - id: triton
       uses: actions/cache/restore@v6
       with:
         path: /root/.cache/triton
-        key: triton-${{ inputs.cache-key }}-${{ github.run_id }}-${{ github.run_attempt }}
+        key: triton-${{ inputs.cache-key }}-${{ steps.week.outputs.week }}-${{ hashFiles('modelopt/torch/kernels/**/*.py') }}
         restore-keys: triton-${{ inputs.cache-key }}-
-    - id: triton-count
-      shell: bash
-      run: echo "count=$( (find /root/.cache/triton -mindepth 1 -maxdepth 1 2>/dev/null || true) | wc -l)" >> "$GITHUB_OUTPUT"
