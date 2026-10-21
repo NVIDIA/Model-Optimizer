@@ -32,10 +32,11 @@ from _test_utils.torch.transformers_models import (
 from transformers import AutoModelForImageTextToText
 
 from modelopt.torch.puzzletron.anymodel import convert_model
+from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_preprocess_data
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "examples" / "megatron_bridge"))
 
-from distill import HAS_DIRECT_HF_SFT, _hf_source
+from distill import HAS_DIRECT_HF_SFT, _document_eod_id, _hf_source
 from export_distilled_megatron_to_hf import _get_checkpoint_export_paths
 
 
@@ -43,11 +44,15 @@ from export_distilled_megatron_to_hf import _get_checkpoint_export_paths
 def test_distill_llm_hf_export(tmp_path, num_gpus, fake_hub_checkpoint):
     """Distill with an inline HF export, then re-export every saved iteration standalone.
 
-    Both exports read the student from the copy ``ensure_local_checkpoint`` resolved (see
-    ``fake_hub_checkpoint``). distill.py keeps the local path on its command line, since get_args()
-    loads the tokenizer from it; the standalone export is passed the Hub ID.
+    Distillation runs with --document_boundaries, so each EOD-separated document of a window trains
+    as its own THD segment. Both exports read the student from the copy ``ensure_local_checkpoint``
+    resolved (see ``fake_hub_checkpoint``). distill.py keeps the local path on its command line,
+    since get_args() loads the tokenizer from it; the standalone export is passed the Hub ID.
     """
-    teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+    # head_dim=8: TE's unfused attention, the only backend for head_dim 2, rejects THD input.
+    teacher_hf_path = create_tiny_qwen3_dir(
+        tmp_path, with_tokenizer=True, head_dim=8, max_position_embeddings=2048
+    )
     student_export_arg = fake_hub_checkpoint.serve(
         teacher_hf_path, "distill.py", "export_distilled_megatron_to_hf.py", nproc=num_gpus
     )
@@ -56,13 +61,20 @@ def test_distill_llm_hf_export(tmp_path, num_gpus, fake_hub_checkpoint):
     distilled_hf_path = tmp_path / "distilled_hf"
     all_exports = tmp_path / "all_exports"
     distill_cmd_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"],
+        [
+            "torchrun",
+            f"--nproc_per_node={num_gpus}",
+            "distill.py",
+            "--use_mock_data",
+            "--document_boundaries",
+        ],
         student_hf_path=teacher_hf_path,
         teacher_hf_path=teacher_hf_path,
         output_dir=distill_output_dir,
         tp_size=num_gpus,
         pp_size=1,
-        seq_length=16,
+        # Mock documents are 1-4095 tokens, so most of these windows span a document boundary.
+        seq_length=2048,
         mbs=1,
         gbs=4,
         train_iters=train_iters,
@@ -97,38 +109,29 @@ def test_distill_llm_hf_export(tmp_path, num_gpus, fake_hub_checkpoint):
             assert (all_exports / f"iter_{it:07d}" / fake_hub_checkpoint.marker).exists()
 
 
-def test_distill_llm_document_boundaries(tmp_path, num_gpus):
-    """--document_boundaries trains each EOD-separated document of a window as its own THD segment."""
-    # head_dim=8: TE's unfused attention, the only backend for head_dim 2, rejects THD input.
-    hf_path = create_tiny_qwen3_dir(
-        tmp_path, with_tokenizer=True, head_dim=8, max_position_embeddings=2048
+@pytest.mark.parametrize("append_eod", [True, False])
+def test_document_eod_id(tmp_path, append_eod):
+    """Document boundaries use the EOS --append_eod wrote, and fail on data without it."""
+    tokenizer = get_tiny_tokenizer()
+    tokenizer.save_pretrained(tmp_path / "tokenizer")
+    jsonl = tmp_path / "docs.jsonl"
+    jsonl.write_text("".join(json.dumps({"text": f"document number {i}"}) + "\n" for i in range(4)))
+    (prefix,) = megatron_preprocess_data(
+        jsonl_paths=jsonl,
+        output_dir=tmp_path / "data",
+        tokenizer_name_or_path=str(tmp_path / "tokenizer"),
+        append_eod=append_eod,
     )
-    distill_output_dir = tmp_path / "distill_output"
-    distill_cmd_parts = extend_cmd_parts(
-        [
-            "torchrun",
-            f"--nproc_per_node={num_gpus}",
-            "distill.py",
-            "--use_mock_data",
-            "--document_boundaries",
-        ],
-        student_hf_path=hf_path,
-        teacher_hf_path=hf_path,
-        output_dir=distill_output_dir,
-        tp_size=num_gpus,
-        pp_size=1,
-        # Mock documents are 1-4095 tokens, so most of these windows span a document boundary.
-        seq_length=2048,
-        mbs=1,
-        gbs=4,
-        train_iters=2,
-        lr_warmup_iters=1,
-        eval_interval=2,
-        eval_iters=0,
-        log_interval=1,
+    args = argparse.Namespace(
+        student_hf_path=str(tmp_path / "tokenizer"),
+        trust_remote_code=False,
+        data_paths=["1.0", prefix],
     )
-    run_example_command(distill_cmd_parts, example_path="megatron_bridge")
-    assert (distill_output_dir / "checkpoints/iter_0000002").exists()
+    if append_eod:
+        assert _document_eod_id(args) == tokenizer.eos_token_id
+    else:
+        with pytest.raises(ValueError, match="--append_eod"):
+            _document_eod_id(args)
 
 
 def test_distill_llm_sft(tmp_path, num_gpus):

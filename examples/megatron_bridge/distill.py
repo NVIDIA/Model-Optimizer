@@ -58,6 +58,7 @@ try:
 except ImportError:
     HAS_DIRECT_HF_SFT = False
 from megatron.core.datasets.gpt_dataset import GPTDataset
+from megatron.core.datasets.indexed_dataset import IndexedDataset
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.utils import unwrap_model
@@ -507,6 +508,28 @@ def _tokenizer_prepends_bos(args) -> bool:
     return tokenizer("x").input_ids[:1] == [tokenizer.bos_token_id]
 
 
+def _document_eod_id(args) -> int:
+    """The token ending each document: the student tokenizer's EOS, which ``--append_eod`` appends.
+
+    Fails if a data file's first document does not end with it, e.g. chat-template data, which has
+    no EOD between conversations, rather than silently attending across documents.
+    """
+    eod = AutoTokenizer.from_pretrained(
+        args.student_hf_path, trust_remote_code=args.trust_remote_code
+    ).eos_token_id
+    if eod is None:
+        raise ValueError("--document_boundaries needs a student tokenizer with an EOS token.")
+    for prefix in get_blend_from_list(args.data_paths)[0] if args.data_paths else []:
+        # Bound to a name: a document is a view of the dataset's memory map, closed with it.
+        dataset = IndexedDataset(prefix)
+        if dataset[0][-1] != eod:
+            raise ValueError(
+                f"--document_boundaries: the first document of {prefix} does not end with the "
+                f"student tokenizer's EOS ({eod}). Tokenize text data with --append_eod."
+            )
+    return eod
+
+
 def _add_document_boundaries() -> None:
     """Give each EOD-separated document of a pre-tokenized window its own THD segment."""
     getitem = GPTDataset.__getitem__
@@ -533,6 +556,8 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     args.student_hub_model_id, args.student_local_checkpoint_path = ensure_local_checkpoint(
         args.student_hf_path
     )
+    # NullTokenizer's EOD defaults to vocab_size - 1, which pre-tokenized data never contains.
+    eod_id = _document_eod_id(args) if args.document_boundaries else None
     student_has_modelopt_state = args.student_megatron_path is not None and has_modelopt_state(
         args.student_megatron_path
     )
@@ -799,7 +824,9 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             )
             if args.sft
             else TokenizerConfig(
-                tokenizer_type="NullTokenizer", vocab_size=distill_provider.vocab_size
+                tokenizer_type="NullTokenizer",
+                vocab_size=distill_provider.vocab_size,
+                null_tokenizer_eod_id=eod_id,
             )
         ),
         checkpoint=CheckpointConfig(

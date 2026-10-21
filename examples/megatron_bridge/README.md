@@ -193,7 +193,9 @@ Megatron-Bridge holds every row in host memory on each rank, so keep `train.json
 the run needs.
 
 With pre-tokenized data, `--document_boundaries` (`--mbs 1`, `--cp_size 1`) restricts attention to
-each EOD-separated document of a window instead of the whole window.
+each EOD-separated document of a window instead of the whole window. Tokenize the data with
+`--append_eod`: the student tokenizer's EOS marks each document's end. Chat-template data has no
+EOD between conversations, so distill.py rejects it.
 
 > [!IMPORTANT]
 > Packed training (`--sft_in_batch_packing` or `--document_boundaries`) of Gated DeltaNet models
