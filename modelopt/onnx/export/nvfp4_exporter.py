@@ -22,7 +22,6 @@ from onnx import numpy_helper
 
 from modelopt.onnx import utils
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_nodes
 from modelopt.onnx.quantization.qdq_utils import onnx_dtype_map
 from modelopt.onnx.quantization.quant_utils import (
     get_weights_scaling_factor,
@@ -116,11 +115,12 @@ def _replace_fp4qdq_with_2dq(
         value_info = onnx.helper.make_tensor_value_info(
             tensor_proto.name, tensor_proto.data_type, tensor_proto.dims
         )
-        graph.input.append(value_info)
+        graph.value_info.append(value_info)
 
     # Remove the original node from the graph
     graph.node.remove(node)
     weight_name = node.input[0]
+    precision_dtype = graph.initializer[initializer_indices[weight_name]].data_type
 
     # Generate unique names for the initializers
     w_f4_name = weight_name + "_f4"
@@ -168,10 +168,11 @@ def _replace_fp4qdq_with_2dq(
 
     # Create DequantizeLinear_2 node: (w_f4, sw_f32) -> w_32
     w32_name = node.output[0]
+    dq_output_name = w32_name if precision_dtype == onnx.TensorProto.FLOAT else w32_name + "_fp32"
     dequant2 = onnx.helper.make_node(
         "DequantizeLinear",
         inputs=[w_f4_proto.name, sw_f32_name],
-        outputs=[w32_name],
+        outputs=[dq_output_name],
         name=weight_name + "_DequantizeLinear_1",
         axis=-1,
         block_size=block_size,
@@ -187,12 +188,18 @@ def _replace_fp4qdq_with_2dq(
 
     # Change the data type of w16 (output of 2nd DQ) to model weight precision type
     if w32_name in value_info_map:
-        value_info_map[w32_name].type.tensor_type.elem_type = onnx_dtype_map["Float"]
+        value_info_map[w32_name].type.tensor_type.elem_type = precision_dtype
     else:
         raise ValueError(f"ValueInfo for {w32_name} not found.")
 
     # Add the new nodes to the graph
     graph.node.extend([dequant1, dequant2])
+    if dq_output_name != w32_name:
+        graph.node.append(
+            onnx.helper.make_node(
+                "Cast", [dq_output_name], [w32_name], name=weight_name + "_Cast", to=precision_dtype
+            )
+        )
 
 
 class NVFP4QuantExporter(ONNXQuantExporter):
@@ -321,60 +328,17 @@ class NVFP4QuantExporter(ONNXQuantExporter):
     def post_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         """Post-processes the ONNX model for NVFP4 quantization.
 
-        Replaces TRT_FP4QDQ nodes with two DequantizeLinear nodes and handles
-        precision casting for inputs.
+        Replaces TRT_FP4QDQ nodes with two DequantizeLinear nodes while preserving
+        the original weight compute type.
         """
         logger.info("Post-processing NVFP4 quantization")
         graph = onnx_model.graph
         initializers_to_delete = []
-        tensor_consumers = get_tensor_consumer_nodes(graph)
         initializer_indices = {
             initializer.name: idx for idx, initializer in enumerate(graph.initializer)
         }
         value_info_map = {vi.name: vi for vi in graph.value_info}
         graph_inputs = {inp.name for inp in graph.input}
-        cast_output_cache: dict[tuple[str, str], str] = {}
-
-        def _get_precision_dtype() -> str:
-            # Check initializers to determine the precision of the weights
-            precision_dtype = "Half"
-            for initializer in graph.initializer:
-                if initializer.data_type == 16:
-                    precision_dtype = "BFloat16"
-                    break  # Assuming all weights are of the same precision
-            return precision_dtype
-
-        def _cast_input_dtypes(node: onnx.NodeProto, precision_dtype: str):
-            # Change the input types to match weight precision (precision_dtype)
-            if node.op_type == "Transpose":
-                maybe_matmul = tensor_consumers[node.output[0]][0]
-                assert maybe_matmul.op_type == "MatMul"
-                node = maybe_matmul
-
-            # Create Cast nodes for each input of the target node except bias
-            for i, input_name in enumerate(node.input[:2]):
-                cast_output_name = cast_output_cache.get((input_name, precision_dtype))
-                if cast_output_name is None:
-                    cast_output_suffix = "bf16" if precision_dtype == "BFloat16" else "f16"
-                    cast_output_name = f"{input_name}_{cast_output_suffix}"
-                    cast_output_cache[(input_name, precision_dtype)] = cast_output_name
-
-                    # Create a Cast node to convert the input to FP16/BF16
-                    cast_node = onnx.helper.make_node(
-                        "Cast",
-                        inputs=[input_name],  # Original input of the target node
-                        outputs=[cast_output_name],
-                        to=onnx_dtype_map[precision_dtype],  # Cast to FP16/BF16
-                    )
-
-                    # Insert the Cast node into the graph
-                    graph.node.extend([cast_node])
-
-                # Update the target node input to use the cast node output
-                node.input[i] = cast_output_name
-
-        precision_dtype = _get_precision_dtype()
-        logger.debug(f"Using precision dtype: {precision_dtype}")
 
         fp4_qdq_nodes = [node for node in graph.node if node.op_type == "TRT_FP4QDQ"]
         logger.debug(f"Found {len(fp4_qdq_nodes)} FP4QDQ nodes to convert")
@@ -415,10 +379,6 @@ class NVFP4QuantExporter(ONNXQuantExporter):
                 sw_f8_per_block,
                 block_size,
             )
-
-            # Cast input dtypes for the next node
-            next_node = tensor_consumers[node.output[0]][0]
-            _cast_input_dtypes(next_node, precision_dtype)
 
         # Remove old initializers
         new_initializers = [

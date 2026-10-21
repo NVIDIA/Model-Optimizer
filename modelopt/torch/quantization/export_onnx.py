@@ -633,11 +633,15 @@ def export_fp4(
             g, inputs, sx_f32_per_tensor, trt_high_precision_dtype, block_size
         )
         dq_scale = _fp4_dequantize(g, sx_f8, sx_f32_per_tensor, trt_high_precision_dtype)
-        return _fp4_dequantize_2(g, x_f4, dq_scale, block_size)
+        output = _fp4_dequantize_2(g, x_f4, dq_scale, block_size)
+        output_dtype = inputs.type().scalarType()
+        if output_dtype != "Float":
+            output = g.op("Cast", output, to_i=onnx_dtype_map[output_dtype])
+        return output.setType(inputs.type())
     else:
         # This is a dummy custom op, we post-process the exported ONNX model to replace this node
         # with two DQ nodes as described in the static double quantization recipe.
-        return g.op("trt::TRT_FP4QDQ", inputs, block_size_i=block_size)
+        return g.op("trt::TRT_FP4QDQ", inputs, block_size_i=block_size).setType(inputs.type())
 
 
 @contextlib.contextmanager

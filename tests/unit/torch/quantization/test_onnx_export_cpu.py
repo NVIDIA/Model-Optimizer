@@ -234,7 +234,7 @@ def test_nvfp4_rejects_invalid_block_scale(scale):
         _encode_nvfp4_block_scale(np.array([scale], dtype=np.float32))
 
 
-def test_nvfp4_shared_activation_reuses_cast():
+def test_nvfp4_shared_activation_preserves_dtype():
     input_tensor = helper.make_tensor_value_info("input", TensorProto.FLOAT, [4, 32])
     outputs = [
         helper.make_tensor_value_info("output0", TensorProto.FLOAT, [4, 64]),
@@ -284,19 +284,10 @@ def test_nvfp4_shared_activation_reuses_cast():
     )
 
     converted_model = NVFP4QuantExporter.process_model(model)
-    activation_casts = [
-        node
-        for node in converted_model.graph.node
-        if node.op_type == "Cast" and node.input == ["input"]
-    ]
-    assert len(activation_casts) == 1
-    assert activation_casts[0].output == ["input_f16"]
     assert all(
-        node.input[0] == "input_f16"
-        for node in converted_model.graph.node
-        if node.op_type == "MatMul"
+        node.input[0] == "input" for node in converted_model.graph.node if node.op_type == "MatMul"
     )
-    onnx.checker.check_model(converted_model)
+    onnx.checker.check_model(converted_model, full_check=True)
 
 
 def test_topologically_sort_graph_nodes_accounts_for_subgraph_captures():

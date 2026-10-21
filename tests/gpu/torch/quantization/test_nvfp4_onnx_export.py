@@ -13,15 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
 import onnx
 import pytest
 import torch
 from _test_utils.torch.quantization.models import SimpleLinear
 
 import modelopt.torch.quantization as mtq
-from modelopt.onnx.export import NVFP4QuantExporter
+from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 from modelopt.torch.quantization.utils import is_quantized_linear
 
 dtype_to_onnx_type_name = {
@@ -62,9 +60,10 @@ def _check_gemm_quantized(model, dtype):
 
 @pytest.mark.parametrize(
     "dtype",
-    ["Half", "BFloat16"],
+    ["Float", "Half", "BFloat16"],
 )
-def test_simple_linear(tmp_path, dtype: str):
+@pytest.mark.parametrize("weights_dtype", ["fp32", "fp16"])
+def test_simple_linear(dtype: str, weights_dtype: str):
     def forward_loop(model, run_backward=False):
         for batch in calib_data:
             output = model(batch)
@@ -72,13 +71,10 @@ def test_simple_linear(tmp_path, dtype: str):
                 output.sum().backward()
 
     config = mtq.NVFP4_DEFAULT_CFG
-    model = SimpleLinear().cuda()
-    calib_data = [model.get_input().cuda() for _ in range(8)]
-    sample_input = model.get_input().cuda()
-    if dtype == "BFloat16":
-        model = model.to(torch.bfloat16)
-        calib_data = [data.to(torch.bfloat16) for data in calib_data]
-        sample_input = sample_input.to(torch.bfloat16)
+    torch_dtype = {"Float": torch.float32, "Half": torch.float16, "BFloat16": torch.bfloat16}[dtype]
+    model = SimpleLinear().cuda().to(torch_dtype)
+    calib_data = [model.get_input().cuda().to(torch_dtype) for _ in range(8)]
+    sample_input = model.get_input().cuda().to(torch_dtype)
 
     model = mtq.quantize(model, config, forward_loop=forward_loop)
     for module in model.modules():
@@ -88,18 +84,13 @@ def test_simple_linear(tmp_path, dtype: str):
             module.input_quantizer._onnx_quantizer_type = "dynamic"
             module.weight_quantizer._onnx_quantizer_type = "static"
 
-    # Export the model to ONNX
-    onnx_path = os.path.join(tmp_path, "simple_linear_qdq.onnx")
-    torch.onnx.export(
+    onnx_bytes, _ = get_onnx_bytes_and_metadata(
         model,
-        sample_input,
-        onnx_path,
-        input_names=["x"],
-        output_names=["output"],
-        export_params=True,
-        opset_version=17,
-        dynamo=False,
+        (sample_input,),
+        weights_dtype=weights_dtype,
     )
-
-    onnx_model = NVFP4QuantExporter.process_model(onnx.load(onnx_path))
-    _check_gemm_quantized(onnx_model, dtype)
+    onnx_model = onnx.load_model_from_string(
+        OnnxBytes.from_bytes(onnx_bytes).get_onnx_model_file_bytes()
+    )
+    onnx.checker.check_model(onnx_model, full_check=True)
+    _check_gemm_quantized(onnx_model, "Half" if weights_dtype == "fp16" else dtype)
