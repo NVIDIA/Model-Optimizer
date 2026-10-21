@@ -23,9 +23,5 @@ with import_plugin("megatron_importer"):
 from .hf_spec_export import *
 from .vllm_fakequant_hf import *
 
-# isort: split
-# Imports unified_export_hf, which imports hf_spec_export, so it must come after it.
-from .ggml_int8_hf import *
-
 with import_plugin("vllm_fakequant_megatron"):
     from .vllm_fakequant_megatron import *

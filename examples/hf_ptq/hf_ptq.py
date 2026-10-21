@@ -75,7 +75,6 @@ from modelopt.recipe.presets import (
 )
 from modelopt.torch.export import (
     export_hf_checkpoint,
-    export_hf_ggml_int8_checkpoint,
     export_hf_vllm_fq_checkpoint,
     export_speculative_decoding,
     has_spec_opt,
@@ -671,8 +670,6 @@ def export_quantized(
             or "int8_smoothquant" in args.qformat
         )
         if is_tensorrt_llm_export:
-            if args.export_ggml_as_int8:
-                raise ValueError("--export_ggml_as_int8 writes a Hugging Face checkpoint only.")
             if (
                 args.inference_tensor_parallel != 1 or args.inference_pipeline_parallel != 1
             ) and args.qformat == "nvfp4_svdquant":
@@ -716,8 +713,6 @@ def export_quantized(
                 export_hf_vllm_fq_checkpoint(
                     full_model, export_dir=export_path, inplace_mem_efficient=True
                 )
-            elif args.export_ggml_as_int8:
-                export_hf_ggml_int8_checkpoint(full_model, export_dir=export_path)
             else:
                 # Weights the loader could not place (an MTP head, an auxiliary tower) are
                 # carried over by the exporter from the keys recorded at load time; nothing
@@ -966,9 +961,6 @@ def quantize_main(
             "holds the full state dict in host memory."
         )
     if args.layerwise_export:
-        if args.export_ggml_as_int8:
-            # The per-layer pass writes the GGML shards and leaves the weights packed.
-            raise ValueError("--export_ggml_as_int8 does not support layerwise.export_dir.")
         if isinstance(recipe, ModelOptAutoQuantizeRecipe):
             # Only the mono-quantize path retargets export_dir and runs the refusals;
             # auto_quantize would export to the placeholder and skip the real export.
@@ -1366,17 +1358,6 @@ def parse_args() -> argparse.Namespace:
         "for use with vllm_serve_fakequant.py).",
     )
     parser.add_argument(
-        "--export_ggml_as_int8",
-        default=False,
-        action="store_true",
-        help=(
-            "Export GGML-quantized layers (IQ1/IQ2 formats, Q8_0) as an INT8 weight-only "
-            "compressed-tensors checkpoint that vLLM serves with its integer kernels. Each weight "
-            "keeps its GGML integer level and sub-block scale, so this reproduces the GGML "
-            "weights up to rounding the scales to the model dtype."
-        ),
-    )
-    parser.add_argument(
         "--cast_mxfp4_to_nvfp4",
         action="store_true",
         default=False,
@@ -1456,10 +1437,6 @@ def parse_args() -> argparse.Namespace:
         parser.error("--cpu_offload requires --use_fsdp2")
     if args.use_fsdp2 and args.sparsity_fmt != "dense":
         parser.error(f"--use_fsdp2 does not support --sparsity_fmt {args.sparsity_fmt}.")
-    if args.export_ggml_as_int8 and args.vllm_fakequant_export:
-        parser.error("--export_ggml_as_int8 and --vllm_fakequant_export are separate exports.")
-    if args.export_ggml_as_int8 and (args.use_fsdp2 or args.offload_folder is not None):
-        parser.error("--export_ggml_as_int8 does not support --use_fsdp2 or --offload_folder.")
     if args.use_fsdp2 and args.vllm_fakequant_export:
         parser.error("--use_fsdp2 does not support --vllm_fakequant_export.")
     if args.use_fsdp2 and args.cast_mxfp4_to_nvfp4:
