@@ -37,6 +37,9 @@ from modelopt.recipe import load_recipe
 
 _RECIPE = "models/zai-org/GLM-5.3-Flash-BF16/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast"
 _IQ2_RECIPE = "models/zai-org/GLM-5.3-Flash-BF16/ptq/iq2_s_experts-q8_0_shared_dense-gptq"
+_IQ2_NVFP4_DOWN_RECIPE = (
+    "models/zai-org/GLM-5.3-Flash-BF16/ptq/iq2_s_experts-nvfp4_down-q8_0_shared_dense-gptq"
+)
 _H = 32
 
 
@@ -193,22 +196,27 @@ def test_glm_5_3_recipe_megatron_names():
         assert proj.weight_quantizer.is_enabled is False
 
 
-def test_glm_5_3_iq2_recipe_megatron_names():
+@pytest.mark.parametrize(
+    ("recipe", "expert_fc2_bits"),
+    [(_IQ2_RECIPE, "iq2_s"), (_IQ2_NVFP4_DOWN_RECIPE, (2, 1))],
+)
+def test_glm_5_3_iq2_recipe_megatron_names(recipe, expert_fc2_bits):
     model = _McoreGLM53Flash()
-    config = load_recipe(_IQ2_RECIPE).quantize.model_dump()
+    config = load_recipe(recipe).quantize.model_dump()
     config["algorithm"] = None
     mtq.quantize(model, config)
 
     dense, sparse = (layer.inner_layer.mlp for layer in model.language_model.decoder.layers)
     mtp = model.language_model.mtp.layers[0].inner_layer.mlp
 
-    # Routed experts -> IQ2_S; dense MLP and shared experts -> Q8_0; activations stay BF16.
-    for mlp, num_bits in [
-        *((expert, "iq2_s") for expert in sparse.experts.local_experts),
-        (dense, "q8_0"),
-        (sparse.shared_experts, "q8_0"),
+    # Routed experts -> IQ2_S (the NVFP4-down variant: NVFP4 on linear_fc2); dense MLP and shared
+    # experts -> Q8_0; activations stay BF16.
+    for mlp, fc1_bits, fc2_bits in [
+        *((expert, "iq2_s", expert_fc2_bits) for expert in sparse.experts.local_experts),
+        (dense, "q8_0", "q8_0"),
+        (sparse.shared_experts, "q8_0", "q8_0"),
     ]:
-        for proj in (mlp.linear_fc1, mlp.linear_fc2):
+        for proj, num_bits in ((mlp.linear_fc1, fc1_bits), (mlp.linear_fc2, fc2_bits)):
             assert proj.weight_quantizer.is_enabled
             assert proj.weight_quantizer.num_bits == num_bits
             assert proj.input_quantizer.is_enabled is False
