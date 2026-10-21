@@ -14,70 +14,36 @@
 # limitations under the License.
 
 import gc
-import importlib.util
-from pathlib import Path
 
 import pytest
 import torch
-from _test_utils.torch.transformers_models import create_tiny_llama_dir
-from transformers import AutoModelForCausalLM
+from _test_utils.examples.ggml_export import quantize_tiny_llama
+from _test_utils.examples.run_command import run_example_command
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.inputs import TokensPrompt
 
-import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_checkpoint
-
-_SCRIPT = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq" / "convert_ggml_to_int8.py"
-_SPEC = importlib.util.spec_from_file_location("convert_ggml_to_int8", _SCRIPT)
-assert _SPEC is not None and _SPEC.loader is not None
-convert_ggml_to_int8 = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(convert_ggml_to_int8)
 
 
 @pytest.fixture(scope="module")
 def int8_export_in_vllm(tmp_path_factory):
-    """vLLM serving the INT8 export of a GGML model, the model's own logprobs and their tokens."""
+    """vLLM serving the INT8 conversion of a GGML export, the model's own logprobs and its tokens."""
     tmp_path = tmp_path_factory.mktemp("ggml_int8")
-    source = create_tiny_llama_dir(
-        tmp_path,
-        hidden_size=256,
-        intermediate_size=512,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=64,
-        max_position_embeddings=64,
-        vocab_size=128,
-        initializer_range=0.05,
-    )
-    # Fake quant runs on CPU: the reference needs no GPU, and it spares the GGML CUDA extension build.
-    model = AutoModelForCausalLM.from_pretrained(source, dtype=torch.bfloat16)
     # Group 32 (IQ1_S) and group 16 (IQ2_XS) layers take different vLLM kernels.
-    quant_cfg = {
-        "quant_cfg": [
-            {"quantizer_name": "*", "enable": False},
-            *(
-                {
-                    "quantizer_name": f"*layers.{i}.mlp*weight_quantizer",
-                    "cfg": {"num_bits": num_bits, "block_sizes": {-1: 256}, "backend": "ggml"},
-                }
-                for i, num_bits in enumerate(("iq1_s", "iq2_xs"))
-            ),
-        ],
-        "algorithm": "max",
-    }
-    token_ids = torch.randint(0, 128, (1, 48), generator=torch.Generator().manual_seed(0))
-    mtq.quantize(model, quant_cfg, lambda m: m(token_ids))
+    model, token_ids = quantize_tiny_llama(tmp_path)
     with torch.no_grad():
         logits = model(token_ids).logits[0, :-1].float()
     expected = logits.log_softmax(-1).gather(-1, token_ids[0, 1:, None])[:, 0]
 
     export_hf_checkpoint(model, export_dir=tmp_path / "ggml")
-    export_dir = tmp_path / "int8"
-    convert_ggml_to_int8.convert_ggml_export_to_int8(tmp_path / "ggml", export_dir)
+    run_example_command(
+        ["python", "convert_ggml_to_int8.py", str(tmp_path / "ggml"), str(tmp_path / "int8")],
+        "hf_ptq",
+    )
 
     llm = LLM(
-        model=str(export_dir),
+        model=str(tmp_path / "int8"),
         enforce_eager=True,
         gpu_memory_utilization=0.2,
         max_model_len=64,

@@ -114,13 +114,19 @@ def _ggml_layer_formats(
     for shard in sorted(set(weight_map.values())):
         with safe_open(ggml_dir / shard, framework="pt") as f:
             # GGML payloads are the only uint8 weights an export writes.
-            payloads = [
-                name
+            payloads = {
+                name: f.get_slice(name).get_shape()
                 for name in f.keys()  # noqa: SIM118 -- a safe_open handle is not a dict
                 if name.endswith(".weight") and f.get_slice(name).get_dtype() == "U8"
-            ]
-        for name in payloads:
+            }
+        for name, shape in payloads.items():
             layer = name.removesuffix(".weight")
+            # A 2-D weight's payload is [rows, blocks, block bytes]; weight_shape and the int32
+            # packing assume that layout.
+            if len(shape) != 3:
+                raise ValueError(f"{layer} is not a 2-D weight; only 2-D weights convert to INT8.")
+            if mixed and layer not in layer_configs:
+                raise ValueError(f"{layer} holds a uint8 weight but is not in quantized_layers.")
             algo = layer_configs[layer]["quant_algo"] if mixed else quantization["quant_algo"]
             layer_formats[layer] = GGML_FORMAT_REGISTRY[algo.lower()]
     if not layer_formats:

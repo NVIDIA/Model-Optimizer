@@ -70,6 +70,7 @@ jobs:
               - "!**/*.{md,rst,png,ipynb}"
             vllm:
               - "{examples,tests/examples}/vllm_serve/**"
+              - examples/hf_ptq/convert_ggml_to_int8.py # tests/examples/vllm_serve serves its output
               - "!**/*.{md,rst,png,ipynb}"
             trtllm:
               - "{examples,tests/examples}/{gpt-oss,hf_ptq,llm_eval}/**"

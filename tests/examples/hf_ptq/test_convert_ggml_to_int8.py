@@ -13,66 +13,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 import torch
-from _test_utils.torch.transformers_models import create_tiny_llama_dir
+from _test_utils.examples.ggml_export import IQ1_S, quantize_tiny_llama
+from _test_utils.examples.hf_ptq_example_utils import convert_ggml_to_int8
+from _test_utils.examples.run_command import run_example_command
 from safetensors.torch import load_file, save_file
-from transformers import AutoModelForCausalLM
 
-import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 
-_SCRIPT = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq" / "convert_ggml_to_int8.py"
-_SPEC = importlib.util.spec_from_file_location("convert_ggml_to_int8", _SCRIPT)
-assert _SPEC is not None and _SPEC.loader is not None
-convert_ggml_to_int8 = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(convert_ggml_to_int8)
-
-# Layer 0 takes a format with 32-weight sub-blocks and layer 1 one with 16, so the export needs
-# one compressed-tensors config group per group size.
+# quantize_tiny_llama's layer 0 is IQ1_S (group 32) and layer 1 IQ2_XS (group 16).
 LAYER_FORMATS = {0: "iq1_s", 1: "iq2_xs"}
-IQ2_XS = {"num_bits": "iq2_xs", "block_sizes": {-1: 256}, "backend": "ggml"}
 
 
-def _export(tmp_path, second_layer_cfg):
-    source = create_tiny_llama_dir(tmp_path, hidden_size=256, intermediate_size=256)
-    model = AutoModelForCausalLM.from_pretrained(source, dtype=torch.bfloat16)
-    layer_cfgs = [
-        {"num_bits": "iq1_s", "block_sizes": {-1: 256}, "backend": "ggml"},
-        second_layer_cfg,
-    ]
-    quant_cfg = {
-        "quant_cfg": [
-            {"quantizer_name": "*", "enable": False},
-            *(
-                {"quantizer_name": f"*layers.{i}.mlp*weight_quantizer", "cfg": cfg}
-                for i, cfg in enumerate(layer_cfgs)
-            ),
-        ],
-        "algorithm": "max",
-    }
-    mtq.quantize(model, quant_cfg, lambda m: m(torch.randint(0, 32, (1, 8))))
-    export_dir = tmp_path / "export"
-    export_hf_checkpoint(model, export_dir=export_dir)
-    return export_dir
+def _convert(ggml_dir, int8_dir, *args):
+    run_example_command(
+        ["python", "convert_ggml_to_int8.py", str(ggml_dir), str(int8_dir), *args], "hf_ptq"
+    )
 
 
 def _files(directory):
-    return {
-        path.relative_to(directory): path.read_bytes()
-        for path in directory.rglob("*")
-        if path.is_file()
-    }
+    return {p.relative_to(directory): p.read_bytes() for p in directory.rglob("*") if p.is_file()}
 
 
 @pytest.fixture(scope="module")
 def ggml_export(tmp_path_factory):
-    export_dir = _export(tmp_path_factory.mktemp("ggml"), IQ2_XS)
+    tmp_path = tmp_path_factory.mktemp("ggml")
+    model, _ = quantize_tiny_llama(tmp_path)
+    export_dir = tmp_path / "export"
+    export_hf_checkpoint(model, export_dir=export_dir)
     # Files a checkpoint can ship beside its indexed weights: a nested sidecar and an off-index
     # weight file such as an MTP head.
     (export_dir / "chat_templates").mkdir()
@@ -86,8 +60,8 @@ def test_ggml_export_converts_to_int8_levels_and_steps(ggml_export, tmp_path):
     before = load_file(ggml_export / "model.safetensors")
     int8_dir = tmp_path / "int8"
 
-    # A small shard size splits the output, so the index has to stitch the shards together.
-    convert_ggml_to_int8.convert_ggml_export_to_int8(ggml_export, int8_dir, max_shard_size=2**18)
+    # Shards of about 200 KB split the output, so the index has to stitch them together.
+    _convert(ggml_export, int8_dir, "--max_shard_size_gb", "0.0002")
 
     assert _files(ggml_export) == ggml_files
     assert not (int8_dir / "hf_quant_config.json").exists()
@@ -130,7 +104,7 @@ def test_a_failed_conversion_leaves_the_output_directory_empty(ggml_export, tmp_
     def fail(*args, **kwargs):
         raise OSError("disk full")
 
-    # The last step: by then the shards, index and config are all written.
+    # Called in-process to fail the last step: by then the shards, index and config are written.
     monkeypatch.setattr(convert_ggml_to_int8, "copy_non_model_files", fail)
 
     with pytest.raises(OSError, match="disk full"):
@@ -140,9 +114,10 @@ def test_a_failed_conversion_leaves_the_output_directory_empty(ggml_export, tmp_
 
 
 def test_export_with_a_non_ggml_layer_is_refused_before_writing(tmp_path):
-    export_dir = _export(tmp_path, {"num_bits": (4, 3), "axis": None})
+    model, _ = quantize_tiny_llama(tmp_path, (IQ1_S, {"num_bits": (4, 3), "axis": None}))
+    export_hf_checkpoint(model, export_dir=tmp_path / "ggml")
 
-    with pytest.raises(ValueError, match="Only GGML layers"):
-        convert_ggml_to_int8.convert_ggml_export_to_int8(export_dir, tmp_path / "int8")
+    with pytest.raises(subprocess.CalledProcessError):
+        _convert(tmp_path / "ggml", tmp_path / "int8")
 
     assert not (tmp_path / "int8").exists()

@@ -709,7 +709,7 @@ print(llm_fp8.generate(["What's the age of the earth? "]))
 
 #### vLLM with GGML recipes (IQ, Q8_0)
 
-vLLM has no GGML kernels. To serve a checkpoint exported with a GGML recipe on vLLM's integer kernels, expand it into an INT8 weight-only compressed-tensors checkpoint with [convert_ggml_to_int8.py](./convert_ggml_to_int8.py):
+vLLM cannot load the GGML checkpoints ModelOpt exports, which are Hugging Face checkpoints holding packed GGML blocks. To serve one on vLLM's integer kernels, expand it into an INT8 weight-only compressed-tensors checkpoint with [convert_ggml_to_int8.py](./convert_ggml_to_int8.py):
 
 ```bash
 python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --recipe general/ptq/iq1_s --export_path <ggml_ckpt_path>
@@ -717,7 +717,7 @@ python convert_ggml_to_int8.py <ggml_ckpt_path> <int8_ckpt_path>
 vllm serve <int8_ckpt_path>
 ```
 
-Each weight keeps its GGML integer level, and the step of its 16- or 32-weight sub-block becomes the INT8 group scale. The INT8 checkpoint therefore holds the same weights up to rounding the scales to the model dtype, at about half the BF16 weight memory. The GGML checkpoint is left unchanged.
+Each weight keeps its GGML integer level, and the step of its 16- or 32-weight sub-block becomes the INT8 group scale. The INT8 checkpoint therefore holds the same weights up to rounding the scales to the model dtype, at about half the BF16 weight memory. Its config names each converted layer explicitly, so every other layer loads unquantized. The GGML checkpoint is left unchanged.
 
 vLLM serves group-32 layers (IQ1_S, IQ2_XXS, Q8_0) with Marlin and group-16 layers (IQ1_M, IQ2_XS, IQ2_S) with Humming. On Blackwell GPUs, Marlin is much slower at large batch sizes, so set `VLLM_DISABLED_KERNELS=MarlinLinearKernel` to use Humming for group 32 as well.
 
