@@ -51,7 +51,14 @@ def _load_export(export_dir: Path):
     return weights, state, recipe
 
 
-def _test_matches_megatron_exporter(source, tmp_path, rank, size):
+QUANT_CFGS = {
+    "nvfp4-kv_fp8": load_recipe("general/ptq/nvfp4_default-kv_fp8").quantize.model_dump(),
+    # INT4 + FP8 weights: a SequentialQuantizer chain the export folds as a whole.
+    "w4a8": {**mtq.W4A8_AWQ_BETA_CFG, "algorithm": "max"},
+}
+
+
+def _test_matches_megatron_exporter(source, quant_cfg_name, tmp_path, rank, size):
     # Models in a reused worker pick their attention backend through process-wide variables.
     for name in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
         os.environ.pop(name, None)
@@ -60,11 +67,7 @@ def _test_matches_megatron_exporter(source, tmp_path, rank, size):
     )
     torch.manual_seed(0)
     input_ids = torch.randint(0, unwrapped.vocab_size, (2, 16), device="cuda")
-    mtq.quantize(
-        unwrapped,
-        load_recipe("general/ptq/nvfp4_default-kv_fp8").quantize.model_dump(),
-        lambda m: megatron_prefill(m, input_ids),
-    )
+    mtq.quantize(unwrapped, QUANT_CFGS[quant_cfg_name], lambda m: megatron_prefill(m, input_ids))
     reference_dir, export_dir = tmp_path / "megatron_exporter", tmp_path / "bridge"
     export_mcore_gpt_to_hf_vllm_fq(unwrapped, str(source), export_dir=str(reference_dir))
     for chunk in model:
@@ -84,7 +87,9 @@ def _test_matches_megatron_exporter(source, tmp_path, rank, size):
     quantizers = recipe["quantizers"]
     enabled = {name for name, entry in ref_recipe.items() if not entry["_disabled"]}
     assert quantizers.keys() == enabled
-    assert any(name.endswith("k_bmm_quantizer") for name in quantizers)
+    assert any(name.endswith("k_bmm_quantizer") for name in quantizers) == quant_cfg_name.endswith(
+        "kv_fp8"
+    )
     to_cfg = TensorQuantizer.attribute_config_from_modelopt_state
     for name, entry in quantizers.items():
         assert to_cfg(ref_recipe[name]).items() <= to_cfg(entry).items(), name
@@ -94,7 +99,16 @@ def _test_matches_megatron_exporter(source, tmp_path, rank, size):
         torch.testing.assert_close(value, ref_state[key], rtol=0, atol=0, msg=key)
 
 
-@pytest.mark.parametrize("create_source", [create_tiny_qwen3_dir, create_tiny_nemotron_h_dir])
-def test_matches_megatron_exporter(dist_workers_size_1, tmp_path, create_source):
+@pytest.mark.parametrize(
+    ("create_source", "quant_cfg_name"),
+    [
+        (create_tiny_qwen3_dir, "nvfp4-kv_fp8"),
+        (create_tiny_nemotron_h_dir, "nvfp4-kv_fp8"),
+        (create_tiny_qwen3_dir, "w4a8"),
+    ],
+)
+def test_matches_megatron_exporter(dist_workers_size_1, tmp_path, create_source, quant_cfg_name):
     source = create_source(tmp_path, with_tokenizer=True)
-    dist_workers_size_1.run(partial(_test_matches_megatron_exporter, source, tmp_path))
+    dist_workers_size_1.run(
+        partial(_test_matches_megatron_exporter, source, quant_cfg_name, tmp_path)
+    )

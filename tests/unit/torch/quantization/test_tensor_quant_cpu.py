@@ -426,6 +426,25 @@ def test_fold_weight_folds_svdquant_lora():
     assert torch.allclose(model(inputs), output_before, atol=1e-6)
 
 
+@torch.no_grad()
+def test_fold_weight_folds_sequential_weight_quantizer():
+    model = SimpleLinear()
+    inputs = model.get_input()
+    mtq.quantize(model, {**WINT4INT8_CFG, "algorithm": "max"}, lambda m: m(inputs))
+    expected = {
+        module: module.weight_quantizer(module.weight)
+        for module in model.modules()
+        if isinstance(getattr(module, "weight_quantizer", None), SequentialQuantizer)
+    }
+    assert expected
+
+    mtq.fold_weight(model)
+
+    for module, weight in expected.items():
+        assert torch.equal(module.weight, weight)
+        assert not any(q.is_enabled or hasattr(q, "_amax") for q in module.weight_quantizer)
+
+
 def test_temporarily_fold_weights_restores_after_exception(monkeypatch):
     calls = []
     backend_name = "test_temporary_fold_backend"
