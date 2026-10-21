@@ -31,7 +31,11 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY, GGMLFormat
-from modelopt.torch.utils.plugins.hf_checkpoint_utils import indexed_weight_map
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    copy_non_model_files,
+    copy_off_index_safetensors,
+    indexed_weight_map,
+)
 
 _INDEX = "model.safetensors.index.json"
 
@@ -52,7 +56,8 @@ def convert_ggml_export_to_int8(
         ggml_dir: A Hugging Face export whose quantized layers are all GGML formats, as written
             by hf_ptq.py with a GGML recipe.
         output_dir: Where to write the INT8 checkpoint. Must be empty or not exist yet.
-        max_shard_size: Bytes per output safetensors shard, which bounds the memory conversion uses.
+        max_shard_size: Target bytes per output safetensors shard; a larger tensor gets a shard
+            of its own. Conversion holds one output shard in memory at a time.
     """
     ggml_dir, output_dir = Path(ggml_dir), Path(output_dir)
     config = json.loads((ggml_dir / "config.json").read_text())
@@ -64,20 +69,28 @@ def convert_ggml_export_to_int8(
         raise ValueError(f"{output_dir} is not empty.")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    shards = sorted(set(weight_map.values()))
-    for path in ggml_dir.iterdir():
-        # The shards are rewritten below, and the GGML metadata does not describe the result.
-        if path.is_file() and path.name not in {*shards, _INDEX, "hf_quant_config.json"}:
-            shutil.copy2(path, output_dir / path.name)
-    new_weight_map = _write_int8_shards(
-        ggml_dir, shards, output_dir, layer_formats, scale_dtype, max_shard_size
-    )
-    total_size = sum((output_dir / shard).stat().st_size for shard in set(new_weight_map.values()))
-    index = {"metadata": {"total_size": total_size}, "weight_map": new_weight_map}
-    (output_dir / _INDEX).write_text(json.dumps(index, indent=2))
-
-    config["quantization_config"] = _compressed_tensors_config(layer_formats)
-    (output_dir / "config.json").write_text(json.dumps(config, indent=4))
+    try:
+        shards = sorted(set(weight_map.values()))
+        new_weight_map = _write_int8_shards(
+            ggml_dir, shards, output_dir, layer_formats, scale_dtype, max_shard_size
+        )
+        total_size = sum((output_dir / s).stat().st_size for s in set(new_weight_map.values()))
+        index = {"metadata": {"total_size": total_size}, "weight_map": new_weight_map}
+        (output_dir / _INDEX).write_text(json.dumps(index, indent=2))
+        config["quantization_config"] = _compressed_tensors_config(layer_formats)
+        (output_dir / "config.json").write_text(json.dumps(config, indent=4))
+        # Both skip files already written, and copy_non_model_files skips hf_quant_config.json,
+        # which describes the GGML payloads this replaced.
+        copy_off_index_safetensors(ggml_dir, output_dir)
+        copy_non_model_files(ggml_dir, output_dir)
+    except BaseException:
+        # Empty the directory again, so a rerun is not refused over a partial checkpoint.
+        for path in output_dir.iterdir():
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        raise
 
 
 def _ggml_layer_formats(
@@ -220,7 +233,10 @@ def main():
     parser.add_argument("ggml_dir", help="Checkpoint exported with a GGML recipe (IQ, q8_0).")
     parser.add_argument("output_dir", help="Where to write the INT8 checkpoint; must be empty.")
     parser.add_argument(
-        "--max_shard_size_gb", type=float, default=10, help="Size of each output shard in GiB."
+        "--max_shard_size_gb",
+        type=float,
+        default=10,
+        help="Target size of each output shard in GiB; a larger tensor gets a shard of its own.",
     )
     args = parser.parse_args()
     convert_ggml_export_to_int8(

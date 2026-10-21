@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import torch
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 from transformers import AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
@@ -36,6 +36,7 @@ _SPEC.loader.exec_module(convert_ggml_to_int8)
 # Layer 0 takes a format with 32-weight sub-blocks and layer 1 one with 16, so the export needs
 # one compressed-tensors config group per group size.
 LAYER_FORMATS = {0: "iq1_s", 1: "iq2_xs"}
+IQ2_XS = {"num_bits": "iq2_xs", "block_sizes": {-1: 256}, "backend": "ggml"}
 
 
 def _export(tmp_path, second_layer_cfg):
@@ -61,19 +62,37 @@ def _export(tmp_path, second_layer_cfg):
     return export_dir
 
 
-def test_ggml_export_converts_to_int8_levels_and_steps(tmp_path):
-    export_dir = _export(
-        tmp_path, {"num_bits": "iq2_xs", "block_sizes": {-1: 256}, "backend": "ggml"}
-    )
-    ggml_files = {path.name: path.read_bytes() for path in export_dir.iterdir()}
-    before = load_file(export_dir / "model.safetensors")
+def _files(directory):
+    return {
+        path.relative_to(directory): path.read_bytes()
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+
+
+@pytest.fixture(scope="module")
+def ggml_export(tmp_path_factory):
+    export_dir = _export(tmp_path_factory.mktemp("ggml"), IQ2_XS)
+    # Files a checkpoint can ship beside its indexed weights: a nested sidecar and an off-index
+    # weight file such as an MTP head.
+    (export_dir / "chat_templates").mkdir()
+    (export_dir / "chat_templates" / "tool_use.jinja").write_text("{{ messages }}")
+    save_file({"mtp.fc.weight": torch.ones(2, 2)}, export_dir / "mtp.safetensors")
+    return export_dir
+
+
+def test_ggml_export_converts_to_int8_levels_and_steps(ggml_export, tmp_path):
+    ggml_files = _files(ggml_export)
+    before = load_file(ggml_export / "model.safetensors")
     int8_dir = tmp_path / "int8"
 
     # A small shard size splits the output, so the index has to stitch the shards together.
-    convert_ggml_to_int8.convert_ggml_export_to_int8(export_dir, int8_dir, max_shard_size=2**18)
+    convert_ggml_to_int8.convert_ggml_export_to_int8(ggml_export, int8_dir, max_shard_size=2**18)
 
-    assert {path.name: path.read_bytes() for path in export_dir.iterdir()} == ggml_files
+    assert _files(ggml_export) == ggml_files
     assert not (int8_dir / "hf_quant_config.json").exists()
+    for sidecar in (Path("chat_templates/tool_use.jinja"), Path("mtp.safetensors")):
+        assert (int8_dir / sidecar).read_bytes() == ggml_files[sidecar]
     config = json.loads((int8_dir / "config.json").read_text())["quantization_config"]
     assert config["quant_method"] == "compressed-tensors"
     layers = {
@@ -105,6 +124,19 @@ def test_ggml_export_converts_to_int8_levels_and_steps(tmp_path):
     assert after.keys() == before.keys()
     for name, tensor in before.items():
         assert torch.equal(after[name], tensor)
+
+
+def test_a_failed_conversion_leaves_the_output_directory_empty(ggml_export, tmp_path, monkeypatch):
+    def fail(*args, **kwargs):
+        raise OSError("disk full")
+
+    # The last step: by then the shards, index and config are all written.
+    monkeypatch.setattr(convert_ggml_to_int8, "copy_non_model_files", fail)
+
+    with pytest.raises(OSError, match="disk full"):
+        convert_ggml_to_int8.convert_ggml_export_to_int8(ggml_export, tmp_path / "int8")
+
+    assert not any((tmp_path / "int8").iterdir())
 
 
 def test_export_with_a_non_ggml_layer_is_refused_before_writing(tmp_path):
