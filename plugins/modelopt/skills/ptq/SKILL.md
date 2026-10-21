@@ -121,7 +121,7 @@ pip install --no-build-isolation "nvidia-modelopt[hf]"
 pip install -r examples/hf_ptq/requirements.txt
 
 python examples/hf_ptq/hf_ptq.py \
-    --pyt_ckpt_path <model> \
+    --model_name_or_path <model> \
     --qformat <format> \
     --calib_size 512 \
     --export_path <output>

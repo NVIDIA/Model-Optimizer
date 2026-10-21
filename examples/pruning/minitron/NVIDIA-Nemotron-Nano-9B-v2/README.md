@@ -334,7 +334,7 @@ Calibrate and export the HF checkpoint from iteration 12800 to FP8 (takes 1-2 mi
 
 ```bash
 python /opt/Model-Optimizer/examples/hf_ptq/hf_ptq.py \
-    --pyt_ckpt_path <output_dir>/checkpoints/hf_iter_12800 \
+    --model_name_or_path <output_dir>/checkpoints/hf_iter_12800 \
     --export_path <output_dir>/checkpoints/hf_iter_12800_fp8 \
     --qformat fp8 \
     --trust_remote_code
