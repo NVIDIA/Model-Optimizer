@@ -17,8 +17,9 @@
 # Q8_0 on the shared experts and the dense MLP of layers 0-2, calibrated with layerwise GPTQ. Both attention
 # families (KDA and sparse MLA), the router, the vision tower, the MTP layer, embeddings and lm_head stay BF16.
 #
-# Run quantize.py, distill.py and export with --no_moe_grouped_gemm: GPTQ and the GGML export
-# only handle per-expert linears. vLLM has no IQ2 kernels, so evaluate an export made with
+# Megatron-Bridge only (examples/megatron_bridge): the patterns use Megatron module names, and
+# GPTQ skips the fused routed experts of the HF model. Run quantize.py, distill.py and export
+# with --no_moe_grouped_gemm: GPTQ and the GGML export only handle per-expert linears. vLLM has no IQ2 kernels, so evaluate an export made with
 # --vllm_fakequant_export, which folds the IQ2 weights into BF16.
 #
 # Every quantized linear's input width is a multiple of the 256-weight GGML block
