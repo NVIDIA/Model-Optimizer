@@ -1,0 +1,67 @@
+name: Run example tests
+description: Install the requirements of one example, run its tests with coverage and upload the coverage under the flag `examples-<example>`. Used by _example_tests_runner.yml,
+  once per example, so that examples sharing a job still get their own step, requirements and Codecov flag.
+
+inputs:
+  example:
+    description: Example directory name, e.g. `llm_distill` (tests/examples/<example>, examples/<example>).
+    required: true
+  allow-failure-examples:
+    description: Comma-separated example names whose test failures are reported as a warning instead of failing the step.
+    required: false
+    default: ""
+  codecov-token:
+    description: Codecov upload token (composite actions cannot read secrets).
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # Installed right before this example's tests, not up front for all examples of the job: an example
+    # that pins or upgrades packages (e.g. gpt-oss upgrades datasets, torch_trt downgrades torch) must not
+    # change the environment of the examples that run before it.
+    - name: Install requirements of ${{ inputs.example }}
+      shell: bash
+      run: find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do python3 -m pip install -r "$req_file" || exit 1; done
+    - name: Run tests
+      id: run_tests
+      shell: bash
+      continue-on-error: ${{ contains(format(',{0},', inputs.allow-failure-examples), format(',{0},', inputs.example)) }}
+      env:
+        # Absolute paths so subprocesses running from different working directories
+        # all find the config and write .coverage.* files to the same location.
+        COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
+        COVERAGE_FILE: ${{ github.workspace }}/.coverage
+        # sys.monitoring records the same lines as the default C tracer at a fraction of the
+        # overhead; the tracer slowed each hf_ptq example run by ~60%. Needs Python 3.12+.
+        COVERAGE_CORE: sysmon
+      run: |
+        echo "Running tests for: ${{ inputs.example }}"
+        pytest_args=()
+        if [[ "${{ inputs.example }}" == "diffusers" ]]; then
+          # Keep legacy ONNX/TRT tests available manually during deprecation.
+          pytest_args+=(--ignore=tests/examples/diffusers/test_diffusers_onnx_trt.py)
+        fi
+        if [[ "${{ inputs.example }}" == "hf_ptq" && "${{ github.ref }}" == refs/heads/pull-request/* ]]; then
+          # One GPU on PR runners: small-model tests share it and the rest run alone on it
+          # (tests/examples/hf_ptq/conftest.py). The 2-GPU nightly stays serial.
+          pytest_args+=(-n 4)
+        fi
+        python3 -m pytest tests/examples/${{ inputs.example }} --cov "${pytest_args[@]}"
+    - name: Flag allowed failure
+      if: ${{ steps.run_tests.outcome == 'failure' }}
+      shell: bash
+      run: |
+        echo "::warning title=Allowed example failure::'${{ inputs.example }}' failed but is in the allow-failure list (vars.ALLOW_FAILURE_EXAMPLE_TESTS); not blocking. Remove it from the variable once fixed."
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      with:
+        token: ${{ inputs.codecov-token }}
+        files: coverage.xml
+        # One flag per example, not a shared `examples`: carryforward only applies to a flag
+        # with no upload, so a shared flag would replace every lane's coverage with the subset
+        # that ran once lanes are gated independently.
+        flags: examples-${{ inputs.example }}
+        fail_ci_if_error: false # test may be skipped if relevant file changes are not detected
+        verbose: true
