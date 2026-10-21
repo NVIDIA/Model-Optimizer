@@ -13,18 +13,14 @@ ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 
 ## Output-token policy
 
-ModelOpt's SWE-bench Verified / OpenHands protocol uses **no configured per-response output-token cap**,
-overriding model-card budgets and generic fallbacks per [generation-policy precedence](../../../references/model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
-Keep `drop_params` stripping `max_tokens`/`max_completion_tokens`. In the merged config
-(fragments plus CLI overrides), don't reintroduce a numeric cap via `services.<svc>.generation`,
-`proxy.extra_body`, solver/agent/LLM kwargs, interceptors, or server flags
-(`--override-generation-config`, `--max-new-tokens`, or backend equivalents).
-Stripping request fields doesn't remove inherited caps (`generation_config.json`, backend defaults).
-Check effective defaults for the backend/version and neutralize any numeric `max_new_tokens`
-(vLLM: `--override-generation-config '{"max_new_tokens":null}'` where supported) without changing
-sampling or stop/EOS settings. Never substitute a numeric fallback.
-Continue model-card lookup for sampling/thinking. Keep context limits (e.g. `--max-model-len`),
-agent/task timeouts and sandbox/SLURM lifetimes separate; record them for baseline/candidate comparison.
+SWE-bench Verified / OpenHands configures **no per-response output cap**, overriding model-card
+budgets and fallbacks per [generation-policy precedence](../../../references/model-card-research.md#max_new_tokens--mandatory-model-card-lookup).
+Keep `drop_params` stripping `max_tokens`/`max_completion_tokens`; remove numeric output caps from
+merged generation settings, `proxy.extra_body`, solver/agent/LLM kwargs, interceptors and CLI/server overrides.
+Check backend/version defaults and inherited `generation_config.json`; neutralize numeric `max_new_tokens`
+without resetting sampling or stop/EOS settings
+(vLLM: `--override-generation-config '{"max_new_tokens":null}'` where supported). Never substitute a numeric fallback.
+Follow shared guidance for sampling/thinking, context limits and timeouts; record these for baseline/candidate comparison.
 
 ## Task-specific values (canonical `bench.yaml`)
 
