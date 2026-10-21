@@ -208,6 +208,36 @@ def export_vllm_fakequant(bridge, model: list, export_dir: str) -> None:
     dist.barrier()
 
 
+def export_unified_hf(unwrapped_model, args: argparse.Namespace, trust_remote_code: bool) -> None:
+    """Export the quantized model to a unified HF checkpoint with ModelOpt's Megatron exporter."""
+    # Extra modules (Medusa / EAGLE / MTP) only exist on the last pipeline stage. Use an all-reduce
+    # MAX over all ranks (rather than a broadcast from a hard-coded source rank) so the decision is
+    # correct regardless of pipeline placement / global rank ordering.
+    has_extra_modules = hasattr(unwrapped_model, "eagle_module") or hasattr(
+        unwrapped_model, "medusa_heads"
+    )
+    if torch.distributed.is_initialized():
+        flag = torch.tensor(
+            [int(has_extra_modules)], dtype=torch.int, device=torch.cuda.current_device()
+        )
+        torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MAX)
+        has_extra_modules = bool(flag.item())
+    export_extra_modules = has_extra_modules and args.export_extra_modules
+
+    print_rank_0(
+        f"Exporting to HuggingFace (unified) checkpoint at {args.export_unified_hf_path}..."
+    )
+    # TODO: Gemma3-VL is not in export_mcore_gpt_to_hf's per-arch mappings yet.
+    export_mcore_gpt_to_hf(
+        unwrapped_model,
+        args.local_checkpoint_path,
+        export_extra_modules=export_extra_modules,
+        dtype=torch.bfloat16,
+        export_dir=args.export_unified_hf_path,
+        trust_remote_code=trust_remote_code,
+    )
+
+
 def main(args: argparse.Namespace):
     # --hf_model_name_or_path stays as given. Later steps read the local copy of the whole
     # checkpoint in local_checkpoint_path, since exporters read the source's files from local disk
@@ -259,36 +289,8 @@ def main(args: argparse.Namespace):
     if args.vllm_fakequant_export:
         print_rank_0(f"Exporting vLLM fake-quant checkpoint to {args.export_unified_hf_path}...")
         export_vllm_fakequant(bridge, model, args.export_unified_hf_path)
-        args.checkpoint_exported = True
-        print_rank_0(f"Exported vLLM fake-quant checkpoint to {args.export_unified_hf_path}")
-        return
-
-    # Extra modules (Medusa / EAGLE / MTP) only exist on the last pipeline stage. Use an all-reduce
-    # MAX over all ranks (rather than a broadcast from a hard-coded source rank) so the decision is
-    # correct regardless of pipeline placement / global rank ordering.
-    has_extra_modules = hasattr(unwrapped_model, "eagle_module") or hasattr(
-        unwrapped_model, "medusa_heads"
-    )
-    if torch.distributed.is_initialized():
-        flag = torch.tensor(
-            [int(has_extra_modules)], dtype=torch.int, device=torch.cuda.current_device()
-        )
-        torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MAX)
-        has_extra_modules = bool(flag.item())
-    export_extra_modules = has_extra_modules and args.export_extra_modules
-
-    print_rank_0(
-        f"Exporting to HuggingFace (unified) checkpoint at {args.export_unified_hf_path}..."
-    )
-    # TODO: Gemma3-VL is not in export_mcore_gpt_to_hf's per-arch mappings yet.
-    export_mcore_gpt_to_hf(
-        unwrapped_model,
-        args.local_checkpoint_path,
-        export_extra_modules=export_extra_modules,
-        dtype=torch.bfloat16,
-        export_dir=args.export_unified_hf_path,
-        trust_remote_code=trust_remote_code,
-    )
+    else:
+        export_unified_hf(unwrapped_model, args, trust_remote_code)
     args.checkpoint_exported = True
     print_rank_0(f"Exported HuggingFace checkpoint to {args.export_unified_hf_path}")
 
