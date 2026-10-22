@@ -50,7 +50,7 @@ runs:
         fi
         python3 -m pytest tests/examples/${{ inputs.example }} --cov "${pytest_args[@]}"
     - name: Flag allowed failure
-      if: ${{ steps.run_tests.outcome == 'failure' }}
+      if: ${{ steps.run_tests.outcome == 'failure' && contains(format(',{0},', inputs.allow-failure-examples), format(',{0},', inputs.example)) }}
       shell: bash
       run: |
         echo "::warning title=Allowed example failure::'${{ inputs.example }}' failed but is in the allow-failure list (vars.ALLOW_FAILURE_EXAMPLE_TESTS); not blocking. Remove it from the variable once fixed."
