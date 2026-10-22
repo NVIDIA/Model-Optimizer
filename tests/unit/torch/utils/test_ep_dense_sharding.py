@@ -34,6 +34,11 @@ from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tenso
 
 pytest.importorskip("transformers")
 
+import transformers.core_model_loading as core_model_loading
+import transformers.modeling_utils as modeling_utils
+from _test_utils.torch.transformers_models import get_tiny_llama
+from transformers import AutoModelForCausalLM
+
 import modelopt.torch.utils.distributed as mto_dist
 import modelopt.torch.utils.moe as moe
 import modelopt.torch.utils.plugins.model_load_utils as model_load_utils
@@ -105,7 +110,6 @@ def test_expert_param_matcher(plan, name, expected):
 def test_a_block_fp8_checkpoints_dense_part_is_not_sharded(monkeypatch):
     """DCP cannot dequantize block-fp8 dense weights, so a plan sharding them is refused before the
     load starts, where from_pretrained would dequantize them as it replicated them."""
-    pytest.importorskip("transformers")
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 2)
     monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
@@ -124,16 +128,12 @@ def _is_expert(name):
 
 def _get_device_lookups():
     """The modules whose ``get_device`` global the state-dict loaders call."""
-    import transformers.core_model_loading as core_model_loading
-    import transformers.modeling_utils as modeling_utils
-
     return modeling_utils, core_model_loading
 
 
 def test_dense_weights_resolve_to_meta_and_the_rest_to_the_stock_device(monkeypatch):
     """Only a dense ``.weight`` / ``.bias`` is sent to meta. An expert param or a buffer goes to
     the stock lookup, with the caller's arguments, in both modules the loaders read it from."""
-    pytest.importorskip("transformers")
     stock_calls = []
 
     def stock_get_device(device_map, key, *args, **kwargs):
@@ -162,8 +162,6 @@ def _get_device_patch():
 
 
 def _warmup_sizing_patch():
-    from transformers import modeling_utils
-
     if not hasattr(modeling_utils, "get_total_byte_count"):
         pytest.skip("transformers has no get_total_byte_count to size")
     sizing = _ep_aware_caching_allocator_warmup(4, _A2A_PLAN)
@@ -175,7 +173,6 @@ def _warmup_sizing_patch():
 )
 def test_a_load_time_patch_is_undone_even_when_the_load_raises(patch):
     """``from_pretrained`` reads these transformers globals; a failed load leaves stock ones."""
-    pytest.importorskip("transformers")
     context, patched = patch()
     stock = [getattr(module, attr) for module, attr in patched]
 
@@ -189,10 +186,6 @@ def test_a_load_time_patch_is_undone_even_when_the_load_raises(patch):
 def test_from_pretrained_leaves_the_dense_weights_on_meta_and_loads_the_rest(tmp_path):
     """Through a real CPU ``from_pretrained``: every dense weight stays on meta for the FSDP2 +
     DCP load to fill, while the MLPs (standing in for experts) and the rotary buffers load."""
-    pytest.importorskip("transformers")
-    from _test_utils.torch.transformers_models import get_tiny_llama
-    from transformers import AutoModelForCausalLM
-
     src = get_tiny_llama()
     src.save_pretrained(tmp_path)
 
