@@ -67,16 +67,6 @@ def _parse_hf_ptq_args(monkeypatch, *args):
     return hf_ptq, parsed_args
 
 
-@pytest.mark.parametrize(
-    ("calib_seq", "num_samples", "expected"),
-    [(512, 512, 16), (512, 4, 4), (16384, 512, 1)],
-    ids=["token_budget", "sample_cap", "long_sequence"],
-)
-def test_layerwise_default_batch_size(monkeypatch, calib_seq, num_samples, expected):
-    hf_ptq = _import_hf_ptq(monkeypatch)
-    assert hf_ptq._layerwise_calib_batch_size(calib_seq, num_samples) == expected
-
-
 def test_recipe_help_distinguishes_weight_and_kv_autoquant(monkeypatch, capsys):
     hf_ptq = _import_hf_ptq(monkeypatch)
     monkeypatch.setattr(sys, "argv", ["hf_ptq.py", "--help"])
@@ -443,6 +433,44 @@ def test_mlflow_is_off_by_default(monkeypatch):
 
     assert args.mlflow is None
     assert args.mlflow_experiment is None
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected"),
+    [
+        ((), 16),  # 8,192 tokens at --calib_seq 512
+        (("--calib_size", "4"), 4),  # never more than the samples
+        (("--calib_seq", "16384"), 1),  # at least one sample
+        (("--batch_size", "1"), 1),  # an explicit value is kept
+    ],
+    ids=["token_budget", "sample_cap", "long_sequence", "explicit"],
+)
+def test_layerwise_calibration_batch_reaches_the_dataloader(monkeypatch, extra_args, expected):
+    """A layerwise recipe sizes the default calibration batch by tokens."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "/models/Qwen3-0.6B",
+        "--recipe",
+        "general/ptq/iq2_xxs",
+        "--calib_size",
+        "64",
+        *extra_args,
+    )
+
+    class _DataloaderReachedError(Exception):
+        pass
+
+    batch_sizes = []
+
+    def make_calib_dataloader(args, *_args, **_kwargs):
+        batch_sizes.append(args.batch_size)
+        raise _DataloaderReachedError
+
+    monkeypatch.setattr(hf_ptq, "make_calib_dataloader", make_calib_dataloader)
+    with pytest.raises(_DataloaderReachedError):
+        hf_ptq.quantize_main(args, None, None, None, False, None, None, torch.device("cpu"))
+    assert batch_sizes == [expected]
 
 
 def test_calib_seq_must_be_positive(monkeypatch):
