@@ -18,6 +18,7 @@
 import copy
 import warnings
 from contextlib import nullcontext
+from unittest import mock
 
 import pytest
 import torch
@@ -26,7 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
-from torch.distributed.tensor import Shard, distribute_tensor
+from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 from torch.distributed.tensor.debug import CommDebugMode
 
 pytest.importorskip("transformers")
@@ -2655,3 +2656,37 @@ def _ep_weight_input_hooks_read_local_experts_job(rank, size):
 def test_ep_weight_input_hooks_read_this_ranks_experts_without_a_collective(cpu_dist_workers):
     """Hook registration only needs one expert's shape, so it must not gather other ranks' experts."""
     cpu_dist_workers.run(_ep_weight_input_hooks_read_local_experts_job)
+
+
+def _ep_gptq_helpers_take_local_experts_job(rank, size):
+    """GPTQ builds each expert's helper from this rank's expert, the one its quantizer quantizes:
+    indexing the expert-parallel DTensor would name a global expert and all-gather every expert."""
+    config = _ep_experts_config()
+    torch.manual_seed(0)
+    whole = _experts_with_distinct_scales(config)
+    mesh = init_device_mesh("cpu", (size,))
+    model = _ExpertsHolder(_sharded_like_transformers(whole, config, mesh, size))
+    n_local = _EP_EXPERTS // size
+    built = {}
+    init = GPTQHelper.__init__
+
+    def recording(helper, module, name, *args, weight=None, **kwargs):
+        if weight is not None:
+            built[name] = weight if isinstance(weight, DTensor) else weight.detach().clone()
+        init(helper, module, name, *args, weight=weight, **kwargs)
+
+    cfg = {**_WEIGHT_ONLY_INT8_EXPERTS_CFG, "algorithm": {"method": "gptq", "block_size": 8}}
+    with mock.patch.object(GPTQHelper, "__init__", recording):
+        mtq.quantize(model, cfg, forward_loop=lambda m: None)
+
+    assert len(built) == 2 * n_local, sorted(built)
+    for name, weight in built.items():
+        _, proj, idx = name.rsplit(".", 2)
+        assert not isinstance(weight, DTensor), name
+        expected = getattr(whole, proj)[rank * n_local + int(idx)].detach()
+        torch.testing.assert_close(weight, expected, atol=0, rtol=0, msg=name)
+
+
+def test_ep_gptq_builds_its_expert_helpers_from_this_ranks_experts(cpu_dist_workers):
+    """A GPTQ helper only needs its expert's shape, so it must not gather other ranks' experts."""
+    cpu_dist_workers.run(_ep_gptq_helpers_take_local_experts_job)

@@ -2523,10 +2523,13 @@ def gptq(
             for weight_name, weight, quantizers, input_quantizer in _fused_expert_projections(
                 module
             ):
-                # An expert's logged error would cost two full matmuls; gptq() logs a summary.
+                # This rank's experts, in quantizer order: an expert-parallel weight is a DTensor
+                # whose index names a global expert and all-gathers every expert. An expert's logged
+                # error would cost two full matmuls; gptq() logs a summary.
+                local = module._local_experts(weight)
                 per_expert = {
                     idx: _make_gptq_handle(
-                        f"{name}.{weight_name}.{idx}", module, q, weight[idx], log_mse=False
+                        f"{name}.{weight_name}.{idx}", module, q, local[idx], log_mse=False
                     )
                     for idx, q in enumerate(quantizers)
                     if q.is_enabled
