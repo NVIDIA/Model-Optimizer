@@ -1,19 +1,25 @@
 name: Run example tests
 description: Install the requirements of one example, run its tests with coverage and upload the coverage under the flag `examples-<example>`. Used by _example_tests_runner.yml,
-  once per example, so that examples sharing a job still get their own step, requirements and Codecov flag.
+  once per example, so that examples sharing a job still get their own step, requirements and Codecov flag. Failing tests do not fail this action; it reports
+  them in `failed`, so that the caller can run the remaining examples first.
 
 inputs:
   example:
     description: Example directory name, e.g. `llm_distill` (tests/examples/<example>, examples/<example>).
     required: true
   allow-failure-examples:
-    description: Comma-separated example names whose test failures are reported as a warning instead of failing the step.
+    description: Comma-separated example names whose test failures are reported as a warning instead of as a failed example.
     required: false
     default: ""
   codecov-token:
     description: Codecov upload token (composite actions cannot read secrets).
     required: false
     default: ""
+
+outputs:
+  failed:
+    description: "'true' if the example's tests failed and the example is not in the allow-failure list."
+    value: ${{ steps.verdict.outputs.failed }}
 
 runs:
   using: composite
@@ -27,7 +33,9 @@ runs:
     - name: Run tests
       id: run_tests
       shell: bash
-      continue-on-error: ${{ contains(format(',{0},', inputs.allow-failure-examples), format(',{0},', inputs.example)) }}
+      # The verdict below decides what a failure means. A step that fails here would fail the whole job at
+      # once, whatever continue-on-error the caller puts on this action's step, and skip the later examples.
+      continue-on-error: true
       env:
         # Absolute paths so subprocesses running from different working directories
         # all find the config and write .coverage.* files to the same location.
@@ -49,13 +57,26 @@ runs:
           pytest_args+=(-n 4)
         fi
         python3 -m pytest tests/examples/${{ inputs.example }} --cov "${pytest_args[@]}"
-    - name: Flag allowed failure
-      if: ${{ steps.run_tests.outcome == 'failure' && contains(format(',{0},', inputs.allow-failure-examples), format(',{0},', inputs.example)) }}
+    - name: Verdict
+      id: verdict
       shell: bash
+      env:
+        OUTCOME: ${{ steps.run_tests.outcome }}
+        EXAMPLE: ${{ inputs.example }}
+        ALLOW_FAILURE_EXAMPLES: ${{ inputs.allow-failure-examples }}
       run: |
-        echo "::warning title=Allowed example failure::'${{ inputs.example }}' failed but is in the allow-failure list (vars.ALLOW_FAILURE_EXAMPLE_TESTS); not blocking. Remove it from the variable once fixed."
+        failed=false
+        if [[ "$OUTCOME" == "failure" ]]; then
+          if [[ ",$ALLOW_FAILURE_EXAMPLES," == *",$EXAMPLE,"* ]]; then
+            echo "::warning title=Allowed example failure::'$EXAMPLE' failed but is in the allow-failure list (vars.ALLOW_FAILURE_EXAMPLE_TESTS); not blocking. Remove it from the variable once fixed."
+          else
+            echo "::error title=Example failed::The tests of '$EXAMPLE' failed (see its Run tests log). The job fails after the remaining examples have run."
+            failed=true
+          fi
+        fi
+        echo "failed=$failed" >> "$GITHUB_OUTPUT"
     - name: Upload coverage to Codecov
-      # continue-on-error leaves the job green after an allowed failure; do not upload its partial coverage
+      # A failed run, allowed or not, only has partial coverage
       if: ${{ steps.run_tests.outcome == 'success' }}
       uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
       with:

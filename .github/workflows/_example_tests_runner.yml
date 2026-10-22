@@ -100,13 +100,12 @@ jobs:
             python3 -m pip uninstall -y apex || true
           fi
 
-      # One step per example. A failing example does not stop the ones after it (they are independent, as
-      # when each had its own job); the last step of the job fails it. A job with one example fails at the
-      # example's own step. These three steps and that final check hold the job's cap of 3 (`max` in the
-      # first step).
+      # One step per example. A failing example does not fail its step (the action reports `failed`
+      # instead, because a failed step would end the job at once), so the examples after it still run, as
+      # when each had its own job, and the last step of the job fails it. These three steps and that final
+      # check hold the job's cap of 3 (`max` in the first step).
       - name: "Example 1: ${{ steps.examples.outputs.e0 }}"
         id: example0
-        continue-on-error: ${{ steps.examples.outputs.e1 != '' }}
         uses: ./.github/actions/run-example
         with:
           example: ${{ steps.examples.outputs.e0 }}
@@ -115,7 +114,6 @@ jobs:
       - name: "Example 2: ${{ steps.examples.outputs.e1 || '-' }}"
         id: example1
         if: steps.examples.outputs.e1 != ''
-        continue-on-error: ${{ steps.examples.outputs.e2 != '' }}
         uses: ./.github/actions/run-example
         with:
           example: ${{ steps.examples.outputs.e1 }}
@@ -135,6 +133,6 @@ jobs:
         uses: ./.github/actions/save-extensions
         with:
           cache-key: ${{ steps.ext-cache.outputs.cache-key }}
-      - name: Fail the job for an example that failed before the last one
-        if: steps.example0.outcome == 'failure' || steps.example1.outcome == 'failure'
+      - name: Fail the job for an example whose tests failed
+        if: steps.example0.outputs.failed == 'true' || steps.example1.outputs.failed == 'true' || steps.example2.outputs.failed == 'true'
         run: exit 1
