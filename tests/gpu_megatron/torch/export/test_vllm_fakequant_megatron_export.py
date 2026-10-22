@@ -546,6 +546,11 @@ def _test_cross_rank_quantizer_merge(tmp_path, rank, size):
             state = torch.load(tmp_path / "quantizer_state.pth", weights_only=True)
             torch.testing.assert_close(state[name + "._amax"], tensor, rtol=0, atol=0)
 
+    # No quantizer on any rank: no sidecars, and those of the export above are removed.
+    gather_mcore_vllm_fq_quantizer_recipe({}, tmp_path)
+    assert not (tmp_path / "quant_recipe.yaml").exists()
+    assert not (tmp_path / "quantizer_state.pth").exists()
+
     failure_dir = tmp_path / "write_failure"
     if rank == 0:
         (failure_dir / "quant_recipe.yaml").mkdir(parents=True)

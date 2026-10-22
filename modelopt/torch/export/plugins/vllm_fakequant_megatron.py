@@ -147,6 +147,8 @@ def gather_mcore_vllm_fq_quantizer_recipe(
 ) -> None:
     """Sync each rank's captured quantizer configs and save as a versioned ``quant_recipe.yaml``.
 
+    Removes both sidecars instead when no rank captured a quantizer.
+
     Args:
         quantizer_state_by_name: HF-prefixed quantizer name -> resolved config, collected in
             ``VllmFqGPTModelExporter._get_quantized_state``.
@@ -157,6 +159,14 @@ def gather_mcore_vllm_fq_quantizer_recipe(
         DistributedProcessGroup(None),
         _merge_quantizer_states,
     )
+    if not merged:
+        # Nothing to reload (the loader rejects an empty recipe): write no sidecars, like
+        # Megatron-Bridge, and drop those of an earlier export.
+        for name in ("quantizer_state.pth", "quant_recipe.yaml"):
+            _save_quantizer_state(
+                Path(save_directory) / name, lambda path: path.unlink(missing_ok=True)
+            )
+        return
 
     recipe = {
         "format": QUANTIZER_RECIPE_FORMAT,
