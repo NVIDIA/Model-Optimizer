@@ -95,11 +95,6 @@ jobs:
           # Editable install so example scripts launched as subprocesses resolve modelopt to the same source path as the test process
           python3 -m pip install -e ".${{ inputs.pip_install_extras }}"
 
-          if [[ "${{ inputs.example }}" == *"diffusers"* ]]; then
-            echo "Uninstalling apex for diffusers: T5 Int8 (PixArt) + Apex is not supported as per https://github.com/huggingface/transformers/issues/21391"
-            python3 -m pip uninstall -y apex || true
-          fi
-
       # One step per example. A failing example does not fail its step (the action reports `failed`
       # instead, because a failed step would end the job at once), so the examples after it still run, as
       # when each had its own job, and the last step of the job fails it. These three steps and that final

@@ -21,7 +21,9 @@ concurrency:
 # step, which saves the container start and the base install (3-5 min each) of every job after the first. Only
 # small examples with the same image and extras are grouped; each example installs its own requirements just
 # before its tests, so a group lists first the examples that leave the environment alone and last the ones that
-# pin or upgrade packages.
+# pin or upgrade packages. An example that changes torch (torch_trt downgrades it) must not be grouped: the
+# extension cache key is the group name plus the image, with no torch version, and a cache built against another
+# torch fails with undefined symbols.
 
 jobs:
   # One changed-files pass decides which lanes run. Lane granularity, not per-example: a job's

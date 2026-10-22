@@ -41,11 +41,28 @@ runs:
         # to the verdict below instead.
         status=0
 
+        # Examples of one job share the GPU and the environment one after the other: log both, so a failure
+        # caused by an earlier example is easy to trace.
+        echo "::group::GPU state before ${{ inputs.example }}"
+        nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv || true
+        nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv || true
+        echo "::endgroup::"
+
+        if [[ "${{ inputs.example }}" == "diffusers" ]]; then
+          echo "Uninstalling apex for diffusers: T5 Int8 (PixArt) + Apex is not supported as per https://github.com/huggingface/transformers/issues/21391"
+          python3 -m pip uninstall -y apex || true
+        fi
+
         # Installed right before this example's tests, not up front for all examples of the job: an example
         # that pins or upgrades packages (e.g. gpt-oss upgrades datasets, torch_trt downgrades torch) must not
         # change the environment of the examples that run before it.
+        packages_before="${RUNNER_TEMP:-/tmp}/packages-before-${{ inputs.example }}.txt"
+        python3 -m pip freeze > "$packages_before" || true
         echo "::group::Install requirements of ${{ inputs.example }}"
         find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do python3 -m pip install -r "$req_file" || exit 1; done || status=$?
+        echo "::endgroup::"
+        echo "::group::Packages changed by the requirements of ${{ inputs.example }} (< before, > after)"
+        { python3 -m pip freeze | diff "$packages_before" - || true; } | grep "^[<>]" || echo "none"
         echo "::endgroup::"
 
         if (( status == 0 )); then
