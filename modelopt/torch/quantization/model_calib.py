@@ -80,6 +80,7 @@ from .utils.calib_utils import (
     GPTQHelper,
     bfloat16_hessian_gemm,
     track_calib_forward_memory,
+    update_expert_weights,
 )
 
 __all__ = [
@@ -2648,18 +2649,17 @@ def gptq(
             handle.update_weights(block_size, perc_damp)
         handle.free()
     for name, module in fused_experts:
-        updated = unreached = 0
         with enable_weight_access_and_writeback(module, model, names):
-            for weight, quantizer in module.iter_weights_for_calibration():
-                handle = expert_handles.pop(id(quantizer), None)
-                if handle is not None:
-                    unreached += handle.n_samples == 0
-                    handle.update_weights(block_size, perc_damp, weight)
-                    handle.free()
-                    updated += 1
-        if updated:
+            work = [
+                (expert_handles.pop(id(quantizer)), weight)
+                for weight, quantizer in module.iter_weights_for_calibration()
+                if id(quantizer) in expert_handles
+            ]
+            unreached = sum(handle.n_samples == 0 for handle, _ in work)
+            update_expert_weights(work, block_size, perc_damp)
+        if work:
             print_rank_0(
-                f"[{name}] GPTQ updated {updated} expert weights, {unreached} of them never "
+                f"[{name}] GPTQ updated {len(work)} expert weights, {unreached} of them never "
                 "reached by calibration"
             )
     del gptq_handles, expert_handles

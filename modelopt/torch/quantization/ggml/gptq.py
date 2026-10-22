@@ -78,11 +78,15 @@ class GGMLGPTQHelper(GPTQHelper):
     those exact codes rather than encoding the GPTQ'd weight again, which would not return them.
     """
 
-    def update_weights(self, block_size, perc_damp, weight=None):
+    # The update reads only the weight, its Hessian and the format's codec.
+    UPDATES_ON_ANY_DEVICE = True
+
+    def update_weights(self, block_size, perc_damp, weight=None, device=None):
         """Run the GPTQ update, then pin the chosen payload to the weight quantizer."""
-        super().update_weights(block_size, perc_damp, weight)
+        super().update_weights(block_size, perc_damp, weight, device)
         quantizer = self.weight_quantizer
-        pin_packed_weight(quantizer, quantizer.num_bits, self._packed)
+        weight = self.module.weight if weight is None else weight
+        pin_packed_weight(quantizer, quantizer.num_bits, self._packed.to(weight.device))
         self._packed = None
 
     def _blockwise_update(self, block_size):

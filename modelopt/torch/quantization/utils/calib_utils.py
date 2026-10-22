@@ -39,6 +39,8 @@
 """GPTQ helper and Hessian utilities for calibration."""
 
 import functools
+import queue
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 import torch
@@ -106,11 +108,68 @@ def _hessian_offload_device(nbytes: int) -> torch.device:
     rescale of the whole matrix. Only GPUs this process already holds memory on are candidates,
     and only outside distributed runs, so no other job's or rank's GPU is touched.
     """
-    if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
-        for gpu in sorted(get_process_gpus(), key=get_available_gpu_memory, reverse=True):
-            if _gpu_has_room(gpu, nbytes):
-                return torch.device("cuda", gpu)
+    for gpu in sorted(_own_gpus(), key=get_available_gpu_memory, reverse=True):
+        if _gpu_has_room(gpu, nbytes):
+            return torch.device("cuda", gpu)
     return torch.device("cpu")
+
+
+def _own_gpus() -> list[int]:
+    """GPUs this process already holds memory on; none in a multi-rank run, where they may be another rank's."""
+    if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+        return []
+    return get_process_gpus()
+
+
+def update_expert_weights(work, block_size, perc_damp):
+    """Run the GPTQ updates of ``(helper, weight)`` pairs, spread over this process's GPUs.
+
+    Expert updates are independent, and in a layerwise run of a model sharded over several GPUs
+    only the current layer's GPU works. Helpers whose update can run on any device run in one
+    worker thread per GPU this process uses that has room for an update, each writing its result
+    back to its weight; the others, or all of them when fewer than two GPUs qualify, run in turn on
+    their weight's device.
+    """
+    movable = [(h, w) for h, w in work if h.UPDATES_ON_ANY_DEVICE and w.is_cuda]
+    # A worker holds one expert at a time: its weight, Hessian, inverse and their temporaries.
+    room = 8 * max((4 * h.hessian.numel() for h, _ in movable), default=0)
+    gpus = [gpu for gpu in _own_gpus() if get_available_gpu_memory(gpu) > room]
+    if len(gpus) < 2 or len(movable) < 2:
+        movable = []
+    moved = {id(helper) for helper, _ in movable}
+    for helper, weight in work:
+        if id(helper) not in moved:
+            helper.update_weights(block_size, perc_damp, weight)
+            helper.free()
+    if not movable:
+        return
+
+    # The first update runs here, so lazy setup such as loading a format's CUDA extension, which is
+    # not thread-safe, happens once before the workers start.
+    helper, weight = movable[0]
+    helper.update_weights(block_size, perc_damp, weight)
+    helper.free()
+    pending: queue.SimpleQueue = queue.SimpleQueue()
+    for item in movable[1:]:
+        pending.put(item)
+
+    def worker(gpu):
+        torch.cuda.set_device(gpu)  # per thread
+        device = torch.device("cuda", gpu)
+        while True:
+            try:
+                helper, weight = pending.get_nowait()
+            except queue.Empty:
+                break
+            helper.update_weights(block_size, perc_damp, weight, device=device)
+            helper.free()
+        torch.cuda.synchronize(device)
+
+    with ThreadPoolExecutor(len(gpus)) as pool:
+        for future in [pool.submit(worker, gpu) for gpu in gpus]:
+            future.result()
+    for device in {weight.device for _, weight in movable}:
+        torch.cuda.synchronize(device)
 
 
 def update_hessian(input, hessian, n_samples, input_dtype=torch.float32):
@@ -255,6 +314,9 @@ class GPTQHelper:
     """
 
     CACHE_NAME = "_forward_no_gptq_hessian"
+    # Whether update_weights() may run on a device other than its weight's: true only for helpers
+    # whose update reads no quantizer state, which lives on the weight's device.
+    UPDATES_ON_ANY_DEVICE = False
 
     def __init__(
         self,
@@ -359,20 +421,22 @@ class GPTQHelper:
         self.weight = None
         self.h_inv = None
 
-    def update_weights(self, block_size, perc_damp, weight=None):
+    def update_weights(self, block_size, perc_damp, weight=None, device=None):
         """Run GPTQ blockwise weight update on this helper's weight.
 
         Populates ``self.weight`` and ``self.h_inv``, runs the blockwise update, logs MSE, and
         overwrites ``weight`` (default ``module.weight``) in place, so an expert's slice of a
-        fused 3-D parameter is written back into that parameter.
+        fused 3-D parameter is written back into that parameter. The update runs on ``device``,
+        by default the weight's; only a helper with ``UPDATES_ON_ANY_DEVICE`` may pass another.
         """
         weight = self.module.weight if weight is None else weight
-        hessian = self.hessian.to(weight.device)
-        self.weight = weight.data.float().clone()
+        device = weight.device if device is None else device
+        hessian = self.hessian.to(device)
+        self.weight = weight.data.to(device, torch.float32, copy=True)
         self._prepare_hessian_inverse(hessian, perc_damp)
         self._blockwise_update(block_size)
         if self.log_mse:
-            self._print_mse_error(hessian, weight)
+            self._print_mse_error(hessian, weight.data.to(device))
         weight.data.copy_(self.weight.reshape(weight.shape))
 
     # ------------------------------------------------------------------

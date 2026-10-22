@@ -18,12 +18,16 @@ import time
 
 import pytest
 import torch
+from _test_utils.torch.quantization.models import TOY_MOE_HIDDEN, ToyFusedExperts, ToyMoE
 from _test_utils.torch.transformers_models import get_tiny_llama
 from conftest import requires_triton
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.quantization.ggml.common import pinned_packed_weight
+from modelopt.torch.quantization.ggml.gptq import GGMLGPTQHelper
 from modelopt.torch.quantization.model_calib import gptq
+from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 from modelopt.torch.quantization.utils import calib_utils
 from modelopt.torch.quantization.utils.calib_utils import (
@@ -59,6 +63,55 @@ def test_hessian_of_a_full_gpu_goes_to_an_idle_gpu(need_2_gpus, monkeypatch):
     helper.accumulate(inputs)
     reference, _ = update_hessian(inputs, torch.zeros(64, 64, device="cuda:0"), 0)
     torch.testing.assert_close(helper.hessian.to("cuda:0"), reference)
+
+
+def test_expert_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch):
+    """GGML expert updates spread over two GPUs give the one-GPU weights and codes, pinned at home."""
+    pytest.importorskip("transformers")  # the fused-experts quant wrapper is the HF plugin's
+    torch.manual_seed(RAND_SEED)
+    reference = ToyMoE().cuda()
+    inputs = torch.randn(96, TOY_MOE_HIDDEN, device="cuda")
+    shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": "iq2_xxs", "block_sizes": {-1: 256}, "backend": "ggml"},
+            },
+        ],
+        "algorithm": {"method": "gptq", "block_size": 256, "perc_damp": 0.3},
+    }
+    devices = []
+    update_weights = GGMLGPTQHelper.update_weights
+
+    def recording_update_weights(self, *args, device=None, **kwargs):
+        devices.append(device)
+        return update_weights(self, *args, device=device, **kwargs)
+
+    monkeypatch.setattr(GGMLGPTQHelper, "update_weights", recording_update_weights)
+    experts = []
+    try:
+        for gpus in ([0], [0, 1]):
+            monkeypatch.setattr(calib_utils, "get_process_gpus", lambda gpus=gpus: gpus)
+            model = copy.deepcopy(reference)
+            mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
+            experts.append(model.mlp.experts)
+    finally:
+        QuantModuleRegistry.unregister(ToyFusedExperts)
+
+    assert torch.device("cuda", 1) in devices
+    one_gpu, two_gpus = experts
+    for name in ("gate_up_proj", "down_proj"):
+        assert torch.equal(getattr(one_gpu, name), getattr(two_gpus, name))
+        for q1, q2 in zip(
+            getattr(one_gpu, f"{name}_weight_quantizers"),
+            getattr(two_gpus, f"{name}_weight_quantizers"),
+        ):
+            assert pinned_packed_weight(q2, "iq2_xxs").device == getattr(two_gpus, name).device
+            assert torch.equal(
+                pinned_packed_weight(q1, "iq2_xxs"), pinned_packed_weight(q2, "iq2_xxs")
+            )
 
 
 @pytest.mark.parametrize("blocker", ["idle_gpu_full", "idle_gpu_too_small", "multi_rank"])
