@@ -474,6 +474,15 @@ def test_registered_conversions_fuse_w1_w3_into_gate_up_and_stack_w2():
     assert torch.equal(fused[prefix + "down_proj"], torch.stack(down))
 
 
+def test_the_registration_raises_without_the_conversion_api(monkeypatch):
+    """Unregistered, the checkpoint's experts would load as MISSING: newly initialized, at full
+    size on every rank. So a missing conversion API stops the load instead of warning."""
+    monkeypatch.setitem(sys.modules, "transformers.conversion_mapping", None)
+
+    with pytest.raises(ImportError):
+        kimi_k3._register_kimi_k3_conversions()
+
+
 @pytest.mark.usefixtures("private_conversion_registry")
 def test_the_plan_the_conversions_and_the_fused_params_name_the_same_tensors():
     """Three separately written names must agree, or EP silently shards nothing: the fused module's

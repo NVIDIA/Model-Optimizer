@@ -517,16 +517,10 @@ def _register_kimi_k3_conversions() -> None:
     w3=up (Concatenate gate-then-up on dim 1), w2=down. The on-the-fly decompressor then rewrites these
     ``.weight`` sources to the checkpoint's ``.weight_packed`` + scales (mxfp4 -> bf16). Idempotent.
     """
-    try:
-        from transformers.conversion_mapping import register_checkpoint_conversion_mapping
-        from transformers.core_model_loading import Concatenate, MergeModulelist, WeightConverter
-    except Exception as e:  # pragma: no cover - version guard
-        print(
-            f"[kimi_k3] WARN: transformers conversion API unavailable ({type(e).__name__}: {e}); "
-            "per-expert fusion NOT registered -- experts will load as MISSING",
-            flush=True,
-        )
-        return
+    # transformers is optional. Its conversion API is in every version prepare() accepts, and a
+    # load without it would leave the experts MISSING, so an ImportError here must stop the load.
+    from transformers.conversion_mapping import register_checkpoint_conversion_mapping
+    from transformers.core_model_loading import Concatenate, MergeModulelist, WeightConverter
 
     def _mapping():
         return [
