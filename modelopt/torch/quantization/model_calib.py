@@ -990,8 +990,9 @@ def _fused_expert_projections(module: nn.Module):
     """Yield ``(weight_name, weight, weight_quantizers, input_quantizer)`` per fused-experts projection.
 
     ``weight`` is the 3-D ``(num_experts, out, in)`` parameter, ``weight_quantizers`` holds one
-    quantizer per expert, and ``input_quantizer`` is shared by the experts and runs once per expert
-    forward with ``module._current_expert_idx`` already set to that expert.
+    quantizer per expert, and ``input_quantizer`` is shared by the experts. Under eager it runs once
+    per expert forward with ``module._current_expert_idx`` set to that expert; under grouped_mm
+    and torch_a2a once per projection, on a batch sorted by expert (``module._grouped_offs``).
     """
     first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     for weight_name, quantizers_name, input_q_name in (
@@ -2498,6 +2499,19 @@ def gptq(
 
     def _make_expert_hook(experts, per_expert):
         def _expert_hook(_input_quantizer, _args, output):
+            if getattr(experts, "_running_grouped_mm", False):
+                # grouped_mm and torch_a2a quantize one expert-sorted batch per projection: split
+                # it back per expert by the cumulative token counts, as the eager loop feeds it.
+                offs = experts._grouped_offs
+                if offs is None:
+                    return
+                start = 0
+                for idx, end in enumerate(offs.tolist()):
+                    handle = per_expert.get(idx)
+                    if end > start and handle is not None:
+                        handle.accumulate(output[start:end])
+                    start = end
+                return
             handle = per_expert.get(experts._current_expert_idx)
             if handle is not None:
                 handle.accumulate(output)

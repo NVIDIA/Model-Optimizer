@@ -58,6 +58,7 @@ from modelopt.torch.quantization.plugins.huggingface import (
     register_fused_experts_on_the_fly,
     register_sparse_moe_on_the_fly,
 )
+from modelopt.torch.quantization.utils.calib_utils import GPTQHelper
 from modelopt.torch.quantization.utils.core_utils import module_name_maps, weight_attr_names
 from modelopt.torch.utils.moe import torch_a2a_experts_forward
 
@@ -1796,6 +1797,51 @@ class TestGroupedMMExperts:
                 assert eq is not None and gq is not None, f"{q_list}[{idx}] not calibrated"
                 assert torch.allclose(eq, gq, atol=1e-5), f"{q_list}[{idx}] weight amax mismatch"
         self._cleanup_registry(_SyntheticGroupedExperts)
+
+    @pytest.mark.parametrize("gated", [True, False], ids=["gated", "ungated"])
+    def test_gptq_hessians_match_eager(self, gated, monkeypatch):
+        """GPTQ gives each expert the Hessian of only its own tokens under grouped_mm, as eager.
+
+        grouped_mm quantizes one expert-sorted batch per projection rather than one call per
+        expert, so GPTQ's per-expert hook splits it back; keyed by the eager loop's expert index
+        alone, the first expert took every token and the others none.
+        """
+        hessians = {}
+        free = GPTQHelper.free
+
+        def recording(helper):
+            hessians[helper.name] = (helper.n_samples, helper.hessian.clone())
+            free(helper)
+
+        monkeypatch.setattr(GPTQHelper, "free", recording)
+        cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": 4, "block_sizes": {-1: 16}},
+                },
+            ],
+            "algorithm": {"method": "gptq", "block_size": 16},
+        }
+        self._cleanup_registry(_SyntheticGroupedExperts)
+        torch.manual_seed(0)
+        eager_model = _GroupedMoEModel("eager", gated=gated)
+        grouped_model = _GroupedMoEModel("grouped_mm", gated=gated)
+        grouped_model.load_state_dict(eager_model.state_dict())
+        found = []
+        for model in (eager_model, grouped_model):
+            hessians.clear()
+            mtq.quantize(model, copy.deepcopy(cfg), forward_loop=self._forward_loop_all_experts)
+            found.append(dict(hessians))
+        self._cleanup_registry(_SyntheticGroupedExperts)
+
+        eager, grouped = found
+        assert eager.keys() == grouped.keys() and len(eager) == 2 * NUM_EXPERTS
+        for name, (n_samples, hessian) in eager.items():
+            assert n_samples > 0 and grouped[name][0] == n_samples, name
+            # The down-proj input flows through a GEMM, hence the tolerance.
+            torch.testing.assert_close(grouped[name][1], hessian, rtol=1e-3, atol=1e-4)
 
     @pytest.mark.parametrize("impl", ["grouped_mm", "torch_a2a"])
     def test_local_hessian_captures_per_expert_in_grouped_mode(self, cpu_dist_workers, impl):
