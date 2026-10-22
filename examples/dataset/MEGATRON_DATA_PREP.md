@@ -234,9 +234,10 @@ num_workers: 48         # Optional; tokenizer processes (default: all CPUs).
 With `tokenizer` and `max_length`, a conversation with no trained token left after truncation is
 dropped, since Megatron-Bridge fails on it during training. `pack_max_tokens` pairs long
 conversations with short ones and writes each split pair by pair, so `--mbs 2` packs every pair
-into one micro-batch; a conversation that fits with no other is dropped. Tokenizing runs on the
-CPU: ~0.4 s per conversation per process for GLM-5.3-Flash on Nemotron-Cascade-2 (4.4K tokens
-on average).
+into one micro-batch; a conversation that fits with no other is dropped. With `--cp_size` > 1,
+Megatron-Bridge pads each conversation to a multiple of `2 * cp_size`, so a pair can exceed the cap
+by under `2 * cp_size` tokens per conversation. Tokenizing runs on the CPU: ~0.4 s per
+conversation per process for GLM-5.3-Flash on Nemotron-Cascade-2 (4.4K tokens on average).
 
 ## `reasoning_content` for Post-Training v3 Datasets
 
