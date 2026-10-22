@@ -77,6 +77,10 @@ runs:
             # (tests/examples/hf_ptq/conftest.py). The 2-GPU nightly stays serial.
             pytest_args+=(-n 4)
           fi
+          if [[ "${{ github.ref }}" != refs/heads/pull-request/* ]]; then
+            # The scheduled and on-demand runs also run the tests marked nightly (tests/conftest.py).
+            pytest_args+=(--run-nightly)
+          fi
           python3 -m pytest tests/examples/${{ inputs.example }} --cov "${pytest_args[@]}" || status=$?
         fi
         echo "status=$status" >> "$GITHUB_OUTPUT"

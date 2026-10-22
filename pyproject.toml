@@ -371,6 +371,7 @@ timeout_func_only = true
 markers = [
     "integration: Tests that require external services or other non-hermetic dependencies",
     "manual: Only run when --run-manual is given",
+    "nightly: Only run when --run-nightly is given (the scheduled and on-demand CI)",
     "release: Regression tests that should be run before every release",
 ]
 
