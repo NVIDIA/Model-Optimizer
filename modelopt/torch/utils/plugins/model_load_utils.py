@@ -1258,7 +1258,20 @@ def _unregister_expert_quant_wrappers(expert_modules) -> None:
     process_group ("forward() takes 4 positional args but 5 given") and discards the grouped structure.
     Unregister those classes so the experts stay a2a-managed (matches deepseek/glm/minimax, which have NO
     registered wrapper).
+
+    Experts stored transposed, ``(num_experts, in_dim, out_dim)`` like GPT-OSS's, are refused first:
+    the grouped quantization leaves them unquantized, so without their own wrapper the model would be
+    quantized everywhere but its experts.
     """
+    transposed = sorted(
+        {type(m).__name__ for m in expert_modules if getattr(m, "is_transposed", False)}
+    )
+    if transposed:
+        raise NotImplementedError(
+            f"Expert-parallel PTQ cannot quantize {', '.join(transposed)}: these experts store their "
+            "weights transposed, which the grouped quantization leaves unquantized. Quantize the "
+            "model without expert parallelism."
+        )
     try:
         from modelopt.torch.quantization.nn.modules.quant_module import QuantModuleRegistry
 

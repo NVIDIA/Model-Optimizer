@@ -184,6 +184,20 @@ def test_the_experts_class_loses_its_quant_wrapper_and_other_classes_keep_theirs
     assert _SharedExperts in quant_wrappers
 
 
+def test_transposed_experts_are_refused_before_their_wrapper_is_unregistered(quant_wrappers):
+    """The grouped quantization leaves experts stored transposed (GPT-OSS's) unquantized, so without
+    their own wrapper the model would be quantized everywhere but its experts."""
+    model = _model_with_decoder_at("model.")
+    experts = [layer.mlp.experts for layer in model.model.layers]
+    for module in experts:
+        module.is_transposed = True
+
+    with pytest.raises(NotImplementedError, match="cannot quantize _Experts"):
+        _unregister_expert_quant_wrappers(experts)
+
+    assert _Experts in quant_wrappers
+
+
 # ----------------------------------------------------------------------- _seed_parallel_states
 
 
