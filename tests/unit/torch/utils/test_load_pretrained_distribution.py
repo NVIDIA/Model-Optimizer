@@ -235,6 +235,20 @@ def test_a_config_passed_for_the_load_is_the_one_it_decides_from(
     assert distribution_plan(model) == DistributionPlan(2, dense="fsdp")
 
 
+def test_hf_config_is_refused_without_the_plan_it_came_with(
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path
+):
+    """A sharded load builds from hf_config as given, so the plan must be the one it came with: a
+    plan decided from the checkpoint's own config would load a model it was not decided for."""
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+    run_as(2, rank=1)
+    serve(LlamaConfig(**_TINY))
+
+    with pytest.raises(TypeError, match="returned with a plan: pass that plan"):
+        load_pretrained(str(tmp_path), hf_config=LlamaConfig(**{**_TINY, "num_hidden_layers": 2}))
+    assert loaders == {}
+
+
 def test_an_expert_parallel_plan_is_refused(run_as, serve, loaders, auto_class, tmp_path):
     """No load here shards the routed experts: an EP plan fails before anything loads."""
     run_as(2)
