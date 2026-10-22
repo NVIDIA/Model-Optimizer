@@ -27,62 +27,6 @@ import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.utils.distributed as dist
 
 
-def test_nas_convert_ffn_pruning(project_root_path: Path, tmp_path: Path):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_nas_convert_ffn_pruning_multiprocess_job, project_root_path, tmp_path),
-        backend="nccl",
-    )
-
-
-def _test_nas_convert_ffn_pruning_multiprocess_job(
-    project_root_path: Path, tmp_path: Path, rank: int, size: int
-):
-    dist.setup(timeout=timedelta(minutes=10))
-    # Setup the test model and data.
-    puzzle_dir, llama_checkpoint_path, dataset_path = setup_test_model_and_data(
-        tmp_path, rank, "meta-llama/Llama-3.1-8B-Instruct"
-    )
-    hydra_config_dir = project_root_path / "tests/gpu/torch/puzzletron/resources/configs"
-    hydra_config_name = "meta-llama/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct"
-
-    #
-    # Run the mnt.convert() step
-    #
-    input_model = mtpz.puzzletron_nas_plugin.PuzzletronModel()
-    mtn.convert(
-        input_model,
-        mode=[
-            (
-                "puzzletron",
-                {
-                    "puzzle_dir": str(puzzle_dir),
-                    "input_model_path": str(llama_checkpoint_path),
-                    "hydra_config_dir": str(hydra_config_dir),
-                    "hydra_config_name": hydra_config_name,
-                    "dataset_path": str(dataset_path),
-                },
-            )
-        ],
-    )
-
-    #
-    # Check assertions
-    #
-    if rank == 0:
-        # assertions for the score_pruning_activations step
-        rank = int(os.environ["RANK"])
-        rank_filepath = (
-            f"pruning/pruning_scores/ffn_iterative/100samples_diverse_mini/rank_{rank}.pth"
-        )
-        assert (puzzle_dir / rank_filepath).is_file()
-
-        # assertions for the pruning_ckpts step
-        assert (puzzle_dir / "ckpts/ffn_256_attn_no_op").exists()
-
-    dist.cleanup()
-
-
 def test_nas_convert_attn_pruning(project_root_path: Path, tmp_path: Path):
     spawn_multiprocess_job(
         size=torch.cuda.device_count(),

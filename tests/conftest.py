@@ -58,7 +58,10 @@ _DEFAULT_TIMEOUT = {
     "gpu_trtllm": 60,
     "gpu_vllm": 60,
     "regression": 180,
-    "unit": 120 if platform.system() == "Windows" else 60,
+    # Tests that spawn processes take 2-3x longer under pytest-xdist: 4 workers and their children
+    # share the 4 vCPUs of a CI runner (test_dist.py::test_data_parallel: 8-15 s serial, 25-35 s with
+    # xdist, over 60 s on a slow runner).
+    "unit": 120,
 }
 
 

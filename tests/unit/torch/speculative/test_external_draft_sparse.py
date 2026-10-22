@@ -210,6 +210,31 @@ def test_sparse_data_path_selects_mode_and_rejects_conflicts():
         DataArguments(sparse_data_path="/tmp/x", offline_data_path="/tmp/y")
 
 
+def test_an_explicit_top_k_rebuilds_a_cache_built_at_another_width(tmp_path):
+    """A changed top_k must invalidate the cache, not be silently dropped.
+
+    The width is part of the objective: it truncates or pads the stored policy. The
+    staleness check keys on the shard list, which does not change when only the
+    requested width does, so without this the run keeps the old width and
+    ``self.top_k`` reports the cache's rather than the caller's.
+    """
+    a = tmp_path / "a.jsonl.gz"
+    _write_records(a, n=2)
+    first = SparsePolicyDataset([str(a)], max_length=32, top_k=TOPK)
+    assert first.top_k == TOPK
+
+    # Widening is the direction the builder allows: it pads with zero-probability
+    # entries. Narrowing would drop teacher mass and raises instead, so it cannot
+    # reach the cache check this test is about.
+    wider = SparsePolicyDataset([str(a)], max_length=32, top_k=TOPK + 4)
+    assert wider.top_k == TOPK + 4, "the cache ignored the requested width"
+    # an unset top_k still accepts whatever the cache holds
+    assert SparsePolicyDataset([str(a)], max_length=32).top_k == TOPK + 4
+    # a non-builder rank must wait for the requested width, not take the one on disk
+    with pytest.raises(TimeoutError):
+        sparse_data._wait_for_cache(tmp_path / ".sparse_cache", [str(a)], TOPK, stall_s=0)
+
+
 def test_cache_rebuilds_over_an_existing_one(tmp_path):
     """A stale cache must be replaced, not crash the rebuild with ENOTEMPTY."""
     a = tmp_path / "a.jsonl.gz"

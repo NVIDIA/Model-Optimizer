@@ -11,6 +11,7 @@ Changelog
 - On Linux x86-64 with Python 3.11 and later, the ONNX extra now selects ONNX Runtime 1.30.x and CUDA 13 packages by default. GPU calibration requires a compatible CUDA 13 runtime and driver; Python 3.10 and other platforms retain their existing dependency selections.
 - Add imatrix calibration (``algorithm: {method: imatrix}``) for the GGML formats with a weighted search: each weight is encoded once, its search weighted by the square root of its inputs' per-column ``E[x^2]`` (llama.cpp's imatrix statistic), and HF fused-MoE experts get one statistic per expert. A weight that already holds final codes is left alone, so ``[{method: gptq}, {method: imatrix}]`` runs GPTQ on the dense linears and imatrix on the experts GPTQ skips; the built-in IQ1 and IQ2 recipes now do this, and new ``<format>_experts_only`` recipes apply imatrix to the routed MoE experts alone.
 - Add a checkpoint-specific NVIDIA Nemotron 3.5 Super VL AutoQuantize recipe with a 4.9-effective-bit NVFP4-MSE/FP8/BF16 search and fixed NVFP4 MTP experts. Select it under ``models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/auto_quantize/``.
+- Add ``examples/hf_ptq/convert_ggml_to_int8.py`` to expand a checkpoint exported with a GGML recipe (IQ formats, ``q8_0``) into an INT8 weight-only compressed-tensors checkpoint. Stock vLLM serves it with its integer kernels at about half the BF16 weight memory, reproducing the GGML weights up to rounding their scales to the model dtype.
 
 *Speculative Decoding*
 
@@ -21,6 +22,7 @@ Changelog
 - Add ``--sft_in_batch_packing``, ``--moe_aux_loss_coeff`` and ``--dsa_kernel_backend`` to ``examples/megatron_bridge/distill.py`` (``--dsa_kernel_backend`` also to ``quantize.py``): pack ``--sft_hf_dataset`` conversations per micro-batch instead of padding each to ``--seq_length``, override the MoE load-balancing loss weight (e.g. 0 for padded SFT data), and select fused DeepSeek sparse-attention kernels for long sequences.
 - Add ``--vllm_fakequant_export`` to ``examples/megatron_bridge/export_quantized_megatron_to_hf.py`` to evaluate formats vLLM has no kernels for (e.g. GGML IQ) as BF16 fake-quant checkpoints, and allow ``--ep_size`` > 1 for checkpoints built with ``--no_moe_grouped_gemm``.
 - GGML GPTQ checkpoints from ``examples/megatron_bridge`` keep their calibrated codes when the Megatron checkpoint is reloaded for QAD or export, and layerwise calibration now runs on Megatron vision-language models.
+- The Megatron unified HF export (``export_mcore_gpt_to_hf``) now copies the source checkpoint's non-model files (tokenizer, processor, remote code, chat templates, ...) into the export unchanged, from local disk only. The ``examples/megatron_bridge`` scripts make a Hugging Face Hub model local first with ``modelopt.torch.export.ensure_local_checkpoint``.
 
 *Misc*
 
@@ -28,10 +30,15 @@ Changelog
 
 **Backward Breaking Changes**
 
+- ``export_mcore_gpt_to_hf`` given a Hugging Face Hub model ID no longer writes the tokenizer, processor, generation config or remote-code files. Pass a local directory instead, e.g. from ``modelopt.torch.export.ensure_local_checkpoint``.
+
 **Deprecations**
+
+- ``modelopt.torch.export.copy_non_safetensor_files_from_ckpt`` is deprecated; use ``copy_non_model_files``.
 
 **Bug Fixes**
 
+- The default PTQ recipes now leave multi-token-prediction (MTP) layers unquantized in Megatron vision-language models too (``language_model.mtp.*``), as they already did at the model root.
 - Fix ONNX quantization placing a per-tensor Q/DQ pair on a rank-0 (scalar) constant input, which TensorRT's ONNX parser rejects (``convertAxis`` asserts the quantization axis lies in ``[0, nbDims]`` but ``nbDims == 0``). Rank-0 constant operands are now kept unquantized in the int8, fp8, and autotune export paths; the existing single-element Mul/Div/Pad stripping stays gated under ``target_dla``.
 - Fix PTQ of native Transformers FP8 experts to apply source weight scales during calibration and export. Re-quantize affected checkpoints from the original FP8 source.
 - Fix ONNX preprocessing with custom TensorRT plugin libraries on TensorRT 11.
@@ -231,6 +238,7 @@ Changelog
 - Fix ONNX export of quantized models failing with ``Unsupported op_type for real weight quantization: Transpose`` when a weight reaches its consumer transposed, as in MaxViT's attention blocks. The same export now also quantizes each weight along the axis its Q/DQ pair declares, correcting silently wrong ``dq_only`` output when that axis differed from the consumer's default.
 - Fix the ``evaluation`` agent skill's LiveCodeBench recipe scoring correct solutions that use binary standard I/O (``sys.stdin.buffer`` / ``sys.stdout.buffer``) as failures: the recipe now pins a fixed LiveCodeBench judge in the NeMo-Skills container. LiveCodeBench scores change as a result, so re-run earlier baselines before comparing.
 - Fix GPTQ with Megatron data parallelism: each data-parallel replica of a module now builds its Hessian from the whole calibration set instead of only its own shard, so all replicas reach the same quantized weights.
+- Fix ``examples/llm_sparsity/weight_sparsity/finetune.py`` saving a sharded state dict under FSDP2, the default FSDP version in Transformers 5, which made ``export_hf_ckpt.py`` fail to restore it. Re-run finetuning to produce a loadable ``finetuned_modelopt_state.pth``.
 
 0.47.0 (2026-09-23)
 ^^^^^^^^^^^^^^^^^^^
