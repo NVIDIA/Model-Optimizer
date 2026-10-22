@@ -300,18 +300,25 @@ def test_an_expert_parallel_plan_loads_through_the_ep_loader(
 
 
 @pytest.mark.parametrize(
-    ("planned", "given_config", "preparations"),
-    [(False, False, 1), (True, False, 1), (True, True, 0)],
-    ids=["decided_by_the_load", "planned", "planned_with_its_config"],
+    ("planned", "passed_as", "preparations"),
+    [(False, None, 1), (True, None, 1), (True, "hf_config", 0), (True, "config", 1)],
+    ids=[
+        "decided_by_the_load",
+        "planned",
+        "planned_with_its_config",
+        "planned_with_a_config_for_the_load",
+    ],
 )
 def test_a_load_prepares_its_config_once(
-    run_as, loaders, monkeypatch, tmp_path, planned, given_config, preparations
+    run_as, loaders, monkeypatch, tmp_path, planned, passed_as, preparations
 ):
     """A model's EP preparation can patch its modeling code, so a load runs it once, and not at all
-    when handed the config resolve_distribution_plan prepared. Every config it reads takes the Hub
-    options the load was given (custom code an ``auto_map`` names in another repo)."""
+    when handed the config resolve_distribution_plan prepared. A config passed for the load is the
+    caller's own, so the load prepares a copy of it. Every config it reads takes the Hub options the
+    load was given (custom code an ``auto_map`` names in another repo)."""
     run_as(4)
     config, reads = _deepseek_v3(n_routed_experts=8), []
+    as_passed = config.to_dict()
     monkeypatch.setattr(
         transformers.AutoConfig, "from_pretrained", lambda *a, **k: reads.append(k) or config
     )
@@ -324,13 +331,18 @@ def test_a_load_prepares_its_config_once(
 
     monkeypatch.setattr(moe, "apply_distributed_support", apply_distributed_support)
     kwargs = {"distribution": DistributionPlan(4, ep_size=4)} if planned else {}
-    if given_config:
-        kwargs["hf_config"] = config
+    if passed_as:
+        kwargs[passed_as] = config
 
     load_pretrained(str(tmp_path), local_files_only=True, **kwargs)
 
     assert len(prepared) == preparations
-    assert loaders["ep"]["hf_config"] is config
+    loaded = loaders["ep"]["hf_config"]
+    if passed_as == "config":
+        assert loaded is not config and loaded.base_model_ep_plan
+        assert config.to_dict() == as_passed
+    else:
+        assert loaded is config
     assert all(read.get("local_files_only") is True for read in reads)
 
 

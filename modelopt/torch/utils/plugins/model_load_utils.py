@@ -535,7 +535,8 @@ def load_pretrained(
     rather than ignore it. ``hf_config`` is the config :func:`resolve_distribution_plan` returned with
     the plan handed in as ``distribution``: the load builds from it as given, so without that plan
     it is refused. A ``config`` passed for the load is the one the plan is decided from, and a
-    sharded load takes it as its ``hf_config``.
+    sharded load takes it as its ``hf_config``: an expert-parallel load a copy of it the model spec
+    prepares (:func:`~modelopt.torch.utils.moe.apply_distributed_support`), as deciding does.
 
     Whatever the placement:
 
@@ -613,10 +614,6 @@ def load_pretrained(
     else:
         raise TypeError(f"distribution={distribution!r}: expected a DistributionPlan or None.")
     route = _route(plan)
-    if route is not None and config is not None:
-        # The sharded load builds the model from hf_config: the plan's copy of this one, or it.
-        del kwargs["config"]
-        kwargs.setdefault("hf_config", config)
     if model_type is None:
         # The load uses the config passed for it, if any, so the loading hook follows that one.
         model_type = getattr(hf_config or config, "model_type", None) or (
@@ -624,6 +621,21 @@ def load_pretrained(
                 ckpt_path, trust_remote_code=trust_remote_code, **hub_options
             ).model_type
         )
+    if route is not None and config is not None:
+        # The sharded load builds the model from hf_config: the plan's copy of this one, or it. With
+        # a plan handed in, an expert-parallel load prepares a copy of it, as deciding would have.
+        del kwargs["config"]
+        if "hf_config" not in kwargs:
+            if route == _EXPERT_PARALLEL:
+                from modelopt.torch.utils.moe import apply_distributed_support
+
+                config = apply_distributed_support(
+                    model_type,
+                    copy.deepcopy(config),
+                    ckpt_path=ckpt_path,
+                    trust_remote_code=trust_remote_code,
+                )
+            kwargs["hf_config"] = config
     if route is not None:
         model = _load_sharded(route, plan, ckpt_path, auto_class, model_type, kwargs, hub_options)
         # A sharded load finds the unplaced keys while it places the weights.
