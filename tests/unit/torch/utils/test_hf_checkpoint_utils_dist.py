@@ -67,7 +67,8 @@ def _ensure_local_checkpoint_job(tmp_path, fail, group_ranks, rank, size):
                 result = utils.ensure_local_checkpoint("org/model", group=group)
                 assert result == ("org/model", str(snapshot))
         finally:
-            if group is not None:  # None would mean the default group
+            # Skip None (the default group) and the sentinel a non-member rank gets from new_group.
+            if isinstance(group, dist.ProcessGroup):
                 dist.destroy_process_group(group)
 
 
