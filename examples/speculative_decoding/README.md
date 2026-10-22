@@ -92,9 +92,9 @@ The saved modelopt checkpoint is similar in architecture to HF models. It can be
 
 For large models, you can export intermediate hidden states to disk and train only the draft model. This significantly reduces GPU memory requirements, but requires several to tens of terabytes of disk storage depending on dataset size.
 
-### Dumpping Hidden States to Disk
+### Dumping Hidden States to Disk
 
-We support two backends for generating base model hidden states. For better effciency, it is recommended to use TRT-LLM:
+We support two backends for generating base model hidden states. For better efficiency, it is recommended to use TRT-LLM:
 
 ```bash
 python collect_hidden_states/compute_hidden_states_trtllm.py \
@@ -187,7 +187,7 @@ Please refer to [TRT-LLM Doc: Speculative Decoding](https://nvidia.github.io/Ten
 
 Please refer to [VLLM Doc: Speculative Decoding](https://docs.vllm.ai/en/latest/features/spec_decode/) for detailed usage.
 
-Optionally, you can convert the exported checkpoint to contain target model information, which is accepted by vLLM to simplify depployment:
+Optionally, you can convert the exported checkpoint to contain target model information, which is accepted by vLLM to simplify deployment:
 
 ```bash
 python scripts/convert_to_vllm_ckpt.py --input <exported_ckpt> --verifier <target_model> --output <output_dir>
