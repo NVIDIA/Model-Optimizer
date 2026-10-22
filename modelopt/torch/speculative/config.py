@@ -250,6 +250,18 @@ class DFlashConfig(ModeloptBaseConfig):
         ),
     )
 
+    dflash_base_lm_loss_alpha: float = ModeloptField(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Weight of a language-modelling cross-entropy on the BASE model's own "
+            "next-token prediction, added to the draft loss. Default 0.0 leaves the "
+            "objective unchanged. Only meaningful with dflash_freeze_base_model=False: it "
+            "is what keeps a trainable base anchored to language modelling instead of "
+            "being optimised purely for draftability. Requires labels in the batch."
+        ),
+    )
+
     dflash_ce_loss_alpha: float = ModeloptField(
         default=0.1,
         ge=0.0,
