@@ -461,7 +461,7 @@ def _load_sharded(route, plan, ckpt_path, auto_class, model_type, kwargs, hub_op
     trust_remote_code = kwargs.pop("trust_remote_code", False)
     hf_config = kwargs.pop("hf_config", None)
     if route == _EXPERT_PARALLEL:
-        from modelopt.torch.utils.moe import apply_distributed_support
+        from modelopt.torch.utils.moe import apply_distributed_support, check_distributed_support
 
         if hf_config is None:
             hf_config = apply_distributed_support(
@@ -472,6 +472,10 @@ def _load_sharded(route, plan, ckpt_path, auto_class, model_type, kwargs, hub_op
                 ckpt_path=ckpt_path,
                 trust_remote_code=trust_remote_code,
             )
+        else:
+            # Prepared with its plan, and preparing can patch modeling code, so it is not prepared
+            # again; a model its spec refuses is refused all the same.
+            check_distributed_support(model_type)
         return load_and_prepare_ep(
             ckpt_path, plan, trust_remote_code=trust_remote_code, hf_config=hf_config, **kwargs
         )

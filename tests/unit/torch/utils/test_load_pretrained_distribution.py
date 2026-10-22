@@ -29,7 +29,7 @@ from _test_utils.torch.distributed.utils import bounded_collectives
 
 transformers = pytest.importorskip("transformers")
 
-from transformers import AutoModel, DeepseekV3Config, LlamaConfig, LlamaForCausalLM
+from transformers import AutoModel, DeepseekV3Config, GptOssConfig, LlamaConfig, LlamaForCausalLM
 
 import modelopt.torch.models.hf as models_hf
 import modelopt.torch.utils.distributed as dist
@@ -344,6 +344,19 @@ def test_a_load_prepares_its_config_once(
     else:
         assert loaded is config
     assert all(read.get("local_files_only") is True for read in reads)
+
+
+def test_a_model_its_spec_refuses_is_refused_with_its_config_handed_in(run_as, loaders, tmp_path):
+    """Handed the config prepared with its plan, the load does not prepare it again, but a model
+    whose spec refuses expert parallelism is refused all the same, before anything loads."""
+    run_as(4)
+    config = GptOssConfig(**_TINY, num_local_experts=4)
+
+    with pytest.raises(NotImplementedError, match="gpt_oss cannot be quantized expert-parallel"):
+        load_pretrained(
+            str(tmp_path), distribution=DistributionPlan(4, ep_size=4), hf_config=config
+        )
+    assert loaders == {}
 
 
 def _every_rank_loads_rank0s_plan_job(rank, size, ckpt):

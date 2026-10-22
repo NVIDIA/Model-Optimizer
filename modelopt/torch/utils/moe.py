@@ -148,6 +148,24 @@ def _ep_spec(model_type: str):
     return getattr(get_spec(model_type), "ep_spec", None)
 
 
+def check_distributed_support(model_type: str) -> None:
+    """Refuse ``model_type``'s expert parallelism if its spec does; enforce its transformers floor.
+
+    :func:`apply_distributed_support` checks this before it prepares a config; a config already
+    prepared with its plan needs only the check.
+    """
+    ep = _ep_spec(model_type)
+    if ep is None:
+        return
+    if ep.unsupported:
+        raise NotImplementedError(
+            f"{model_type} cannot be quantized expert-parallel yet: {ep.unsupported} Quantize it "
+            "without expert parallelism, e.g. with FSDP2 (--use_fsdp2 in examples/hf_ptq/hf_ptq.py)."
+        )
+    if ep.requires_transformers:
+        require_transformers(ep.requires_transformers, f"{model_type} expert-parallel PTQ")
+
+
 def apply_distributed_support(
     model_type: str,
     hf_config,
@@ -172,17 +190,10 @@ def apply_distributed_support(
     :func:`~modelopt.torch.utils.plugins.model_load_utils.load_and_prepare_ep`, so nothing about it
     is per-model.
     """
+    check_distributed_support(model_type)
     ep = _ep_spec(model_type)
     if ep is None:
         return hf_config
-
-    if ep.unsupported:
-        raise NotImplementedError(
-            f"{model_type} cannot be quantized expert-parallel yet: {ep.unsupported} Quantize it "
-            "without expert parallelism, e.g. with FSDP2 (--use_fsdp2 in examples/hf_ptq/hf_ptq.py)."
-        )
-    if ep.requires_transformers:
-        require_transformers(ep.requires_transformers, f"{model_type} expert-parallel PTQ")
 
     if ep.base_model_ep_plan:
         target = hf_config
