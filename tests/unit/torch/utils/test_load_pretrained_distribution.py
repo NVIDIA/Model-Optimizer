@@ -212,19 +212,22 @@ def test_a_load_it_decides_reads_the_config_once(
     assert distribution_plan(model) == DistributionPlan(2, dense="fsdp")
 
 
+@pytest.mark.parametrize("handed", [False, True], ids=["decided", "handed"])
 def test_a_config_passed_for_the_load_is_the_one_it_decides_from(
-    run_as, loaders, process_group, monkeypatch, tmp_path
+    run_as, loaders, process_group, monkeypatch, tmp_path, handed
 ):
     """No config is read: the plan is decided from the one passed for the load, which the FSDP2
-    load then builds from. Deciding adds to that config, so it works on a copy of it."""
+    load then builds from, as it does with a plan handed in. Deciding adds to that config, so it
+    works on a copy of it."""
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
     run_as(2, rank=1)
     reads: list = []
     monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *a, **k: reads.append(a))
     config = LlamaConfig(**{**_TINY, "num_hidden_layers": 2})
     as_passed = config.to_dict()
+    plan = {"distribution": DistributionPlan(2, dense="fsdp")} if handed else {}
 
-    model = load_pretrained(str(tmp_path), config=config)
+    model = load_pretrained(str(tmp_path), config=config, **plan)
 
     assert reads == []
     assert loaders["fsdp2"]["hf_config"].num_hidden_layers == 2
