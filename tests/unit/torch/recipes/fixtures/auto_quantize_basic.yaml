@@ -1,0 +1,27 @@
+# Auto-quantize resolves to kwargs dict
+_test:
+  description: "Auto-quantize resolves to kwargs with constraints and formats"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_has_key: auto_quantize_kwargs
+    check_no_key: quantize_config
+    check_config:
+      auto_quantize_kwargs:
+        constraints:
+          effective_bits: 4.5
+        num_calib_steps: 256
+        num_score_steps: 64
+        method: gradient
+    check_format_count: 2
+
+version: "1.0"
+auto_quantize:
+  effective_bits: 4.5
+  formats:
+    - preset: fp8
+    - preset: int8
+  num_calib_steps: 256
+  num_score_steps: 64

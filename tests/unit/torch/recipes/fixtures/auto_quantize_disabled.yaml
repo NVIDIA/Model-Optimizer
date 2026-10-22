@@ -1,0 +1,20 @@
+# Auto-quantize maps disabled_patterns to disabled_layers
+_test:
+  description: "Auto-quantize disabled_patterns map to disabled_layers"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_config:
+      auto_quantize_kwargs:
+        disabled_layers: ["*lm_head*", "*embed*"]
+
+version: "1.0"
+auto_quantize:
+  effective_bits: 4.5
+  formats:
+    - preset: fp8
+  disabled_patterns:
+    - "*lm_head*"
+    - "*embed*"
