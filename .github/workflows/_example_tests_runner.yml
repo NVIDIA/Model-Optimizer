@@ -133,6 +133,6 @@ jobs:
         uses: ./.github/actions/save-extensions
         with:
           cache-key: ${{ steps.ext-cache.outputs.cache-key }}
-      - name: Fail the job for an example whose tests failed
+      - name: Fail the job for an example that failed
         if: steps.example0.outputs.failed == 'true' || steps.example1.outputs.failed == 'true' || steps.example2.outputs.failed == 'true'
         run: exit 1
