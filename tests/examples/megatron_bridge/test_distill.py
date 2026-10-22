@@ -18,6 +18,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -29,6 +30,7 @@ from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_moe_dir,
     get_tiny_tokenizer,
 )
+from megatron.core.datasets.gpt_dataset import GPTDataset
 from transformers import AutoModelForImageTextToText
 
 from modelopt.torch.puzzletron.anymodel import convert_model
@@ -36,7 +38,7 @@ from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_prepr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "examples" / "megatron_bridge"))
 
-from distill import HAS_DIRECT_HF_SFT, _document_eod_id, _hf_source
+from distill import HAS_DIRECT_HF_SFT, _add_document_boundaries, _document_eod_id, _hf_source
 from export_distilled_megatron_to_hf import _get_checkpoint_export_paths
 
 
@@ -73,7 +75,8 @@ def test_distill_llm_hf_export(tmp_path, num_gpus, fake_hub_checkpoint):
         output_dir=distill_output_dir,
         tp_size=num_gpus,
         pp_size=1,
-        # Mock documents are 1-4095 tokens, so most of these windows span a document boundary.
+        # Mock token ids cycle through the 128-token vocab, so the EOD id recurs every 128 tokens
+        # and each window trains as ~17 THD segments.
         seq_length=2048,
         mbs=1,
         gbs=4,
@@ -132,6 +135,28 @@ def test_document_eod_id(tmp_path, append_eod):
     else:
         with pytest.raises(ValueError, match="--append_eod"):
             _document_eod_id(args)
+
+
+@pytest.mark.parametrize(
+    ("tokens", "cu_seqlens"),
+    [
+        ([1, 2, 9, 3, 4, 5, 9, 6], [0, 3, 7, 8]),  # EOD mid-window
+        ([1, 2, 3, 9, 4, 5, 6, 9], [0, 4, 8]),  # EOD as the last token
+        ([9, 1, 2, 3, 4, 5, 6, 7], [0, 1, 8]),  # EOD as the first token
+        ([1, 2, 3, 4, 5, 6, 7, 8], [0, 8]),  # no EOD
+    ],
+)
+def test_document_boundaries_cu_seqlens(monkeypatch, tokens, cu_seqlens):
+    """Each EOD ends a THD segment; the window's end closes the last one."""
+    monkeypatch.setattr(
+        GPTDataset, "__getitem__", lambda self, idx: {"tokens": torch.tensor(tokens)}
+    )
+    _add_document_boundaries()  # monkeypatch restores the original __getitem__ on teardown
+    dataset = SimpleNamespace(config=SimpleNamespace(tokenizer=SimpleNamespace(eod=9)))
+    sample = GPTDataset.__getitem__(dataset, 0)
+    expected = torch.tensor(cu_seqlens, dtype=torch.int32)
+    assert torch.equal(sample["cu_seqlens_q"], expected)
+    assert sample["max_seqlen_q"] == (expected[1:] - expected[:-1]).max()
 
 
 def test_distill_llm_sft(tmp_path, num_gpus):
