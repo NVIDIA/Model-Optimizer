@@ -177,14 +177,32 @@ def test_a_tied_name_the_checkpoint_stores_is_placed(tmp_path):
     assert sharded._modelopt_unplaced_source_keys == []
 
 
-def test_output_loading_info_is_refused_before_anything_loads():
-    """``from_pretrained`` would return ``(model, loading_info)``, where a model is expected.
+@pytest.mark.parametrize(
+    ("option", "refused"),
+    [({"output_loading_info": True}, "output_loading_info"), ({"variant": "fp16"}, "variant")],
+)
+def test_an_option_it_cannot_honor_is_refused_before_anything_loads(option, refused):
+    """``output_loading_info`` would return ``(model, loading_info)``, where a model is expected; a
+    ``variant`` would load weight files the record and the export do not read.
 
     Resolving this path, neither a directory nor a valid Hub ID, raises too, so the refusal must
     come before anything runs.
     """
-    with pytest.raises(ValueError, match="output_loading_info"):
-        load_pretrained("no/such/checkpoint", output_loading_info=True)
+    with pytest.raises(ValueError, match=refused):
+        load_pretrained("no/such/checkpoint", **option)
+
+
+def test_a_config_passed_for_the_load_needs_none_on_disk(tmp_path):
+    """The load uses the config it is passed, as ``from_pretrained`` does, and so does the choice of
+    its loading hook: a directory without a config.json loads."""
+    config = _tiny_llama_config()
+    _save(tmp_path, config, {**LlamaForCausalLM(config).state_dict(), STRAY: torch.ones(32)})
+    (tmp_path / "config.json").unlink()
+    (tmp_path / "generation_config.json").write_text("{}")  # from_pretrained reads it instead
+
+    model = _load(tmp_path, config=config)
+
+    assert model._modelopt_unplaced_source_keys == [STRAY]
 
 
 def test_an_ignore_rule_does_not_hide_an_unplaced_tensor(tmp_path):

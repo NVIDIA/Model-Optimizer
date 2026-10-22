@@ -394,17 +394,24 @@ def load_pretrained(
       as the load does.
     * The model type's loading hook runs
       (:func:`~modelopt.torch.models.hf.prepare_model_for_loading`), e.g. to keep the MTP head a
-      Nemotron-H checkpoint carries. ``model_type`` selects it, read from the checkpoint's config
-      when omitted.
+      Nemotron-H checkpoint carries. ``model_type`` selects it; when omitted, the type of the
+      ``config`` passed for the load, else of the checkpoint's config.
     * The checkpoint tensors the model has no parameter for are recorded
       (:func:`record_unplaced_source_keys`), so the export carries them over unchanged. The model
-      is returned alone: ``output_loading_info=True`` is refused.
+      is returned alone: ``output_loading_info=True`` is refused. So is a ``variant``: the record
+      and the export read the checkpoint's default weight files.
     """
     if kwargs.pop("output_loading_info", False):
         raise ValueError(
             "load_pretrained returns the model alone and does not take output_loading_info=True; "
             "the checkpoint tensors the model has no parameter for are recorded on it instead "
             "(see record_unplaced_source_keys)."
+        )
+    if kwargs.get("variant") is not None:
+        raise ValueError(
+            f"load_pretrained does not take variant={kwargs['variant']!r}: the checkpoint tensors "
+            "the model has no parameter for are recorded from, and carried into the export from, "
+            "the checkpoint's default weight files."
         )
     # Importing modelopt.torch.models registers every model spec; only callers of this need them.
     from modelopt.torch.models.hf import prepare_model_for_loading
@@ -420,9 +427,12 @@ def load_pretrained(
         ckpt_path = os.path.join(ckpt_path, subfolder)
     trust_remote_code = kwargs.get("trust_remote_code", False)
     if model_type is None:
-        model_type = AutoConfig.from_pretrained(
-            ckpt_path, trust_remote_code=trust_remote_code, **hub_options
-        ).model_type
+        # The load uses the config passed for it, if any, so the loading hook follows that one.
+        model_type = getattr(kwargs.get("config"), "model_type", None) or (
+            AutoConfig.from_pretrained(
+                ckpt_path, trust_remote_code=trust_remote_code, **hub_options
+            ).model_type
+        )
     with prepare_model_for_loading(
         model_type,
         ckpt_path,
