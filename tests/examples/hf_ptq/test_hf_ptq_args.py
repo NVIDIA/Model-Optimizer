@@ -352,17 +352,35 @@ def test_composed_kv_autoquant_rejects_enabled_actual_kv_quantizers(monkeypatch)
         hf_ptq.auto_quantize(args, model, [], aq, full_model=model)
 
 
-def test_fsdp2_kv_autoquant_rejected_before_model_load(monkeypatch):
-    hf_ptq = _import_hf_ptq(monkeypatch)
-    monkeypatch.setattr(hf_ptq, "_recipe_is_kv_auto_quantize", lambda _: True)
-    monkeypatch.setattr(
-        hf_ptq.AutoConfig,
-        "from_pretrained",
-        lambda *_args, **_kwargs: pytest.fail("The model config must not be loaded."),
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        "kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+        "nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+    ],
+)
+def test_fsdp2_kv_autoquant_reaches_distributed_model_load(monkeypatch, tmp_path, recipe):
+    get_tiny_qwen3(num_hidden_layers=1).save_pretrained(tmp_path)
+    monkeypatch.setenv("RANK", "0")
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        str(tmp_path),
+        "--use_fsdp2",
+        "--recipe",
+        "general/auto_quantize/" + recipe,
     )
+    args.dist_state = SimpleNamespace(device="cpu", rank=0, world_size=1)
+    args.hub_model_id, args.local_checkpoint_path = None, str(tmp_path)
 
-    with pytest.raises(NotImplementedError, match="KV-cache AutoQuantize does not support"):
-        hf_ptq.load_model(SimpleNamespace(use_fsdp2=True, recipe="autoquant"))
+    def distributed_load(checkpoint, *_args, **_kwargs):
+        assert checkpoint == str(tmp_path)
+        raise RuntimeError("distributed loader reached")
+
+    monkeypatch.setattr(hf_ptq, "parallel_load_and_prepare_fsdp2", distributed_load)
+
+    with pytest.raises(RuntimeError, match="distributed loader reached"):
+        hf_ptq.load_model(args)
 
 
 @pytest.mark.parametrize("has_mtp", [False, True])
