@@ -57,6 +57,27 @@ def test_hessian_of_a_full_gpu_goes_to_an_idle_gpu(need_2_gpus, monkeypatch):
     torch.testing.assert_close(helper.hessian.to("cuda:0"), reference)
 
 
+@pytest.mark.parametrize("blocker", ["idle_gpu_full", "idle_gpu_too_small", "multi_rank"])
+def test_hessian_of_a_full_gpu_falls_back_to_the_cpu(need_2_gpus, monkeypatch, blocker):
+    """With no other GPU that can take it, or on any rank of a multi-rank run, it goes to the CPU."""
+    idle_fraction = 0.9 if blocker == "idle_gpu_full" else 0.1
+
+    def used_fraction(device):
+        return 0.9 if torch.device(device).index in (0, None) else idle_fraction
+
+    monkeypatch.setattr(calib_utils, "get_used_gpu_mem_fraction", used_fraction)
+    if blocker == "idle_gpu_too_small":
+        # 64 x 64 float32 is 16 KiB; leave 1 KiB free.
+        monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device=None: (1024, 2**40))
+    elif blocker == "multi_rank":
+        monkeypatch.setattr(calib_utils.dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(calib_utils.dist, "get_world_size", lambda group=None: 2)
+    linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
+    shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
+    helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
+    assert helper.hessian.device == torch.device("cpu")
+
+
 @pytest.mark.parametrize(
     ("block_size", "dim", "model_weight", "expect_weight_change"),
     [

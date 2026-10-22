@@ -53,19 +53,22 @@ def _gpu_is_full(device) -> bool:
     return get_used_gpu_mem_fraction(device) > _HESSIAN_GPU_MEM_LIMIT
 
 
-def _hessian_offload_device() -> torch.device:
+def _hessian_offload_device(nbytes: int) -> torch.device:
     """Where a Hessian goes when its weight's GPU is full: the emptiest GPU with room, else CPU.
 
     A model sharded over several GPUs leaves the ones not holding the current layer idle, and a
     Hessian there costs a device-to-device copy per update instead of a host copy and a CPU
     rescale of the whole matrix. Only GPUs this process already holds memory on are candidates,
-    and only outside distributed runs, so no other job's or rank's GPU is touched.
+    and only outside distributed runs, so no other job's or rank's GPU is touched. A candidate
+    must also have the Hessian's ``nbytes`` free.
     """
     if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
         gpus = [i for i in range(torch.cuda.device_count()) if torch.cuda.memory_reserved(i)]
-        gpus.sort(key=get_used_gpu_mem_fraction)
-        if gpus and not _gpu_is_full(gpus[0]):
-            return torch.device("cuda", gpus[0])
+        for gpu in sorted(gpus, key=get_used_gpu_mem_fraction):
+            if _gpu_is_full(gpu):
+                break
+            if torch.cuda.mem_get_info(gpu)[0] > nbytes:
+                return torch.device("cuda", gpu)
     return torch.device("cpu")
 
 
@@ -181,7 +184,7 @@ class GPTQHelper:
         if device.type == "meta":
             device = torch.device("cpu")
         elif offload_to_cpu and device.type == "cuda" and _gpu_is_full(device):
-            device = _hessian_offload_device()
+            device = _hessian_offload_device(4 * in_features**2)
         self.hessian = torch.zeros(in_features, in_features, dtype=torch.float32, device=device)
         self.n_samples = 0
         # Set by update_weights(); listed here for documentation.

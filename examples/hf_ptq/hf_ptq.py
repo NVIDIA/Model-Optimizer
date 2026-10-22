@@ -117,6 +117,12 @@ RAND_SEED = 1234
 # Tokens per calibration batch when layerwise calibration picks the batch size (16 x 512).
 LAYERWISE_CALIB_TOKENS = 8192
 
+
+def _layerwise_calib_batch_size(calib_seq: int, num_samples: int) -> int:
+    """Default layerwise batch size: LAYERWISE_CALIB_TOKENS tokens, but 1 to all of the samples."""
+    return max(1, min(LAYERWISE_CALIB_TOKENS // calib_seq, num_samples))
+
+
 mto.enable_huggingface_checkpointing()
 
 
@@ -995,9 +1001,7 @@ def quantize_main(
         # then only holds one layer's activations, so size it by tokens: batch 1 makes an MoE
         # layer run its per-expert loop once per sample.
         elif is_layerwise:
-            args.batch_size = max(
-                1, min(LAYERWISE_CALIB_TOKENS // args.calib_seq, sum(args.calib_size))
-            )
+            args.batch_size = _layerwise_calib_batch_size(args.calib_seq, sum(args.calib_size))
             print(
                 f"Layerwise calibration enabled. Using default batch_size={args.batch_size} "
                 f"({LAYERWISE_CALIB_TOKENS} tokens per batch) for calibration."

@@ -67,6 +67,16 @@ def _parse_hf_ptq_args(monkeypatch, *args):
     return hf_ptq, parsed_args
 
 
+@pytest.mark.parametrize(
+    ("calib_seq", "num_samples", "expected"),
+    [(512, 512, 16), (512, 4, 4), (16384, 512, 1)],
+    ids=["token_budget", "sample_cap", "long_sequence"],
+)
+def test_layerwise_default_batch_size(monkeypatch, calib_seq, num_samples, expected):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    assert hf_ptq._layerwise_calib_batch_size(calib_seq, num_samples) == expected
+
+
 def test_recipe_help_distinguishes_weight_and_kv_autoquant(monkeypatch, capsys):
     hf_ptq = _import_hf_ptq(monkeypatch)
     monkeypatch.setattr(sys, "argv", ["hf_ptq.py", "--help"])
