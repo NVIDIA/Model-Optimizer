@@ -27,6 +27,7 @@ import warnings
 
 import torch
 import torch.distributed as dist
+from torch.distributed.nn.functional import all_to_all_single as autograd_all_to_all_single
 
 # ---------------------------------------------------------------------------------------------------
 # DP=EP all-to-all expert transport (`torch_a2a`)
@@ -85,15 +86,11 @@ def _a2a_moe_torch(
             # reverse all-to-all). It is deprecated in torch>=2.13 in favor of
             # torch.distributed._functional_collectives.all_to_all_single (AsyncCollectiveTensor); migrating
             # is a follow-up -- suppress the per-call FutureWarning here to keep score-estimation logs clean.
-            import warnings
-
-            from torch.distributed.nn.functional import all_to_all_single as _ata_autograd
-
             with warnings.catch_warnings():
                 warnings.filterwarnings(
                     "ignore", category=FutureWarning, message=".*all_to_all_single.*"
                 )
-                return _ata_autograd(output, input_, out_split, in_split, group=group)
+                return autograd_all_to_all_single(output, input_, out_split, in_split, group=group)
         dist.all_to_all_single(output, input_, out_split, in_split, group=group)
         return output
 
