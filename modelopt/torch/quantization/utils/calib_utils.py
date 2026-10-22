@@ -166,18 +166,21 @@ class GPTQHelper:
         importance_weighted=False,
         weight_quantizer=None,
         weight=None,
+        log_mse=True,
     ):
         """Initialize GPTQHelper with module state and Hessian storage.
 
         ``weight_quantizer`` and ``weight`` select one of several weights a module holds, such as
         one expert's slice of an HF fused-MoE parameter; by default the helper owns
-        ``module.weight`` and ``module.weight_quantizer``.
+        ``module.weight`` and ``module.weight_quantizer``. ``log_mse=False`` skips the logged
+        Hessian-weighted error, which costs two weight-by-Hessian matmuls.
         """
         self.module = module
         self.name = name
         self.fused = fused
         self.importance_weighted = importance_weighted
         self._weight_quantizer = weight_quantizer
+        self.log_mse = log_mse
         weight = module.weight if weight is None else weight
         in_features = weight.shape[-1]
         device = weight.device
@@ -262,7 +265,8 @@ class GPTQHelper:
         self.weight = weight.data.float().clone()
         self._prepare_hessian_inverse(hessian, perc_damp)
         self._blockwise_update(block_size)
-        self._print_mse_error(hessian, weight)
+        if self.log_mse:
+            self._print_mse_error(hessian, weight)
         weight.data.copy_(self.weight.reshape(weight.shape))
 
     # ------------------------------------------------------------------

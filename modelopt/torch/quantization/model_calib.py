@@ -2385,7 +2385,7 @@ def gptq(
             "exhaust it. Enable layerwise calibration to hold one layer's Hessians at a time."
         )
 
-    def _make_gptq_handle(name, m, weight_quantizer=None, weight=None):
+    def _make_gptq_handle(name, m, weight_quantizer=None, weight=None, log_mse=True):
         quantizer = m.weight_quantizer if weight_quantizer is None else weight_quantizer
         backend = getattr(quantizer, "backend", None)
         if backend is None:
@@ -2400,6 +2400,7 @@ def gptq(
             importance_weighted=importance_weighted,
             weight_quantizer=weight_quantizer,
             weight=weight,
+            log_mse=log_mse,
         )
 
     gptq_handles = {name: _make_gptq_handle(name, m) for name, m in quantized_layers}
@@ -2426,8 +2427,11 @@ def gptq(
             for weight_name, weight, quantizers, input_quantizer in _fused_expert_projections(
                 module
             ):
+                # An expert's logged error would cost two full matmuls; gptq() logs a summary.
                 per_expert = {
-                    idx: _make_gptq_handle(f"{name}.{weight_name}.{idx}", module, q, weight[idx])
+                    idx: _make_gptq_handle(
+                        f"{name}.{weight_name}.{idx}", module, q, weight[idx], log_mse=False
+                    )
                     for idx, q in enumerate(quantizers)
                     if q.is_enabled
                 }
@@ -2461,13 +2465,21 @@ def gptq(
         with enable_weight_access_and_writeback(handle.module, model, names):
             handle.update_weights(block_size, perc_damp)
         handle.free()
-    for _, module in fused_experts:
+    for name, module in fused_experts:
+        updated = unreached = 0
         with enable_weight_access_and_writeback(module, model, names):
             for weight, quantizer in module.iter_weights_for_calibration():
                 handle = expert_handles.pop(id(quantizer), None)
                 if handle is not None:
+                    unreached += handle.n_samples == 0
                     handle.update_weights(block_size, perc_damp, weight)
                     handle.free()
+                    updated += 1
+        if updated:
+            print_rank_0(
+                f"[{name}] GPTQ updated {updated} expert weights, {unreached} of them never "
+                "reached by calibration"
+            )
     del gptq_handles, expert_handles
 
     if torch.cuda.is_available():
