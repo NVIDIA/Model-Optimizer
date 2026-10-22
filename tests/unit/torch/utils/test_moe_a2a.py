@@ -32,6 +32,7 @@ import warnings
 import pytest
 import torch
 import torch.distributed as dist
+from packaging.version import Version
 
 import modelopt.torch.utils.moe as moe
 from modelopt.torch.utils.moe import a2a_moe
@@ -142,6 +143,7 @@ def test_a2a_moe_warns_when_a_rank_receives_far_more_than_it_sent(cpu_dist_worke
 
 def _split_qwen3_moe_experts(rank, size):
     """transformers' fused Qwen3-MoE experts, whole and this rank's contiguous share of them."""
+    # transformers is optional: CI's transformers-free unit lane collects this file.
     from transformers import Qwen3MoeConfig
     from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts
 
@@ -183,8 +185,6 @@ def _assert_experts_backward_matches(rank, whole, local, owned, size):
     """``local`` runs this rank's tokens through the torch_a2a forward; ``whole`` runs all tokens on one
     process. The forward, and the gradients of this rank's hidden states and routing weights and of
     this rank's experts, must agree."""
-    from transformers.integrations.moe import grouped_mm_experts_forward
-
     x, weights, index = _routed_tokens(size)
     tok = slice(rank * T, (rank + 1) * T)
 
@@ -201,7 +201,6 @@ def _assert_experts_backward_matches(rank, whole, local, owned, size):
     out_ep = local(x_ep, index[tok], w_ep, dist.group.WORLD)
     out_ep.float().pow(2).sum().backward()
 
-    assert grouped_mm_experts_forward is not None  # the reference took the grouped_mm path
     close = {"atol": 3e-2, "rtol": 3e-2}
     torch.testing.assert_close(out_ep.float(), out_ref[tok].detach().float(), **close)
     torch.testing.assert_close(x_ep.grad.float(), x_ref.grad[tok].float(), **close)
@@ -226,8 +225,6 @@ def test_fused_experts_backward_through_torch_a2a_matches_the_whole_module(cpu_d
     as the whole module does on one process: same output, and same gradients for the hidden states,
     the routing weights and each rank's experts."""
     transformers = pytest.importorskip("transformers")
-    from packaging.version import Version
-
     if Version(transformers.__version__) < Version("5.6"):
         pytest.skip("expert parallelism needs transformers >= 5.6")
     cpu_dist_workers.run(_real_experts_backward_job)
