@@ -34,6 +34,7 @@ from modelopt.onnx.graph_surgery.utils.graph_utils import (
     insert_nodes_at_position,
     parse_qdq_quantized_dtype_list,
     resolve_reshape_shape,
+    save_onnx_model,
 )
 
 
@@ -378,3 +379,52 @@ def test_qdq_dtype_filters_normalize_aliases_and_reject_unknown_types():
     ) == frozenset({TensorProto.INT16, TensorProto.UINT16})
     with pytest.raises(ValueError):
         parse_qdq_quantized_dtype_list(["int16", "unit16"])
+
+
+@pytest.mark.parametrize("dtype", [np.float16, np.float32, np.int8])
+def test_repeated_external_save_keeps_sidecar_bounded(tmp_path, dtype):
+    """Round-trip adjacent payloads, including a Windows text-mode EOF byte."""
+    path = tmp_path / "model.onnx"
+    location = "weights/data.bin" if dtype == np.float32 else "model.onnx_data"
+    values = np.arange(2048, dtype=np.float32).astype(dtype)
+    for offset in [0, 1]:
+        first, second = values + offset, np.full_like(values, 39 + offset)
+        first.view(np.uint8)[-1] = 0x1A
+        model = helper.make_model(
+            helper.make_graph(
+                [],
+                "weights",
+                [],
+                [
+                    helper.make_tensor_value_info(
+                        name, helper.np_dtype_to_tensor_dtype(np.dtype(dtype)), [2048]
+                    )
+                    for name in ("w", "other")
+                ],
+                [numpy_helper.from_array(first, "w"), numpy_helper.from_array(second, "other")],
+            )
+        )
+        save_onnx_model(model, str(path), external_data_name=location, verbose=False)
+        assert (tmp_path / location).stat().st_size == 2 * values.nbytes
+        saved = onnx.load(path)
+        onnx.checker.check_model(saved)
+        for tensor, expected in zip(saved.graph.initializer, (first, second), strict=True):
+            assert numpy_helper.to_array(tensor).tobytes() == expected.tobytes()
+
+
+@pytest.mark.parametrize("location", ["../weights.bin", "absolute", "model.onnx", ""])
+def test_invalid_external_location_preserves_model_and_existing_output(tmp_path, location):
+    model = helper.make_model(
+        helper.make_graph(
+            [], "save", [], [], [numpy_helper.from_array(np.ones(2048, np.float32), "w")]
+        )
+    )
+    before = model.SerializeToString()
+    path = tmp_path / "model.onnx"
+    path.write_bytes(b"unchanged")
+    if location == "absolute":
+        location = str(tmp_path / "weights.bin")
+    with pytest.raises(ValueError):
+        save_onnx_model(model, str(path), external_data_name=location, verbose=False)
+    assert model.SerializeToString() == before
+    assert path.read_bytes() == b"unchanged"

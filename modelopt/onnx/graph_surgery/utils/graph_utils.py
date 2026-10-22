@@ -18,8 +18,10 @@
 import gc
 import math
 import os
+import tempfile
 from collections import defaultdict, deque
 from collections.abc import Iterable
+from pathlib import Path
 
 import numpy as np
 import onnx
@@ -61,6 +63,7 @@ __all__ = [
     "parse_qdq_quantized_dtype_list",
     "remove_node",
     "resolve_reshape_shape",
+    "save_onnx_model",
     "set_node_attr_i",
     "topological_sort_nodes",
     "uses_external_data",
@@ -88,6 +91,82 @@ def uses_external_data(model_path: str) -> bool:
     ]
 
     return any(os.path.exists(os.path.join(model_dir, pattern)) for pattern in external_patterns)
+
+
+def save_onnx_model(
+    model: onnx.ModelProto,
+    output_path: str,
+    *,
+    use_external_data: bool = True,
+    external_data_name: str | None = None,
+    size_threshold: int = 1024,
+    verbose: bool = True,
+) -> None:
+    """Save a loaded ONNX model, optionally storing large weights in a sidecar.
+
+    Args:
+        model: Loaded model; externalizing weights updates its tensor storage metadata.
+        output_path: Destination ONNX file.
+        use_external_data: Store large tensor payloads in an external file.
+        external_data_name: Relative sidecar path; defaults to the ONNX filename plus ``_data``.
+        size_threshold: Minimum tensor size in bytes to externalize.
+        verbose: Log the destination.
+    """
+    if verbose:
+        logger.info("Saving modified model to: %s", output_path)
+    output_dir = os.path.dirname(output_path)
+    location = Path(external_data_name or os.path.basename(output_path) + "_data")
+    if use_external_data:
+        if (
+            external_data_name == ""
+            or location.anchor
+            or not location.name
+            or ".." in location.parts
+            or location == Path(Path(output_path).name)
+        ):
+            raise ValueError(
+                "External data must have a distinct relative path inside the output directory"
+            )
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    if not use_external_data:
+        onnx.save(model, output_path)
+        return
+    with tempfile.TemporaryDirectory(dir=output_dir or ".") as temporary:
+        staged_model = Path(temporary) / Path(output_path).name
+        staged_weights = Path(temporary) / location
+        staged_weights.parent.mkdir(parents=True, exist_ok=True)
+        _save_external_weights(
+            model, staged_model, staged_weights, location.as_posix(), size_threshold
+        )
+        if staged_weights.exists():
+            destination = Path(output_dir or ".") / location
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged_weights, destination)
+        os.replace(staged_model, output_path)
+
+
+# TODO: Once ONNX >= 1.22.0 is required, use its external writer instead (onnx/onnx#7790).
+def _save_external_weights(model, model_path, weights_path, location, size_threshold):
+    onnx.external_data_helper.convert_model_to_external_data(
+        model, location=location, size_threshold=size_threshold
+    )
+    tensors = [
+        tensor
+        for tensor in onnx.external_data_helper._get_all_tensors(model)
+        if onnx.external_data_helper.uses_external_data(tensor) and tensor.HasField("raw_data")
+    ]
+    if tensors:
+        # ONNX 1.21 reopens sidecars in Windows text mode, truncating trailing 0x1A.
+        with weights_path.open("wb") as stream:
+            for tensor in tensors:
+                data, offset = tensor.raw_data, stream.tell()
+                stream.write(data)
+                onnx.external_data_helper.set_external_data(
+                    tensor, location, offset=offset, length=len(data)
+                )
+                tensor.ClearField("raw_data")
+    onnx.save(model, model_path)
 
 
 def topological_sort_nodes(graph: onnx.GraphProto) -> list[onnx.NodeProto]:
