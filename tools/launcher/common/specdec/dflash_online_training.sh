@@ -38,6 +38,25 @@
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source ${SCRIPT_DIR}/../service_utils.sh
 
+OUTPUT_DIR=$(python3 -c "
+import sys
+for arg in sys.argv[1:]:
+    if arg.startswith('training.output_dir='):
+        print(arg.split('=', 1)[1])
+        break
+" "$@")
+# A verdict left in a reused output_dir by an earlier run must never be read as this run's,
+# so remove it before anything below can stop the script.
+if [ "${SLURM_PROCID:-0}" = "0" ] && [ -n "$OUTPUT_DIR" ]; then
+    rm -f "${OUTPUT_DIR}/regression_check.json"
+fi
+
+# Checked before any work: a typo such as "true" must not cost a full training run.
+case "${REGRESSION_STRICT:-0}" in
+    0|1) ;;
+    *) echo "ERROR: REGRESSION_STRICT must be 0 or 1, got '${REGRESSION_STRICT}'" >&2; exit 1 ;;
+esac
+
 pip install -r modules/Model-Optimizer/examples/speculative_decoding/requirements.txt
 pip install huggingface-hub>=1.2.1
 export PATH=$PATH:/workspace/.local/bin
@@ -115,18 +134,6 @@ if [ -n "${ACCELERATE_CONFIG:-}" ] && [ -f "${ACCELERATE_CONFIG}" ]; then
     echo "Using accelerate config: ${ACCELERATE_CONFIG}"
 fi
 
-OUTPUT_DIR=$(python3 -c "
-import sys
-for arg in sys.argv[1:]:
-    if arg.startswith('training.output_dir='):
-        print(arg.split('=', 1)[1])
-        break
-" "$@")
-# A verdict left in a reused output_dir by an earlier run must never be read as this run's.
-if [ "${SLURM_PROCID:-0}" = "0" ] && [ -n "$OUTPUT_DIR" ]; then
-    rm -f "${OUTPUT_DIR}/regression_check.json"
-fi
-
 set -x
 start_time=$(date +%s)
 # The ERR trap only records a failure and lets the script go on, so test the status here:
@@ -182,11 +189,10 @@ elif [ "${SLURM_PROCID:-0}" = "0" ]; then
     # REGRESSION_STRICT=1, which fails the task (via the ERR trap) so Slurm reports it.
     if [ -n "$OUTPUT_DIR" ]; then
         REGRESSION_ARGS=("${OUTPUT_DIR}" --json "${OUTPUT_DIR}/regression_check.json")
-        case "${REGRESSION_STRICT:-0}" in
-            1) python3 common/check_regression.py "${REGRESSION_ARGS[@]}" ;;
-            0) python3 common/check_regression.py "${REGRESSION_ARGS[@]}" || true ;;
-            # Fail rather than silently run warn-only on a typo such as "true".
-            *) echo "ERROR: REGRESSION_STRICT must be 0 or 1, got '${REGRESSION_STRICT}'" >&2; false ;;
-        esac
+        if [ "${REGRESSION_STRICT:-0}" = 1 ]; then
+            python3 common/check_regression.py "${REGRESSION_ARGS[@]}"
+        else
+            python3 common/check_regression.py "${REGRESSION_ARGS[@]}" || true
+        fi
     fi
 fi
