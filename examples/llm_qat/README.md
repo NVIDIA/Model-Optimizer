@@ -27,10 +27,14 @@ Please refer to [hf_ptq/README.md](../hf_ptq/README.md#pre-requisites) for conta
 recommendations and base ModelOpt installation guidance. For this QAT/QAD example,
 install the Hugging Face dependencies and the example-specific requirements:
 
+<!-- modelopt-snippet: llm-qat-install -->
 ```bash
 pip install -U nvidia-modelopt[hf]
-pip install -r examples/llm_qat/requirements.txt
+pip install --no-build-isolation -r examples/llm_qat/requirements.txt
 ```
+
+`--no-build-isolation` lets FlashAttention build against the PyTorch installed by
+the first command.
 
 The Qwen3-8B example below requires a minimum of **2 x 80GB GPUs**.
 
@@ -45,6 +49,8 @@ All arguments can be set via YAML, CLI, or both (CLI overrides YAML). See
 
 Recipes are declarative YAML files that specify the quantization configuration. Built-in recipes are available in [`modelopt_recipes/`](../../modelopt_recipes/):
 
+<!-- modelopt-snippet: llm-qat-recipes -->
+
 ```sh
 # From the Model-Optimizer repository root, list available built-in recipes
 ls modelopt_recipes/general/ptq/
@@ -54,9 +60,13 @@ See [custom calibration](https://nvidia.github.io/Model-Optimizer/guides/_pytorc
 
 ### QAT
 
-Quantize, fine-tune on labeled data, and export:
+Quantize, fine-tune on labeled data, and export. Start from the repository root:
+
+<!-- modelopt-snippet: llm-qat-quickstart -->
 
 ```sh
+cd examples/llm_qat
+
 # 1. Quantize
 python quantize.py \
   --model_name_or_path Qwen/Qwen3-8B \
@@ -78,6 +88,7 @@ python export.py --pyt_ckpt_path qwen3-8b-qat-nvfp4 --export_path qwen3-8b-qat-d
 
 Quantize, recover accuracy using the original model as teacher, and export:
 
+<!-- modelopt-snippet: llm-qad-quickstart -->
 ```sh
 # 1. Quantize
 python quantize.py \
@@ -102,9 +113,11 @@ Exported checkpoints can be deployed on [TensorRT-LLM](https://github.com/NVIDIA
 > [!NOTE]
 > For a minimal end-to-end demo (quantize + train + save in one script), see [simple_qat_train.py](simple_qat_train.py). It runs on a **single GPU** only and is intended as a quick introduction to the QAT flow (without transformer trainer)—not for distributed training.
 >
+> <!-- modelopt-snippet: llm-qat-simple -->
 > ```sh
 > python simple_qat_train.py --model-path meta-llama/Llama-3.2-3B --recipe general/ptq/nvfp4_default-kv_fp8
 > ```
+>
 >
 > For multi-GPU training (FSDP2, DDP, DeepSpeed), use [train.py](train.py) with `accelerate launch` as shown in the [commands](#qat) above.
 
@@ -154,6 +167,7 @@ Replace `--config-file configs/accelerate/fsdp2.yaml` with the desired backend c
 
 [QLoRA](https://arxiv.org/pdf/2305.14314) reduces training memory by quantizing LoRA backbone weights with real quantization via `mtq.compress()`.
 
+<!-- modelopt-snippet: llm-qlora-quickstart -->
 ```sh
 # 1. Quantize with compression
 python quantize.py \
@@ -174,9 +188,15 @@ python export.py \
   --pyt_ckpt_path qwen3-8b-fp4-qlora \
   --export_path qwen3-8b-fp4-qlora-hf
 
+```
+
+Serve the exported adapter with vLLM:
+
+<!-- modelopt-snippet: llm-qlora-serve -->
+```sh
 # 4. Serve with vLLM
 vllm serve qwen3-8b-fp4-qlora-hf/base_model --enable-lora \
-  --lora-modules adapter=qwen3-8b-fp4-qlora-hf --port 8000 \
+  --lora-modules adapter=qwen3-8b-fp4-qlora-hf --port "${PORT:-8000}" \
   --tokenizer qwen3-8b-fp4-qlora-hf
 ```
 
@@ -186,6 +206,7 @@ vllm serve qwen3-8b-fp4-qlora-hf/base_model --enable-lora \
 
 ### Quantize and Fine-Tune with Python
 
+<!-- modelopt-snippet: llm-qat-python -->
 ```python
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
@@ -205,6 +226,7 @@ trainer.save_model()
 
 `QATTrainer` is a drop-in replacement for HuggingFace's `Trainer` that handles quantization-aware training seamlessly with various distributed backends (FSDP2, DeepSpeed, DDP):
 
+<!-- modelopt-snippet: llm-qat-trainer -->
 ```python
 from modelopt.torch.quantization.plugins.transformers_trainer import QATTrainer
 
@@ -218,15 +240,19 @@ trainer.train()
 trainer.save_model()
 ```
 
-`QADTrainer` extends `QATTrainer` with distillation. Pass the teacher model and a `DistillArguments` instance:
+`QADTrainer` extends `QATTrainer` with distillation. Load the teacher first and pass a `DistillArgsWithTeacherModel` instance:
 
+<!-- modelopt-snippet: llm-qad-trainer -->
 ```python
-from modelopt.torch.distill.plugins.huggingface import DistillArguments
+from transformers import AutoModelForCausalLM
+
+from modelopt.torch.distill.plugins.huggingface import DistillArgsWithTeacherModel
 from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer
 
-distill_args = DistillArguments(
+teacher = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B", dtype=model.dtype)
+distill_args = DistillArgsWithTeacherModel(
     distill=True,
-    teacher_model="Qwen/Qwen3-8B",
+    teacher_model=teacher,
     criterion="logits_loss",
 )
 
@@ -250,14 +276,17 @@ You can either:
 
 1. **Override via CLI** (recommended for one-off runs):
 
+   <!-- modelopt-snippet: llm-qat-llama-wrap -->
    ```sh
    accelerate launch --config-file configs/accelerate/fsdp2.yaml \
      --fsdp_transformer_layer_cls_to_wrap LlamaDecoderLayer \
-     train.py --config configs/train/qat_nvfp4.yaml ...
+     train.py --config configs/train/qat_nvfp4.yaml \
+     --model_name_or_path llama-quantized --output_dir llama-qat
    ```
 
 2. **Create a custom config** (recommended for repeated use):
 
+   <!-- modelopt-snippet: llm-qat-copy-config -->
    ```sh
    cp configs/accelerate/fsdp2.yaml configs/accelerate/fsdp2_llama.yaml
    # Edit fsdp2_llama.yaml: change Qwen3DecoderLayer -> LlamaDecoderLayer
@@ -282,10 +311,12 @@ There are two types of configs:
 
 `quantize.py` only needs `--dataset_config` and `--recipe`. `train.py` uses a full training config via `--config`. All arguments can be specified via YAML, CLI flags, or both (CLI overrides YAML). See [ARGUMENTS.md](ARGUMENTS.md) for the full reference, regenerated with `python_pwd examples/llm_qat/arguments.py --generate_docs examples/llm_qat/ARGUMENTS.md`.
 
+<!-- modelopt-snippet: llm-qat-cli-override -->
 ```sh
 # YAML + CLI override
 accelerate launch --config-file configs/accelerate/fsdp2.yaml train.py \
-  --config configs/train/qat_nvfp4.yaml --learning_rate 5e-5
+  --config configs/train/qat_nvfp4.yaml --learning_rate 5e-5 \
+  --model_name_or_path qwen3-8b-quantized --output_dir qwen3-8b-qat-override
 ```
 
 See [Dataset Configuration](configs/dataset/README.md) for custom dataset blends and adding new datasets.
@@ -297,6 +328,7 @@ See [Dataset Configuration](configs/dataset/README.md) for custom dataset blends
 
 You can pre-tokenize and cache the dataset before training using `dataset_utils.py`. This is useful for large blends or multi-node setups where you want to build the cache once and reuse it across experiments.
 
+<!-- modelopt-snippet: llm-qat-dataset -->
 ```sh
 python dataset_utils.py \
   --dataset_config configs/dataset/blend.yaml \
@@ -315,13 +347,14 @@ See [Qwen3-8B evaluation results](evaluation/README.md) for the teacher, PTQ, an
 
 ModelOpt quantized models can be saved and restored without exporting to a deployment platform. This is useful for fast evaluation with fake quantization using standard LLM benchmarks (MMLU, WikiText, etc.). See [HuggingFace checkpointing](https://nvidia.github.io/Model-Optimizer/guides/2_save_load.html#modelopt-save-restore-using-huggingface-checkpointing-apis) for details.
 
+<!-- modelopt-snippet: llm-qat-evaluation -->
 ```sh
 cd ../llm_eval
 
 python lm_eval_hf.py --model hf \
     --tasks mmlu,wikitext \
     --model_args pretrained=../llm_qat/qwen3-8b-qat-nvfp4 \
-    --batch_size 4
+    --batch_size 4 --output_path "${EVAL_OUTPUT:-eval-results}"
 ```
 
 See [llm_eval/README.md](../llm_eval/README.md) for supported tasks.
