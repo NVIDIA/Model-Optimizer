@@ -41,20 +41,12 @@ from torch.distributed.nn.functional import all_to_all_single as autograd_all_to
 
 
 # all_to_all_single addresses its flattened buffers with int32 element offsets, so a hop larger than
-# this overflows them; _a2a_moe_torch chunks such transfers along the hidden dim.
+# this overflows them; a2a_moe chunks such transfers along the hidden dim.
 _A2A_MAX_HOP_ELEMENTS = 2**31 - 1
 
 
-def _a2a_moe_torch(
-    group,
-    hidden_states,
-    topk_idx,
-    topk_weights,
-    num_global_experts,
-    num_local_experts,
-    expert_fn,
-):
-    """All-to-all MoE expert stage via plain `torch.distributed.all_to_all_single` (NCCL).
+def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, expert_fn):
+    """Route one MoE layer's expert stage by plain `torch.distributed.all_to_all_single` (NCCL).
 
     Works cross-node at any rank count, with explicit token permute/unpermute.
 
@@ -223,27 +215,6 @@ def _a2a_moe_torch(
     return result
 
 
-def a2a_moe(
-    group,
-    hidden_states,
-    topk_idx,
-    topk_weights,
-    num_global_experts,
-    num_local_experts,
-    expert_fn,
-):
-    """Route one MoE layer's expert stage by all-to-all (NCCL)."""
-    return _a2a_moe_torch(
-        group,
-        hidden_states,
-        topk_idx,
-        topk_weights,
-        num_global_experts,
-        num_local_experts,
-        expert_fn,
-    )
-
-
 def torch_a2a_experts_forward(self, hidden_states, top_k_index, top_k_weights, process_group=None):
     """All-to-all expert-parallel forward for PTQ calibration (DP=EP).
 
@@ -263,7 +234,6 @@ def torch_a2a_experts_forward(self, hidden_states, top_k_index, top_k_weights, p
             "TP style, which injects it via _prepare_input_fn)."
         )
     num_local = self.num_experts
-    num_global = num_local * process_group.size()
     # Per-expert biases (e.g. GPT-OSS ``gate_up_proj_bias`` / ``down_proj_bias``, shape [num_local, out],
     # EP-sharded dim-0 by grouped_gemm like the weights). transformers' ``_grouped_linear`` (and ModelOpt's
     # quantized override) already accept ``bias`` and do ``out += bias`` -- transposed-safe. Bias is added
@@ -293,9 +263,7 @@ def torch_a2a_experts_forward(self, hidden_states, top_k_index, top_k_weights, p
             proj, self.down_proj, offsets, bias=b2, is_transposed=self.is_transposed
         )
 
-    return a2a_moe(
-        process_group, hidden_states, top_k_index, top_k_weights, num_global, num_local, expert_fn
-    )
+    return a2a_moe(process_group, hidden_states, top_k_index, top_k_weights, num_local, expert_fn)
 
 
 _TORCH_A2A_REGISTERED = False

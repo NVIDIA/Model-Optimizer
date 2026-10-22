@@ -67,7 +67,7 @@ def _keeps_dtype_job(rank, size, dtype, tol):
         )
 
     with torch.no_grad():
-        out = a2a_moe(group, x, ti, tw, E, E, experts)
+        out = a2a_moe(group, x, ti, tw, E, experts)
     want = sum(
         tw[:, k, None].float() * torch.einsum("th,thj->tj", x.float(), w[ti[:, k]].float())
         for k in range(TOP_K)
@@ -105,11 +105,11 @@ def _chunked_hops_job(rank, size):
     dist.all_to_all_single = recording
     try:
         with torch.no_grad():
-            whole = a2a_moe(dist.group.WORLD, x, ti, tw, E, E // size, _identity_experts)
+            whole = a2a_moe(dist.group.WORLD, x, ti, tw, E // size, _identity_experts)
             whole_hops = hops.copy()
             hops.clear()
             moe._A2A_MAX_HOP_ELEMENTS = limit
-            chunked = a2a_moe(dist.group.WORLD, x, ti, tw, E, E // size, _identity_experts)
+            chunked = a2a_moe(dist.group.WORLD, x, ti, tw, E // size, _identity_experts)
     finally:
         dist.all_to_all_single = real
         moe._A2A_MAX_HOP_ELEMENTS = 2**31 - 1
@@ -131,7 +131,7 @@ def _skewed_routing_job(rank, size):
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         with torch.no_grad():
-            a2a_moe(dist.group.WORLD, x, ti, tw, E, E // size, _identity_experts)
+            a2a_moe(dist.group.WORLD, x, ti, tw, E // size, _identity_experts)
     imbalance = [w for w in caught if "imbalance" in str(w.message)]
     assert len(imbalance) == (1 if rank == 0 else 0), [str(w.message) for w in caught]
 
