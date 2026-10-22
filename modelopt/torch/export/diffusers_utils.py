@@ -717,7 +717,7 @@ get_diffusers_components = get_diffusion_components
 
 
 @contextmanager
-def hide_quantizers_from_state_dict(model: nn.Module):
+def hide_quantizers_from_state_dict(model: nn.Module, export_attention_quantizers: bool = False):
     """Context manager that temporarily removes quantizer modules from the model.
 
     This allows save_pretrained to save the model without quantizer buffers like _amax.
@@ -725,6 +725,8 @@ def hide_quantizers_from_state_dict(model: nn.Module):
 
     Args:
         model: The model with quantizers to temporarily hide.
+        export_attention_quantizers: Keep enabled Q/K/V BMM quantizers for runtimes
+            that consume their legacy ``*_bmm_quantizer._amax`` keys.
 
     Yields:
         None - the model can be saved within the context.
@@ -739,8 +741,23 @@ def hide_quantizers_from_state_dict(model: nn.Module):
     # first since we mutate the module tree while iterating.
     for name, module in list(model.named_modules()):
         backup = {}
-        for attr in ["weight_quantizer", "input_quantizer", "output_quantizer"]:
+        for attr in [
+            "weight_quantizer",
+            "input_quantizer",
+            "output_quantizer",
+            "q_bmm_quantizer",
+            "k_bmm_quantizer",
+            "v_bmm_quantizer",
+            "softmax_quantizer",
+            "bmm2_output_quantizer",
+        ]:
             child = getattr(module, attr, None)
+            if (
+                export_attention_quantizers
+                and attr in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer")
+                and getattr(child, "is_enabled", False)
+            ):
+                continue
             if isinstance(child, nn.Module):
                 backup[attr] = child
                 delattr(module, attr)

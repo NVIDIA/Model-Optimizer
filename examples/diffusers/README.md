@@ -124,6 +124,17 @@ python quantize.py \
     --hf-ckpt-dir ./hf_ckpt
 ```
 
+HF exports omit attention quantizer state by default, including when calibration uses
+`--quantize-mha`, except for FLUX.1. Qwen-Image's TRT-LLM loader requires this clean
+checkpoint. FLUX.1 retains enabled Q/K/V `_amax` keys by default for compatibility with
+the static FP8 attention path in [TensorRT-LLM PR #18396](https://github.com/NVIDIA/TensorRT-LLM/pull/18396).
+Use `--extra-param export_attention_quantizers=true` to retain enabled Q/K/V quantizers
+explicitly, or `export_attention_quantizers=false` to omit them, including for FLUX.1.
+Disabled quantizers are always omitted. The equivalent Python option is
+`export_hf_checkpoint(pipe, export_dir="./hf_ckpt", export_attention_quantizers=True)`.
+Diffusion attention quantization, including native LTX-2 components, is not exported
+as KV-cache quantization. Transformers components retain their KV-cache metadata.
+
 #### Wan 2.2 VAE NVFP4 (Conv3D Implicit GEMM)
 
 The Wan 2.2 VAE (`AutoencoderKLWan`, shared between the 5B and 14B pipelines) is built from 3D convolutions. When quantizing the VAE with NVFP4, the `Conv3d` layers are automatically dispatched through a custom BF16 WMMA implicit-GEMM kernel with fused FP4 activation quantization. Requires SM80+ (Ampere or newer). See [`modelopt/torch/kernels/quantization/conv/README.md`](../../modelopt/torch/kernels/quantization/conv/README.md) for kernel details.

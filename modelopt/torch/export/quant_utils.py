@@ -1760,6 +1760,8 @@ def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
 def get_quant_config(
     model: nn.Module,
     is_modelopt_qlora: bool = False,
+    *,
+    include_kv_cache: bool = True,
 ) -> dict[str, Any]:
     """Generate quantization config for a model.
 
@@ -1769,6 +1771,8 @@ def get_quant_config(
     Args:
         model: The PyTorch model to make config for.
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
+        include_kv_cache: Infer KV-cache metadata from attention quantizers. Disable
+            for diffusion models, whose attention quantizers do not represent a cache.
 
     Returns:
         Dictionary containing the quantization configuration
@@ -1885,7 +1889,7 @@ def get_quant_config(
             for quantizer in (k_quantizer, v_quantizer, output_quantizer)
             if is_kv_boundary and quantizer is not None and quantizer.is_enabled
         ]
-        if enabled_kv_quantizers and is_language_model_module:
+        if include_kv_cache and enabled_kv_quantizers and is_language_model_module:
             module_kv_quant = get_kv_cache_dtype(module)
             if module_kv_quant != QUANTIZATION_NONE:
                 kv_cache_formats.add(module_kv_quant)
