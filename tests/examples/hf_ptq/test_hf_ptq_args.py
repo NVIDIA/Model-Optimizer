@@ -445,6 +445,11 @@ def test_mlflow_is_off_by_default(monkeypatch):
     assert args.mlflow_experiment is None
 
 
+def test_calib_seq_must_be_positive(monkeypatch):
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--calib_seq", "0")
+
+
 def test_mlflow_rejects_a_bad_tracking_uri(monkeypatch):
     with pytest.raises(SystemExit):
         _parse_hf_ptq_args(

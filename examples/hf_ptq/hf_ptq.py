@@ -1433,6 +1433,9 @@ def parse_args() -> argparse.Namespace:
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
 
+    if args.calib_seq <= 0:
+        parser.error("--calib_seq must be positive.")
+
     if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
         parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")
 
