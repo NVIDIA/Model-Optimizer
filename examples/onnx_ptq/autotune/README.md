@@ -2,7 +2,7 @@
 
 This example demonstrates automated Q/DQ (Quantize/Dequantize) node placement optimization for ONNX models using TensorRT performance measurements.
 
-> **Warning:** This example uses the direct Autotune entry point for lower-level Q/DQ placement experiments. If you are starting from an unquantized ONNX model and care about **accuracy**, please use the ONNX PTQ workflow with `--autotune` enabled and with representative calibration data. See [../README#optimize-qdq-node-placement-with-autotune](../README#optimize-qdq-node-placement-with-autotune).
+> **Warning:** This example uses the direct Autotune entry point for lower-level Q/DQ placement experiments. If you are starting from an unquantized ONNX model and care about **accuracy**, please use the ONNX PTQ workflow with `--autotune` enabled and with representative calibration data. See [../README.md#optimize-qdq-node-placement-with-autotune](../README.md#optimize-qdq-node-placement-with-autotune).
 
 ## Table of Contents
 
@@ -265,7 +265,7 @@ All examples above use the command-line interface. For **low-level programmatic 
 
 **See the API Reference documentation for low-level usage:**
 
-- [`docs/source/reference/2_qdq_placement.rst`](../../docs/source/reference/2_qdq_placement.rst)
+- [`modelopt.onnx.quantization.autotune`](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.onnx.quantization.autotune.html)
 
 The API docs include detailed examples of:
 
@@ -278,13 +278,13 @@ The API docs include detailed examples of:
 
 For comprehensive documentation on QDQ placement optimization, see:
 
-- **User Guide**: [`docs/source/guides/9_qdq_placement.rst`](../../docs/source/guides/9_qdq_placement.rst)
+- **User Guide**: [`docs/source/guides/9_autotune.rst`](../../../docs/source/guides/9_autotune.rst)
   - Detailed explanations of how the autotuner works
   - Advanced usage patterns and best practices
   - Configuration options and performance tuning
   - Troubleshooting common issues
 
-- **API Reference**: [`docs/source/reference/2_qdq_placement.rst`](../../docs/source/reference/2_qdq_placement.rst)
+- **API Reference**: [`modelopt.onnx.quantization.autotune`](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.onnx.quantization.autotune.html)
   - Complete API documentation for all classes and functions
   - Low-level usage examples
   - State management and pattern cache details
