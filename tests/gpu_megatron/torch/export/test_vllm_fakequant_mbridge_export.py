@@ -29,6 +29,10 @@ from safetensors.torch import load_file
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
 from modelopt.torch.export import export_mcore_gpt_to_hf_vllm_fq
+from modelopt.torch.export.plugins.vllm_fakequant_hf import (
+    QUANTIZER_RECIPE_FORMAT,
+    QUANTIZER_RECIPE_VERSION,
+)
 from modelopt.torch.export.plugins.vllm_fakequant_megatron import (
     check_mcore_vllm_fakequant_quantizers,
 )
@@ -48,7 +52,9 @@ def _load_export(export_dir: Path):
         weights.update(load_file(shard))
     state = torch.load(export_dir / "quantizer_state.pth", weights_only=True)
     recipe = yaml.safe_load((export_dir / "quant_recipe.yaml").read_text())
-    return weights, state, recipe
+    assert recipe["format"] == QUANTIZER_RECIPE_FORMAT
+    assert recipe["version"] == QUANTIZER_RECIPE_VERSION
+    return weights, state, recipe["quantizers"]
 
 
 QUANT_CFGS = {
@@ -78,13 +84,11 @@ def _test_matches_megatron_exporter(source, quant_cfg_name, tmp_path, rank, size
         return
 
     ref_weights, ref_state, ref_recipe = _load_export(reference_dir)
-    weights, state, recipe = _load_export(export_dir)
+    weights, state, quantizers = _load_export(export_dir)
     assert weights.keys() == ref_weights.keys()
     for name, weight in weights.items():
         torch.testing.assert_close(weight, ref_weights[name], rtol=0, atol=0, msg=name)
 
-    assert recipe["format"] == "modelopt_quantizer_recipe" and recipe["version"] == 1
-    quantizers = recipe["quantizers"]
     enabled = {name for name, entry in ref_recipe.items() if not entry["_disabled"]}
     assert quantizers.keys() == enabled
     assert any(name.endswith("k_bmm_quantizer") for name in quantizers) == quant_cfg_name.endswith(
