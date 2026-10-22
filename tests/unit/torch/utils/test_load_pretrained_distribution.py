@@ -212,6 +212,26 @@ def test_a_load_it_decides_reads_the_config_once(
     assert distribution_plan(model) == DistributionPlan(2, dense="fsdp")
 
 
+def test_a_config_passed_for_the_load_is_the_one_it_decides_from(
+    run_as, loaders, process_group, monkeypatch, tmp_path
+):
+    """No config is read: the plan is decided from the one passed for the load, which the FSDP2
+    load then builds from. Deciding adds to that config, so it works on a copy of it."""
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
+    run_as(2, rank=1)
+    reads: list = []
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *a, **k: reads.append(a))
+    config = LlamaConfig(**{**_TINY, "num_hidden_layers": 2})
+    as_passed = config.to_dict()
+
+    model = load_pretrained(str(tmp_path), config=config)
+
+    assert reads == []
+    assert loaders["fsdp2"]["hf_config"].num_hidden_layers == 2
+    assert config.to_dict() == as_passed
+    assert distribution_plan(model) == DistributionPlan(2, dense="fsdp")
+
+
 def test_an_expert_parallel_plan_is_refused(run_as, serve, loaders, auto_class, tmp_path):
     """No load here shards the routed experts: an EP plan fails before anything loads."""
     run_as(2)
@@ -243,14 +263,20 @@ def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path):
         ({"kwargs": {"device_map": "auto"}}, TypeError, r"\['device_map'\] do not apply"),
         ({"auto_class": AutoModel}, NotImplementedError, "builds its model class itself"),
         ({"mtp": True}, NotImplementedError, "cannot build the MTP head"),
+        (
+            {"kwargs": {"config": LlamaConfig(**_TINY), "hf_config": LlamaConfig(**_TINY)}},
+            TypeError,
+            "config and hf_config both name",
+        ),
     ],
-    ids=["placement", "model_class", "mtp_head"],
+    ids=["placement", "model_class", "mtp_head", "two_configs"],
 )
 def test_a_sharded_load_refuses_what_it_cannot_honor(
     run_as, serve, loaders, process_group, monkeypatch, tmp_path, change, error, match
 ):
-    """Placement, a model class, a head only a whole model builds: none reaches a sharded load,
-    which fails before it starts rather than load something other than what was asked."""
+    """Placement, a model class, a head only a whole model builds, two configs to load with: none
+    reaches a sharded load, which fails before it starts rather than load something other than
+    what was asked."""
     run_as(2)
     serve(LlamaConfig(**_TINY))
     if change.get("mtp"):
