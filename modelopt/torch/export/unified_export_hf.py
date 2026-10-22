@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -1324,11 +1324,15 @@ def _export_diffusers_checkpoint(
             # TODO: Add FFN fusion for AWQ-style quantization (pre_quant_scale is
             # promoted to module keys at export by _promote_quantizer_tensors_to_module below)
             print(f"  Running QKV fusion for {component_name}...")
-            # Qwen-Image's packed-latent forward signature is non-standard; if the
-            # dummy forward fails for it, fail loudly rather than silently skipping
-            # fusion (which would export un-unified amax values).
+            # Qwen-Image and image-conditioned Wan must not skip fusion
+            # when their probe forward fails.
             is_qwen_component = "qwen" in type(component).__name__.lower()
-            _fuse_qkv_linears_diffusion(component, strict=is_qwen_component)
+            is_wan_i2v_component = (
+                HAS_DIFFUSERS
+                and isinstance(component, getattr(diffusers, "WanTransformer3DModel", ()))
+                and getattr(getattr(component, "config", None), "image_dim", None) is not None
+            )
+            _fuse_qkv_linears_diffusion(component, strict=is_qwen_component or is_wan_i2v_component)
 
             # Process quantized modules (convert weights, register scales)
             _process_quantized_modules(component, component_dtype, is_modelopt_qlora=False)
