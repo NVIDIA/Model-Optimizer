@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Export example models with an explicit NVFP4 FP16 compute preparation step."""
+
 import argparse
 import os
 
@@ -20,10 +22,32 @@ import timm
 import torch
 
 from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
+from modelopt.torch._deploy.utils.torch_onnx import (
+    _prepare_nvfp4_fp16_export,
+    is_fp4_quantized,
+    is_fp8_quantized,
+    is_int4_quantized,
+    is_int8_quantized,
+    is_mxfp8_quantized,
+)
 
 
 def export_to_onnx(model, input_shape, onnx_save_path, device, weights_dtype="fp32"):
-    """Export the torch model to ONNX format."""
+    """Export to ONNX; the NVFP4 FP16 route converts compute parameters in place."""
+    if (
+        weights_dtype == "fp16"
+        and is_fp4_quantized(model)
+        and not any(
+            check(model)
+            for check in (
+                is_fp8_quantized,
+                is_int4_quantized,
+                is_int8_quantized,
+                is_mxfp8_quantized,
+            )
+        )
+    ):
+        _prepare_nvfp4_fp16_export(model)
     # Create input tensor with same precision as model's first parameter
     input_dtype = model.parameters().__next__().dtype
     input_tensor = torch.randn(input_shape, dtype=input_dtype).to(device)
@@ -51,7 +75,10 @@ if __name__ == "__main__":
         help="Export any timm model to ONNX (e.g., vit_base_patch16_224, swin_tiny_patch4_window7_224).",
     )
     parser.add_argument(
-        "--onnx_save_path", type=str, required=False, help="Path to save the final ONNX model."
+        "--onnx_save_path",
+        type=str,
+        required=False,
+        help="Path to save the final ONNX model.",
     )
     parser.add_argument(
         "--batch_size",
