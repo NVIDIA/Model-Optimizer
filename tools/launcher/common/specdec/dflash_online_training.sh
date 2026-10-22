@@ -115,22 +115,37 @@ if [ -n "${ACCELERATE_CONFIG:-}" ] && [ -f "${ACCELERATE_CONFIG}" ]; then
     echo "Using accelerate config: ${ACCELERATE_CONFIG}"
 fi
 
-set -x
-start_time=$(date +%s)
-accelerate launch $ACCEL_CONFIG_ARGS --mixed_precision "${MIXED_PRECISION:-bf16}" $MULTI_NODE_ARGS $MAIN_PY "$@"
-echo "Training time: $(( $(date +%s) - start_time )) seconds"
-set +x
-
-# Export last checkpoint to deployment format (rank 0 only, single GPU)
-if [ "${SLURM_PROCID:-0}" = "0" ]; then
-    OUTPUT_DIR=$(python3 -c "
+OUTPUT_DIR=$(python3 -c "
 import sys
 for arg in sys.argv[1:]:
     if arg.startswith('training.output_dir='):
         print(arg.split('=', 1)[1])
         break
 " "$@")
+# A verdict left in a reused output_dir by an earlier run must never be read as this run's.
+if [ "${SLURM_PROCID:-0}" = "0" ] && [ -n "$OUTPUT_DIR" ]; then
+    rm -f "${OUTPUT_DIR}/regression_check.json"
+fi
 
+set -x
+start_time=$(date +%s)
+# The ERR trap only records a failure and lets the script go on, so test the status here:
+# a crashed run must not export or write a regression verdict from whatever checkpoints
+# and trainer_state.json it, or an earlier run, left behind.
+if accelerate launch $ACCEL_CONFIG_ARGS --mixed_precision "${MIXED_PRECISION:-bf16}" $MULTI_NODE_ARGS $MAIN_PY "$@"; then
+    TRAIN_STATUS=0
+else
+    # The if suppresses the ERR trap, so report as it would; $? is still the launch status.
+    error_handler "$0" "$LINENO"
+    TRAIN_STATUS=1
+fi
+echo "Training time: $(( $(date +%s) - start_time )) seconds"
+set +x
+
+if [ "$TRAIN_STATUS" != 0 ]; then
+    echo "ERROR: training failed; skipping export and regression check." >&2
+# Export last checkpoint to deployment format (rank 0 only, single GPU)
+elif [ "${SLURM_PROCID:-0}" = "0" ]; then
     if [ -n "$OUTPUT_DIR" ]; then
         # Export all checkpoints that don't already have an exported version
         EXPORTED=0

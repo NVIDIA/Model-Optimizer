@@ -26,9 +26,10 @@ Environment variables (all optional — no check if unset):
                      passing unevaluated.
     MAX_FINAL_PERPLEXITY: Final perplexity must be below this value
 
-An empty variable counts as unset. Once any threshold is set, a missing or
-unreadable trainer_state.json, or one without training logs, also fails the check,
-and so does a NaN or infinite metric.
+An empty variable counts as unset, and one that isn't a finite number fails the check.
+Once any threshold is set, a missing or unreadable trainer_state.json, or one without
+training logs, also fails the check, and so does a NaN or infinite value for a metric
+that has a threshold.
 
 Usage:
     python check_regression.py /path/to/output_dir [--json verdict.json]
@@ -158,9 +159,27 @@ def check_regression(metrics, thresholds):
     return passed, messages
 
 
+def parse_thresholds(environ):
+    """Returns ({env_var: value}, [error]) for the set threshold variables."""
+    thresholds, errors = {}, []
+    for v in THRESHOLD_VARS:
+        raw = environ.get(v)
+        if not raw:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            value = math.nan
+        if math.isfinite(value):
+            thresholds[v] = value
+        else:
+            errors.append(f"REGRESSION: {v}={raw!r} is not a finite number")
+    return thresholds, errors
+
+
 def evaluate(output_dir):
-    """Run the check on output_dir. Returns the verdict dict that --json writes."""
-    thresholds = {v: float(os.environ[v]) for v in THRESHOLD_VARS if os.environ.get(v)}
+    """Run the check on output_dir. Returns the verdict that --json writes."""
+    thresholds, errors = parse_thresholds(os.environ)
     verdict: dict[str, Any] = {
         "pass": True,
         "failure_class": None,
@@ -169,6 +188,10 @@ def evaluate(output_dir):
         "thresholds": thresholds,
         "messages": [],
     }
+    if errors:
+        # The recipe's thresholds are unusable, so the run cannot be checked against them.
+        verdict.update({"pass": False, "failure_class": "METRICS_MISSING", "messages": errors})
+        return verdict
     if not thresholds:
         return verdict
 
@@ -193,8 +216,7 @@ def evaluate(output_dir):
         return verdict
 
     passed, messages = check_regression(metrics, thresholds)
-    finite = {k: v if math.isfinite(v) else None for k, v in metrics.items()}
-    verdict.update({"pass": passed, "metrics": finite, "messages": messages})
+    verdict.update({"pass": passed, "metrics": metrics, "messages": messages})
     if not passed:
         verdict["failure_class"] = "TRAIN_REGRESSION"
     return verdict
@@ -211,7 +233,7 @@ def main(argv=None):
         return 0
 
     verdict = evaluate(args.output_dir)
-    if verdict["thresholds"]:
+    if verdict["thresholds"] or verdict["messages"]:
         print(f"=== Regression Check ({verdict['trainer_state'] or args.output_dir}) ===")
         if verdict["metrics"]:
             print(f"Final metrics: {verdict['metrics']}")
@@ -220,8 +242,11 @@ def main(argv=None):
         print(f"Regression check {'PASSED' if verdict['pass'] else 'FAILED'}")
 
     if args.json_path:
+        # Strict JSON, serialized before the file is opened so a failure cannot truncate it.
+        metrics = {k: v if math.isfinite(v) else None for k, v in verdict["metrics"].items()}
+        text = json.dumps({**verdict, "metrics": metrics}, indent=2, allow_nan=False)
         with open(args.json_path, "w") as f:
-            json.dump(verdict, f, indent=2, allow_nan=False)
+            f.write(text)
     return 0 if verdict["pass"] else 1
 
 

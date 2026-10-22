@@ -122,3 +122,14 @@ def test_cli_exit_code_and_json_verdict(
     assert verdict["pass"] is (exit_code == 0)
     assert verdict["failure_class"] == failure_class
     assert verdict["thresholds"] == {"MAX_FINAL_LOSS": 5.0}
+
+
+@pytest.mark.parametrize("raw", ["7,0", "nan", "inf"])
+def test_invalid_threshold_writes_failed_verdict(tmp_path, monkeypatch, raw):
+    """A malformed or non-finite threshold fails as a readable verdict, not a traceback."""
+    monkeypatch.setenv("MAX_FINAL_LOSS", raw)
+    verdict_path = tmp_path / "verdict.json"
+    assert check_regression_mod.main([str(tmp_path), "--json", str(verdict_path)]) == 1
+    verdict = json.loads(verdict_path.read_text(), parse_constant=pytest.fail)
+    assert verdict["failure_class"] == "METRICS_MISSING"
+    assert verdict["thresholds"] == {}
