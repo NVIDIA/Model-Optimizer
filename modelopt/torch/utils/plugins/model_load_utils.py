@@ -15,6 +15,7 @@
 
 """HuggingFace model loading: :func:`load_pretrained`, by a plan to distribute the model."""
 
+import copy
 import logging
 import os
 import re
@@ -544,7 +545,8 @@ def load_pretrained(
 
     A sharded load builds the model class and places it itself. Besides its own options it takes
     ``trust_remote_code``, ``attn_implementation`` and ``hf_config`` (the config to load with), and
-    refuses any other keyword rather than ignore it.
+    refuses any other keyword rather than ignore it. A ``config`` passed for the load is the one the
+    plan is decided from, and a sharded load takes it as its ``hf_config``.
 
     Whatever the placement:
 
@@ -590,10 +592,14 @@ def load_pretrained(
     if subfolder:
         ckpt_path = os.path.join(ckpt_path, subfolder)
     trust_remote_code = kwargs.get("trust_remote_code", False)
+    config = kwargs.get("config")
+    config = config if isinstance(config, PretrainedConfig) else None
+    if config is not None and "hf_config" in kwargs:
+        raise TypeError("config and hf_config both name the config to load with; pass one.")
     hf_config = kwargs.get("hf_config")
     if distribution is None:
         plan, hf_config = resolve_distribution_plan(
-            ckpt_path, trust_remote_code=trust_remote_code, **hub_options
+            ckpt_path, config=config, trust_remote_code=trust_remote_code, **hub_options
         )
         if _route(plan) is not None:
             kwargs.setdefault("hf_config", hf_config)
@@ -611,10 +617,13 @@ def load_pretrained(
     else:
         raise TypeError(f"distribution={distribution!r}: expected a DistributionPlan or None.")
     route = _route(plan)
+    if route is not None and config is not None:
+        # The sharded load builds the model from hf_config: the plan's copy of this one, or it.
+        del kwargs["config"]
+        kwargs.setdefault("hf_config", config)
     if model_type is None:
         # The load uses the config passed for it, if any, so the loading hook follows that one.
-        config = hf_config or kwargs.get("config")
-        model_type = getattr(config, "model_type", None) or (
+        model_type = getattr(hf_config or config, "model_type", None) or (
             AutoConfig.from_pretrained(
                 ckpt_path, trust_remote_code=trust_remote_code, **hub_options
             ).model_type
@@ -1244,6 +1253,7 @@ def _decide_distribution(
 def resolve_distribution_plan(
     ckpt_path: str,
     *,
+    config: PretrainedConfig | None = None,
     trust_remote_code: bool = False,
     ep_size: int | str | None = None,
     dense: str | None = None,
@@ -1287,6 +1297,9 @@ def resolve_distribution_plan(
     returns no path, so a caller that loads the checkpoint resolves it first, with
     :func:`ensure_local_checkpoint`, and passes the local directory: the plan is then decided for
     the snapshot the load reads.
+
+    ``config``, the config the load will use when the caller has one, is decided from instead of
+    the checkpoint's, which is then not read: each rank takes a copy, as deciding may add to it.
     """
     # Each rank reads the checkpoint for itself. One that cannot must fail every rank here, rather
     # than leave the others waiting in a broadcast below for a rank that already raised.
@@ -1302,14 +1315,17 @@ def resolve_distribution_plan(
         )
         if subfolder:
             local_path = os.path.join(local_path, subfolder)
-        config = AutoConfig.from_pretrained(
+        if config is not None:
+            read.append((local_path, copy.deepcopy(config)))
+            return True
+        hf_config = AutoConfig.from_pretrained(
             local_path,
             trust_remote_code=trust_remote_code,
             token=token,
             cache_dir=cache_dir,
             local_files_only=local_files_only,
         )
-        read.append((local_path, config))
+        read.append((local_path, hf_config))
         return True
 
     dist.all_reduce("checkpoint read", checkpoint_read, all)
