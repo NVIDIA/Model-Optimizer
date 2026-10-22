@@ -162,9 +162,9 @@ def _ptq_and_export(rank, size, *, src_dir, export_dir, quant_cfg):
         set_distribution_plan(
             model, DistributionPlan(size, dense="fsdp")
         )  # wrapped by hand, so recorded here, as load_pretrained would
-        # The no-gather writer is selected by this predicate plus the opt-in below, so assert it here:
-        # without it the export would silently fall back to the rank-0 gather and the test would pass
-        # while never touching the code under test.
+        # The no-gather writer is chosen by the plan recorded above plus the opt-in below. It writes
+        # each rank's FSDP2 shards, so check that fsdp2_wrap sharded the model: unsharded, the test
+        # would not exercise it.
         assert is_fsdp2_model(model), "fsdp2_wrap did not shard the model"
         assert torch.distributed.is_initialized()
         torch.distributed.barrier()
