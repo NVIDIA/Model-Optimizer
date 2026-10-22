@@ -481,7 +481,8 @@ def load_pretrained(
       own layers (:func:`parallel_load_and_prepare_fsdp2`, whose ``cpu_offload``, ``mp_policy`` and
       ``broadcast_chunk_size`` ``kwargs`` may set). A single process has no group to shard through,
       so the load sets up one of one rank, which
-      :func:`~modelopt.torch.utils.distributed.distributed_run` destroys with the run.
+      :func:`~modelopt.torch.utils.distributed.distributed_run` destroys with the run. It reads the
+      checkpoint's tensors as stored, so it refuses a quantized checkpoint.
     * otherwise ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class`` defaults to
       ``AutoModelForCausalLM``), placed as ``kwargs`` say. Every rank of a distributed run gets the
       whole model, ``device_map`` defaulting to the rank's GPU.
