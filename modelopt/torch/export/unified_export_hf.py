@@ -1324,9 +1324,11 @@ def _export_diffusers_checkpoint(
             # TODO: Add FFN fusion for AWQ-style quantization (pre_quant_scale is
             # promoted to module keys at export by _promote_quantizer_tensors_to_module below)
             print(f"  Running QKV fusion for {component_name}...")
-            # Qwen-Image and image-conditioned Wan must not skip fusion
-            # when their probe forward fails.
+            # Qwen-Image's packed-latent forward signature is non-standard; if the
+            # dummy forward fails for it, fail loudly rather than silently skipping
+            # fusion (which would export un-unified amax values).
             is_qwen_component = "qwen" in type(component).__name__.lower()
+            # Image-conditioned Wan also requires a successful dummy forward for fusion.
             is_wan_i2v_component = (
                 HAS_DIFFUSERS
                 and isinstance(component, getattr(diffusers, "WanTransformer3DModel", ()))
