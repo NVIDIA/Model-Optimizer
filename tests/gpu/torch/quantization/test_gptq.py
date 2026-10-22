@@ -39,13 +39,16 @@ RAND_SEED = 42
 torch.manual_seed(RAND_SEED)
 
 
+def _report_available(monkeypatch, available):
+    """Make each GPU report ``available[gpu]`` bytes for a new allocation, with no forward measured."""
+    monkeypatch.setattr(calib_utils, "_available_bytes", lambda gpu: available[gpu])
+    monkeypatch.setattr(calib_utils, "_calib_forward_peak", {})
+
+
 def test_hessian_of_a_full_gpu_goes_to_an_idle_gpu(need_2_gpus, monkeypatch):
     """A Hessian whose GPU is full lands on an idle GPU rather than the CPU, with the same values."""
-
-    def used_fraction(device):
-        return 0.9 if torch.device(device).index in (0, None) else 0.1
-
-    monkeypatch.setattr(calib_utils, "get_used_gpu_mem_fraction", used_fraction)
+    total = torch.cuda.get_device_properties(0).total_memory
+    _report_available(monkeypatch, {0: total // 10, 1: total * 9 // 10})
     linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
     shard = torch.zeros(1, device="cuda:1")  # the model also lives on cuda:1
     helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
@@ -60,22 +63,57 @@ def test_hessian_of_a_full_gpu_goes_to_an_idle_gpu(need_2_gpus, monkeypatch):
 @pytest.mark.parametrize("blocker", ["idle_gpu_full", "idle_gpu_too_small", "multi_rank"])
 def test_hessian_of_a_full_gpu_falls_back_to_the_cpu(need_2_gpus, monkeypatch, blocker):
     """With no other GPU that can take it, or on any rank of a multi-rank run, it goes to the CPU."""
-    idle_fraction = 0.9 if blocker == "idle_gpu_full" else 0.1
-
-    def used_fraction(device):
-        return 0.9 if torch.device(device).index in (0, None) else idle_fraction
-
-    monkeypatch.setattr(calib_utils, "get_used_gpu_mem_fraction", used_fraction)
-    if blocker == "idle_gpu_too_small":
-        # 64 x 64 float32 is 16 KiB; leave 1 KiB free.
-        monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device=None: (1024, 2**40))
-    elif blocker == "multi_rank":
+    total = torch.cuda.get_device_properties(0).total_memory
+    reserve = int(calib_utils._HESSIAN_UNMEASURED_RESERVE * total)
+    idle = {
+        "idle_gpu_full": reserve // 2,
+        "idle_gpu_too_small": reserve + 64 * 64 * 4 - 1,  # one byte short of reserve + Hessian
+        "multi_rank": total,
+    }[blocker]
+    _report_available(monkeypatch, {0: total // 10, 1: idle})
+    if blocker == "multi_rank":
         monkeypatch.setattr(calib_utils.dist, "is_initialized", lambda: True)
         monkeypatch.setattr(calib_utils.dist, "get_world_size", lambda group=None: 2)
     linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
     shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
     helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
     assert helper.hessian.device == torch.device("cpu")
+
+
+@pytest.mark.parametrize(
+    ("measured_fraction", "stays"),
+    [(None, False), (0.05, True), (0.25, False)],
+    ids=["unmeasured", "small_forward", "large_forward"],
+)
+def test_a_measured_calibration_forward_sets_the_hessian_reserve(
+    monkeypatch, measured_fraction, stays
+):
+    """At 30% available, a GPU keeps a Hessian only once a measured forward leaves it room."""
+    total = torch.cuda.get_device_properties(0).total_memory
+    _report_available(monkeypatch, {0: total * 3 // 10})
+    monkeypatch.setattr(calib_utils, "_process_gpus", lambda: [0])
+    if measured_fraction is not None:
+        calib_utils._calib_forward_peak[0] = int(measured_fraction * total)
+    linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
+    helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
+    assert helper.hessian.device == (torch.device("cuda", 0) if stays else torch.device("cpu"))
+
+
+def test_gptq_records_its_calibration_forward_memory(monkeypatch):
+    """The next layer's Hessian reserve covers what this layer's calibration forward added."""
+    monkeypatch.setattr(calib_utils, "_calib_forward_peak", {})
+    model = torch.nn.Linear(256, 256, device="cuda")
+    inputs = torch.randn(2, 16, 256, device="cuda")
+    mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, forward_loop=lambda m: m(inputs))
+    transient = 64 * 2**20
+
+    def forward_loop(m):
+        scratch = torch.empty(transient, dtype=torch.uint8, device="cuda")
+        m(inputs)
+        del scratch
+
+    gptq(model, forward_loop=forward_loop, perc_damp=0.1, block_size=16)
+    assert calib_utils._calib_forward_peak[torch.cuda.current_device()] >= transient
 
 
 @pytest.mark.parametrize(

@@ -19,6 +19,7 @@ import fnmatch
 import math
 import time
 import warnings
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import Any, TypeAlias
@@ -69,7 +70,12 @@ from .utils import (
     persistent_materialization,
     promote_static_block_weight_quantizers,
 )
-from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, _IMATRIX_ENCODER_REGISTRY, GPTQHelper
+from .utils.calib_utils import (
+    _GPTQ_HELPER_REGISTRY,
+    _IMATRIX_ENCODER_REGISTRY,
+    GPTQHelper,
+    track_calib_forward_memory,
+)
 
 __all__ = [
     "CalibratorFactory",
@@ -2480,14 +2486,21 @@ def gptq(
                         input_quantizer.register_forward_hook(_make_expert_hook(module, per_expert))
                     )
 
+    placement = Counter(
+        str(h.hessian.device) for h in [*gptq_handles.values(), *expert_handles.values()]
+    )
     print_rank_0(
         f"Computing Hessians for {len(gptq_handles)} linear layers and "
-        f"{len(expert_handles)} fused-expert weights ({expert_hessian_bytes / 2**30:.1f} GiB)..."
+        f"{len(expert_handles)} fused-expert weights ({expert_hessian_bytes / 2**30:.1f} GiB, "
+        f"on {', '.join(f'{d} x{n}' for d, n in sorted(placement.items()))})..."
     )
 
     try:
-        with set_quantizer_by_cfg_context(
-            model, [{"quantizer_name": "*weight_quantizer", "enable": False}]
+        with (
+            set_quantizer_by_cfg_context(
+                model, [{"quantizer_name": "*weight_quantizer", "enable": False}]
+            ),
+            track_calib_forward_memory(),
         ):
             forward_loop(model)
     finally:
