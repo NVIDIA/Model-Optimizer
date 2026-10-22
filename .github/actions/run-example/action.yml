@@ -55,6 +55,8 @@ runs:
       run: |
         echo "::warning title=Allowed example failure::'${{ inputs.example }}' failed but is in the allow-failure list (vars.ALLOW_FAILURE_EXAMPLE_TESTS); not blocking. Remove it from the variable once fixed."
     - name: Upload coverage to Codecov
+      # continue-on-error leaves the job green after an allowed failure; do not upload its partial coverage
+      if: ${{ steps.run_tests.outcome == 'success' }}
       uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
       with:
         token: ${{ inputs.codecov-token }}

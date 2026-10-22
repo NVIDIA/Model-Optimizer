@@ -53,9 +53,11 @@ jobs:
       - name: Split the examples of this job
         id: examples
         shell: bash
+        env:
+          EXAMPLES: ${{ inputs.example }}
         run: |
-          read -ra examples <<< "${{ inputs.example }}"
-          (( ${#examples[@]} <= 3 )) || { echo "::error::At most 3 examples can share a job: ${{ inputs.example }}"; exit 1; }
+          read -ra examples <<< "$EXAMPLES"
+          (( ${#examples[@]} >= 1 && ${#examples[@]} <= 3 )) || { echo "::error::A job runs 1 to 3 examples, got: '$EXAMPLES'"; exit 1; }
           for i in 0 1 2; do echo "e$i=${examples[$i]:-}" >> "$GITHUB_OUTPUT"; done
           # Expressions have no replace(), and a cache key is better without spaces
           echo "key=$(IFS=+; echo "${examples[*]}")" >> "$GITHUB_OUTPUT"
