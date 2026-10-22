@@ -1,0 +1,98 @@
+# DSpark streaming SMOKE run (co-located single node) for Gemma-4-E4B-it on AWS-PDX.
+#
+# Purpose: prove the streaming chain end-to-end (vLLM serve -> aux hidden-state
+# capture -> NIXL transfer -> fake-base trainer) for a NEW base model. Only ~20
+# steps on a 1024-row corpus; the numbers are meaningless, the point is that the
+# pipeline runs and the loss is finite and decreasing.
+#
+# Topology: serve TP=1 on GPU 0 (E4B is 16 GB, fits one B300), DSpark trainer on
+# GPUs 4-7. Intra-node NIXL, no cross-node EFA.
+#
+# Gemma-4-E4B specifics verified on PDX 2026-08-12:
+#  * EAGLE_CAPTURE_IDS: vLLM's EagleModelMixin captures POST-layer with the
+#    residual added and indexes as layer_idx+1, so valid ids are 1..42 and 42 is
+#    the TRUE final layer (verified cos=1.0000 against HF hidden_states, with
+#    off-by-one dropping to 0.55-0.98). Gemma 4 repeats 5x sliding + 1x full
+#    attention, so full-attention layers sit at capture ids
+#    [6,12,18,24,30,36,42]; we sample those to land on residual-stream
+#    boundaries instead of spacing uniformly (deep layers are near-redundant:
+#    adjacent cosine ~0.98-0.99 around id 36 vs 0.55-0.70 around id 9).
+#  * NO --trust-remote-code needed (the repo ships no .py) and no vLLM patch:
+#    gemma4 is natively supported in the 2026-08-11 nightly container.
+#  * Corpus has its user-only `messages` column DROPPED — hf_streaming_dataset
+#    prefers `messages` over `conversations` and a user-only one makes streaming
+#    SILENTLY HANG.
+
+job_name: Gemma-4-E4B_DSpark_streaming_smoke
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/gemma-4-E4B-it
+
+  task_0:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dspark_gemma4_e4b.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.use_fake_base_for_offline=true
+      - data.mode=streaming
+      # Gemma 4's stock chat template has NO generation markers, so
+      # answer_only_loss silently yields an all-zero loss_mask and EVERY row is
+      # rejected ("no fetchable sample found in the entire corpus"). This copy
+      # adds them; see the template file header for details.
+      - data.chat_template=examples/google/gemma-4-E4B-it/chat_template_train.jinja
+      - data.data_path=/smokedata
+      - training.output_dir=/scratchspace/dspark_smoke
+      - training.training_seq_len=2048
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=500000
+      - training.num_train_epochs=1
+      - training.max_steps=20
+      - training.logging_steps=1
+      - training.save_steps=20
+      - training.per_device_train_batch_size=1
+      - training.answer_only_loss=true
+      - training.report_to=none
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      # MUST be exactly num_draft_layers + 1 entries (5 draft layers -> 6 ids):
+      # the projector is sized from the DRAFT's num_hidden_layers, so 7 ids gave
+      # "mat1 and mat2 shapes cannot be multiplied (2048x15360 and 12800x2560)".
+      # Confirmed against the working runs: K2.6 6 layers -> 7 ids, gpt-oss 5 -> 6.
+      # Chosen from the full-attention layers of the 5:1 sliding/full cycle
+      # ([6,12,18,24,30,36,42]), dropping 30 to keep both ends and the true final 42.
+      - EAGLE_CAPTURE_IDS: "[6,12,18,24,36,42]"
+      - SERVE_GPU: "0"
+      - SERVE_TP: "1"
+      - SERVE_GPU_MEM_UTIL: "0.85"
+      - STREAMING_NUM_WORKERS: "1"
+      - SERVE_MAX_MODEL_LEN: "2176"
+      - SERVE_MAX_NUM_SEQS: "4"
+      - SERVE_READY_TIMEOUT: "2400"
+      - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
+      # NIXL hidden-state transport. Without these, NIXL falls back to the UCX
+      # backend, which reports "8 NVIDIA GPU(s) were detected, but UCX CUDA
+      # support was not found" and then dies with NIXL_ERR_REMOTE_DISCONNECT the
+      # moment the trainer tries to pull hidden states. LIBFABRIC+efa is what the
+      # working Kimi-K2.6 streaming runs use.
+      - NIXL_BACKENDS: LIBFABRIC
+      - FI_PROVIDER: efa
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      # The 2026-08-11 nem35 image has NO libfabric and no NIXL plugins, so
+      # NIXL_BACKENDS=LIBFABRIC dies with NIXL_ERR_NOT_FOUND and the UCX fallback
+      # dies with NIXL_ERR_REMOTE_DISCONNECT ("UCX CUDA support was not found").
+      # The auxfix image carries the AWS libfabric stack and is what the working
+      # Kimi-K2.6 streaming runs use. Its vLLM is older (transformers 5.12.1) --
+      # gemma4 support must be re-verified in THIS image.
+      container: /home/haoguo/lustre/containers/vllm-nightly-efa-x86_64-auxfix.sqsh
+      container_mounts:
+        - /home/haoguo/lustre/hf-local:/hf-local
+        - /home/haoguo/lustre/g4_smoke_corpus:/smokedata
