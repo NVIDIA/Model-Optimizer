@@ -278,7 +278,7 @@ The API docs include detailed examples of:
 
 For comprehensive documentation on QDQ placement optimization, see:
 
-- **User Guide**: [`docs/source/guides/9_autotune.rst`](../../../docs/source/guides/9_autotune.rst)
+- **User Guide**: [`9_autotune`](https://nvidia.github.io/Model-Optimizer/guides/9_autotune.html)
   - Detailed explanations of how the autotuner works
   - Advanced usage patterns and best practices
   - Configuration options and performance tuning
