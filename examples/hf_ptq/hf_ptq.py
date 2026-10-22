@@ -26,6 +26,7 @@ import torch
 from accelerate.hooks import remove_hook_from_module
 from autoquant_utils import (
     _FSDP2_KV_AUTOQUANT_ERROR,
+    _get_autoquant_memory_probe,
     _quantize_config_explicitly_enables_kv,
     _recipe_is_auto_quantize,
     _recipe_is_kv_auto_quantize,
@@ -1022,7 +1023,11 @@ def quantize_main(
                 max_sample_length=args.calib_seq,
                 sample_memory_usage_ratio=sample_memory_usage_ratio if not run_auto_quant else 1.0,
                 sample_input_single_batch=sample_input_single_batch,
-                enable_grad=run_auto_quant,
+                enable_grad=(
+                    aq_config is not None
+                    and aq_config.auto_quantize_method in ("gradient", "aumann_shapley")
+                ),
+                forward_step=(_get_autoquant_memory_probe(recipe) if run_auto_quant else None),
             )
             args.batch_size = min(args.batch_size, sum(args.calib_size))
 
