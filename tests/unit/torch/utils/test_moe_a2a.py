@@ -84,32 +84,36 @@ def test_a2a_moe_keeps_the_dtype_it_is_given(cpu_dist_workers, dtype, tol):
 
 
 def _chunked_hops_job(rank, size):
-    """Shrinking the per-hop element limit splits every 2-D hop along the hidden dim -- the guard
-    against int32 offset overflow, at a size a unit test can afford -- without changing the result."""
+    """Shrinking the per-hop element limit splits every 2-D hop along the hidden dim into slices
+    within it -- the guard against int32 offset overflow, at a size a unit test can afford --
+    without changing the result."""
     gen = torch.Generator().manual_seed(rank)
     x = torch.randn(T, H, generator=gen)
-    ti = torch.randint(0, E, (T, TOP_K), generator=gen)
+    # Every rank sends and receives T * TOP_K = 12 rows. A limit of 34 holds 2 of their H = 8
+    # columns; splitting H evenly into ceil(12 * 8 / 34) = 3 slices would make them 3 wide (36).
+    ti = (torch.arange(T * TOP_K) % E).reshape(T, TOP_K)
     tw = torch.rand(T, TOP_K, generator=gen)
-    hops = []
+    limit = 34
+    hops = []  # the elements each 2-D hop moves
     real = dist.all_to_all_single
 
-    def counting(*args, **kwargs):
-        hops.append(1)
-        return real(*args, **kwargs)
+    def recording(output, input_, *args, **kwargs):
+        if input_.dim() == 2:
+            hops.append(max(output.numel(), input_.numel()))
+        return real(output, input_, *args, **kwargs)
 
-    dist.all_to_all_single = counting
+    dist.all_to_all_single = recording
     try:
         with torch.no_grad():
             whole = a2a_moe(dist.group.WORLD, x, ti, tw, E, E // size, _identity_experts)
-            n_whole = len(hops)
+            whole_hops = hops.copy()
             hops.clear()
-            moe._A2A_MAX_HOP_ELEMENTS = 7
+            moe._A2A_MAX_HOP_ELEMENTS = limit
             chunked = a2a_moe(dist.group.WORLD, x, ti, tw, E, E // size, _identity_experts)
-            n_chunked = len(hops)
     finally:
         dist.all_to_all_single = real
         moe._A2A_MAX_HOP_ELEMENTS = 2**31 - 1
-    assert n_chunked > n_whole
+    assert max(hops) <= limit < max(whole_hops)
     torch.testing.assert_close(chunked, whole, atol=0, rtol=0)
 
 

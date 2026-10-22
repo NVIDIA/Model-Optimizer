@@ -97,60 +97,46 @@ def _a2a_moe_torch(
         dist.all_to_all_single(output, input_, out_split, in_split, group=group)
         return output
 
-    def _all_to_all(output, input_, out_split, in_split):
+    def _all_to_all(output, input_, out_split, in_split, step=None):
         """All-to-all that chunks along the hidden dim to stay inside the int32 element limit.
 
-        all_to_all_single, transparently CHUNKED along the hidden dim when a single transfer would
+        all_to_all_single, CHUNKED into hidden-column slices ``step`` wide when a single transfer would
         exceed the int32 element limit. ``all_to_all_single`` addresses the flattened ``[rows, H]`` buffer
         with element offsets ``= row_offset * H``; once ``rows*H > 2**31`` that offset overflows int32 in
         the NCCL path and the collective HANGS (observed: qwen3_5_moe_text EP calib at batch8 x seq4096 ->
-        Q*H = 327680*8192 = 2.68e9 > 2**31, all_to_all ran the full 3h NCCL timeout, then aborted). Split
-        the LAST (hidden) dim into column slices so every hop stays < 2**31 elements; the per-rank ROW split
-        sizes are identical for every slice, and cat-ing the slices is autograd-safe.
+        Q*H = 327680*8192 = 2.68e9 > 2**31, all_to_all ran the full 3h NCCL timeout, then aborted). The
+        per-rank ROW split sizes are identical for every slice, and cat-ing the slices is autograd-safe.
+        A ``step`` of None, or one covering the whole hidden dim, moves the transfer in one hop.
         """
-        int32_max = _A2A_MAX_HOP_ELEMENTS
-        if input_.dim() >= 2:
-            # n_chunks (the number of collective HOPS we issue) MUST be identical on every rank, but the
-            # recv size Q*H is per-rank data-dependent (routing imbalance -> different Q). Deciding n_chunks
-            # from the LOCAL numel desyncs the hop count and re-deadlocks. All-reduce the MAX transfer size
-            # so every rank agrees on the same split. Unconditional over the group (every rank runs this same
-            # branch for a 2-D hop) so the all_reduce itself can never desync; it's a cheap scalar.
-            gmax_t = torch.tensor(
-                [max(output.numel(), input_.numel())], device=output.device, dtype=torch.int64
+        hdim = input_.shape[-1]
+        if step is None or step >= hdim:
+            return _one_all_to_all(output, input_, out_split, in_split)
+        if torch.is_grad_enabled() and input_.requires_grad:
+            # Autograd (AutoQuantize scoring): cat is graph-safe (an in-place copy_ would break the
+            # reverse-all-to-all backward). Higher peak, but grad scoring uses far fewer tokens.
+            slices = [
+                _one_all_to_all(
+                    output[..., c0 : c0 + step].contiguous(),
+                    input_[..., c0 : c0 + step].contiguous(),
+                    out_split,
+                    in_split,
+                )
+                for c0 in range(0, hdim, step)
+            ]
+            return torch.cat(slices, dim=-1)
+        # Forward-only calibration: write each hidden-column slice back into `output` IN PLACE so we
+        # never hold a full second [Q,H] copy (torch.cat would). The imbalanced-rank recv buffer is
+        # already tens of GiB at long seq x batch; the cat doubling is what tips calibration into OOM.
+        for c0 in range(0, hdim, step):
+            c1 = min(c0 + step, hdim)
+            tmp = _one_all_to_all(
+                output[..., c0:c1].contiguous(),
+                input_[..., c0:c1].contiguous(),
+                out_split,
+                in_split,
             )
-            dist.all_reduce(gmax_t, op=dist.ReduceOp.MAX, group=group)
-            gmax = int(gmax_t.item())
-            if gmax > int32_max:
-                hdim = input_.shape[-1]
-                n_chunks = (gmax + int32_max - 1) // int32_max
-                step = (hdim + n_chunks - 1) // n_chunks
-                if torch.is_grad_enabled() and input_.requires_grad:
-                    # Autograd (AutoQuantize scoring): cat is graph-safe (an in-place copy_ would break the
-                    # reverse-all-to-all backward). Higher peak, but grad scoring uses far fewer tokens.
-                    slices = [
-                        _one_all_to_all(
-                            output[..., c0 : c0 + step].contiguous(),
-                            input_[..., c0 : c0 + step].contiguous(),
-                            out_split,
-                            in_split,
-                        )
-                        for c0 in range(0, hdim, step)
-                    ]
-                    return torch.cat(slices, dim=-1)
-                # Forward-only calibration: write each hidden-column slice back into `output` IN PLACE so we
-                # never hold a full second [Q,H] copy (torch.cat would). The imbalanced-rank recv buffer is
-                # already tens of GiB at long seq x batch; the cat doubling is what tips calibration into OOM.
-                for c0 in range(0, hdim, step):
-                    c1 = min(c0 + step, hdim)
-                    tmp = _one_all_to_all(
-                        output[..., c0:c1].contiguous(),
-                        input_[..., c0:c1].contiguous(),
-                        out_split,
-                        in_split,
-                    )
-                    output[..., c0:c1].copy_(tmp)
-                return output
-        return _one_all_to_all(output, input_, out_split, in_split)
+            output[..., c0:c1].copy_(tmp)
+        return output
 
     # (token, expert) pairs (drop any -1 "no selection" slots).
     token_rows = torch.arange(T, device=dev).repeat_interleave(top_k)  # [P]
@@ -192,9 +178,18 @@ def _a2a_moe_torch(
             f"collapsed onto few experts (check the router/hidden states for NaN or blow-up).",
             stacklevel=2,
         )
+    # The two [rows, H] hops (dispatch, combine) move at most max(P_sent, Q) rows; past the int32
+    # element limit they go as hidden-column slices. The slice count (the number of collective HOPS)
+    # MUST be identical on every rank, but Q is per-rank data-dependent (routing imbalance), so
+    # deciding it from LOCAL sizes desyncs the hop count and deadlocks: all-reduce the most rows any
+    # rank moves, once for both hops. A slice is then as wide as that many rows allow; splitting H
+    # evenly instead rounds each slice up, which can carry it past the limit.
+    rows = torch.tensor([max(P_sent, Q)], device=dev, dtype=torch.int64)
+    dist.all_reduce(rows, op=dist.ReduceOp.MAX, group=group)
+    step = _A2A_MAX_HOP_ELEMENTS // max(int(rows.item()), 1)
     # dispatch hidden (autograd-aware when scoring) + local-expert id + weight (same split sizes)
     recv_hidden = torch.empty(Q, H, device=dev, dtype=x.dtype)
-    recv_hidden = _all_to_all(recv_hidden, send_hidden, out_list, in_list)
+    recv_hidden = _all_to_all(recv_hidden, send_hidden, out_list, in_list, step)
     recv_eid = torch.empty(Q, device=dev, dtype=torch.int64)
     dist.all_to_all_single(recv_eid, local_eid_s.contiguous(), out_list, in_list, group=group)
     # Routing WEIGHT hop is gradient-carrying (its backward reaches the gate/router when training the MoE
@@ -214,7 +209,7 @@ def _a2a_moe_torch(
 
     # combine: all_to_all back (swap counts, autograd-aware when scoring) -> scatter-sum to original tokens
     send_back = torch.empty(send_hidden.size(0), H, device=dev, dtype=x.dtype)
-    send_back = _all_to_all(send_back, eo_recv, in_list, out_list)
+    send_back = _all_to_all(send_back, eo_recv, in_list, out_list, step)
     out_pair = torch.empty_like(send_back)
     out_pair[order] = send_back  # back to pair order
     # Accumulate the per-token top-k scatter-sum in FP32, then round ONCE. Each token's output is a sum
