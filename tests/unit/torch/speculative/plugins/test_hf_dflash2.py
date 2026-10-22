@@ -375,6 +375,14 @@ class TestDFlash2Forward:
         assert out["selector_metrics"]["selector_accuracy"].item() > 0.9
         assert out["selector_metrics"]["selector_coverage"].item() > 0.9
 
+        # Candidate selection is a topk over draft logits; check it in bf16, the training dtype.
+        model.to(torch.bfloat16)
+        torch.manual_seed(0)
+        with torch.no_grad():
+            out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        assert out["selector_metrics"]["selector_accuracy"].item() > 0.9
+        assert out["selector_metrics"]["selector_coverage"].item() > 0.9
+
 
 class TestCandidateSelectorAlignment:
     """Pin the offset convention shared by the training objective and the lattice walk."""
