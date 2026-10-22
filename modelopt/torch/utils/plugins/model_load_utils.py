@@ -492,9 +492,11 @@ def load_pretrained(
     read it back.
 
     A sharded load builds the model class and places it itself. Besides its own options it takes
-    ``trust_remote_code``, ``attn_implementation`` and ``hf_config`` (the config to load with), and
-    refuses any other keyword rather than ignore it. A ``config`` passed for the load is the one the
-    plan is decided from, and a sharded load takes it as its ``hf_config``.
+    ``trust_remote_code``, ``attn_implementation`` and ``hf_config``, and refuses any other keyword
+    rather than ignore it. ``hf_config`` is the config :func:`resolve_distribution_plan` returned with
+    the plan handed in as ``distribution``: the load builds from it as given, so without that plan
+    it is refused. A ``config`` passed for the load is the one the plan is decided from, and a
+    sharded load takes it as its ``hf_config``.
 
     Whatever the placement:
 
@@ -544,6 +546,13 @@ def load_pretrained(
     config = config if isinstance(config, PretrainedConfig) else None
     if config is not None and "hf_config" in kwargs:
         raise TypeError("config and hf_config both name the config to load with; pass one.")
+    if distribution is None and "hf_config" in kwargs:
+        # The load builds from hf_config as given, so the plan must be the one it came with, not
+        # one decided here from another config.
+        raise TypeError(
+            "hf_config is the config resolve_distribution_plan returned with a plan: pass that plan "
+            "as distribution=, or pass config= to have the plan decided from your config."
+        )
     hf_config = kwargs.get("hf_config")
     if distribution is None:
         plan, hf_config = resolve_distribution_plan(
