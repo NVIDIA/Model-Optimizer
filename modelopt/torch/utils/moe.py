@@ -294,11 +294,13 @@ def register_torch_a2a():
     if _TORCH_A2A_REGISTERED:
         return
     from transformers.integrations.moe import ALL_EXPERTS_FUNCTIONS
-    from transformers.integrations.tensor_parallel import (
-        ALL_PARALLEL_STYLES,
-        RouterParallel,
-        TensorParallelLayer,
-    )
+    from transformers.integrations.tensor_parallel import ALL_PARALLEL_STYLES, TensorParallelLayer
+
+    try:
+        from transformers.integrations.tensor_parallel import RouterParallel
+    except ImportError:
+        # transformers 5.16.0 exports it only as EpRouterParallel; 5.16.1 restored the alias.
+        from transformers.integrations.tensor_parallel import EpRouterParallel as RouterParallel
 
     ALL_EXPERTS_FUNCTIONS.register("torch_a2a", torch_a2a_experts_forward)
 

@@ -141,6 +141,20 @@ def test_a2a_moe_warns_when_a_rank_receives_far_more_than_it_sent(cpu_dist_worke
     cpu_dist_workers.run(_skewed_routing_job)
 
 
+def test_the_router_style_registers_under_transformers_5_16_0s_name(monkeypatch):
+    """transformers 5.16.0 exports the router style only as ``EpRouterParallel``; 5.16.1 restored
+    ``RouterParallel`` as an alias. The registration takes either."""
+    tp = pytest.importorskip("transformers.integrations.tensor_parallel")
+    if not hasattr(tp, "EpRouterParallel"):
+        pytest.skip("this transformers has no EpRouterParallel")
+    monkeypatch.delattr(tp, "RouterParallel")
+    monkeypatch.setattr(moe, "_TORCH_A2A_REGISTERED", False)
+
+    moe.register_torch_a2a()
+
+    assert isinstance(tp.ALL_PARALLEL_STYLES["torch_a2a_router"], tp.EpRouterParallel)
+
+
 def _split_qwen3_moe_experts(rank, size):
     """transformers' fused Qwen3-MoE experts, whole and this rank's contiguous share of them."""
     # transformers is optional: CI's transformers-free unit lane collects this file.
