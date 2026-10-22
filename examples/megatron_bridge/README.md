@@ -334,6 +334,22 @@ torchrun --nproc_per_node 8 distill.py \
     --output_dir /output/qwen3_8b_nvfp4_qad
 ```
 
+With pipeline parallelism, the last stage also runs the teacher and student output layers and the KD loss, and
+stage `k` holds `pp_size - k` micro-batches of activations in flight. An even layer split with uniform full
+recompute therefore leaves the other stages idle while they wait for the last one. Balance the pipeline by giving the
+last stage fewer layers, and recompute fewer layers on later stages, which have memory to spare. For example, for
+Qwen3-8B (36 layers) on 4 pipeline stages, this places 10/10/10/6 layers:
+
+```bash
+    --pp_size 4 \
+    --num_layers_in_first_pipeline_stage 10 --num_layers_in_last_pipeline_stage 6 \
+    --recompute_granularity full --recompute_method block \
+    --recompute_num_layers_per_stage 7 5 2 2
+```
+
+The split applies to both student and teacher, so it must be valid for each. The best values depend on the model,
+sequence length, and GPU memory: measure per-stage time and memory over a few iterations before choosing them.
+
 The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) (point `--megatron_path` at `/output/qwen3_8b_nvfp4_qad/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
 
 ### LoRA QAD
