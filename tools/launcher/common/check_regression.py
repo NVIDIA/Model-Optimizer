@@ -27,7 +27,8 @@ Environment variables (all optional — no check if unset):
     MAX_FINAL_PERPLEXITY: Final perplexity must be below this value
 
 An empty variable counts as unset. Once any threshold is set, a missing or
-unreadable trainer_state.json, or one without training logs, also fails the check.
+unreadable trainer_state.json, or one without training logs, also fails the check,
+and so does a NaN or infinite metric.
 
 Usage:
     python check_regression.py /path/to/output_dir [--json verdict.json]
@@ -37,7 +38,8 @@ Usage:
 
     --json also writes the verdict as {"pass", "failure_class", "trainer_state",
     "metrics", "thresholds", "messages"}, so a pipeline gate can read it without
-    parsing logs. failure_class is null, "TRAIN_REGRESSION" or "METRICS_MISSING".
+    parsing logs. failure_class is null, "TRAIN_REGRESSION" or "METRICS_MISSING". It is
+    strict JSON: a non-finite metric is written as null.
 
 Exit codes:
     0 — all checks pass (or no thresholds set)
@@ -46,6 +48,7 @@ Exit codes:
 
 import argparse
 import json
+import math
 import os
 import sys
 from glob import glob
@@ -142,6 +145,10 @@ def check_regression(metrics, thresholds):
             )
             passed = False
             continue
+        if not math.isfinite(val):
+            messages.append(f"REGRESSION: {metric_key} is {val}, not a finite number")
+            passed = False
+            continue
         if check_fn(val, thresh):
             messages.append(f"PASS: {metric_key}={val:.3f} (threshold: {env_var}={thresh})")
         else:
@@ -171,7 +178,8 @@ def evaluate(output_dir):
     try:
         metrics = get_final_metrics(trainer_state) if trainer_state else {}
         missing = f"no training logs to check in {where}"
-    except (OSError, ValueError) as e:
+    # TypeError/AttributeError: valid JSON of the wrong shape, e.g. "loss": null or a list.
+    except (OSError, ValueError, TypeError, AttributeError) as e:
         metrics, missing = {}, f"cannot read {where}: {e}"
     if not metrics:
         # Thresholds were set, so an unreadable run must not pass as unchecked.
@@ -185,7 +193,8 @@ def evaluate(output_dir):
         return verdict
 
     passed, messages = check_regression(metrics, thresholds)
-    verdict.update({"pass": passed, "metrics": metrics, "messages": messages})
+    finite = {k: v if math.isfinite(v) else None for k, v in metrics.items()}
+    verdict.update({"pass": passed, "metrics": finite, "messages": messages})
     if not passed:
         verdict["failure_class"] = "TRAIN_REGRESSION"
     return verdict
@@ -212,7 +221,7 @@ def main(argv=None):
 
     if args.json_path:
         with open(args.json_path, "w") as f:
-            json.dump(verdict, f, indent=2)
+            json.dump(verdict, f, indent=2, allow_nan=False)
     return 0 if verdict["pass"] else 1
 
 

@@ -167,10 +167,11 @@ for arg in sys.argv[1:]:
     # REGRESSION_STRICT=1, which fails the task (via the ERR trap) so Slurm reports it.
     if [ -n "$OUTPUT_DIR" ]; then
         REGRESSION_ARGS=("${OUTPUT_DIR}" --json "${OUTPUT_DIR}/regression_check.json")
-        if [ "${REGRESSION_STRICT:-0}" = "1" ]; then
-            python3 common/check_regression.py "${REGRESSION_ARGS[@]}"
-        else
-            python3 common/check_regression.py "${REGRESSION_ARGS[@]}" || true
-        fi
+        case "${REGRESSION_STRICT:-0}" in
+            1) python3 common/check_regression.py "${REGRESSION_ARGS[@]}" ;;
+            0) python3 common/check_regression.py "${REGRESSION_ARGS[@]}" || true ;;
+            # Fail rather than silently run warn-only on a typo such as "true".
+            *) echo "ERROR: REGRESSION_STRICT must be 0 or 1, got '${REGRESSION_STRICT}'" >&2; false ;;
+        esac
     fi
 fi

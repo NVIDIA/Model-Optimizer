@@ -97,6 +97,11 @@ def test_latest_checkpoint_is_chosen_by_step_number(tmp_path):
     [
         (None, 1, "METRICS_MISSING"),  # no trainer_state.json at all
         ('{"log_hist', 1, "METRICS_MISSING"),  # truncated by a job killed mid-save
+        ("[]", 1, "METRICS_MISSING"),  # valid JSON, wrong shape
+        ('{"log_history": [{"loss": null}]}', 1, "METRICS_MISSING"),
+        ('{"log_history": [{"loss": NaN}]}', 1, "TRAIN_REGRESSION"),  # a diverged run
+        # An unchecked non-finite metric still serializes, as null.
+        ('{"log_history": [{"loss": 4.5, "acc": Infinity}]}', 0, None),
         (json.dumps({"log_history": [{"loss": 6.5}]}), 1, "TRAIN_REGRESSION"),
         (json.dumps({"log_history": [{"loss": 4.5}]}), 0, None),
     ],
@@ -112,7 +117,8 @@ def test_cli_exit_code_and_json_verdict(
         (ckpt / "trainer_state.json").write_text(state_text)
     verdict_path = tmp_path / "verdict.json"
     assert check_regression_mod.main([str(tmp_path), "--json", str(verdict_path)]) == exit_code
-    verdict = json.loads(verdict_path.read_text())
+    # Strict JSON: NaN/Infinity would break non-Python readers of the verdict.
+    verdict = json.loads(verdict_path.read_text(), parse_constant=pytest.fail)
     assert verdict["pass"] is (exit_code == 0)
     assert verdict["failure_class"] == failure_class
     assert verdict["thresholds"] == {"MAX_FINAL_LOSS": 5.0}
