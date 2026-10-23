@@ -83,6 +83,17 @@ _RANK_LOCAL_CALIBRATION = (
 )
 
 
+def _calibration_methods(algorithm: QuantizeAlgoCfgType) -> list[str]:
+    """The calibration methods ``algorithm`` runs, with those it runs for its scales."""
+    methods = []
+    for mode, config in get_modelike_from_algo_cfg(algorithm):
+        methods.append(mode.removesuffix("_calibrate"))
+        for key in ("weight_scale_algorithm", "scale_algorithm"):
+            if config.get(key) is not None:
+                methods += _calibration_methods(config[key])
+    return methods
+
+
 def _refuse_rank_local_calibration(model: nn.Module, algorithm: QuantizeAlgoCfgType) -> None:
     """Refuse a rank-local calibration algorithm on a model distributed over several ranks.
 
@@ -92,8 +103,7 @@ def _refuse_rank_local_calibration(model: nn.Module, algorithm: QuantizeAlgoCfgT
     plan = dist.recorded_distribution_plan(model)
     if plan is None or plan.world_size == 1:
         return
-    methods = [mode.removesuffix("_calibrate") for mode, _ in get_modelike_from_algo_cfg(algorithm)]
-    refused = [method for method in methods if method in _RANK_LOCAL_CALIBRATION]
+    refused = [m for m in _calibration_methods(algorithm) if m in _RANK_LOCAL_CALIBRATION]
     if refused:
         raise NotImplementedError(
             f"Calibrating with {', '.join(refused)} is not supported on a model distributed over "

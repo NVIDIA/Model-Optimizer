@@ -459,10 +459,25 @@ def test_the_ep_mesh_comes_with_an_expert_parallel_plan_only(plan, mesh):
 # ------------------------------------------------------------------------ rank-local calibration
 
 
-@pytest.mark.parametrize("entry", ["quantize", "calibrate"])
-def test_rank_local_calibration_is_refused_before_it_changes_a_distributed_model(entry):
+@pytest.mark.parametrize(
+    ("entry", "algorithm", "refused"),
+    [
+        ("quantize", {"method": "awq_lite"}, "awq_lite"),
+        ("calibrate", "awq_lite", "awq_lite"),
+        (
+            "calibrate",
+            {"method": "nvfp4_act_headroom", "weight_scale_algorithm": "local_hessian"},
+            "local_hessian",
+        ),
+    ],
+    ids=["quantize", "calibrate", "for-the-weight-scales"],
+)
+def test_rank_local_calibration_is_refused_before_it_changes_a_distributed_model(
+    entry, algorithm, refused
+):
     """Each rank calibrates on its own data, and AWQ keeps what its search gathers on the rank: the
-    ranks' copies of a weight would come out different. The refusal comes before any change."""
+    ranks' copies of a weight would come out different. So would local_hessian, run by another
+    algorithm for its weight scales. The refusal comes before any change."""
     import modelopt.torch.quantization as mtq
 
     model = nn.Sequential(nn.Linear(16, 16))
@@ -472,11 +487,12 @@ def test_rank_local_calibration_is_refused_before_it_changes_a_distributed_model
     modules = [type(module) for module in model.modules()]
     state = {name: tensor.clone() for name, tensor in model.state_dict().items()}
 
-    with pytest.raises(NotImplementedError, match=r"awq_lite is not supported .* over 2 ranks"):
+    with pytest.raises(NotImplementedError, match=rf"{refused} is not supported .* over 2 ranks"):
         if entry == "quantize":
-            mtq.quantize(model, mtq.INT4_AWQ_CFG, lambda m: m(torch.randn(2, 16)))
+            config = {**mtq.INT4_AWQ_CFG, "algorithm": algorithm}
+            mtq.quantize(model, config, lambda m: m(torch.randn(2, 16)))
         else:
-            mtq.calibrate(model, "awq_lite", lambda m: m(torch.randn(2, 16)))
+            mtq.calibrate(model, algorithm, lambda m: m(torch.randn(2, 16)))
 
     assert [type(module) for module in model.modules()] == modules
     after = model.state_dict()
