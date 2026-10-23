@@ -77,12 +77,14 @@ from modelopt.recipe.presets import (
     RecipeSupersededAction,
 )
 from modelopt.torch.export import ensure_local_checkpoint
+from modelopt.torch.quantization.hf_to_megatron import translate_quant_cfg_to_megatron
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.dataset_utils import get_supported_datasets
 from modelopt.torch.utils.mlflow import Tool, masked_args, resolved_recipe_texts
 from modelopt.torch.utils.plugins.mbridge import (
     get_language_model,
     load_mbridge_model_from_hf,
+    module_mappings_from_bridge,
     use_moe_grouped_gemm,
 )
 from modelopt.torch.utils.plugins.megatron_calibration import (
@@ -171,7 +173,8 @@ def get_args() -> argparse.Namespace:
         help=(
             "PTQ recipe YAML file or builtin name (e.g. 'general/ptq/fp8_default-kv_fp8'). "
             "When set, --quant_cfg, --kv_cache_quant and --weight_only are ignored; the recipe "
-            "is authoritative for quant_cfg, algorithm, and KV-cache config."
+            "is authoritative for quant_cfg, algorithm, and KV-cache config. Its Hugging Face "
+            "module names are translated to this model's Megatron-Core names."
         ),
     )
     parser.add_argument(
@@ -331,6 +334,15 @@ def get_quant_config(args: argparse.Namespace) -> dict:
     return mtq_config
 
 
+def translate_to_megatron(quant_cfg: list, bridge, language_model) -> list:
+    """Translate the Hugging Face module names of ``quant_cfg`` to this Megatron model's."""
+    # Global index of each local layer, so a pipeline stage reads the recipe's layer indices right.
+    layer_indices = [layer.layer_number - 1 for layer in language_model.decoder.layers]
+    return translate_quant_cfg_to_megatron(
+        quant_cfg, module_mappings_from_bridge(bridge), layer_indices
+    )
+
+
 def main(args: argparse.Namespace):
     # --hf_model_name_or_path stays as given. Later steps read the local copy of the whole
     # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local path.
@@ -398,6 +410,12 @@ def main(args: argparse.Namespace):
     print_rank_0(f"Using calibration dataset: {args.calib_dataset_name}")
 
     mtq_config = get_quant_config(args)
+    num_entries = len(mtq_config["quant_cfg"])
+    mtq_config["quant_cfg"] = translate_to_megatron(mtq_config["quant_cfg"], bridge, language_model)
+    print_rank_0(
+        f"Translated quant_cfg to Megatron-Core names: {len(mtq_config['quant_cfg']) - num_entries} "
+        f"entries added to the {num_entries} given."
+    )
 
     # Quantize only the language model: disable quantizers on every top-level submodule that is not
     # the language model (vision tower + projector). Skip aliases of language-model submodules (e.g.

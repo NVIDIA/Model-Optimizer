@@ -18,7 +18,10 @@ from pathlib import Path
 
 import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
-from _test_utils.torch.export.unified_checkpoint import assert_exported_checkpoint_matches
+from _test_utils.torch.export.unified_checkpoint import (
+    assert_exported_checkpoint_matches,
+    load_safetensors_dir,
+)
 from _test_utils.torch.megatron.modelopt_state import assert_has_modelopt_state
 from _test_utils.torch.transformers_models import (
     create_tiny_nemotron_h_dir,
@@ -41,23 +44,40 @@ _DENSE_KWARGS = {
 
 
 @pytest.mark.parametrize(
-    ("create_model", "model_kwargs", "recipe", "quantize_parallelism", "export_parallelism"),
+    (
+        "create_model",
+        "model_kwargs",
+        "recipe",
+        "quantize_parallelism",
+        "export_parallelism",
+        "quantized_weight",
+    ),
     [
         # MoE: routed experts used to be dropped silently from the export. Calibrates with context
-        # parallelism (not on the VLM: M-RoPE CP needs nemo:26.10).
+        # parallelism (not on the VLM: M-RoPE CP needs nemo:26.10). The recipe quantizes the
+        # attention output projection by its Hugging Face name `o_proj`, which reaches Megatron's
+        # `linear_proj` only once quantize.py translates the recipe.
         (
             create_tiny_qwen3_moe_dir,
             _DENSE_KWARGS,
-            "general/ptq/nvfp4_default-kv_fp8",
+            "general/ptq/nvfp4_omlp_only-kv_fp8",
             "cp_size",
             "pp_size",
+            "self_attn.o_proj",
         ),
         # Dense VLM: only the language model is quantized, vision is copied through. Keeps the
         # FP8 script-to-checkpoint coverage.
-        (create_tiny_qwen3vl_dir, {}, "general/ptq/fp8_default-kv_fp8", "tp_size", "pp_size"),
+        (create_tiny_qwen3vl_dir, {}, "general/ptq/fp8_default-kv_fp8", "tp_size", "pp_size", None),
         # Mamba hybrid + MoE with grouped-GEMM experts: exported with its experts sharded
         # across ranks (EP), resharded from the TP-quantized checkpoint.
-        (create_tiny_nemotron_h_dir, {}, "general/ptq/nvfp4_default-kv_fp8", "tp_size", "ep_size"),
+        (
+            create_tiny_nemotron_h_dir,
+            {},
+            "general/ptq/nvfp4_default-kv_fp8",
+            "tp_size",
+            "ep_size",
+            None,
+        ),
     ],
     ids=["qwen3_moe", "qwen3vl", "nemotron_h"],
 )
@@ -70,6 +90,7 @@ def test_quantize_and_export(
     recipe,
     quantize_parallelism,
     export_parallelism,
+    quantized_weight,
     fake_hub_checkpoint,
 ):
     """Quantize a tiny model via a YAML recipe and export it to a unified HF checkpoint.
@@ -117,6 +138,11 @@ def test_quantize_and_export(
     assert (hf_export_path / "config.json").exists()
     assert (hf_export_path / "hf_quant_config.json").exists()
     assert_exported_checkpoint_matches(hf_export_path, hf_model_path)
+    if quantized_weight:
+        exported = load_safetensors_dir(hf_export_path)
+        assert any(key.endswith(f"{quantized_weight}.weight_scale") for key in exported), (
+            f"{quantized_weight} was exported unquantized"
+        )
     if fake_hub_checkpoint.active:
         assert (hf_export_path / fake_hub_checkpoint.marker).exists()
 

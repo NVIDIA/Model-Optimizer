@@ -41,6 +41,7 @@ from torch.distributed.checkpoint import FileSystemReader
 from transformers import AutoConfig, AutoTokenizer
 
 from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
+from modelopt.torch.quantization.hf_to_megatron import ModuleMapping, module_mappings_from_registry
 from modelopt.torch.utils import print_rank_0, warn_rank_0
 from modelopt.torch.utils.plugins.megatron_layer_specs import te_hybrid_stack_spec_sequential_mlp
 
@@ -57,6 +58,7 @@ __all__ = [
     "is_vlm_config",
     "load_mbridge_model_from_hf",
     "load_modelopt_megatron_checkpoint",
+    "module_mappings_from_bridge",
     "set_moe_expert_layout",
     "use_moe_grouped_gemm",
 ]
@@ -219,6 +221,15 @@ def load_mbridge_model_from_hf(
     tokenizer.padding_side = "left"  # better for calibration
 
     return bridge, provider, model, unwrapped_model, tokenizer
+
+
+def module_mappings_from_bridge(bridge: AutoBridge) -> list[ModuleMapping]:
+    """Module-level Hugging Face to Megatron mappings of ``bridge``'s architecture.
+
+    These feed :func:`~modelopt.torch.quantization.hf_to_megatron.translate_quant_cfg_to_megatron`.
+    """
+    # AutoBridge has no public accessor for the architecture's mapping registry.
+    return module_mappings_from_registry(bridge._model_bridge.mapping_registry())
 
 
 def _checkpoint_keys(checkpoint_path: str) -> list[str]:

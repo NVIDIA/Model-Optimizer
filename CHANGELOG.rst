@@ -26,6 +26,7 @@ Changelog
 - Add ``--vllm_fakequant_export`` to ``examples/megatron_bridge/export_quantized_megatron_to_hf.py`` to evaluate formats vLLM has no kernels for (e.g. GGML IQ) as BF16 fake-quant checkpoints, and allow ``--ep_size`` > 1 for checkpoints built with ``--no_moe_grouped_gemm``.
 - GGML GPTQ checkpoints from ``examples/megatron_bridge`` keep their calibrated codes when the Megatron checkpoint is reloaded for QAD or export, and layerwise calibration now runs on Megatron vision-language models.
 - The Megatron unified HF export (``export_mcore_gpt_to_hf``) now copies the source checkpoint's non-model files (tokenizer, processor, remote code, chat templates, ...) into the export unchanged, from local disk only. The ``examples/megatron_bridge`` scripts make a Hugging Face Hub model local first with ``modelopt.torch.export.ensure_local_checkpoint``.
+- ``examples/megatron_bridge/quantize.py`` translates the Hugging Face module names in a PTQ recipe (``q_proj``, ``gate_proj``, ``lm_head``) to the Megatron-Core modules they map to (``linear_qkv``, ``linear_fc1``, ``output_layer``), so one recipe serves both flows. A recipe that configures only some of the Hugging Face modules one Megatron module fuses, such as ``q_proj`` and ``k_proj`` but not ``v_proj``, is now rejected: configure them alike.
 
 *Misc*
 
