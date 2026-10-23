@@ -190,13 +190,13 @@ Instead of specifying `--qformat` and `--kv_cache_qformat` separately, you can u
 ```bash
 # Using a built-in recipe name (without .yaml suffix)
 python hf_ptq.py \
-  --pyt_ckpt_path <huggingface_model_card> \
+  --model_name_or_path <huggingface_model_card> \
   --recipe general/ptq/nvfp4_default-kv_fp8_cast \
   --export_path <quantized_ckpt_path>
 
 # Using a custom recipe YAML file path
 python hf_ptq.py \
-  --pyt_ckpt_path <huggingface_model_card> \
+  --model_name_or_path <huggingface_model_card> \
   --recipe /path/to/my_ptq.yaml \
   --export_path <quantized_ckpt_path>
 ```
@@ -211,13 +211,13 @@ KV cache quantization reduces memory usage during inference by quantizing the ke
 
 ```bash
 # FP8 KV cache with cast (no calibration needed, fast)
-python hf_ptq.py --pyt_ckpt_path <model> --qformat fp8 --kv_cache_qformat fp8_cast --export_path <path>
+python hf_ptq.py --model_name_or_path <model> --qformat fp8 --kv_cache_qformat fp8_cast --export_path <path>
 
 # NVFP4 KV cache with data-driven calibration
-python hf_ptq.py --pyt_ckpt_path <model> --qformat nvfp4 --kv_cache_qformat nvfp4 --export_path <path>
+python hf_ptq.py --model_name_or_path <model> --qformat nvfp4 --kv_cache_qformat nvfp4 --export_path <path>
 
 # Disable KV cache quantization
-python hf_ptq.py --pyt_ckpt_path <model> --qformat fp8 --kv_cache_qformat none --export_path <path>
+python hf_ptq.py --model_name_or_path <model> --qformat fp8 --kv_cache_qformat none --export_path <path>
 ```
 
 Via the shell script:
@@ -247,7 +247,7 @@ GPT-OSS checkpoints (`openai/gpt-oss-20b`, `openai/gpt-oss-120b`) ship with nati
 
 ```bash
 python hf_ptq.py \
-  --pyt_ckpt_path openai/gpt-oss-20b \
+  --model_name_or_path openai/gpt-oss-20b \
   --qformat nvfp4_mlp_only \
   --cast_mxfp4_to_nvfp4 \
   --export_path <quantized_ckpt_path>
@@ -286,7 +286,7 @@ Use the recipe directory matching the checkpoint's `model_type`: `qwen3_vl` or `
 ```bash
 # Vision encoder only: FP8 vision Linears and merger, BF16 LLM and KV cache.
 python hf_ptq.py \
-  --pyt_ckpt_path <Qwen3-VL-or-Qwen3.5-checkpoint> \
+  --model_name_or_path <Qwen3-VL-or-Qwen3.5-checkpoint> \
   --recipe model_type/qwen3_vl/ptq/fp8_vision-kv_none \
   --calib_with_images \
   --calib_size 512 \
@@ -295,7 +295,7 @@ python hf_ptq.py \
 
 # Joint vision encoder + language model FP8 with FP8 KV-cache cast.
 python hf_ptq.py \
-  --pyt_ckpt_path <Qwen3-VL-or-Qwen3.5-checkpoint> \
+  --model_name_or_path <Qwen3-VL-or-Qwen3.5-checkpoint> \
   --recipe model_type/qwen3_vl/ptq/fp8_vision_lm-kv_fp8_cast \
   --calib_with_images \
   --calib_size 512 \
@@ -325,7 +325,7 @@ For vision-language models, calibration quality can likely improve by using imag
 
 ```bash
 python hf_ptq.py \
-  --pyt_ckpt_path <huggingface_model_card> \
+  --model_name_or_path <huggingface_model_card> \
   --qformat nvfp4 \
   --export_path <quantized_ckpt_path> \
   --trust_remote_code \
@@ -538,7 +538,7 @@ companion vLLM implementation does not support that asymmetric per-layer format:
 
 ```bash
 python hf_ptq.py \
-  --pyt_ckpt_path Qwen/Qwen3.8-27B \
+  --model_name_or_path Qwen/Qwen3.8-27B \
   --recipe general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits \
   --kv_auto_quantize_checkpoint /path/to/kv_autoquant.pth \
   --export_path /path/to/qwen3.8-27b-mixed-kv
@@ -632,7 +632,7 @@ torchrun \
     --master_addr=<node0_ip_addr> --master_port=<port> \
     --nproc_per_node=<num_gpus_per_node> \
     hf_ptq.py \
-    --pyt_ckpt_path <path_to_model> \
+    --model_name_or_path <path_to_model> \
     --recipe general/ptq/nvfp4_default-kv_fp8_cast \
     --batch_size <calib_batch_size> \
     --calib_size <num_calib_samples> \
@@ -680,7 +680,7 @@ with torch.inference_mode():
 ### Quantize and Export
 
 ```bash
-python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --qformat fp8 --export_path <quantized_ckpt_path> --trust_remote_code
+python hf_ptq.py --model_name_or_path <huggingface_model_card> --qformat fp8 --export_path <quantized_ckpt_path> --trust_remote_code
 ```
 
 > *For exporting fake-quantized models for vLLM serving (e.g., for research or kernels not yet supported in real-quant), use the `--vllm_fakequant_export` flag. See [vllm_serve/README.md](../vllm_serve/README.md) for details. When every quantizer is a weight quantizer, as in the GGML recipes (IQ, Q8_0), the export is a plain BF16 checkpoint that a stock vLLM image serves directly.*
@@ -795,7 +795,7 @@ run on an MLflow server so it can be reproduced later from its MLflow entry alon
 
 ```bash
 python hf_ptq.py \
-  --pyt_ckpt_path <huggingface_model_card> \
+  --model_name_or_path <huggingface_model_card> \
   --recipe general/ptq/nvfp4_default-kv_fp8_cast \
   --export_path <quantized_ckpt_path> \
   --mlflow https://<your-mlflow-server>/

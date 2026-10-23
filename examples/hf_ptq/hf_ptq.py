@@ -67,6 +67,7 @@ from transformers import (
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
+from modelopt.cli import add_model_args
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, ModelOptPTQRecipe, load_recipe
 from modelopt.recipe.presets import (
     KV_CACHE_NONE,
@@ -1141,16 +1142,15 @@ def quantize_main(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--pyt_ckpt_path",
-        "--model",
-        help=(
+    add_model_args(
+        parser,
+        aliases=("--pyt_ckpt_path",),
+        help_text=(
             "Model name or path to the PyTorch checkpoint to be quantized. "
             "Can be a local path or a Huggingface model name; a model name is downloaded in "
             "full. To skip files, download it yourself (e.g. `hf download <name> --exclude "
             "'original/*'`) and pass the local path."
         ),
-        required=True,
     )
     parser.add_argument(
         "--recipe",
@@ -1252,12 +1252,6 @@ def parse_args() -> argparse.Namespace:
         default="hf",
         choices=["tensorrt_llm", "hf"],
         help="Deprecated. Please avoid using this argument.",
-    )
-    parser.add_argument(
-        "--trust_remote_code",
-        help="Set trust_remote_code for Huggingface models and tokenizers",
-        default=False,
-        action="store_true",
     )
     parser.add_argument(
         "--gpu_max_mem_percentage",
@@ -1372,7 +1366,7 @@ def parse_args() -> argparse.Namespace:
             "After calibration, override NVFP4 weight quantizers' global_amax with "
             "the closed-form value derived from the source MXFP4 *_scales. "
             "Per-block _amax is computed from the loaded BF16 weights (data-derived). "
-            "Use when --pyt_ckpt_path points at an MXFP4 HF checkpoint (e.g. "
+            "Use when --model_name_or_path points at an MXFP4 HF checkpoint (e.g. "
             "openai/gpt-oss-20b) and the target qformat is NVFP4-family."
         ),
     )
@@ -1493,11 +1487,11 @@ def main(args: argparse.Namespace):
         # cleanup_distributed would leave the other ranks blocked on the first collective
         # until the NCCL timeout.
         with mlflow_run(args):
-            # --pyt_ckpt_path stays as given. Every later step reads the local copy of the whole
+            # --model_name_or_path stays as given. Every later step reads the local copy of the whole
             # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local
             # path.
             args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
-                args.pyt_ckpt_path
+                args.model_name_or_path
             )
 
             # launch a memory monitor to read the currently used GPU memory.

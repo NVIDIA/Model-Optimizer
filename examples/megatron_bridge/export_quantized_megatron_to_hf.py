@@ -28,7 +28,7 @@ export.
 Example usage to export an FP8 checkpoint produced by quantize.py:
 
     torchrun --nproc_per_node 2 export_quantized_megatron_to_hf.py \
-        --hf_model_name_or_path Qwen/Qwen3-8B \
+        --model_name_or_path Qwen/Qwen3-8B \
         --megatron_path /tmp/Qwen3-8B-FP8-megatron \
         --pp_size 2 \
         --export_unified_hf_path /tmp/Qwen3-8B-FP8-hf
@@ -52,6 +52,7 @@ from mlflow_utils import (
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
+from modelopt.cli import add_model_args
 from modelopt.torch.export import ensure_local_checkpoint, export_mcore_gpt_to_hf
 from modelopt.torch.export.plugins.vllm_fakequant_megatron import export_mcore_gpt_to_hf_vllm_fq
 from modelopt.torch.utils import print_args, print_rank_0
@@ -70,7 +71,7 @@ EXPORT = Tool(
     ),
     variant_help="the Megatron checkpoint's directory name",
     variant=lambda args: checkpoint_name(args.megatron_path),
-    model=lambda args: args.hf_model_name_or_path,
+    model=lambda args: args.model_name_or_path,
     checkpoint=lambda args: args.export_unified_hf_path,
     source=lambda args: checkpoint_root(args.megatron_path),
     non_params=NON_PARAMS,
@@ -79,11 +80,10 @@ EXPORT = Tool(
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument(
-        "--hf_model_name_or_path",
-        type=str,
-        required=True,
-        help="Original HuggingFace model (used for the model structure, tokenizer, and config).",
+    add_model_args(
+        parser,
+        aliases=("--hf_model_name_or_path",),
+        help_text="Original HuggingFace model (used for the model structure, tokenizer, and config).",
     )
     parser.add_argument(
         "--megatron_path",
@@ -97,7 +97,6 @@ def get_args() -> argparse.Namespace:
         required=True,
         help="Directory to write the exported HuggingFace (unified) checkpoint to.",
     )
-    parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument(
         "--no_moe_grouped_gemm",
         action="store_true",
@@ -158,12 +157,10 @@ def get_args() -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace):
-    # --hf_model_name_or_path stays as given. Later steps read the local copy of the whole
+    # --model_name_or_path stays as given. Later steps read the local copy of the whole
     # checkpoint in local_checkpoint_path, since exporters read the source's files from local disk
     # only; hub_model_id is the Hub ID, or None for a local path.
-    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
-        args.hf_model_name_or_path
-    )
+    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(args.model_name_or_path)
     trust_remote_code = is_safe_repo(
         trust_remote_code=args.trust_remote_code, hf_path=args.local_checkpoint_path
     )

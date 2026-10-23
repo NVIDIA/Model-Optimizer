@@ -77,6 +77,7 @@ from transformers import AutoTokenizer
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.utils.distributed as dist
+from modelopt.cli import add_model_args
 from modelopt.torch.export import ensure_local_checkpoint
 from modelopt.torch.opt.conversion import ModeloptStateManager
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
@@ -103,12 +104,12 @@ DISTILL = Tool(
     variant=lambda args: (
         checkpoint_name(args.student_megatron_path) if args.student_megatron_path else "bf16"
     ),
-    model=lambda args: args.student_hf_path,
+    model=lambda args: args.student_model_name_or_path,
     # None for --validate_only: the run writes no checkpoint to tag or point at.
     checkpoint=lambda args: (
         None if args.validate_only else str(Path(args.output_dir) / "checkpoints")
     ),
-    source=lambda args: args.student_megatron_path or args.student_hf_path,
+    source=lambda args: args.student_megatron_path or args.student_model_name_or_path,
     # Megatron-Bridge saves it, so record_checkpoint_provenance settles the pointer: only it
     # can tell a checkpoint this run saved from the one it resumed from.
     settles_pointer=False,
@@ -144,19 +145,19 @@ def get_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Distillation for Megatron-Bridge.")
     # Model arguments (HF teacher, HF or Megatron student)
-    parser.add_argument(
-        "--student_hf_path",
-        type=str,
-        required=True,
-        help="HuggingFace model name or path for the student (e.g. Qwen/Qwen3-0.6B)",
+    add_model_args(
+        parser,
+        role="student",
+        aliases=("--student_hf_path",),
+        help_text="HuggingFace model name or path for the student (e.g. Qwen/Qwen3-0.6B)",
     )
-    parser.add_argument(
-        "--teacher_hf_path",
-        type=str,
-        required=True,
-        help="HuggingFace model name or path for the teacher (e.g. Qwen/Qwen3-8B)",
+    add_model_args(
+        parser,
+        role="teacher",
+        aliases=("--teacher_hf_path",),
+        help_text="HuggingFace model name or path for the teacher (e.g. Qwen/Qwen3-8B)",
+        trust_remote_code=False,
     )
-    parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
     parser.add_argument(
         "--no_moe_grouped_gemm",
         action="store_true",
@@ -172,7 +173,7 @@ def get_args():
         default=None,
         help=(
             "Path to a Megatron checkpoint to initialize the student weights from, instead of the HuggingFace "
-            "weights of --student_hf_path (which is still required to build the student model structure). "
+            "weights of --student_model_name_or_path (which is still required to build the student model structure). "
             "If the checkpoint carries ModelOpt state (i.e. it is quantized), the quantizers are "
             "restored automatically, turning distillation into Quantization Aware Distillation (QAD)."
         ),
@@ -440,7 +441,7 @@ def get_args():
         required=False,
         default=None,
         help="Reference HF model with a homogeneous architecture, used as the export template for a "
-        "heterogeneous (Puzzletron/NAS) student's weights. Defaults to --student_hf_path, which is "
+        "heterogeneous (Puzzletron/NAS) student's weights. Defaults to --student_model_name_or_path, which is "
         "correct for homogeneous students; unused for VLMs.",
     )
     add_mlflow_args(parser, DISTILL, log_checkpoints=True)
@@ -453,7 +454,7 @@ def get_args():
         raise ValueError("Must provide either --data_paths or set --use_mock_data.")
 
     if args.student_hf_model is None:
-        args.student_hf_model = args.student_hf_path
+        args.student_hf_model = args.student_model_name_or_path
     if args.checkpoint_keep_last < -1:
         raise ValueError("--checkpoint_keep_last must be >= -1.")
     if args.validate_only and args.eval_iters == 0:
@@ -529,8 +530,12 @@ def get_args():
 def _check_shared_vocabulary(args) -> None:
     """Raise unless teacher and student use the same tokenizer."""
     _tok = {"trust_remote_code": args.trust_remote_code}
-    student_vocab = AutoTokenizer.from_pretrained(args.student_hf_path, **_tok).get_vocab()
-    teacher_vocab = AutoTokenizer.from_pretrained(args.teacher_hf_path, **_tok).get_vocab()
+    student_vocab = AutoTokenizer.from_pretrained(
+        args.student_model_name_or_path, **_tok
+    ).get_vocab()
+    teacher_vocab = AutoTokenizer.from_pretrained(
+        args.teacher_model_name_or_path, **_tok
+    ).get_vocab()
     if student_vocab != teacher_vocab:
         raise ValueError(
             "Distillation scores the teacher on the student's token ids, so teacher and student "
@@ -544,7 +549,7 @@ def _tokenizer_prepends_bos(args) -> bool:
     Probes an encode: fast tokenizers prepend via a post-processor that exposes no attribute.
     """
     tokenizer = AutoTokenizer.from_pretrained(
-        args.student_hf_path, trust_remote_code=args.trust_remote_code
+        args.student_model_name_or_path, trust_remote_code=args.trust_remote_code
     )
     if not getattr(tokenizer, "bos_token", None):
         return False
@@ -593,11 +598,11 @@ def _add_document_boundaries() -> None:
 
 
 def main(args: argparse.Namespace, owns_the_run: bool = True):
-    # --student_hf_path stays as given. The student is built and exported from the local copy of
+    # --student_model_name_or_path stays as given. The student is built and exported from the local copy of
     # the whole checkpoint in student_local_checkpoint_path, since the HF export reads the source's
     # files from local disk only; student_hub_model_id is the Hub ID, or None for a local path.
     args.student_hub_model_id, args.student_local_checkpoint_path = ensure_local_checkpoint(
-        args.student_hf_path
+        args.student_model_name_or_path
     )
     # NullTokenizer's EOD defaults to vocab_size - 1, which pre-tokenized data never contains.
     eod_id = _document_eod_id(args) if args.document_boundaries else None
@@ -654,7 +659,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
                 provider.recompute_modules = args.recompute_modules
         return provider
 
-    # The student structure is always built from --student_hf_path. When --student_megatron_path is
+    # The student structure is always built from --student_model_name_or_path. When --student_megatron_path is
     # given, the HF weights are skipped (they are overwritten by the Megatron checkpoint, loaded into
     # the built student inside the patched provide() below).
     # Only the student's layout is pinned -- it must match --student_megatron_path (see quantize.py).
@@ -670,7 +675,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     # The teacher only runs forward, is loaded from HF, and is hidden from the checkpoint
     # (``expose_minimal_state_dict``), so it keeps the faster grouped GEMM regardless.
     teacher_provider = _build_model_provider(
-        args.teacher_hf_path, moe_grouped_gemm=not args.no_moe_grouped_gemm
+        args.teacher_model_name_or_path, moe_grouped_gemm=not args.no_moe_grouped_gemm
     )
 
     # The KD losses compare logits elementwise over the vocab dim, so both output layers must have
@@ -874,7 +879,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             # consumes pre-tokenized data and keeps NullTokenizer.
             TokenizerConfig(
                 tokenizer_type="HuggingFaceTokenizer",
-                tokenizer_model=args.student_hf_path,
+                tokenizer_model=args.student_model_name_or_path,
                 hf_tokenizer_kwargs={
                     "trust_remote_code": args.trust_remote_code,
                     # Default True would make text_to_ids inject a BOS at the answer boundary,

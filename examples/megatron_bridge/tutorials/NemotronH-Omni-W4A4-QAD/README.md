@@ -72,7 +72,7 @@ PTQ runs on **one 4-GPU GB300 node** with 512 calibration samples.
 
 ```bash
 torchrun --nproc_per_node 4 /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
-    --hf_model_name_or_path <nemotron_h_omni-checkpoint> \
+    --model_name_or_path <nemotron_h_omni-checkpoint> \
     --trust_remote_code \
     --recipe models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/ptq/nvfp4-mse \
     --tp_size 1 --ep_size 4 --pp_size 1 \
@@ -108,8 +108,8 @@ We used **8 nodes × 4 GB300 (32 GPUs)** with context parallelism 4 and expert p
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1) MASTER_PORT=29500
 srun bash -c 'export RANK=$SLURM_PROCID WORLD_SIZE=$SLURM_NTASKS LOCAL_RANK=$SLURM_LOCALID
 python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
-    --teacher_hf_path <nemotron_h_omni-checkpoint> \
-    --student_hf_path <nemotron_h_omni-checkpoint> \
+    --teacher_model_name_or_path <nemotron_h_omni-checkpoint> \
+    --student_model_name_or_path <nemotron_h_omni-checkpoint> \
     --student_megatron_path /path/to/nemotron_h_omni_w4a4_megatron \
     --trust_remote_code \
     --tp_size 1 --pp_size 1 --cp_size 4 --ep_size 32 \
@@ -128,7 +128,7 @@ python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
     --output_dir /path/to/qad_output'
 ```
 
-- `--student_megatron_path` is the PTQ checkpoint from Section 2; `--student_hf_path` still points at the BF16 model, which supplies the architecture. The PTQ checkpoint was written at EP=4 and loads at EP=32.
+- `--student_megatron_path` is the PTQ checkpoint from Section 2; `--student_model_name_or_path` still points at the BF16 model, which supplies the architecture. The PTQ checkpoint was written at EP=4 and loads at EP=32.
 - `--sft --sft_hf_dataset ... --sft_loss_mode assistant` renders each conversation with the model's chat template and computes the loss on assistant tokens only.
 - `--seq_length 32768 --gbs 64`: 600 iterations cover 38,400 records, about 1.07 epochs of the 35,800-record training split.
 - `--recompute_*` and `--no_async_save` are needed to fit: the async-save worker needs its own CUDA context and runs out of memory next to the resident teacher.
@@ -145,7 +145,7 @@ Export the QAD checkpoint to a Hugging Face checkpoint on one 4-GPU node (pipeli
 
 ```bash
 torchrun --nproc_per_node 4 /opt/Model-Optimizer/examples/megatron_bridge/export_quantized_megatron_to_hf.py \
-    --hf_model_name_or_path <nemotron_h_omni-checkpoint> \
+    --model_name_or_path <nemotron_h_omni-checkpoint> \
     --trust_remote_code \
     --megatron_path /path/to/qad_output/checkpoints \
     --export_unified_hf_path /path/to/nemotron_h_omni_w4a4_hf \

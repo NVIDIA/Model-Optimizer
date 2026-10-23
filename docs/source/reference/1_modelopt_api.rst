@@ -9,6 +9,7 @@ modelopt API
    :toctree: generated
    :recursive:
 
+   modelopt.cli
    modelopt.deploy
    modelopt.onnx
    modelopt.torch

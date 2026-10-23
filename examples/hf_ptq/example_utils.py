@@ -1104,7 +1104,7 @@ HF_PTQ = Tool(
     ),
     variant_help="recipe name, or --qformat if no --recipe",
     variant=lambda args: Path(args.recipe).stem if args.recipe else args.qformat,
-    model=lambda args: args.pyt_ckpt_path,
+    model=lambda args: args.model_name_or_path,
     checkpoint=lambda args: args.export_path,
     texts=lambda args: resolved_recipe_texts(args.recipe),
     # Missing entries are skipped: the MoE table only exists for MoE models, and neither

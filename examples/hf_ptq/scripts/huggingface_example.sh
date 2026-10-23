@@ -181,7 +181,7 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
                 --summary "$MEM_MON_DIR/mem_peak.txt" --)
         fi
         "${MEM_MON_PREFIX[@]}" python hf_ptq.py \
-            --pyt_ckpt_path=$MODEL_PATH \
+            --model_name_or_path=$MODEL_PATH \
             --export_path=$SAVE_PATH \
             --sparsity_fmt=$SPARSITY_FMT \
             $QUANT_SPEC_ARGS \

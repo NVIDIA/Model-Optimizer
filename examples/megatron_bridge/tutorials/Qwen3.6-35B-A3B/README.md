@@ -129,7 +129,7 @@ PTQ takes **~9 min on 2 GB200 nodes (1.2 GPU-hours)** at EP=8.
 ```bash
 # SBATCH --nodes=2 --ntasks-per-node=4 --gpus-per-node=4
 srun ... python /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
-    --hf_model_name_or_path Qwen/Qwen3.6-35B-A3B \
+    --model_name_or_path Qwen/Qwen3.6-35B-A3B \
     --recipe model_type/qwen3_6_moe/ptq/w4a4_nvfp4-fp8_attn-kv_fp8_cast_mcore \
     --tp_size 1 --ep_size 8 --pp_size 1 \
     --calib_dataset_name cnn_nemotron_v2_mix \
@@ -165,8 +165,8 @@ keeps the multi-node logs unbuffered.
 ```bash
 # SBATCH --nodes=32 --ntasks-per-node=4 --gpus-per-node=4
 srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
-    --teacher_hf_path Qwen/Qwen3.6-35B-A3B \
-    --student_hf_path Qwen/Qwen3.6-35B-A3B \
+    --teacher_model_name_or_path Qwen/Qwen3.6-35B-A3B \
+    --student_model_name_or_path Qwen/Qwen3.6-35B-A3B \
     --student_megatron_path /path/to/qwen36_w4a4_megatron \
     --tp_size 1 --pp_size 1 --cp_size 1 --ep_size 8 \
     --data_paths "${DATA_BLEND}" \
@@ -186,7 +186,7 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
 
 Non-default arguments:
 
-- `--student_megatron_path` — the quantized checkpoint from Section 2; `--student_hf_path` still points at the BF16 model, which supplies the architecture.
+- `--student_megatron_path` — the quantized checkpoint from Section 2; `--student_model_name_or_path` still points at the BF16 model, which supplies the architecture.
 - `--tp_size 1 --pp_size 1` — **required, not chosen** (see below). `--ep_size 8` must match the PTQ checkpoint. You may increase `--cp_size` to enable context parallelism for longer sequence lengths (`nemo:26.10` container onwards).
 - `--seq_length 32768 --gbs 512` — 16.8M tokens/iteration, 1.7B per 100 iterations.
 - `--lr 1e-5 --min_lr 1e-6` — an order of magnitude below typical distillation LRs: the job is to adapt weights to quantization, not to learn the task.
@@ -206,7 +206,7 @@ Convert the quantized Megatron checkpoint to a deployable unified HuggingFace ch
 
 ```bash
 torchrun --nproc_per_node 4 /opt/Model-Optimizer/examples/megatron_bridge/export_quantized_megatron_to_hf.py \
-    --hf_model_name_or_path Qwen/Qwen3.6-35B-A3B \
+    --model_name_or_path Qwen/Qwen3.6-35B-A3B \
     --megatron_path /path/to/qad_output/checkpoints/iter_0000500 \
     --pp_size 4 \
     --export_unified_hf_path /path/to/qwen36_w4a4_qad_hf

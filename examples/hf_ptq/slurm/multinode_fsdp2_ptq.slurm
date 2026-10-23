@@ -81,7 +81,7 @@ srun --container-image="${CONTAINER_IMAGE}" \
       --rdzv_backend=c10d \
       --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
       hf_ptq.py \
-        --pyt_ckpt_path "${MODEL_PATH}" \
+        --model_name_or_path "${MODEL_PATH}" \
         --recipe "${RECIPE}" \
         --calib_size "${CALIB_SIZE}" \
         --batch_size "${BATCH_SIZE}" \

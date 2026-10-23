@@ -23,6 +23,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, P
 
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity as mts
+from modelopt.cli import add_model_args
 from modelopt.torch.export import ensure_local_checkpoint, export_hf_checkpoint
 
 DEFAULT_PAD_TOKEN = "[PAD]"
@@ -127,9 +128,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--model_name_or_path", help="Specify where the PyTorch checkpoint path is", required=True
-    )
+    add_model_args(parser, help_text="Specify where the PyTorch checkpoint path is")
     parser.add_argument(
         "--modelopt_restore_path",
         help="Path to the pruned modelopt checkpoint",
@@ -145,12 +144,6 @@ if __name__ == "__main__":
         help="Maximum sequence length. Sequences will be right padded (and possibly truncated).",
     )
     parser.add_argument("--output_dir", default="output_dir")
-    parser.add_argument(
-        "--trust_remote_code",
-        help="Set trust_remote_code for Huggingface models and tokenizers",
-        default=False,
-        action="store_true",
-    )
 
     args = parser.parse_args()
 

@@ -81,14 +81,14 @@ RECIPE = "general/ptq/nvfp4_default-kv_fp8_cast"
 # What each script's parser offers, limited to what the tracking reads off args.
 _SCRIPT_ARGS = {
     "QUANTIZE": {
-        "--hf_model_name_or_path": "/models/Qwen3-0.6B",
+        "--model_name_or_path": "/models/Qwen3-0.6B",
         "--export_megatron_path": "/tmp/out",
         "--recipe": None,
         "--quant_cfg": None,
         "--tp_size": 1,
     },
     "PRUNE": {
-        "--hf_model_name_or_path": "/models/Qwen3-0.6B",
+        "--model_name_or_path": "/models/Qwen3-0.6B",
         "--output_megatron_path": None,
         "--output_hf_path": None,
         "--prune_target_params": None,
@@ -97,19 +97,19 @@ _SCRIPT_ARGS = {
         "--prune_export_config": None,
     },
     "EXPORT": {
-        "--hf_model_name_or_path": "/models/Qwen3-0.6B",
+        "--model_name_or_path": "/models/Qwen3-0.6B",
         "--megatron_path": "/ckpts/Qwen3-0.6B-nvfp4-megatron/",
         "--export_unified_hf_path": "/tmp/hf_out",
     },
     "DISTILL": {
         "--validate_only": False,
-        "--student_hf_path": "/models/Qwen3-0.6B",
+        "--student_model_name_or_path": "/models/Qwen3-0.6B",
         "--student_megatron_path": "/ckpts/Qwen3-0.6B-nvfp4-megatron",
-        "--teacher_hf_path": "/models/Qwen3-0.6B",
+        "--teacher_model_name_or_path": "/models/Qwen3-0.6B",
         "--output_dir": "/runs/qad",
     },
     "DISTILL_EXPORT": {
-        "--student_hf_path": "/models/Qwen3-0.6B",
+        "--student_model_name_or_path": "/models/Qwen3-0.6B",
         "--megatron_path": "/runs/qad/checkpoints",
         "--hf_export_path": "/tmp/hf_out",
         "--export_iterations": None,
@@ -299,7 +299,7 @@ def test_params_track_every_cli_argument(monkeypatch):
 
     params = mlflow_lib.describe_run(args, QUANTIZE, 8)["params"]
 
-    assert params["hf_model_name_or_path"] == "/models/Qwen3-0.6B"
+    assert params["model_name_or_path"] == "/models/Qwen3-0.6B"
     assert params["tp_size"] == 2
     # Data parallelism is implicit, so the parallelism flags alone do not say how many GPUs ran.
     assert params["world_size"] == 8
@@ -476,23 +476,23 @@ _WIRING = {
     "QUANTIZE": (
         _SCRIPT,
         "with mlflow_run(args, QUANTIZE):",
-        ("--hf_model_name_or_path", "--export_megatron_path", "--recipe", "--quant_cfg"),
+        ("--export_megatron_path", "--recipe", "--quant_cfg"),
     ),
     "PRUNE": (
         _PRUNE_SCRIPT,
         "with mlflow_run(args, PRUNE):",
-        ("--hf_model_name_or_path", "--output_megatron_path", "--output_hf_path"),
+        ("--output_megatron_path", "--output_hf_path"),
     ),
     "EXPORT": (
         _EXPORT_SCRIPT,
         "with mlflow_run(args, EXPORT):",
-        ("--hf_model_name_or_path", "--megatron_path", "--export_unified_hf_path"),
+        ("--megatron_path", "--export_unified_hf_path"),
     ),
     "DISTILL_EXPORT": (_DISTILL_EXPORT_SCRIPT, "with mlflow_run(args, DISTILL_EXPORT):", ()),
     "DISTILL": (
         _DISTILL_SCRIPT,
         "with distill_run(args, DISTILL) as owns_the_run:",
-        ("--student_hf_path", "--student_megatron_path", "--output_dir"),
+        ("--student_megatron_path", "--output_dir"),
     ),
 }
 
@@ -508,7 +508,9 @@ def test_every_script_wires_the_tracking(tool):
     assert opens_the_run in source
     # The namespace reaches print_args masked, so a user:token@ URI stays out of the job log.
     assert "print_args(masked_args(args))" in source
-    # Every args attribute the tracking reads is a flag the script registers.
+    # Every args attribute the tracking reads is a flag the script registers; the model is
+    # registered through modelopt.cli.add_model_args.
+    assert "add_model_args(" in source
     for flag in flags:
         assert f'"{flag}"' in source
 
@@ -633,7 +635,7 @@ def test_only_a_run_that_saved_settles_the_pointer(
 def test_only_the_training_script_offers_the_checkpoint_upload_flag():
     """Declared once beside the Tool records, not decided inside add_mlflow_args."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--hf_model_name_or_path", default="/models/m")
+    parser.add_argument("--model_name_or_path", default="/models/m")
     parser.add_argument("--megatron_path", default="/ckpts/m")
     parser.add_argument("--export_unified_hf_path", default="/tmp/out")
     mlflow_utils.add_mlflow_args(parser, EXPORT)
@@ -747,7 +749,7 @@ def test_the_distill_run_carries_what_the_other_scripts_carry(monkeypatch, fake_
         pass
 
     # Its own arguments, which Megatron-Bridge's flattened config does not carry.
-    assert fake_mlflow.params["teacher_hf_path"] == "/models/Qwen3-0.6B"
+    assert fake_mlflow.params["teacher_model_name_or_path"] == "/models/Qwen3-0.6B"
     assert fake_mlflow.params["student_megatron_path"] == "/ckpts/Qwen3-0.6B-nvfp4-megatron"
     assert "command.txt" in fake_mlflow.texts
     assert fake_mlflow.status == "FINISHED"

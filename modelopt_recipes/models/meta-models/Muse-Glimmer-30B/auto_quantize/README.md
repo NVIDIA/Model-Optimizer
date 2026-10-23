@@ -9,7 +9,7 @@ Use unquantized KV cache and representative text calibration:
 
 ```bash
 python examples/hf_ptq/hf_ptq.py \
-  --pyt_ckpt_path <muse-glimmer-checkpoint> \
+  --model_name_or_path <muse-glimmer-checkpoint> \
   --recipe models/meta-models/Muse-Glimmer-30B/auto_quantize/w4a16_nvfp4_4o6_mixed \
   --kv_cache_qformat none \
   --dataset nemotron-post-training-v3 \

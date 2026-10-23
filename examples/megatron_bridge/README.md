@@ -85,7 +85,7 @@ This section shows how to quantize a HuggingFace model using ModelOpt in the Meg
 
 ```bash
 torchrun --nproc_per_node 2 quantize.py \
-    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --model_name_or_path Qwen/Qwen3-8B \
     --quant_cfg nvfp4 \
     --tp_size 2 \
     --calib_batch_size 1 \
@@ -100,7 +100,7 @@ torchrun --nproc_per_node 2 quantize.py \
 
 ```bash
 torchrun --nproc_per_node 2 export_quantized_megatron_to_hf.py \
-    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --model_name_or_path Qwen/Qwen3-8B \
     --megatron_path /tmp/Qwen3-8B-NVFP4-megatron \
     --pp_size 2 \
     --export_unified_hf_path /tmp/Qwen3-8B-NVFP4-hf
@@ -130,7 +130,7 @@ Set MLflow's own `MLFLOW_TRACKING_URI`, or pass `--mlflow <tracking-uri>`, to re
 
 ```bash
 torchrun --nproc_per_node 2 quantize.py \
-    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --model_name_or_path Qwen/Qwen3-8B \
     --recipe general/ptq/nvfp4_default-kv_fp8 \
     --tp_size 2 \
     --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron \
@@ -152,9 +152,9 @@ This section shows how to distill a student model from a teacher model in the Me
 
 This can be used stand-alone or after [Pruning](#pruning) / [Post-Training Quantization](#post-training-quantization) to recover accuracy of the model by distilling from the original model (teacher).
 
-The [distill.py](distill.py) script supports both standard HuggingFace checkpoints and [Puzzletron AnyModel](../puzzletron/README.md) checkpoints as student/teacher inputs. Just pass the checkpoint path via `--student_hf_path` / `--teacher_hf_path`. The distilled model is saved to `<output_dir>/checkpoints` in Megatron distributed checkpoint format.
+The [distill.py](distill.py) script supports both standard HuggingFace checkpoints and [Puzzletron AnyModel](../puzzletron/README.md) checkpoints as student/teacher inputs. Just pass the checkpoint path via `--student_model_name_or_path` / `--teacher_model_name_or_path`. The distilled model is saved to `<output_dir>/checkpoints` in Megatron distributed checkpoint format.
 
-To distill a student whose weights live in a **Megatron checkpoint** (e.g. a quantized checkpoint from [quantize.py](quantize.py) for [Quantization Aware Distillation](#quantization-aware-distillation-qad), or a pruned checkpoint), additionally pass `--student_megatron_path` — `--student_hf_path` is still required to build the student architecture.
+To distill a student whose weights live in a **Megatron checkpoint** (e.g. a quantized checkpoint from [quantize.py](quantize.py) for [Quantization Aware Distillation](#quantization-aware-distillation-qad), or a pruned checkpoint), additionally pass `--student_megatron_path` — `--student_model_name_or_path` is still required to build the student architecture.
 
 ### Data Preparation
 
@@ -213,8 +213,8 @@ Example usage to distill a 4B student (HF) from an 8B teacher (HF) on 8 GPUs (TP
 ```bash
 torchrun --nnodes 1 --nproc_per_node 8 distill.py \
     --tp_size 8 \
-    --teacher_hf_path Qwen/Qwen3-8B \
-    --student_hf_path Qwen/Qwen3-4B \
+    --teacher_model_name_or_path Qwen/Qwen3-8B \
+    --student_model_name_or_path Qwen/Qwen3-4B \
     --data_paths 1.0 tokenized_qwen3/data1_text_document 1.0 tokenized_qwen3/data2_text_document \
     --data_path_to_cache /path/to/cache/dataset_indices_qwen3 \
     --seq_length 8192 \
@@ -250,8 +250,8 @@ Example usage with mock data for quick testing (no pre-tokenized data needed):
 ```bash
 torchrun --nproc_per_node 8 distill.py \
     --tp_size 8 \
-    --teacher_hf_path Qwen/Qwen3-0.6B \
-    --student_hf_path Qwen/Qwen3-0.6B \
+    --teacher_model_name_or_path Qwen/Qwen3-0.6B \
+    --student_model_name_or_path Qwen/Qwen3-0.6B \
     --use_mock_data \
     --seq_length 512 \
     --mbs 1 \
@@ -264,13 +264,13 @@ torchrun --nproc_per_node 8 distill.py \
 
 ### Vision-Language Models (VLMs)
 
-For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `distill.py` distills only the **language model** (on text data) and leaves the vision tower and projector untouched — matching the pruning and quantization behavior. It composes with pruning and QAD (`--student_megatron_path`) exactly as for LLMs, and the HF export reuses `--student_hf_path` (no `--student_hf_model` needed).
+For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `distill.py` distills only the **language model** (on text data) and leaves the vision tower and projector untouched — matching the pruning and quantization behavior. It composes with pruning and QAD (`--student_megatron_path`) exactly as for LLMs, and the HF export reuses `--student_model_name_or_path` (no `--student_hf_model` needed).
 
 ```bash
 torchrun --nproc_per_node 8 distill.py \
     --tp_size 8 \
-    --teacher_hf_path Qwen/Qwen3-VL-2B-Thinking \
-    --student_hf_path Qwen/Qwen3-VL-2B-Thinking \
+    --teacher_model_name_or_path Qwen/Qwen3-VL-2B-Thinking \
+    --student_model_name_or_path Qwen/Qwen3-VL-2B-Thinking \
     ...
 ```
 
@@ -286,13 +286,13 @@ torchrun --nnodes 1 --nproc_per_node 8 distill.py \
     --hf_export_path /path/to/save/distilled_hf_ckpt
 ```
 
-`--student_hf_path` builds the student and provides the exported config / tokenizer. `--student_hf_model` is a reference HF model with a **homogeneous** architecture, used as the export template only for **heterogeneous** (Puzzletron/NAS) students; for homogeneous models and VLMs, omit it -- it defaults to `--student_hf_path`.
+`--student_model_name_or_path` builds the student and provides the exported config / tokenizer. `--student_hf_model` is a reference HF model with a **homogeneous** architecture, used as the export template only for **heterogeneous** (Puzzletron/NAS) students; for homogeneous models and VLMs, omit it -- it defaults to `--student_model_name_or_path`.
 
 **Separate conversion** -- convert **any** saved iteration (intermediate or final) with [export_distilled_megatron_to_hf.py](export_distilled_megatron_to_hf.py):
 
 ```bash
 torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
-    --student_hf_path <student_hf_model_or_path> \
+    --student_model_name_or_path <student_hf_model_or_path> \
     --megatron_path <distill_output_dir>/checkpoints/iter_<iter_number> \
     --hf_export_path /path/to/save/distilled_hf_ckpt
 ```
@@ -307,7 +307,7 @@ Then export all retained checkpoints, with one Hugging Face checkpoint written p
 
 ```bash
 torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
-    --student_hf_path <student_hf_model_or_path> \
+    --student_model_name_or_path <student_hf_model_or_path> \
     --megatron_path <distill_output_dir>/checkpoints \
     --hf_export_path /path/to/save/hf_validation_checkpoints \
     --export_iterations all
@@ -326,7 +326,7 @@ To export selected iterations instead, use `--export_iterations 200 400 600`.
 
 ### Quantization Aware Distillation (QAD)
 
-To recover the accuracy lost during [Post-Training Quantization](#post-training-quantization), distill the quantized model (student) from the original, unquantized model (teacher). Pass the quantized **Megatron checkpoint** produced by `quantize.py` via `--student_megatron_path` (the ModelOpt quantizers are restored automatically, so distillation trains the fake-quantized student), while `--student_hf_path` provides the student architecture and `--teacher_hf_path` points to the original unquantized model.
+To recover the accuracy lost during [Post-Training Quantization](#post-training-quantization), distill the quantized model (student) from the original, unquantized model (teacher). Pass the quantized **Megatron checkpoint** produced by `quantize.py` via `--student_megatron_path` (the ModelOpt quantizers are restored automatically, so distillation trains the fake-quantized student), while `--student_model_name_or_path` provides the student architecture and `--teacher_model_name_or_path` points to the original unquantized model.
 
 If you do not already have a suitable QAD dataset, start with
 [data/nemotron-cascade-2-blend.yaml](data/nemotron-cascade-2-blend.yaml). It defines a general-purpose
@@ -340,8 +340,8 @@ We also use a smaller learning rate for QAD:
 ```bash
 torchrun --nproc_per_node 8 distill.py \
     --tp_size 8 \
-    --teacher_hf_path Qwen/Qwen3-8B \
-    --student_hf_path Qwen/Qwen3-8B \
+    --teacher_model_name_or_path Qwen/Qwen3-8B \
+    --student_model_name_or_path Qwen/Qwen3-8B \
     --student_megatron_path /tmp/Qwen3-8B-NVFP4-megatron \
     --data_paths 1.0 tokenized_qwen3/data1_text_document 1.0 tokenized_qwen3/data2_text_document \
     --data_path_to_cache /path/to/cache/dataset_indices_qwen3 \
@@ -377,7 +377,7 @@ Add `--lora_rank` to PTQ to train low-rank weight updates with the usual QAD flo
 
 ```bash
 torchrun --nproc_per_node 2 quantize.py \
-    --hf_model_name_or_path Qwen/Qwen3-0.6B \
+    --model_name_or_path Qwen/Qwen3-0.6B \
     --recipe general/ptq/nvfp4_default-kv_fp8 \
     --tp_size 2 --lora_rank 8 --lora_alpha 16 \
     --export_megatron_path /output/qwen3_06b_nvfp4_lora
@@ -435,7 +435,7 @@ Multiple NAS targets can be combined — e.g. `--prune_target_params 6e9 --prune
 ```bash
 torchrun --nproc_per_node 2 prune_minitron.py \
     --pp_size 2 \
-    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --model_name_or_path Qwen/Qwen3-8B \
     --prune_target_params 6e9 \
     --hparams_to_skip num_attention_heads \
     --output_hf_path /tmp/Qwen3-8B-Pruned-6B
@@ -446,7 +446,7 @@ torchrun --nproc_per_node 2 prune_minitron.py \
 ```bash
 torchrun --nproc_per_node 2 prune_minitron.py \
     --pp_size 2 \
-    --hf_model_name_or_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+    --model_name_or_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
     --prune_target_active_params 3e9 \
     --output_hf_path /tmp/Nemotron-3-Nano-30B-A3B-BF16-Pruned-3B-Active
 ```
@@ -456,7 +456,7 @@ torchrun --nproc_per_node 2 prune_minitron.py \
 ```bash
 torchrun --nproc_per_node 2 prune_minitron.py \
     --pp_size 2 \
-    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --model_name_or_path Qwen/Qwen3-8B \
     --prune_target_memory_mb 12288 \
     --seq_length 4096 \
     --calib_batch_size 1 \
@@ -468,7 +468,7 @@ torchrun --nproc_per_node 2 prune_minitron.py \
 ```bash
 torchrun --nproc_per_node 2 prune_minitron.py \
     --pp_size 2 \
-    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --model_name_or_path Qwen/Qwen3-8B \
     --prune_export_config '{"hidden_size": 3584, "ffn_hidden_size": 9216}' \
     --output_hf_path /tmp/Qwen3-8B-Pruned-6B-manual
 ```
@@ -500,7 +500,7 @@ For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `prune_minitron.py` au
 ```bash
 torchrun --nproc_per_node 2 prune_minitron.py \
     --pp_size 2 \
-    --hf_model_name_or_path Qwen/Qwen3.5-4B \
+    --model_name_or_path Qwen/Qwen3.5-4B \
     --prune_target_params 3e9 \
     --output_hf_path /tmp/Qwen3.5-4B-Pruned-3B
 ```
