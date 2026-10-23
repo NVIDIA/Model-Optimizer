@@ -182,6 +182,9 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     # dispatch hidden (autograd-aware when scoring) + local-expert id (same split sizes)
     recv_hidden = torch.empty(Q, H, device=dev, dtype=x.dtype)
     recv_hidden = _all_to_all(recv_hidden, send_hidden, out_list, in_list, step)
+    # Each [rows, H] buffer goes as soon as its stage is done; kept to the end, six of them were the
+    # layer's peak memory.
+    del send_hidden
     recv_eid = torch.empty(Q, device=dev, dtype=torch.int64)
     dist.all_to_all_single(recv_eid, local_eid_s.contiguous(), out_list, in_list, group=group)
 
@@ -190,14 +193,18 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     counts = torch.bincount(recv_eid[rorder], minlength=num_local_experts)
     offsets = torch.cumsum(counts, dim=0).to(torch.int32)
     eo = expert_fn(recv_hidden[rorder], offsets).to(x.dtype)
+    del recv_hidden
     eo_recv = torch.empty(Q, H, device=dev, dtype=x.dtype)
     eo_recv[rorder] = eo  # back to recv order
+    del eo
 
     # combine: all_to_all back (swap counts, autograd-aware when scoring) -> scatter-sum to original tokens
-    send_back = torch.empty(send_hidden.size(0), H, device=dev, dtype=x.dtype)
+    send_back = torch.empty(P_sent, H, device=dev, dtype=x.dtype)
     send_back = _all_to_all(send_back, eo_recv, in_list, out_list, step)
+    del eo_recv
     out_pair = torch.empty_like(send_back)
     out_pair[order] = send_back  # back to pair order
+    del send_back
     # Weight each result by its routing weight in the weight's own dtype, as transformers' grouped_mm
     # forward does: a router that returns fp32 weights (Mixtral's) gets an fp32 product; rounding the
     # weights to bf16 first would change the model's output even at EP=1.
