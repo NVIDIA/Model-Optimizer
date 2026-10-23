@@ -201,6 +201,21 @@ def test_routed_experts_with_a_quant_wrapper_of_their_own_are_refused(quant_wrap
     assert _SharedExperts in quant_wrappers
 
 
+def test_routed_experts_under_the_generic_fused_wrapper_are_accepted():
+    """mtq.quantize registers the generic fused-experts wrapper, for the whole process, for every
+    fused-experts class it meets, and that wrapper quantizes through the grouped GEMM: a second
+    expert-parallel load of the same class is not refused for it."""
+    from modelopt.torch.quantization.nn.modules.quant_module import QuantModuleRegistry
+    from modelopt.torch.quantization.plugins.huggingface import _QuantFusedExperts
+
+    model = _model_with_decoder_at("model.")
+    QuantModuleRegistry.register({_Experts: "test._Experts"})(_QuantFusedExperts)
+    try:
+        _refuse_unquantizable_experts([layer.mlp.experts for layer in model.model.layers])
+    finally:
+        QuantModuleRegistry.unregister(_Experts)
+
+
 def test_transposed_experts_are_refused():
     """The grouped quantization leaves experts stored transposed (GPT-OSS's) unquantized: the model
     would be quantized everywhere but its experts."""

@@ -1255,7 +1255,9 @@ def _refuse_unquantizable_experts(expert_modules) -> None:
     forward (as for DeepSeek, GLM and MiniMax). Experts stored transposed, ``(num_experts, in_dim,
     out_dim)`` like GPT-OSS's, that would leave unquantized. Experts ModelOpt quantizes through a
     wrapper of their own, like Llama4's, ``mtq.quantize`` would convert to it, and its forward drops
-    the process group the all-to-all transport passes in.
+    the process group the all-to-all transport passes in. The generic fused-experts wrapper is no
+    bar: it quantizes through the grouped GEMM, and ``mtq.quantize`` registers it, for the whole
+    process, for every fused-experts class it meets, so a second load of the same class sees it.
     """
     transposed = sorted(
         {type(m).__name__ for m in expert_modules if getattr(m, "is_transposed", False)}
@@ -1267,8 +1269,16 @@ def _refuse_unquantizable_experts(expert_modules) -> None:
             "model without expert parallelism."
         )
     from modelopt.torch.quantization.nn.modules.quant_module import QuantModuleRegistry
+    from modelopt.torch.quantization.plugins.huggingface import _QuantFusedExperts
 
-    wrapped = sorted({type(m).__name__ for m in expert_modules if type(m) in QuantModuleRegistry})
+    wrapped = sorted(
+        {
+            type(m).__name__
+            for m in expert_modules
+            if type(m) in QuantModuleRegistry
+            and not issubclass(QuantModuleRegistry[type(m)], _QuantFusedExperts)
+        }
+    )
     if wrapped:
         raise NotImplementedError(
             f"Expert-parallel PTQ cannot quantize {', '.join(wrapped)}: ModelOpt quantizes these "
