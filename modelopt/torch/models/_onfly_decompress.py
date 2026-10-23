@@ -327,6 +327,12 @@ def _mark(hf_config, fmt):
         setattr(hf_config, _MARK, fmt)
 
 
+def is_marked(hf_config) -> bool:
+    """Whether :func:`install_onfly_decompress` marked ``hf_config`` (or its ``text_config``) for its hooks."""
+    configs = (hf_config, getattr(hf_config, "text_config", None))
+    return any(getattr(c, _MARK, None) is not None for c in configs if c is not None)
+
+
 def install_onfly_decompress(hf_config):
     """Monkeypatch get_model_conversion_mapping so the fused-MoE per-expert converters decompress the
     checkpoint's compressed-tensors weights on the fly, in whatever ``format`` the checkpoint declares.

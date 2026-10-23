@@ -1885,6 +1885,13 @@ def _fsdp2_shard_dense(model: nn.Module, fsdp_mesh, expert_modules) -> int:
 _EP_SOURCE_FORMATS = frozenset({None, "fp8", "mxfp4"})
 
 
+def _decompressed_as_loaded(cfg) -> bool:
+    """Whether a model spec installed the on-the-fly decompressor for this config's checkpoint."""
+    from modelopt.torch.models import _onfly_decompress
+
+    return _onfly_decompress.is_marked(cfg)
+
+
 def _ckpt_quant_method(cfg):
     """Return the checkpoint's native quantization method, or ``None``.
 
@@ -2124,7 +2131,7 @@ def load_and_prepare_ep(
             "Checkpoint cannot dequantize its F8_E8M0 scales. Plan dense='replicate'."
         )
     quant_method = _ckpt_quant_method(hf_config)
-    if quant_method not in _EP_SOURCE_FORMATS:
+    if quant_method not in _EP_SOURCE_FORMATS and not _decompressed_as_loaded(hf_config):
         # transformers' own quantizer would load it as stored, for PTQ to treat as plain weights.
         dequantized = ", ".join(sorted(f for f in _EP_SOURCE_FORMATS if f))
         raise NotImplementedError(
