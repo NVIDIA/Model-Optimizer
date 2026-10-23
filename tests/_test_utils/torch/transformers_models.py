@@ -334,6 +334,32 @@ def create_tiny_gemma3vl_dir(
     )
 
 
+##### Gemma4 (text-only; per-layer attention config) #####
+def get_tiny_gemma4(**config_kwargs) -> PreTrainedModel:
+    """Tiny Gemma 4 text model whose head_dim and kv-head count differ between layer types."""
+    set_seed(SEED)
+
+    # Lazy import: Gemma4TextConfig only exists in transformers >= 5.15.
+    from transformers import Gemma4TextConfig
+
+    kwargs = {
+        "dtype": torch.bfloat16,
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 6,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "num_global_key_value_heads": 1,
+        "attention_k_eq_v": True,  # without it the global kv-head count is ignored
+        "head_dim": 8,
+        "global_head_dim": 16,
+        "max_position_embeddings": 32,
+        "vocab_size": 32,
+    }
+    kwargs.update(config_kwargs)
+    return AutoModelForCausalLM.from_config(Gemma4TextConfig(**kwargs))
+
+
 ##### Qwen3.5-VL (dense or MoE, hybrid GatedDeltaNet + gated attention) #####
 QWEN3_5_VL_REF = "Qwen/Qwen3.5-0.8B"
 
