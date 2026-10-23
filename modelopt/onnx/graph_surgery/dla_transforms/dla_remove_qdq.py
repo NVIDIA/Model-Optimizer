@@ -15,9 +15,11 @@
 
 """Remove paired QuantizeLinear / DequantizeLinear nodes for selected quantized dtypes.
 
-Pairs are removed when the quantizer's zero-point tensor element type matches one of the
+Pairs are removed when the quantizer's storage element type matches one of the
 user-configurable storage types (default: UINT16 and INT16). See :mod:`utils.graph_utils` for
 name/NumPy mappings.
+Scope-captured pairs are preserved. Input clipping requires matching data/output
+types and scalar static bounds; unsupported clipping is rejected before mutation.
 """
 
 from __future__ import annotations
@@ -33,8 +35,21 @@ from ..utils.graph_utils import (
     GraphCache,
     add_unique_initializers,
     calculate_clip_range,
+    get_node_attr_i,
     insert_nodes_at_position,
 )
+from .dla_graph_cleanup import _subgraph_captures
+
+
+def _qdq_output_dtype(node: onnx.NodeProto, cache: GraphCache) -> int | None:
+    """Resolve Q/DQ output types from explicit attributes and typed control inputs."""
+    declared = get_node_attr_i(node, "output_dtype", 0)
+    if declared:
+        return declared
+    index = 2 if node.op_type == "QuantizeLinear" else 1
+    if len(node.input) > index and node.input[index]:
+        return cache.get_dtype(node.input[index])
+    return onnx.TensorProto.UINT8 if node.op_type == "QuantizeLinear" else None
 
 
 def _remove_qdq_from_model(
@@ -49,30 +64,34 @@ def _remove_qdq_from_model(
     dq_input_to_dq_node_map: dict = defaultdict(list)
     graph = model.graph
     cache = GraphCache(graph)
+    versions = {opset.domain: opset.version for opset in model.opset_import}
+    opset = versions.get("", versions.get("ai.onnx", 1))
     unique_initializer: set[str] = set()
     node_datatype_map: dict[str, int] = {}
+    captured = _subgraph_captures(graph)
 
     for node in graph.node:
+        if node.domain not in {"", "ai.onnx", "com.microsoft"} or node.overload:
+            continue
         if node.op_type == "QuantizeLinear":
+            if node.input[0] in captured or node.output[0] in captured:
+                continue
             if not node.output[0] or len(node.output) > 1:
                 continue
             q_output_to_q_node_map[node.output[0]] = node
-            zp_dtype = (
-                cache.get_dtype(node.input[2]) if len(node.input) > 2 else onnx.TensorProto.UINT8
-            )
+            zp_dtype = _qdq_output_dtype(node, cache)
             if zp_dtype is not None:
                 node_datatype_map[node.output[0]] = zp_dtype
             in_dtype = cache.get_dtype(node.input[0])
             if in_dtype is not None:
                 node_datatype_map[node.input[0]] = in_dtype
         elif node.op_type == "DequantizeLinear":
+            if node.output[0] in captured:
+                continue
             if not node.input[0]:
                 continue
             dq_input_to_dq_node_map[node.input[0]].append(node)
-            out_dtype = cache.get_dtype(node.output[0])
-            if out_dtype is None and len(node.input) > 1 and node.input[1]:
-                # Fall back to scale dtype — DQ output has the same float type as the scale.
-                out_dtype = cache.get_dtype(node.input[1])
+            out_dtype = cache.get_dtype(node.output[0]) or _qdq_output_dtype(node, cache)
             if out_dtype is not None:
                 node_datatype_map[node.output[0]] = out_dtype
 
@@ -80,12 +99,20 @@ def _remove_qdq_from_model(
     cnt = 0
     input_names = {inp.name for inp in model.graph.input}
     aliases = {}
+    input_clips = {}
+    clip_types = (
+        {
+            kind
+            for constraint in onnx.defs.get_schema("Clip", opset).type_constraints
+            for kind in constraint.allowed_type_strs
+        }
+        if keep_clip_after_inputs
+        else set()
+    )
     for q_output, q_node in q_output_to_q_node_map.items():
         if node_datatype_map.get(q_output) not in quant_types_to_remove:
             continue
         for dq_node in dq_input_to_dq_node_map.get(q_output, []):
-            if keep_clip_after_inputs and q_node.input[0] in input_names:
-                continue
             in_dtype = node_datatype_map.get(q_node.input[0])
             out_dtype = node_datatype_map.get(dq_node.output[0])
             if in_dtype is None or out_dtype is None:
@@ -93,6 +120,38 @@ def _remove_qdq_from_model(
                     f"Cannot remove QDQ pair ({q_node.name!r}, {dq_node.name!r}): "
                     "dtype is unknown. Ensure shape inference has been run."
                 )
+            if keep_clip_after_inputs and q_node.input[0] in input_names:
+                if (
+                    in_dtype != out_dtype
+                    or f"tensor({onnx.TensorProto.DataType.Name(out_dtype).lower()})"
+                    not in clip_types
+                ):
+                    raise NotImplementedError(
+                        "Input clipping requires matching types supported by the model's Clip schema"
+                    )
+                zero_name = dq_node.input[2] if len(dq_node.input) > 2 else ""
+                if zero_name and cache.get_init(zero_name) is None:
+                    raise NotImplementedError(
+                        "Fold zero-point constants before preserving input clips"
+                    )
+                if (
+                    not zero_name
+                    and cache.get_dtype(dq_node.input[0]) is None
+                    and node_datatype_map[q_output] != onnx.TensorProto.UINT8
+                ):
+                    raise ValueError(
+                        "Infer quantized tensor types before preserving input clips without a zero point"
+                    )
+                clip_min, clip_max = calculate_clip_range(dq_node, model)
+                if clip_min.size != 1 or clip_max.size != 1:
+                    raise NotImplementedError(
+                        "Per-axis input clipping requires an additional transformation"
+                    )
+                dtype = onnx.helper.tensor_dtype_to_np_dtype(out_dtype)
+                input_clips[dq_node.output[0]] = tuple(
+                    np.asarray(bound, dtype=dtype).reshape(()) for bound in (clip_min, clip_max)
+                )
+                continue
             if in_dtype == out_dtype:
                 aliases[dq_node.output[0]] = q_node.input[0]
     for output in aliases:
@@ -114,42 +173,30 @@ def _remove_qdq_from_model(
 
         for dq_node in dq_input_to_dq_node_map[q_output]:
             if keep_clip_after_inputs and q_node.input[0] in input_names:
-                clip_min, clip_max = calculate_clip_range(dq_node, model)
-                clip_min_init = numpy_helper.from_array(
-                    np.asarray(clip_min, dtype=np.float32), f"{dq_node.name}_clip_min"
-                )
-                clip_max_init = numpy_helper.from_array(
-                    np.asarray(clip_max, dtype=np.float32), f"{dq_node.name}_clip_max"
-                )
-                add_unique_initializers(
-                    model.graph, unique_initializer, [clip_min_init, clip_max_init]
-                )
+                clip_min, clip_max = input_clips[dq_node.output[0]]
+                clip_inputs = [q_node.input[0]]
+                clip_options = {}
+                if opset < 11:
+                    clip_options = {"min": float(clip_min), "max": float(clip_max)}
+                else:
+                    for suffix, bound in (("min", clip_min), ("max", clip_max)):
+                        name = cache.unique_name(f"{dq_node.name}_clip_{suffix}")
+                        add_unique_initializers(
+                            graph, unique_initializer, [numpy_helper.from_array(bound, name)]
+                        )
+                        clip_inputs.append(name)
                 clip_node = helper.make_node(
                     "Clip",
-                    inputs=[
-                        q_node.input[0],
-                        f"{dq_node.name}_clip_min",
-                        f"{dq_node.name}_clip_max",
-                    ],
+                    inputs=clip_inputs,
                     outputs=[dq_node.output[0]],
-                    name=f"{dq_node.name}_clip",
+                    name=cache.unique_name(f"{dq_node.name}_clip"),
+                    **clip_options,
                 )
                 insert_nodes_at_position(graph, [clip_node], q_node)
             else:
+                # The preparation pass validated these dtypes before any mutations.
                 in_dt = node_datatype_map.get(q_node.input[0])
                 out_dt = node_datatype_map.get(dq_node.output[0])
-                if in_dt is None:
-                    raise ValueError(
-                        f"Cannot remove QDQ pair ({q_node.name!r}, {dq_node.name!r}): "
-                        f"dtype of input tensor {q_node.input[0]!r} is unknown. "
-                        "Ensure shape inference has been run before calling this transform."
-                    )
-                if out_dt is None:
-                    raise ValueError(
-                        f"Cannot remove QDQ pair ({q_node.name!r}, {dq_node.name!r}): "
-                        f"dtype of output tensor {dq_node.output[0]!r} is unknown. "
-                        "Ensure shape inference has been run before calling this transform."
-                    )
                 if in_dt != out_dt:
                     cast_node = helper.make_node(
                         "Cast",

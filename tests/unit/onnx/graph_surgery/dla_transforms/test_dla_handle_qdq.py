@@ -44,19 +44,17 @@ Q already 4-D → skipped (no Unsqueeze/Squeeze inserted)
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 
 import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms import dla_handle_qdq as _mod
 
-pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
+ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-_SAVED_MODELS_DIR = _REPO_ROOT / "scratch_space" / "handle_qdq_test_models"
 _OPSET_VERSION = 21  # INT4/UINT4 require ≥ opset 21
 _MAX_IR_VERSION_FOR_ORT = 9
 
@@ -68,30 +66,25 @@ _apply = _mod._apply_handle_qdq
 
 
 def _vi(name: str, elem_type: int, shape: list) -> onnx.ValueInfoProto:
+    """Build a typed tensor descriptor for a small test graph."""
     return helper.make_tensor_value_info(name, elem_type, shape)
 
 
 def _clamp_ir(model: onnx.ModelProto) -> None:
+    """Keep the test model compatible with the supported ORT versions."""
     model.ir_version = min(model.ir_version, _MAX_IR_VERSION_FOR_ORT)
 
 
 def _prepare_model(model: onnx.ModelProto) -> None:
-    try:
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
-
-        inferred = SymbolicShapeInference.infer_shapes(model)
-        if inferred is not None:
-            del model.graph.value_info[:]
-            model.graph.value_info.extend(inferred.graph.value_info)
-    except Exception:
-        pass
+    """Refresh intermediate metadata and surface invalid graph or inference errors."""
+    inferred = onnx.shape_inference.infer_shapes(model, strict_mode=True)
+    onnx.checker.check_model(inferred, full_check=True)
+    del model.graph.value_info[:]
+    model.graph.value_info.extend(inferred.graph.value_info)
 
 
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
-    import onnxruntime as ort  # type: ignore[import-untyped]
-
+    """Execute the test model on the CPU and return named outputs."""
     _clamp_ir(model)
     sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
     return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
@@ -114,13 +107,16 @@ _RNG = np.random.default_rng(2024)
 # ── 1. QuantizeLinear — 3-D dynamic input, per-channel axis ──────────────────
 
 
-def test_quantize_linear_3d_dynamic_wrapped():
+@pytest.mark.parametrize(("opset", "domain"), [(21, ""), (10, "com.microsoft")])
+def test_quantize_linear_3d_dynamic_wrapped(opset, domain):
     """Q [2,4,8] axis=1 → Unsqueeze→Q(axis=2)→Squeeze; output shape and values match base."""
     shape = [2, 4, 8]
     scale = numpy_helper.from_array(np.full((4,), 0.1, dtype=np.float32), name="scale")
     zp = numpy_helper.from_array(np.zeros((4,), dtype=np.int8), name="zp")
 
-    q = helper.make_node("QuantizeLinear", ["X", "scale", "zp"], ["Y"], name="q", axis=1)
+    q = helper.make_node(
+        "QuantizeLinear", ["X", "scale", "zp"], ["Y"], name="q", axis=1, domain=domain
+    )
     graph = helper.make_graph(
         [q],
         "g",
@@ -128,7 +124,13 @@ def test_quantize_linear_3d_dynamic_wrapped():
         [_vi("Y", TensorProto.INT8, shape)],
         initializer=[scale, zp],
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
+    model = helper.make_model(
+        graph,
+        opset_imports=[
+            helper.make_opsetid("", opset),
+            *([helper.make_opsetid(domain, 1)] if domain else []),
+        ],
+    )
     _clamp_ir(model)
 
     x = _RNG.standard_normal(shape).astype(np.float32)
@@ -162,7 +164,8 @@ def test_quantize_linear_3d_dynamic_wrapped():
 # ── 2. DequantizeLinear — 3-D static initializer data input, per-channel ─────
 
 
-def test_dequantize_linear_3d_static_init_wrapped():
+@pytest.mark.parametrize(("opset", "domain"), [(21, ""), (10, "com.microsoft")])
+def test_dequantize_linear_3d_static_init_wrapped(opset, domain):
     """DQ with static int8 initializer [2,4,8] axis=1 → wrapped; float output matches base."""
     shape = [2, 4, 8]
     data = numpy_helper.from_array((_RNG.integers(-5, 6, shape)).astype(np.int8), name="data")
@@ -170,7 +173,7 @@ def test_dequantize_linear_3d_static_init_wrapped():
     zp = numpy_helper.from_array(np.zeros((4,), dtype=np.int8), name="dq_zp")
 
     dq = helper.make_node(
-        "DequantizeLinear", ["data", "dq_scale", "dq_zp"], ["Y"], name="dq", axis=1
+        "DequantizeLinear", ["data", "dq_scale", "dq_zp"], ["Y"], name="dq", axis=1, domain=domain
     )
     graph = helper.make_graph(
         [dq],
@@ -179,7 +182,13 @@ def test_dequantize_linear_3d_static_init_wrapped():
         [_vi("Y", TensorProto.FLOAT, shape)],
         initializer=[data, scale, zp],
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
+    model = helper.make_model(
+        graph,
+        opset_imports=[
+            helper.make_opsetid("", opset),
+            *([helper.make_opsetid(domain, 1)] if domain else []),
+        ],
+    )
     _clamp_ir(model)
 
     _prepare_model(model)
@@ -271,3 +280,135 @@ def test_quantize_linear_4d_skipped():
     assert not any(n.op_type == "Unsqueeze" for n in tr.graph.node)
     assert not any(n.op_type == "Squeeze" for n in tr.graph.node)
     np.testing.assert_array_equal(ref["Y"], got["Y"])
+
+
+@pytest.mark.parametrize(
+    ("opset", "collision"),
+    [
+        (10, None),
+        (12, None),
+        (21, None),
+        (21, "node0_unsq_axes_0"),
+        (21, "node0_in4d_0"),
+        (21, "node0_out4d_0"),
+        (21, "node0_unsq_0"),
+    ],
+)
+def test_mixed_qdq_nodes_use_their_snapshot_positions(opset, collision):
+    """Mixed-rank Q/DQ nodes retain values when only selected positions are wrapped."""
+    specs = [
+        ("QuantizeLinear", [3]),
+        ("DequantizeLinear", [1, 1, 2, 2]),
+        ("QuantizeLinear", [2, 2, 3]),
+        ("DequantizeLinear", [2, 3]),
+    ]
+    nodes, inputs, outputs, feeds = [], [], [], {}
+    for index, (op_type, shape) in enumerate(specs):
+        input_name, output_name = f"X{index}", f"Y{index}"
+        quantize = op_type == "QuantizeLinear"
+        input_dtype = TensorProto.FLOAT if quantize else TensorProto.UINT8
+        output_dtype = TensorProto.UINT8 if quantize else TensorProto.FLOAT
+        nodes.append(
+            helper.make_node(
+                op_type, [input_name, "scale", "zero"], [output_name], name=f"node{index}"
+            )
+        )
+        inputs.append(_vi(input_name, input_dtype, shape))
+        outputs.append(_vi(output_name, output_dtype, shape))
+        feeds[input_name] = np.arange(
+            np.prod(shape), dtype=np.float32 if quantize else np.uint8
+        ).reshape(shape)
+    initializers = [
+        numpy_helper.from_array(np.float32(0.25), "scale"),
+        numpy_helper.from_array(np.uint8(0), "zero"),
+    ]
+    if collision == "node0_unsq_axes_0":
+        initializers.append(numpy_helper.from_array(np.array([0], dtype=np.int64), collision))
+    elif collision == "node0_unsq_0":
+        nodes.append(helper.make_node("Identity", ["X1"], ["protected"], name=collision))
+        outputs.append(_vi("protected", TensorProto.UINT8, [1, 1, 2, 2]))
+    elif collision:
+        inputs.append(_vi(collision, TensorProto.FLOAT, [1]))
+        feeds[collision] = np.array([1], dtype=np.float32)
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "mixed_qdq",
+            inputs,
+            outputs,
+            initializer=initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", opset)],
+        ir_version=_MAX_IR_VERSION_FOR_ORT,
+    )
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    transformed = _apply(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    unchanged = next(node for node in transformed.graph.node if node.name == "node1")
+    assert list(unchanged.input) == ["X1", "scale", "zero"]
+    for name, output in _run_ort(transformed, feeds).items():
+        np.testing.assert_array_equal(output, expected[name])
+
+
+@pytest.mark.parametrize("op_type", ["QuantizeLinear", "DequantizeLinear"])
+def test_untyped_qdq_output_keeps_its_inferred_dtype(op_type):
+    """An internal output without value_info remains correctly typed after wrapping."""
+    quantize = op_type == "QuantizeLinear"
+    input_dtype = TensorProto.FLOAT if quantize else TensorProto.INT8
+    output_dtype = TensorProto.INT8 if quantize else TensorProto.FLOAT
+    shape = [2, 3]
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(op_type, ["X", "scale", "zero"], ["hidden"], name="qdq"),
+                helper.make_node("Identity", ["hidden"], ["Y"]),
+            ],
+            "untyped_output",
+            [_vi("X", input_dtype, shape)],
+            [_vi("Y", output_dtype, shape)],
+            initializer=[
+                numpy_helper.from_array(np.float32(0.25), "scale"),
+                numpy_helper.from_array(np.int8(0), "zero"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=_MAX_IR_VERSION_FOR_ORT,
+    )
+    onnx.checker.check_model(model, full_check=True)
+    x = np.arange(6, dtype=np.float32 if quantize else np.int8).reshape(shape)
+    expected = _run_ort(model, {"X": x})
+    transformed = _apply(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    np.testing.assert_array_equal(_run_ort(transformed, {"X": x})["Y"], expected["Y"])
+
+
+@pytest.mark.parametrize("op_type", ["QuantizeLinear", "DequantizeLinear"])
+def test_blocked_qdq_is_preserved_until_scale_rank_is_supported(op_type):
+    """Blocked quantization keeps data and scale ranks consistent by remaining unchanged."""
+    quantize = op_type == "QuantizeLinear"
+    input_dtype = TensorProto.FLOAT if quantize else TensorProto.INT8
+    output_dtype = TensorProto.INT8 if quantize else TensorProto.FLOAT
+    shape = [2, 4]
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node(op_type, ["X", "scale", "zero"], ["Y"], axis=1, block_size=2)],
+            "blocked",
+            [_vi("X", input_dtype, shape)],
+            [_vi("Y", output_dtype, shape)],
+            initializer=[
+                numpy_helper.from_array(np.full((2, 2), 0.25, dtype=np.float32), "scale"),
+                numpy_helper.from_array(np.zeros((2, 2), dtype=np.int8), "zero"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=_MAX_IR_VERSION_FOR_ORT,
+    )
+    onnx.checker.check_model(model, full_check=True)
+    x = np.arange(8, dtype=np.float32 if quantize else np.int8).reshape(shape)
+    expected = ReferenceEvaluator(model).run(None, {"X": x})[0]
+    before = model.SerializeToString()
+    _apply(model)
+    assert model.SerializeToString() == before
+    onnx.checker.check_model(model, full_check=True)
+    np.testing.assert_array_equal(ReferenceEvaluator(model).run(None, {"X": x})[0], expected)

@@ -48,7 +48,6 @@ multiple Constants                  → all converted in one pass, ORT parity
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 
 import numpy as np
 import onnx
@@ -57,10 +56,8 @@ from onnx import TensorProto, helper, numpy_helper
 
 from modelopt.onnx.graph_surgery.dla_transforms import dla_constants_to_initializers as _mod
 
-pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
+ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-_SAVED_MODELS_DIR = _REPO_ROOT / "scratch_space" / "constants_to_initializers_test_models"
 _OPSET_VERSION = 17
 _MAX_IR_VERSION_FOR_ORT = 9
 
@@ -72,41 +69,37 @@ _apply = _mod._constants_to_initializers_from_model
 
 
 def _vi(name: str, elem_type: int, shape: list) -> onnx.ValueInfoProto:
+    """Build a typed tensor descriptor for a small test graph."""
     return helper.make_tensor_value_info(name, elem_type, shape)
 
 
 def _clamp_ir(model: onnx.ModelProto) -> None:
+    """Keep the test model compatible with the supported ORT versions."""
     model.ir_version = min(model.ir_version, _MAX_IR_VERSION_FOR_ORT)
 
 
 def _prepare_model(model: onnx.ModelProto) -> None:
-    """Run shape inference in-place to populate value_info."""
-    try:
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-not-found]
-        )
-
-        inferred = SymbolicShapeInference.infer_shapes(model)
-        if inferred is not None:
-            del model.graph.value_info[:]
-            model.graph.value_info.extend(inferred.graph.value_info)
-    except Exception:
-        pass
+    """Refresh intermediate metadata and surface invalid graph or inference errors."""
+    inferred = onnx.shape_inference.infer_shapes(model, strict_mode=True)
+    onnx.checker.check_model(inferred, full_check=True)
+    del model.graph.value_info[:]
+    model.graph.value_info.extend(inferred.graph.value_info)
 
 
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
-    import onnxruntime as ort  # type: ignore[import-not-found]
-
+    """Execute the test model on the CPU and return named outputs."""
     _clamp_ir(model)
     sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
     return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
 
 
 def _initializer_names(model: onnx.ModelProto) -> set[str]:
+    """Collect initializer names to check that folded values remain addressable."""
     return {i.name for i in model.graph.initializer}
 
 
 def _constant_node_names(model: onnx.ModelProto) -> set[str]:
+    """Collect Constant output names that have not been folded."""
     return {n.output[0] for n in model.graph.node if n.op_type == "Constant"}
 
 
@@ -156,6 +149,44 @@ def test_constant_value_tensor_converted():
 
 
 # ── 2. value_float attribute (scalar float32) ────────────────────────────────
+
+
+@pytest.mark.parametrize("layout", ["linear", "coordinates", "empty"])
+def test_sparse_constant_is_densified_without_changing_values(layout):
+    """Sparse Constant layouts become dense initializers with identical tensor values."""
+    shape = [2, 3]
+    values = np.array([] if layout == "empty" else [2.0, -4.0], dtype=np.float32)
+    indices = np.array(
+        [[0, 1], [1, 2]] if layout == "coordinates" else ([] if layout == "empty" else [1, 5]),
+        dtype=np.int64,
+    )
+    sparse = helper.make_sparse_tensor(
+        numpy_helper.from_array(values, "K"), numpy_helper.from_array(indices, "indices"), shape
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Constant", [], ["K"], sparse_value=sparse),
+                helper.make_node("Add", ["X", "K"], ["Y"]),
+            ],
+            "sparse_constant",
+            [_vi("X", TensorProto.FLOAT, shape)],
+            [_vi("Y", TensorProto.FLOAT, shape)],
+        ),
+        opset_imports=[helper.make_opsetid("", _OPSET_VERSION)],
+        ir_version=_MAX_IR_VERSION_FOR_ORT,
+    )
+    onnx.checker.check_model(model, full_check=True)
+    expected = np.zeros(shape, dtype=np.float32)
+    if layout != "empty":
+        expected.reshape(-1)[[1, 5]] = values
+    assert _apply(model, verbose=False) == 1
+    assert not _constant_node_names(model)
+    initializer = next(value for value in model.graph.initializer if value.name == "K")
+    np.testing.assert_array_equal(numpy_helper.to_array(initializer), expected)
+    onnx.checker.check_model(model, full_check=True)
+    x = np.arange(6, dtype=np.float32).reshape(shape)
+    np.testing.assert_array_equal(_run_ort(model, {"X": x})["Y"], x + expected)
 
 
 def test_constant_value_float_converted():

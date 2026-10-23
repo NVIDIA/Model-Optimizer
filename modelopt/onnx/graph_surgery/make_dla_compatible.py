@@ -46,11 +46,13 @@ __all__ = []
 
 
 def _apply_remove_qdq(model, **options):
+    """Run QDQ removal while retaining the model result for ordered stage dispatch."""
     _remove_qdq_from_model(model, **options)
     return model
 
 
 def _apply_constants_to_initializers(model, **options):
+    """Fold constants while retaining the model result for ordered stage dispatch."""
     _constants_to_initializers_from_model(model, **options)
     return model
 

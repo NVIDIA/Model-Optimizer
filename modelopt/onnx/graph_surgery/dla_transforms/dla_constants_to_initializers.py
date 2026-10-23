@@ -48,7 +48,14 @@ def _tensor_from_constant_node(node: onnx.NodeProto) -> onnx.TensorProto:
             arr = np.asarray(list(attr.ints), dtype=np.int64)
             return numpy_helper.from_array(arr, name=out_name)
         if attr.name == "sparse_value":
-            arr = numpy_helper.to_array(attr.sparse_tensor)
+            sparse = attr.sparse_tensor
+            values = numpy_helper.to_array(sparse.values)
+            indices = numpy_helper.to_array(sparse.indices)
+            arr = np.zeros(sparse.dims, dtype=values.dtype)
+            if indices.ndim == 1:
+                arr.reshape(-1)[indices] = values
+            else:
+                arr[tuple(indices.T)] = values
             return numpy_helper.from_array(arr, name=out_name)
 
     attr_names = [a.name for a in node.attribute]
@@ -63,12 +70,13 @@ def _constants_to_initializers_from_model(
     *,
     verbose: bool,
 ) -> int:
+    """Fold supported Constant nodes in place and return their conversion count."""
     graph = model.graph
     unique: set[str] = {i.name for i in graph.initializer}
     nodes_to_remove: list[onnx.NodeProto] = []
 
     for node in list(graph.node):
-        if node.op_type != "Constant":
+        if node.op_type != "Constant" or node.domain not in {"", "ai.onnx"} or node.overload:
             continue
         if not node.output:
             continue

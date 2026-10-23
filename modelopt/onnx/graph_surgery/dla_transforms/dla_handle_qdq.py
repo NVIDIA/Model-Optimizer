@@ -19,6 +19,7 @@ Both Q and DQ are handled independently regardless of whether their data input
 is a static initializer or a dynamic tensor.  Scale and zero-point inputs are
 left untouched.  The ``axis`` attribute is shifted by ``4 - orig_rank`` to
 keep per-channel quantization referencing the correct dimension.
+Blocked quantization is left unchanged because its scales track the data rank.
 
 Pattern applied to each node::
 
@@ -30,39 +31,42 @@ Pattern applied to each node::
 
 from __future__ import annotations
 
-import numpy as np
 import onnx
-from onnx import helper, numpy_helper
+from onnx import helper
 
 from ...logging_config import logger
 from ..utils.graph_utils import (
     GraphCache,
-    add_unique_initializers,
     add_value_info,
     axes_for_rank,
-    batch_replace_nodes,
     get_node_attr_i,
     pad4d,
     set_node_attr_i,
 )
+from .dla_graph_cleanup import _set_axes
+from .dla_remove_qdq import _qdq_output_dtype
 
 _axes_for_rank = axes_for_rank
 
 
 def _apply_handle_qdq(model: onnx.ModelProto) -> onnx.ModelProto:
-    """Wrap every Q / DQ node with Unsqueeze → node → Squeeze."""
+    """Wrap eligible Q / DQ nodes with Unsqueeze → node → Squeeze."""
     graph = model.graph
     cache = GraphCache(graph)
-    node_idx = {id(n): i for i, n in enumerate(graph.node)}
-    unique_init: set[str] = set()
+    versions = {opset.domain: opset.version for opset in model.opset_import}
+    opset = versions.get("", versions.get("ai.onnx", 1))
 
-    replacements: dict[int, tuple[list, list]] = {}
+    replacements: dict[int, list[onnx.NodeProto]] = {}
     cnt = [0]
 
-    for node in list(graph.node):
+    for node_pos, node in enumerate(list(graph.node)):
+        if node.domain not in {"", "ai.onnx", "com.microsoft"} or node.overload:
+            continue
         if node.op_type not in ("QuantizeLinear", "DequantizeLinear"):
             continue
         if not node.input or not node.output:
+            continue
+        if get_node_attr_i(node, "block_size", 0) > 0:
             continue
 
         data_name = node.input[0]
@@ -82,49 +86,44 @@ def _apply_handle_qdq(model: onnx.ModelProto) -> onnx.ModelProto:
         cnt[0] += 1
 
         # ── Unsqueeze data input to 4D ────────────────────────────────────────
-        unsq_axes_init = numpy_helper.from_array(
-            np.array(axes, dtype=np.int64), name=f"{pfx}_unsq_axes_{c}"
-        )
-        add_unique_initializers(graph, unique_init, [unsq_axes_init])
-        in4d = f"{pfx}_in4d_{c}"
+        in4d = cache.unique_name(f"{pfx}_in4d_{c}")
         unsq = helper.make_node(
             "Unsqueeze",
-            inputs=[data_name, unsq_axes_init.name],
+            inputs=[data_name],
             outputs=[in4d],
-            name=f"{pfx}_unsq_{c}",
+            name=cache.unique_name(f"{pfx}_unsq_{c}"),
         )
+        _set_axes(model, cache, unsq, axes, f"{pfx}_unsq_axes_{c}")
         in_dtype = cache.get_dtype(data_name) or onnx.TensorProto.FLOAT
         add_value_info(graph, in4d, in_dtype, pad4d(orig_shape))
         node.input[0] = in4d
 
         # ── Update axis attribute (ONNX Q/DQ default: 1) ─────────────────────
         has_axis = any(a.name == "axis" for a in node.attribute)
-        if has_axis or len(orig_shape) > 1:
+        if (opset >= 13 or node.domain == "com.microsoft") and (has_axis or len(orig_shape) > 1):
             orig_axis = get_node_attr_i(node, "axis", 1)
             if orig_axis >= 0:
                 set_node_attr_i(node, "axis", orig_axis + delta)
 
         # ── Squeeze output back to original rank ──────────────────────────────
         orig_out = node.output[0]
-        out4d = f"{pfx}_out4d_{c}"
-        out_dtype = cache.get_dtype(orig_out) or in_dtype
-        add_value_info(graph, out4d, out_dtype, pad4d(orig_shape))
+        out4d = cache.unique_name(f"{pfx}_out4d_{c}")
+        out_dtype = cache.get_dtype(orig_out) or _qdq_output_dtype(node, cache)
+        if out_dtype:
+            add_value_info(graph, out4d, out_dtype, pad4d(orig_shape))
         node.output[0] = out4d
 
         c2 = cnt[0]
         cnt[0] += 1
-        sq_axes_init = numpy_helper.from_array(
-            np.array(axes, dtype=np.int64), name=f"{pfx}_sq_axes_{c2}"
-        )
-        add_unique_initializers(graph, unique_init, [sq_axes_init])
         sq = helper.make_node(
             "Squeeze",
-            inputs=[out4d, sq_axes_init.name],
+            inputs=[out4d],
             outputs=[orig_out],
-            name=f"{pfx}_sq_{c2}",
+            name=cache.unique_name(f"{pfx}_sq_{c2}"),
         )
+        _set_axes(model, cache, sq, axes, f"{pfx}_sq_axes_{c2}")
 
-        replacements[node_idx[id(node)]] = ([node], [unsq, node, sq])
+        replacements[node_pos] = [unsq, node, sq]
         logger.debug(
             "%s %r: wrapped Unsqueeze→op→Squeeze (rank %d→4, axis delta=%d).",
             node.op_type,
@@ -133,7 +132,14 @@ def _apply_handle_qdq(model: onnx.ModelProto) -> onnx.ModelProto:
             delta,
         )
 
-    batch_replace_nodes(graph, replacements)
+    if replacements:
+        nodes = [
+            replacement
+            for index, node in enumerate(graph.node)
+            for replacement in replacements.get(index, [node])
+        ]
+        del graph.node[:]
+        graph.node.extend(nodes)
 
     logger.debug("handle_qdq: wrapped %d Q/DQ node(s) with Unsqueeze/Squeeze.", len(replacements))
     return model

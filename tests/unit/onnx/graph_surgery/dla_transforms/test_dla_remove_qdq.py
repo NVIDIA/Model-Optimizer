@@ -48,7 +48,6 @@ from __future__ import annotations
 
 import copy
 import importlib
-from pathlib import Path
 
 import numpy as np
 import onnx
@@ -57,11 +56,9 @@ from onnx import TensorProto, helper, numpy_helper
 
 from modelopt.onnx.graph_surgery.dla_transforms.dla_remove_qdq import _remove_qdq_from_model
 
-pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
+ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-_SAVED_MODELS_DIR = _REPO_ROOT / "scratch_space" / "remove_qdq_test_models"
-_OPSET_VERSION = 17
+_OPSET_VERSION = 21
 _MAX_IR_VERSION_FOR_ORT = 9
 
 
@@ -74,38 +71,26 @@ _parse_dtype_list = _onnx_dtypes_mod.parse_qdq_quantized_dtype_list
 
 
 def _vi(name: str, elem_type: int, shape: list) -> onnx.ValueInfoProto:
+    """Build a typed tensor descriptor for a small test graph."""
     return helper.make_tensor_value_info(name, elem_type, shape)
 
 
 def _clamp_ir(model: onnx.ModelProto) -> None:
+    """Keep the test model compatible with the supported ORT versions."""
     model.ir_version = min(model.ir_version, _MAX_IR_VERSION_FOR_ORT)
 
 
 def _prepare_model(model: onnx.ModelProto) -> onnx.ModelProto:
-    """Run symbolic shape inference in-place to populate value_info for all intermediate tensors."""
-    try:
-        from onnxruntime.tools.symbolic_shape_infer import (  # type: ignore[import-not-found]
-            SymbolicShapeInference,
-        )
-
-        inferred = SymbolicShapeInference.infer_shapes(model)
-        if inferred is not None:
-            del model.graph.value_info[:]
-            model.graph.value_info.extend(inferred.graph.value_info)
-    except Exception:
-        # Fall back to ONNX built-in shape inference
-        try:
-            inferred = onnx.shape_inference.infer_shapes(model)
-            del model.graph.value_info[:]
-            model.graph.value_info.extend(inferred.graph.value_info)
-        except Exception:
-            pass
+    """Refresh intermediate metadata and surface invalid graph or inference errors."""
+    inferred = onnx.shape_inference.infer_shapes(model, strict_mode=True)
+    onnx.checker.check_model(inferred, full_check=True)
+    del model.graph.value_info[:]
+    model.graph.value_info.extend(inferred.graph.value_info)
     return model
 
 
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
-    import onnxruntime as ort  # type: ignore[import-not-found]
-
+    """Execute the test model on the CPU and return named outputs."""
     _clamp_ir(model)
     sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
     return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
@@ -123,6 +108,7 @@ def _apply(model, quant_types=None, **kw):
 
 
 def _make_qdq_init(name_prefix, scale_val, zp_val, zp_np_dtype):
+    """Build a scale and zero point for the selected quantized storage type."""
     scale = numpy_helper.from_array(np.float32(scale_val), name=f"{name_prefix}_scale")
     zp = numpy_helper.from_array(zp_np_dtype(zp_val), name=f"{name_prefix}_zp")
     return scale, zp
@@ -450,6 +436,7 @@ def test_remove_int16_qdq():
 
 @pytest.mark.parametrize("extra_outputs", [[], ["a"], ["a", "b"], ["activation", "a", "b"]])
 def test_remove_qdq_fanout_preserves_every_graph_output(extra_outputs):
+    """Preserve all output names when dequantizers share one quantizer."""
     shape = [1, 1, 1, 3]
     nodes = [
         helper.make_node("Relu", ["X"], ["activation"]),
@@ -482,13 +469,19 @@ def test_remove_qdq_fanout_preserves_every_graph_output(extra_outputs):
     np.testing.assert_array_equal(results["Y"], np.maximum(data, 0) * 2)
 
 
-def test_remove_default_uint8_qdq_without_explicit_zero_point():
+@pytest.mark.parametrize("empty_zero_point", [False, True])
+def test_remove_default_uint8_qdq_without_explicit_zero_point(empty_zero_point):
+    """Recognize the default UINT8 zero point when removing a selected QDQ pair."""
     shape = [1, 1, 1, 3]
     model = helper.make_model(
         helper.make_graph(
             [
-                helper.make_node("QuantizeLinear", ["X", "scale"], ["q"]),
-                helper.make_node("DequantizeLinear", ["q", "scale"], ["Y"]),
+                helper.make_node(
+                    "QuantizeLinear", ["X", "scale"] + ([""] if empty_zero_point else []), ["q"]
+                ),
+                helper.make_node(
+                    "DequantizeLinear", ["q", "scale"] + ([""] if empty_zero_point else []), ["Y"]
+                ),
             ],
             "default_zero",
             [_vi("X", TensorProto.FLOAT, shape)],
@@ -501,3 +494,166 @@ def test_remove_default_uint8_qdq_without_explicit_zero_point():
     assert _apply(model, quant_types=[TensorProto.UINT8]) == 1
     data = np.arange(3, dtype=np.float32).reshape(shape)
     np.testing.assert_array_equal(_run_ort(model, {"X": data})["Y"], data)
+
+
+@pytest.mark.parametrize("storage_dtype", [TensorProto.UINT16, TensorProto.INT16])
+@pytest.mark.parametrize("empty_zero_point", [False, True])
+def test_output_dtype_selects_quantizers_without_a_zero_point(storage_dtype, empty_zero_point):
+    """Explicit quantized output types control selection when the zero-point slot is absent."""
+    extra = [""] if empty_zero_point else []
+    shape = [2, 3]
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "QuantizeLinear", ["X", "scale", *extra], ["q"], output_dtype=storage_dtype
+                ),
+                helper.make_node("DequantizeLinear", ["q", "scale", *extra], ["Y"]),
+            ],
+            "explicit_storage",
+            [_vi("X", TensorProto.FLOAT, shape)],
+            [_vi("Y", TensorProto.FLOAT, shape)],
+            initializer=[numpy_helper.from_array(np.float32(0.25), "scale")],
+            value_info=[_vi("q", storage_dtype, shape)],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=_MAX_IR_VERSION_FOR_ORT,
+    )
+    onnx.checker.check_model(model, full_check=True)
+    excluded = copy.deepcopy(model)
+    before = excluded.SerializeToString()
+    assert _apply(excluded, quant_types=["uint8"]) == 0
+    assert excluded.SerializeToString() == before
+    assert _apply(model) == 1
+    onnx.checker.check_model(model, full_check=True)
+    x = np.arange(6, dtype=np.float32).reshape(shape)
+    np.testing.assert_array_equal(_run_ort(model, {"X": x})["Y"], x)
+
+
+@pytest.mark.parametrize("captured", ["activation", "q", "D"])
+def test_remove_qdq_keeps_values_captured_by_control_flow(captured):
+    """QDQ removal leaves lexically captured tensors defined with their original types."""
+    shape = [3]
+    dtype = TensorProto.UINT8 if captured == "q" else TensorProto.FLOAT
+    branch = helper.make_graph(
+        [helper.make_node("Identity", [captured], ["branch_out"])],
+        "branch",
+        [],
+        [_vi("branch_out", dtype, shape)],
+    )
+    public_output = "Y" if captured == "D" else "D"
+    bridge = [helper.make_node("Identity", ["D"], ["Y"])] if captured == "D" else []
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Relu", ["X"], ["activation"]),
+                helper.make_node("QuantizeLinear", ["activation", "scale", "zero"], ["q"]),
+                helper.make_node("DequantizeLinear", ["q", "scale", "zero"], ["D"]),
+                *bridge,
+                helper.make_node(
+                    "If", ["condition"], ["Z"], then_branch=branch, else_branch=branch
+                ),
+            ],
+            "captured",
+            [_vi("X", TensorProto.FLOAT, shape), _vi("condition", TensorProto.BOOL, [])],
+            [_vi(public_output, TensorProto.FLOAT, shape), _vi("Z", dtype, shape)],
+            initializer=[
+                numpy_helper.from_array(np.float32(1), "scale"),
+                numpy_helper.from_array(np.uint8(0), "zero"),
+            ],
+            value_info=[
+                _vi("activation", TensorProto.FLOAT, shape),
+                _vi("q", TensorProto.UINT8, shape),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=_MAX_IR_VERSION_FOR_ORT,
+    )
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"X": np.array([-1, 1, 2], dtype=np.float32), "condition": np.array(True)}
+    expected = _run_ort(model, feeds)
+    before = model.SerializeToString()
+    count = _apply(model, quant_types=["uint8"])
+    onnx.checker.check_model(model, full_check=True)
+    assert count == 0 and model.SerializeToString() == before
+    for name, actual in _run_ort(model, feeds).items():
+        np.testing.assert_array_equal(actual, expected[name])
+
+
+@pytest.mark.parametrize(
+    ("opset", "dtype"),
+    [(10, TensorProto.FLOAT), (21, TensorProto.FLOAT16), (21, TensorProto.FLOAT)],
+)
+def test_input_clip_respects_opset_and_output_dtype(opset, dtype):
+    """Input clipping uses a valid schema and returns values in the declared output dtype."""
+    np_dtype = np.float16 if dtype == TensorProto.FLOAT16 else np.float32
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("QuantizeLinear", ["X", "scale", "zero"], ["q"]),
+                helper.make_node("DequantizeLinear", ["q", "scale", "zero"], ["Y"]),
+            ],
+            "input_clip",
+            [_vi("X", dtype, [3])],
+            [_vi("Y", dtype, [3])],
+            initializer=[
+                numpy_helper.from_array(np_dtype(0.25), "scale"),
+                numpy_helper.from_array(np.uint8(0), "zero"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", opset)],
+        ir_version=_MAX_IR_VERSION_FOR_ORT,
+    )
+    onnx.checker.check_model(model, full_check=True)
+    assert _apply(model, quant_types=["uint8"], keep_clip_after_inputs=True) == 1
+    onnx.checker.check_model(model, full_check=True)
+    x = np.array([-10, 1, 100], dtype=np_dtype)
+    np.testing.assert_array_equal(_run_ort(model, {"X": x})["Y"], np.clip(x, 0, 63.75))
+
+
+@pytest.mark.parametrize("unsupported", ["per_axis", "dtype_change", "untyped_storage"])
+def test_input_clip_refusal_preserves_all_pairs(unsupported):
+    """An unsupported later pair leaves earlier valid pairs and caller state unchanged."""
+    shape = [2, 3]
+    output_dtype = TensorProto.FLOAT16 if unsupported == "dtype_change" else TensorProto.FLOAT
+    per_axis = unsupported == "per_axis"
+    missing_zero = unsupported == "untyped_storage"
+    scale = np.full(3, 0.25, dtype=np.float32) if per_axis else np.float32(0.25)
+    zero = np.zeros(3, dtype=np.uint8) if per_axis else np.uint8(0)
+    second_inputs = ["W", "second_scale"] + ([] if missing_zero else ["second_zero"])
+    options = {"axis": 1} if per_axis else {}
+    q_options = {"output_dtype": TensorProto.UINT16} if missing_zero else options
+    dq_scale = "half_scale" if unsupported == "dtype_change" else "second_scale"
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("QuantizeLinear", ["X", "scale", "zero"], ["first_q"]),
+                helper.make_node("DequantizeLinear", ["first_q", "scale", "zero"], ["Y"]),
+                helper.make_node("QuantizeLinear", second_inputs, ["second_q"], **q_options),
+                helper.make_node(
+                    "DequantizeLinear", ["second_q", dq_scale, *second_inputs[2:]], ["Z"], **options
+                ),
+            ],
+            "clip_refusal",
+            [_vi(name, TensorProto.FLOAT, shape) for name in ("X", "W")],
+            [_vi("Y", TensorProto.FLOAT, shape), _vi("Z", output_dtype, shape)],
+            initializer=[
+                numpy_helper.from_array(np.float32(0.25), "scale"),
+                numpy_helper.from_array(np.uint8(0), "zero"),
+                numpy_helper.from_array(scale, "second_scale"),
+                *([] if missing_zero else [numpy_helper.from_array(zero, "second_zero")]),
+                *(
+                    [numpy_helper.from_array(np.float16(0.25), "half_scale")]
+                    if unsupported == "dtype_change"
+                    else []
+                ),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=_MAX_IR_VERSION_FOR_ORT,
+    )
+    onnx.checker.check_model(model, full_check=True)
+    before = model.SerializeToString()
+    with pytest.raises((NotImplementedError, ValueError)):
+        _apply(model, quant_types=["uint8", "uint16"], keep_clip_after_inputs=True)
+    assert model.SerializeToString() == before
