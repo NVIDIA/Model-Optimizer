@@ -608,7 +608,7 @@ mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)
 
 ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for distributed model sharding and calibration, exposed via the `--use_fsdp2` flag on the standard `hf_ptq.py` entry point.
 
-> *KV-cache AutoQuantize recipes are not supported with `--use_fsdp2` and are rejected before model loading. Distributed KV sensitivity scoring, selection, and checkpoint writes must be synchronized before this combination can be enabled safely. Existing weight AutoQuantize recipes retain their previous experimental warning with FSDP2.*
+> *Weight and KV-cache AutoQuantize with `--use_fsdp2` are experimental.*
 
 > *Nemotron-H checkpoints containing MTP weights are not supported with `--use_fsdp2` and are rejected before distributed model loading. Remove `--use_fsdp2` to load and calibrate the MTP modules; the distributed loader does not construct them.*
 
@@ -641,6 +641,8 @@ torchrun \
 ```
 
 See [Recipe-based Quantization](#recipe-based-quantization) for the recipe format and built-in recipe names. The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For more details refer to the [deployment section](#deployment) of this document.
+
+[AutoQuantize recipes](#autoquantize) use the same `torchrun` launch. With FSDP2, `--batch_size` is per rank and defaults to 1; recipe `score_size` is global. Use shared checkpoint directories and restore all `rank<N>.pth` files together, with the same world size, model, recipe, and data.
 
 > *Performance Note: FSDP2 is designed for training workloads and may result in longer calibration and export times. For faster calibration, maximize the batch size based on available GPU memory and choose the right number of GPUs to avoid unnecessary communication.*
 
