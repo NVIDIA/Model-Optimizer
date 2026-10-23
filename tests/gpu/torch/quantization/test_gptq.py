@@ -208,6 +208,20 @@ def _run_fused_gptq_nvfp4(
     return w
 
 
+@requires_triton
+def test_fused_nvfp4_gptq_runs_on_the_weights_gpu(need_2_gpus):
+    """A layer device_map placed on another GPU is updated there, not from the current GPU."""
+    torch.manual_seed(42)
+    weight, _, block_amax, global_scale, h_inv = _make_nvfp4_test_data(16, 64, 256)
+    expected = _run_fused_gptq_nvfp4(weight, block_amax, global_scale, h_inv, 128, 16)
+
+    weight, block_amax, h_inv = (t.to("cuda:1") for t in (weight, block_amax, h_inv))
+    got = _run_fused_gptq_nvfp4(weight, block_amax, global_scale, h_inv, 128, 16)
+
+    assert torch.cuda.current_device() == 0
+    torch.testing.assert_close(got.cpu(), expected.cpu(), rtol=0, atol=0)
+
+
 _NVFP4_QUANT_BLOCK_SIZES = [16, 128]
 _NVFP4_GPTQ_BLOCK_SIZES = [16, 128]
 
