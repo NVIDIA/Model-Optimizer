@@ -109,7 +109,8 @@ _RNG = np.random.default_rng(2024)
 # ── 1. value attribute (dense float32 tensor) ────────────────────────────────
 
 
-def test_constant_value_tensor_converted():
+@pytest.mark.parametrize(("ir_version", "opset"), [(3, 7), (4, 9), (9, _OPSET_VERSION)])
+def test_constant_value_tensor_converted(ir_version, opset):
     """Constant with 'value' (TensorProto) replaced by initializer; ORT output unchanged."""
     shape = [2, 4]
     const_data = _RNG.standard_normal(shape).astype(np.float32)
@@ -131,7 +132,9 @@ def test_constant_value_tensor_converted():
         [_vi("Y", TensorProto.FLOAT, shape)],
         value_info=[_vi("const_w", TensorProto.FLOAT, shape)],
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
+    model = helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", opset)], ir_version=ir_version
+    )
     _clamp_ir(model)
 
     x = _RNG.standard_normal(shape).astype(np.float32)
@@ -140,6 +143,10 @@ def test_constant_value_tensor_converted():
     tr = copy.deepcopy(model)
     _prepare_model(tr)
     cnt = _apply(tr, verbose=False)
+    onnx.checker.check_model(tr, full_check=True)
+    assert [value.name for value in tr.graph.input] == (
+        ["X", "const_w"] if ir_version <= 3 else ["X"]
+    )
     got = _run_ort(tr, {"X": x})
 
     assert cnt == 1

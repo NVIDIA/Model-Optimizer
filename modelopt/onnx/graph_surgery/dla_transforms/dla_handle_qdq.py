@@ -43,6 +43,7 @@ from ..utils.graph_utils import (
     pad4d,
     set_node_attr_i,
 )
+from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _set_axes
 from .dla_remove_qdq import _qdq_output_dtype
 
@@ -149,6 +150,7 @@ def _apply_handle_qdq(model: onnx.ModelProto) -> onnx.ModelProto:
         ]
         del graph.node[:]
         graph.node.extend(nodes)
+        _add_legacy_initializer_inputs(model)
 
     logger.debug("handle_qdq: wrapped %d Q/DQ node(s) with Unsqueeze/Squeeze.", len(replacements))
     return model

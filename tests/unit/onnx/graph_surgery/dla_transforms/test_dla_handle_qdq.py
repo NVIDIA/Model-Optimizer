@@ -139,9 +139,11 @@ def test_runtime_per_tensor_qdq_keeps_axis_absent(op_type):
 # ── 1. QuantizeLinear — 3-D dynamic input, per-channel axis ──────────────────
 
 
-@pytest.mark.parametrize(("opset", "domain"), [(21, ""), (10, "com.microsoft")])
+@pytest.mark.parametrize(
+    ("opset", "domain", "ir_version"), [(21, "", 9), (10, "com.microsoft", 9), (13, "", 3)]
+)
 @pytest.mark.parametrize("shape", [[2, 4, 8], ["batch", 4, None]])
-def test_quantize_linear_3d_dynamic_wrapped(opset, domain, shape):
+def test_quantize_linear_3d_dynamic_wrapped(opset, domain, ir_version, shape):
     """Q [2,4,8] axis=1 → Unsqueeze→Q(axis=2)→Squeeze; output shape and values match base."""
     scale = numpy_helper.from_array(np.full((4,), 0.1, dtype=np.float32), name="scale")
     zp = numpy_helper.from_array(np.zeros((4,), dtype=np.int8), name="zp")
@@ -152,7 +154,14 @@ def test_quantize_linear_3d_dynamic_wrapped(opset, domain, shape):
     graph = helper.make_graph(
         [q],
         "g",
-        [_vi("X", TensorProto.FLOAT, shape)],
+        [
+            _vi("X", TensorProto.FLOAT, shape),
+            *(
+                [_vi("scale", TensorProto.FLOAT, [4]), _vi("zp", TensorProto.INT8, [4])]
+                if ir_version <= 3
+                else []
+            ),
+        ],
         [_vi("Y", TensorProto.INT8, shape)],
         initializer=[scale, zp],
     )
@@ -162,6 +171,7 @@ def test_quantize_linear_3d_dynamic_wrapped(opset, domain, shape):
             helper.make_opsetid("", opset),
             *([helper.make_opsetid(domain, 1)] if domain else []),
         ],
+        ir_version=ir_version,
     )
     _clamp_ir(model)
 

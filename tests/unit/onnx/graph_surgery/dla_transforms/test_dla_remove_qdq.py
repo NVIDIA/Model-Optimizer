@@ -581,10 +581,15 @@ def test_remove_qdq_keeps_values_captured_by_control_flow(captured):
 
 
 @pytest.mark.parametrize(
-    ("opset", "dtype"),
-    [(10, TensorProto.FLOAT), (21, TensorProto.FLOAT16), (21, TensorProto.FLOAT)],
+    ("opset", "dtype", "ir_version"),
+    [
+        (10, TensorProto.FLOAT, 9),
+        (21, TensorProto.FLOAT16, 9),
+        (21, TensorProto.FLOAT, 9),
+        (21, TensorProto.FLOAT, 3),
+    ],
 )
-def test_input_clip_respects_opset_and_output_dtype(opset, dtype):
+def test_input_clip_respects_opset_and_output_dtype(opset, dtype, ir_version):
     """Input clipping uses a valid schema and returns values in the declared output dtype."""
     np_dtype = np.float16 if dtype == TensorProto.FLOAT16 else np.float32
     model = helper.make_model(
@@ -594,7 +599,14 @@ def test_input_clip_respects_opset_and_output_dtype(opset, dtype):
                 helper.make_node("DequantizeLinear", ["q", "scale", "zero"], ["Y"]),
             ],
             "input_clip",
-            [_vi("X", dtype, [3])],
+            [
+                _vi("X", dtype, [3]),
+                *(
+                    [_vi("scale", dtype, []), _vi("zero", TensorProto.UINT8, [])]
+                    if ir_version <= 3
+                    else []
+                ),
+            ],
             [_vi("Y", dtype, [3])],
             initializer=[
                 numpy_helper.from_array(np_dtype(0.25), "scale"),
@@ -602,7 +614,7 @@ def test_input_clip_respects_opset_and_output_dtype(opset, dtype):
             ],
         ),
         opset_imports=[helper.make_opsetid("", opset)],
-        ir_version=_MAX_IR_VERSION_FOR_ORT,
+        ir_version=ir_version,
     )
     onnx.checker.check_model(model, full_check=True)
     assert _apply(model, quant_types=["uint8"], keep_clip_after_inputs=True) == 1

@@ -38,6 +38,7 @@ from ..utils.graph_utils import (
     get_node_attr_i,
     insert_nodes_at_position,
 )
+from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _subgraph_captures
 
 
@@ -306,5 +307,7 @@ def _remove_qdq_from_model(
                     f"{graph_output.name!r}."
                 )
 
+    if cnt:
+        _add_legacy_initializer_inputs(model)
     logger.debug("Removed %d QuantizeLinear and DequantizeLinear pairs", cnt)
     return cnt

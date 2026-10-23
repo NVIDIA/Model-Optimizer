@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 import onnx
-from onnx import numpy_helper
+from onnx import helper, numpy_helper
 
 from ...logging_config import logger
 from ..utils.graph_utils import add_unique_initializers
@@ -65,6 +65,20 @@ def _tensor_from_constant_node(node: onnx.NodeProto) -> onnx.TensorProto:
     )
 
 
+def _add_legacy_initializer_inputs(model: onnx.ModelProto) -> None:
+    """Declare initializer defaults as graph inputs for ONNX IR versions through 3."""
+    if model.ir_version > 3:
+        return
+    graph = model.graph
+    input_names = {value.name for value in graph.input}
+    for init in graph.initializer:
+        if init.name not in input_names:
+            graph.input.append(
+                helper.make_tensor_value_info(init.name, init.data_type, list(init.dims))
+            )
+            input_names.add(init.name)
+
+
 def _constants_to_initializers_from_model(
     model: onnx.ModelProto,
     *,
@@ -93,6 +107,8 @@ def _constants_to_initializers_from_model(
 
     for node in nodes_to_remove:
         graph.node.remove(node)
+    if nodes_to_remove:
+        _add_legacy_initializer_inputs(model)
 
     if verbose:
         logger.debug("Converted %d Constant nodes to initializers", len(nodes_to_remove))
