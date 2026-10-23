@@ -42,6 +42,7 @@ import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms import dla_graph_cleanup as _mod
 from modelopt.onnx.graph_surgery.utils.graph_utils import GraphCache
@@ -220,24 +221,33 @@ def test_canonicalize_3d_input_duplicate_unsqueezes_deduped():
     )
 
 
-def test_canonicalize_4d_input_unchanged():
-    """4-D graph input → step 1 is a noop."""
-    relu = helper.make_node("Relu", ["X"], ["Y"], name="relu")
+@pytest.mark.parametrize("axes_input", [False, True])
+def test_canonicalize_4d_input_unchanged(axes_input):
+    """Keep 4D data inputs and optional Unsqueeze control inputs unchanged."""
+    inputs = [_vi("X", TensorProto.FLOAT, [1, 2, 3, 4])]
+    output_shape = [1, 2, 3, 4]
+    node = helper.make_node("Relu", ["X"], ["Y"], name="relu")
+    feeds = {"X": np.arange(24, dtype=np.float32).reshape(1, 2, 3, 4)}
+    if axes_input:
+        inputs.append(_vi("axes", TensorProto.INT64, [1]))
+        node = helper.make_node("Unsqueeze", ["X", "axes"], ["Y"], name="uq")
+        output_shape = [1, 1, 2, 3, 4]
+        feeds["axes"] = np.array([0], np.int64)
     graph = helper.make_graph(
-        [relu],
+        [node],
         "g",
-        [_vi("X", TensorProto.FLOAT, [1, 2, 3, 4])],
-        [_vi("Y", TensorProto.FLOAT, [1, 2, 3, 4])],
+        inputs,
+        [_vi("Y", TensorProto.FLOAT, output_shape)],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
-    orig_nodes = len(model.graph.node)
-
-    tr = copy.deepcopy(model)
-    _prepare_model(tr)
-    tr = _canonicalize_inputs(tr)
-
-    assert len(tr.graph.node) == orig_nodes, "4-D input: no nodes should be added"
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    before = model.SerializeToString()
+    tr = _canonicalize_inputs(copy.deepcopy(model))
+    assert tr.SerializeToString() == before
+    onnx.checker.check_model(tr, full_check=True)
+    np.testing.assert_array_equal(_run_ort(tr, feeds)["Y"], expected["Y"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -463,12 +473,18 @@ def test_intermediary_squeeze_replaced_with_reshape():
     assert shape == [1, 2, 6, 8], f"expected [1,2,6,8], got {shape}"
 
 
-def test_intermediary_unsqueeze_replaced_with_reshape():
-    """Unsqueeze [2,4,6] → [2,4,1,6] (axis=2) is replaced by Reshape → [2,4,1,6].
-
-    pad([2,4,6]) = [1,2,4,6], pad([2,4,1,6]) = [2,4,1,6] — shapes differ → Reshape inserted.
-    """
-    unsq_axes = numpy_helper.from_array(np.array([2], dtype=np.int64), name="unsq_ax")
+@pytest.mark.parametrize(
+    ("axes", "output_shape"),
+    [
+        ([2], [2, 4, 1, 6]),
+        ([-1, -3], [2, 4, 1, 6, 1]),
+        ([2, -1], [2, 4, 1, 6, 1]),
+        ([-5, -3], [1, 2, 1, 4, 6]),
+    ],
+)
+def test_intermediary_unsqueeze_replaced_with_reshape(axes, output_shape):
+    """Preserve multi-axis Unsqueeze layout when output shape metadata is absent."""
+    unsq_axes = numpy_helper.from_array(np.array(axes, dtype=np.int64), name="unsq_ax")
     relu = helper.make_node("Relu", ["X"], ["X_relu"], name="relu")
     unsqueeze = helper.make_node("Unsqueeze", ["X_relu", "unsq_ax"], ["Uq_out"], name="uq")
     relu2 = helper.make_node("Relu", ["Uq_out"], ["Y"], name="relu2")
@@ -476,14 +492,16 @@ def test_intermediary_unsqueeze_replaced_with_reshape():
         [relu, unsqueeze, relu2],
         "g",
         [_vi("X", TensorProto.FLOAT, [2, 4, 6])],
-        [_vi("Y", TensorProto.FLOAT, [2, 4, 1, 6])],
+        [_vi("Y", TensorProto.FLOAT, output_shape)],
         initializer=[unsq_axes],
+        value_info=[_vi("X_relu", TensorProto.FLOAT, [2, 4, 6])],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
+    feeds = {"X": _RNG.standard_normal([2, 4, 6]).astype(np.float32)}
+    expected = _run_ort(model, feeds)
 
     tr = copy.deepcopy(model)
-    _prepare_model(tr)
     tr = _replace_sq_unsq(tr)
 
     assert not any(n.op_type == "Unsqueeze" for n in tr.graph.node), "Unsqueeze must be removed"
@@ -492,7 +510,9 @@ def test_intermediary_unsqueeze_replaced_with_reshape():
     shape_init = next((i for i in tr.graph.initializer if i.name == "uq_4d_shape"), None)
     assert shape_init is not None, "Reshape shape initializer must exist"
     shape = numpy_helper.to_array(shape_init).tolist()
-    assert shape == [2, 4, 1, 6], f"expected [2,4,1,6], got {shape}"
+    assert shape == output_shape
+    onnx.checker.check_model(tr, full_check=True)
+    np.testing.assert_array_equal(_run_ort(tr, feeds)["Y"], expected["Y"])
 
 
 def test_intermediary_squeeze_at_graph_output_replaced():
@@ -1300,6 +1320,88 @@ def test_cast_chain_three_nodes():
     assert len(cast_nodes) == 1
     to_val = next(a.i for a in cast_nodes[0].attribute if a.name == "to")
     assert to_val == TensorProto.INT32
+
+
+@pytest.mark.parametrize(
+    ("opset", "target", "attributes", "values"),
+    [
+        (19, TensorProto.FLOAT8E4M3FN, {"saturate": 0}, [-700, 700, 1.25, 1.75]),
+        (
+            24,
+            TensorProto.FLOAT8E8M0,
+            {"saturate": 0, "round_mode": "down"},
+            [1.25, 1.75, 3.25, 0.6],
+        ),
+    ],
+)
+def test_cast_chain_preserves_final_attributes(opset, target, attributes, values):
+    """Retain float8 saturation and rounding semantics when removing a lossless cast."""
+    first = helper.make_node("Cast", ["X"], ["wide"], to=TensorProto.DOUBLE)
+    last = helper.make_node("Cast", ["wide"], ["Y"], to=target, **attributes)
+    model = helper.make_model(
+        helper.make_graph(
+            [first, last],
+            "cast_attributes",
+            [_vi("X", TensorProto.FLOAT, [4])],
+            [_vi("Y", target, [4])],
+            value_info=[_vi("wide", TensorProto.DOUBLE, [4])],
+        ),
+        opset_imports=[helper.make_opsetid("", opset)],
+    )
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"X": np.array(values, np.float32)}
+    with np.errstate(over="ignore", invalid="ignore"):
+        expected = ReferenceEvaluator(model).run(None, feeds)[0]
+        transformed = _remove_cast_chains(copy.deepcopy(model))
+        actual = ReferenceEvaluator(transformed).run(None, feeds)[0]
+    np.testing.assert_array_equal(actual.astype(np.float32), expected.astype(np.float32))
+    assert len(transformed.graph.node) == 1
+    assert list(transformed.graph.node[0].attribute) == list(last.attribute)
+    onnx.checker.check_model(transformed, full_check=True)
+
+
+def test_custom_domain_cast_is_not_collapsed():
+    """Treat a custom-domain Cast as opaque instead of assuming standard Cast semantics."""
+    function = helper.make_function(
+        "test.modelopt",
+        "Cast",
+        ["X"],
+        ["Y"],
+        [
+            helper.make_node("Cast", ["X"], ["wide"], to=TensorProto.DOUBLE),
+            helper.make_node("Neg", ["wide"], ["Y"]),
+        ],
+        [helper.make_opsetid("", _OPSET_VERSION)],
+        attributes=["to"],
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "Cast", ["X"], ["wide"], domain="test.modelopt", to=TensorProto.DOUBLE
+                ),
+                helper.make_node("Cast", ["wide"], ["Y"], to=TensorProto.FLOAT),
+            ],
+            "custom_cast",
+            [_vi("X", TensorProto.FLOAT, [4])],
+            [_vi("Y", TensorProto.FLOAT, [4])],
+            value_info=[_vi("wide", TensorProto.DOUBLE, [4])],
+        ),
+        opset_imports=[
+            helper.make_opsetid("", _OPSET_VERSION),
+            helper.make_opsetid("test.modelopt", 1),
+        ],
+        functions=[function],
+    )
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"X": np.arange(1, 5, dtype=np.float32)}
+    expected = ReferenceEvaluator(model).run(None, feeds)[0]
+    before = model.SerializeToString()
+    transformed = _remove_cast_chains(copy.deepcopy(model))
+    actual = ReferenceEvaluator(transformed).run(None, feeds)[0]
+    np.testing.assert_array_equal(actual, expected)
+    assert transformed.SerializeToString() == before
+    onnx.checker.check_model(transformed, full_check=True)
 
 
 def test_single_cast_unchanged():

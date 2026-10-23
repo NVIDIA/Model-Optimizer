@@ -180,7 +180,7 @@ def _canonicalize_inputs(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mode
                 "Gather",
             ):
                 continue
-            if c_node.op_type == "Unsqueeze":
+            if c_node.op_type == "Unsqueeze" and c_idx == 0:
                 old_shape = cache.get_shape(c_node.output[0])
                 if old_shape is None or (
                     len(old_shape) < 4
@@ -330,7 +330,8 @@ def _compute_sq_unsq_out_shape(
         if axes is None:
             return None
         out = list(in_shape)
-        for ax in sorted([a if a >= 0 else len(out) + a + 1 for a in axes]):
+        out_rank = len(in_shape) + len(axes)
+        for ax in sorted(a if a >= 0 else out_rank + a for a in axes):
             out.insert(ax, 1)
         return out
 
@@ -825,7 +826,7 @@ def _remove_unused_initializers(model: onnx.ModelProto) -> onnx.ModelProto:
 
 
 def _remove_consecutive_casts(model: onnx.ModelProto, cache: GraphCache) -> onnx.ModelProto:
-    """Collapse consecutive Cast nodes into a single Cast with the last node's target dtype.
+    """Collapse standard-domain Cast chains while preserving the final Cast's attributes.
 
     A chain ``Cast(to=A) → Cast(to=B) → Cast(to=C)`` is replaced by a single
     ``Cast(to=C)`` from the first Cast's input to the last Cast's output.
@@ -836,7 +837,7 @@ def _remove_consecutive_casts(model: onnx.ModelProto, cache: GraphCache) -> onnx
     cnt = 0
 
     # Build chains: tail_output → [cast_node, ...]
-    all_casts = [n for n in graph.node if n.op_type == "Cast"]
+    all_casts = [n for n in graph.node if n.op_type == "Cast" and not n.domain and not n.overload]
     tail_to_chain: dict[str, list] = {}
 
     for node in all_casts:
@@ -882,15 +883,13 @@ def _remove_consecutive_casts(model: onnx.ModelProto, cache: GraphCache) -> onnx
         ):
             continue
         last_output = ch[-1].output[0]
-        last_to = get_node_attr_i(ch[-1], "to", 1)  # ONNX Cast default: FLOAT
-
         new_cast = helper.make_node(
             "Cast",
             inputs=[first_input],
             outputs=[last_output],
-            to=last_to,
             name=cache.unique_name(f"{ch[-1].name or 'cast'}_chain"),
         )
+        new_cast.attribute.extend(ch[-1].attribute)
         idx = node_idx[id(ch[0])]
         replacements[idx] = (ch[:], [new_cast])
         cnt += len(ch)
