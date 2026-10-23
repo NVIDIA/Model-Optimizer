@@ -15,13 +15,16 @@
 
 """Unit tests for layerwise calibration checkpoint save/resume."""
 
+import copy
 import json
 import os
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn as nn
 
+import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils.network import get_module_device
@@ -128,6 +131,149 @@ def test_resume_matches_full_run(monkeypatch, tmp_path):
         assert torch.allclose(ref_param, resumed_param, atol=1e-6), (
             f"Parameter {name} diverged after resume"
         )
+
+
+class _Payload:
+    """Pickle that creates ``marker`` when loaded (stands in for attacker code)."""
+
+    def __init__(self, marker):
+        self.marker = marker
+
+    def __reduce__(self):
+        return (open, (self.marker, "w"))
+
+
+@pytest.mark.parametrize(
+    "planted",
+    [
+        "output_meta.pt",
+        "next_inputs.pt",
+        "quantizer_state.pt",
+        "weights.pt",
+        "quantizer_buffers.pt",
+    ],
+)
+@pytest.mark.parametrize("force_no_weights_only", [False, True])
+def test_resume_does_not_unpickle_planted_files(
+    monkeypatch, tmp_path, planted, force_no_weights_only
+):
+    """A forged checkpoint file must be refused, not executed, on resume.
+
+    Also pins that ``TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD`` cannot downgrade the explicit load.
+    """
+    _register_test_discoverer(monkeypatch)
+    ckpt_dir = str(tmp_path / "ckpt")
+    model, forward_loop = _make_model_and_forward(n_layers=3)
+    layerwise_calibrate(model, forward_loop, _dummy_calib_func, checkpoint_dir=ckpt_dir)
+    with open(os.path.join(ckpt_dir, "manifest.json"), "w") as f:
+        json.dump({"last_completed_layer": 1, "num_layers": 3}, f)
+
+    marker = str(tmp_path / "pwned")
+    layer_dir = os.path.join(
+        ckpt_dir, "layer_0000" if planted == "output_meta.pt" else "layer_0001"
+    )
+    if planted == "quantizer_buffers.pt":  # only read when weights.pt is absent
+        os.remove(os.path.join(layer_dir, "weights.pt"))
+    torch.save(_Payload(marker), os.path.join(layer_dir, planted))
+    if force_no_weights_only:
+        monkeypatch.setenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
+
+    resumed_model, forward_loop = _make_model_and_forward(n_layers=3)
+    with pytest.raises(RuntimeError, match="Cannot resume") as exc:
+        layerwise_calibrate(resumed_model, forward_loop, _dummy_calib_func, checkpoint_dir=ckpt_dir)
+    assert os.path.join(layer_dir, planted) in str(exc.value)
+    assert not os.path.exists(marker)
+
+
+def test_resume_truncated_file_gives_fresh_dir_guidance(monkeypatch, tmp_path):
+    _register_test_discoverer(monkeypatch)
+    ckpt_dir = str(tmp_path / "ckpt")
+    model, forward_loop = _make_model_and_forward(n_layers=3)
+    layerwise_calibrate(model, forward_loop, _dummy_calib_func, checkpoint_dir=ckpt_dir)
+    with open(os.path.join(ckpt_dir, "manifest.json"), "w") as f:
+        json.dump({"last_completed_layer": 1, "num_layers": 3}, f)
+    path = os.path.join(ckpt_dir, "layer_0001", "next_inputs.pt")
+    with open(path, "r+b") as f:
+        f.truncate(10)
+
+    resumed_model, forward_loop = _make_model_and_forward(n_layers=3)
+    with pytest.raises(RuntimeError, match="fresh checkpoint directory"):
+        layerwise_calibrate(resumed_model, forward_loop, _dummy_calib_func, checkpoint_dir=ckpt_dir)
+
+
+class _Opaque:
+    """A layer input that ``weights_only`` loading cannot restore."""
+
+
+class _OpaqueKwargModel(_SimpleTransformerModel):
+    def forward(self, x, **kwargs):
+        x = self.embed(x)
+        for layer in self.layers:
+            x = layer(x, extra=_Opaque())
+        return x
+
+
+def test_save_warns_when_checkpoint_not_resumable(monkeypatch, tmp_path):
+    """An unloadable layer input is reported at calibration time, and calibration still finishes."""
+    _register_test_discoverer(monkeypatch)
+    torch.manual_seed(0)
+    model = _OpaqueKwargModel(n_layers=3)
+    tokens = torch.randint(0, 32, (2, 8))
+
+    with pytest.warns(UserWarning, match="will not be resumable"):
+        layerwise_calibrate(
+            model, lambda m: m(tokens), _dummy_calib_func, checkpoint_dir=str(tmp_path / "ckpt")
+        )
+
+
+def test_resume_hf_model_with_quantizers(tmp_path):
+    """Resume of a real HF model (KV-cache and tuple inputs, quantizer state) still loads safely."""
+    transformers = pytest.importorskip("transformers")
+    ckpt_dir = str(tmp_path / "ckpt")
+    ids = [torch.randint(0, 128, (2, 16)) for _ in range(2)]
+
+    def build():
+        torch.manual_seed(0)
+        cfg = transformers.LlamaConfig(
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=4,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            vocab_size=128,
+        )
+        return transformers.LlamaForCausalLM(cfg).eval()
+
+    def forward_loop(m):
+        for t in ids:
+            m(t)
+
+    def quant_cfg():
+        cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+        cfg["algorithm"] = {
+            "method": "max",
+            "layerwise": {"enable": True, "checkpoint_dir": ckpt_dir},
+        }
+        return cfg
+
+    ref = mtq.quantize(build(), quant_cfg(), forward_loop)
+    # Exercise the cache allowlist: next_inputs.pt must really hold a DynamicCache.
+    saved = torch.load(  # trusted: written by this test
+        os.path.join(ckpt_dir, "layer_0001", "next_inputs.pt"), weights_only=False
+    )
+    assert any(type(v).__name__ == "DynamicCache" for _, kw in saved for v in kw.values())
+    ref_state = {k: v.clone() for k, v in ref.state_dict().items()}
+
+    manifest_path = os.path.join(ckpt_dir, "manifest.json")
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+    manifest["last_completed_layer"] = 1
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f)
+
+    resumed = mtq.quantize(build(), quant_cfg(), forward_loop)
+    for k, v in resumed.state_dict().items():
+        assert torch.allclose(ref_state[k].float(), v.float()), k
 
 
 def test_no_checkpoint_unchanged(monkeypatch):
