@@ -523,6 +523,23 @@ def _resolve_init_config(hf_config, auto_model_module, ckpt_path, config_kwargs)
         return hf_config
 
 
+def _builtin_config_unavailable(hf_config, ckpt_path, config_kwargs):
+    """True when ``hf_config`` is a remote-code config whose built-in counterpart can't be built.
+
+    A built-in transformers model class may exist for the architecture yet only cover a subset
+    of it (e.g. built-in Nemotron-H implements the MoE variant only, so dense checkpoints fail
+    to parse). In that case the checkpoint's bundled modeling code must be used instead.
+    """
+    if not type(hf_config).__module__.startswith("transformers_modules"):
+        return False
+    builtin_config_kwargs = {k: v for k, v in config_kwargs.items() if k != "trust_remote_code"}
+    try:
+        AutoConfig.from_pretrained(ckpt_path, **builtin_config_kwargs)
+    except Exception:
+        return True
+    return False
+
+
 def _get_config_dtype(config):
     config_dtype = (
         getattr(config, "dtype", None) or getattr(config, "torch_dtype", None) or torch.bfloat16
@@ -713,7 +730,16 @@ def get_model(
 
         # DeepSeek ships bundled modeling code, but the built-in class is what the
         # disk-offload and streaming-export paths are validated against.
-        use_bundled_code = trust_remote_code and "Deepseek" in architecture
+        # Also use the bundled code when the built-in class covers only part of the architecture,
+        # i.e. the checkpoint's config cannot be re-derived as a built-in one (built-in Nemotron-H
+        # implements the MoE variant only, so dense checkpoints would hit a KeyError on 'mlp').
+        use_bundled_code = trust_remote_code and (
+            "Deepseek" in architecture
+            or (
+                hasattr(transformers, architecture)
+                and _builtin_config_unavailable(hf_config, ckpt_path, config_kwargs)
+            )
+        )
 
         if not hasattr(transformers, architecture) or use_bundled_code:
             if not hasattr(transformers, architecture):
