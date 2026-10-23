@@ -115,19 +115,27 @@ _RNG = np.random.default_rng(2024)
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def test_canonicalize_3d_input_unsqueeze_added():
-    """Promote the safe branch of a shared input while preserving a Transpose branch."""
+@pytest.mark.parametrize("opset", [12, 17])
+@pytest.mark.parametrize("input_shape", [[1], [6], [1, 6], [2, 3, 4]])
+def test_canonicalize_input_promotes_safe_branch_and_preserves_outputs(opset, input_shape):
+    """Keep 4D interior promotion while preserving both pointwise and Transpose outputs."""
     relu = helper.make_node("Relu", ["X"], ["Y"], name="relu")
-    transpose = helper.make_node("Transpose", ["X"], ["Z"], perm=[2, 1, 0])
+    transpose = helper.make_node(
+        "Transpose", ["X"], ["Z"], perm=list(reversed(range(len(input_shape))))
+    )
     graph = helper.make_graph(
         [relu, transpose],
         "g",
-        [_vi("X", TensorProto.FLOAT, [2, 3, 4])],
-        [_vi("Y", TensorProto.FLOAT, [2, 3, 4]), _vi("Z", TensorProto.FLOAT, [4, 3, 2])],
+        [_vi("X", TensorProto.FLOAT, input_shape)],
+        [
+            _vi("Y", TensorProto.FLOAT, input_shape),
+            _vi("Z", TensorProto.FLOAT, list(reversed(input_shape))),
+        ],
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", opset)])
     _clamp_ir(model)
-    feeds = {"X": _RNG.standard_normal([2, 3, 4]).astype(np.float32)}
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"X": _RNG.standard_normal(input_shape).astype(np.float32)}
     expected = _run_ort(model, feeds)
 
     tr = copy.deepcopy(model)
@@ -135,18 +143,49 @@ def test_canonicalize_3d_input_unsqueeze_added():
     onnx.checker.check_model(tr, full_check=True)
 
     unsq_nodes = [n for n in tr.graph.node if n.op_type == "Unsqueeze"]
-    assert len(unsq_nodes) == 1, "one Unsqueeze must be inserted for the 3-D input"
+    assert len(unsq_nodes) == 1
     unsq = unsq_nodes[0]
     assert unsq.input[0] == "X", "Unsqueeze reads the graph input"
 
     # Relu must now read the Unsqueeze output, not X directly
     relu_node = next(n for n in tr.graph.node if n.op_type == "Relu")
     assert relu_node.input[0] == unsq.output[0], "Relu must be redirected to Unsqueeze output"
+    assert len(GraphCache(tr.graph).get_shape(relu_node.output[0])) == 4
     transpose_node = next(n for n in tr.graph.node if n.op_type == "Transpose")
     assert transpose_node.input[0] == "X"
     actual = _run_ort(tr, feeds)
-    np.testing.assert_array_equal(actual["Y"], expected["Y"].reshape(1, 2, 3, 4))
+    assert list(tr.graph.output) == list(model.graph.output)
+    np.testing.assert_array_equal(actual["Y"], expected["Y"])
     np.testing.assert_array_equal(actual["Z"], expected["Z"])
+
+
+@pytest.mark.parametrize("opset", [12, 17])
+def test_cleanup_preserves_scalar_output_after_intermediary_promotion(opset):
+    """Restore a scalar result after an intermediary Squeeze is promoted to 4D."""
+    squeeze = helper.make_node("Squeeze", ["X"], ["middle"], axes=[0, 1])
+    initializers = []
+    if opset >= 13:
+        squeeze.ClearField("attribute")
+        squeeze.input.append("axes")
+        initializers.append(numpy_helper.from_array(np.array([0, 1], np.int64), name="axes"))
+    model = helper.make_model(
+        helper.make_graph(
+            [squeeze, helper.make_node("Relu", ["middle"], ["Y"])],
+            "scalar_boundary",
+            [_vi("X", TensorProto.FLOAT, [1, 1])],
+            [_vi("Y", TensorProto.FLOAT, [])],
+            initializer=initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", opset)],
+    )
+    _clamp_ir(model)
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"X": np.array([[2]], np.float32)}
+    expected = _run_ort(model, feeds)["Y"]
+    transformed = _apply(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    assert list(transformed.graph.output) == list(model.graph.output)
+    np.testing.assert_array_equal(_run_ort(transformed, feeds)["Y"], expected)
 
 
 @pytest.mark.parametrize("opset", [12, 13, 17])

@@ -23,6 +23,8 @@ initializers. Constant folding requires the optional onnx-graphsurgeon package.
 
 from __future__ import annotations
 
+import copy
+
 import numpy as np
 import onnx
 from onnx import helper, numpy_helper
@@ -943,11 +945,65 @@ def _remove_consecutive_casts(model: onnx.ModelProto, cache: GraphCache) -> onnx
     return model
 
 
+def _restore_promoted_graph_outputs(model, cache: GraphCache, original_outputs: dict) -> bool:
+    """Restore declared output ranks while retaining leading-unit promotion inside the graph."""
+    graph = model.graph
+    plans = []
+    for output in graph.output:
+        original = original_outputs[output.name]
+        current_type = output.type.tensor_type
+        original_type = original.type.tensor_type
+        if not current_type.HasField("shape") or not original_type.HasField("shape"):
+            continue
+        padding = len(current_type.shape.dim) - len(original_type.shape.dim)
+        if padding == 0:
+            continue
+        producer = cache.get_producer(output.name)
+        if (
+            padding < 0
+            or any(dim.dim_value != 1 for dim in current_type.shape.dim[:padding])
+            or producer is None
+        ):
+            raise ValueError(
+                f"Cleanup cannot restore non-unit shape changes for output {output.name!r}"
+            )
+        plans.append((output, original, producer, padding))
+    if not plans:
+        return False
+
+    positions = {id(node): index for index, node in enumerate(graph.node)}
+    insertions = {}
+    for output, original, producer, padding in plans:
+        promoted_name = cache.unique_name(f"{output.name}_4d_output")
+        promoted_info = copy.deepcopy(output)
+        promoted_info.name = promoted_name
+        graph.value_info.append(promoted_info)
+        for index, name in enumerate(producer.output):
+            if name == output.name:
+                producer.output[index] = promoted_name
+        for consumer, index in cache.get_consumers(output.name):
+            consumer.input[index] = promoted_name
+        squeeze = helper.make_node(
+            "Squeeze",
+            [promoted_name],
+            [output.name],
+            name=cache.unique_name(f"{output.name}_restore_rank"),
+        )
+        _set_axes(model, cache, squeeze, range(padding), f"{output.name}_restore_axes")
+        output.CopyFrom(original)
+        insertions.setdefault(positions[id(producer)] + 1, []).append(squeeze)
+    for position in sorted(insertions, reverse=True):
+        for node in reversed(insertions[position]):
+            graph.node.insert(position, node)
+    return True
+
+
 # ── Master transform ──────────────────────────────────────────────────────────
 
 
 def _apply_graph_cleanup(model: onnx.ModelProto) -> onnx.ModelProto:
-    """Apply the seven DLA cleanup stages while retaining rank-sensitive paths."""
+    """Apply seven DLA cleanup stages while retaining output signatures and rank-sensitive paths."""
+    original_outputs = {output.name: copy.deepcopy(output) for output in model.graph.output}
     model = infer_shapes(model)
     cache = GraphCache(model.graph)
 
@@ -959,6 +1015,8 @@ def _apply_graph_cleanup(model: onnx.ModelProto) -> onnx.ModelProto:
     model = _canonicalize_inputs(model, cache)
     model = infer_shapes(model)
     cache.rebuild()
+    if _restore_promoted_graph_outputs(model, cache, original_outputs):
+        cache.rebuild()
 
     # Step 3 — collapse Reshape chains
     model = _remove_reshape_chains(model, cache)
@@ -976,5 +1034,7 @@ def _apply_graph_cleanup(model: onnx.ModelProto) -> onnx.ModelProto:
 
     # Step 7 — remove unused initializers
     model = _remove_unused_initializers(model)
+    for output in model.graph.output:
+        output.CopyFrom(original_outputs[output.name])
 
     return model
