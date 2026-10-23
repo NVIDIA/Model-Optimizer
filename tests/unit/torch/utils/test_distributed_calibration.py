@@ -469,15 +469,20 @@ def test_the_ep_mesh_comes_with_an_expert_parallel_plan_only(plan, mesh):
             {"method": "nvfp4_act_headroom", "weight_scale_algorithm": "local_hessian"},
             "local_hessian",
         ),
+        (
+            "calibrate",
+            {"method": "max", "distributed_sync": False},
+            "max with distributed_sync=False",
+        ),
     ],
-    ids=["quantize", "calibrate", "for-the-weight-scales"],
+    ids=["quantize", "calibrate", "for-the-weight-scales", "max-without-its-sync"],
 )
 def test_rank_local_calibration_is_refused_before_it_changes_a_distributed_model(
     entry, algorithm, refused
 ):
     """Each rank calibrates on its own data, and AWQ keeps what its search gathers on the rank: the
     ranks' copies of a weight would come out different. So would local_hessian, run by another
-    algorithm for its weight scales. The refusal comes before any change."""
+    algorithm for its weight scales, and max told not to sync. The refusal comes before any change."""
     import modelopt.torch.quantization as mtq
 
     model = nn.Sequential(nn.Linear(16, 16))

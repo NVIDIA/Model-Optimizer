@@ -68,7 +68,8 @@ __all__ = [
     "temporarily_fold_weights",
 ]
 
-# Calibration algorithms whose statistics stay on the rank that gathered them.
+# Calibration algorithms whose statistics stay on the rank that gathered them. Any other keeps its
+# own there too when its config turns distributed_sync off.
 _RANK_LOCAL_CALIBRATION = (
     "awq_lite",
     "awq_clip",
@@ -79,15 +80,19 @@ _RANK_LOCAL_CALIBRATION = (
 )
 
 
-def _calibration_methods(algorithm: QuantizeAlgoCfgType) -> list[str]:
-    """The calibration methods ``algorithm`` runs, with those it runs for its scales."""
-    methods = []
+def _rank_local_calibrations(algorithm: QuantizeAlgoCfgType) -> list[str]:
+    """The rank-local calibrations ``algorithm`` runs, with those it runs for its scales."""
+    found = []
     for mode, config in get_modelike_from_algo_cfg(algorithm):
-        methods.append(mode.removesuffix("_calibrate"))
+        method = mode.removesuffix("_calibrate")
+        if method in _RANK_LOCAL_CALIBRATION:
+            found.append(method)
+        elif "distributed_sync" in config and not config["distributed_sync"]:
+            found.append(f"{method} with distributed_sync={config['distributed_sync']}")
         for key in ("weight_scale_algorithm", "scale_algorithm"):
             if config.get(key) is not None:
-                methods += _calibration_methods(config[key])
-    return methods
+                found += _rank_local_calibrations(config[key])
+    return found
 
 
 def _refuse_rank_local_calibration(model: nn.Module, algorithm: QuantizeAlgoCfgType) -> None:
@@ -99,13 +104,14 @@ def _refuse_rank_local_calibration(model: nn.Module, algorithm: QuantizeAlgoCfgT
     plan = dist.recorded_distribution_plan(model)
     if plan is None or plan.world_size == 1:
         return
-    refused = [m for m in _calibration_methods(algorithm) if m in _RANK_LOCAL_CALIBRATION]
+    refused = _rank_local_calibrations(algorithm)
     if refused:
         raise NotImplementedError(
             f"Calibrating with {', '.join(refused)} is not supported on a model distributed over "
             f"{plan.world_size} ranks. Each rank calibrates on its own data and this calibration "
             "keeps what it gathers on the rank, so the ranks' copies of a weight would come out "
-            "different. Calibrate with max, MSE, GPTQ or SmoothQuant, or in a single process."
+            "different. Calibrate with max, MSE, GPTQ or SmoothQuant, with distributed_sync on, or "
+            "in a single process."
         )
 
 
