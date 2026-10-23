@@ -256,7 +256,9 @@ def test_canonicalize_4d_input_unchanged(axes_input):
 
 
 @pytest.mark.parametrize("stage", ["input", "squeeze", "unsqueeze"])
-@pytest.mark.parametrize("consumer", ["Transpose", "Softmax", "MatMul", "transpose_via_relu"])
+@pytest.mark.parametrize(
+    "consumer", ["Transpose", "Softmax", "MatMul", "transpose_via_relu", "prelu_slope"]
+)
 def test_rank_promotion_preserves_rank_sensitive_consumers(stage, consumer):
     """Preserve rank-sensitive behavior, including consumers behind an elementwise node."""
     input_shape = [1, 2, 3] if stage == "squeeze" else [2, 3]
@@ -286,6 +288,15 @@ def test_rank_promotion_preserves_rank_sensitive_consumers(stage, consumer):
         output_shape = list(reversed(source_shape))
     elif consumer == "Softmax":
         nodes.append(helper.make_node(consumer, [source], ["Y"], axis=len(source_shape) - 2))
+        output_shape = source_shape
+    elif consumer == "prelu_slope":
+        initializers.append(
+            numpy_helper.from_array(
+                -np.arange(1, np.prod(source_shape) + 1, dtype=np.float32).reshape(source_shape),
+                "data",
+            )
+        )
+        nodes.append(helper.make_node("PRelu", ["data", source], ["Y"]))
         output_shape = source_shape
     else:
         initializers.append(

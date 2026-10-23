@@ -142,7 +142,7 @@ def _rank_sensitive_consumers(
         if not rank_agnostic:
             sensitive_values.update(_node_inputs(node))
         for index, name in enumerate(node.input):
-            if name and (not rank_agnostic or (node.op_type == "Clip" and index > 0)):
+            if name and (not rank_agnostic or (node.op_type in ("Clip", "PRelu") and index > 0)):
                 sensitive_values.add(name)
                 sensitive_edges.add((id(node), index))
     return sensitive_values, sensitive_edges
