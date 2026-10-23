@@ -398,17 +398,19 @@ def test_is_diffusion_gemma(hf_config, expected):
     (
         "architecture",
         "remote_config",
-        "builtin_config_fails",
+        "builtin_config_error",
         "trust_remote_code",
         "expect_bundled",
     ),
     [
-        ("DeepseekV3ForCausalLM", False, False, True, True),
-        ("DeepseekV3ForCausalLM", False, False, False, False),
+        ("DeepseekV3ForCausalLM", False, None, True, True),
+        ("DeepseekV3ForCausalLM", False, None, False, False),
         # Dense Nemotron-H: the built-in class cannot parse the remote config -> bundled code.
-        ("NemotronHForCausalLM", True, True, True, True),
+        ("NemotronHForCausalLM", True, KeyError("-"), True, True),
         # MoE Nemotron-H (or a newer Transformers): the built-in config parses -> built-in class.
-        ("NemotronHForCausalLM", True, False, True, False),
+        ("NemotronHForCausalLM", True, None, True, False),
+        # An unrelated failure (e.g. Hub retrieval) is not an incompatibility: it propagates.
+        ("NemotronHForCausalLM", True, OSError("hub down"), True, None),
     ],
 )
 def test_get_model_selects_bundled_or_builtin_class(
@@ -417,7 +419,7 @@ def test_get_model_selects_bundled_or_builtin_class(
     *,
     architecture,
     remote_config,
-    builtin_config_fails,
+    builtin_config_error,
     trust_remote_code,
     expect_bundled,
 ):
@@ -438,8 +440,8 @@ def test_get_model_selects_bundled_or_builtin_class(
 
     def _load_config(*args, **kwargs):
         # The re-derivation of a built-in config is the call made without trust_remote_code.
-        if builtin_config_fails and not kwargs.get("trust_remote_code"):
-            raise KeyError("-")
+        if builtin_config_error and not kwargs.get("trust_remote_code"):
+            raise builtin_config_error
         return hf_config
 
     class FakeModel:
@@ -473,6 +475,12 @@ def test_get_model_selects_bundled_or_builtin_class(
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
 
+    if expect_bundled is None:
+        with pytest.raises(OSError):
+            example_utils.get_model(
+                str(tmp_path), device="cpu", trust_remote_code=trust_remote_code
+            )
+        return
     example_utils.get_model(str(tmp_path), device="cpu", trust_remote_code=trust_remote_code)
 
     assert used["path"] == ("bundled" if expect_bundled else "builtin")
