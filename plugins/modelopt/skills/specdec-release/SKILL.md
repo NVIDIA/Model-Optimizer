@@ -77,7 +77,8 @@ track progress:
 ### Running a gate
 
 Gates and `freeze_drafter.py` print JSON `{pass, failure_class, detail, ...}` and exit `0`
-pass, `1` failed, `2` bad input (`USER_CONFIG_ERROR`: fix the invocation, not the run). Run
+pass, `1` failed, `2` bad input (`USER_CONFIG_ERROR`: fix the invocation or the recipe value it
+names, not the drafter). Run
 them on the job host so artifacts are read in place:
 
 ```bash
@@ -279,7 +280,7 @@ Submissions and approvals are `ACTION`. Any step a human had to take is
 
 | `failure_class` | Gate | Action |
 | --- | --- | --- |
-| `USER_CONFIG_ERROR` | any | Fix the invocation (paths, `--algorithm`, unknown family → `--expect-architecture`), or permissions or disk space (freeze); re-run the gate only |
+| `USER_CONFIG_ERROR` | any | Fix the invocation (paths, `--algorithm`, unknown family → `--expect-architecture`), or permissions or disk space (freeze); re-run the gate only. From `gate_smoke` with `stage: invalid_config`: fix `MIN_ACCEPTANCE_LENGTH`/`NUM_SPEC_TOKENS` in the YAML and resubmit as a smoke-only submission; training needn't rerun |
 | `METRICS_MISSING` | train | No regression verdict (training crashed, or the recipe set no thresholds). Review logs with **speculative-decoding**; set `MAX_FINAL_LOSS`/`MIN_FINAL_ACC` in the YAML |
 | `TRAIN_REGRESSION` | train | The recipe's own floors failed. Triage with **speculative-decoding**; never waive the floor |
 | `EXPORT_MISSING` | train, freeze | Training died before exporting, or the export is incomplete. Triage the training task; retrain as a new run |
