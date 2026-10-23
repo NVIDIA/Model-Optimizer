@@ -1675,7 +1675,10 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
                     **kwargs,
                 )
 
-        if not getattr(_FineGrainedFP8HfQuantizer, "_modelopt_uwc_patched", False):
+        # A transformers without the hook prepends no dequant to the expert converters: nothing to fuse.
+        if hasattr(_FineGrainedFP8HfQuantizer, "update_weight_conversions") and not getattr(
+            _FineGrainedFP8HfQuantizer, "_modelopt_uwc_patched", False
+        ):
             _orig_uwc = _FineGrainedFP8HfQuantizer.update_weight_conversions
 
             def _uwc_fixed(self, weight_conversions):
@@ -1698,8 +1701,11 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
 
             _FineGrainedFP8HfQuantizer.update_weight_conversions = _uwc_fixed
             _FineGrainedFP8HfQuantizer._modelopt_uwc_patched = True
-    except Exception as _e:
-        print(f"[ep] WARNING: could not patch update_weight_conversions: {_e}", flush=True)
+    except Exception as e:
+        # Unpatched, every routed expert would load sliced apart from its scales (see above).
+        raise RuntimeError(
+            f"block-FP8 load: could not fuse transformers' expert dequant into its merge ({e})."
+        ) from e
 
     _FINEGRAINED_FP8_PATCHED = True
 

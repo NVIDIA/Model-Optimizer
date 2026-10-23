@@ -22,6 +22,7 @@ transformers 5.10.1, so the tests present an older version to it. The dequant is
 plain blockwise reference: ``weight[..., i, j] * scale_inv[..., i // block_n, j // block_k]``.
 """
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -309,3 +310,11 @@ def test_from_5_10_1_its_own_dequant_also_takes_partial_last_blocks(
 
     assert torch.equal(out, _reference(weight, scale_inv, (128, 128)))
     assert vars(FineGrainedFP8HfQuantizer).get("update_weight_conversions", _MISSING) is hook
+
+
+def test_an_expert_converter_it_cannot_fuse_stops_the_load(pre_5_10_transformers, monkeypatch):
+    """Unpatched, every routed expert would load sliced apart from its scales."""
+    monkeypatch.setitem(sys.modules, "transformers.core_model_loading", None)
+
+    with pytest.raises(RuntimeError, match="could not fuse transformers' expert dequant"):
+        model_load_utils._patch_finegrained_fp8_dequant()
