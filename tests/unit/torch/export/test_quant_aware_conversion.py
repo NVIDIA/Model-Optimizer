@@ -576,6 +576,31 @@ def test_stacked_3d_expert_raises_unsupported():
         apply_reverse_rules(sd, [rule], [])
 
 
+def test_split_unfuses_unquantized_dense_3d_weight():
+    """A fused dense 3-D weight (GLM-5.3 KDA depthwise conv1d [C, 1, K]) splits on dim 0."""
+    q, k, v = (torch.randn(8, 1, 4, dtype=torch.bfloat16) for _ in range(3))
+    sd = {"m.layers.0.self_attn.conv1d.weight": torch.cat([q, k, v], dim=0)}
+    rule = SplitRule(".conv1d", (".q_conv1d", ".k_conv1d", ".v_conv1d"), dim=0)
+
+    out = apply_reverse_rules(sd, [rule], [])
+
+    prefix = "m.layers.0.self_attn"
+    assert set(out) == {f"{prefix}.{p}_conv1d.weight" for p in ("q", "k", "v")}
+    for part, expected in zip(("q", "k", "v"), (q, k, v)):
+        assert torch.equal(out[f"{prefix}.{part}_conv1d.weight"], expected)
+
+
+def test_quantized_3d_weight_raises_unsupported():
+    """A 3-D weight carrying quantization state still triggers the safe fallback path."""
+    sd = {
+        "m.layers.0.mlp.gate_up_proj.weight": torch.zeros(4, 8, 16, dtype=torch.uint8),
+        "m.layers.0.mlp.gate_up_proj.weight_scale": torch.zeros(4, 8, 2, dtype=torch.uint8),
+    }
+    rule = SplitRule(".gate_up_proj", (".gate_proj", ".up_proj"), dim=0)
+    with pytest.raises(QuantConversionUnsupportedError):
+        apply_reverse_rules(sd, [rule], [])
+
+
 def test_non_divisible_split_raises():
     sd = {"m.mlp.gate_up_proj.weight": torch.zeros(7, 8, dtype=torch.uint8)}
     rule = SplitRule(".gate_up_proj", (".gate_proj", ".up_proj"), dim=0)
