@@ -179,7 +179,10 @@ def _prepare_sources(
 
 
 def _to_chat(
-    row: dict[str, Any], content_field: str, reasoning_content: ReasoningContentMode = "native"
+    row: dict[str, Any],
+    content_field: str,
+    reasoning_content: ReasoningContentMode = "native",
+    loss_mode: str = "assistant",
 ) -> dict[str, Any] | None:
     """Convert a source row to ``{"messages": [...]}``, or ``None`` if it has nothing to train on.
 
@@ -225,8 +228,10 @@ def _to_chat(
             if content.strip()
         ]
         chat = {"messages": turns}
-    # Nothing in a row without an assistant turn is trained under assistant-only loss.
-    if not any(turn.get("role") == "assistant" for turn in chat["messages"]):
+    # Only loss_mode full trains a row without an assistant turn.
+    if loss_mode != "full" and not any(
+        turn.get("role") == "assistant" for turn in chat["messages"]
+    ):
         return None
     return chat
 
@@ -261,6 +266,7 @@ def _take_chat_rows(
     shuffle: bool,
     seed: int,
     reasoning_content: ReasoningContentMode,
+    loss_mode: str,
 ) -> list[dict[str, Any]]:
     """Return the first ``want`` usable chat rows of a source.
 
@@ -278,7 +284,7 @@ def _take_chat_rows(
     max_rejected = 10 * want + 100
     try:
         for row in _iter_rows(source, output_dir, shuffle, seed):
-            chat = _to_chat(row, source["content_field"], reasoning_content)
+            chat = _to_chat(row, source["content_field"], reasoning_content, loss_mode)
             # Judge the source row's top-level media keys too, which the conversion does not keep.
             if chat is None or not is_text_only_chat_example({**row, **chat}):
                 rejected += 1
@@ -352,7 +358,11 @@ def _sft_length(row: dict[str, Any]) -> int:
 
     try:
         tokenized = tokenize_chat_example(row, warn_on_all_masked=False, **_SFT_TOKENIZER)
-    except ValueError:  # e.g. no assistant span matched: Bridge raises from a dataloader worker
+    except ValueError as e:
+        # No assistant span matched: Bridge raises from a dataloader worker. Other errors are setup
+        # errors (e.g. a tokenizer without a chat template) that would drop every row.
+        if "did not match any loss-contributing spans" not in str(e):
+            raise
         return 0
     return tokenized.input_ids.numel() if tokenized.assistant_mask.any() else 0
 
@@ -464,6 +474,9 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
     settings = {"shuffle": shuffle, "reasoning_content": reasoning_content}
     if shuffle:
         settings["seed"] = seed
+    loss_mode = config.get("loss_mode", "assistant")
+    if loss_mode == "full":  # keeps rows without an assistant turn
+        settings["loss_mode"] = loss_mode
 
     rows: list[dict[str, Any]] = []
     for source, want in zip(config["sources"], budgets):
@@ -473,7 +486,9 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
         part = _part_path(parts_dir, source, settings)
         got = _read_jsonl(part)
         if got is None or len(got) < want:
-            got = _take_chat_rows(source, output_dir, want, shuffle, seed, reasoning_content)
+            got = _take_chat_rows(
+                source, output_dir, want, shuffle, seed, reasoning_content, loss_mode
+            )
             _write_jsonl(part, got)
         rows.extend(got[:want])
 

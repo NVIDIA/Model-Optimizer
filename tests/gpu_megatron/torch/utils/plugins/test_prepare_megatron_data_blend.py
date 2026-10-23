@@ -176,8 +176,11 @@ def test_to_chat_handles_all_row_shapes():
     msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
     assert blend_module._to_chat({"messages": msgs}, "messages") == {"messages": msgs}
     assert blend_module._to_chat({"messages": []}, "messages") is None
-    # Nothing would be trained under assistant-only loss.
+    # Nothing would be trained under assistant-only loss; loss_mode full trains the user turn.
     assert blend_module._to_chat({"messages": msgs[:1]}, "messages") is None
+    assert blend_module._to_chat({"messages": msgs[:1]}, "messages", loss_mode="full") == {
+        "messages": msgs[:1]
+    }
     # Tool definitions and a top-level system prompt reach the chat path.
     tools = [{"type": "function", "function": {"name": "add"}}]
     row = {"messages": msgs, "tools": tools, "system": "Be brief.", "id": 7}
@@ -228,13 +231,13 @@ def test_take_chat_rows_skips_non_text_rows_and_fails_without_enough(tmp_path: P
     # Media is rejected inside message content and as a top-level key the conversion drops.
     rows = [_chat(0), _image_chat(1), {**_chat(9), "images": ["a.png"]}, _chat(2), _chat(3)]
     monkeypatch.setattr(blend_module, "_iter_rows", lambda *a: iter(rows))
-    got = blend_module._take_chat_rows(source, tmp_path, 3, False, 0, "native")
+    got = blend_module._take_chat_rows(source, tmp_path, 3, False, 0, "native", "assistant")
     assert [c["messages"][0]["content"] for c in got] == ["q0", "q2", "q3"]
 
     images = [_image_chat(i) for i in range(200)]
     monkeypatch.setattr(blend_module, "_iter_rows", lambda *a: iter(images))
     with pytest.raises(RuntimeError, match=r"only 0/2 usable rows \(gave up after 121 rejected"):
-        blend_module._take_chat_rows(source, tmp_path, 2, False, 0, "native")
+        blend_module._take_chat_rows(source, tmp_path, 2, False, 0, "native", "assistant")
 
 
 def test_chat_blend_splits_weighted_rows(tmp_path: Path, chat_blend, monkeypatch):
@@ -281,8 +284,9 @@ def test_chat_blend_reuses_and_rebuilds_cached_parts(tmp_path: Path, chat_blend)
         ({}, {"shuffle": True}),
         ({"shuffle": True, "seed": 0}, {"shuffle": True, "seed": 1}),
         ({}, {"reasoning_content": "inline"}),
+        ({}, {"loss_mode": "full"}),
     ],
-    ids=["split", "files", "shuffle", "seed", "reasoning_content"],
+    ids=["split", "files", "shuffle", "seed", "reasoning_content", "loss_mode"],
 )
 def test_chat_blend_reselects_after_a_selection_change(chat_blend, first, second):
     write_config, calls = chat_blend
@@ -409,6 +413,10 @@ def test_chat_blend_drops_untrainable_rows_and_pairs_the_rest(
     rows = _read_jsonl(out / "train.jsonl") + _read_jsonl(out / "validation.jsonl")
     assert 40 < len(rows) < 100  # the 50 + 50 selected rows, minus the long prompts
     assert all(blend_module._sft_length(row) for row in rows)
+    # A setup error would drop every row, so it is raised instead.
+    monkeypatch.setitem(blend_module._SFT_TOKENIZER, "loss_mode", "unknown")
+    with pytest.raises(ValueError, match="loss_mode"):
+        blend_module._sft_length(rows[0])
 
     # A cap of 2 * max_length fits any two rows, so only an odd row per split is left out.
     paired = blend_module.prepare_chat_data_blend(write_config(**config, pack_max_tokens=128))
