@@ -406,6 +406,17 @@ def test_correctness_reports_greedy_match_without_gating():
     r = evaluate_correctness(summary)
     assert r["pass"] and r["measurable"] and not r["blocking"]
     assert r["min_exact_match_rate"] == pytest.approx(0.95625)
+    assert r["min_self_exact_match_rate"] is None and r["notes"]  # no control: say so
+
+    # The target-alone control is reported as the noise floor next to the A-vs-B rate.
+    summary["rows"][0]["a_self_match"] = {
+        "exact_match_rate": 0.2,
+        "first_turn_exact_match_rate": 0.25,
+    }
+    r = evaluate_correctness(summary)
+    assert r["min_self_exact_match_rate"] == 0.2
+    assert r["min_self_first_turn_exact_match_rate"] == 0.25
+    assert "target alone" in r["detail"] and not r["notes"]
 
     summary["rows"][0]["temperature_b"] = None  # unknown temperature: not greedy evidence
     r = evaluate_correctness(summary)

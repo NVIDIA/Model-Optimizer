@@ -18,7 +18,9 @@
 REPORT-ONLY: always returns pass true (exit 0) on readable input. How often greedy outputs
 drift apart depends on the target's numerics, the engine's kernels and the output length,
 so any blocking floor would be a per-model number. The rates go into the report as evidence
-for the release review.
+for the release review, next to the target-alone control (compare_ab's ``a_self_match``: A
+at concurrency 1 vs A at the next concurrency). That control is the noise floor: a hybrid
+target can agree with itself on few turns, and then a low A-vs-B rate is not the drafter's.
 
 Reads ab_summary.json from examples/specdec_bench/compare_ab.py and uses only rows measured
 at concurrency 1 with temperature 0 recorded for both arms (batching alone breaks bitwise
@@ -39,7 +41,8 @@ def evaluate_correctness(summary):
 
     Returns:
         dict ``{pass, failure_class, blocking, measurable, detail, notes,
-        min_exact_match_rate, min_first_turn_exact_match_rate, per_repeat}``.
+        min_exact_match_rate, min_first_turn_exact_match_rate, min_self_exact_match_rate,
+        min_self_first_turn_exact_match_rate, per_repeat}``.
     """
     greedy = [
         r
@@ -82,17 +85,35 @@ def evaluate_correctness(summary):
         notes.append("some turns had no counterpart in the other arm")
     min_exact = min(exact) if exact else None
     min_first = min(first) if first else None
+    controls = [r["a_self_match"] for r in rows if isinstance(r.get("a_self_match"), dict)]
+    self_exact = [c["exact_match_rate"] for c in controls if c.get("exact_match_rate") is not None]
+    self_first = [
+        c["first_turn_exact_match_rate"]
+        for c in controls
+        if c.get("first_turn_exact_match_rate") is not None
+    ]
+    min_self = min(self_exact) if self_exact else None
+    min_self_first = min(self_first) if self_first else None
     detail = (
         f"exact match {min_exact} (all turns), {min_first} (first turns); not gated"
         if exact
         else "no turn pairs to compare"
     )
+    if self_exact:
+        detail += f"; target alone across batch shapes {min_self} / {min_self_first}"
+    elif exact:
+        notes.append(
+            "no target-alone control (arm A at a second concurrency): a low rate cannot be "
+            "told apart from the target's own batch-shape drift"
+        )
     return {
         **result,
         "measurable": bool(exact),
         "detail": detail,
         "min_exact_match_rate": min_exact,
         "min_first_turn_exact_match_rate": min_first,
+        "min_self_exact_match_rate": min_self,
+        "min_self_first_turn_exact_match_rate": min_self_first,
         "per_repeat": per_repeat,
     }
 
