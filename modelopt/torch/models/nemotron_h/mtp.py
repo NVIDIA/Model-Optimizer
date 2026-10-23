@@ -86,6 +86,7 @@ def prefers_bundled_code(hf_config, checkpoint_path: str, config_kwargs: dict) -
         # Config-parsing incompatibilities only; e.g. an OSError from the Hub must propagate.
         return True
     # Parsing can succeed while model construction fails on a block type the built-in lacks.
+    # Native Nemotron-H is optional: older Transformers can still load unrelated models.
     from transformers.models.nemotron_h.modeling_nemotron_h import MIXER_TYPES
 
     return any(t not in MIXER_TYPES for t in getattr(builtin_config, "layers_block_type", ()))
