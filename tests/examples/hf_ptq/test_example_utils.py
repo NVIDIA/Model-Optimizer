@@ -486,6 +486,26 @@ def test_get_model_selects_bundled_or_builtin_class(
     assert used["path"] == ("bundled" if expect_bundled else "builtin")
 
 
+def test_nemotron_h_prefers_bundled_code_for_unsupported_block_type(monkeypatch):
+    """A built-in config that parses but names a block type the built-in model lacks needs the
+    checkpoint's bundled code."""
+    from modelopt.torch.models.hf import prefers_bundled_code
+
+    modeling = pytest.importorskip("transformers.models.nemotron_h.modeling_nemotron_h")
+    remote_cls = type("_Config", (SimpleNamespace,), {"__module__": "transformers_modules.c.cfg"})
+    hf_config = remote_cls(model_type="nemotron_h")
+    monkeypatch.setattr(
+        example_utils.AutoConfig,
+        "from_pretrained",
+        lambda *a, **k: SimpleNamespace(layers_block_type=["mamba", "mlp"]),
+    )
+
+    monkeypatch.setattr(modeling, "MIXER_TYPES", {"mamba": object})
+    assert prefers_bundled_code("nemotron_h", hf_config, "ckpt", {})
+    monkeypatch.setattr(modeling, "MIXER_TYPES", {"mamba": object, "mlp": object})
+    assert not prefers_bundled_code("nemotron_h", hf_config, "ckpt", {})
+
+
 # ---------- get_tokenizer ----------------------------------------------------
 
 

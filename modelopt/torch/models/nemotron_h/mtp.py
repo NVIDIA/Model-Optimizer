@@ -81,11 +81,14 @@ def prefers_bundled_code(hf_config, checkpoint_path: str, config_kwargs: dict) -
         return False
     builtin_kwargs = {k: v for k, v in config_kwargs.items() if k != "trust_remote_code"}
     try:
-        AutoConfig.from_pretrained(checkpoint_path, **builtin_kwargs)
+        builtin_config = AutoConfig.from_pretrained(checkpoint_path, **builtin_kwargs)
     except (KeyError, ValueError, TypeError, AttributeError):
         # Config-parsing incompatibilities only; e.g. an OSError from the Hub must propagate.
         return True
-    return False
+    # Parsing can succeed while model construction fails on a block type the built-in lacks.
+    from transformers.models.nemotron_h.modeling_nemotron_h import MIXER_TYPES
+
+    return any(t not in MIXER_TYPES for t in getattr(builtin_config, "layers_block_type", ()))
 
 
 def _normalize_mtp_block_types(block_types, mixer_types):
