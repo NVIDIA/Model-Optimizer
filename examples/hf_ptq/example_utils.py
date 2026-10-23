@@ -535,7 +535,8 @@ def _builtin_config_unavailable(hf_config, ckpt_path, config_kwargs):
     builtin_config_kwargs = {k: v for k, v in config_kwargs.items() if k != "trust_remote_code"}
     try:
         AutoConfig.from_pretrained(ckpt_path, **builtin_config_kwargs)
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError):
+        # Config-parsing incompatibilities only; e.g. an OSError from the Hub must propagate.
         return True
     return False
 
