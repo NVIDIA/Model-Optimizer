@@ -47,7 +47,11 @@ from transformers import (
 from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
 from modelopt.torch.models import hf_model_type
-from modelopt.torch.models.hf import checkpoint_has_mtp, prepare_model_for_loading
+from modelopt.torch.models.hf import (
+    checkpoint_has_mtp,
+    prefers_bundled_code,
+    prepare_model_for_loading,
+)
 from modelopt.torch.utils import distributed as dist_utils
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
@@ -713,7 +717,15 @@ def get_model(
 
         # DeepSeek ships bundled modeling code, but the built-in class is what the
         # disk-offload and streaming-export paths are validated against.
-        use_bundled_code = trust_remote_code and "Deepseek" in architecture
+        # Also use it when the model plugin says the built-in class can't represent the checkpoint
+        # (dense Nemotron-H on Transformers 5.5, whose built-in class is MoE-only).
+        use_bundled_code = trust_remote_code and (
+            "Deepseek" in architecture
+            or (
+                hasattr(transformers, architecture)
+                and prefers_bundled_code(hf_config.model_type, hf_config, ckpt_path, config_kwargs)
+            )
+        )
 
         if not hasattr(transformers, architecture) or use_bundled_code:
             if not hasattr(transformers, architecture):

@@ -29,6 +29,7 @@ from pathlib import Path
 import torch
 from huggingface_hub import snapshot_download
 from safetensors import SafetensorError
+from transformers import AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.masking_utils import create_causal_mask
 
@@ -42,6 +43,7 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import indexed_weight_map
 
 __all__ = [
     "has_mtp_weights",
+    "prefers_bundled_code",
     "prepare_for_calibration",
     "prepare_for_loading",
 ]
@@ -65,6 +67,29 @@ def _resolve_checkpoint_path(checkpoint_path: str) -> Path:
 def has_mtp_weights(checkpoint_path: str) -> bool:
     """Inspect local or Hub checkpoint tensors without constructing or executing model code."""
     return _get_mtp_layout(_resolve_checkpoint_path(checkpoint_path)) is not None
+
+
+def prefers_bundled_code(hf_config, checkpoint_path: str, config_kwargs: dict) -> bool:
+    """True for a remote-code config the built-in Nemotron-H class cannot represent.
+
+    Built-in Nemotron-H implements only the MoE variant on some Transformers releases, so a
+    dense checkpoint's config fails to parse as a built-in one and needs its bundled code.
+    """
+    if getattr(hf_config, "model_type", None) != "nemotron_h":
+        return False
+    if not type(hf_config).__module__.startswith("transformers_modules"):
+        return False
+    builtin_kwargs = {k: v for k, v in config_kwargs.items() if k != "trust_remote_code"}
+    try:
+        builtin_config = AutoConfig.from_pretrained(checkpoint_path, **builtin_kwargs)
+    except (KeyError, ValueError, TypeError, AttributeError):
+        # Config-parsing incompatibilities only; e.g. an OSError from the Hub must propagate.
+        return True
+    # Parsing can succeed while model construction fails on a block type the built-in lacks.
+    # Native Nemotron-H is optional: older Transformers can still load unrelated models.
+    from transformers.models.nemotron_h.modeling_nemotron_h import MIXER_TYPES
+
+    return any(t not in MIXER_TYPES for t in getattr(builtin_config, "layers_block_type", ()))
 
 
 def _normalize_mtp_block_types(block_types, mixer_types):
