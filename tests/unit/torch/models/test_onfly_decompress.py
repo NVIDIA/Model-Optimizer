@@ -317,16 +317,19 @@ def test_a_checkpoint_compressed_differently_needs_a_process_of_its_own(monkeypa
     """The hooks are process-wide: decompressing a second checkpoint with the first one's scheme and
     stored params would load it wrong without a word, so its install is refused and the hooks stay as
     they are. A config the installing prepare already stripped of its quantization_config is the
-    first checkpoint again."""
+    first checkpoint again; one whose quantization_config fails to parse is not, and its error
+    goes through."""
     _, down = _stock_expert_converters()
     compressions = {
         "a": (_ScaledCompressor, None, PACKED, "stub-format"),
         "b": (_ScaledCompressor, None, (*PACKED, "weight_zero_point"), "stub-format"),
+        None: None,
     }
 
     def read(cfg):
-        if cfg.checkpoint is None:
-            raise ValueError("install_onfly_decompress: config has no quantization_config")
+        if cfg.checkpoint == "malformed":
+            # compressed_tensors' parse raises pydantic's ValidationError, a ValueError.
+            raise ValueError("1 validation error for QuantizationConfig")
         return compressions[cfg.checkpoint]
 
     monkeypatch.setattr(
@@ -339,6 +342,8 @@ def test_a_checkpoint_compressed_differently_needs_a_process_of_its_own(monkeypa
     onfly.install_onfly_decompress(SimpleNamespace(checkpoint=None))
     with pytest.raises(RuntimeError, match="needs a process of its own"):
         onfly.install_onfly_decompress(SimpleNamespace(checkpoint="b"))
+    with pytest.raises(ValueError, match="validation error"):
+        onfly.install_onfly_decompress(SimpleNamespace(checkpoint="malformed"))
 
     assert mu.get_model_conversion_mapping is installed
 
@@ -348,9 +353,7 @@ def _install_for_deepseek_v3(monkeypatch):
     compression = (_ScaledCompressor, None, PACKED, "stub-format")
 
     def read(cfg):
-        if getattr(cfg, "quantization_config", None) is None:
-            raise ValueError("install_onfly_decompress: config has no quantization_config")
-        return compression
+        return None if getattr(cfg, "quantization_config", None) is None else compression
 
     monkeypatch.setattr(
         mu, "get_model_conversion_mapping", lambda model, **kw: list(_stock_expert_converters())

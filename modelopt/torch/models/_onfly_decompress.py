@@ -86,7 +86,7 @@ def to_native_backbone_config(
 
 def _find_quantization_config(hf_config):
     """Locate the compressed-tensors ``quantization_config`` (top-level or under ``text_config``) and
-    return it as a plain dict."""
+    return it as a plain dict, or ``None`` for a config without one."""
     qc = getattr(hf_config, "quantization_config", None)
     if qc is None:
         tc = getattr(hf_config, "text_config", None)
@@ -96,9 +96,7 @@ def _find_quantization_config(hf_config):
             "quantization_config"
         )
     if qc is None:
-        raise ValueError(
-            "install_onfly_decompress: config has no compressed-tensors quantization_config"
-        )
+        return None
     if hasattr(qc, "to_dict"):
         qc = qc.to_dict()
     elif not isinstance(qc, dict):
@@ -113,10 +111,13 @@ def _read_compression(hf_config):
     ``compressor`` is the registered compressor for ``format`` (its ``decompress`` classmethod is the
     dequant); ``scheme`` is the ``QuantizationScheme`` (supplies ``scheme.weights`` to ``decompress``);
     ``param_names`` is the exact set of stored sibling keys per weight. The experts' group is chosen as
-    the sole config group, else the one whose ``targets`` reference "expert", else the first."""
-    # Look the config up first: with none, there is nothing to decompress (ValueError), and
-    # compressed_tensors need not even be installed.
+    the sole config group, else the one whose ``targets`` reference "expert", else the first.
+    ``None`` for a config with no ``quantization_config``: nothing to decompress."""
+    # Look the config up first: with none, compressed_tensors need not even be installed. A config
+    # that fails to parse raises pydantic's ValidationError, a ValueError of its own.
     quantization_config = _find_quantization_config(hf_config)
+    if quantization_config is None:
+        return None
     from compressed_tensors.compressors.base import BaseCompressor
     from compressed_tensors.quantization import QuantizationConfig
 
@@ -350,10 +351,9 @@ def install_onfly_decompress(hf_config):
     from modelopt.torch.utils.moe import require_transformers
 
     installed = getattr(mu.get_model_conversion_mapping, "_onfly_compression", None)
+    compression = _read_compression(hf_config)
     if installed is not None:
-        try:
-            compression = _read_compression(hf_config)
-        except ValueError:
+        if compression is None:
             # The prepare that installed the hooks drops quantization_config from its config, already
             # marked, and may run again on that same config: nothing new to decompress.
             return
@@ -366,8 +366,11 @@ def install_onfly_decompress(hf_config):
         # The same checkpoint through a config of its own, which its load must find marked too.
         _mark(hf_config, installed[3])
         return
-    # Raises ValueError for a config with nothing to decompress, before anything is patched.
-    compression = _read_compression(hf_config)
+    if compression is None:
+        # Nothing to decompress: refused before anything is patched.
+        raise ValueError(
+            "install_onfly_decompress: config has no compressed-tensors quantization_config"
+        )
     compressor, scheme, param_names, fmt = compression
     require_transformers("5.8", "on-the-fly compressed-tensors decompression")
     _install_numeric_expert_ordering()
