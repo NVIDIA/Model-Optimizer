@@ -1,0 +1,16 @@
+# Leave GYM_SLURM_HOST unset when submitting from the cluster login node.
+compute:
+  cluster:
+    type: slurm
+    hostname: ${oc.env:GYM_SLURM_HOST,null}
+    account: ${oc.env:GYM_SLURM_ACCOUNT}
+    walltime: "04:00:00"
+    node_pools:
+      gpu:
+        partition: ${oc.env:GYM_SLURM_PARTITION}
+        nodes: 1
+        ntasks_per_node: 1
+        gpus_per_node: ${oc.decode:${oc.env:GYM_GPUS_PER_NODE,8}}
+
+job:
+  output_path: ${oc.env:GYM_OUTPUT_DIR}
