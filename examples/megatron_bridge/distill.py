@@ -58,6 +58,8 @@ try:
 except ImportError:
     HAS_DIRECT_HF_SFT = False
 from megatron.core import parallel_state
+from megatron.core.datasets.gpt_dataset import GPTDataset
+from megatron.core.datasets.indexed_dataset import IndexedDataset
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.utils import unwrap_model
@@ -213,6 +215,12 @@ def get_args():
         "--data_paths",
         nargs="+",
         help="List of tokenized data paths to load from (weight1 path1 weight2 path2 ...)",
+    )
+    parser.add_argument(
+        "--document_boundaries",
+        action="store_true",
+        help="Pre-tokenized data only: attend within each EOD-separated document of a sequence (THD "
+        "segments) instead of across the whole packed window. Needs --mbs 1 and --cp_size 1.",
     )
     parser.add_argument(
         "--data_path_to_cache", type=str, default=None, help="Path to cache the dataset indices"
@@ -492,6 +500,9 @@ def get_args():
         raise ValueError(
             "--sft_hf_validation / --sft_loss_mode / --sft_in_batch_packing require --sft_hf_dataset."
         )
+    if args.document_boundaries and (args.sft or args.mbs != 1 or args.cp_size != 1):
+        # Each window carries its own number of documents, so windows cannot be stacked.
+        raise ValueError("--document_boundaries needs pre-tokenized data, --mbs 1 and --cp_size 1.")
     if args.sft and (args.data_paths or args.use_mock_data):
         raise ValueError(
             "--sft is mutually exclusive with --data_paths / --use_mock_data: the SFT branch wins "
@@ -540,6 +551,47 @@ def _tokenizer_prepends_bos(args) -> bool:
     return tokenizer("x").input_ids[:1] == [tokenizer.bos_token_id]
 
 
+def _document_eod_id(args) -> int:
+    """The token ending each document: the student tokenizer's EOS, which ``--append_eod`` appends.
+
+    Fails if a data file's first document does not end with it, e.g. chat-template data, which has
+    no EOD between conversations, rather than silently attending across documents.
+    """
+    eod = AutoTokenizer.from_pretrained(
+        args.student_hf_path, trust_remote_code=args.trust_remote_code
+    ).eos_token_id
+    if eod is None:
+        raise ValueError("--document_boundaries needs a student tokenizer with an EOS token.")
+    for prefix in get_blend_from_list(args.data_paths)[0] if args.data_paths else []:
+        # Bound to a name: a document is a view of the dataset's memory map, closed with it.
+        dataset = IndexedDataset(prefix)
+        if dataset[0][-1] != eod:
+            raise ValueError(
+                f"--document_boundaries: the first document of {prefix} does not end with the "
+                f"student tokenizer's EOS ({eod}). Tokenize text data with --append_eod."
+            )
+    return eod
+
+
+def _add_document_boundaries() -> None:
+    """Give each EOD-separated document of a pre-tokenized window its own THD segment."""
+    getitem = GPTDataset.__getitem__
+
+    def getitem_with_boundaries(self, idx):
+        sample = getitem(self, idx)
+        tokens = sample["tokens"]
+        n = tokens.numel()
+        ends = (tokens == self.config.tokenizer.eod).nonzero(as_tuple=True)[0] + 1
+        # On the tokens' (CPU) device: CUDA tensors from a dataloader worker are shared over IPC.
+        bounds = [tokens.new_zeros(1), ends[ends < n], tokens.new_tensor([n])]
+        cu_seqlens = torch.cat(bounds).to(torch.int32)
+        sample["cu_seqlens_q"] = cu_seqlens
+        sample["max_seqlen_q"] = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        return sample
+
+    GPTDataset.__getitem__ = getitem_with_boundaries
+
+
 def main(args: argparse.Namespace, owns_the_run: bool = True):
     # --student_hf_path stays as given. The student is built and exported from the local copy of
     # the whole checkpoint in student_local_checkpoint_path, since the HF export reads the source's
@@ -547,6 +599,8 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
     args.student_hub_model_id, args.student_local_checkpoint_path = ensure_local_checkpoint(
         args.student_hf_path
     )
+    # NullTokenizer's EOD defaults to vocab_size - 1, which pre-tokenized data never contains.
+    eod_id = _document_eod_id(args) if args.document_boundaries else None
     student_has_modelopt_state = args.student_megatron_path is not None and has_modelopt_state(
         args.student_megatron_path
     )
@@ -683,6 +737,8 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             return model_chunks
 
         distill_provider.register_pre_wrap_hook(_restore_student_hook, prepend=True)
+    if args.document_boundaries:
+        _add_document_boundaries()
 
     if args.recompute_num_layers_per_stage is not None:
         # Set this pipeline stage's student recompute depth before the model is wrapped.
@@ -714,7 +770,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         "path_to_cache": args.data_path_to_cache,
         "random_seed": args.seed,
         "reset_attention_mask": False,
-        "reset_position_ids": False,
+        "reset_position_ids": args.document_boundaries,
         "eod_mask_loss": False,
         "num_dataset_builder_threads": 1,
         "data_sharding": True,
@@ -829,7 +885,9 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             )
             if args.sft
             else TokenizerConfig(
-                tokenizer_type="NullTokenizer", vocab_size=distill_provider.vocab_size
+                tokenizer_type="NullTokenizer",
+                vocab_size=distill_provider.vocab_size,
+                null_tokenizer_eod_id=eod_id,
             )
         ),
         checkpoint=CheckpointConfig(

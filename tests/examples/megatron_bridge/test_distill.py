@@ -18,6 +18,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -29,13 +30,15 @@ from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_moe_dir,
     get_tiny_tokenizer,
 )
+from megatron.core.datasets.gpt_dataset import GPTDataset
 from transformers import AutoModelForImageTextToText
 
 from modelopt.torch.puzzletron.anymodel import convert_model
+from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_preprocess_data
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "examples" / "megatron_bridge"))
 
-from distill import HAS_DIRECT_HF_SFT, _hf_source
+from distill import HAS_DIRECT_HF_SFT, _add_document_boundaries, _document_eod_id, _hf_source
 from export_distilled_megatron_to_hf import _get_checkpoint_export_paths
 
 
@@ -43,11 +46,15 @@ from export_distilled_megatron_to_hf import _get_checkpoint_export_paths
 def test_distill_llm_hf_export(tmp_path, num_gpus, fake_hub_checkpoint):
     """Distill with an inline HF export, then re-export every saved iteration standalone.
 
-    Both exports read the student from the copy ``ensure_local_checkpoint`` resolved (see
-    ``fake_hub_checkpoint``). distill.py keeps the local path on its command line, since get_args()
-    loads the tokenizer from it; the standalone export is passed the Hub ID.
+    Distillation runs with --document_boundaries, so each EOD-separated document of a window trains
+    as its own THD segment. Both exports read the student from the copy ``ensure_local_checkpoint``
+    resolved (see ``fake_hub_checkpoint``). distill.py keeps the local path on its command line,
+    since get_args() loads the tokenizer from it; the standalone export is passed the Hub ID.
     """
-    teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+    # head_dim=8: TE's unfused attention, the only backend for head_dim 2, rejects THD input.
+    teacher_hf_path = create_tiny_qwen3_dir(
+        tmp_path, with_tokenizer=True, head_dim=8, max_position_embeddings=2048
+    )
     student_export_arg = fake_hub_checkpoint.serve(
         teacher_hf_path, "distill.py", "export_distilled_megatron_to_hf.py", nproc=num_gpus
     )
@@ -56,13 +63,21 @@ def test_distill_llm_hf_export(tmp_path, num_gpus, fake_hub_checkpoint):
     distilled_hf_path = tmp_path / "distilled_hf"
     all_exports = tmp_path / "all_exports"
     distill_cmd_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"],
+        [
+            "torchrun",
+            f"--nproc_per_node={num_gpus}",
+            "distill.py",
+            "--use_mock_data",
+            "--document_boundaries",
+        ],
         student_hf_path=teacher_hf_path,
         teacher_hf_path=teacher_hf_path,
         output_dir=distill_output_dir,
         tp_size=num_gpus,
         pp_size=1,
-        seq_length=16,
+        # Mock token ids cycle through the 128-token vocab, so the EOD id recurs every 128 tokens
+        # and each window trains as ~17 THD segments.
+        seq_length=2048,
         mbs=1,
         gbs=4,
         train_iters=train_iters,
@@ -95,6 +110,53 @@ def test_distill_llm_hf_export(tmp_path, num_gpus, fake_hub_checkpoint):
         assert (all_exports / f"iter_{it:07d}/config.json").exists()
         if fake_hub_checkpoint.active:
             assert (all_exports / f"iter_{it:07d}" / fake_hub_checkpoint.marker).exists()
+
+
+@pytest.mark.parametrize("append_eod", [True, False])
+def test_document_eod_id(tmp_path, append_eod):
+    """Document boundaries use the EOS --append_eod wrote, and fail on data without it."""
+    tokenizer = get_tiny_tokenizer()
+    tokenizer.save_pretrained(tmp_path / "tokenizer")
+    jsonl = tmp_path / "docs.jsonl"
+    jsonl.write_text("".join(json.dumps({"text": f"document number {i}"}) + "\n" for i in range(4)))
+    (prefix,) = megatron_preprocess_data(
+        jsonl_paths=jsonl,
+        output_dir=tmp_path / "data",
+        tokenizer_name_or_path=str(tmp_path / "tokenizer"),
+        append_eod=append_eod,
+    )
+    args = argparse.Namespace(
+        student_hf_path=str(tmp_path / "tokenizer"),
+        trust_remote_code=False,
+        data_paths=["1.0", prefix],
+    )
+    if append_eod:
+        assert _document_eod_id(args) == tokenizer.eos_token_id
+    else:
+        with pytest.raises(ValueError, match="--append_eod"):
+            _document_eod_id(args)
+
+
+@pytest.mark.parametrize(
+    ("tokens", "cu_seqlens"),
+    [
+        ([1, 2, 9, 3, 4, 5, 9, 6], [0, 3, 7, 8]),  # EOD mid-window
+        ([1, 2, 3, 9, 4, 5, 6, 9], [0, 4, 8]),  # EOD as the last token
+        ([9, 1, 2, 3, 4, 5, 6, 7], [0, 1, 8]),  # EOD as the first token
+        ([1, 2, 3, 4, 5, 6, 7, 8], [0, 8]),  # no EOD
+    ],
+)
+def test_document_boundaries_cu_seqlens(monkeypatch, tokens, cu_seqlens):
+    """Each EOD ends a THD segment; the window's end closes the last one."""
+    monkeypatch.setattr(
+        GPTDataset, "__getitem__", lambda self, idx: {"tokens": torch.tensor(tokens)}
+    )
+    _add_document_boundaries()  # monkeypatch restores the original __getitem__ on teardown
+    dataset = SimpleNamespace(config=SimpleNamespace(tokenizer=SimpleNamespace(eod=9)))
+    sample = GPTDataset.__getitem__(dataset, 0)
+    expected = torch.tensor(cu_seqlens, dtype=torch.int32)
+    assert torch.equal(sample["cu_seqlens_q"], expected)
+    assert sample["max_seqlen_q"] == (expected[1:] - expected[:-1]).max()
 
 
 def test_distill_uneven_pipeline_per_stage_recompute(tmp_path, num_gpus):

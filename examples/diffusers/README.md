@@ -489,7 +489,7 @@ compile(
     engine_path=Path("./engine"),
 )
 
-cachify.prepare(pipe, num_inference_steps, SDXL_DEFAULT_CONFIG)
+cachify.prepare(pipe, SDXL_DEFAULT_CONFIG)
 ```
 
 Afterward, use it as a standard cache diffusion pipeline to generate the image.
@@ -508,7 +508,7 @@ SDXL_DEFAULT_CONFIG = [
     }
 ]
 
-cachify.prepare(pipe, num_inference_steps, SDXL_DEFAULT_CONFIG)
+cachify.prepare(pipe, SDXL_DEFAULT_CONFIG)
 ```
 
 Two parameters are essential: `wildcard_or_filter_func` and `select_cache_step_func`.

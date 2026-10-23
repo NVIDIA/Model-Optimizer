@@ -1,0 +1,4 @@
+# nemo:26.08 ships flash-linear-attention 0.4.2, whose Gated DeltaNet kernel computes packed (THD) sequences
+# wrongly (--sft_in_batch_packing, --document_boundaries); 0.5.2 is the first correct release.
+# TODO: remove once the examples move to nemo:26.10, which ships 0.5.2.
+flash-linear-attention>=0.5.2
