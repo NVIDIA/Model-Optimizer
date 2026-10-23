@@ -35,6 +35,29 @@ from transformers import AutoModelForCausalLM, LlamaConfig
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+@pytest.mark.parametrize(
+    ("calib_with_images", "packed_location", "error"),
+    [
+        (False, None, None),
+        (True, None, "text-only inputs"),
+        (False, "root", "pack-quantized"),
+        (False, "text", "pack-quantized"),
+    ],
+)
+def test_fsdp2_qwen_vlm_requires_text_only_calibration(
+    model_type, calib_with_images, packed_location, error
+):
+    args = SimpleNamespace(local_checkpoint_path="local-model", calib_with_images=calib_with_images)
+    config = SimpleNamespace(model_type=model_type, vision_config={}, text_config=SimpleNamespace())
+    if packed_location is not None:
+        target = config if packed_location == "root" else config.text_config
+        target.quantization_config = {"quant_method": "compressed-tensors"}
+    expected = pytest.raises(NotImplementedError, match=error) if error else nullcontext()
+    with expected:
+        example_utils.validate_fsdp2_supported(args, config)
+
+
 def _write_safetensors(path, tensors):
     save_file(tensors, str(path), metadata={"format": "pt"})
 
