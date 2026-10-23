@@ -25,7 +25,7 @@ already below 1%.
 ## Follow the supported workflow
 
 Read `docs/source/guides/quantization_aware_training_and_distillation.rst`
-for QAD background and framework selection (the source of the published HTML guide).
+for QAD background and framework selection.
 Recommend Megatron Bridge for scalable training and its model-specific tutorials.
 Choose the applicable tutorial from `examples/megatron_bridge/tutorials/README.md`.
 Honor an explicit HF choice.
@@ -93,7 +93,7 @@ For Megatron Bridge, before constructing commands, read:
 | Checkpoint interval | 50 iterations |
 | Loss logging | every 10 iterations |
 | Recovery benchmark | 150, then every 100 iterations while training runs |
-| Slurm duration exit | When using Slurm: 220 minutes for a 4-hour allocation |
+| Slurm duration exit | 220 minutes for a 4-hour allocation |
 
 ### Run policy
 
