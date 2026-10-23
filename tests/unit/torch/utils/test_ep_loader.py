@@ -149,6 +149,25 @@ def test_a_hub_id_is_made_local_before_the_weights_load(monkeypatch):
     assert resolved == ["org/model"]
 
 
+@pytest.mark.parametrize("quant_method", ["gptq", "modelopt", "compressed-tensors"])
+def test_a_checkpoint_format_the_load_cannot_dequantize_is_refused(monkeypatch, quant_method):
+    """transformers' own quantizer would load it as stored, for PTQ to treat as plain weights; the
+    load refuses it before anything is read."""
+    resolved = []
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "size", lambda group=None: 2)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
+    monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
+    monkeypatch.setattr(
+        model_load_utils, "_resolve_checkpoint_dir", lambda p, r: resolved.append(p)
+    )
+    config = SimpleNamespace(quantization_config={"quant_method": quant_method})
+
+    with pytest.raises(NotImplementedError, match=f"cannot dequantize a '{quant_method}'"):
+        load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
+    assert resolved == []
+
+
 # ------------------------------------------------------------------------ quant wrappers
 
 

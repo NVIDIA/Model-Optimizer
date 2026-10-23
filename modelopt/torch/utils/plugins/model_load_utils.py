@@ -1297,6 +1297,10 @@ def _seed_parallel_states(model: nn.Module, expert_names, dense_state, expert_st
         )
 
 
+# The checkpoint formats load_and_prepare_ep dequantizes as it loads, beside unquantized ones (None).
+_EP_SOURCE_FORMATS = frozenset({None, "mxfp4"})
+
+
 def _ckpt_quant_method(cfg):
     """Return the checkpoint's native quantization method, or ``None``.
 
@@ -1430,6 +1434,15 @@ def load_and_prepare_ep(
         if attn_implementation is not None:
             config_kwargs["attn_implementation"] = attn_implementation
         hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
+    quant_method = _ckpt_quant_method(hf_config)
+    if quant_method not in _EP_SOURCE_FORMATS:
+        # transformers' own quantizer would load it as stored, for PTQ to treat as plain weights.
+        dequantized = ", ".join(sorted(f for f in _EP_SOURCE_FORMATS if f))
+        raise NotImplementedError(
+            f"The expert-parallel load cannot dequantize a {quant_method!r} checkpoint: it loads "
+            f"unquantized checkpoints and dequantizes {dequantized}. Start from an unquantized copy "
+            "of the model."
+        )
     dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
     # The weights load, and the checkpoint recorded for the export to read the unplaced tensors back
     # from, take the local snapshot: a Hub ID recorded there would leave the export nothing to read.
