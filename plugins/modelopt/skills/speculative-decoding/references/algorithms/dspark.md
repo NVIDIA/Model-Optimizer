@@ -152,7 +152,7 @@ failures (`seq_len` divisibility, offline eval, mask token, chat template) are i
 | `DSpark requires markov_rank > 0, got N` | Non-positive value | Set a positive rank |
 | `Unsupported markov_head_type: '...'. Expected 'vanilla', 'gated' or 'rnn'` | Typo or unsupported head | Use one of the three |
 | `dflash_confidence_head_alpha > 0 but the confidence head was not built` | Loss term enabled without the head | Set `dflash_architecture_config.use_confidence_head=true`, or set the alpha to 0 |
-| `DSpark offline model cannot run AR validation / pseudo_speculative_generate` | Offline/streaming conversion deleted base layers | Keep `estimate_ar=false` and `ar_validate_steps=0`; evaluate after export |
+| `An offline DFlash-family model cannot run AR validation / pseudo_speculative_generate` | Offline/streaming conversion deleted base layers | Keep `estimate_ar=false` and `ar_validate_steps=0`; evaluate after export |
 | Draft trains but acceptance length is poor | Draft dims left at defaults instead of matching the base | Set the GQA/FFN dims explicitly (see *Per-model adjustments*) |
 | Acceptance length capped despite clean training (streaming) | `EAGLE_CAPTURE_IDS` final layer wrong, or the vLLM aux-capture fix (vllm#46788) missing | Correct the ids; use a container with the fix |
 | Trainer init crash on a serve container | tensorboard absent | `training.report_to=none` |
