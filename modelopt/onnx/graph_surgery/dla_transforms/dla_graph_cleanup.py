@@ -109,6 +109,21 @@ _RANK_AGNOSTIC_OPS = frozenset(
 )
 
 
+def _set_axes(model, cache: GraphCache, node: onnx.NodeProto, axes, preferred_name: str) -> None:
+    """Attach axes using the model's default-domain Squeeze/Unsqueeze schema."""
+    opset = next((o.version for o in model.opset_import if o.domain == ""), 1)
+    if opset < 13:
+        node.attribute.append(
+            helper.make_attribute("axes", list(axes), attr_type=onnx.AttributeProto.INTS)
+        )
+    else:
+        axes_name = cache.unique_name(preferred_name)
+        model.graph.initializer.append(
+            numpy_helper.from_array(np.asarray(axes, dtype=np.int64), name=axes_name)
+        )
+        node.input.append(axes_name)
+
+
 def _subgraph_captures(graph: onnx.GraphProto) -> set[str]:
     """Collect outer-scope values referenced inside this graph's nested subgraphs."""
     captured: set[str] = set()
@@ -212,18 +227,14 @@ def _canonicalize_inputs(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mode
         if not consumers:
             continue
 
-        axes_name = cache.unique_name(f"{graph_input.name}_unsqueeze_axes")
         out_name = cache.unique_name(f"{graph_input.name}_4d")
-        add_unique_initializers(
-            graph, unique_init, [numpy_helper.from_array(axes_arr, name=axes_name)]
-        )
-
         unsq = helper.make_node(
             "Unsqueeze",
-            inputs=[graph_input.name, axes_name],
+            inputs=[graph_input.name],
             outputs=[out_name],
             name=cache.unique_name(f"{graph_input.name}_unsqueeze"),
         )
+        _set_axes(model, cache, unsq, axes_arr, f"{graph_input.name}_unsqueeze_axes")
         add_value_info(graph, out_name, tt.elem_type, canonical_4d)
 
         # Find the first consumer node in graph order for insertion point
@@ -771,22 +782,13 @@ def _replace_graph_output_reshape_with_squeeze(
             # Update the Reshape node to target the 4D shape
             node.input[1] = rs_shape_name
             node.output[0] = rs_4d_out
-            sq_axes_name = cache.unique_name(f"{pfx}_sq0_axes")
-            add_unique_initializers(
-                graph,
-                unique_init,
-                [
-                    numpy_helper.from_array(
-                        np.array(squeeze_axes, dtype=np.int64), name=sq_axes_name
-                    )
-                ],
-            )
             sq = helper.make_node(
                 "Squeeze",
-                inputs=[rs_4d_out, sq_axes_name],
+                inputs=[rs_4d_out],
                 outputs=[out_name],
                 name=cache.unique_name(f"{pfx}_squeeze_leading"),
             )
+            _set_axes(model, cache, sq, squeeze_axes, f"{pfx}_sq0_axes")
             go_batch[go_node_idx[id(node)]] = ([node], [node, sq])
             cnt += 1
             logger.debug(
@@ -799,20 +801,17 @@ def _replace_graph_output_reshape_with_squeeze(
             continue
 
         squeeze_axes.sort()  # ascending axis order required by ONNX Squeeze
+        if not squeeze_axes:
+            continue
 
         # Build Squeeze node
-        axes_name = cache.unique_name(f"{pfx}_squeeze_axes")
-        add_unique_initializers(
-            graph,
-            unique_init,
-            [numpy_helper.from_array(np.array(squeeze_axes, dtype=np.int64), name=axes_name)],
-        )
         sq = helper.make_node(
             "Squeeze",
-            inputs=[in_name, axes_name],
+            inputs=[in_name],
             outputs=[out_name],
             name=cache.unique_name(f"{pfx}_squeeze"),
         )
+        _set_axes(model, cache, sq, squeeze_axes, f"{pfx}_squeeze_axes")
         go_batch[go_node_idx[id(node)]] = ([node], [sq])
         cnt += 1
         logger.debug(
@@ -849,7 +848,7 @@ def _remove_unused_initializers(model: onnx.ModelProto) -> onnx.ModelProto:
     return model
 
 
-# ── Step 7: Remove consecutive Cast chains ──────────────────────────────────
+# ── Step 6: Remove consecutive Cast chains ──────────────────────────────────
 
 
 def _remove_consecutive_casts(model: onnx.ModelProto, cache: GraphCache) -> onnx.ModelProto:

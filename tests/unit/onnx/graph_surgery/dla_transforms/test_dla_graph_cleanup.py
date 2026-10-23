@@ -13,30 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Unit tests for :mod:`modelopt.onnx.graph_surgery.dla_transforms.dla_graph_cleanup`.
-
 """Structural and ORT parity tests for ``dla_graph_cleanup``.
 
-The combined transform applies five steps:
-  1. Canonicalize non-4D inputs  (adds Unsqueeze, deduplicates existing ones)
-  2. Replace intermediary Squeeze/Unsqueeze with 4-D Reshape
-  3. Collapse Reshape chains (noop → remove; multi → single Reshape)
-  4. Fold constants via onnx-graphsurgeon
-  5. Remove unused initializers
+The combined transform applies seven stages in order:
+  1. Replace intermediary Squeeze/Unsqueeze with 4-D Reshape.
+  2. Canonicalize eligible non-4D inputs.
+  3. Collapse Reshape chains.
+  4. Adapt graph-output Reshapes with Squeeze.
+  5. Fold constants via onnx-graphsurgeon.
+  6. Collapse lossless Cast chains.
+  7. Remove unused initializers.
 
-Steps 1 and 2 intentionally change tensor shapes, so ORT parity only works
-for end-to-end models that happen to keep graph I/O shapes the same.
-Tests for those steps verify structural changes (node types, counts).
-Steps 3-5 preserve graph I/O shapes, so ORT parity is verified for them.
+Numerical cases use ORT; float8 and custom-function cases use ONNX ReferenceEvaluator.
 """
 
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 
 import numpy as np
 import onnx
@@ -52,8 +45,6 @@ pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity c
 import onnxruntime as ort
 from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
 
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-_SAVED_MODELS_DIR = _REPO_ROOT / "scratch_space" / "graph_cleanup_test_models"
 _OPSET_VERSION = 17
 _MAX_IR_VERSION_FOR_ORT = 9
 
@@ -158,7 +149,8 @@ def test_canonicalize_3d_input_unsqueeze_added():
     np.testing.assert_array_equal(actual["Z"], expected["Z"])
 
 
-def test_canonicalize_2d_input_unsqueeze_added():
+@pytest.mark.parametrize("opset", [12, 13, 17])
+def test_canonicalize_2d_input_unsqueeze_added(opset):
     """Promote a 2D input when broadcasting already fixes downstream rank at four."""
     add = helper.make_node("Add", ["X", "W"], ["sum"], name="add")
     transpose = helper.make_node("Transpose", ["sum"], ["Y"], perm=[0, 1, 3, 2])
@@ -170,7 +162,14 @@ def test_canonicalize_2d_input_unsqueeze_added():
         [numpy_helper.from_array(np.zeros([1, 1, 4, 5], np.float32), "W")],
         value_info=[_vi("sum", TensorProto.FLOAT, [1, 1, 4, 5])],
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
+    model = helper.make_model(
+        graph,
+        opset_imports=[
+            helper.make_opsetid("test.modelopt", 99),
+            helper.make_opsetid("ai.onnx", 17),
+            helper.make_opsetid("", opset),
+        ],
+    )
     _clamp_ir(model)
     feeds = {"X": _RNG.standard_normal([4, 5]).astype(np.float32)}
     expected = _run_ort(model, feeds)
@@ -181,8 +180,13 @@ def test_canonicalize_2d_input_unsqueeze_added():
 
     unsq_nodes = [n for n in tr.graph.node if n.op_type == "Unsqueeze"]
     assert len(unsq_nodes) == 1
-    axes_init = next(i for i in tr.graph.initializer if i.name.endswith("_unsqueeze_axes"))
-    axes = numpy_helper.to_array(axes_init).tolist()
+    if opset < 13:
+        axes = list(next(attr.ints for attr in unsq_nodes[0].attribute if attr.name == "axes"))
+        assert len(unsq_nodes[0].input) == 1
+        assert not any(i.name.endswith("_unsqueeze_axes") for i in tr.graph.initializer)
+    else:
+        axes_init = next(i for i in tr.graph.initializer if i.name == unsq_nodes[0].input[1])
+        axes = numpy_helper.to_array(axes_init).tolist()
     assert axes == [0, 1], f"axes should be [0,1] for 2-D input, got {axes}"
     add_node = next(node for node in tr.graph.node if node.op_type == "Add")
     assert add_node.input[0] == unsq_nodes[0].output[0]
@@ -1098,18 +1102,26 @@ def test_interleaved_reshape_chains_collapsed(names):
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def test_graph_output_reshape_replaced_with_squeeze():
-    """[1,3,4,1] → Reshape → [3,4] at graph output → replaced by Squeeze(axes=[0,3]); ORT parity."""
-    sh_init = numpy_helper.from_array(np.array([3, 4], dtype=np.int64), name="rs_shape")
+@pytest.mark.parametrize("opset", [12, 13, 17])
+@pytest.mark.parametrize("output_shape", [[3, 4], [1, 3, 4, 1]])
+def test_graph_output_reshape_replaced_with_squeeze(opset, output_shape):
+    """Use opset-compatible output Squeezes while retaining identity Reshapes."""
+    sh_init = numpy_helper.from_array(np.array(output_shape, dtype=np.int64), name="rs_shape")
     reshape = helper.make_node("Reshape", ["X", "rs_shape"], ["Y"], name="rs")
     graph = helper.make_graph(
         [reshape],
         "g",
         [_vi("X", TensorProto.FLOAT, [1, 3, 4, 1])],
-        [_vi("Y", TensorProto.FLOAT, [3, 4])],
+        [_vi("Y", TensorProto.FLOAT, output_shape)],
         initializer=[sh_init],
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
+    model = helper.make_model(
+        graph,
+        opset_imports=[
+            helper.make_opsetid("test.modelopt", 99),
+            helper.make_opsetid("", opset),
+        ],
+    )
     _clamp_ir(model)
 
     x = _RNG.standard_normal([1, 3, 4, 1]).astype(np.float32)
@@ -1119,21 +1131,27 @@ def test_graph_output_reshape_replaced_with_squeeze():
     tr = copy.deepcopy(model)
     _prepare_model(tr)
     tr = _reshape_to_squeeze(tr)
+    onnx.checker.check_model(tr, full_check=True)
     _prepare_model(tr)
     got = _run_ort(tr, {"X": x})
 
+    np.testing.assert_array_equal(ref["Y"], got["Y"])
+    if output_shape == [1, 3, 4, 1]:
+        assert any(node.op_type == "Reshape" for node in tr.graph.node)
+        assert not any(node.op_type == "Squeeze" for node in tr.graph.node)
+        return
     assert not any(n.op_type == "Reshape" for n in tr.graph.node), "Reshape must be replaced"
     sq_nodes = [n for n in tr.graph.node if n.op_type == "Squeeze"]
     assert len(sq_nodes) == 1, "One Squeeze must be inserted"
 
-    # Verify axes initializer contains [0, 3]
-    axes_init = next((i for i in tr.graph.initializer if "squeeze_axes" in i.name), None)
-    assert axes_init is not None, "Squeeze axes initializer must exist"
-    assert numpy_helper.to_array(axes_init).tolist() == [0, 3], (
-        f"Expected axes [0,3], got {numpy_helper.to_array(axes_init).tolist()}"
-    )
-
-    np.testing.assert_array_equal(ref["Y"], got["Y"])
+    if opset < 13:
+        axes = list(next(attr.ints for attr in sq_nodes[0].attribute if attr.name == "axes"))
+        assert len(sq_nodes[0].input) == 1
+        assert not any("squeeze_axes" in i.name for i in tr.graph.initializer)
+    else:
+        axes_init = next(i for i in tr.graph.initializer if i.name == sq_nodes[0].input[1])
+        axes = numpy_helper.to_array(axes_init).tolist()
+    assert axes == [0, 3]
 
 
 def test_graph_output_reshape_squeeze_axes_left_to_right():
@@ -1177,7 +1195,8 @@ def test_graph_output_reshape_squeeze_axes_left_to_right():
 
 
 @pytest.mark.parametrize("output_shape", [[6, 4], [24]])
-def test_graph_output_reshape_not_squeezable_padded_to_4d(output_shape):
+@pytest.mark.parametrize("opset", [12, 13, 17])
+def test_graph_output_reshape_not_squeezable_padded_to_4d(output_shape, opset):
     """[2,3,4] → Reshape → [6,4] at graph output: not a pure squeeze, output is 2D (<4D).
 
     Pad the Reshape target to rank four and squeeze every prepended unit dimension.
@@ -1192,7 +1211,13 @@ def test_graph_output_reshape_not_squeezable_padded_to_4d(output_shape):
         [_vi("Y", TensorProto.FLOAT, output_shape)],
         initializer=[sh_init],
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
+    model = helper.make_model(
+        graph,
+        opset_imports=[
+            helper.make_opsetid("test.modelopt", 99),
+            helper.make_opsetid("", opset),
+        ],
+    )
     _clamp_ir(model)
 
     x = _RNG.standard_normal([2, 3, 4]).astype(np.float32)
@@ -1216,8 +1241,15 @@ def test_graph_output_reshape_not_squeezable_padded_to_4d(output_shape):
         numpy_helper.to_array(rs_shape_init).tolist()
         == [1] * (4 - len(output_shape)) + output_shape
     )
-    axes = next(i for i in tr.graph.initializer if i.name == sq_nodes[0].input[1])
-    assert numpy_helper.to_array(axes).tolist() == list(range(4 - len(output_shape)))
+    if opset < 13:
+        axes = list(next(attr.ints for attr in sq_nodes[0].attribute if attr.name == "axes"))
+        assert len(sq_nodes[0].input) == 1
+        assert not any("sq0_axes" in i.name for i in tr.graph.initializer)
+    else:
+        axes_init = next(i for i in tr.graph.initializer if i.name == sq_nodes[0].input[1])
+        axes = numpy_helper.to_array(axes_init).tolist()
+    assert axes == list(range(4 - len(output_shape)))
+    onnx.checker.check_model(tr, full_check=True)
     np.testing.assert_array_equal(ref["Y"], got["Y"])
 
 
