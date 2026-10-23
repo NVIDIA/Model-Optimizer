@@ -417,6 +417,38 @@ def test_cast_conversion_respects_shared_operand_types(peer):
     np.testing.assert_array_equal(_run_ort(transformed, feeds)["Y"], expected)
 
 
+@pytest.mark.parametrize("fmod", [None, 0, 1])
+def test_cast_conversion_respects_mod_attribute_mode(fmod):
+    """Integer Mod modes keep integer casts while floating fmod can promote together."""
+    source_dtype = TensorProto.DOUBLE if fmod == 1 else TensorProto.INT64
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Cast", ["X"], ["left"], name="left_cast", to=source_dtype),
+                helper.make_node("Cast", ["B"], ["right"], name="right_cast", to=source_dtype),
+                helper.make_node(
+                    "Mod", ["left", "right"], ["Y"], **({} if fmod is None else {"fmod": fmod})
+                ),
+            ],
+            "mod_mode",
+            [_vi("X", TensorProto.FLOAT, [2]), _vi("B", TensorProto.FLOAT, [2])],
+            [_vi("Y", source_dtype, [2])],
+        ),
+        opset_imports=[helper.make_opsetid("", _OPSET_VERSION)],
+        ir_version=_MAX_IR_VERSION_FOR_ORT,
+    )
+    model = onnx.shape_inference.infer_shapes(model)
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"X": np.array([-5, 5], dtype=np.float32), "B": np.array([3, -3], dtype=np.float32)}
+    expected = _run_ort(model, feeds)["Y"]
+    transformed = _apply(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    np.testing.assert_array_equal(_run_ort(transformed, feeds)["Y"], expected)
+    target_dtype = TensorProto.FLOAT if fmod == 1 else TensorProto.INT64
+    assert _cast_to_attr(transformed, "left_cast") == target_dtype
+    assert _cast_to_attr(transformed, "right_cast") == target_dtype
+
+
 def test_cast_preserves_implicitly_derived_output_dtype():
     """A generator's default output dtype can depend on a separately typed input."""
     model = helper.make_model(

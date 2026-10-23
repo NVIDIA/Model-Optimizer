@@ -93,6 +93,17 @@ def _fp32_cast_outputs(model: onnx.ModelProto) -> set[str]:
         ):
             blocked.update(name for name in (*node.input, *node.output) if name)
             continue
+        if (
+            domain == ""
+            and node.op_type == "Mod"
+            and schema.since_version < 28
+            and not any(
+                attribute.name == "fmod" and attribute.i == 1 for attribute in node.attribute
+            )
+        ):
+            # Older Mod schemas require integer inputs in the default attribute mode.
+            blocked.update(name for name in (*node.input, *node.output) if name)
+            continue
         allowed = {
             constraint.type_param_str: constraint.allowed_type_strs
             for constraint in schema.type_constraints
