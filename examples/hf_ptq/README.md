@@ -642,10 +642,7 @@ torchrun \
 
 See [Recipe-based Quantization](#recipe-based-quantization) for the recipe format and built-in recipe names. The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For more details refer to the [deployment section](#deployment) of this document.
 
-[AutoQuantize recipes](#autoquantize) use the same `torchrun` launch. With FSDP2,
-`--batch_size` is per rank and defaults to 1; recipe `score_size` is global.
-Use shared checkpoint directories and restore all `rank<N>.pth` files together,
-with the same world size, model, recipe, and data.
+[AutoQuantize recipes](#autoquantize) use the same `torchrun` launch. With FSDP2, `--batch_size` is per rank and defaults to 1; recipe `score_size` is global. Use shared checkpoint directories and restore all `rank<N>.pth` files together, with the same world size, model, recipe, and data.
 
 > *Performance Note: FSDP2 is designed for training workloads and may result in longer calibration and export times. For faster calibration, maximize the batch size based on available GPU memory and choose the right number of GPUs to avoid unnecessary communication.*
 
