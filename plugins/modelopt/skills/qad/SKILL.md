@@ -30,29 +30,20 @@ Recommend Megatron Bridge for scalable training and its model-specific tutorials
 Choose the applicable tutorial from `examples/megatron_bridge/tutorials/README.md`.
 Honor an explicit HF choice.
 
-For Megatron Bridge, before constructing commands, read:
-
-- `examples/megatron_bridge/README.md`, especially PTQ, data preparation, QAD,
-  export, and Slurm usage
-- `examples/megatron_bridge/{quantize.py,distill.py}` via `--help`
-- the common skill's `environment-setup.md` and `workspace-management.md`;
-  for Slurm, also read `slurm-setup.md` and, when remote, `remote-execution.md`
+Use the common skill's `environment-setup.md` and `workspace-management.md`;
+for Slurm, also read `slurm-setup.md` and, when remote, `remote-execution.md`.
 
 Treat the example README and `--help` output as authoritative for mutable flags,
 commands, containers, and checkpoint formats. Both frameworks can run on local
 GPUs or Slurm; use the user's requested environment.
 
-For Hugging Face, use the same common setup guidance, but replace the
-Bridge-specific reading above with
-`examples/llm_qat/README.md`, its `ARGUMENTS.md`, selected training/dataset/
-Accelerate configs, and `{quantize.py,train.py,export.py} --help`.
-Follow its quantize → distill → export flow: the PTQ checkpoint is the student;
-the original unquantized model is the teacher. Adapt the QAD training and
-Accelerate configs to the model and budget.
-Resolve tutorial-relative commands and config paths from `examples/llm_qat/`.
-Use the HF tutorial's evaluation and checkpoint resume guidance.
-
 ## Megatron Bridge execution and training policy
+
+For Megatron Bridge, before constructing commands, read:
+
+- `examples/megatron_bridge/README.md`, especially PTQ, data preparation, QAD,
+  export, and Slurm usage
+- `examples/megatron_bridge/{quantize.py,distill.py}` via `--help`
 
 ### Execute in this order
 
@@ -127,3 +118,20 @@ Use the HF tutorial's evaluation and checkpoint resume guidance.
   scheduler, iteration, and consumed-sample state; do not restart from PTQ.
 - Report the PTQ recipe, data sample, training topology, loss/state, checkpoints,
   and comparable BF16/PTQ/QAD results.
+
+## Hugging Face execution and training policy
+
+Before constructing commands, read `examples/llm_qat/README.md`, its
+`ARGUMENTS.md`, selected training/dataset/Accelerate configs, and
+`{quantize.py,train.py,export.py} --help`.
+Follow its quantize → distill → export flow: the PTQ checkpoint is the student;
+the original unquantized model is the teacher. Adapt the QAD training and
+Accelerate configs to the model and budget.
+Resolve tutorial-relative commands and config paths from `examples/llm_qat/`.
+Use the HF tutorial's evaluation and checkpoint resume guidance.
+
+Reuse the Bridge procedure's PTQ-recipe preservation and one-training-job-at-a-time
+guidance. Apply the [Run policy](#run-policy)'s loss-stability and
+benchmark-recovery stop conditions and report the same fields.
+Use HF evaluation/checkpoint intervals; Bridge-specific topology, data defaults,
+iteration thresholds, and Slurm job chaining are not HF requirements.
