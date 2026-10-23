@@ -719,6 +719,21 @@ def test_the_remote_modeling_is_imported_through_the_class_the_auto_map_declares
         kimi_k3._force_load_remote_modeling(config_only, "/ckpt", False)
 
 
+@pytest.mark.usefixtures("private_conversion_registry")
+def test_prepare_lets_an_error_reading_the_quant_config_through(monkeypatch):
+    """compressed_tensors raises pydantic's ValidationError, a ValueError, for a quantization_config
+    it cannot parse. Dropped after that, the config would load the experts newly initialized."""
+
+    def install(cfg):
+        raise ValueError("1 validation error for QuantizationConfig")
+
+    monkeypatch.setattr(_onfly_decompress, "install_onfly_decompress", install)
+    config = SimpleNamespace(text_config=SimpleNamespace(), quantization_config={"format": "new"})
+
+    with pytest.raises(ValueError, match="validation error"):
+        kimi_k3.prepare(config)
+
+
 @pytest.mark.usefixtures("private_conversion_registry", "restore_loader_hooks")
 def test_prepare_leaves_the_loader_alone_for_bf16_experts():
     """Without a compressed-tensors config the experts are plain bf16: prepare completes and leaves

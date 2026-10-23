@@ -67,7 +67,6 @@ Version floor: transformers >= 5.8, for the on-the-fly decompression. Developed 
 transformers 5.13 + flash-linear-attention (FLA) 0.5.0, which the remote code's KDA layers need at runtime.
 """
 
-import contextlib
 import sys
 
 import torch
@@ -618,9 +617,8 @@ def prepare(
     # the decompressor has converters to rewrite into compressed-aware (weight_packed -> bf16) ones. Drop
     # quantization_config afterwards so transformers builds no competing HF quantizer.
     _register_kimi_k3_conversions()
-    # ValueError == no compressed-tensors quantization_config, i.e. plain bf16 experts and nothing to
-    # decompress.
-    with contextlib.suppress(ValueError):
+    # Plain bf16 experts come without a quantization_config: nothing to decompress.
+    if any(getattr(cfg, "quantization_config", None) is not None for cfg in (hf_config, text_cfg)):
         _onfly_decompress.install_onfly_decompress(hf_config)
     for cfg in (hf_config, text_cfg):
         if getattr(cfg, "quantization_config", None) is not None:
