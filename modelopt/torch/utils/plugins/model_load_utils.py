@@ -1525,27 +1525,54 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
     else derived), then crop to the weight shape -- correct for both full and partial last blocks,
     2-D dense linears and (leading-dim-broadcast) per-expert tensors. Idempotent.
 
-    transformers >= 5.10.1 ONLY: this is skipped. Upstream fixed the two show-stoppers there -- the
+    transformers >= 5.10.1 keeps its own dequant. Upstream fixed two of the show-stoppers there -- the
     loader's expert ``tensor_idx`` check became ``any(op is MergeModulelist ...)`` (bug 1) and
     ``_dequantize_one`` gained an ``output_dtype`` the loader passes as the destination dtype (bug 3) --
     and it added native FP4-unpack + ue8m0 (E8M0) scale decoding that our simpler override does NOT do
-    (installing it on >= 5.10.1 would BREAK ue8m0 checkpoints like DeepSeek-V4). The only thing still
-    unpatched upstream is the partial-block divisibility (bug 2), which no shipping model on >= 5.10.1
-    hits here (DeepSeek-V4's dims are all 128-multiples); revisit if one does.
+    (installing it on >= 5.10.1 would BREAK ue8m0 checkpoints like DeepSeek-V4). It still requires the
+    weight to divide evenly into the scale grid (bug 2), which DeepSeek-V3's partial last blocks do not,
+    so there a weight whose grid is the configured block's ceil grid is padded to whole blocks for it
+    and the result cropped back.
     """
     global _FINEGRAINED_FP8_PATCHED, _FP8_DEQUANT_DTYPE
     if target_dtype is not None:
         _FP8_DEQUANT_DTYPE = target_dtype  # keep current even if already patched
     if _FINEGRAINED_FP8_PATCHED:
         return
+    import torch
     import transformers
     from packaging.version import parse
+    from transformers.integrations import finegrained_fp8 as _fp8
 
     if parse(transformers.__version__) >= parse("5.10.1"):
-        _FINEGRAINED_FP8_PATCHED = True  # upstream handles it (and natively supports ue8m0/fp4)
+        _stock_dequantize_one = _fp8.Fp8Dequantize._dequantize_one
+        fp8_dtypes = {
+            getattr(torch, name)
+            for name in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
+            if hasattr(torch, name)
+        }
+
+        def _dequantize_partial_blocks(self, quantized, scales, *args, **kwargs):
+            rows, cols = quantized.shape[-2:]
+            block = getattr(
+                getattr(self.hf_quantizer, "quantization_config", None), "weight_block_size", None
+            ) or (128, 128)
+            ceil_grid = (-(-rows // block[0]), -(-cols // block[1]))
+            if (
+                quantized.dtype not in fp8_dtypes
+                or scales.dim() < 2
+                or tuple(scales.shape[-2:]) != ceil_grid
+                or (rows % ceil_grid[0] == 0 and cols % ceil_grid[1] == 0)
+            ):
+                return _stock_dequantize_one(self, quantized, scales, *args, **kwargs)
+            pad_rows, pad_cols = ceil_grid[0] * block[0] - rows, ceil_grid[1] * block[1] - cols
+            padded = torch.nn.functional.pad(quantized.float(), (0, pad_cols, 0, pad_rows))
+            out = _stock_dequantize_one(self, padded, scales, *args, **kwargs)
+            return out[..., :rows, :cols]
+
+        _fp8.Fp8Dequantize._dequantize_one = _dequantize_partial_blocks
+        _FINEGRAINED_FP8_PATCHED = True
         return
-    import torch
-    from transformers.integrations import finegrained_fp8 as _fp8
 
     def _dequantize_one(self, quantized, scales):
         # FP4 path (int8 / float4_e2m1fn_x2 nibble-packed) unchanged: unpack to fp32 first.

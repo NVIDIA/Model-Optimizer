@@ -26,6 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from packaging.version import Version
 
 transformers = pytest.importorskip("transformers")
 finegrained_fp8 = pytest.importorskip("transformers.integrations.finegrained_fp8")
@@ -41,6 +42,8 @@ if not hasattr(finegrained_fp8, "Fp8Dequantize"):
 if not hasattr(torch, "float8_e4m3fn"):
     pytest.skip("torch has no float8_e4m3fn", allow_module_level=True)
 
+# The installed version: the fixture below makes the patch see an older one.
+_INSTALLED_TRANSFORMERS = Version(transformers.__version__)
 Fp8Dequantize = finegrained_fp8.Fp8Dequantize
 FineGrainedFP8HfQuantizer = quantizer_fp8.FineGrainedFP8HfQuantizer
 
@@ -285,11 +288,24 @@ def test_undoing_the_patch_restores_stock_transformers(pre_5_10_transformers, mo
     )
 
 
-def test_transformers_from_5_10_1_keeps_its_own_dequant(pre_5_10_transformers, monkeypatch):
-    """Upstream fixed the dequant there and decodes ue8m0 scales, which the patch does not."""
+@pytest.mark.parametrize(
+    ("shape", "grid"), [((576, 7168), (5, 56)), ((512, 256), (4, 2))], ids=["partial", "whole"]
+)
+def test_from_5_10_1_its_own_dequant_also_takes_partial_last_blocks(
+    pre_5_10_transformers, monkeypatch, shape, grid
+):
+    """Upstream fixed the expert converter there and decodes ue8m0 and FP4 scales, which the override
+    does not, so its dequant is kept and only wrapped. A partial last block (DeepSeek-V3's 576-row
+    kv_a_proj_with_mqa under a 5-row grid of 128-row blocks) is padded to whole blocks for it and
+    cropped back; a weight of whole blocks goes to it as is."""
+    if Version("5.10.1") > _INSTALLED_TRANSFORMERS:
+        pytest.skip("needs transformers' own dequant from 5.10.1")
     monkeypatch.setattr(transformers, "__version__", "5.10.1")
-    stock = _patched_state()
+    hook = vars(FineGrainedFP8HfQuantizer).get("update_weight_conversions", _MISSING)
+    weight, scale_inv = _block_fp8(shape, grid)
 
     model_load_utils._patch_finegrained_fp8_dequant(torch.bfloat16)
+    out = _dequant_op((128, 128))._dequantize_one(weight, scale_inv, torch.float32)
 
-    assert _patched_state() == stock
+    assert torch.equal(out, _reference(weight, scale_inv, (128, 128)))
+    assert vars(FineGrainedFP8HfQuantizer).get("update_weight_conversions", _MISSING) is hook
