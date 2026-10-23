@@ -145,6 +145,51 @@ python3 run.py \
     --runtime_params runtime_args_long_context.yaml
 ```
 
+## Benchmarking a served model with AIPerf
+
+`run.py` can also benchmark a running `vllm serve` endpoint through [AIPerf](https://github.com/ai-dynamo/aiperf)
+instead of building an engine in process. It writes the same result files, so `upload_to_s3.py` and other
+consumers work unchanged, and one server covers any number of temperatures, concurrencies and datasets
+without rebuilding the engine.
+
+Acceptance length comes from the server's per-request speculative-decoding statistics
+(`--per-request-spec-decode-metrics`, vLLM v0.29.0 or later).
+It is counted the way `run.py` counts streamed chunks (the prefill token, then one entry per verification step),
+so `Average_AL` matches the in-process value. AIPerf's own exports, including its token-weighted acceptance
+length, stay in `<save_dir>/aiperf/`.
+
+Install AIPerf in its own virtual environment, then start the server with the engine `run.py` would build.
+`--serve` execs `vllm serve` and passes unrecognized arguments on to it:
+
+```bash
+python3 -m venv aiperf-venv && aiperf-venv/bin/pip install aiperf==0.13.0
+
+python3 run.py --serve --engine VLLM --model_dir <target> --tokenizer <target> \
+    --speculative_algorithm DFLASH --draft_model_dir <draft> --block_size 7 \
+    --tp_size 4 --ep_size 4 --concurrency 32 --runtime_params runtime.yaml &
+```
+
+Then benchmark it once per configuration:
+
+```bash
+for T in 0 1; do
+    python3 run.py --aiperf_url http://localhost:8000 --aiperf_bin aiperf-venv/bin/aiperf \
+        --model_dir <target> --tokenizer <target> --tp_size 4 --runtime_params runtime.yaml \
+        --mtbench question.jsonl --output_length 4096 --temperature $T --concurrency 32 \
+        --save_dir results/mtbench_t$T
+done
+```
+
+- The sampling settings and `chat_template_args` in the runtime YAML are sent with every request. For
+  temperature > 0, also set `engine_args.draft_sample_method: probabilistic` before starting the server.
+- The server's `max_num_seqs` is `--concurrency` × draft length, as in process, so start it with the largest
+  concurrency you will benchmark. For DFlash, keep `max_num_seqs` × (1 + draft length) within
+  `--max-num-batched-tokens`, or vLLM fails at startup.
+- `vllm serve` picks its own default `--max-num-batched-tokens`, which can differ from the in-process
+  engine's and changes the KV cache size with it. That moves time to first token and throughput, not
+  acceptance; pass it to `--serve` to pin it.
+- `--aa_timing`, `--completions` and `--postprocess gptoss` are not supported with `--aiperf_url`.
+
 ## Uploading results to S3
 
 Each `run.py` invocation writes a result directory containing `configuration.json`,
@@ -176,5 +221,5 @@ source land in the same place.
 
 The goal of this benchmark is to provide an easy way to configure, run, and compare speculative implementations across frameworks in an apples-to-apples method.
 This benchmark sends request in a single-threaded fashion, so running large concurrency (>256) may result in python async scheduling delays and skew metrics.
-If larger concurrency is needed, it is recommended to fully deploy the model using `vllm serve`, `python -m sglang.launch_server`, or `trtllm-serve` (for vLLM, SGlang, or TRTLLM respectively) and
+If larger concurrency is needed, benchmark a served vLLM model with `--aiperf_url` (see above), or deploy with `python -m sglang.launch_server` or `trtllm-serve` and
 use a more robust benchmarking client like NVIDIA AI Perf.

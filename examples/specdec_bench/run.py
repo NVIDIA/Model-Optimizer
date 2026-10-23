@@ -15,9 +15,11 @@
 
 import argparse
 import asyncio
+import os
+import shlex
 
 import yaml
-from specdec_bench import datasets, metrics, models, runners
+from specdec_bench import aiperf_client, datasets, metrics, models, runners
 from specdec_bench.utils import (
     decode_chat,
     dump_env,
@@ -143,6 +145,49 @@ async def run_loop(
     return text_outputs
 
 
+def model_kwargs(args):
+    # CLI overrides take precedence over --runtime_params; supplying neither
+    # leaves engine_args empty (engine auto-derives sequence length).
+    #
+    # --max_seq_len is the generic sequence-length cap; _MAX_SEQ_LEN_KEY
+    # (module scope) maps it to the engine-specific kwarg so cell / variant
+    # YAMLs can use one flag regardless of --engine. Engines outside the
+    # table fall back to --runtime_params (engine_args.<their-key>).
+    engine_args = args.runtime_params.get("engine_args", {})
+    if args.max_seq_len is not None:
+        key = _MAX_SEQ_LEN_KEY.get(args.engine)
+        if key is None:
+            raise ValueError(
+                f"--max_seq_len is not wired for --engine {args.engine}. "
+                f"Use --runtime_params with engine_args.<key> for this engine, "
+                f"or extend _MAX_SEQ_LEN_KEY in run.py."
+            )
+        engine_args[key] = args.max_seq_len
+    return {
+        "speculative_algorithm": args.speculative_algorithm,
+        "draft_model_dir": args.draft_model_dir,
+        "speculative_num_steps": args.draft_length,
+        "speculative_num_draft_tokens": args.block_size,
+        "tensor_parallel_size": args.tp_size,
+        "moe_expert_parallel_size": args.ep_size,
+        "trust_remote_code": args.trust_remote_code,
+        "tokenizer_path": args.tokenizer,
+        **engine_args,
+    }
+
+
+def serve(args, extra_serve_args):
+    """Exec ``vllm serve`` with the engine this run would otherwise build in process."""
+    if args.engine != "VLLM":
+        raise ValueError("--serve supports --engine VLLM only")
+    engine_kwargs = models.VLLMModel.engine_kwargs(
+        args.model_dir, args.concurrency, **model_kwargs(args)
+    )
+    cmd = aiperf_client.vllm_serve_command(engine_kwargs, args.port, extra_serve_args)
+    print(shlex.join(cmd), flush=True)
+    os.execvp(cmd[0], cmd)
+
+
 def run_simple(args):
     tokenizer = get_tokenizer(args.tokenizer, trust_remote_code=args.trust_remote_code)
     chat_template_args = args.runtime_params.get("chat_template_args", {})
@@ -161,42 +206,18 @@ def run_simple(args):
         dataset = datasets.RandomToken(tokenizer, args.random_isl, **dataset_kwargs)
     elif args.specbench is not None:
         dataset = datasets.SpecBench(args.specbench, **dataset_kwargs)
-    # CLI overrides take precedence over --runtime_params; supplying neither
-    # leaves engine_args empty (engine auto-derives sequence length) and
-    # sampling_kwargs defaulting to greedy (temperature=0).
-    #
-    # --max_seq_len is the generic sequence-length cap; _MAX_SEQ_LEN_KEY
-    # (module scope) maps it to the engine-specific kwarg so cell / variant
-    # YAMLs can use one flag regardless of --engine. Engines outside the
-    # table fall back to --runtime_params (engine_args.<their-key>).
-    engine_args = args.runtime_params.get("engine_args", {})
-    if args.max_seq_len is not None:
-        key = _MAX_SEQ_LEN_KEY.get(args.engine)
-        if key is None:
-            raise ValueError(
-                f"--max_seq_len is not wired for --engine {args.engine}. "
-                f"Use --runtime_params with engine_args.<key> for this engine, "
-                f"or extend _MAX_SEQ_LEN_KEY in run.py."
-            )
-        engine_args[key] = args.max_seq_len
+    # Defaults to greedy (temperature=0) when neither CLI nor --runtime_params sets it.
     sampling_kwargs = args.runtime_params.get("sampling_kwargs", {"temperature": 0})
     if args.temperature is not None:
         sampling_kwargs["temperature"] = args.temperature
-    model_class = engines_available[args.engine]
-    model = model_class(
-        args.model_dir,
-        max_concurrent_requests=args.concurrency,
-        sampling_kwargs=sampling_kwargs,
-        speculative_algorithm=args.speculative_algorithm,
-        draft_model_dir=args.draft_model_dir,
-        speculative_num_steps=args.draft_length,
-        speculative_num_draft_tokens=args.block_size,
-        tensor_parallel_size=args.tp_size,
-        moe_expert_parallel_size=args.ep_size,
-        trust_remote_code=args.trust_remote_code,
-        tokenizer_path=args.tokenizer,
-        **engine_args,
-    )
+    model = None
+    if args.aiperf_url is None:
+        model = engines_available[args.engine](
+            args.model_dir,
+            max_concurrent_requests=args.concurrency,
+            sampling_kwargs=sampling_kwargs,
+            **model_kwargs(args),
+        )
 
     metrics_list = [metrics.Timing(args.tp_size)]
     if args.aa_timing:
@@ -214,7 +235,16 @@ def run_simple(args):
         # Stamp configuration.json BEFORE the run loop so the file lands even
         # when the run crashes mid-way. Engine init is already done, so the
         # live serving_config from the model is available.
-        dump_env(args, args.save_dir, overrides={"serving_config": model.get_serving_config()})
+        serving_config = (
+            aiperf_client.server_info(args.aiperf_url)
+            if model is None
+            else model.get_serving_config()
+        )
+        dump_env(args, args.save_dir, overrides={"serving_config": serving_config})
+
+    if model is None:
+        aiperf_client.run(args, dataset, metrics_list, sampling_kwargs, chat_template_args)
+        return
 
     runner = runners.SimpleRunner(model, metrics=metrics_list)
 
@@ -405,13 +435,41 @@ if __name__ == "__main__":
         default=None,
         help="Directory to save the results",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help=(
+            "Instead of benchmarking, exec `vllm serve` with the engine this command would build "
+            "in process, plus per-request spec-decode metrics. Unrecognized arguments are passed "
+            "on to `vllm serve`."
+        ),
+    )
+    parser.add_argument("--port", type=int, default=8000, help="Port for --serve")
+    parser.add_argument(
+        "--aiperf_url",
+        type=str,
+        default=None,
+        help=(
+            "Benchmark through AIPerf against this OpenAI-compatible server (e.g. one started "
+            "with --serve) instead of an in-process engine. Writes the same result files."
+        ),
+    )
+    parser.add_argument(
+        "--aiperf_bin", type=str, default="aiperf", help="AIPerf executable for --aiperf_url"
+    )
+    args, extra_serve_args = parser.parse_known_args()
+    if extra_serve_args and not args.serve:
+        parser.error(f"unrecognized arguments: {' '.join(extra_serve_args)}")
 
     if args.runtime_params is not None:
         with open(args.runtime_params) as f:
             args.runtime_params = yaml.safe_load(f)
     else:
         args.runtime_params = {}
+    if args.serve:
+        serve(args, extra_serve_args)
+    if args.aiperf_url is not None and aiperf_client.unsupported_options(args):
+        parser.error(f"not supported with --aiperf_url: {aiperf_client.unsupported_options(args)}")
     if args.dataset is None:
         assert (
             args.mtbench is not None or args.random_isl is not None or args.specbench is not None

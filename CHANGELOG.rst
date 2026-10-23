@@ -17,6 +17,7 @@ Changelog
 *Speculative Decoding*
 
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
+- ``examples/specdec_bench/run.py`` can benchmark a served vLLM model through AIPerf (``--aiperf_url``) and start that server with the engine settings it would use in process (``--serve``). Results land in the same files, and one server covers several temperatures, concurrencies and datasets; requires vLLM v0.29.0 or later.
 
 *Megatron Framework (M-LM / M-Bridge)*
 

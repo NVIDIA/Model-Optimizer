@@ -48,6 +48,24 @@ class VLLMModel(Model):
     # and is read at line ~92 below into AsyncEngineArgs.
 
     def __init__(self, model_dir, max_concurrent_requests, sampling_kwargs, **kwargs):
+        self.engine_args = AsyncEngineArgs(
+            **self.engine_kwargs(model_dir, max_concurrent_requests, **kwargs)
+        )
+        self.model = AsyncLLM.from_engine_args(self.engine_args)
+        self.sampling_kwargs = sampling_kwargs
+        # https://github.com/vllm-project/vllm/blob/main/vllm/sampling_params.py
+        self.sampling_config = SamplingParams(
+            detokenize=False,
+            temperature=sampling_kwargs.get("temperature", 1.0),
+            top_p=sampling_kwargs.get("top_p", 1.0),
+            top_k=sampling_kwargs.get("top_k", 0),
+        )
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+
+    @staticmethod
+    def engine_kwargs(model_dir, max_concurrent_requests, **kwargs):
+        """``AsyncEngineArgs`` kwargs; ``run.py --serve`` passes the same ones to ``vllm serve``."""
         specdec = None
         if kwargs.get("speculative_algorithm") == "EAGLE3":
             specdec = {
@@ -127,6 +145,7 @@ class VLLMModel(Model):
                 "method": "dflash",
                 "model": kwargs.get("draft_model_dir"),
                 "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 8),
+                "draft_sample_method": kwargs.get("draft_sample_method", "greedy"),
             }
         elif kwargs.get("speculative_algorithm") == "DSPARK":
             specdec = {
@@ -143,7 +162,7 @@ class VLLMModel(Model):
         else:
             num_speculative_tokens = specdec.get("num_speculative_tokens", 3)
 
-        engine_args = AsyncEngineArgs(
+        return dict(
             model=model_dir,
             tokenizer=kwargs.get("tokenizer_path"),
             trust_remote_code=kwargs.get("trust_remote_code", False),
@@ -158,18 +177,6 @@ class VLLMModel(Model):
             max_model_len=kwargs.get("max_model_len"),
             **{key: kwargs[key] for key in PASSTHROUGH_ENGINE_ARGS if kwargs.get(key) is not None},
         )
-        self.engine_args = engine_args
-        self.model = AsyncLLM.from_engine_args(engine_args)
-        self.sampling_kwargs = sampling_kwargs
-        # https://github.com/vllm-project/vllm/blob/main/vllm/sampling_params.py
-        self.sampling_config = SamplingParams(
-            detokenize=False,
-            temperature=sampling_kwargs.get("temperature", 1.0),
-            top_p=sampling_kwargs.get("top_p", 1.0),
-            top_k=sampling_kwargs.get("top_k", 0),
-        )
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
 
     async def run(self, prompt_ids, max_length, end_id, request_id, turn_id):  # pragma: no cover
         output_dict = {}
