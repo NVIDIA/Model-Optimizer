@@ -40,9 +40,9 @@ from modelopt.torch.utils.plugins import model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import (
     _ckpt_quant_method,
     _experts_sharded_over,
+    _refuse_unquantizable_experts,
     _seed_parallel_states,
     _transformers_mesh_builder,
-    _unregister_expert_quant_wrappers,
     load_and_prepare_ep,
 )
 
@@ -173,10 +173,7 @@ def test_a_checkpoint_format_the_load_cannot_dequantize_is_refused(monkeypatch, 
 
 @pytest.fixture
 def quant_wrappers():
-    """ModelOpt quant wrappers registered for the experts' and the shared experts' classes.
-
-    Whatever the test leaves registered is unregistered afterwards.
-    """
+    """ModelOpt quant wrappers registered for the experts' and the shared experts' classes."""
     from modelopt.torch.quantization.nn.modules.quant_module import QuantModule, QuantModuleRegistry
 
     class _PerExpertQuantWrapper(QuantModule):
@@ -188,33 +185,32 @@ def quant_wrappers():
     )
     yield QuantModuleRegistry
     for cls in classes:
-        if cls in QuantModuleRegistry:
-            QuantModuleRegistry.unregister(cls)
+        QuantModuleRegistry.unregister(cls)
 
 
-def test_the_experts_class_loses_its_quant_wrapper_and_other_classes_keep_theirs(quant_wrappers):
-    """Quantization would swap a registered wrapper in for the experts, whose forward drops the EP
-    process group the a2a transport injects. Only the routed experts' class is unregistered."""
+def test_routed_experts_with_a_quant_wrapper_of_their_own_are_refused(quant_wrappers):
+    """Quantization would convert them to it, whose forward drops the process group the all-to-all
+    transport passes in. The registry serves every model in the process, so it is left as it is; the
+    shared experts, which the transport does not manage, may keep a wrapper."""
     model = _model_with_decoder_at("model.")
 
-    _unregister_expert_quant_wrappers([layer.mlp.experts for layer in model.model.layers])
+    with pytest.raises(NotImplementedError, match=r"cannot quantize _Experts: ModelOpt quantizes"):
+        _refuse_unquantizable_experts([layer.mlp.experts for layer in model.model.layers])
 
-    assert _Experts not in quant_wrappers
+    assert _Experts in quant_wrappers
     assert _SharedExperts in quant_wrappers
 
 
-def test_transposed_experts_are_refused_before_their_wrapper_is_unregistered(quant_wrappers):
-    """The grouped quantization leaves experts stored transposed (GPT-OSS's) unquantized, so without
-    their own wrapper the model would be quantized everywhere but its experts."""
+def test_transposed_experts_are_refused():
+    """The grouped quantization leaves experts stored transposed (GPT-OSS's) unquantized: the model
+    would be quantized everywhere but its experts."""
     model = _model_with_decoder_at("model.")
     experts = [layer.mlp.experts for layer in model.model.layers]
     for module in experts:
         module.is_transposed = True
 
-    with pytest.raises(NotImplementedError, match="cannot quantize _Experts"):
-        _unregister_expert_quant_wrappers(experts)
-
-    assert _Experts in quant_wrappers
+    with pytest.raises(NotImplementedError, match="cannot quantize _Experts: these experts store"):
+        _refuse_unquantizable_experts(experts)
 
 
 # ----------------------------------------------------------------------- _seed_parallel_states

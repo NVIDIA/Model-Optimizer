@@ -1248,20 +1248,14 @@ def resolve_distribution_plan(
     return plan, hf_config
 
 
-def _unregister_expert_quant_wrappers(expert_modules) -> None:
-    """Keep the routed experts a2a-managed through quantization.
+def _refuse_unquantizable_experts(expert_modules) -> None:
+    """Refuse routed experts that expert-parallel PTQ would quantize wrong.
 
-    Quantize the grouped experts through the patched ``_grouped_linear`` and keep the fused grouped-GEMM
-    weights + the ``torch_a2a`` experts forward. If ModelOpt has a per-expert-nn.Linear quant wrapper
-    registered for the experts class (Qwen3VLMoeTextExperts, Llama4TextExperts, DbrxExperts),
-    ``mtq.quantize`` would convert the module to that wrapper -- whose forward drops the a2a-injected
-    process_group ("forward() takes 4 positional args but 5 given") and discards the grouped structure.
-    Unregister those classes so the experts stay a2a-managed (matches deepseek/glm/minimax, which have NO
-    registered wrapper).
-
-    Experts stored transposed, ``(num_experts, in_dim, out_dim)`` like GPT-OSS's, are refused first:
-    the grouped quantization leaves them unquantized, so without their own wrapper the model would be
-    quantized everywhere but its experts.
+    It quantizes the routed experts as they are, through the grouped GEMM of their ``torch_a2a``
+    forward (as for DeepSeek, GLM and MiniMax). Experts stored transposed, ``(num_experts, in_dim,
+    out_dim)`` like GPT-OSS's, that would leave unquantized. Experts ModelOpt quantizes through a
+    wrapper of their own, like Llama4's, ``mtq.quantize`` would convert to it, and its forward drops
+    the process group the all-to-all transport passes in.
     """
     transposed = sorted(
         {type(m).__name__ for m in expert_modules if getattr(m, "is_transposed", False)}
@@ -1272,14 +1266,15 @@ def _unregister_expert_quant_wrappers(expert_modules) -> None:
             "weights transposed, which the grouped quantization leaves unquantized. Quantize the "
             "model without expert parallelism."
         )
-    try:
-        from modelopt.torch.quantization.nn.modules.quant_module import QuantModuleRegistry
+    from modelopt.torch.quantization.nn.modules.quant_module import QuantModuleRegistry
 
-        for cls in {type(m) for m in expert_modules}:
-            if cls in QuantModuleRegistry:
-                QuantModuleRegistry.unregister(cls)
-    except Exception as _e:  # pragma: no cover - defensive; never block the load on this
-        print(f"[ep] WARNING: could not unregister experts quant wrapper: {_e}", flush=True)
+    wrapped = sorted({type(m).__name__ for m in expert_modules if type(m) in QuantModuleRegistry})
+    if wrapped:
+        raise NotImplementedError(
+            f"Expert-parallel PTQ cannot quantize {', '.join(wrapped)}: ModelOpt quantizes these "
+            "experts through a wrapper of their own, whose forward drops the expert-parallel "
+            "transport. Quantize the model without expert parallelism."
+        )
 
 
 def _seed_parallel_states(model: nn.Module, expert_names, dense_state, expert_state) -> None:
@@ -1580,7 +1575,7 @@ def load_and_prepare_ep(
     # The routed-expert containers, from the SAME base_model_ep_plan that drove the sharding. A MoE model
     # loaded WITHOUT EP (dense DP) never reaches this loader, so its experts stay dense.
     expert_modules = _routed_expert_modules(model, ep_plan)
-    _unregister_expert_quant_wrappers(expert_modules.values())
+    _refuse_unquantizable_experts(expert_modules.values())
 
     # Each module's ParallelState for calibration's amax sync: dense modules reduce over the whole world;
     # routed experts reduce over their expert-data-parallel replicas, and share one input amax across the
