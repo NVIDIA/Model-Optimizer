@@ -507,6 +507,32 @@ def test_external_save_checks_sidecar_links(tmp_path, link_kind, contained):
             assert destination.read_bytes() == b"existing weights"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Win32 filename aliases and alternate data streams")
+@pytest.mark.parametrize("existing_output", [False, True])
+@pytest.mark.parametrize(
+    "location", ["MODEL.onnx", "model.onnx.", "model.onnx ", "model.onnx:weights"]
+)
+def test_external_save_rejects_windows_model_aliases(tmp_path, existing_output, location):
+    """Reject Win32 aliases without losing caller payloads or the existing model."""
+    path = tmp_path / "model.onnx"
+    if existing_output:
+        path.write_bytes(b"original model")
+    model = helper.make_model(
+        helper.make_graph(
+            [], "alias", [], [], [numpy_helper.from_array(np.ones(2048, np.float32), "w")]
+        )
+    )
+    before = model.SerializeToString()
+    with pytest.raises((OSError, ValueError)):
+        save_onnx_model(model, str(path), external_data_name=location, verbose=False)
+    assert model.SerializeToString() == before
+    if existing_output:
+        assert path.read_bytes() == b"original model"
+    else:
+        assert not path.exists()
+    assert list(tmp_path.iterdir()) == ([path] if existing_output else [])
+
+
 @pytest.mark.parametrize("existing_sidecar", [False, True])
 @pytest.mark.parametrize("failure_stage", ["weights", "model", "short_read"])
 @pytest.mark.parametrize("external_metadata", [False, True])

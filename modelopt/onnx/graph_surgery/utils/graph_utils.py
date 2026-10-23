@@ -133,6 +133,7 @@ def save_onnx_model(
             or not location.name
             or ".." in location.parts
             or location == Path(Path(output_path).name)
+            or (os.name == "nt" and any(":" in part for part in location.parts))
         ):
             raise ValueError(
                 "External data must have a distinct relative path inside the output directory"
@@ -144,8 +145,10 @@ def save_onnx_model(
         onnx.save(model, output_path)
         return
     with tempfile.TemporaryDirectory(dir=output_dir or ".") as temporary:
-        staged_model = Path(temporary) / Path(output_path).name
-        staged_weights = Path(temporary) / location
+        # Separate roots prevent filesystem filename aliases from overwriting staged payloads.
+        staged_model = Path(temporary) / "model" / Path(output_path).name
+        staged_weights = Path(temporary) / "weights" / location
+        staged_model.parent.mkdir()
         staged_weights.parent.mkdir(parents=True, exist_ok=True)
         backup_weights = None
         weights_replaced = False
@@ -168,6 +171,10 @@ def save_onnx_model(
                         os.replace(destination, backup_weights)
                     os.replace(staged_weights, destination)
                     weights_replaced = True
+                    if os.path.exists(output_path) and os.path.samefile(destination, output_path):
+                        raise OSError(
+                            "External data must have a distinct path from the output model"
+                        )
                 os.replace(staged_model, output_path)
         except OSError:
             if backup_weights is not None and backup_weights.exists():
