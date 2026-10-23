@@ -31,6 +31,7 @@ Changelog
 *Misc*
 
 - The ``evaluation`` agent skill can stop looping ("doom loop") reasoning early: ask it to avoid doom loops and it adds vLLM's ``repetition_detection`` request field (vLLM 0.17.0 or later) to every task, ending a request once its output repeats. Use the same setting for baseline and candidate runs.
+- Add the ``specdec-release`` agent skill: it trains, smoke-tests, freezes and A|B-benchmarks a speculative-decoding drafter with a gate after each stage, resumes from a state file, and returns a readiness verdict (not a publish decision).
 
 **Backward Breaking Changes**
 

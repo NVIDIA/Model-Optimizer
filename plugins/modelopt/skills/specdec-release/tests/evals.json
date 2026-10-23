@@ -1,0 +1,86 @@
+[
+  {
+    "name": "full-specdec-flow-triggers",
+    "skills": [
+      "specdec-release"
+    ],
+    "query": "Train a DFlash2 drafter for Qwen/Qwen3-8B on my cluster with the dev budget, and tell me whether it's ready for release review.",
+    "files": [],
+    "expected_behavior": [
+      "Selects the specdec-release skill for the full goal-driven flow",
+      "Resolves target, algorithm, launcher examples, cluster and budget before submitting anything",
+      "Asks for approval before each launcher submission (approve_submissions defaults to each)",
+      "Runs stages in fixed order: setup, train pipeline, gate_train, gate_smoke, freeze, A|B bench, gate_bench, gate_correctness, closeout",
+      "Reads every verdict from a gate script's JSON, never from a log or a job state",
+      "Does not benchmark before gate_train and gate_smoke pass",
+      "Returns DRAFTER_READY / INFEASIBLE / ANOMALOUS and says DRAFTER_READY is not a publish decision"
+    ]
+  },
+  {
+    "name": "resume-skips-passed-stages",
+    "skills": [
+      "specdec-release"
+    ],
+    "query": "Resume the spec-dec run in this directory.",
+    "files": [],
+    "expected_behavior": [
+      "Reads specdec_state.json from the run dir before doing anything else",
+      "Does not re-run a stage whose status is passed",
+      "Re-watches a submitted stage instead of resubmitting it",
+      "Re-verifies the frozen drafter with freeze_drafter.py --verify --manifest-sha256 <recorded value> before benchmarking"
+    ]
+  },
+  {
+    "name": "existing-drafter-skips-training",
+    "skills": [
+      "specdec-release"
+    ],
+    "query": "I already have an exported DFlash2 drafter for Qwen3-8B at /cicd/m0-drafts/qwen3-8b-dflash2/exported-checkpoint-2000. Benchmark it against the target alone and tell me if it's ready for release review.",
+    "files": [],
+    "expected_behavior": [
+      "Selects specdec-release with existing_drafter set",
+      "Does not submit a training pipeline",
+      "Checks the export with gate_train.py --export-only and smoke-tests the drafter with a smoke-only submission, gating it with --draft set to the DRAFT_MODEL value",
+      "Freezes the drafter with freeze_drafter.py, then benchmarks the frozen copy in one matched A|B job",
+      "Gates the benchmark with gate_bench using the submitted concurrencies, repeats, algorithm and token count"
+    ]
+  },
+  {
+    "name": "train-gate-failure-stops-the-flow",
+    "skills": [
+      "specdec-release",
+      "speculative-decoding"
+    ],
+    "query": "Run the spec-dec release flow for Qwen3-8B DFlash2. The training finished but gate_train returned TRAIN_REGRESSION.",
+    "files": [],
+    "expected_behavior": [
+      "Stops at the failed gate and does not serve, freeze or benchmark the drafter",
+      "Triages the regression with the speculative-decoding skill",
+      "Does not waive or raise the recipe's training thresholds to make the gate pass"
+    ]
+  },
+  {
+    "name": "triage-only-does-not-trigger-specdec-release",
+    "skills": [
+      "speculative-decoding"
+    ],
+    "query": "Why did my EAGLE3 training job fail? The experiment is cicd_1234.",
+    "files": [],
+    "expected_behavior": [
+      "Selects the speculative-decoding skill, not specdec-release",
+      "Does not submit any new job or run the readiness gates"
+    ]
+  },
+  {
+    "name": "quantize-only-does-not-trigger-specdec-release",
+    "skills": [
+      "ptq"
+    ],
+    "query": "Quantize Qwen3-8B to NVFP4 and save the checkpoint.",
+    "files": [],
+    "expected_behavior": [
+      "Selects the ptq skill, not specdec-release",
+      "Does not train a drafter or run a speculative-decoding benchmark"
+    ]
+  }
+]
