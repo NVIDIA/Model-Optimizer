@@ -44,8 +44,12 @@ import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 from modelopt.onnx.graph_surgery.dla_transforms import dla_graph_cleanup as _mod
+from modelopt.onnx.graph_surgery.utils.graph_utils import GraphCache
 
 pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
+
+import onnxruntime as ort
+from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
 
 _REPO_ROOT = Path(__file__).resolve().parents[5]
 _SAVED_MODELS_DIR = _REPO_ROOT / "scratch_space" / "graph_cleanup_test_models"
@@ -57,26 +61,29 @@ _apply = _mod._apply_graph_cleanup
 _fold_consts = _mod._fold_constants
 _remove_unused_inits = _mod._remove_unused_initializers
 
-from modelopt.onnx.graph_surgery.utils.graph_utils import GraphCache
-
 
 def _canonicalize_inputs(model):
+    """Canonicalize model inputs using a fresh graph cache."""
     return _mod._canonicalize_inputs(model, GraphCache(model.graph))
 
 
 def _replace_sq_unsq(model):
+    """Replace eligible Squeeze and Unsqueeze nodes using current shapes."""
     return _mod._replace_intermediary_squeeze_unsqueeze(model, GraphCache(model.graph))
 
 
 def _remove_reshapes(model):
+    """Collapse reshape chains using a fresh graph cache."""
     return _mod._remove_reshape_chains(model, GraphCache(model.graph))
 
 
 def _reshape_to_squeeze(model):
+    """Adapt graph-output reshapes without changing their declared outputs."""
     return _mod._replace_graph_output_reshape_with_squeeze(model, GraphCache(model.graph))
 
 
 def _remove_cast_chains(model):
+    """Collapse eligible cast chains using current graph metadata."""
     return _mod._remove_consecutive_casts(model, GraphCache(model.graph))
 
 
@@ -84,30 +91,25 @@ def _remove_cast_chains(model):
 
 
 def _vi(name: str, elem_type: int, shape: list) -> onnx.ValueInfoProto:
+    """Build a typed graph value with the declared shape."""
     return helper.make_tensor_value_info(name, elem_type, shape)
 
 
 def _clamp_ir(model: onnx.ModelProto) -> None:
+    """Keep fixtures within ORT's supported IR range."""
     model.ir_version = min(model.ir_version, _MAX_IR_VERSION_FOR_ORT)
 
 
 def _prepare_model(model: onnx.ModelProto) -> None:
-    try:
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
-
-        inferred = SymbolicShapeInference.infer_shapes(model)
-        if inferred is not None:
-            del model.graph.value_info[:]
-            model.graph.value_info.extend(inferred.graph.value_info)
-    except Exception:
-        pass
+    """Populate intermediate shapes and surface unexpected inference failures."""
+    inferred = SymbolicShapeInference.infer_shapes(model)
+    if inferred is not None:
+        del model.graph.value_info[:]
+        model.graph.value_info.extend(inferred.graph.value_info)
 
 
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
-    import onnxruntime as ort  # type: ignore[import-untyped]
-
+    """Run all graph outputs with ORT's CPU execution provider."""
     _clamp_ir(model)
     sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
     return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
@@ -122,23 +124,23 @@ _RNG = np.random.default_rng(2024)
 
 
 def test_canonicalize_3d_input_unsqueeze_added():
-    """3-D graph input X [2,3,4] → Unsqueeze to 4-D [1,2,3,4] is inserted.
-
-    Downstream Relu receives the 4-D tensor.
-    """
+    """Promote the safe branch of a shared input while preserving a Transpose branch."""
     relu = helper.make_node("Relu", ["X"], ["Y"], name="relu")
+    transpose = helper.make_node("Transpose", ["X"], ["Z"], perm=[2, 1, 0])
     graph = helper.make_graph(
-        [relu],
+        [relu, transpose],
         "g",
         [_vi("X", TensorProto.FLOAT, [2, 3, 4])],
-        [_vi("Y", TensorProto.FLOAT, [2, 3, 4])],
+        [_vi("Y", TensorProto.FLOAT, [2, 3, 4]), _vi("Z", TensorProto.FLOAT, [4, 3, 2])],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
+    feeds = {"X": _RNG.standard_normal([2, 3, 4]).astype(np.float32)}
+    expected = _run_ort(model, feeds)
 
     tr = copy.deepcopy(model)
-    _prepare_model(tr)
-    tr = _canonicalize_inputs(tr)
+    tr = _apply(tr)
+    onnx.checker.check_model(tr, full_check=True)
 
     unsq_nodes = [n for n in tr.graph.node if n.op_type == "Unsqueeze"]
     assert len(unsq_nodes) == 1, "one Unsqueeze must be inserted for the 3-D input"
@@ -148,19 +150,29 @@ def test_canonicalize_3d_input_unsqueeze_added():
     # Relu must now read the Unsqueeze output, not X directly
     relu_node = next(n for n in tr.graph.node if n.op_type == "Relu")
     assert relu_node.input[0] == unsq.output[0], "Relu must be redirected to Unsqueeze output"
+    transpose_node = next(n for n in tr.graph.node if n.op_type == "Transpose")
+    assert transpose_node.input[0] == "X"
+    actual = _run_ort(tr, feeds)
+    np.testing.assert_array_equal(actual["Y"], expected["Y"].reshape(1, 2, 3, 4))
+    np.testing.assert_array_equal(actual["Z"], expected["Z"])
 
 
 def test_canonicalize_2d_input_unsqueeze_added():
-    """2-D graph input X [4,5] → Unsqueeze at axes [0,1] to 4-D [1,1,4,5]."""
-    relu = helper.make_node("Relu", ["X"], ["Y"], name="relu")
+    """Promote a 2D input when broadcasting already fixes downstream rank at four."""
+    add = helper.make_node("Add", ["X", "W"], ["sum"], name="add")
+    transpose = helper.make_node("Transpose", ["sum"], ["Y"], perm=[0, 1, 3, 2])
     graph = helper.make_graph(
-        [relu],
+        [add, transpose],
         "g",
         [_vi("X", TensorProto.FLOAT, [4, 5])],
-        [_vi("Y", TensorProto.FLOAT, [4, 5])],
+        [_vi("Y", TensorProto.FLOAT, [1, 1, 5, 4])],
+        [numpy_helper.from_array(np.zeros([1, 1, 4, 5], np.float32), "W")],
+        value_info=[_vi("sum", TensorProto.FLOAT, [1, 1, 4, 5])],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
+    feeds = {"X": _RNG.standard_normal([4, 5]).astype(np.float32)}
+    expected = _run_ort(model, feeds)
 
     tr = copy.deepcopy(model)
     _prepare_model(tr)
@@ -171,6 +183,10 @@ def test_canonicalize_2d_input_unsqueeze_added():
     axes_init = next(i for i in tr.graph.initializer if i.name.endswith("_unsqueeze_axes"))
     axes = numpy_helper.to_array(axes_init).tolist()
     assert axes == [0, 1], f"axes should be [0,1] for 2-D input, got {axes}"
+    add_node = next(node for node in tr.graph.node if node.op_type == "Add")
+    assert add_node.input[0] == unsq_nodes[0].output[0]
+    onnx.checker.check_model(tr, full_check=True)
+    np.testing.assert_array_equal(_run_ort(tr, feeds)["Y"], expected["Y"])
 
 
 def test_canonicalize_3d_input_duplicate_unsqueezes_deduped():
@@ -227,6 +243,189 @@ def test_canonicalize_4d_input_unchanged():
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 2 — Replace intermediary Squeeze / Unsqueeze with 4-D Reshape
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize("stage", ["input", "squeeze", "unsqueeze"])
+@pytest.mark.parametrize("consumer", ["Transpose", "Softmax", "MatMul", "transpose_via_relu"])
+def test_rank_promotion_preserves_rank_sensitive_consumers(stage, consumer):
+    """Preserve rank-sensitive behavior, including consumers behind an elementwise node."""
+    input_shape = [1, 2, 3] if stage == "squeeze" else [2, 3]
+    source_shape = [1, 2, 3] if stage == "unsqueeze" else [2, 3]
+    nodes, initializers, values = [], [], []
+    source = "X"
+    if stage != "input":
+        initializers.append(numpy_helper.from_array(np.array([0], np.int64), "axes"))
+        if stage == "unsqueeze":
+            nodes.append(helper.make_node("Identity", ["X"], ["middle"]))
+            values.append(_vi("middle", TensorProto.FLOAT, input_shape))
+            source = "middle"
+        nodes.append(helper.make_node(stage.title(), [source, "axes"], ["adapted"]))
+        source = "adapted"
+        values.append(_vi(source, TensorProto.FLOAT, source_shape))
+    if consumer == "transpose_via_relu":
+        nodes.append(helper.make_node("Relu", [source], ["activated"]))
+        source = "activated"
+        values.append(_vi(source, TensorProto.FLOAT, source_shape))
+        consumer = "Transpose"
+    if consumer == "Transpose":
+        nodes.append(
+            helper.make_node(
+                consumer, [source], ["Y"], perm=list(reversed(range(len(source_shape))))
+            )
+        )
+        output_shape = list(reversed(source_shape))
+    elif consumer == "Softmax":
+        nodes.append(helper.make_node(consumer, [source], ["Y"], axis=len(source_shape) - 2))
+        output_shape = source_shape
+    else:
+        initializers.append(
+            numpy_helper.from_array(np.arange(12, dtype=np.float32).reshape(3, 4), "W")
+        )
+        nodes.append(helper.make_node(consumer, [source, "W"], ["Y"]))
+        output_shape = [*source_shape[:-1], 4]
+    graph = helper.make_graph(
+        nodes,
+        "rank_sensitive",
+        [_vi("X", TensorProto.FLOAT, input_shape)],
+        [_vi("Y", TensorProto.FLOAT, output_shape)],
+        initializers,
+        value_info=values,
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
+    _clamp_ir(model)
+    feeds = {"X": np.arange(np.prod(input_shape), dtype=np.float32).reshape(input_shape)}
+    expected = _run_ort(model, feeds)
+    before = model.SerializeToString()
+    transformed = copy.deepcopy(model)
+    transformed = (
+        _canonicalize_inputs(transformed) if stage == "input" else _replace_sq_unsq(transformed)
+    )
+    onnx.checker.check_model(transformed, full_check=True)
+    np.testing.assert_array_equal(_run_ort(transformed, feeds)["Y"], expected["Y"])
+    assert transformed.SerializeToString() == before
+
+
+@pytest.mark.parametrize("stage", ["canonical", "squeeze"])
+@pytest.mark.parametrize("names", ["empty", "duplicate", "existing"])
+def test_generated_reshape_targets_do_not_collide(stage, names):
+    """Keep distinct reshape targets for unnamed nodes and existing tensor names."""
+    prefix = "uq" if stage == "canonical" else "sq"
+    first_name = "" if names == "empty" else prefix
+    second_name = prefix + "_other" if names == "existing" else first_name
+    initializers = []
+    if stage == "canonical":
+        initializers.extend(
+            [
+                numpy_helper.from_array(np.array([2, 3], np.int64), "axes1"),
+                numpy_helper.from_array(np.array([1, 3], np.int64), "axes2"),
+            ]
+        )
+        nodes = [
+            helper.make_node("Unsqueeze", ["X", "axes1"], ["Y1"], name=first_name),
+            helper.make_node("Unsqueeze", ["X", "axes2"], ["Y2"], name=second_name),
+        ]
+        inputs = [_vi("X", TensorProto.FLOAT, [2, 3])]
+        outputs = [
+            _vi("Y1", TensorProto.FLOAT, [2, 3, 1, 1]),
+            _vi("Y2", TensorProto.FLOAT, [2, 1, 3, 1]),
+        ]
+        feeds = {"X": np.arange(6, dtype=np.float32).reshape(2, 3)}
+        suffix = "_reshape_shape"
+    else:
+        initializers.append(numpy_helper.from_array(np.array([0], np.int64), "axes"))
+        nodes = [
+            helper.make_node("Squeeze", ["X1", "axes"], ["Y1"], name=first_name),
+            helper.make_node("Squeeze", ["X2", "axes"], ["Y2"], name=second_name),
+        ]
+        inputs = [_vi("X1", TensorProto.FLOAT, [1, 2, 3]), _vi("X2", TensorProto.FLOAT, [1, 3, 2])]
+        outputs = [_vi("Y1", TensorProto.FLOAT, [2, 3]), _vi("Y2", TensorProto.FLOAT, [3, 2])]
+        feeds = {
+            "X1": np.arange(6, dtype=np.float32).reshape(1, 2, 3),
+            "X2": np.arange(6, dtype=np.float32).reshape(1, 3, 2),
+        }
+        suffix = "_4d_shape"
+    if names == "existing":
+        initializers.append(numpy_helper.from_array(np.array([99], np.int64), prefix + suffix))
+    model = helper.make_model(
+        helper.make_graph(nodes, "target_names", inputs, outputs, initializers),
+        opset_imports=[helper.make_opsetid("", _OPSET_VERSION)],
+    )
+    _clamp_ir(model)
+    onnx.checker.check_model(model, full_check=True)
+    reference = model
+    if names == "duplicate":
+        # ORT rejects duplicate labels; normalize only the reference fixture.
+        reference = copy.deepcopy(model)
+        for index, node in enumerate(reference.graph.node):
+            node.name = f"reference_{index}"
+    expected = _run_ort(reference, feeds)
+    transformed = copy.deepcopy(model)
+    transformed = (
+        _canonicalize_inputs(transformed) if stage == "canonical" else _replace_sq_unsq(transformed)
+    )
+    onnx.checker.check_model(transformed, full_check=True)
+    actual = _run_ort(transformed, feeds)
+    for name, value in expected.items():
+        np.testing.assert_array_equal(actual[name], value)
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2])
+def test_canonicalize_preserves_graph_output_shape(axis):
+    """Preserve a non-4D graph-output Unsqueeze's declared shape and values."""
+    target = [2, 3]
+    target.insert(axis, 1)
+    axes = numpy_helper.from_array(np.array([axis], np.int64), "axes")
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Unsqueeze", ["X", "axes"], ["Y"], name="uq")],
+            "output_boundary",
+            [_vi("X", TensorProto.FLOAT, [2, 3])],
+            [_vi("Y", TensorProto.FLOAT, target)],
+            [axes],
+        ),
+        opset_imports=[helper.make_opsetid("", _OPSET_VERSION)],
+    )
+    _clamp_ir(model)
+    feeds = {"X": np.arange(6, dtype=np.float32).reshape(2, 3)}
+    expected = _run_ort(model, feeds)
+    transformed = _canonicalize_inputs(copy.deepcopy(model))
+    assert transformed.graph.output[0].type == model.graph.output[0].type
+    onnx.checker.check_model(transformed, full_check=True)
+    np.testing.assert_array_equal(_run_ort(transformed, feeds)["Y"], expected["Y"])
+
+
+@pytest.mark.parametrize("opset", [12, 17])
+@pytest.mark.parametrize("axes", [[1], [-3]])
+def test_squeeze_fallback_uses_selected_axes(opset, axes):
+    """Infer only selected squeeze axes when intermediate shape metadata is absent."""
+    initializers = []
+    if opset < 13:
+        squeeze = helper.make_node("Squeeze", ["X"], ["middle"], axes=axes, name="sq")
+    else:
+        initializers.append(numpy_helper.from_array(np.array(axes, np.int64), "axes"))
+        squeeze = helper.make_node("Squeeze", ["X", "axes"], ["middle"], name="sq")
+    model = helper.make_model(
+        helper.make_graph(
+            [squeeze, helper.make_node("Identity", ["middle"], ["Y"])],
+            "axes_fallback",
+            [_vi("X", TensorProto.FLOAT, [2, 1, 1, 3])],
+            [_vi("Y", TensorProto.FLOAT, [2, 1, 3])],
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", opset)],
+    )
+    _clamp_ir(model)
+    feeds = {"X": np.arange(6, dtype=np.float32).reshape(2, 1, 1, 3)}
+    expected = _run_ort(model, feeds)
+    transformed = _replace_sq_unsq(copy.deepcopy(model))
+    reshape = next(node for node in transformed.graph.node if node.op_type == "Reshape")
+    target = next(init for init in transformed.graph.initializer if init.name == reshape.input[1])
+    assert numpy_helper.to_array(target).tolist() == [1, 2, 1, 3]
+    transformed = _mod.infer_shapes(transformed)
+    onnx.checker.check_model(transformed, full_check=True)
+    np.testing.assert_array_equal(
+        _run_ort(transformed, feeds)["Y"], expected["Y"].reshape(1, 2, 1, 3)
+    )
 
 
 def test_intermediary_squeeze_replaced_with_reshape():
@@ -675,7 +874,8 @@ def test_combined_reshape_and_unused_init_cleaned():
     np.testing.assert_array_equal(ref["Y"], got["Y"])
 
 
-def test_interleaved_reshape_chains_collapsed():
+@pytest.mark.parametrize("names", ["named", "empty", "duplicate", "existing"])
+def test_interleaved_reshape_chains_collapsed(names):
     """Two Reshape chains interleaved in node order are both collapsed correctly.
 
     Graph topology:
@@ -713,6 +913,9 @@ def test_interleaved_reshape_chains_collapsed():
     r4 = helper.make_node("Reshape", ["X2", "sh_c"], ["T4"], name="r4")
     r5 = helper.make_node("Reshape", ["T4", "sh_d"], ["T5"], name="r5")
     add = helper.make_node("Add", ["T2", "T5"], ["Y"], name="add1")
+    if names in ("empty", "duplicate"):
+        for node in (r1, r2, r4, r5):
+            node.name = "" if names == "empty" else "reshape"
 
     # Interleaved: r4 sits between r1 and r2 in the node list
     graph = helper.make_graph(
@@ -734,14 +937,26 @@ def test_interleaved_reshape_chains_collapsed():
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
 
+    if names == "existing":
+        model.graph.initializer.append(
+            numpy_helper.from_array(np.array([99], np.int64), "r2_chain_shape")
+        )
+
     x1 = _RNG.standard_normal([1, 2, 4, 4]).astype(np.float32)
     x2 = _RNG.standard_normal([1, 2, 4, 4]).astype(np.float32)
     _prepare_model(model)
-    ref = _run_ort(model, {"X1": x1, "X2": x2})
+    onnx.checker.check_model(model, full_check=True)
+    reference = model
+    if names == "duplicate":
+        reference = copy.deepcopy(model)
+        for index, node in enumerate(reference.graph.node):
+            node.name = f"reference_{index}"
+    ref = _run_ort(reference, {"X1": x1, "X2": x2})
 
     tr = copy.deepcopy(model)
     _prepare_model(tr)
     tr = _remove_reshapes(tr)
+    onnx.checker.check_model(tr, full_check=True)
     _prepare_model(tr)
     got = _run_ort(tr, {"X1": x1, "X2": x2})
 
@@ -837,19 +1052,20 @@ def test_graph_output_reshape_squeeze_axes_left_to_right():
     np.testing.assert_array_equal(ref["Y"], got["Y"])
 
 
-def test_graph_output_reshape_not_squeezable_padded_to_4d():
+@pytest.mark.parametrize("output_shape", [[6, 4], [24]])
+def test_graph_output_reshape_not_squeezable_padded_to_4d(output_shape):
     """[2,3,4] → Reshape → [6,4] at graph output: not a pure squeeze, output is 2D (<4D).
 
-    New behaviour: pad Reshape target to [1,6,4], then Squeeze([0]) → [6,4].
+    Pad the Reshape target to rank four and squeeze every prepended unit dimension.
     This ensures the Reshape produces a 4D tensor before being squeezed back.
     """
-    sh_init = numpy_helper.from_array(np.array([6, 4], dtype=np.int64), name="rs_shape2")
+    sh_init = numpy_helper.from_array(np.array(output_shape, dtype=np.int64), name="rs_shape2")
     reshape = helper.make_node("Reshape", ["X", "rs_shape2"], ["Y"], name="rs2")
     graph = helper.make_graph(
         [reshape],
         "g",
         [_vi("X", TensorProto.FLOAT, [2, 3, 4])],
-        [_vi("Y", TensorProto.FLOAT, [6, 4])],
+        [_vi("Y", TensorProto.FLOAT, output_shape)],
         initializer=[sh_init],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
@@ -865,18 +1081,19 @@ def test_graph_output_reshape_not_squeezable_padded_to_4d():
     _prepare_model(tr)
     got = _run_ort(tr, {"X": x})
 
-    # Reshape must still exist (now targeting [1,6,4])
+    # The boundary restores the original output while the intermediate stays 4D.
     rs_nodes = [n for n in tr.graph.node if n.op_type == "Reshape"]
     assert len(rs_nodes) == 1, "Reshape must remain (with updated shape)"
-    # Squeeze([0]) must be inserted after Reshape
     sq_nodes = [n for n in tr.graph.node if n.op_type == "Squeeze"]
-    assert len(sq_nodes) == 1, "Squeeze([0]) must be inserted"
-    # Verify Reshape now targets a 4D shape [1,6,4]
+    assert len(sq_nodes) == 1
     rs_shape_init = next((i for i in tr.graph.initializer if i.name == rs_nodes[0].input[1]), None)
     assert rs_shape_init is not None
-    assert numpy_helper.to_array(rs_shape_init).tolist() == [1, 6, 4], (
-        f"Reshape shape must be [1,6,4], got {numpy_helper.to_array(rs_shape_init).tolist()}"
+    assert (
+        numpy_helper.to_array(rs_shape_init).tolist()
+        == [1] * (4 - len(output_shape)) + output_shape
     )
+    axes = next(i for i in tr.graph.initializer if i.name == sq_nodes[0].input[1])
+    assert numpy_helper.to_array(axes).tolist() == list(range(4 - len(output_shape)))
     np.testing.assert_array_equal(ref["Y"], got["Y"])
 
 
@@ -1016,65 +1233,11 @@ def test_unsqueeze_after_gqa_3d_to_4d_skipped():
     )
 
 
-def test_unsqueeze_after_gqa_4d_output_not_skipped():
-    """Unsqueeze after a GQA node whose output is already 4D is NOT special — treated normally.
-
-    If the GQA output is 4D (not 3D), the skip condition does not apply.
-    """
-    b, s, h = 1, 4, 8
-    unsq_axes = numpy_helper.from_array(np.array([1], dtype=np.int64), name="gqa4d_unsq_ax")
-
-    gqa = helper.make_node(
-        "GroupQueryAttention",
-        inputs=["X", "", ""],
-        outputs=["gqa_out"],
-        name="gqa_node2",
-        domain="com.microsoft",
-        num_heads=2,
-        kv_num_heads=2,
-    )
-    unsqueeze = helper.make_node(
-        "Unsqueeze", ["gqa_out", "gqa4d_unsq_ax"], ["gqa_5d"], name="gqa_unsq2"
-    )
-    relu = helper.make_node("Relu", ["gqa_5d"], ["Y"], name="relu")
-
-    graph = helper.make_graph(
-        [gqa, unsqueeze, relu],
-        "g",
-        [_vi("X", TensorProto.FLOAT, [b, s, h])],
-        [_vi("Y", TensorProto.FLOAT, [b, 1, s, h])],
-        value_info=[
-            # GQA output is 4D here (not 3D) — skip condition does NOT apply
-            _vi("gqa_out", TensorProto.FLOAT, [b, 1, s, h]),
-            _vi("gqa_5d", TensorProto.FLOAT, [b, 1, 1, s, h]),
-        ],
-        initializer=[unsq_axes],
-    )
-    model = helper.make_model(
-        graph,
-        opset_imports=[
-            helper.make_opsetid("", _OPSET_VERSION),
-            helper.make_opsetid("com.microsoft", 1),
-        ],
-    )
-    _clamp_ir(model)
-
-    tr = copy.deepcopy(model)
-    _prepare_model(tr)
-    tr = _replace_sq_unsq(tr)
-
-    # GQA output is 4D → Unsqueeze is NOT skipped by the GQA rule;
-    # it should be replaced (output has 5D — beyond 4D, so the generic handler skips too,
-    # but the important thing is the GQA-specific skip did NOT fire).
-    # Verify no GQA-specific skip was applied by confirming the Unsqueeze was processed
-    # (either replaced or removed, not left as-is due to the GQA rule).
-    # Here output is 5D so the transform skips it anyway — just assert no crash.
-
-
 # ── Tests: _remove_consecutive_casts ─────────────────────────────────────────
 
 
-def test_cast_chain_collapsed_to_single():
+@pytest.mark.parametrize("colliding_name", [False, True])
+def test_cast_chain_collapsed_to_single(colliding_name):
     """Cast(INT8→INT64) → Cast(INT64→INT32) collapsed to Cast(INT8→INT32)."""
     cast1 = helper.make_node("Cast", ["X"], ["c1"], name="cast1", to=TensorProto.INT64)
     cast2 = helper.make_node("Cast", ["c1"], ["Y"], name="cast2", to=TensorProto.INT32)
@@ -1087,6 +1250,11 @@ def test_cast_chain_collapsed_to_single():
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
+    if colliding_name:
+        model.graph.node.append(helper.make_node("Identity", ["X"], ["Z"], name="cast2_chain"))
+        model.graph.output.append(_vi("Z", TensorProto.INT8, [2, 4]))
+    feeds = {"X": np.arange(8, dtype=np.int8).reshape(2, 4)}
+    expected = _run_ort(model, feeds)
 
     tr = copy.deepcopy(model)
     _prepare_model(tr)
@@ -1100,6 +1268,10 @@ def test_cast_chain_collapsed_to_single():
     # Input should be X, output should be Y
     assert cast_nodes[0].input[0] == "X"
     assert cast_nodes[0].output[0] == "Y"
+    onnx.checker.check_model(tr, full_check=True)
+    actual = _run_ort(tr, feeds)
+    for name, value in expected.items():
+        np.testing.assert_array_equal(actual[name], value)
 
 
 def test_cast_chain_three_nodes():

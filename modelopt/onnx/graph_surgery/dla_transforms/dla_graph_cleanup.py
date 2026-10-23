@@ -13,32 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Combined graph-cleanup pass for DLA ONNX models.
+"""Graph cleanup for DLA ONNX models.
 
-Applies five cleanup steps in sequence:
-
-1. **Canonicalize non-4D model inputs** — Each 1-D/2-D/3-D graph input gets a single
-   canonical ``Unsqueeze`` inserted at the front of the graph, padding to 4-D.
-   Existing ``Unsqueeze`` consumers of that input are either deduped (same output shape)
-   or replaced by a ``Reshape`` (different output shape).  All other consumers are
-   redirected to the canonical Unsqueeze output.
-
-2. **Replace intermediary Squeeze / Unsqueeze with 4-D Reshape** — Any ``Squeeze`` or
-   ``Unsqueeze`` whose output is **not** a graph output is replaced by a ``Reshape`` whose
-   output shape is the original output shape padded to 4-D by prepending 1-s.
-   If the padded input and output shapes are identical the node is removed entirely
-   and consumers are wired to the input directly.
-
-3. **Collapse Reshape chains** — Consecutive ``Reshape`` nodes whose output is consumed
-   only by the next ``Reshape`` are collapsed.  A chain where first-input-shape equals
-   last-output-shape is removed entirely; otherwise it is reduced to a single ``Reshape``.
-
-4. **Fold constants** — Uses ``onnx-graphsurgeon`` to evaluate constant subgraphs at
-   compile time, skipping ``DequantizeLinear`` and ``Identity`` nodes.  Silently skipped
-   if ``onnx-graphsurgeon`` is unavailable.
-
-5. **Remove unused initializers** — Initializers that are not referenced as a node input
-   are dropped.
+Promote eligible input and Squeeze/Unsqueeze paths to 4D while retaining original
+ranks at rank-sensitive consumers. Collapse reshape chains, adapt graph-output
+reshapes, fold constants, collapse lossless cast chains, and remove unused
+initializers. Constant folding requires the optional onnx-graphsurgeon package.
 """
 
 from __future__ import annotations
@@ -63,16 +43,108 @@ from ..utils.graph_utils import (
 # ── Internal utilities ────────────────────────────────────────────────────────
 
 
+_RANK_AGNOSTIC_OPS = frozenset(
+    {
+        "Abs",
+        "Acos",
+        "Acosh",
+        "Add",
+        "And",
+        "Asin",
+        "Asinh",
+        "Atan",
+        "Atanh",
+        "Cast",
+        "Ceil",
+        "Clip",
+        "Cos",
+        "Cosh",
+        "Div",
+        "Elu",
+        "Equal",
+        "Erf",
+        "Exp",
+        "Floor",
+        "Greater",
+        "GreaterOrEqual",
+        "HardSigmoid",
+        "HardSwish",
+        "Identity",
+        "IsInf",
+        "IsNaN",
+        "LeakyRelu",
+        "Less",
+        "LessOrEqual",
+        "Log",
+        "Max",
+        "Mean",
+        "Min",
+        "Mod",
+        "Mul",
+        "Neg",
+        "Not",
+        "Or",
+        "PRelu",
+        "Pow",
+        "Reciprocal",
+        "Relu",
+        "Round",
+        "Selu",
+        "Sigmoid",
+        "Sign",
+        "Sin",
+        "Sinh",
+        "Softplus",
+        "Softsign",
+        "Sqrt",
+        "Sub",
+        "Sum",
+        "Tan",
+        "Tanh",
+        "ThresholdedRelu",
+        "Where",
+        "Xor",
+    }
+)
+
+
+def _rank_sensitive_consumers(
+    graph: onnx.GraphProto, cache: GraphCache
+) -> tuple[set[str], set[tuple[int, int]]]:
+    """Find edges where leading unit dimensions can change downstream semantics.
+
+    Propagate restrictions through elementwise paths until an already-4D output
+    prevents an input promotion from changing downstream ranks.
+    """
+    sensitive_values: set[str] = set()
+    sensitive_edges: set[tuple[int, int]] = set()
+    for node in reversed(graph.node):
+        rank_agnostic = node.domain in ("", "ai.onnx") and node.op_type in _RANK_AGNOSTIC_OPS
+        if rank_agnostic:
+            rank_agnostic = not any(
+                output in sensitive_values and len(cache.get_shape(output) or []) < 4
+                for output in node.output
+            )
+        if not rank_agnostic:
+            sensitive_values.update(_node_inputs(node))
+        for index, name in enumerate(node.input):
+            if name and (not rank_agnostic or (node.op_type == "Clip" and index > 0)):
+                sensitive_values.add(name)
+                sensitive_edges.add((id(node), index))
+    return sensitive_values, sensitive_edges
+
+
 # ── Step 1: Canonicalize non-4D model inputs ─────────────────────────────────
 
 
 def _canonicalize_inputs(model: onnx.ModelProto, cache: GraphCache) -> onnx.ModelProto:
-    """Insert one canonical Unsqueeze per non-4D graph input; dedup existing Unsqueeze consumers."""
+    """Promote eligible input consumers to 4D without changing rank-sensitive paths."""
     graph = model.graph
     unique_init: set[str] = set()
     consumer_map = cache.consumer_map
     nodes_to_insert: list[tuple] = []  # (new_node, reference_node)
     nodes_to_remove: list = []
+    promotion_safety = None
     cnt = 0
 
     for graph_input in list(graph.input):
@@ -88,6 +160,10 @@ def _canonicalize_inputs(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mode
             )
             continue
 
+        if promotion_safety is None:
+            promotion_safety = _rank_sensitive_consumers(graph, cache)
+        sensitive_values, sensitive_edges = promotion_safety
+
         # Read concrete input shape (may be None for symbolic dims)
         input_shape: list[int | None] = [
             d.dim_value if d.HasField("dim_value") else None for d in tt.shape.dim
@@ -97,8 +173,29 @@ def _canonicalize_inputs(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mode
         axes_arr = np.arange(n_new, dtype=np.int64)
         canonical_4d = [1] * n_new + list(input_shape)
 
-        axes_name = f"{graph_input.name}_unsqueeze_axes"
-        out_name = f"{graph_input.name}_4d"
+        consumers = []
+        for c_node, c_idx in consumer_map.get(graph_input.name, []):
+            if (c_node.op_type == "Squeeze" and "Gather" in c_node.name) or c_node.op_type in (
+                "GroupQueryAttention",
+                "Gather",
+            ):
+                continue
+            if c_node.op_type == "Unsqueeze":
+                old_shape = cache.get_shape(c_node.output[0])
+                if old_shape is None or (
+                    len(old_shape) < 4
+                    and c_node.output[0] not in cache.graph_output_names
+                    and c_node.output[0] in sensitive_values
+                ):
+                    continue
+            elif (id(c_node), c_idx) in sensitive_edges:
+                continue
+            consumers.append((c_node, c_idx))
+        if not consumers:
+            continue
+
+        axes_name = cache.unique_name(f"{graph_input.name}_unsqueeze_axes")
+        out_name = cache.unique_name(f"{graph_input.name}_4d")
         add_unique_initializers(
             graph, unique_init, [numpy_helper.from_array(axes_arr, name=axes_name)]
         )
@@ -107,23 +204,9 @@ def _canonicalize_inputs(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mode
             "Unsqueeze",
             inputs=[graph_input.name, axes_name],
             outputs=[out_name],
-            name=f"{graph_input.name}_unsqueeze",
+            name=cache.unique_name(f"{graph_input.name}_unsqueeze"),
         )
         add_value_info(graph, out_name, tt.elem_type, canonical_4d)
-
-        consumers = consumer_map.get(graph_input.name, [])
-        consumers = [
-            (c_node, c_idx)
-            for c_node, c_idx in consumers
-            if len(c_node.input) > 0
-            and graph_input.name in c_node.input
-            and not (
-                (c_node.op_type == "Squeeze" and "Gather" in c_node.name)
-                or c_node.op_type in ("GroupQueryAttention", "Gather")
-            )
-        ]
-        if not consumers:
-            continue
 
         # Find the first consumer node in graph order for insertion point
         consumer_set = {id(n) for n, _ in consumers}
@@ -158,13 +241,17 @@ def _canonicalize_inputs(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mode
                             dn.input[di] = out_name
                     else:
                         # Different 4-D shape → Reshape from canonical output
-                        rs_name = f"{c_node.name}_reshape_shape"
+                        is_graph_output = c_node.output[0] in cache.graph_output_names
+                        reshape_target = old_out_shape if is_graph_output else old_4d
+                        rs_name = cache.unique_name(
+                            f"{c_node.name or c_node.op_type}_reshape_shape"
+                        )
                         add_unique_initializers(
                             graph,
                             unique_init,
                             [
                                 numpy_helper.from_array(
-                                    np.array(old_4d, dtype=np.int64), name=rs_name
+                                    np.array(reshape_target, dtype=np.int64), name=rs_name
                                 )
                             ],
                         )
@@ -172,9 +259,10 @@ def _canonicalize_inputs(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mode
                             "Reshape",
                             inputs=[out_name, rs_name],
                             outputs=list(c_node.output),
-                            name=f"{c_node.name}_reshape",
+                            name=cache.unique_name(f"{c_node.name or c_node.op_type}_reshape"),
                         )
-                        cache.update_shape(c_node.output[0], old_4d)
+                        if not is_graph_output:
+                            cache.update_shape(c_node.output[0], old_4d)
                         nodes_to_insert.append((rs, c_node))
                 else:
                     # Unknown shape — just update the input to canonical unsqueeze output
@@ -227,6 +315,9 @@ def _compute_sq_unsq_out_shape(
                             break
                     break
 
+    if node.op_type == "Squeeze" and axes is None:
+        axes = next((list(attr.ints) for attr in node.attribute if attr.name == "axes"), None)
+
     if node.op_type == "Squeeze":
         if axes is None:
             return [d for d in in_shape if d != 1]
@@ -258,8 +349,8 @@ def _should_skip_squeeze_unsqueeze(
     * ``Unsqueeze`` whose data input is a graph input — canonical 4D-promotion node.
     * Output feeds ``Gather`` / ``GatherElements`` ``input[1]`` (indices must stay INT32).
     * Output feeds any ``GroupQueryAttention`` input (GQA manages its own shapes).
-    * ``Unsqueeze`` whose data input is a GQA output AND the GQA input was 3D while
-      the GQA output is 4D — this Unsqueeze was placed to adapt the 3D→4D boundary
+    * ``Unsqueeze`` whose data input is a 3D GQA output and whose own output is 4D
+      — this Unsqueeze was placed to adapt the 3D→4D boundary
       and must be preserved.
 
     The check looks one level through an intervening ``Cast`` node since
@@ -309,10 +400,12 @@ def _replace_intermediary_squeeze_unsqueeze(
     * Output feeds Gather/GatherElements ``input[1]`` (indices must remain INT32).
     * Output feeds GroupQueryAttention (GQA manages its own dimensionality).
     * Output of GroupQueryAttention feeds to Unsqueeze node with 3D input.
+    * Promoting the output would change a downstream rank-sensitive operation.
     """
     graph = model.graph
     unique_init: set[str] = set()
     graph_output_names = cache.graph_output_names
+    sensitive_values: set[str] | None = None
 
     nodes_to_remove: list = []
     nodes_to_insert: list[tuple] = []
@@ -338,11 +431,16 @@ def _replace_intermediary_squeeze_unsqueeze(
             continue
 
         is_graph_output = node.output[0] in graph_output_names
+        if not is_graph_output and len(out_shape) < 4:
+            if sensitive_values is None:
+                sensitive_values, _ = _rank_sensitive_consumers(graph, cache)
+            if node.output[0] in sensitive_values:
+                continue
 
         # Graph output: use declared shape (preserves name binding); else pad to 4D.
         reshape_target = out_shape if is_graph_output else pad4d(out_shape)
 
-        rs_name = f"{node.name}_4d_shape"
+        rs_name = cache.unique_name(f"{node.name or node.op_type}_4d_shape")
         add_unique_initializers(
             graph,
             unique_init,
@@ -352,7 +450,7 @@ def _replace_intermediary_squeeze_unsqueeze(
             "Reshape",
             inputs=[node.input[0], rs_name],
             outputs=list(node.output),
-            name=f"{node.name}_to_reshape",
+            name=cache.unique_name(f"{node.name or node.op_type}_to_reshape"),
         )
         nodes_to_insert.append((rs, node))
         nodes_to_remove.append(node)
@@ -410,7 +508,7 @@ def _remove_reshape_chains(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mo
                 "Identity",
                 [inp],
                 [out_tensor],
-                name=f"cleanup_noop_id_{out_tensor}",
+                name=cache.unique_name(f"cleanup_noop_id_{out_tensor}"),
             )
             pass1_batch[node_idx[id(node)]] = ([node], [id_node])
         else:
@@ -472,7 +570,7 @@ def _remove_reshape_chains(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mo
                     "Identity",
                     [inp],
                     [out_tensor],
-                    name=f"cleanup_chain_id_{out_tensor}",
+                    name=cache.unique_name(f"cleanup_chain_id_{out_tensor}"),
                 )
                 pass2_batch[node_idx[id(ch[0])]] = (ch[:], [id_node])
             else:
@@ -480,14 +578,14 @@ def _remove_reshape_chains(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mo
         else:
             rs_shape = numpy_helper.from_array(
                 np.array(out_shape, dtype=np.int64),
-                name=ch[-1].name + "_chain_shape",
+                name=cache.unique_name(f"{ch[-1].name or 'reshape'}_chain_shape"),
             )
             graph.initializer.append(rs_shape)
             rs = helper.make_node(
                 "Reshape",
                 inputs=[inp, rs_shape.name],
                 outputs=[out_tensor],
-                name=ch[-1].name + "_chain",
+                name=cache.unique_name(f"{ch[-1].name or 'reshape'}_chain"),
             )
             pass2_batch[node_idx[id(ch[0])]] = (ch[:], [rs])
         chain_count += 1
@@ -521,6 +619,7 @@ def _fold_constants(model: onnx.ModelProto) -> onnx.ModelProto:
         return model
 
     def _exclude(node) -> bool:
+        """Keep quantization boundaries and identity bindings out of constant folding."""
         return node.op in ("DequantizeLinear", "Identity")
 
     prev_ir = onnx.IR_VERSION
@@ -623,8 +722,7 @@ def _replace_graph_output_reshape_with_squeeze(
 
         if not matched or j != -1:
             # Cannot express as a pure Squeeze of the existing input.
-            # If the output is non-4D, pad the Reshape target to 4D with a
-            # leading 1-dim and add a Squeeze(axis=[0]) to strip it back.
+            # Pad the Reshape target to 4D and restore the declared output rank.
             #
             # Example:
             #   [5,6,7,8] → Reshape([30,14,4]) → graph_output[30,14,4]
@@ -632,38 +730,42 @@ def _replace_graph_output_reshape_with_squeeze(
             #   [5,6,7,8] → Reshape([1,30,14,4]) → Squeeze([0]) → graph_output[30,14,4]
             if len(out_shape) >= 4:
                 continue  # already 4D or higher — leave as-is
-            # Build a 4D shape by prepending 1
-            shape_4d = [1, *out_shape]
-            rs_shape_name = f"{pfx}_4d_shape"
+            shape_4d = pad4d(out_shape)
+            squeeze_axes = list(range(4 - len(out_shape)))
+            rs_shape_name = cache.unique_name(f"{pfx}_4d_shape")
             add_unique_initializers(
                 graph,
                 unique_init,
                 [numpy_helper.from_array(np.array(shape_4d, dtype=np.int64), name=rs_shape_name)],
             )
             # Intermediate 4D tensor name
-            rs_4d_out = f"{pfx}_4d_out"
+            rs_4d_out = cache.unique_name(f"{pfx}_4d_out")
             # Update the Reshape node to target the 4D shape
             node.input[1] = rs_shape_name
             node.output[0] = rs_4d_out
-            # Squeeze to remove the leading 1-dim
-            sq_axes_name = f"{pfx}_sq0_axes"
+            sq_axes_name = cache.unique_name(f"{pfx}_sq0_axes")
             add_unique_initializers(
                 graph,
                 unique_init,
-                [numpy_helper.from_array(np.array([0], dtype=np.int64), name=sq_axes_name)],
+                [
+                    numpy_helper.from_array(
+                        np.array(squeeze_axes, dtype=np.int64), name=sq_axes_name
+                    )
+                ],
             )
             sq = helper.make_node(
                 "Squeeze",
                 inputs=[rs_4d_out, sq_axes_name],
                 outputs=[out_name],
-                name=f"{pfx}_squeeze_leading",
+                name=cache.unique_name(f"{pfx}_squeeze_leading"),
             )
             go_batch[go_node_idx[id(node)]] = ([node], [node, sq])
             cnt += 1
             logger.debug(
-                "Reshape %r → Reshape(%s) + Squeeze([0]) for non-4D graph output %r.",
+                "Reshape %r → Reshape(%s) + Squeeze(%s) for non-4D graph output %r.",
                 node.name,
                 shape_4d,
+                squeeze_axes,
                 out_name,
             )
             continue
@@ -671,7 +773,7 @@ def _replace_graph_output_reshape_with_squeeze(
         squeeze_axes.sort()  # ascending axis order required by ONNX Squeeze
 
         # Build Squeeze node
-        axes_name = f"{pfx}_squeeze_axes"
+        axes_name = cache.unique_name(f"{pfx}_squeeze_axes")
         add_unique_initializers(
             graph,
             unique_init,
@@ -681,7 +783,7 @@ def _replace_graph_output_reshape_with_squeeze(
             "Squeeze",
             inputs=[in_name, axes_name],
             outputs=[out_name],
-            name=f"{pfx}_squeeze",
+            name=cache.unique_name(f"{pfx}_squeeze"),
         )
         go_batch[go_node_idx[id(node)]] = ([node], [sq])
         cnt += 1
@@ -787,7 +889,7 @@ def _remove_consecutive_casts(model: onnx.ModelProto, cache: GraphCache) -> onnx
             inputs=[first_input],
             outputs=[last_output],
             to=last_to,
-            name=f"{ch[-1].name}_chain",
+            name=cache.unique_name(f"{ch[-1].name or 'cast'}_chain"),
         )
         idx = node_idx[id(ch[0])]
         replacements[idx] = (ch[:], [new_cast])
@@ -806,7 +908,7 @@ def _remove_consecutive_casts(model: onnx.ModelProto, cache: GraphCache) -> onnx
 
 
 def _apply_graph_cleanup(model: onnx.ModelProto) -> onnx.ModelProto:
-    """Apply all five cleanup steps in sequence."""
+    """Apply the seven DLA cleanup stages while retaining rank-sensitive paths."""
     model = infer_shapes(model)
     cache = GraphCache(model.graph)
 
