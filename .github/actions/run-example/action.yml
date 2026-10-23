@@ -57,12 +57,12 @@ runs:
         # that pins or upgrades packages (e.g. gpt-oss upgrades datasets, torch_trt downgrades torch) must not
         # change the environment of the examples that run before it.
         packages_before="${RUNNER_TEMP:-/tmp}/packages-before-${{ inputs.example }}.txt"
-        python3 -m pip freeze > "$packages_before" || true
+        python3 -m pip freeze 2>/dev/null > "$packages_before" || true
         echo "::group::Install requirements of ${{ inputs.example }}"
         find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do python3 -m pip install -r "$req_file" || exit 1; done || status=$?
         echo "::endgroup::"
         echo "::group::Packages changed by the requirements of ${{ inputs.example }} (< before, > after)"
-        { python3 -m pip freeze | diff "$packages_before" - || true; } | grep "^[<>]" || echo "none"
+        { python3 -m pip freeze 2>/dev/null | diff "$packages_before" - || true; } | grep "^[<>]" || echo "none"
         echo "::endgroup::"
 
         if (( status == 0 )); then
