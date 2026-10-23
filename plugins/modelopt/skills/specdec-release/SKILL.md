@@ -27,7 +27,7 @@ stage, route to the domain skill: configure a new model, review or triage a trai
 
 Resolve these before starting (ask the user for anything missing):
 
-- **Target** — HF handle or `/hf-local/...` path.
+- **Target** — HF handle or `/hf-local/...` path; Step 1 stages a handle the job host lacks.
 - **Algorithm** — one with launcher examples: `tools/launcher/examples/<Org>/<Model>/hf_online_<algo>.yaml`
   (training, export, smoke) and `specdec_ab_<algo>.yaml` (A|B bench). No training example →
   configure one with **speculative-decoding** first; a missing bench example is added in Step 4.
@@ -43,9 +43,14 @@ Resolve these before starting (ask the user for anything missing):
   Never invent training knobs.
 - **`existing_drafter`** (optional) — an exported drafter to freeze and benchmark instead of
   training one.
-- **`approve_submissions`** — `each` (default): before every launcher submission, retries
-  included, show the resolved command, job count, node-hours and reason, and wait for an
-  OK. `none`: submit within the retry limits below. Either way, log each submission.
+- **`approve_submissions`** — `each` (default): before every cluster job (launcher,
+  `sbatch`/`srun`, weight staging), retries included and whoever submits it, show the
+  resolved command, job count, node-hours and reason, and wait for an OK. An OK covers that
+  exact job once: a retry, or a changed partition, image or command, needs a new one (an
+  attempt that created no job, e.g. an SSH error, may be repeated once unchanged). A
+  sub-agent's brief says: submit at most once; on failure, report back, never retry. `none`:
+  submit within the retry limits below. Either way, log every attempt, even one that created
+  no job.
 - **Run dir** — the working directory, unless the user names another. Don't create a
   subdirectory for the run.
 
@@ -117,6 +122,16 @@ Use the common skill's `credentials.md` and `remote-execution.md` to confirm cre
 cluster reachability. On a remote job host, `remote_sync_to "$SKILL_DIR/scripts" specdec-gates`
 and check its `python3 -V` (≥ 3.8, for the gates). If any fails, stop with `SYSTEMIC` — do not
 submit training.
+
+**Stage the target** (here until it moves to the common skill, for **ptq** and
+**day0-release** too). Jobs see `hf_local` (`$SLURM_HF_LOCAL` on Slurm) at `/hf-local`. If
+`<hf_local>/<org>/<model>/config.json` reads, use it; a copy that lists but can't be read is
+missing, not a reason to hunt for another. Otherwise submit one download job: a CPU partition
+from `clusters.yaml`, `HF_TOKEN` from the environment and never echoed, `huggingface_hub`
+installed if the image lacks it, and `snapshot_download(<handle>, revision=<pinned>,
+local_dir=<hf_local>/<org>/<model>)`. Check `config.json`, the tokenizer and every shard the
+index lists, and record the revision in `inputs`. A 401/403 on a gated model is
+`USER_CONFIG_ERROR`: ask the user to accept its license.
 
 ### Step 2 — Train pipeline
 
@@ -204,7 +219,7 @@ with `<ab>` = `<job_dir>/cicd/<exp_id>/ab`:
 --summary <ab>/ab_summary.json --concurrencies <CONCURRENCIES> --repeats <REPEATS> \
     --algorithm <SPEC_ALGO> --num-spec-tokens <NUM_SPEC_TOKENS> \
     --draft /cicd/drafts/<target>/<algo>/<run_id> --target <hf_model>
-# gate_correctness.py — report only, never blocks
+# gate_correctness.py — report only, never blocks; A-vs-B match next to target-alone drift
 --summary <ab>/ab_summary.json
 ```
 
@@ -224,7 +239,8 @@ Set `verdict` in the state, then write `SPECDEC_REPORT.md` in the run dir from t
   smoke-test AL.
 - **Drafter:** frozen path and checksums.
 - **Benchmark:** AL, TPS A/B and speedup per concurrency from `gate_bench`'s `evidence`, its
-  `measurement_setup`, and `gate_correctness`'s greedy exact match.
+  `measurement_setup`, and `gate_correctness`'s greedy exact match next to its target-alone
+  control (a low match at a matching control is the target's numerics, not the drafter).
 - **Verdicts:** every gate's, the `HUMAN_INTERVENTION` count with reasons, and the readiness
   verdict.
 
@@ -285,7 +301,7 @@ Submissions and approvals are `ACTION`. Any step a human had to take is
 | `TRAIN_REGRESSION` | train | The recipe's own floors failed. Triage with **speculative-decoding**; never waive the floor |
 | `EXPORT_MISSING` | train, freeze | Training died before exporting, or the export is incomplete. Triage the training task; retrain as a new run |
 | `DRAFT_CONFIG_MISMATCH` | train | Export does not fit the target (architecture, projector type, hidden/vocab size, mask token, layer ids). Fix the recipe overrides per the algorithm sheet; retrain |
-| `CHECKPOINT_NOT_SERVABLE` | smoke | Fix the export or serving flags with **deployment**; do not benchmark. If `stage` is `server_died`/`server_timeout` with no config change, resubmit once as a smoke-only submission |
+| `CHECKPOINT_NOT_SERVABLE` | smoke | Act on the smoke JSON's `stage`, not the log's last traceback (the script's exit tears the container down, so later errors are noise). `server_timeout`: the server was still starting; resubmit as a smoke-only submission with a larger `SERVER_TIMEOUT` (900 for a large or hybrid target). `server_died`: fix the export or serving flags with **deployment**, or resubmit once unchanged if the log shows a transient fault. Do not benchmark |
 | `SPEC_NOT_ACTIVE` | smoke | AL ≤ 1.05: drafter not wired up or useless. Check `SPEC_METHOD`, token count, drafter path |
 | `ACCEPTANCE_REGRESSION` | smoke | Serves and speculates, but AL < the recipe's `MIN_ACCEPTANCE_LENGTH`. Triage training with **speculative-decoding**; do not benchmark |
 | `SPEC_CONFIG_MISMATCH` | smoke, bench | Wrong or unrecorded drafter, target, algorithm or token count, or speculation on in arm A / off in arm B. Fix the submission; re-run |
