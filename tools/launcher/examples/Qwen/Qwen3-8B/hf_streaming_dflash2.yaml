@@ -71,6 +71,8 @@ pipeline:
       - data.final_aux_is_base_hidden=true
       - training.output_dir=<<global_vars.output_dir>>
       - training.training_seq_len=4096
+      # The recipe's 16; train on the block vLLM serves, 1 + NUM_SPEC_TOKENS (task_2).
+      - dflash.dflash_block_size=8
       - training.disable_tqdm=true
       # The serve prefills the corpus conversation rather than generating, so the
       # assistant turn is present; Qwen3-8B's stock template just has no

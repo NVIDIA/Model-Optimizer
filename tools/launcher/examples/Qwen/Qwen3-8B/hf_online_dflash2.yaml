@@ -80,11 +80,12 @@ pipeline:
       - training.logging_steps=100
       - training.disable_tqdm=true
       - training.answer_only_loss=true
-      # Draft backbone — identical to the DFlash / DSpark / Domino arms so the
-      # only difference between them is the correction head.
-      - dflash.dflash_block_size=16
+      # Draft backbone — as in the DFlash / DSpark / Domino arms, except the block size.
+      # Train on the block vLLM serves, 1 + NUM_SPEC_TOKENS (task_2); vLLM ignores the
+      # checkpoint's block_size. A 16-token block gave the same AL at the dev budget.
+      # dflash_loss_decay_factor is not set: the recipe's dpace objective ignores it.
+      - dflash.dflash_block_size=8
       - dflash.dflash_num_anchors=512
-      - dflash.dflash_loss_decay_factor=7
       - dflash.dflash_mask_token_id=151669
       - dflash.dflash_self_logit_distillation=false
       - dflash.dflash_architecture_config.num_hidden_layers=5
