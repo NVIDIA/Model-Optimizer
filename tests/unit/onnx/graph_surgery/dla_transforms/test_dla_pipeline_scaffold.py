@@ -17,10 +17,13 @@
 
 import importlib
 
+import numpy as np
+import onnx
 import pytest
 from onnx import TensorProto, helper
 
 pipeline = importlib.import_module("modelopt.onnx.graph_surgery.make_dla_compatible")
+ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for pipeline execution")
 
 
 @pytest.mark.parametrize(
@@ -53,3 +56,49 @@ def test_pipeline_rejects_unavailable_qdq_options(monkeypatch, options):
     with pytest.raises(error):
         pipeline._transform_make_dla_compatible(model, verbose=False, **options)
     assert model.SerializeToString() == before
+
+
+def test_pipeline_applies_cast_reorders_nodes_and_returns_model():
+    """The real pipeline dispatches stages, orders support nodes and returns executable outputs."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "Constant",
+                    [],
+                    ["K"],
+                    name="constant",
+                    value=helper.make_tensor("k", TensorProto.FLOAT, [2], [1.0, 2.0]),
+                ),
+                helper.make_node("Cast", ["X"], ["C"], name="cast", to=TensorProto.INT32),
+                helper.make_node("Identity", ["C"], ["Y"], name="consumer"),
+                helper.make_node("Identity", ["K"], ["Z"], name="constant_consumer"),
+            ],
+            "pipeline",
+            [helper.make_tensor_value_info("X", TensorProto.FLOAT, [2])],
+            [
+                helper.make_tensor_value_info("Y", TensorProto.INT32, [2]),
+                helper.make_tensor_value_info("Z", TensorProto.FLOAT, [2]),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    onnx.checker.check_model(model, full_check=True)
+    result = pipeline._transform_make_dla_compatible(model, verbose=False)
+    names = [node.name for node in result.graph.node]
+    assert names.index("cast") < names.index("consumer") < names.index("constant_consumer")
+    if "constant" in names:
+        # Later slices turn Constants into initializers before the final reorder.
+        assert names.index("consumer") < names.index("constant") < names.index("constant_consumer")
+    cast = next(node for node in result.graph.node if node.name == "cast")
+    assert (
+        next(attribute for attribute in cast.attribute if attribute.name == "to").i
+        == TensorProto.FLOAT
+    )
+    onnx.checker.check_model(result, full_check=True)
+    x = np.array([1.5, -2.5], dtype=np.float32)
+    session = ort.InferenceSession(result.SerializeToString(), providers=["CPUExecutionProvider"])
+    outputs = dict(zip([value.name for value in result.graph.output], session.run(None, {"X": x})))
+    np.testing.assert_array_equal(outputs["Y"], x)
+    np.testing.assert_array_equal(outputs["Z"], np.array([1.0, 2.0], dtype=np.float32))
