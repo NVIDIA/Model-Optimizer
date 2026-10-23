@@ -24,7 +24,7 @@ permissions:
 jobs:
   build-docs:
     if: github.event.action != 'closed'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -40,7 +40,7 @@ jobs:
 
   changes:
     if: github.event_name == 'pull_request' && github.event.action != 'closed'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       docs: ${{ steps.filter.outputs.docs }}
     steps:
@@ -62,7 +62,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       (github.event.action == 'closed' || needs.changes.outputs.docs == 'true')
     needs: [build-docs, changes]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     # Per-PR concurrency without cancel-in-progress so 'closed' cleanup always runs
     concurrency:
@@ -83,7 +83,7 @@ jobs:
   deploy-gh-pages:
     if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: build-docs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - name: Download docs artifact

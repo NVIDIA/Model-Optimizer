@@ -21,7 +21,7 @@ jobs:
   # One changed-files pass decides which lanes run. Lane granularity, not per-example: a job's
   # `if` cannot read `matrix`, so gating an individual example would need a job per example.
   pr-gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       checks: read
       contents: read
@@ -237,7 +237,7 @@ jobs:
     # Run even if example tests are skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
     needs: [pr-gate, torch, vllm, trtllm, megatron, diffusers, onnx]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Required example tests did not succeed
         if: |
