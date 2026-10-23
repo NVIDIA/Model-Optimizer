@@ -659,3 +659,67 @@ def test_save_rejects_unloaded_external_tensors_before_changes(
     assert {
         entry: entry.read_bytes() for entry in tmp_path.rglob("*") if entry.is_file()
     } == files_before
+
+
+@pytest.mark.parametrize("storage", ["initializer", "attribute", "subgraph"])
+@pytest.mark.parametrize("write_failure", [False, True])
+def test_inline_save_preserves_loaded_external_tensors(tmp_path, storage, write_failure):
+    """Inline loaded external payloads without changing caller state or existing sidecars."""
+    values = np.arange(2048, dtype=np.float32)
+    values.view(np.uint8)[-1] = 0x1A
+    weight = numpy_helper.from_array(values, "weight")
+    onnx.external_data_helper.set_external_data(
+        weight, "original.weights", offset=7, length=values.nbytes, checksum="original-checksum"
+    )
+    value = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2048])
+    if storage == "initializer":
+        graph = helper.make_graph(
+            [],
+            "inline",
+            [],
+            [helper.make_tensor_value_info("weight", TensorProto.FLOAT, [2048])],
+            [weight],
+        )
+    elif storage == "attribute":
+        graph = helper.make_graph(
+            [helper.make_node("Constant", [], ["y"], value=weight)], "inline", [], [value]
+        )
+    else:
+        branch = helper.make_graph(
+            [helper.make_node("Constant", [], ["y"], value=weight)], "branch", [], [value]
+        )
+        graph = helper.make_graph(
+            [helper.make_node("If", ["condition"], ["y"], then_branch=branch, else_branch=branch)],
+            "inline",
+            [],
+            [value],
+            [numpy_helper.from_array(np.asarray(True), "condition")],
+        )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=9)
+    before = model.SerializeToString()
+    sidecar = tmp_path / "original.weights"
+    sidecar.write_bytes(b"original sidecar")
+    path = tmp_path / "inline.onnx"
+    if write_failure:
+        path.mkdir()
+        with pytest.raises(OSError):
+            save_onnx_model(model, str(path), use_external_data=False, verbose=False)
+    else:
+        save_onnx_model(model, str(path), use_external_data=False, verbose=False)
+        saved = onnx.load(path, load_external_data=False)
+        onnx.checker.check_model(saved)
+        weights = [
+            tensor
+            for tensor in onnx.external_data_helper._get_all_tensors(saved)
+            if tensor.name == "weight"
+        ]
+        assert len(weights) == (2 if storage == "subgraph" else 1)
+        for tensor in weights:
+            assert tensor.data_location != TensorProto.EXTERNAL
+            assert not tensor.external_data
+            assert numpy_helper.to_array(tensor).tobytes() == values.tobytes()
+    assert model.SerializeToString() == before
+    assert sidecar.read_bytes() == b"original sidecar"
+    assert {entry for entry in tmp_path.iterdir() if entry.is_file()} == (
+        {sidecar} if write_failure else {sidecar, path}
+    )

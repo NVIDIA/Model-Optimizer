@@ -142,7 +142,13 @@ def save_onnx_model(
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
     if not use_external_data:
-        onnx.save(model, output_path)
+        states = _snapshot_tensor_storage(model, external_only=True)
+        try:
+            if states:
+                onnx.external_data_helper.convert_model_from_external_data(model)
+            onnx.save(model, output_path)
+        finally:
+            _restore_tensor_storage(states)
         return
     with tempfile.TemporaryDirectory(dir=output_dir or ".") as temporary:
         # Separate roots prevent filesystem filename aliases from overwriting staged payloads.
@@ -190,6 +196,28 @@ def save_onnx_model(
                 backup_weights.parent.rmdir()
 
 
+def _snapshot_tensor_storage(model, *, external_only=False):
+    """Snapshot storage flags and external entries without copying tensor payloads."""
+    states = []
+    for tensor in onnx.external_data_helper._get_all_tensors(model):
+        if external_only and not onnx.external_data_helper.uses_external_data(tensor):
+            continue
+        metadata = TensorProto()
+        if tensor.HasField("data_location"):
+            metadata.data_location = tensor.data_location
+        metadata.external_data.extend(tensor.external_data)
+        states.append((tensor, metadata))
+    return states
+
+
+def _restore_tensor_storage(states):
+    """Restore storage metadata, including field presence and external-entry order."""
+    for tensor, metadata in states:
+        tensor.ClearField("data_location")
+        tensor.ClearField("external_data")
+        tensor.MergeFrom(metadata)
+
+
 def _validate_external_data_destination(
     output_root: Path, destination: Path, output_path: Path
 ) -> None:
@@ -214,13 +242,7 @@ def _save_external_weights(model, model_path, weights_path, location, size_thres
 
     Successful saves retain the updated external storage metadata.
     """
-    states = []
-    for tensor in onnx.external_data_helper._get_all_tensors(model):
-        metadata = TensorProto()
-        if tensor.HasField("data_location"):
-            metadata.data_location = tensor.data_location
-        metadata.external_data.extend(tensor.external_data)
-        states.append((tensor, metadata))
+    states = _snapshot_tensor_storage(model)
     payloads = []
     try:
         # Assign the final location only when writing; its existing sidecar is still live.
@@ -259,10 +281,7 @@ def _save_external_weights(model, model_path, weights_path, location, size_thres
                         )
                     tensor.raw_data = data
                     del data
-        for tensor, metadata in states:
-            tensor.ClearField("data_location")
-            tensor.ClearField("external_data")
-            tensor.MergeFrom(metadata)
+        _restore_tensor_storage(states)
         raise
 
 
