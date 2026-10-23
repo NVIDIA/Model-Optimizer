@@ -21,6 +21,7 @@ import os
 import tempfile
 from collections import defaultdict, deque
 from collections.abc import Iterable
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -105,18 +106,27 @@ def save_onnx_model(
     """Save a loaded ONNX model, optionally storing large weights in a sidecar.
 
     Args:
-        model: Loaded model; externalizing weights updates its tensor storage metadata.
+        model: Model with external tensor payloads loaded; successful external saves update
+            its tensor storage metadata.
         output_path: Destination ONNX file.
         use_external_data: Store large tensor payloads in an external file.
         external_data_name: Relative sidecar path; defaults to the ONNX filename plus ``_data``.
         size_threshold: Minimum tensor size in bytes to externalize.
         verbose: Log the destination.
     """
+    for tensor in onnx.external_data_helper._get_all_tensors(model):
+        if onnx.external_data_helper.uses_external_data(tensor) and not tensor.HasField("raw_data"):
+            raise ValueError(
+                f"External tensor {tensor.name!r} has no raw_data; "
+                "load external data before saving (onnx.load(..., load_external_data=True))"
+            )
     if verbose:
         logger.info("Saving modified model to: %s", output_path)
     output_dir = os.path.dirname(output_path)
     location = Path(external_data_name or os.path.basename(output_path) + "_data")
     if use_external_data:
+        output_root = Path(output_dir or ".").resolve()
+        destination = output_root / location
         if (
             external_data_name == ""
             or location.anchor
@@ -127,6 +137,7 @@ def save_onnx_model(
             raise ValueError(
                 "External data must have a distinct relative path inside the output directory"
             )
+        _validate_external_data_destination(output_root, destination, Path(output_path))
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
     if not use_external_data:
@@ -136,37 +147,110 @@ def save_onnx_model(
         staged_model = Path(temporary) / Path(output_path).name
         staged_weights = Path(temporary) / location
         staged_weights.parent.mkdir(parents=True, exist_ok=True)
-        _save_external_weights(
-            model, staged_model, staged_weights, location.as_posix(), size_threshold
-        )
-        if staged_weights.exists():
-            destination = Path(output_dir or ".") / location
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(staged_weights, destination)
-        os.replace(staged_model, output_path)
+        backup_weights = None
+        weights_replaced = False
+        try:
+            with _save_external_weights(
+                model,
+                staged_model,
+                staged_weights,
+                location.as_posix(),
+                size_threshold,
+                destination,
+            ):
+                if staged_weights.exists():
+                    # Recheck after staging in case a link changed during the write.
+                    _validate_external_data_destination(output_root, destination, Path(output_path))
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if destination.exists():
+                        # Keep the backup outside staging so a failed rollback cannot delete it.
+                        backup_weights = Path(tempfile.mkdtemp(dir=destination.parent)) / "weights"
+                        os.replace(destination, backup_weights)
+                    os.replace(staged_weights, destination)
+                    weights_replaced = True
+                os.replace(staged_model, output_path)
+        except OSError:
+            if backup_weights is not None and backup_weights.exists():
+                os.replace(backup_weights, destination)
+            elif weights_replaced:
+                destination.unlink()
+            raise
+        else:
+            if backup_weights is not None:
+                backup_weights.unlink()
+        finally:
+            if backup_weights is not None and not backup_weights.exists():
+                backup_weights.parent.rmdir()
+
+
+def _validate_external_data_destination(
+    output_root: Path, destination: Path, output_path: Path
+) -> None:
+    resolved_destination = destination.resolve()
+    if not resolved_destination.is_relative_to(output_root):
+        raise ValueError("External data must resolve inside the output directory")
+    if resolved_destination == output_path.resolve():
+        raise ValueError("External data must have a distinct path from the output model")
+    if destination.is_symlink():
+        raise ValueError("External data destination must not be a symbolic link")
+    if destination.exists() and not destination.is_file():
+        raise ValueError("External data destination must be a regular file")
+    if destination.exists() and destination.stat().st_nlink > 1:
+        raise ValueError("External data destination must not have multiple hard links")
 
 
 # TODO: Once ONNX >= 1.22.0 is required, use its external writer instead (onnx/onnx#7790).
-def _save_external_weights(model, model_path, weights_path, location, size_threshold):
-    onnx.external_data_helper.convert_model_to_external_data(
-        model, location=location, size_threshold=size_threshold
-    )
-    tensors = [
-        tensor
-        for tensor in onnx.external_data_helper._get_all_tensors(model)
-        if onnx.external_data_helper.uses_external_data(tensor) and tensor.HasField("raw_data")
-    ]
-    if tensors:
-        # ONNX 1.21 reopens sidecars in Windows text mode, truncating trailing 0x1A.
-        with weights_path.open("wb") as stream:
-            for tensor in tensors:
-                data, offset = tensor.raw_data, stream.tell()
-                stream.write(data)
-                onnx.external_data_helper.set_external_data(
-                    tensor, location, offset=offset, length=len(data)
-                )
-                tensor.ClearField("raw_data")
-    onnx.save(model, model_path)
+@contextmanager
+def _save_external_weights(model, model_path, weights_path, location, size_threshold, destination):
+    states = []
+    for tensor in onnx.external_data_helper._get_all_tensors(model):
+        metadata = TensorProto()
+        if tensor.HasField("data_location"):
+            metadata.data_location = tensor.data_location
+        metadata.external_data.extend(tensor.external_data)
+        states.append((tensor, metadata))
+    payloads = []
+    try:
+        onnx.external_data_helper.convert_model_to_external_data(
+            model, location=location, size_threshold=size_threshold
+        )
+        tensors = [
+            tensor for tensor, _ in states if onnx.external_data_helper.uses_external_data(tensor)
+        ]
+        if tensors:
+            # ONNX 1.21 reopens sidecars in Windows text mode, truncating trailing 0x1A.
+            with weights_path.open("wb") as stream:
+                for tensor in tensors:
+                    data, offset = tensor.raw_data, stream.tell()
+                    stream.write(data)
+                    onnx.external_data_helper.set_external_data(
+                        tensor, location, offset=offset, length=len(data)
+                    )
+                    payloads.append((tensor, offset, len(data)))
+                    tensor.ClearField("raw_data")
+                    del data
+        onnx.save(model, model_path)
+        yield
+    except BaseException:
+        # Restore from staging or the installed sidecar before filesystem rollback replaces it.
+        if payloads:
+            source = weights_path if weights_path.exists() else destination
+            with source.open("rb") as stream:
+                for tensor, offset, length in payloads:
+                    stream.seek(offset)
+                    data = stream.read(length)
+                    if len(data) != length:
+                        raise OSError(
+                            f"Cannot restore tensor {tensor.name!r}: expected {length} bytes, "
+                            f"read {len(data)}"
+                        )
+                    tensor.raw_data = data
+                    del data
+        for tensor, metadata in states:
+            tensor.ClearField("data_location")
+            tensor.ClearField("external_data")
+            tensor.MergeFrom(metadata)
+        raise
 
 
 def topological_sort_nodes(graph: onnx.GraphProto) -> list[onnx.NodeProto]:
