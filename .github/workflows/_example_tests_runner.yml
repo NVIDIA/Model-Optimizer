@@ -8,11 +8,6 @@ on:
         description: "Docker image to use for tests"
         required: true
         type: string
-      container_options:
-        description: "Docker options for the test container"
-        required: false
-        type: string
-        default: "--shm-size=2gb"
       example:
         description: "Example name to test (e.g. 'hf_ptq')"
         required: true
@@ -46,7 +41,9 @@ jobs:
       contents: read
     container:
       image: ${{ inputs.docker_image }}
-      options: ${{ inputs.container_options }} # TRT-LLM tests on 2-GPU runner need more shared memory
+      # Fixed rather than caller-supplied so no caller can pass e.g. --privileged or host mounts.
+      # TRT-LLM tests on 2-GPU runner need more shared memory; the vLLM image needs root.
+      options: --shm-size=2gb ${{ (startsWith(inputs.docker_image, 'vllm/') || startsWith(inputs.docker_image, 'docker.io/vllm/')) && '--user 0' || '' }}
       env:
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -57,10 +54,12 @@ jobs:
         if: startsWith(inputs.docker_image, 'vllm/') || startsWith(inputs.docker_image, 'docker.io/vllm/')
         run: apt-get update && apt-get install -y git
       - uses: actions/checkout@v6
-      - uses: nv-gha-runners/setup-proxy-cache@main
+      - uses: nv-gha-runners/setup-proxy-cache@eadc57871cde0c92a223d0f486ab669a2360f978 # main
       - uses: ./.github/actions/cache-extensions
+        id: ext-cache
         with:
-          cache-key: rtxpro6000-${{ inputs.docker_image }}
+          # Per example: jobs sharing an image build different extensions, and the first to save wins the key.
+          cache-key: rtxpro6000-example-${{ inputs.example }}-${{ inputs.docker_image }}
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu:/usr/local/tensorrt/targets/x86_64-linux-gnu/lib" >> $GITHUB_ENV
@@ -113,12 +112,18 @@ jobs:
             pytest_args+=(-n 4)
           fi
           python3 -m pytest tests/examples/${{ inputs.example }} --cov "${pytest_args[@]}"
+      - name: Save extensions
+        # Not tied to the tests passing, see the action description
+        if: always() && steps.ext-cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/save-extensions
+        with:
+          cache-key: ${{ steps.ext-cache.outputs.cache-key }}
       - name: Flag allowed failure
         if: ${{ inputs.allow_failure && steps.run_tests.outcome == 'failure' }}
         run: |
           echo "::warning title=Allowed example failure::'${{ inputs.example }}' failed but is in the allow-failure list (vars.ALLOW_FAILURE_EXAMPLE_TESTS); not blocking. Remove it from the variable once fixed."
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml

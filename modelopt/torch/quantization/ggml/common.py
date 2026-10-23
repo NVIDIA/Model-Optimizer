@@ -154,8 +154,12 @@ def pinned_packed_weight(quantizer, format_name: str) -> torch.Tensor | None:
     return getattr(quantizer, _pin_name(format_name), None)
 
 
+# Prefix of the buffer holding a pinned payload; checkpoint code keeps buffers with it.
+PINNED_PAYLOAD_PREFIX = "_ggml_pinned_"
+
+
 def _pin_name(format_name: str) -> str:
-    return f"_ggml_pinned_{format_name}"
+    return f"{PINNED_PAYLOAD_PREFIX}{format_name}"
 
 
 def _matching_rows(table: torch.Tensor, rows: torch.Tensor) -> torch.Tensor | None:
@@ -243,6 +247,11 @@ class GGMLFormat:
     # its search temporaries, decoding runs every forward and is bounded by kernel launches.
     block_chunk_size: int
     decode_chunk_size: int
+    # Every decoded weight is an int8 level times a float32 step shared by ``int8_group_size``
+    # weights. ``unpack_int8`` returns both for a chunk of blocks, and the torch decoder
+    # multiplies them out, so the integer view and the decoding cannot disagree.
+    int8_group_size: int
+    unpack_int8: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
     # Whether ``quantize`` takes a per-input-column ``importance`` that weights its search.
     weighted: bool = False
 
@@ -250,6 +259,36 @@ class GGMLFormat:
     def effective_bits(self) -> float:
         """Packed storage cost per weight."""
         return self.block_bytes * 8 / self.block_size
+
+    def decode_int8(
+        self, packed_weights: torch.Tensor, weight_shape: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Decode a payload into int8 levels and the float32 step of each ``int8_group_size``.
+
+        ``levels * steps`` (each step repeated over its group) equals ``dequantize`` in float32
+        exactly, so a weight-only integer kernel with these group scales reproduces the format.
+
+        Returns:
+            ``levels`` shaped like the weight and ``steps`` shaped
+            ``[*weight_shape[:-1], weight_shape[-1] // int8_group_size]``.
+        """
+        shape = validate_packed_weights(
+            packed_weights,
+            weight_shape,
+            block_bytes=self.block_bytes,
+            block_size=self.block_size,
+            format_name=self.name.upper(),
+        )
+        blocks = packed_weights.contiguous().reshape(-1, self.block_bytes)
+        groups = self.block_size // self.int8_group_size
+        levels = torch.empty((len(blocks), self.block_size), dtype=torch.int8, device=blocks.device)
+        steps = torch.empty((len(blocks), groups), dtype=torch.float32, device=blocks.device)
+        for start in range(0, len(blocks), self.decode_chunk_size):
+            stop = start + self.decode_chunk_size
+            chunk_levels, chunk_steps = self.unpack_int8(blocks[start:stop])
+            levels[start:stop] = chunk_levels
+            steps[start:stop] = chunk_steps
+        return levels.reshape(shape), steps.reshape(*shape[:-1], -1)
 
     def fake_quant(
         self,
@@ -348,6 +387,26 @@ class GGMLFormat:
             if index is not None:
                 return pinned[index].reshape(*weight.shape[:-1], width, self.block_bytes)
         return None
+
+
+def dequantize_blocks(
+    blocks: torch.Tensor,
+    unpack_int8: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]],
+    *,
+    block_size: int,
+    group_size: int,
+    dtype: torch.dtype,
+    block_chunk_size: int,
+) -> torch.Tensor:
+    """Decode ``[blocks, block_bytes]`` payload rows a chunk at a time as ``levels * steps``."""
+    decoded = torch.empty((len(blocks), block_size), dtype=dtype, device=blocks.device)
+    for start in range(0, len(blocks), block_chunk_size):
+        stop = start + block_chunk_size
+        levels, steps = unpack_int8(blocks[start:stop])
+        decoded[start:stop] = (
+            levels.reshape(len(levels), -1, group_size) * steps.unsqueeze(-1)
+        ).reshape(-1, block_size)
+    return decoded
 
 
 def narrow_to_float32(blocks: torch.Tensor) -> torch.Tensor:

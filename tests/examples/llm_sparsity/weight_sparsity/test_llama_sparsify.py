@@ -112,6 +112,19 @@ def _test_llama_sparsity_finetune(tiny_llama_path, tmp_path, data_path, sparsity
         max_length=64,
     )
 
+    # Finally restore the finetuned (FSDP-saved) state into an unsharded model and export it
+    run_example_command(
+        extend_cmd_parts(
+            ["python", "export_hf_ckpt.py"],
+            model_name_or_path=tiny_llama_path,
+            modelopt_restore_path=finetune_output / "finetuned_modelopt_state.pth",
+            dtype=dtype,
+            model_max_length=64,
+            output_dir=tmp_path / "export_output",
+        ),
+        "llm_sparsity/weight_sparsity",
+    )
+
 
 @pytest.mark.parametrize(
     ("sparsity_fmt", "dtype"),

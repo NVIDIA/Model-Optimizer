@@ -130,14 +130,14 @@ def test_gptq_export_roundtrip():
 @pytest.mark.parametrize(
     "quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG]
 )
-def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer):
+def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer, calib_jsonl):
     model = get_tiny_llama(vocab_size=tiny_tokenizer.vocab_size).to("cuda")
     model.eval()
 
     quant_cfg = copy.deepcopy(quant_cfg)
     quant_cfg["algorithm"] = {"method": "gptq", "layerwise": {"enable": True}}
     calib_dataloader = get_dataset_dataloader(
-        dataset_name="cnn_dailymail",
+        dataset_name=calib_jsonl,
         tokenizer=tiny_tokenizer,
         batch_size=2,
         num_samples=8,
@@ -206,6 +206,20 @@ def _run_fused_gptq_nvfp4(
         w, block_amax, global_scale, h_inv, gptq_block_size, quant_block_size
     )
     return w
+
+
+@requires_triton
+def test_fused_nvfp4_gptq_runs_on_the_weights_gpu(need_2_gpus):
+    """A layer device_map placed on another GPU is updated there, not from the current GPU."""
+    torch.manual_seed(42)
+    weight, _, block_amax, global_scale, h_inv = _make_nvfp4_test_data(16, 64, 256)
+    expected = _run_fused_gptq_nvfp4(weight, block_amax, global_scale, h_inv, 128, 16)
+
+    weight, block_amax, h_inv = (t.to("cuda:1") for t in (weight, block_amax, h_inv))
+    got = _run_fused_gptq_nvfp4(weight, block_amax, global_scale, h_inv, 128, 16)
+
+    assert torch.cuda.current_device() == 0
+    torch.testing.assert_close(got.cpu(), expected.cpu(), rtol=0, atol=0)
 
 
 _NVFP4_QUANT_BLOCK_SIZES = [16, 128]

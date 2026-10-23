@@ -48,23 +48,14 @@ def _check_lib_in_ld_library_path(ld_library_path, lib_pattern):
     return False, None
 
 
-def _run_trtexec(
-    args: list[str] | None = None, timeout: float | None = None
+def _run_trtexec_command(
+    args: list[str] | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run a 'trtexec' command via subprocess.
-
-    Args:
-        args: Arguments to pass to trtexec (without the 'trtexec' command itself).
-        timeout: Optional subprocess timeout in seconds.
-
-    Returns:
-        The completed subprocess result.
-
-    Raises:
-        FileNotFoundError: If the 'trtexec' binary is not found in PATH.
-    """
+    """Run the trusted ``trtexec`` executable without invoking a shell."""
     cmd = ["trtexec", *(args or [])]
     try:
+        # The executable is fixed and argv remains list-form, so no local shell interprets input.
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)  # nosec B603
     except FileNotFoundError as e:
         raise FileNotFoundError(
@@ -115,7 +106,7 @@ def _check_for_trtexec(min_version: str = "10.0") -> str:
         )
 
     try:
-        result = _run_trtexec(timeout=5)
+        result = _run_trtexec_command(timeout=5)
         banner_output = result.stdout + result.stderr
         parsed_version = _parse_version_from_string(banner_output)
 

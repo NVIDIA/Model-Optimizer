@@ -26,7 +26,7 @@ data:
   data_path:
   offline_data_path:
   # Dumped top-k teacher deployment policy. Selects data.mode=sparse, which needs no
-  # base lm_head at train time and requires a TVD objective (tvd or tvd_deploy).
+  # base lm_head at train time and requires a TVD objective (tvd, tvd_deploy or tvd_ce).
   #
   # The first run over a dump builds a memmapped cache beside the shards, which takes
   # hours on a large corpus. Under torchrun only rank 0 builds it and the others wait,
@@ -70,7 +70,8 @@ training:
 external:
   # soft_ce matches the EAGLE offline objective. tvd is plain total-variation
   # distance; tvd_deploy filters both sides to the serving policy first and is the
-  # acceptance the deployed pair sees.
+  # acceptance the deployed pair sees. tvd_ce adds a cross-entropy term on the base's
+  # argmax, weighted by external_tvd_alpha / external_ce_alpha.
   #
   # How much of the base's distribution the loss can see depends on the data:
   #   offline_data_path  hidden states -> base lm_head -> the FULL distribution,

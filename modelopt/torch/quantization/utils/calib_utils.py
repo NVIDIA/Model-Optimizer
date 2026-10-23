@@ -130,14 +130,30 @@ class GPTQHelper:
 
     CACHE_NAME = "_forward_no_gptq_hessian"
 
-    def __init__(self, module, name, offload_to_cpu=False, fused=False, importance_weighted=False):
-        """Initialize GPTQHelper with module state and Hessian storage."""
+    def __init__(
+        self,
+        module,
+        name,
+        offload_to_cpu=False,
+        fused=False,
+        importance_weighted=False,
+        weight_quantizer=None,
+        weight=None,
+    ):
+        """Initialize GPTQHelper with module state and Hessian storage.
+
+        ``weight_quantizer`` and ``weight`` select one of several weights a module holds, such as
+        one expert's slice of an HF fused-MoE parameter; by default the helper owns
+        ``module.weight`` and ``module.weight_quantizer``.
+        """
         self.module = module
         self.name = name
         self.fused = fused
         self.importance_weighted = importance_weighted
-        in_features = module.weight.shape[-1]
-        device = module.weight.device
+        self._weight_quantizer = weight_quantizer
+        weight = module.weight if weight is None else weight
+        in_features = weight.shape[-1]
+        device = weight.device
         if device.type == "meta" or (
             offload_to_cpu and device.type == "cuda" and get_used_gpu_mem_fraction(device) > 0.65
         ):
@@ -147,6 +163,13 @@ class GPTQHelper:
         # Set by update_weights(); listed here for documentation.
         self.weight: torch.Tensor | None = None
         self.h_inv: torch.Tensor | None = None
+
+    @property
+    def weight_quantizer(self):
+        """The quantizer GPTQ quantizes this helper's weight with."""
+        if self._weight_quantizer is not None:
+            return self._weight_quantizer
+        return self.module.weight_quantizer
 
     def setup(self):
         """Patch the module's forward to accumulate Hessian during the collection pass."""
@@ -158,15 +181,18 @@ class GPTQHelper:
                 hessian_input = self.input_quantizer(inp)
             else:
                 hessian_input = inp
-            gptq_helper.hessian, gptq_helper.n_samples = update_hessian(
-                hessian_input, gptq_helper.hessian, gptq_helper.n_samples
-            )
+            gptq_helper.accumulate(hessian_input)
 
             out = self._forward_no_gptq_hessian(input, *args, **kwargs)
 
             return out
 
         bind_forward_method(self.module, hessian_forward, self.CACHE_NAME)
+
+    def accumulate(self, inputs):
+        """Add a batch of this weight's inputs, after input quantization, to the Hessian."""
+        inputs = inputs.to_local() if hasattr(inputs, "to_local") else inputs
+        self.hessian, self.n_samples = update_hessian(inputs, self.hessian, self.n_samples)
 
     def cleanup(self):
         """Unpatch the module's forward method."""
@@ -197,23 +223,23 @@ class GPTQHelper:
         self.weight = None
         self.h_inv = None
 
-    def update_weights(self, block_size, perc_damp):
-        """Run GPTQ blockwise weight update on this module.
+    def update_weights(self, block_size, perc_damp, weight=None):
+        """Run GPTQ blockwise weight update on this helper's weight.
 
-        Populates ``self.weight`` and ``self.h_inv``, runs the blockwise update,
-        logs MSE, and writes the result back to the module.
+        Populates ``self.weight`` and ``self.h_inv``, runs the blockwise update, logs MSE, and
+        overwrites ``weight`` (default ``module.weight``) in place, so an expert's slice of a
+        fused 3-D parameter is written back into that parameter.
         """
-        hessian = self.hessian.to(self.module.weight.device)
-        self.weight = self.module.weight.data.float().clone()
+        weight = self.module.weight if weight is None else weight
+        hessian = self.hessian.to(weight.device)
+        self.weight = weight.data.float().clone()
         self._prepare_hessian_inverse(hessian, perc_damp)
         self._blockwise_update(block_size)
-        self._print_mse_error(hessian)
-        self.module.weight.data = self.weight.reshape(self.module.weight.shape).to(
-            self.module.weight.data.dtype
-        )
+        self._print_mse_error(hessian, weight)
+        weight.data.copy_(self.weight.reshape(weight.shape))
 
     # ------------------------------------------------------------------
-    # Quantize helpers — all read from self.module, self.weight, self.h_inv
+    # Quantize helpers — all read from self.weight_quantizer, self.weight, self.h_inv
     # ------------------------------------------------------------------
 
     def _prepare_hessian_inverse(self, hessian, perc_damp):
@@ -232,7 +258,7 @@ class GPTQHelper:
         assert self.weight is not None and self.h_inv is not None, (
             "_blockwise_update called before _prepare_hessian_inverse()"
         )
-        quantizer = self.module.weight_quantizer
+        quantizer = self.weight_quantizer
 
         if self.fused and getattr(quantizer, "_is_nvfp4_static_quantizer", False):
             block_sizes = quantizer.block_sizes
@@ -252,9 +278,9 @@ class GPTQHelper:
         else:
             gptq_blockwise_update(self.weight, self.h_inv, block_size, quantizer)
 
-    def _print_mse_error(self, hessian):
-        """Log Hessian-weighted relative MSE between ``self.weight`` and original weights."""
-        w_orig = self.module.weight.float()
+    def _print_mse_error(self, hessian, weight):
+        """Log Hessian-weighted relative MSE between ``self.weight`` and original ``weight``."""
+        w_orig = weight.float()
         delta = self.weight - w_orig
         mse = (delta).mm(hessian).mul(delta).mean() / (w_orig.mm(hessian).mul(w_orig).mean() + 1e-6)
         suffix = f", n_hessian_samples: {self.n_samples}" if self.n_samples else ""
