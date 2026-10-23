@@ -21,9 +21,8 @@ experts, split over the ranks, run through it, and we compare the forward AND th
 the input hidden states, each rank's experts, and the **routing weights**) against the whole module
 on one process.
 
-The routing-weight gradient check is the regression guard for the autograd-aware routing-weight hop:
-if the routing weights were transported with a plain (non-autograd) collective, they would receive
-no gradient and the comparison would fail.
+The routing-weight gradient check guards that the routing weights keep their gradient: they never
+travel, and weight their tokens' expert results on the rank that holds them.
 """
 
 import copy
@@ -118,6 +117,47 @@ def _chunked_hops_job(rank, size):
     torch.testing.assert_close(chunked, whole, atol=0, rtol=0)
 
 
+def _bounded_combine_job(rank, size):
+    from torch.utils._python_dispatch import TorchDispatchMode
+    from torch.utils._pytree import tree_leaves
+
+    class LargestFp32(TorchDispatchMode):
+        """Records the largest fp32 tensor any op produces."""
+
+        numel = 0
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            out = func(*args, **(kwargs or {}))
+            for t in tree_leaves(out):
+                if isinstance(t, torch.Tensor) and t.dtype == torch.float32:
+                    self.numel = max(self.numel, t.numel())
+            return out
+
+    group, _ = dist.new_subgroups(1)
+    gen = torch.Generator().manual_seed(0)
+    x = torch.randn(T, H, generator=gen).to(COMPUTE_DTYPE)
+    ti = torch.randint(0, E, (T, TOP_K), generator=gen)
+    tw = torch.rand(T, TOP_K, generator=gen)
+    default = moe._COMBINE_SLICE_ELEMENTS
+    with torch.no_grad():
+        whole = a2a_moe(group, x, ti, tw, E, _identity_experts)
+        moe._COMBINE_SLICE_ELEMENTS = H  # one row a slice
+        try:
+            with LargestFp32() as largest:
+                sliced = a2a_moe(group, x, ti, tw, E, _identity_experts)
+        finally:
+            moe._COMBINE_SLICE_ELEMENTS = default
+    # Only the [T, H] accumulator: the [T * TOP_K, H] results never go fp32 whole.
+    assert largest.numel <= T * H
+    torch.testing.assert_close(sliced, whole, rtol=0, atol=0)
+
+
+def test_the_combine_works_in_fp32_a_slice_of_rows_at_a_time(cpu_dist_workers):
+    """A whole fp32 copy of the (token, expert) results reaches GiBs at calibration batch sizes; the
+    combine weights and sums them a slice at a time, with the same result."""
+    cpu_dist_workers.run(_bounded_combine_job)
+
+
 def test_a2a_moe_chunks_hops_past_the_element_limit(cpu_dist_workers):
     cpu_dist_workers.run(_chunked_hops_job)
 
@@ -202,7 +242,7 @@ def _split_qwen3_moe_experts(rank, size):
     return whole, local, owned
 
 
-def _routed_tokens(size, to_rank0=False):
+def _routed_tokens(size, to_rank0=False, weights_dtype=COMPUTE_DTYPE):
     """Every rank's tokens and their top-k routing, identical on all ranks; ``to_rank0`` routes every
     token to the experts rank 0 owns."""
     gen = torch.Generator().manual_seed(1)
@@ -210,7 +250,7 @@ def _routed_tokens(size, to_rank0=False):
     weights, index = torch.randn(size * T, E, generator=gen).softmax(-1).topk(TOP_K, dim=-1)
     if to_rank0:
         index = torch.arange(TOP_K).expand(size * T, TOP_K) % (E // size)
-    return x, weights.to(COMPUTE_DTYPE), index
+    return x, weights.to(weights_dtype), index
 
 
 def _assert_experts_backward_matches(rank, whole, local, owned, size, to_rank0=False):
@@ -262,3 +302,25 @@ def test_fused_experts_backward_through_torch_a2a_matches_the_whole_module(cpu_d
     if Version(transformers.__version__) < Version("5.6"):
         pytest.skip("expert parallelism needs transformers >= 5.6")
     cpu_dist_workers.run(_real_experts_backward_job)
+
+
+def _fp32_routing_weights_job(rank, size):
+    moe.register_torch_a2a()
+    group, _ = dist.new_subgroups(1)
+    whole, local, _ = _split_qwen3_moe_experts(0, 1)
+    x, weights, index = _routed_tokens(1, weights_dtype=torch.float32)
+    whole.config._experts_implementation = "grouped_mm"
+    local.config._experts_implementation = "torch_a2a"
+    with torch.no_grad():
+        want = whole(x, index, weights)
+        got = local(x, index, weights, group)
+    torch.testing.assert_close(got, want, rtol=0, atol=0)
+
+
+def test_fp32_routing_weights_give_grouped_mms_result_at_ep1(cpu_dist_workers):
+    """A router may return fp32 weights for bf16 experts, as Mixtral's does. grouped_mm weights the
+    experts' results in fp32 then; at EP=1 the torch_a2a forward must give its result bit for bit."""
+    transformers = pytest.importorskip("transformers")
+    if Version(transformers.__version__) < Version("5.6"):
+        pytest.skip("expert parallelism needs transformers >= 5.6")
+    cpu_dist_workers.run(_fp32_routing_weights_job)

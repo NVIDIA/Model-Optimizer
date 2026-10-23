@@ -43,6 +43,9 @@ from torch.distributed.nn.functional import all_to_all_single as autograd_all_to
 # all_to_all_single addresses its flattened buffers with int32 element offsets, so a hop larger than
 # this overflows them; a2a_moe chunks such transfers along the hidden dim.
 _A2A_MAX_HOP_ELEMENTS = 2**31 - 1
+# The combine weights and sums the (token, expert) results in fp32 a slice of rows at a time, so its fp32
+# temporaries stay this many elements (128 MiB) however many tokens the layer routes.
+_COMBINE_SLICE_ELEMENTS = 2**25
 
 
 def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, expert_fn):
@@ -51,11 +54,12 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     Works cross-node at any rank count, with explicit token permute/unpermute.
 
     Flow: expand (token, expert) pairs -> route each to dest_rank = global_expert // num_local ->
-    all_to_all the tokens (+ local-expert id + weight) -> local grouped_mm (quantizable) -> weight ->
-    all_to_all back -> scatter-sum to original tokens.
+    all_to_all the tokens (+ local-expert id) -> local grouped_mm (quantizable) -> all_to_all back ->
+    weight by the routing weights and scatter-sum to original tokens.
 
     Tokens travel and the result returns in ``hidden_states``' dtype -- the model's, so its residual
-    stream keeps one dtype -- and only the per-token combine accumulates in fp32.
+    stream keeps one dtype. The routing weights never travel: the rank that holds a token weights its
+    experts' results in the weights' own dtype, and the per-token combine accumulates in fp32.
     """
     world = group.size()
     x = hidden_states.contiguous()
@@ -64,12 +68,11 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     dev = x.device
 
     def _one_all_to_all(output, input_, out_split, in_split):
-        """One all_to_all_single hop (hidden, expert-output, AND routing weight).
+        """One all_to_all_single hop (hidden or expert output).
 
         Uses the AUTOGRAD-AWARE ``torch.distributed.nn.functional.all_to_all_single`` (whose backward is
         the reverse all-to-all) when a graph is being built AND the input needs grad -- so gradients
-        propagate through dispatch/combine to the routed experts (AutoQuantize gradient score estimation)
-        AND, via the routing-weight hop, back to the gate/router (MoE training through the experts).
+        propagate through dispatch/combine to the routed experts (AutoQuantize gradient score estimation).
         Otherwise (forward-only calibration / inference, or a frozen input) it uses the plain, no-graph
         collective, leaving the validated production path byte-for-byte unchanged.
         """
@@ -130,14 +133,14 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     # (token, expert) pairs (drop any -1 "no selection" slots).
     token_rows = torch.arange(T, device=dev).repeat_interleave(top_k)  # [P]
     exp = topk_idx.reshape(-1).to(torch.int64)
-    w = topk_weights.reshape(-1).to(x.dtype)
+    w = topk_weights.reshape(-1)
     valid = exp >= 0
     token_rows, exp, w = token_rows[valid], exp[valid], w[valid]
     dest = (exp // num_local_experts).to(torch.int64)  # owner rank of each pair
     local_eid = exp % num_local_experts
 
     order = torch.argsort(dest, stable=True)  # group pairs by dest rank
-    token_rows_s, local_eid_s, w_s = token_rows[order], local_eid[order], w[order]
+    token_rows_s, local_eid_s = token_rows[order], local_eid[order]
     send_hidden = x[token_rows_s].contiguous()  # [P, H]
     in_counts = torch.bincount(dest[order], minlength=world).to(torch.int64)  # rows -> each rank
 
@@ -176,23 +179,17 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     rows = torch.tensor([max(P_sent, Q)], device=dev, dtype=torch.int64)
     dist.all_reduce(rows, op=dist.ReduceOp.MAX, group=group)
     step = _A2A_MAX_HOP_ELEMENTS // max(int(rows.item()), 1)
-    # dispatch hidden (autograd-aware when scoring) + local-expert id + weight (same split sizes)
+    # dispatch hidden (autograd-aware when scoring) + local-expert id (same split sizes)
     recv_hidden = torch.empty(Q, H, device=dev, dtype=x.dtype)
     recv_hidden = _all_to_all(recv_hidden, send_hidden, out_list, in_list, step)
     recv_eid = torch.empty(Q, device=dev, dtype=torch.int64)
     dist.all_to_all_single(recv_eid, local_eid_s.contiguous(), out_list, in_list, group=group)
-    # Routing WEIGHT hop is gradient-carrying (its backward reaches the gate/router when training the MoE
-    # through the experts), so it goes through the autograd-aware ``_all_to_all`` -- unlike the integer
-    # expert-id hop above, which is a non-differentiable routing DECISION. Falls back to the plain
-    # collective when ``w_s`` doesn't need grad (frozen router / forward-only), so PTQ is unchanged.
-    recv_w = torch.empty(Q, device=dev, dtype=x.dtype)
-    recv_w = _all_to_all(recv_w, w_s.contiguous(), out_list, in_list)
 
-    # group received tokens by local expert -> grouped_mm (quantizable) -> weight
+    # group received tokens by local expert -> grouped_mm (quantizable); weighted back home
     rorder = torch.argsort(recv_eid, stable=True)
     counts = torch.bincount(recv_eid[rorder], minlength=num_local_experts)
     offsets = torch.cumsum(counts, dim=0).to(torch.int32)
-    eo = expert_fn(recv_hidden[rorder], offsets).to(x.dtype) * recv_w[rorder].unsqueeze(-1)
+    eo = expert_fn(recv_hidden[rorder], offsets).to(x.dtype)
     eo_recv = torch.empty(Q, H, device=dev, dtype=x.dtype)
     eo_recv[rorder] = eo  # back to recv order
 
@@ -201,18 +198,25 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     send_back = _all_to_all(send_back, eo_recv, in_list, out_list, step)
     out_pair = torch.empty_like(send_back)
     out_pair[order] = send_back  # back to pair order
-    # Accumulate the per-token top-k scatter-sum in FP32, then round ONCE. Each token's output is a sum
-    # of its top_k expert results; accumulating that in bf16 rounds at every partial add (~0.4% each), so
-    # a different summation ORDER gives a different answer -- and the a2a returns partials in
+    # Weight each result by its routing weight in the weight's own dtype, as transformers' grouped_mm
+    # forward does: a router that returns fp32 weights (Mixtral's) gets an fp32 product; rounding the
+    # weights to bf16 first would change the model's output even at EP=1.
+    # Then accumulate the per-token top-k scatter-sum in FP32 and round ONCE. Each token's output is a
+    # sum of its top_k expert results; accumulating that in bf16 rounds at every partial add (~0.4% each),
+    # so a different summation ORDER gives a different answer -- and the a2a returns partials in
     # post-all_to_all order, which differs from the native (non-EP) forward's local order. That made the
     # exported activation scales EP-dependent: on Qwen3-30B-A3B (top_k=8) 27% of input_scale values
     # differed from the single-GPU reference, by up to 28%. FP32 accumulation is order-independent to
     # ~1e-7, so every order rounds to the same bf16 value -> byte-identical scales at EP1/2/4/8
-    # (validated single- and multi-node). Costs one T x H fp32 temporary; no measurable runtime change.
+    # (validated single- and multi-node). Slices of rows bound the fp32 temporaries
+    # (_COMBINE_SLICE_ELEMENTS); a whole [P, H] fp32 copy reaches GiBs at calibration batch sizes.
     _acc = torch.zeros(T, H, device=dev, dtype=torch.float32)
-    _acc.index_add_(0, token_rows, out_pair.float())
-    result = _acc.to(x.dtype)
-    return result
+    slice_rows = max(1, _COMBINE_SLICE_ELEMENTS // max(H, 1))
+    for r0 in range(0, out_pair.size(0), slice_rows):
+        r1 = r0 + slice_rows
+        weighted = out_pair[r0:r1] * w[r0:r1, None]
+        _acc.index_add_(0, token_rows[r0:r1], weighted.float())
+    return _acc.to(x.dtype)
 
 
 def torch_a2a_experts_forward(self, hidden_states, top_k_index, top_k_weights, process_group=None):
