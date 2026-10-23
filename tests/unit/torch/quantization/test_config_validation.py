@@ -643,7 +643,9 @@ class TestLayerwiseNestedConfig:
             "checkpoint_dir": None,
             "save_every": 1,
             "export_dir": None,
-            "calib_mutates_weights": True,
+            # Unset means "derive from the algorithm's declared capabilities at run time"
+            # rather than a hardcoded assumption restated per config class.
+            "calib_mutates_weights": None,
         }
         assert "layerwise_checkpoint_dir" not in dumped
 
