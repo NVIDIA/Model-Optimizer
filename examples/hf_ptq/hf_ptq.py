@@ -115,8 +115,8 @@ from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloa
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
-# Most tokens per calibration batch when layerwise calibration picks the batch size (16 x 512).
-LAYERWISE_CALIB_TOKENS = 8192
+# Most tokens per calibration batch when layerwise calibration picks the batch size (64 x 512).
+LAYERWISE_CALIB_TOKENS = 32768
 
 
 def _layerwise_calib_batch_size(calib_seq: int, num_samples: int) -> int:

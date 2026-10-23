@@ -135,7 +135,7 @@ at sequence length 512, **batch size 8**.
 
    **Pick the batch size on purpose.** For layerwise runs, ``hf_ptq.py`` left at its default
    probes one decoder layer of each kind and takes the most samples whose forward fits in half
-   the GPU's free memory, up to 8,192 tokens' worth (16 at sequence length 512). It was 1 when
+   the GPU's free memory, up to 32,768 tokens' worth (64 at sequence length 512). It was 1 when
    this run was made, which is why it passed ``--batch_size 8``. An explicit value passes
    straight through. Going from 1 to 8 cut wall clock roughly in half. It does move the
    numbers a little. Weights, ``weight_scale`` and ``weight_scale_2`` come out bit-identical,

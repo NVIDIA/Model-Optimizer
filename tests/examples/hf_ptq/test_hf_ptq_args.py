@@ -438,10 +438,10 @@ def test_mlflow_is_off_by_default(monkeypatch):
 @pytest.mark.parametrize(
     ("extra_args", "memory_fit", "expected"),
     [
-        ((), 1000, 16),  # 8,192 tokens at --calib_seq 512
+        ((), 1000, 64),  # 32,768 tokens at --calib_seq 512
         ((), 5, 5),  # what fits a decoder layer's forward
         (("--calib_size", "4"), 1000, 4),  # never more than the samples
-        (("--calib_seq", "16384"), 1000, 1),  # at least one sample
+        (("--calib_seq", "65536"), 1000, 1),  # at least one sample
         (("--batch_size", "1"), 1000, 1),  # an explicit value is kept
     ],
     ids=["token_budget", "memory", "sample_cap", "long_sequence", "explicit"],
