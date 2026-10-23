@@ -31,6 +31,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, IterableDataset
 
+import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as mto_dist
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
@@ -483,8 +484,6 @@ def test_rank_local_calibration_is_refused_before_it_changes_a_distributed_model
     """Each rank calibrates on its own data, and AWQ keeps what its search gathers on the rank: the
     ranks' copies of a weight would come out different. So would local_hessian, run by another
     algorithm for its weight scales, and max told not to sync. The refusal comes before any change."""
-    import modelopt.torch.quantization as mtq
-
     model = nn.Sequential(nn.Linear(16, 16))
     set_distribution_plan(model, DistributionPlan(world_size=2))
     if entry == "calibrate":
