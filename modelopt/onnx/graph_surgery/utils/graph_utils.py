@@ -186,6 +186,7 @@ def save_onnx_model(
 def _validate_external_data_destination(
     output_root: Path, destination: Path, output_path: Path
 ) -> None:
+    """Require a contained sidecar path distinct from the model and reject unsafe file links."""
     resolved_destination = destination.resolve()
     if not resolved_destination.is_relative_to(output_root):
         raise ValueError("External data must resolve inside the output directory")
@@ -202,6 +203,10 @@ def _validate_external_data_destination(
 # TODO: Once ONNX >= 1.22.0 is required, use its external writer instead (onnx/onnx#7790).
 @contextmanager
 def _save_external_weights(model, model_path, weights_path, location, size_threshold, destination):
+    """Stage external weights and restore caller tensors if the replacement context fails.
+
+    Successful saves retain the updated external storage metadata.
+    """
     states = []
     for tensor in onnx.external_data_helper._get_all_tensors(model):
         metadata = TensorProto()
