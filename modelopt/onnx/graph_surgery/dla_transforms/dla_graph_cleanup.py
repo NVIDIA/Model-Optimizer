@@ -352,6 +352,8 @@ def _compute_sq_unsq_out_shape(
 
     if node.op_type == "Squeeze":
         if axes is None:
+            if len(node.input) > 1 and node.input[1]:
+                return None
             return [d for d in in_shape if d != 1]
         out = list(in_shape)
         for ax in sorted([a if a >= 0 else len(out) + a for a in axes], reverse=True):

@@ -459,6 +459,43 @@ def test_squeeze_fallback_uses_selected_axes(opset, axes):
     )
 
 
+@pytest.mark.parametrize("axes_mode", ["dynamic", "omitted"])
+def test_squeeze_fallback_distinguishes_unknown_and_omitted_axes(axes_mode):
+    """Retain unresolved axes and preserve the remove-all fallback for omitted axes."""
+    inputs = [_vi("X", TensorProto.FLOAT, [1, 2, 1, 3])]
+    node_inputs = ["X"]
+    if axes_mode == "dynamic":
+        inputs.append(_vi("axes", TensorProto.INT64, [1]))
+        node_inputs.append("axes")
+    squeeze = helper.make_node("Squeeze", node_inputs, ["middle"], name="sq")
+    output_shape = [None, None, None] if axes_mode == "dynamic" else [2, 3]
+    model = helper.make_model(
+        helper.make_graph(
+            [squeeze, helper.make_node("Relu", ["middle"], ["Y"])],
+            "axes_resolution",
+            inputs,
+            [_vi("Y", TensorProto.FLOAT, output_shape)],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    _clamp_ir(model)
+    onnx.checker.check_model(model, full_check=True)
+    transformed = _replace_sq_unsq(copy.deepcopy(model))
+    if axes_mode == "dynamic":
+        assert transformed.SerializeToString() == model.SerializeToString()
+    else:
+        transformed = _mod.infer_shapes(transformed)
+    onnx.checker.check_model(transformed, full_check=True)
+    for axes in ([0], [2]) if axes_mode == "dynamic" else [None]:
+        feeds = {"X": np.arange(6, dtype=np.float32).reshape(1, 2, 1, 3)}
+        if axes is not None:
+            feeds["axes"] = np.array(axes, np.int64)
+        expected = _run_ort(model, feeds)["Y"]
+        if axes_mode != "dynamic":
+            expected = expected.reshape(1, 1, 2, 3)
+        np.testing.assert_array_equal(_run_ort(transformed, feeds)["Y"], expected)
+
+
 def test_intermediary_squeeze_replaced_with_reshape():
     """Squeeze [2,1,6,8] → [2,6,8] (axis=1) is replaced by Reshape → [1,2,6,8].
 
