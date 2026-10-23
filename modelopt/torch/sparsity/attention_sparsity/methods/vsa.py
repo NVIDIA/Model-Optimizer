@@ -238,13 +238,15 @@ class VSA(SparseAttentionMethod):
         # Extract non-padded tokens and reverse order
         return tensor[:, :, non_pad_index][:, :, reverse_indices]
 
-    def can_replace_sdpa(self, query, key, value, **sdpa_kwargs) -> bool:
-        """Self-attention whose length matches the configured video shape."""
-        return (
-            self.video_shape is not None
-            and query.shape[2] == key.shape[2]
-            and query.shape[2] == math.prod(self.video_shape)
-        )
+    def sdpa_fallback_reason(self, query, key, value, **sdpa_kwargs) -> str | None:
+        """Accept self-attention whose length matches the configured video shape."""
+        if self.video_shape is None:
+            return "video_shape is not set"
+        if query.shape[2] != key.shape[2]:
+            return "Q/K lengths differ (e.g. cross-attention)"
+        if query.shape[2] != math.prod(self.video_shape):
+            return f"seq_len={query.shape[2]} does not match video_shape={self.video_shape}"
+        return None
 
     def forward_attention(
         self,

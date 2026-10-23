@@ -218,8 +218,9 @@ class SparseAttentionModule(DynamicModule):
     def _forward_with_sdpa_patch(self, args, kwargs):
         """Run forward with F.scaled_dot_product_attention routed to the method kernel.
 
-        Calls rejected by the method's ``can_replace_sdpa`` fall through to the original
-        SDPA.  Warns if SDPA was never called.
+        Calls for which the method's ``sdpa_fallback_reason`` returns a reason fall through
+        to the original SDPA.  Warns if SDPA was never called, and once per module if all of
+        its self-attention calls fell back.
         """
         import torch.nn.functional as F
 
@@ -228,10 +229,13 @@ class SparseAttentionModule(DynamicModule):
         method = self._sparse_method_instance
         original_sdpa = F.scaled_dot_product_attention
         self._sdpa_called = False
+        replaced = False
+        fallback_reasons: set[str] = set()
 
         def _patched_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, **kw):
+            nonlocal replaced
             self._sdpa_called = True
-            if not method.can_replace_sdpa(
+            reason = method.sdpa_fallback_reason(
                 query,
                 key,
                 value,
@@ -239,7 +243,11 @@ class SparseAttentionModule(DynamicModule):
                 dropout_p=dropout_p,
                 is_causal=is_causal,
                 **kw,
-            ):
+            )
+            if reason is not None:
+                # Cross-attention staying dense is expected, so only self-attention is reported.
+                if query.shape[-2] == key.shape[-2]:
+                    fallback_reasons.add(reason)
                 return original_sdpa(
                     query,
                     key,
@@ -249,6 +257,7 @@ class SparseAttentionModule(DynamicModule):
                     is_causal=is_causal,
                     **kw,
                 )
+            replaced = True
             output, stats = method.forward_attention(query, key, value)
             self._last_stats = stats
             return output
@@ -256,9 +265,17 @@ class SparseAttentionModule(DynamicModule):
         with replace_function(F, "scaled_dot_product_attention", _patched_sdpa):
             result = super().forward(*args, **kwargs)
 
-        if not self._sdpa_called:
-            import warnings
+        import warnings
 
+        if fallback_reasons and not replaced and not getattr(self, "_warned_all_dense", False):
+            # Warn once per module: eligibility is narrow, so silent all-dense runs are easy to miss.
+            self._warned_all_dense = True
+            warnings.warn(
+                f"{method.name}: every self-attention F.scaled_dot_product_attention call in "
+                f"{type(self).__name__}.forward() fell back to dense SDPA "
+                f"({'; '.join(sorted(fallback_reasons))}).",
+            )
+        if not self._sdpa_called:
             warnings.warn(
                 f"{method.name}: F.scaled_dot_product_attention was not called during "
                 f"{type(self).__name__}.forward(). The attention layer may use a "

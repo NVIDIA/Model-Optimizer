@@ -588,6 +588,10 @@ def _format_threshold(info: dict) -> str:
         if isinstance(v, dict):
             return f"threshold={v}"
         return f"threshold={v:.2e}" if isinstance(v, float) else f"threshold={v}"
+    if t == "sol_attn":
+        return (
+            f"tau={info['tau']}, thresh_type={info['thresh_type']}, kv_splits={info['kv_splits']}"
+        )
     return "threshold=N/A"
 
 

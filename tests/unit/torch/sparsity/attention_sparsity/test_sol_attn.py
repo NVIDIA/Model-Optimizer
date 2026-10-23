@@ -17,6 +17,7 @@
 
 import sys
 import types
+import warnings
 from unittest.mock import patch
 
 import pytest
@@ -31,6 +32,7 @@ from pydantic import ValidationError
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity.attention_sparsity as mtsa
 from modelopt.torch.sparsity.attention_sparsity.config import SolAttnAttributeConfig
+from modelopt.torch.sparsity.attention_sparsity.conversion import _format_threshold
 from modelopt.torch.sparsity.attention_sparsity.methods import sol_attn as sol_attn_method
 from modelopt.torch.sparsity.attention_sparsity.methods.sol_attn import SolAttn
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
@@ -86,10 +88,10 @@ def test_sparsify_routes_eligible_sdpa_to_sol_attn():
     x = torch.randn(1, 2, 16, 128)  # [batch, heads, seq, dim]
     ctx = torch.randn(1, 2, 8, 128)
     calls = []
-    eligible = lambda self, q, k, v, **kw: q.shape == k.shape  # noqa: E731
+    reason = lambda self, q, k, v, **kw: None if q.shape == k.shape else "cross"  # noqa: E731
     with (
         patch.object(sol_attn_method, "_import_sol_attn", lambda: _fake_sol_attn_module(calls)),
-        patch.object(SolAttn, "can_replace_sdpa", eligible),
+        patch.object(SolAttn, "sdpa_fallback_reason", reason),
     ):
         out = model(x, ctx)
 
@@ -100,8 +102,56 @@ def test_sparsify_routes_eligible_sdpa_to_sol_attn():
 def test_ineligible_inputs_stay_dense():
     method = SolAttn()
     q = torch.randn(1, 2, 16, 128)
-    assert not method.can_replace_sdpa(q, q, q)  # CPU and float32
-    assert not method.can_replace_sdpa(q, q, q, is_causal=True)
+    assert method.sdpa_fallback_reason(q, q, q) == "dtype=torch.float32"
+    assert method.sdpa_fallback_reason(q, q, q, is_causal=True) is not None
+    q_grad = q.bfloat16().requires_grad_()
+    assert method.sdpa_fallback_reason(q_grad, q_grad, q_grad) == "inputs require grad"
+
+
+@pytest.mark.parametrize(
+    ("backend", "seq_len", "dense"),
+    [("triton", 8192, True), ("cute_sm90", 64, True), ("cute_sm90", 8192, False)],
+)
+def test_explicit_kv_splits_unsupported_by_kernel_stays_dense(backend, seq_len, dense):
+    fake = types.SimpleNamespace(get_sol_attn_backend=lambda device: backend)
+    q = torch.empty(1, 2, seq_len, 128)
+    with patch.object(sol_attn_method, "_import_sol_attn", lambda: fake):
+        reason = SolAttn({"kv_splits": 2})._kv_splits_fallback_reason(q)
+    assert (reason is not None) == dense
+
+
+def test_all_dense_module_warns_once_with_reason():
+    model = mtsa.sparsify(TwoAttnModel(), mtsa.SOL_ATTN_DEFAULT)
+    x, ctx = torch.randn(1, 2, 16, 128), torch.randn(1, 2, 8, 128)
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        for _ in range(2):
+            model(x, ctx)
+    msgs = [str(w.message) for w in record if "fell back to dense SDPA" in str(w.message)]
+    assert len(msgs) == 1  # once, for self-attention attn1; cross-attention attn2 is expected dense
+    assert "dtype=torch.float32" in msgs[0]
+
+
+def test_stats_and_summary():
+    model = mtsa.sparsify(
+        TwoAttnModel(),
+        {
+            "sparse_cfg": {
+                "*attn1*": {"method": "sol_attn", "collect_stats": True},
+                "default": {"enable": False},
+            }
+        },
+    )
+    x = torch.randn(1, 2, 16, 128)
+    with (
+        patch.object(sol_attn_method, "_import_sol_attn", lambda: _fake_sol_attn_module([])),
+        patch.object(SolAttn, "sdpa_fallback_reason", lambda self, *a, **kw: None),
+    ):
+        model(x, x)
+    assert model.attn1.get_stats()["phase_distribution"]["unknown"] == 1
+    assert _format_threshold(model.attn1.get_threshold_info()) == (
+        "tau=1.0, thresh_type=diag, kv_splits=auto"
+    )
 
 
 def test_missing_package_raises_install_hint(monkeypatch):
@@ -110,7 +160,7 @@ def test_missing_package_raises_install_hint(monkeypatch):
     q = torch.randn(1, 2, 16, 128)
     sdpa = F.scaled_dot_product_attention
     with (
-        patch.object(SolAttn, "can_replace_sdpa", lambda self, *a, **kw: True),
+        patch.object(SolAttn, "sdpa_fallback_reason", lambda self, *a, **kw: None),
         pytest.raises(ImportError, match=r"requires the .sol_attn. package"),
     ):
         model(q, q)

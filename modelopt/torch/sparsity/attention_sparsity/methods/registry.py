@@ -70,11 +70,11 @@ class SparseAttentionMethod(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement forward_attention.")
 
-    def can_replace_sdpa(
+    def sdpa_fallback_reason(
         self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, **sdpa_kwargs
-    ) -> bool:
-        """Whether ``forward_attention`` can replace this SDPA call; otherwise dense SDPA runs."""
-        return False
+    ) -> str | None:
+        """Why this SDPA call must stay dense, or ``None`` if ``forward_attention`` replaces it."""
+        return "method does not replace SDPA"
 
     def calculate_sparsity(
         self,

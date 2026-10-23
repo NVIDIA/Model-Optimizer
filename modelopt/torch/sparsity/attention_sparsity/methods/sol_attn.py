@@ -73,7 +73,7 @@ class SolAttn(SparseAttentionMethod):
         if self.kv_splits not in ("auto", 1, 2, 4):
             raise ValueError(f"kv_splits must be 'auto', 1, 2, or 4, got {self.kv_splits!r}")
 
-    def can_replace_sdpa(
+    def sdpa_fallback_reason(
         self,
         query,
         key,
@@ -84,22 +84,36 @@ class SolAttn(SparseAttentionMethod):
         scale=None,
         enable_gqa=False,
         **kwargs,
-    ) -> bool:
-        """Non-causal, unmasked BF16 self-attention with head dim 128 on SM80+."""
-        return (
-            attn_mask is None
-            and dropout_p == 0.0
-            and not is_causal
-            and not enable_gqa
-            and not kwargs
-            and (scale is None or math.isclose(scale, _HEAD_DIM**-0.5))
-            and query.ndim == 4
-            and query.shape == key.shape == value.shape
-            and query.shape[-1] == _HEAD_DIM
-            and query.dtype == key.dtype == value.dtype == torch.bfloat16
-            and query.is_cuda
-            and torch.cuda.get_device_capability(query.device) >= (8, 0)
-        )
+    ) -> str | None:
+        """Accept non-causal, unmasked BF16 self-attention inference with head dim 128 on SM80+."""
+        # The kernel is forward-only, so calls that need gradients keep dense SDPA.
+        if torch.is_grad_enabled() and any(x.requires_grad for x in (query, key, value)):
+            return "inputs require grad"
+        if attn_mask is not None or is_causal or dropout_p != 0.0 or enable_gqa or kwargs:
+            return "attn_mask, is_causal, dropout_p, enable_gqa or extra SDPA arguments"
+        if scale is not None and not math.isclose(scale, _HEAD_DIM**-0.5):
+            return f"scale={scale}"
+        if query.ndim != 4 or not query.shape == key.shape == value.shape:
+            return "Q/K/V shapes differ (e.g. cross-attention)"
+        if query.shape[-1] != _HEAD_DIM:
+            return f"head_dim={query.shape[-1]}"
+        if not query.dtype == key.dtype == value.dtype == torch.bfloat16:
+            return f"dtype={query.dtype}"
+        if not query.is_cuda or torch.cuda.get_device_capability(query.device) < (8, 0):
+            return f"device={query.device}"
+        return self._kv_splits_fallback_reason(query)
+
+    def _kv_splits_fallback_reason(self, query: torch.Tensor) -> str | None:
+        # Mirror the kernel's checks so an explicit kv_splits it would reject stays dense.
+        if self.kv_splits in ("auto", 1):
+            return None
+        backend = _import_sol_attn().get_sol_attn_backend(query.device)
+        if backend != "cute_sm90":
+            return f"kv_splits={self.kv_splits} requires the SM90 backend, got {backend}"
+        route_groups = math.ceil(math.ceil(query.shape[2] / 64) / 64)
+        if self.kv_splits > route_groups:
+            return f"kv_splits={self.kv_splits} exceeds seq_len={query.shape[2]}"
+        return None
 
     def _resolve_kv_splits(self, sol_attn, query: torch.Tensor) -> int:
         if self.kv_splits != "auto":
@@ -125,11 +139,17 @@ class SolAttn(SparseAttentionMethod):
             thresh_type=self.thresh_type,
             kv_splits=self._resolve_kv_splits(sol_attn, query),
         )
-        return out.transpose(1, 2), {"phase": "sol_attn"}
+        # The kernel does not report block routing, so only the call is counted.
+        return out.transpose(1, 2), {"phase": "unknown"}
 
     def get_threshold_info(self) -> dict:
         """Get Sol-Attn configuration info."""
-        return {"type": "sol_attn", "tau": self.tau, "thresh_type": self.thresh_type}
+        return {
+            "type": "sol_attn",
+            "tau": self.tau,
+            "thresh_type": self.thresh_type,
+            "kv_splits": self.kv_splits,
+        }
 
     @property
     def name(self) -> str:
