@@ -1796,7 +1796,7 @@ def _fsdp2_shard_dense(model: nn.Module, fsdp_mesh, expert_modules) -> int:
 
 
 # The checkpoint formats load_and_prepare_ep dequantizes as it loads, beside unquantized ones (None).
-_EP_SOURCE_FORMATS = frozenset({None, "mxfp4"})
+_EP_SOURCE_FORMATS = frozenset({None, "fp8", "mxfp4"})
 
 
 def _ckpt_quant_method(cfg):
