@@ -215,7 +215,7 @@ def get_mcore_gpt_model(
         pipeline_model_parallel_size=pipeline_model_parallel_size,
         expert_model_parallel_size=expert_model_parallel_size,
         expert_tensor_parallel_size=expert_tensor_parallel_size,
-        sequence_parallel=False,
+        sequence_parallel=config_kwargs.pop("sequence_parallel", False),
         num_layers=num_layers,
         num_layers_in_first_pipeline_stage=num_layers_in_first_pipeline_stage,
         num_layers_in_last_pipeline_stage=num_layers_in_last_pipeline_stage,
