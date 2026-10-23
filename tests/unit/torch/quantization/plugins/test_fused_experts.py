@@ -805,6 +805,13 @@ class TestExportFusedExperts:
                     fp8.amax = torch.tensor(2.0 if amax_state == "calibrated" else 0.0)
                 return SequentialQuantizer(int4, fp8)
 
+            # Export refuses INT4 block weights on fused experts (no pre_quant_scale can be
+            # exported); lift that here to test the stage-wise amax handling it would need.
+            monkeypatch.setattr(
+                "modelopt.torch.export.moe_utils._check_int4_weights_supported",
+                lambda *args: None,
+            )
+
             for idx in range(NUM_EXPERTS):
                 converted.gate_up_proj_weight_quantizers[idx] = _w4a8_quantizer(
                     2 * INTERMEDIATE_DIM, fused=True
@@ -848,6 +855,46 @@ class TestExportFusedExperts:
                 gate_up_rows = {int4_amax[0, 0].item() for rows, int4_amax, _ in seen if rows == 16}
                 # gate starts at row marker 1, up at INTERMEDIATE_DIM + 1.
                 assert gate_up_rows == {1.0, float(INTERMEDIATE_DIM + 1)}
+        finally:
+            if QuantModuleRegistry.get(expert_type) is not None:
+                QuantModuleRegistry.unregister(expert_type)
+
+    @pytest.mark.parametrize("w4a8", [True, False], ids=["w4a8_awq", "int4_awq"])
+    @pytest.mark.parametrize("int4_projections", ["gate_up", "down", "both"])
+    def test_int4_block_weights_are_refused(self, w4a8, int4_projections):
+        """AWQ skips fused experts and export writes no pre_quant_scale, while the exporter
+        labels any INT4 block weight ``*_AWQ`` with one. Export must refuse instead of writing a
+        checkpoint runtimes cannot load, for either projection, and leave the module untouched."""
+        experts = _SyntheticFusedExperts()
+        expert_type = type(experts)
+        if QuantModuleRegistry.get(expert_type) is None:
+            QuantModuleRegistry.register({expert_type: "test.SyntheticFusedExperts"})(
+                _QuantFusedExperts
+            )
+        try:
+            converted = QuantModuleRegistry.convert(experts)
+            int4_lists = {
+                "gate_up": [converted.gate_up_proj_weight_quantizers],
+                "down": [converted.down_proj_weight_quantizers],
+                "both": [
+                    converted.gate_up_proj_weight_quantizers,
+                    converted.down_proj_weight_quantizers,
+                ],
+            }[int4_projections]
+            for wq_list in int4_lists:
+                for idx in range(NUM_EXPERTS):
+                    stage = TensorQuantizer(
+                        QuantizerAttributeConfig(num_bits=4, block_sizes={-1: 16, "type": "static"})
+                    )
+                    if w4a8:
+                        fp8 = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3)))
+                        wq_list[idx] = SequentialQuantizer(stage, fp8)
+                    else:
+                        wq_list[idx] = stage
+
+            with pytest.raises(NotImplementedError, match="not supported on fused MoE experts"):
+                _export_fused_experts(converted, torch.float16)
+            assert hasattr(converted, "gate_up_proj") and hasattr(converted, "down_proj")
         finally:
             if QuantModuleRegistry.get(expert_type) is not None:
                 QuantModuleRegistry.unregister(expert_type)

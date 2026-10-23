@@ -110,6 +110,31 @@ def _fallback_amax(weight: torch.Tensor, quantizer) -> torch.Tensor:
     return torch.maximum(groups.amax(dim=-1), -groups.amin(dim=-1)).float().reshape(like.shape)
 
 
+def _check_int4_weights_supported(module, weight_quantizers, input_quantizer) -> None:
+    """Refuse INT4 block weights, which fused experts cannot export loadably.
+
+    The exporter labels every INT4 block weight ``INT4_AWQ`` / ``W4A8_AWQ`` and declares a
+    ``pre_quant_scale`` in ``hf_quant_config.json``. AWQ skips fused experts and this export
+    writes no ``pre_quant_scale``, so runtimes fail to load the checkpoint. All experts share
+    one format, so the first one decides.
+    """
+    # Deferred: ``export/__init__`` star-imports this module, and ``quant_utils`` imports it back.
+    from modelopt.torch.export.quant_utils import (
+        QUANTIZATION_INT4_AWQ,
+        QUANTIZATION_W4A8_AWQ,
+        _get_quantization_from_quantizers,
+    )
+
+    fmt = _get_quantization_from_quantizers(module, weight_quantizers[0], input_quantizer)
+    if fmt in (QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ):
+        raise NotImplementedError(
+            f"INT4 block weights (exported as {fmt}) are not supported on fused MoE experts: "
+            "AWQ does not run on them and no pre_quant_scale is exported, although "
+            "hf_quant_config.json declares one, so the checkpoint cannot be loaded. "
+            "Quantize the experts with another format (e.g. FP8 or NVFP4) or exclude them."
+        )
+
+
 def _export_fused_experts(
     module: nn.Module,
     dtype: torch.dtype,
@@ -156,6 +181,9 @@ def _export_fused_experts(
     first_proj_input_q = getattr(module, f"{first_proj_attr}_input_quantizer")
     first_proj_weight_quantizers = getattr(module, f"{first_proj_attr}_weight_quantizers")
     down_input_q = module.down_proj_input_quantizer
+
+    _check_int4_weights_supported(module, first_proj_weight_quantizers, first_proj_input_q)
+    _check_int4_weights_supported(module, module.down_proj_weight_quantizers, down_input_q)
 
     first_proj = getattr(module, first_proj_attr).data  # gate_up_proj or up_proj
     down = module.down_proj.data
