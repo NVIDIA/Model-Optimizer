@@ -114,10 +114,13 @@ jobs:
           python3 -m pytest tests/examples/${{ inputs.example }} --cov "${pytest_args[@]}"
       - name: Save extensions
         # Not tied to the tests passing, see the action description
-        if: always() && steps.ext-cache.outputs.cache-hit != 'true'
+        if: always()
         uses: ./.github/actions/save-extensions
         with:
           cache-key: ${{ steps.ext-cache.outputs.cache-key }}
+          cache-hit: ${{ steps.ext-cache.outputs.cache-hit }}
+          triton-key: ${{ steps.ext-cache.outputs.triton-key }}
+          triton-hit: ${{ steps.ext-cache.outputs.triton-hit }}
       - name: Flag allowed failure
         if: ${{ inputs.allow_failure && steps.run_tests.outcome == 'failure' }}
         run: |

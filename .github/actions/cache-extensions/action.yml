@@ -1,5 +1,5 @@
 name: Cache extensions
-description: Restore JIT-compiled extensions (e.g. CUDA extensions) cached by an earlier run. Pair with ./.github/actions/save-extensions.
+description: Restore JIT-compiled extensions (CUDA extensions, Triton kernels) cached by an earlier run. Pair with ./.github/actions/save-extensions.
 
 inputs:
   cache-key:
@@ -13,12 +13,21 @@ outputs:
   cache-key:
     description: The key to pass to ./.github/actions/save-extensions.
     value: ${{ steps.cache.outputs.cache-primary-key }}
+  triton-key:
+    description: The Triton key to pass to ./.github/actions/save-extensions.
+    value: ${{ steps.triton.outputs.cache-primary-key }}
+  triton-hit:
+    description: Whether the Triton cache was restored from the exact key.
+    value: ${{ steps.triton.outputs.cache-hit }}
 
 runs:
   using: composite
   steps:
     - shell: bash
-      run: echo "TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions" >> "$GITHUB_ENV"
+      run: |
+        echo "TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions" >> "$GITHUB_ENV"
+        echo "TRITON_CACHE_DIR=/root/.cache/triton" >> "$GITHUB_ENV"
+        echo "TRITON_CACHE_AUTOTUNING=1" >> "$GITHUB_ENV"
     - id: cache
       uses: actions/cache/restore@v6
       with:
@@ -32,3 +41,15 @@ runs:
     - if: steps.cache.outputs.cache-hit == 'true'
       shell: bash
       run: find modelopt/torch/kernels/quantization -exec touch -d '2000-01-01' {} +
+    - id: week
+      shell: bash
+      run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+    # Triton entries are content-addressed and only ever added, so any older cache is safe to start from:
+    # restore-keys takes the newest. The week and the kernel sources are in the exact key, so a new cache
+    # is saved once a week and when the kernels change, not on every run.
+    - id: triton
+      uses: actions/cache/restore@v6
+      with:
+        path: /root/.cache/triton
+        key: triton-${{ inputs.cache-key }}-${{ steps.week.outputs.week }}-${{ hashFiles('modelopt/torch/kernels/**/*.py') }}
+        restore-keys: triton-${{ inputs.cache-key }}-
