@@ -30,6 +30,7 @@ from onnx import helper, numpy_helper
 from ...logging_config import logger
 from ..utils.graph_utils import (
     GraphCache,
+    _captured_names,
     _node_inputs,
     add_unique_initializers,
     add_value_info,
@@ -108,6 +109,19 @@ _RANK_AGNOSTIC_OPS = frozenset(
 )
 
 
+def _subgraph_captures(graph: onnx.GraphProto) -> set[str]:
+    """Collect outer-scope values referenced inside this graph's nested subgraphs."""
+    captured: set[str] = set()
+    for node in graph.node:
+        for attribute in node.attribute:
+            if attribute.type == onnx.AttributeProto.GRAPH:
+                captured.update(_captured_names(attribute.g))
+            elif attribute.type == onnx.AttributeProto.GRAPHS:
+                for subgraph in attribute.graphs:
+                    captured.update(_captured_names(subgraph))
+    return captured
+
+
 def _rank_sensitive_consumers(
     graph: onnx.GraphProto, cache: GraphCache
 ) -> tuple[set[str], set[tuple[int, int]]]:
@@ -145,6 +159,7 @@ def _canonicalize_inputs(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mode
     nodes_to_insert: list[tuple] = []  # (new_node, reference_node)
     nodes_to_remove: list = []
     promotion_safety = None
+    captured: set[str] = set()
     cnt = 0
 
     for graph_input in list(graph.input):
@@ -162,6 +177,7 @@ def _canonicalize_inputs(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mode
 
         if promotion_safety is None:
             promotion_safety = _rank_sensitive_consumers(graph, cache)
+            captured = _subgraph_captures(graph)
         sensitive_values, sensitive_edges = promotion_safety
 
         # Read concrete input shape (may be None for symbolic dims)
@@ -181,6 +197,8 @@ def _canonicalize_inputs(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mode
             ):
                 continue
             if c_node.op_type == "Unsqueeze" and c_idx == 0:
+                if c_node.output[0] in captured:
+                    continue
                 old_shape = cache.get_shape(c_node.output[0])
                 if old_shape is None or (
                     len(old_shape) < 4
@@ -474,17 +492,18 @@ def _replace_intermediary_squeeze_unsqueeze(
 def _remove_reshape_chains(model: onnx.ModelProto, cache: GraphCache) -> onnx.ModelProto:
     """Remove noop Reshapes then collapse consecutive Reshape chains.
 
-    Pass 1 — Remove every noop Reshape (``in_shape == out_shape``) completely:
+    Pass 1 — Remove noop Reshapes (``in_shape == out_shape``) without captured outputs:
     consumers are wired directly to the Reshape input; at graph-output boundaries
     an ``Identity`` node is inserted to keep the output name alive.
 
     Pass 2 — Collapse consecutive Reshape chains (each member's output consumed
-    only by the next Reshape) into a single Reshape; chains that are noops as
-    a whole are removed the same way.
+    only by the next Reshape, without subgraph captures) into a single Reshape;
+    chains that are noops as a whole are removed the same way.
     """
     graph = model.graph
     graph_output_names = cache.graph_output_names
     noop_count = 0
+    captured = _subgraph_captures(graph)
     chain_count = 0
     chain_nodes_count = 0
     # ── Pass 1: Remove standalone noop Reshapes ───────────────────────────────
@@ -501,6 +520,8 @@ def _remove_reshape_chains(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mo
         # Noop reshape: rewire downstream node-consumers to bypass this node
         inp = node.input[0]
         out_tensor = node.output[0]
+        if out_tensor in captured:
+            continue
         for c_node, c_idx in cache.get_consumers(out_tensor):
             if c_node.input[c_idx] == out_tensor:
                 c_node.input[c_idx] = inp
@@ -543,7 +564,11 @@ def _remove_reshape_chains(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mo
         if inp_tensor and inp_tensor in tail_to_chain:
             # Extend existing chain only if this node is the sole consumer
             consumers = cache.get_consumers(inp_tensor)
-            if len(consumers) == 1 and inp_tensor not in cache.graph_output_names:
+            if (
+                len(consumers) == 1
+                and inp_tensor not in cache.graph_output_names
+                and inp_tensor not in captured
+            ):
                 chain = tail_to_chain.pop(inp_tensor)
                 chain.append(node)
                 tail_to_chain[node.output[0]] = chain
@@ -562,6 +587,8 @@ def _remove_reshape_chains(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mo
         inp = ch[0].input[0]
         out_tensor = ch[-1].output[0]
         if list(in_shape) == list(out_shape):
+            if out_tensor in captured:
+                continue
             # Entire chain is a noop
             for c_node, c_idx in cache.get_consumers(out_tensor):
                 if c_node.input[c_idx] == out_tensor:
@@ -838,13 +865,18 @@ def _remove_consecutive_casts(model: onnx.ModelProto, cache: GraphCache) -> onnx
 
     # Build chains: tail_output → [cast_node, ...]
     all_casts = [n for n in graph.node if n.op_type == "Cast" and not n.domain and not n.overload]
+    captured = _subgraph_captures(graph)
     tail_to_chain: dict[str, list] = {}
 
     for node in all_casts:
         inp_tensor = node.input[0] if node.input else None
         if inp_tensor and inp_tensor in tail_to_chain:
             consumers = cache.get_consumers(inp_tensor)
-            if len(consumers) == 1 and inp_tensor not in cache.graph_output_names:
+            if (
+                len(consumers) == 1
+                and inp_tensor not in cache.graph_output_names
+                and inp_tensor not in captured
+            ):
                 chain = tail_to_chain.pop(inp_tensor)
                 chain.append(node)
                 tail_to_chain[node.output[0]] = chain

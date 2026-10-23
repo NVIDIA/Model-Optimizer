@@ -702,6 +702,99 @@ def test_single_reshape_unchanged():
     assert len(tr.graph.node) == orig_count, "single Reshape must not be changed"
 
 
+@pytest.mark.parametrize(
+    "kind",
+    ["reshape_noop", "reshape_chain", "reshape_noop_chain", "cast_chain", "unsqueeze", "control"],
+)
+def test_cleanup_preserves_subgraph_captures(kind):
+    """Keep chain values alive when If branches capture them, including direct controls."""
+    dtype = TensorProto.BOOL if kind == "control" else TensorProto.FLOAT
+    input_shape = [] if kind == "control" else [6]
+    target_shape = input_shape
+    captured = "Y"
+    captured_type = dtype
+    initializers = []
+    value_info = []
+    if kind == "cast_chain":
+        nodes = [
+            helper.make_node("Cast", ["X"], ["T"], to=TensorProto.DOUBLE),
+            helper.make_node("Cast", ["T"], ["Y"], to=TensorProto.FLOAT),
+        ]
+        captured = "T"
+        captured_type = TensorProto.DOUBLE
+        value_info.append(_vi("T", captured_type, input_shape))
+    elif kind == "unsqueeze":
+        input_shape = [2, 3]
+        target_shape = [1, 1, 2, 3]
+        initializers.append(numpy_helper.from_array(np.array([0, 1], np.int64), name="axes"))
+        nodes = [helper.make_node("Unsqueeze", ["X", "axes"], ["Y"])]
+    else:
+        shapes = [[2, 3], [6]] if "chain" in kind else [input_shape]
+        if kind == "reshape_chain":
+            shapes[-1] = [1, 2, 3]
+            captured = "T"
+        nodes = []
+        previous = "X"
+        for index, shape in enumerate(shapes):
+            name = f"shape_{index}"
+            initializers.append(numpy_helper.from_array(np.array(shape, np.int64), name=name))
+            output = "Y" if index == len(shapes) - 1 else "T"
+            nodes.append(helper.make_node("Reshape", [previous, name], [output]))
+            value_info.append(_vi(output, dtype, shape))
+            previous = output
+        target_shape = shapes[-1]
+    captured_shape = [2, 3] if captured == "T" and kind != "cast_chain" else target_shape
+    if kind in ("cast_chain", "unsqueeze"):
+        value_info.append(_vi("Y", dtype, target_shape))
+    inputs = [_vi("X", dtype, input_shape)]
+    condition = "Y" if kind == "control" else "condition"
+    if kind != "control":
+        inputs.append(_vi(condition, TensorProto.BOOL, []))
+    branch = helper.make_graph(
+        [helper.make_node("Identity", [captured], ["branch_out"])],
+        "capture",
+        [],
+        [_vi("branch_out", captured_type, captured_shape)],
+    )
+    nodes.extend(
+        [
+            helper.make_node("Identity", ["Y"], ["main"]),
+            helper.make_node(
+                "If", [condition], ["captured"], then_branch=branch, else_branch=branch
+            ),
+        ]
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "captured_chain",
+            inputs,
+            [_vi("main", dtype, target_shape), _vi("captured", captured_type, captured_shape)],
+            initializer=initializers,
+            value_info=value_info,
+        ),
+        opset_imports=[helper.make_opsetid("", _OPSET_VERSION)],
+    )
+    _clamp_ir(model)
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {
+        "X": np.array(True)
+        if kind == "control"
+        else np.arange(6, dtype=np.float32).reshape(input_shape)
+    }
+    if kind != "control":
+        feeds[condition] = np.array(True)
+    expected = _run_ort(model, feeds)
+    transform = _remove_cast_chains if kind == "cast_chain" else _remove_reshapes
+    if kind == "unsqueeze":
+        transform = _canonicalize_inputs
+    transformed = transform(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    actual = _run_ort(transformed, feeds)
+    for name in expected:
+        np.testing.assert_array_equal(actual[name], expected[name])
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 4 — Fold constants
 # ══════════════════════════════════════════════════════════════════════════════
