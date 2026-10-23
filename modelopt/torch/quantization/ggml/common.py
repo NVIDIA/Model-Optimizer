@@ -91,13 +91,23 @@ def _input_cache_key(inputs: torch.Tensor) -> _CacheKey | None:
 
 
 def _input_fingerprint(inputs: torch.Tensor) -> torch.Tensor:
-    """Return a small device-resident fingerprint of the input's bit representation."""
+    """Return a position-sensitive device-resident fingerprint of every input element."""
     bits = inputs.contiguous().view(_SIGNED_INT_OF_SIZE[inputs.element_size()]).reshape(-1)
-    sample = bits[:: max(1, bits.numel() // 1024)]
-    summary = torch.stack(
-        (bits.sum(), (bits * bits).sum(), sample.sum(), (sample * sample).sum())
-    )
-    return torch.cat((summary, sample))
+    summary = torch.zeros(4, dtype=torch.int64, device=bits.device)
+    for start in range(0, bits.numel(), _ROW_KEY_CHUNK):
+        chunk = bits[start : start + _ROW_KEY_CHUNK].to(torch.int64)
+        positions = torch.arange(
+            start + 1, start + chunk.numel() + 1, dtype=torch.int64, device=bits.device
+        )
+        summary += torch.stack(
+            (
+                chunk.sum(),
+                (chunk * chunk).sum(),
+                (chunk * positions).sum(),
+                (chunk * chunk * positions).sum(),
+            )
+        )
+    return summary
 
 
 def _is_contiguous(shape: tuple[int, ...], stride: tuple[int, ...]) -> bool:
@@ -170,27 +180,18 @@ def _matching_cache(
         return None
     # ``inputs`` is often a view created in the forward; under no_grad its requires_grad is False
     # even for a trainable parameter, so read it from the parameter itself.
+    same_layout = _same_input_layout(cache.input_key, input_key) or (
+        any_contiguous_view and _same_contiguous_layout(cache.input_key, input_key)
+    )
+    if not same_layout:
+        return None
+    same_version = cache.input_key.version == input_key.version
+    if not same_version:
+        return None
     trainable_weight = _cache_base(inputs).requires_grad
-    if (
-        (
-            trainable_weight
-            and (
-                _same_input_layout(cache.input_key, input_key)
-                or (
-                    any_contiguous_view
-                    and _same_contiguous_layout(cache.input_key, input_key)
-                )
-            )
-            and torch.equal(cache.input_fingerprint, _input_fingerprint(inputs))
-        )
-        or (
-            not trainable_weight
-            and (
-                cache.input_key == input_key
-                or (any_contiguous_view and _same_elements(cache.input_key, input_key))
-            )
-        )
-    ):
+    if not trainable_weight or torch.is_inference_mode_enabled():
+        return cache
+    if torch.equal(cache.input_fingerprint, _input_fingerprint(inputs)):
         return cache
     return None
 
