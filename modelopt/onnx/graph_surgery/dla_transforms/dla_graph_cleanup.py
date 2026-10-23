@@ -111,7 +111,8 @@ _RANK_AGNOSTIC_OPS = frozenset(
 
 def _set_axes(model, cache: GraphCache, node: onnx.NodeProto, axes, preferred_name: str) -> None:
     """Attach axes using the model's default-domain Squeeze/Unsqueeze schema."""
-    opset = next((o.version for o in model.opset_import if o.domain == ""), 1)
+    versions = {o.domain: o.version for o in model.opset_import}
+    opset = versions.get("", versions.get("ai.onnx", 1))
     if opset < 13:
         node.attribute.append(
             helper.make_attribute("axes", list(axes), attr_type=onnx.AttributeProto.INTS)
@@ -148,7 +149,7 @@ def _rank_sensitive_consumers(
     sensitive_values: set[str] = set()
     sensitive_edges: set[tuple[int, int]] = set()
     for node in reversed(graph.node):
-        rank_agnostic = node.domain in ("", "ai.onnx") and node.op_type in _RANK_AGNOSTIC_OPS
+        rank_agnostic = not node.domain and not node.overload and node.op_type in _RANK_AGNOSTIC_OPS
         if rank_agnostic:
             rank_agnostic = not any(
                 output in sensitive_values and len(cache.get_shape(output) or []) < 4
@@ -206,6 +207,8 @@ def _canonicalize_inputs(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mode
 
         consumers = []
         for c_node, c_idx in consumer_map.get(graph_input.name, []):
+            if c_node.domain or c_node.overload:
+                continue
             if (c_node.op_type == "Squeeze" and "Gather" in c_node.name) or c_node.op_type in (
                 "GroupQueryAttention",
                 "Gather",
@@ -442,7 +445,7 @@ def _replace_intermediary_squeeze_unsqueeze(
     cnt_replace = 0
 
     for node in list(graph.node):
-        if node.op_type not in ("Squeeze", "Unsqueeze"):
+        if node.domain or node.overload or node.op_type not in ("Squeeze", "Unsqueeze"):
             continue
         if not node.input or not node.output:
             continue
@@ -522,6 +525,8 @@ def _remove_reshape_chains(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mo
     pass1_batch: dict[int, tuple[list, list]] = {}
 
     for node in cache.nodes_by_op("Reshape"):
+        if node.domain or node.overload:
+            continue
         in_shape = cache.get_shape(node.input[0])
         out_shape = cache.get_shape(node.output[0])
         if in_shape is None or out_shape is None:
@@ -565,7 +570,9 @@ def _remove_reshape_chains(model: onnx.ModelProto, cache: GraphCache) -> onnx.Mo
     # members (e.g. r1→r2→r5→r3 where r5 is not a Reshape: r1,r2,r3 still
     # form a chain as long as each Reshape is the sole consumer of the previous
     # Reshape's output).
-    all_reshapes = [n for n in graph.node if n.op_type == "Reshape"]
+    all_reshapes = [
+        n for n in graph.node if n.op_type == "Reshape" and not n.domain and not n.overload
+    ]
 
     # output_name → chain (list of Reshape nodes whose last output == output_name)
     tail_to_chain: dict[str, list] = {}
@@ -711,7 +718,7 @@ def _replace_graph_output_reshape_with_squeeze(
     cnt = 0
 
     for node in list(graph.node):
-        if node.op_type != "Reshape":
+        if node.domain or node.overload or node.op_type != "Reshape":
             continue
         if not node.output or node.output[0] not in graph_output_names:
             continue

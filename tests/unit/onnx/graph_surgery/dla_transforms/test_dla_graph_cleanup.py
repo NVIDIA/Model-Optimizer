@@ -150,7 +150,8 @@ def test_canonicalize_3d_input_unsqueeze_added():
 
 
 @pytest.mark.parametrize("opset", [12, 13, 17])
-def test_canonicalize_2d_input_unsqueeze_added(opset):
+@pytest.mark.parametrize("alias_only", [False, True])
+def test_canonicalize_2d_input_unsqueeze_added(opset, alias_only):
     """Promote a 2D input when broadcasting already fixes downstream rank at four."""
     add = helper.make_node("Add", ["X", "W"], ["sum"], name="add")
     transpose = helper.make_node("Transpose", ["sum"], ["Y"], perm=[0, 1, 3, 2])
@@ -170,6 +171,9 @@ def test_canonicalize_2d_input_unsqueeze_added(opset):
             helper.make_opsetid("", opset),
         ],
     )
+    if alias_only:
+        model.ClearField("opset_import")
+        model.opset_import.append(helper.make_opsetid("ai.onnx", opset))
     _clamp_ir(model)
     feeds = {"X": _RNG.standard_normal([4, 5]).astype(np.float32)}
     expected = _run_ort(model, feeds)
@@ -190,7 +194,9 @@ def test_canonicalize_2d_input_unsqueeze_added(opset):
     assert axes == [0, 1], f"axes should be [0,1] for 2-D input, got {axes}"
     add_node = next(node for node in tr.graph.node if node.op_type == "Add")
     assert add_node.input[0] == unsq_nodes[0].output[0]
-    onnx.checker.check_model(tr, full_check=True)
+    # ONNX 1.21 requires an empty-domain import; ORT also accepts alias-only imports.
+    if not alias_only:
+        onnx.checker.check_model(tr, full_check=True)
     np.testing.assert_array_equal(_run_ort(tr, feeds)["Y"], expected["Y"])
 
 
@@ -1538,6 +1544,79 @@ def test_custom_domain_cast_is_not_collapsed():
     np.testing.assert_array_equal(actual, expected)
     assert transformed.SerializeToString() == before
     onnx.checker.check_model(transformed, full_check=True)
+
+
+@pytest.mark.parametrize(
+    ("stage", "op_type", "input_shape", "output_shape", "parameters"),
+    [
+        ("input", "Unsqueeze", [2, 3], [1, 1, 2, 3], [0, 1]),
+        ("intermediary", "Unsqueeze", [2, 3], [1, 1, 2, 3], [0, 1]),
+        ("intermediary", "Squeeze", [1, 1, 2, 3], [2, 3], [0, 1]),
+        ("reshape", "Reshape", [2, 3], [2, 3], [2, 3]),
+        ("chain", "Reshape", [6], [2, 3], [2, 3]),
+        ("output", "Reshape", [1, 2, 3, 1], [2, 3], [2, 3]),
+    ],
+)
+def test_custom_domain_shape_operations_are_preserved(
+    stage, op_type, input_shape, output_shape, parameters
+):
+    """Preserve local functions whose names match standard shape operations."""
+    function = helper.make_function(
+        "test.modelopt",
+        op_type,
+        ["X", "parameters"],
+        ["Y"],
+        [
+            helper.make_node(op_type, ["X", "parameters"], ["adapted"]),
+            helper.make_node("Neg", ["adapted"], ["Y"]),
+        ],
+        [helper.make_opsetid("", _OPSET_VERSION)],
+    )
+    nodes, value_info = [], []
+    source = "X"
+    if stage == "intermediary":
+        nodes.append(helper.make_node("Identity", ["X"], ["middle"]))
+        value_info.append(_vi("middle", TensorProto.FLOAT, input_shape))
+        source = "middle"
+    output = "T" if stage == "chain" else "Y"
+    nodes.append(
+        helper.make_node(op_type, [source, "parameters"], [output], domain="test.modelopt")
+    )
+    initializers = [numpy_helper.from_array(np.array(parameters, np.int64), name="parameters")]
+    if stage == "chain":
+        value_info.append(_vi("T", TensorProto.FLOAT, output_shape))
+        output_shape = [1, 2, 3]
+        initializers.append(numpy_helper.from_array(np.array(output_shape, np.int64), name="final"))
+        nodes.append(helper.make_node("Reshape", ["T", "final"], ["Y"]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "custom_shape_operation",
+            [_vi("X", TensorProto.FLOAT, input_shape)],
+            [_vi("Y", TensorProto.FLOAT, output_shape)],
+            initializer=initializers,
+            value_info=value_info,
+        ),
+        opset_imports=[
+            helper.make_opsetid("", _OPSET_VERSION),
+            helper.make_opsetid("test.modelopt", 1),
+        ],
+        functions=[function],
+    )
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"X": np.arange(1, 7, dtype=np.float32).reshape(input_shape)}
+    expected = ReferenceEvaluator(model).run(None, feeds)[0]
+    transform = {
+        "input": _canonicalize_inputs,
+        "intermediary": _replace_sq_unsq,
+        "reshape": _remove_reshapes,
+        "chain": _remove_reshapes,
+        "output": _reshape_to_squeeze,
+    }[stage]
+    transformed = transform(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    np.testing.assert_array_equal(ReferenceEvaluator(transformed).run(None, feeds)[0], expected)
+    assert transformed.SerializeToString() == model.SerializeToString()
 
 
 def test_single_cast_unchanged():
