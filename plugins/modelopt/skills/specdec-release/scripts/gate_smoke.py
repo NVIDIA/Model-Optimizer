@@ -62,9 +62,20 @@ def evaluate_smoke(smoke, draft=None, target=None):
             "notes": [],
             "mean_acceptance_length": smoke.get("mean_acceptance_length"),
         }
+    stage = smoke["stage"]
+    if stage == "invalid_config":
+        # The script rejected a recipe value before serving anything: nothing about the
+        # drafter is known, and re-running unchanged fails the same way.
+        return {
+            "pass": False,
+            "failure_class": "USER_CONFIG_ERROR",
+            "detail": f"smoke task config: {smoke.get('reason')}; fix it in the recipe and "
+            "re-run the smoke task",
+            "notes": [],
+            "mean_acceptance_length": smoke.get("mean_acceptance_length"),
+        }
     problems = []
     passed, failed = smoke.get("prompts_passed"), smoke.get("prompts_failed")
-    stage = smoke["stage"]
     if stage != "completed":
         problems.append(("CHECKPOINT_NOT_SERVABLE", f"stopped at {stage}: {smoke.get('reason')}"))
     elif failed or not passed:

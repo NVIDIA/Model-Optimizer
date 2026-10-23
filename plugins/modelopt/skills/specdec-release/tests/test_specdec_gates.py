@@ -242,6 +242,11 @@ def test_train_inherited_qwen_mask_token_on_smaller_vocab_fails():
             "CHECKPOINT_NOT_SERVABLE",
         ),
         ({"stage": None}, {}, "USER_CONFIG_ERROR"),  # deleted below: predates "stage"
+        (
+            {"stage": "invalid_config", "pass": False, "mean_acceptance_length": None},
+            {},
+            "USER_CONFIG_ERROR",
+        ),
         ({"mean_acceptance_length": 1.0}, {}, "SPEC_NOT_ACTIVE"),
         ({"mean_acceptance_length": None}, {}, "SPEC_NOT_ACTIVE"),
         ({"pass": False, "mean_acceptance_length": 1.4}, {}, "ACCEPTANCE_REGRESSION"),
