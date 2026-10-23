@@ -216,8 +216,9 @@ def _save_external_weights(model, model_path, weights_path, location, size_thres
         states.append((tensor, metadata))
     payloads = []
     try:
+        # Assign the final location only when writing; its existing sidecar is still live.
         onnx.external_data_helper.convert_model_to_external_data(
-            model, location=location, size_threshold=size_threshold
+            model, size_threshold=size_threshold
         )
         tensors = [
             tensor for tensor, _ in states if onnx.external_data_helper.uses_external_data(tensor)

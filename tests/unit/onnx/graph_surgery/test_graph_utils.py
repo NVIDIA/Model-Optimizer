@@ -383,8 +383,9 @@ def test_qdq_dtype_filters_normalize_aliases_and_reject_unknown_types():
 
 
 @pytest.mark.parametrize("dtype", [np.float16, np.float32, np.int8])
-def test_repeated_external_save_keeps_sidecar_bounded(tmp_path, dtype):
+def test_repeated_external_save_keeps_sidecar_bounded(tmp_path, monkeypatch, dtype):
     """Round-trip adjacent payloads, including a Windows text-mode EOF byte."""
+    monkeypatch.chdir(tmp_path)
     path = tmp_path / "model.onnx"
     location = "weights/data.bin" if dtype == np.float32 else "model.onnx_data"
     values = np.arange(2048, dtype=np.float32).astype(dtype)
@@ -421,6 +422,7 @@ def test_repeated_external_save_keeps_sidecar_bounded(tmp_path, dtype):
     "location", ["../weights.bin", "absolute", "model.onnx", "", "directory", "model_alias"]
 )
 def test_invalid_external_location_preserves_model_and_existing_output(tmp_path, location):
+    """Reject invalid sidecar paths before changing caller tensors or existing files."""
     model = helper.make_model(
         helper.make_graph(
             [], "save", [], [], [numpy_helper.from_array(np.ones(2048, np.float32), "w")]
