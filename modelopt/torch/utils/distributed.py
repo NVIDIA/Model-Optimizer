@@ -60,6 +60,7 @@ __all__ = [
     "is_initialized",
     "is_master",
     "rank",
+    "recorded_distribution_plan",
     "set_distribution_plan",
     "shard_dataloader",
     "size",
@@ -403,7 +404,7 @@ def distribution_plan(model: torch.nn.Module) -> DistributionPlan:
     a launch sets its group up, each of its processes runs alone with a model of its own, so a model
     with no plan reads as a single process's there.
     """
-    plan = getattr(model, _PLAN_ATTR, None)
+    plan = recorded_distribution_plan(model)
     if plan is not None:
         return plan
     sharded = is_fsdp2_model(model)
@@ -415,6 +416,15 @@ def distribution_plan(model: torch.nn.Module) -> DistributionPlan:
             "was recorded has none, so read the plan off that model."
         )
     return DistributionPlan()
+
+
+def recorded_distribution_plan(model: torch.nn.Module) -> DistributionPlan | None:
+    """The plan :func:`set_distribution_plan` recorded on ``model``, or ``None`` if none was.
+
+    For code that also serves models distributed without a plan, such as Megatron's, which
+    :func:`distribution_plan` refuses in a run of several ranks.
+    """
+    return getattr(model, _PLAN_ATTR, None)
 
 
 _V = TypeVar("_V")
