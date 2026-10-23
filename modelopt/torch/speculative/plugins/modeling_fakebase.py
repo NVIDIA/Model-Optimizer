@@ -92,6 +92,20 @@ _BASE_MODEL_PATHS = [
     "language_model.backbone",
 ]
 _VLM_CONFIG_ATTRS = ["text_config", "llm_config"]
+
+
+def _cfg_attr(cfg, name, default=None, layer=-1):
+    """Read ``name`` from ``cfg``; take it from one layer when transformers declares it per layer."""
+    try:
+        return getattr(cfg, name, default)
+    except Exception as exc:  # transformers' AmbiguousGlobalPerLayerAttributeError, by name
+        if type(exc).__name__ != "AmbiguousGlobalPerLayerAttributeError":
+            raise
+        per_layer = getattr(cfg, "per_layer_config")
+        count = len(per_layer)
+        return getattr(per_layer[(count + layer) % count], name, default)
+
+
 _SAFETENSORS_INDEX_FILENAME = "model.safetensors.index.json"
 # Single-file safetensors names to try, in order.  Mistral native checkpoints
 # use ``consolidated.safetensors`` instead of the HF-standard ``model.safetensors``.
@@ -232,10 +246,10 @@ class FakeBaseModel(PreTrainedModel):
             max_position_embeddings=getattr(base_cfg, "max_position_embeddings", None),
             dtype=getattr(base_cfg, "dtype", torch.bfloat16),
             tie_word_embeddings=getattr(base_cfg, "tie_word_embeddings", False),
-            num_attention_heads=getattr(base_cfg, "num_attention_heads", None),
-            num_key_value_heads=getattr(base_cfg, "num_key_value_heads", None),
-            intermediate_size=getattr(base_cfg, "intermediate_size", None),
-            rms_norm_eps=getattr(base_cfg, "rms_norm_eps", 1e-6),
+            num_attention_heads=_cfg_attr(base_cfg, "num_attention_heads", None),
+            num_key_value_heads=_cfg_attr(base_cfg, "num_key_value_heads", None),
+            intermediate_size=_cfg_attr(base_cfg, "intermediate_size", None),
+            rms_norm_eps=_cfg_attr(base_cfg, "rms_norm_eps", 1e-6),
             # Shared with the exporter: where a config keeps rope_theta depends on the
             # transformers version, and reading it wrong is silent until serve time.
             rope_theta=_get_rope_theta(base_cfg),
