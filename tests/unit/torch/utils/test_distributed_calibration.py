@@ -454,3 +454,31 @@ def test_the_ep_mesh_comes_with_an_expert_parallel_plan_only(plan, mesh):
 
     with pytest.raises(ValueError, match="calibrates with the ep_mesh"):
         distributed_forward_loop(model, [{"input_ids": torch.zeros(1, 1)}], ep_mesh=mesh)
+
+
+# ------------------------------------------------------------------------ rank-local calibration
+
+
+@pytest.mark.parametrize("entry", ["quantize", "calibrate"])
+def test_rank_local_calibration_is_refused_before_it_changes_a_distributed_model(entry):
+    """Each rank calibrates on its own data, and AWQ keeps what its search gathers on the rank: the
+    ranks' copies of a weight would come out different. The refusal comes before any change."""
+    import modelopt.torch.quantization as mtq
+
+    model = nn.Sequential(nn.Linear(16, 16))
+    set_distribution_plan(model, DistributionPlan(world_size=2))
+    if entry == "calibrate":
+        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))
+    modules = [type(module) for module in model.modules()]
+    state = {name: tensor.clone() for name, tensor in model.state_dict().items()}
+
+    with pytest.raises(NotImplementedError, match=r"awq_lite is not supported .* over 2 ranks"):
+        if entry == "quantize":
+            mtq.quantize(model, mtq.INT4_AWQ_CFG, lambda m: m(torch.randn(2, 16)))
+        else:
+            mtq.calibrate(model, "awq_lite", lambda m: m(torch.randn(2, 16)))
+
+    assert [type(module) for module in model.modules()] == modules
+    after = model.state_dict()
+    assert after.keys() == state.keys()
+    assert all(torch.equal(after[name], tensor) for name, tensor in state.items())
