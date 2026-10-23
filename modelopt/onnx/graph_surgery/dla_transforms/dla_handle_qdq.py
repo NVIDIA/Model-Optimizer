@@ -70,7 +70,14 @@ def _apply_handle_qdq(model: onnx.ModelProto) -> onnx.ModelProto:
             continue
 
         data_name = node.input[0]
-        orig_shape = cache.get_shape(data_name)
+        orig_shape: list | None = cache.get_shape(data_name)
+        if orig_shape is None:
+            info = cache.vi_map.get(data_name)
+            if info is not None and info.type.tensor_type.HasField("shape"):
+                orig_shape = [
+                    dim.dim_value if dim.HasField("dim_value") else dim.dim_param or None
+                    for dim in info.type.tensor_type.shape.dim
+                ]
 
         if orig_shape is None:
             logger.debug("%s %r: data input shape unknown; skipping.", node.op_type, node.name)
@@ -100,7 +107,9 @@ def _apply_handle_qdq(model: onnx.ModelProto) -> onnx.ModelProto:
 
         # ── Update axis attribute (ONNX Q/DQ default: 1) ─────────────────────
         has_axis = any(a.name == "axis" for a in node.attribute)
-        if (opset >= 13 or node.domain == "com.microsoft") and (has_axis or len(orig_shape) > 1):
+        if (opset >= 13 or node.domain == "com.microsoft") and (
+            has_axis or (node.domain != "com.microsoft" and len(orig_shape) > 1)
+        ):
             orig_axis = get_node_attr_i(node, "axis", 1)
             if orig_axis >= 0:
                 set_node_attr_i(node, "axis", orig_axis + delta)

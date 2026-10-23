@@ -104,13 +104,45 @@ def _assert_wrapped(tr, op_type: str, orig_name: str) -> None:
 _RNG = np.random.default_rng(2024)
 
 
+@pytest.mark.parametrize("op_type", ["QuantizeLinear", "DequantizeLinear"])
+def test_runtime_per_tensor_qdq_keeps_axis_absent(op_type):
+    """Runtime per-tensor QDQ retains scalar controls and its absent axis when wrapped."""
+    quantize = op_type == "QuantizeLinear"
+    shape = [2, 3]
+    input_dtype = TensorProto.FLOAT if quantize else TensorProto.UINT8
+    output_dtype = TensorProto.UINT8 if quantize else TensorProto.FLOAT
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node(op_type, ["X", "scale", "zero"], ["Y"], domain="com.microsoft")],
+            "runtime_per_tensor",
+            [_vi("X", input_dtype, shape)],
+            [_vi("Y", output_dtype, shape)],
+            initializer=[
+                numpy_helper.from_array(np.float32(0.25), "scale"),
+                numpy_helper.from_array(np.uint8(0), "zero"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 10), helper.make_opsetid("com.microsoft", 1)],
+        ir_version=_MAX_IR_VERSION_FOR_ORT,
+    )
+    onnx.checker.check_model(model, full_check=True)
+    data = np.arange(6, dtype=np.float32 if quantize else np.uint8).reshape(shape)
+    expected = _run_ort(model, {"X": data})["Y"]
+    _apply(model)
+    onnx.checker.check_model(model, full_check=True)
+    transformed = next(node for node in model.graph.node if node.op_type == op_type)
+    assert not any(attribute.name == "axis" for attribute in transformed.attribute)
+    _assert_wrapped(model, op_type, transformed.name)
+    np.testing.assert_array_equal(_run_ort(model, {"X": data})["Y"], expected)
+
+
 # ── 1. QuantizeLinear — 3-D dynamic input, per-channel axis ──────────────────
 
 
 @pytest.mark.parametrize(("opset", "domain"), [(21, ""), (10, "com.microsoft")])
-def test_quantize_linear_3d_dynamic_wrapped(opset, domain):
+@pytest.mark.parametrize("shape", [[2, 4, 8], ["batch", 4, None]])
+def test_quantize_linear_3d_dynamic_wrapped(opset, domain, shape):
     """Q [2,4,8] axis=1 → Unsqueeze→Q(axis=2)→Squeeze; output shape and values match base."""
-    shape = [2, 4, 8]
     scale = numpy_helper.from_array(np.full((4,), 0.1, dtype=np.float32), name="scale")
     zp = numpy_helper.from_array(np.zeros((4,), dtype=np.int8), name="zp")
 
@@ -133,13 +165,21 @@ def test_quantize_linear_3d_dynamic_wrapped(opset, domain):
     )
     _clamp_ir(model)
 
-    x = _RNG.standard_normal(shape).astype(np.float32)
+    x = _RNG.standard_normal([2, 4, 8]).astype(np.float32)
     _prepare_model(model)
     ref = _run_ort(model, {"X": x})
 
     tr = copy.deepcopy(model)
     _prepare_model(tr)
     tr = _apply(tr)
+    q_node = next(n for n in tr.graph.node if n.op_type == "QuantizeLinear")
+    for name in [q_node.input[0], q_node.output[0]]:
+        info = next(value for value in tr.graph.value_info if value.name == name)
+        actual = [
+            d.dim_value if d.HasField("dim_value") else d.dim_param or None
+            for d in info.type.tensor_type.shape.dim
+        ]
+        assert actual == [1, *shape]
     _prepare_model(tr)
     got = _run_ort(tr, {"X": x})
 
