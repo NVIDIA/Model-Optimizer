@@ -436,17 +436,20 @@ def test_mlflow_is_off_by_default(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("extra_args", "expected"),
+    ("extra_args", "memory_fit", "expected"),
     [
-        ((), 16),  # 8,192 tokens at --calib_seq 512
-        (("--calib_size", "4"), 4),  # never more than the samples
-        (("--calib_seq", "16384"), 1),  # at least one sample
-        (("--batch_size", "1"), 1),  # an explicit value is kept
+        ((), 1000, 16),  # 8,192 tokens at --calib_seq 512
+        ((), 5, 5),  # what fits a decoder layer's forward
+        (("--calib_size", "4"), 1000, 4),  # never more than the samples
+        (("--calib_seq", "16384"), 1000, 1),  # at least one sample
+        (("--batch_size", "1"), 1000, 1),  # an explicit value is kept
     ],
-    ids=["token_budget", "sample_cap", "long_sequence", "explicit"],
+    ids=["token_budget", "memory", "sample_cap", "long_sequence", "explicit"],
 )
-def test_layerwise_calibration_batch_reaches_the_dataloader(monkeypatch, extra_args, expected):
-    """A layerwise recipe sizes the default calibration batch by tokens."""
+def test_layerwise_calibration_batch_reaches_the_dataloader(
+    monkeypatch, extra_args, memory_fit, expected
+):
+    """A layerwise recipe sizes the default calibration batch by tokens and layer memory."""
     hf_ptq, args = _parse_hf_ptq_args(
         monkeypatch,
         "--pyt_ckpt_path",
@@ -468,6 +471,11 @@ def test_layerwise_calibration_batch_reaches_the_dataloader(monkeypatch, extra_a
         raise _DataloaderReachedError
 
     monkeypatch.setattr(hf_ptq, "make_calib_dataloader", make_calib_dataloader)
+    monkeypatch.setattr(
+        hf_ptq,
+        "get_max_layerwise_batch_size",
+        lambda model, seq_len, max_batch_size, num_samples, device: min(max_batch_size, memory_fit),
+    )
     with pytest.raises(_DataloaderReachedError):
         hf_ptq.quantize_main(args, None, None, None, False, None, None, torch.device("cpu"))
     assert batch_sizes == [expected]

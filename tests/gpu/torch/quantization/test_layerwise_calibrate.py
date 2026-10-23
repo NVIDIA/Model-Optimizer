@@ -19,7 +19,11 @@ import torch
 import torch.nn as nn
 
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
-from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+from modelopt.torch.quantization.utils import layerwise_calib
+from modelopt.torch.quantization.utils.layerwise_calib import (
+    LayerActivationCollector,
+    get_max_layerwise_batch_size,
+)
 
 
 class _DecoderBlock(nn.Module):
@@ -339,3 +343,40 @@ def test_skip_placeholder_uses_meta_device():
     assert out.device == torch.device("meta")
     assert out.shape == torch.Size([2, 3])
     assert out.dtype == torch.float32
+
+
+class _WideDecoderBlock(_DecoderBlock):
+    """A heavier kind of decoder layer: its FFN is 8x wider than _DecoderBlock's."""
+
+    def __init__(self, dim=16):
+        super().__init__(dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim * 32, bias=False),
+            nn.ReLU(),
+            nn.Linear(dim * 32, dim, bias=False),
+        )
+
+
+def test_layerwise_batch_probe_fits_the_heaviest_kind_of_layer(monkeypatch):
+    """The batch probe runs every kind of decoder layer, not just the first one."""
+    _register_test_discoverer(monkeypatch)
+    budget = 256 * 2**20
+    monkeypatch.setattr(layerwise_calib, "_available_gpu_bytes", lambda gpu: budget)
+    model = _SimpleTransformerModel(n_layers=3, dim=256).cuda()
+
+    def probe():
+        return get_max_layerwise_batch_size(model, seq_len=512, max_batch_size=4096, num_samples=1)
+
+    light = probe()
+    model.layers[2] = _WideDecoderBlock(256).cuda()
+    heavy = probe()
+    assert 1 < heavy < light < 4096
+    assert not any(hasattr(layer, "_layerwise_calib") for layer in model.layers)
+
+    # The heavy layer's forward at the probed batch takes at most half of the available memory.
+    x = torch.randn(heavy, 512, 256, device="cuda")
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    with torch.no_grad():
+        model.layers[2](x)
+    assert torch.cuda.max_memory_allocated() - base <= budget / 2
