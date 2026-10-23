@@ -155,6 +155,21 @@ def test_the_router_style_registers_under_transformers_5_16_0s_name(monkeypatch)
     assert isinstance(tp.ALL_PARALLEL_STYLES["torch_a2a_router"], tp.EpRouterParallel)
 
 
+def _no_tokens_for_rank1_job(rank, size):
+    moe.register_torch_a2a()
+    whole, local, owned = _split_qwen3_moe_experts(rank, size)
+    _assert_experts_backward_matches(rank, whole, local, owned, size, to_rank0=True)
+
+
+def test_experts_that_receive_no_tokens_run_on_an_empty_batch(cpu_dist_workers):
+    """Every token routed to rank 0's experts: rank 1 runs transformers' fused experts on an empty
+    batch, and the forward and gradients still match the whole module's on every rank."""
+    transformers = pytest.importorskip("transformers")
+    if Version(transformers.__version__) < Version("5.6"):
+        pytest.skip("expert parallelism needs transformers >= 5.6")
+    cpu_dist_workers.run(_no_tokens_for_rank1_job)
+
+
 def _split_qwen3_moe_experts(rank, size):
     """transformers' fused Qwen3-MoE experts, whole and this rank's contiguous share of them."""
     # transformers is optional: CI's transformers-free unit lane collects this file.
@@ -187,19 +202,22 @@ def _split_qwen3_moe_experts(rank, size):
     return whole, local, owned
 
 
-def _routed_tokens(size):
-    """Every rank's tokens and their top-k routing, identical on all ranks."""
+def _routed_tokens(size, to_rank0=False):
+    """Every rank's tokens and their top-k routing, identical on all ranks; ``to_rank0`` routes every
+    token to the experts rank 0 owns."""
     gen = torch.Generator().manual_seed(1)
     x = torch.randn(size * T, H, generator=gen).to(COMPUTE_DTYPE)
     weights, index = torch.randn(size * T, E, generator=gen).softmax(-1).topk(TOP_K, dim=-1)
+    if to_rank0:
+        index = torch.arange(TOP_K).expand(size * T, TOP_K) % (E // size)
     return x, weights.to(COMPUTE_DTYPE), index
 
 
-def _assert_experts_backward_matches(rank, whole, local, owned, size):
+def _assert_experts_backward_matches(rank, whole, local, owned, size, to_rank0=False):
     """``local`` runs this rank's tokens through the torch_a2a forward; ``whole`` runs all tokens on one
     process. The forward, and the gradients of this rank's hidden states and routing weights and of
     this rank's experts, must agree."""
-    x, weights, index = _routed_tokens(size)
+    x, weights, index = _routed_tokens(size, to_rank0)
     tok = slice(rank * T, (rank + 1) * T)
 
     whole.config._experts_implementation = "grouped_mm"
@@ -220,9 +238,11 @@ def _assert_experts_backward_matches(rank, whole, local, owned, size):
     torch.testing.assert_close(x_ep.grad.float(), x_ref.grad[tok].float(), **close)
     torch.testing.assert_close(w_ep.grad.float(), w_ref.grad[tok].float(), **close)
     for name in ("gate_up_proj", "down_proj"):
-        # Each rank's experts collect the gradient of every rank's tokens routed to them.
-        local_grad = getattr(local, name).grad
-        assert local_grad is not None and local_grad.abs().max() > 0, name
+        # Each rank's experts collect the gradient of every rank's tokens routed to them, and only
+        # that: experts no token reached get none.
+        param = getattr(local, name)
+        local_grad = param.grad if param.grad is not None else torch.zeros_like(param)
+        assert (local_grad.abs().max() > 0) == (not to_rank0 or rank == 0), name
         torch.testing.assert_close(
             local_grad.float(), getattr(whole, name).grad[owned].float(), **close
         )
