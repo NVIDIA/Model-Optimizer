@@ -68,6 +68,36 @@ __all__ = [
     "temporarily_fold_weights",
 ]
 
+# Calibration algorithms whose statistics stay on the rank that gathered them.
+_RANK_LOCAL_CALIBRATION = (
+    "awq_lite",
+    "awq_clip",
+    "awq_full",
+    "svdquant",
+    "local_hessian",
+    "imatrix",
+)
+
+
+def _refuse_rank_local_calibration(model: nn.Module, algorithm: QuantizeAlgoCfgType) -> None:
+    """Refuse a rank-local calibration algorithm on a model distributed over several ranks.
+
+    Each rank of such a model calibrates on its own data, so an algorithm that keeps its statistics
+    on the rank would leave the ranks' copies of a weight different. Called before anything changes.
+    """
+    plan = dist.recorded_distribution_plan(model)
+    if plan is None or plan.world_size == 1:
+        return
+    methods = [mode.removesuffix("_calibrate") for mode, _ in get_modelike_from_algo_cfg(algorithm)]
+    refused = [method for method in methods if method in _RANK_LOCAL_CALIBRATION]
+    if refused:
+        raise NotImplementedError(
+            f"Calibrating with {', '.join(refused)} is not supported on a model distributed over "
+            f"{plan.world_size} ranks. Each rank calibrates on its own data and this calibration "
+            "keeps what it gathers on the rank, so the ranks' copies of a weight would come out "
+            "different. Calibrate with max, MSE, GPTQ or SmoothQuant, or in a single process."
+        )
+
 
 # TODO: Descriptors for the supported algorithms
 def calibrate(
@@ -98,6 +128,7 @@ def calibrate(
 
     Returns: The calibrated pytorch model.
     """
+    _refuse_rank_local_calibration(model, algorithm)
     if forward_loop is not None:
         # get the number of arguments of forward_loop
         num_args = len(inspect.signature(forward_loop).parameters)
@@ -429,6 +460,7 @@ def quantize(
     Returns: A pytorch model which has been quantized and calibrated.
     """
     quantize_config = QuantizeConfig(**dict(config))
+    _refuse_rank_local_calibration(model, config.get("algorithm"))
     if not is_quantized(model):
         model = apply_mode(model, mode=[("quantize", dict(config))], registry=QuantizeModeRegistry)
     else:
