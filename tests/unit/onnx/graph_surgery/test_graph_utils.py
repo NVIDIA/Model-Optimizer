@@ -584,6 +584,7 @@ def test_external_save_rolls_back_failed_replacement(
     failed = False
 
     def fail_selected_replacement(source, destination):
+        """Fail one selected replacement to verify tensor and file rollback."""
         nonlocal failed
         if not failed and os.fspath(destination) == str(failure_path):
             failed = True
