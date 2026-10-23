@@ -80,6 +80,37 @@ def test_recipe_help_distinguishes_weight_and_kv_autoquant(monkeypatch, capsys):
     assert "KV-cache AutoQuantize recipes select per-layer K/V formats" in help_text
 
 
+@pytest.mark.parametrize(
+    ("recipe", "batch_size", "expected"),
+    [
+        (None, 0, 4),
+        ("general/ptq/nvfp4_default-kv_fp8_cast", 0, 4),
+        ("general/auto_quantize/nvfp4_fp8_at_5p4bits", 0, 1),
+        ("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits", 0, 1),
+        ("general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits", 0, 1),
+        ("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits", 2, 2),
+    ],
+)
+def test_fsdp2_default_batch_size_is_limited_to_autoquant(
+    monkeypatch, recipe, batch_size, expected
+):
+    monkeypatch.setenv("RANK", "0")
+    cli = ["--pyt_ckpt_path", "/local/model", "--use_fsdp2", "--batch_size", str(batch_size)]
+    if recipe is not None:
+        cli += ["--recipe", recipe]
+    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, *cli)
+    # GPU memory probing and dataset loading are unavailable in this offline argument test.
+    monkeypatch.setattr(hf_ptq, "get_max_batch_size", lambda *_args, **_kwargs: 4)
+
+    def stop_before_dataset_loading(*_args, **_kwargs):
+        raise RuntimeError("batch size selected")
+
+    monkeypatch.setattr(hf_ptq, "make_calib_dataloader", stop_before_dataset_loading)
+    with pytest.raises(RuntimeError, match="batch size selected"):
+        hf_ptq.quantize_main(args, None, None, None, False, None, None, torch.device("cpu"))
+    assert args.batch_size == expected
+
+
 def test_hf_ptq_kv_autoquant_invokes_public_api(monkeypatch):
     """The HF entry point runs the real public KV AutoQuant path on an offline Qwen fixture."""
     hf_ptq = _import_hf_ptq(monkeypatch)

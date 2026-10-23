@@ -759,13 +759,19 @@ class AutoQuantizeKVSearcher(BaseSearcher):
         """Keep sharded-model forward schedules identical, including iterator exhaustion."""
         iterator = iter(self.config["data_loader"])
         sentinel = object()
+        world_size = size()
+        availability = (
+            torch.empty((), dtype=torch.int, device=self._collective_device)
+            if world_size > 1
+            else None
+        )
         for _ in range(num_steps):
             data = next(iterator, sentinel)
             available = data is not sentinel
-            if size() > 1:
-                availability = [None] * size()
-                dist.all_gather_object(availability, available)
-                if any(availability) != all(availability):
+            if availability is not None:
+                availability.fill_(available)
+                dist.all_reduce(availability)
+                if availability.item() not in (0, world_size):
                     raise ValueError(
                         "Distributed KV-cache AutoQuantize requires the same number of batches "
                         "on every rank; use a distributed sampler with equal-length shards."
@@ -844,6 +850,7 @@ class AutoQuantizeKVSearcher(BaseSearcher):
     def before_search(self) -> None:
         """Resolve attention decisions and calibrate or restore candidate scales."""
         super().before_search()
+        # Also guard direct searcher use, which bypasses the public API's pre-conversion check.
         _validate_parallel_state(self.model)
         self.constraints = normalize_auto_quantize_constraints(self.model, self.constraints)
         target_bits, self._candidates = _validate_search_inputs(

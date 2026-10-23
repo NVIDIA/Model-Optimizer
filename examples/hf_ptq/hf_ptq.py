@@ -982,9 +982,9 @@ def quantize_main(
     if args.batch_size == 0:
         # For VL models with image-text calibration, skip automatic batch size detection
         # since get_max_batch_size can't handle multimodal inputs
-        if args.use_fsdp2:
+        if args.use_fsdp2 and aq_config is not None:
             print_rank_0(
-                "FSDP2 calibration uses batch_size=1 by default; set --batch_size to override."
+                "FSDP2 AutoQuant uses batch_size=1 by default; set --batch_size to override."
             )
             args.batch_size = 1
         elif args.calib_with_images:
