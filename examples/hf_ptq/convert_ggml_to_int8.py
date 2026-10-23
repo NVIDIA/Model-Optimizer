@@ -62,7 +62,15 @@ def convert_ggml_export_to_int8(
     ggml_dir, output_dir = Path(ggml_dir), Path(output_dir)
     config = json.loads((ggml_dir / "config.json").read_text())
     quantization = json.loads((ggml_dir / "hf_quant_config.json").read_text())["quantization"]
-    scale_dtype = getattr(torch, config.get("dtype") or config["torch_dtype"])
+    # Multimodal configs such as GLM-5.3-Flash's keep the dtype in text_config only.
+    text_config = config.get("text_config", {})
+    dtype = (
+        config.get("dtype")
+        or config.get("torch_dtype")
+        or text_config.get("dtype")
+        or text_config["torch_dtype"]
+    )
+    scale_dtype = getattr(torch, dtype)
     weight_map = indexed_weight_map(ggml_dir)
     layer_formats = _ggml_layer_formats(ggml_dir, weight_map, quantization)
     if output_dir.exists() and any(output_dir.iterdir()):

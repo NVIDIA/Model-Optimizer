@@ -16,7 +16,7 @@ Cache Diffusion is a technique that reuses cached outputs from previous diffusio
 | :------------: | :------------: | :------------: | :------------: |
 | Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
 | Getting Started | Learn how to optimize your models using quantization/cache diffusion to reduce precision and improve inference efficiency | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
-| Support Matrix | View the support matrix to see quantization/cahce diffusion compatibility and feature availability across different models | \[[Link](#support-matrix)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
+| Support Matrix | View the support matrix to see quantization/cache diffusion compatibility and feature availability across different models | \[[Link](#support-matrix)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Sparse Attention (Skip-Softmax) | Skip-softmax sparse attention for diffusion models | \[[Link](#sparse-attention-skip-softmax)\] | |
 | Cache Diffusion | Caching technique to accelerate inference without compromising quality | \[[Link](#cache-diffusion)\] | |
 | Post Training Quantization (PTQ) | Example scripts on how to run PTQ on diffusion models | \[[Link](#post-training-quantization-ptq)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
@@ -97,7 +97,7 @@ We support calibration for INT8, FP8 and FP4 precision and for both weights and 
 We also provide instructions on deploying and running E2E diffusion pipelines with Model Optimizer quantized INT8 and FP8 Backbone to generate images and measure latency on target GPUs. Note, Jetson devices are not supported at this time due to the incompatibility of the software.
 
 > [!NOTE]
-> Model calibration requires relatively more GPU computing power then deployment. It does not need to be on the same GPUs as the deployment target GPUs. Deprecated ONNX export and TensorRT engine instructions remain available in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
+> Model calibration requires relatively more GPU computing power than deployment. It does not need to be on the same GPUs as the deployment target GPUs. Deprecated ONNX export and TensorRT engine instructions remain available in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
 
 ### Quantize scripts
 
@@ -489,7 +489,7 @@ compile(
     engine_path=Path("./engine"),
 )
 
-cachify.prepare(pipe, num_inference_steps, SDXL_DEFAULT_CONFIG)
+cachify.prepare(pipe, SDXL_DEFAULT_CONFIG)
 ```
 
 Afterward, use it as a standard cache diffusion pipeline to generate the image.
@@ -508,7 +508,7 @@ SDXL_DEFAULT_CONFIG = [
     }
 ]
 
-cachify.prepare(pipe, num_inference_steps, SDXL_DEFAULT_CONFIG)
+cachify.prepare(pipe, SDXL_DEFAULT_CONFIG)
 ```
 
 Two parameters are essential: `wildcard_or_filter_func` and `select_cache_step_func`.

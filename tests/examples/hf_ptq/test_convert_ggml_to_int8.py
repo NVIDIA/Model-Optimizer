@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -98,6 +99,24 @@ def test_ggml_export_converts_to_int8_levels_and_steps(ggml_export, tmp_path):
     assert after.keys() == before.keys()
     for name, tensor in before.items():
         assert torch.equal(after[name], tensor)
+
+
+def test_dtype_is_read_from_text_config(ggml_export, tmp_path):
+    # Multimodal configs keep the dtype in text_config only.
+    ggml_dir = tmp_path / "ggml"
+    shutil.copytree(ggml_export, ggml_dir)
+    config = json.loads((ggml_dir / "config.json").read_text())
+    dtype = config.pop("dtype", None) or config.pop("torch_dtype")
+    config.pop("torch_dtype", None)
+    config["text_config"] = {"dtype": dtype}
+    (ggml_dir / "config.json").write_text(json.dumps(config))
+
+    int8_dir = tmp_path / "int8"
+    convert_ggml_to_int8.convert_ggml_export_to_int8(ggml_dir, int8_dir)
+
+    name = "model.layers.0.mlp.up_proj.weight_scale"
+    shard = json.loads((int8_dir / "model.safetensors.index.json").read_text())["weight_map"][name]
+    assert load_file(int8_dir / shard)[name].dtype == torch.bfloat16
 
 
 def test_a_failed_conversion_leaves_the_output_directory_empty(ggml_export, tmp_path, monkeypatch):

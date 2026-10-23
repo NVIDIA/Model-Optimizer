@@ -1706,7 +1706,7 @@ def _get_carried_over_module_names(model: nn.Module) -> list[str]:
 
     Prefers ``_modelopt_carried_over_names``, which the export records once it knows what it
     actually wrote -- carried tensors plus the off-index weight files copied verbatim. Those files
-    are never ``unexpected_keys``, so the unplaced list alone would miss GLM-4.7's
+    are never among the unplaced source keys, so the unplaced list alone would miss GLM-4.7's
     ``mtp.safetensors`` and leave its tensors in the export with nothing in ``exclude_modules``.
 
     A state-dict key is ``<module path>.<parameter name>``, so the owning module is the key with

@@ -1328,7 +1328,13 @@ def _export_diffusers_checkpoint(
             # dummy forward fails for it, fail loudly rather than silently skipping
             # fusion (which would export un-unified amax values).
             is_qwen_component = "qwen" in type(component).__name__.lower()
-            _fuse_qkv_linears_diffusion(component, strict=is_qwen_component)
+            # Image-conditioned Wan also requires a successful dummy forward for fusion.
+            is_wan_i2v_component = (
+                HAS_DIFFUSERS
+                and isinstance(component, getattr(diffusers, "WanTransformer3DModel", ()))
+                and getattr(getattr(component, "config", None), "image_dim", None) is not None
+            )
+            _fuse_qkv_linears_diffusion(component, strict=is_qwen_component or is_wan_i2v_component)
 
             # Process quantized modules (convert weights, register scales)
             _process_quantized_modules(component, component_dtype, is_modelopt_qlora=False)
@@ -1719,7 +1725,7 @@ def off_index_tensor_names(model: nn.Module) -> list[str]:
 
     Those files (GLM-4.7's ``mtp.safetensors``) are copied into the export verbatim by
     :func:`~modelopt.torch.utils.plugins.hf_checkpoint_utils.copy_off_index_safetensors` rather
-    than loaded, so they are never ``unexpected_keys`` and
+    than loaded, so they are never among the unplaced source keys and
     :func:`carryable_unplaced_keys` cannot see them -- yet their tensors land in the export in
     original precision exactly like a carried weight, and must reach ``exclude_modules`` the same
     way. Before this mechanism existed
@@ -1743,31 +1749,18 @@ def off_index_tensor_names(model: nn.Module) -> list[str]:
 
 
 def unplaced_keys_for(model: nn.Module, ckpt: "str | Path") -> list[str]:
-    """Every source key the model has no parameter for, from both accountings.
+    """The source keys the model has no parameter for, as recorded when it was loaded.
 
-    Neither source is sufficient alone, and each covers the other's blind spot:
+    The loaders that build a model for export --
+    :func:`~modelopt.torch.utils.plugins.model_load_utils.load_pretrained` and
+    ``parallel_load_and_prepare_fsdp2`` -- work this out once, at load time
+    (``record_unplaced_source_keys``), and the export only reads it back. A model loaded some other
+    way, by a caller's own ``from_pretrained`` say, has no record: the same derivation then runs
+    once, here, and is recorded so nothing derives it again.
 
-    * The **structural** pass (``unplaced_source_keys``) walks the checkpoint index and asks, for
-      each source key, whether the built model has a parameter for it -- resolving the key through
-      Transformers' renames and converters first. Being structural it is unaffected by
-      ``_keys_to_ignore_on_load_unexpected``, and being source-keyed it names tensors that exist on
-      disk. It cannot see a key the index omits.
-    * The **recorded** set is the loader's own ``unexpected_keys``. It sees tensors the index omits,
-      because the loader enumerates the contents of every shard it opens. But Transformers filters
-      it through the architecture's ignore rules -- Qwen3-Next drops ``^mtp.*``, DeepSeek-V3 and GLM
-      drop their MTP prefixes -- so for exactly the MTP heads this mechanism exists to carry it can
-      come back EMPTY. It can also report post-conversion target names (a fused
-      ``...experts.gate_up_proj``) that exist in no shard, and one such name can stand for several
-      source tensors.
-
-    Taking the union means an architecture's ignore rules cannot hide a weight, a fused name cannot
-    strand the tensors behind it, and a key missing from the index is still carried. Recorded names
-    that no shard backs are dropped by :func:`locate_source_keys`, which is the right outcome: the
-    structural pass has already named the real source keys for any converted target.
-
-    The structural pass needs ``model_load_utils``, which imports transformers and accelerate at
-    module scope. Where those are absent the recorded set stands alone -- degraded, but no worse
-    than before this function existed.
+    That derivation needs ``model_load_utils``, which imports transformers and accelerate at module
+    scope. Where those are absent an unrecorded model carries nothing, with a warning; a recorded
+    one needs neither.
     """
     # Local import breaks the cycle: layerwise_export imports this module.
     from .layerwise_export import LAYERWISE_EXPORTER_ATTR
@@ -1777,23 +1770,18 @@ def unplaced_keys_for(model: nn.Module, ckpt: "str | Path") -> list[str]:
     if snapshot is not None and snapshot[0] == str(ckpt):
         return list(snapshot[1])
 
-    recorded = getattr(model, "_modelopt_unplaced_source_keys", None) or []
-    structural: list[str] = []
+    if hasattr(model, "_modelopt_unplaced_source_keys"):
+        return list(model._modelopt_unplaced_source_keys)
     try:
-        from modelopt.torch.utils.plugins.model_load_utils import unplaced_source_keys
+        from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
 
-        structural = unplaced_source_keys(model, str(ckpt))
+        return record_unplaced_source_keys(model, str(ckpt))
     except Exception as exc:
-        # Warn regardless of whether anything was recorded: a non-empty recorded set is not
-        # proof the union is complete, since the structural pass is what catches keys an
-        # architecture's ignore rules dropped from the recorded set in the first place. Staying
-        # quiet here just because recorded happens to be non-empty is the same silent
-        # degradation this function exists to avoid.
         warnings.warn(
-            f"Could not derive unplaced source keys structurally ({exc}); relying on the "
-            "loader's report, which its architecture may have filtered."
+            f"Could not derive unplaced source keys ({exc}), so the export carries none. Loading "
+            "with modelopt.torch.utils.plugins.model_load_utils.load_pretrained records them."
         )
-    return sorted({*structural, *recorded})
+        return []
 
 
 # Placeholder for keys_only resolution: the name is real, the tensor is never read.
@@ -1805,13 +1793,13 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
 
     A checkpoint can hold parameters the built model has no home for -- an MTP head, an auxiliary
     tower -- which means quantization never sees them and they would be missing from the exported
-    checkpoint unless they are copied across verbatim. ``parallel_load_and_prepare_fsdp2`` records
-    which keys those were (:attr:`_modelopt_unplaced_source_keys`) and where they came from; this
-    reads them on demand rather than holding them in memory from load to export.
+    checkpoint unless they are copied across verbatim. The loader records which keys those were
+    (:attr:`_modelopt_unplaced_source_keys`) and where they came from (see :func:`unplaced_keys_for`);
+    this reads them on demand rather than holding them in memory from load to export.
 
     Deliberately architecture-agnostic: the question asked at load time was "does the model have a
     parameter for this checkpoint key", not "is this an MTP head", so anything the model did not
-    load is carried through. Returns an empty dict when the model was not loaded that way.
+    load is carried through. Returns an empty dict when there is no source checkpoint to read.
 
     Best-effort: a checkpoint that cannot be re-read warns rather than failing the export, since
     the rest of the weights are already correct.
@@ -1821,19 +1809,13 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
     state use this: the FSDP2 writer only emits ``extra_state_dict`` from rank 0, so having every
     rank materialize an MTP head (10 GB+ in bf16 on a large MoE) is host memory read and dropped.
     """
-    # The recorded list is never treated as final, empty or not. An earlier revision returned
-    # early when the loader recorded [], reasoning that it "had already answered" -- but
-    # Transformers filters unexpected_keys through _keys_to_ignore_on_load_unexpected, and
-    # Qwen3-Next ignores ^mtp.*, so for exactly the MTP heads this exists to carry the report comes
-    # back empty and the export silently shipped without them. See unplaced_keys_for.
-    #
     # These are pure filesystem checks and deliberately sit ABOVE the try below: deciding that
     # there is nothing to carry must not depend on an optional import succeeding.
     ckpt = _source_checkpoint(model)
     if not ckpt or not Path(ckpt).is_dir():
         # A hub id rather than a local path, or no provenance at all -- nothing to read. Quiet
         # when nothing was recorded, because there is no reason to think anything is missing. But
-        # if the loader DID report unplaced keys, they are about to be dropped, and dropping them
+        # if the loader DID record unplaced keys, they are about to be dropped, and dropping them
         # silently is the failure this whole path exists to prevent.
         recorded = getattr(model, "_modelopt_unplaced_source_keys", None) or []
         if recorded:
@@ -1852,6 +1834,7 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
     ):
         return {}
 
+    keys: list[str] | None = None
     try:
         keys = unplaced_keys_for(model, ckpt)
         if not keys:

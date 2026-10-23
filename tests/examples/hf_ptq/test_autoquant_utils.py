@@ -21,11 +21,14 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from _test_utils.torch.transformers_models import get_tiny_llama
+from transformers import WhisperConfig, WhisperForConditionalGeneration
 
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.quantization.config import QuantizeConfig
+from modelopt.torch.utils.dataset_utils import get_max_batch_size
 
 
 @pytest.fixture
@@ -39,6 +42,110 @@ def _validated_autoquant_config(**updates):
     config = load_recipe("general/auto_quantize/nvfp4_fp8_at_5p4bits").auto_quantize
     values = {name: getattr(config, name) for name in type(config).model_fields}
     return AutoQuantizeConfig.model_validate({**values, **updates})
+
+
+@pytest.mark.parametrize(
+    ("recipe_name", "has_kl", "has_gradient"),
+    [
+        ("nvfp4_fp8_at_5p4bits", False, True),
+        ("nvfp4_fp8_kl_div_at_5p4bits", True, False),
+        ("kv_fp8_nvfp4_cast_kl_div_at_5p4bits", True, False),
+        ("nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits", True, True),
+    ],
+)
+def test_autoquant_memory_probe_and_oom_retry(
+    autoquant_utils, monkeypatch, recipe_name, has_kl, has_gradient
+):
+    model = get_tiny_llama()
+    model.config.use_cache = True
+    recipe = load_recipe("general/auto_quantize/" + recipe_name)
+    probe = autoquant_utils._get_autoquant_memory_probe(recipe)
+    assert (probe is not None) == has_kl
+    forwards, kl_tokens, logit_pointers = [], [], []
+
+    def record_forward(module, inputs):
+        assert not module.config.use_cache
+        forwards.append((inputs[0].shape[0], torch.is_grad_enabled()))
+
+    model.register_forward_pre_hook(record_forward)
+    model.register_forward_hook(
+        lambda _m, _i, output: logit_pointers.append(output.logits.data_ptr())
+    )
+    real_kl = autoquant_utils._forward_kl
+
+    def limited_kl(logits, log_prob_ref):
+        score = real_kl(logits, log_prob_ref)
+        assert not logits.requires_grad and not log_prob_ref.requires_grad
+        assert log_prob_ref.dtype == torch.float32
+        tokens = logits.numel() // logits.shape[-1]
+        kl_tokens.append(tokens)
+        assert (logits.data_ptr() == logit_pointers[-1]) == (
+            recipe.auto_quantize.constraints.cost_model == "weight"
+            and recipe.kv_auto_quantize is None
+        )
+        # Simulate a GPU limit reached only by scoring, not by the model forward.
+        if tokens > 4 * 8:
+            raise torch.cuda.OutOfMemoryError
+        return score
+
+    monkeypatch.setattr(autoquant_utils, "_forward_kl", limited_kl)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        torch.cuda, "get_device_properties", lambda _: SimpleNamespace(total_memory=1000)
+    )
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    free_memory = iter((1000, 900))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _: (next(free_memory), 1000))
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda _: 0)
+
+    result = get_max_batch_size(
+        model,
+        sample_input_single_batch=torch.ones((1, 8), dtype=torch.long),
+        enable_grad=has_gradient,
+        forward_step=probe,
+    )
+    assert model.config.use_cache
+    if has_kl:
+        assert result == 2
+        assert kl_tokens == [8, 8, 80, 40, 16, 16]
+        assert [batch for batch, grad in forwards if grad] == (
+            [1, 10, 5, 2] if has_gradient else []
+        )
+    else:
+        assert result == 8
+        assert forwards == [(1, True), (10, True)]
+        assert not kl_tokens
+
+
+def test_kl_memory_probe_preserves_whisper_generation(autoquant_utils):
+    model = WhisperForConditionalGeneration(
+        WhisperConfig(
+            vocab_size=32,
+            num_mel_bins=8,
+            d_model=16,
+            encoder_layers=1,
+            decoder_layers=1,
+            encoder_attention_heads=2,
+            decoder_attention_heads=2,
+            encoder_ffn_dim=32,
+            decoder_ffn_dim=32,
+            max_source_positions=4,
+            max_target_positions=16,
+            pad_token_id=0,
+            bos_token_id=1,
+            eos_token_id=2,
+            decoder_start_token_id=1,
+            suppress_tokens=[],
+            begin_suppress_tokens=[],
+        )
+    ).eval()
+    model.generation_config.max_new_tokens = 2
+    outputs = []
+    model.register_forward_hook(lambda _m, _i, output: outputs.append(output.logits))
+    recipe = load_recipe("general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits")
+    with torch.no_grad():
+        autoquant_utils._get_autoquant_memory_probe(recipe)(model, torch.ones((1, 8, 8)))
+    assert outputs and all(torch.isfinite(logits).all() for logits in outputs)
 
 
 def test_autoquant_recipe_builds_mtq_inputs(autoquant_utils):

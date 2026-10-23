@@ -184,6 +184,25 @@ the last one (`last_turn`), or the whole conversation (`full`). With `--eval_ite
 `--sft_hf_validation` in the same format. This path needs a Megatron-Bridge with
 `DirectHFSFTDatasetConfig`.
 
+Megatron-Bridge pads every conversation to `--seq_length` when `--ep_size` > 1, so for MoE models
+add `--sft_in_batch_packing --mbs 2 --moe_aux_loss_coeff 0`: each micro-batch packs two
+conversations into one unpadded THD sequence, and the MoE load-balancing loss, which would also
+run over padding, is dropped. Order the rows as pairs that fit together with the chat-blend
+`pack_max_tokens` option ([Dataset Preparation README](../dataset/MEGATRON_DATA_PREP.md#chat-jsonl-blends-for-assistant-only-loss)).
+Megatron-Bridge holds every row in host memory on each rank, so keep `train.jsonl` to the rows
+the run needs.
+
+With pre-tokenized data, `--document_boundaries` (`--mbs 1`, `--cp_size 1`) restricts attention to
+each EOD-separated document of a window instead of the whole window. Tokenize the data with
+`--append_eod`: the student tokenizer's EOS marks each document's end. Chat-template data has no
+EOD between conversations, so distill.py rejects it.
+
+> [!IMPORTANT]
+> Packed training (`--sft_in_batch_packing` or `--document_boundaries`) of Gated DeltaNet models
+> (e.g. Qwen3.5 / Qwen3.6) needs `flash-linear-attention` >= 0.5.2: earlier versions compute the
+> packed linear attention wrongly. `nemo:26.08` ships 0.4.2, so run
+> `python -m pip install -r requirements.txt` in this directory first.
+
 Teacher and student must share a tokenizer — distillation scores the teacher on the student's
 token ids, and the KD losses compare the two models' logits elementwise over the vocab dimension.
 
@@ -333,6 +352,22 @@ torchrun --nproc_per_node 8 distill.py \
     --min_lr 5e-6 \
     --output_dir /output/qwen3_8b_nvfp4_qad
 ```
+
+With pipeline parallelism, the last stage also runs the teacher and student output layers and the KD loss, and
+stage `k` holds `pp_size - k` micro-batches of activations in flight. An even layer split with uniform full
+recompute therefore leaves the other stages idle while they wait for the last one. Balance the pipeline by giving the
+last stage fewer layers, and recompute fewer layers on later stages, which have memory to spare. For example, for
+Qwen3-8B (36 layers) on 4 pipeline stages, this places 10/10/10/6 layers:
+
+```bash
+    --pp_size 4 \
+    --num_layers_in_first_pipeline_stage 10 --num_layers_in_last_pipeline_stage 6 \
+    --recompute_granularity full --recompute_method block \
+    --recompute_num_layers_per_stage 7 5 2 2
+```
+
+The split applies to both student and teacher, so it must be valid for each. The best values depend on the model,
+sequence length, and GPU memory: measure per-stage time and memory over a few iterations before choosing them.
 
 The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) (point `--megatron_path` at `/output/qwen3_8b_nvfp4_qad/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
 
