@@ -723,3 +723,64 @@ def test_inline_save_preserves_loaded_external_tensors(tmp_path, storage, write_
     assert {entry for entry in tmp_path.iterdir() if entry.is_file()} == (
         {sidecar} if write_failure else {sidecar, path}
     )
+
+
+@pytest.mark.parametrize("external_metadata", [False, True])
+@pytest.mark.parametrize("failure_stage", ["write", "replace"])
+def test_inline_save_failure_preserves_existing_model(
+    tmp_path, monkeypatch, external_metadata, failure_stage
+):
+    """Preserve existing files and caller tensors after partial writes or replacement errors."""
+    path = tmp_path / "model.onnx"
+    values = np.arange(2048, dtype=np.float32)
+    model = helper.make_model(
+        helper.make_graph(
+            [],
+            "inline_failure",
+            [],
+            [helper.make_tensor_value_info("w", TensorProto.FLOAT, [2048])],
+            [numpy_helper.from_array(values, "w")],
+        )
+    )
+    onnx.save(model, path)
+    original = path.read_bytes()
+    model.graph.initializer[0].CopyFrom(numpy_helper.from_array(values + 1, "w"))
+    sidecar = tmp_path / "original.weights"
+    sidecar.write_bytes(b"existing sidecar")
+    if external_metadata:
+        onnx.external_data_helper.set_external_data(
+            model.graph.initializer[0], "original.weights", offset=7, length=values.nbytes
+        )
+    before = model.SerializeToString()
+    failure = OSError("Injected inline save failure")
+    write_bytes = onnx._save_bytes
+
+    def fail_write(content, destination):
+        """Use the real writer to leave partial serialized bytes before failing."""
+        write_bytes(content[: len(content) // 2], destination)
+        raise failure
+
+    def fail_replace(source, destination):
+        """Inject a replacement failure after the staged model was saved."""
+        raise failure
+
+    with monkeypatch.context() as patch:
+        if failure_stage == "write":
+            patch.setattr(onnx, "_save_bytes", fail_write)
+        else:
+            patch.setattr(os, "replace", fail_replace)
+        with pytest.raises(OSError) as error:
+            save_onnx_model(model, str(path), use_external_data=False, verbose=False)
+        assert error.value is failure
+    assert path.read_bytes() == original
+    assert model.SerializeToString() == before
+    assert sidecar.read_bytes() == b"existing sidecar"
+    assert {entry.name for entry in tmp_path.iterdir()} == {"model.onnx", "original.weights"}
+    onnx.checker.check_model(onnx.load(path))
+    save_onnx_model(model, str(path), use_external_data=False, verbose=False)
+    saved = onnx.load(path, load_external_data=False)
+    onnx.checker.check_model(saved)
+    assert numpy_helper.to_array(saved.graph.initializer[0]).tobytes() == (values + 1).tobytes()
+    assert not saved.graph.initializer[0].external_data
+    assert model.SerializeToString() == before
+    assert sidecar.read_bytes() == b"existing sidecar"

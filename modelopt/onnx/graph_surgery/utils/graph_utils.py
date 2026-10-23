@@ -146,7 +146,10 @@ def save_onnx_model(
         try:
             if states:
                 onnx.external_data_helper.convert_model_from_external_data(model)
-            onnx.save(model, output_path)
+            with tempfile.TemporaryDirectory(dir=output_dir or ".") as temporary:
+                staged_model = Path(temporary) / Path(output_path).name
+                onnx.save(model, staged_model)
+                os.replace(staged_model, output_path)
         finally:
             _restore_tensor_storage(states)
         return
