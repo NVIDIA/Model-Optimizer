@@ -1,0 +1,48 @@
+# Megatron-Bridge PTQ for nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16.
+#
+# Follows https://github.com/NVIDIA-NeMo/Nemotron/blob/main/docs/nemotron/super3/quantization.md:
+#   torchrun --nproc_per_node=16 examples/quantization/quantize.py \
+#     --hf-model-id $HF_MODEL \
+#     --export-quant-cfg mamba_moe_nvfp4_conservative \
+#     --megatron-save-path $MEGATRON_SAVE_PATH \
+#     --pp 2 --tp 8 --ep 8 --trust-remote-code
+#
+# Cluster shape: 4 nodes x 4 GPUs = 16 ranks (doc references 2 nodes x 8x H100).
+# Both shapes give world=16; multi-node torchrun rendezvous is derived from
+# SLURM_NODELIST inside quantize.sh.
+#
+# Usage:
+#   source .env-slurm
+#   cd tools/launcher
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/megatron_bridge_ptq.yaml --yes
+
+job_name: Nemotron-3-Super-120B_megatron_bridge_PTQ
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note: "Megatron-Bridge PTQ on Super-120B (mamba_moe_nvfp4_conservative): 4 nodes x 4 GPUs, TP=8 PP=2 EP=8"
+
+  global_vars:
+    output_dir: /cicd/megatron-bridge
+
+  task_0:
+    script: common/megatron_bridge/quantize/quantize.sh
+    environment:
+      - HF_MODEL_ID: /hf-local/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+      - OUTPUT_DIR: <<global_vars.output_dir>>
+      - MEGATRON_SAVE_PATH: <<global_vars.output_dir>>/NVIDIA-Nemotron-3-Super-120B-A12B-mamba_moe_nvfp4_conservative
+      - EXPORT_QUANT_CFG: mamba_moe_nvfp4_conservative
+      - TP: "8"
+      - PP: "2"
+      - EP: "8"
+      - ETP: "1"
+      - TRUST_REMOTE_CODE: "true"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.04
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      partition: batch
+      nodes: 4
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      time: "06:00:00"
