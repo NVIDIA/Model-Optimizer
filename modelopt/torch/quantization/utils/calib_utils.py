@@ -253,7 +253,7 @@ class GPTQHelper:
         self.weight = None
         self.h_inv = None
 
-    def update_weights(self, block_size, perc_damp, weight=None):
+    def update_weights(self, block_size, perc_damp, weight=None, *, writeback=True):
         """Run GPTQ blockwise weight update on this helper's weight.
 
         Populates ``self.weight`` and ``self.h_inv``, runs the blockwise update, logs MSE, and
@@ -267,7 +267,8 @@ class GPTQHelper:
         self._blockwise_update(block_size)
         if self.log_mse:
             self._print_mse_error(hessian, weight)
-        weight.data.copy_(self.weight.reshape(weight.shape))
+        if writeback:
+            weight.data.copy_(self.weight.reshape(weight.shape))
 
     # ------------------------------------------------------------------
     # Quantize helpers — all read from self.weight_quantizer, self.weight, self.h_inv

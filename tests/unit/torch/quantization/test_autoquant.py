@@ -26,6 +26,7 @@ from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.model_quant as model_quant
+from modelopt.recipe import load_recipe
 from modelopt.torch.quantization._auto_quantize_cost import (
     EXCLUDED_MODULE_NAME_PATTERNS_KEY,
     _get_module_weight_numel,
@@ -42,21 +43,141 @@ from modelopt.torch.quantization.algorithms import (
     estimate_quant_compression,
 )
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.utils import safe_load, safe_save
 from modelopt.torch.utils.distributed import DistributedProcessGroup
 
 
+@pytest.mark.parametrize("ties", ["searched", "disabled", "fp8"])
+def test_auto_quantize_iq_rejects_searched_tied_weights(ties):
+    model = torch.nn.ModuleDict(
+        {name: torch.nn.Linear(256, 2, bias=False) for name in ("a", "b", "c")}
+    )
+    model["b"].weight = model["a"].weight
+    original = model["a"].weight.detach().clone()
+    config = load_recipe("general/ptq/iq2_xs").quantize.model_dump()
+    config["algorithm"] = "imatrix"
+
+    def search():
+        return mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 16},
+            quantization_formats=[mtq.FP8_DEFAULT_CFG] if ties == "fp8" else [(config, "iq2_xs")],
+            module_search_spaces=(
+                [{"module_name_patterns": ["c"], "quantization_formats": [(config, "iq2_xs")]}]
+                if ties == "fp8"
+                else None
+            ),
+            data_loader=[torch.randn(2, 256)],
+            forward_step=lambda m, x: sum(layer(x) for layer in m.values()),
+            loss_func=lambda output, batch: output.square().mean(),
+            disabled_layers=["a", "b"] if ties == "disabled" else [],
+            num_calib_steps=1,
+            num_score_steps=1,
+            verbose=False,
+        )
+
+    if ties != "searched":
+        search()
+    else:
+        with pytest.raises(ValueError, match="tied parameters"):
+            search()
+        assert type(model["a"]) is torch.nn.Linear
+        assert not hasattr(model, "_modelopt_state")
+    assert model["a"].weight is model["b"].weight
+    torch.testing.assert_close(model["a"].weight, original, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("format_name", ["iq2_xxs", "iq2_xs", "iq2_s"])
+@pytest.mark.parametrize(
+    "algorithm",
+    [
+        "imatrix",
+        {"method": "gptq", "block_size": 256},
+        [{"method": "gptq", "block_size": 256}, "imatrix"],
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("method", ["kl_div", "gradient"])
+def test_auto_quantize_iq_candidates_preserve_source_weights(
+    format_name, algorithm, dtype, method, tmp_path
+):
+    torch.manual_seed(12)
+    original = torch.nn.Sequential(torch.nn.Linear(512, 2, bias=False)).to(dtype)
+    inputs = torch.randn(4, 512, dtype=dtype)
+    weight = original[0].weight.detach().clone()
+    ggml_format = GGML_FORMAT_REGISTRY[format_name]
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {
+                    "num_bits": format_name,
+                    "backend": "ggml",
+                    "block_sizes": {-1: 256},
+                    "effective_bits": ggml_format.effective_bits,
+                },
+            },
+        ],
+        "algorithm": algorithm,
+    }
+    reference = mtq.quantize(copy.deepcopy(original), config, forward_loop=lambda m: m(inputs))
+
+    def forward_step(model, batch):
+        # Every calibration and scoring forward must see the same source parameters.
+        torch.testing.assert_close(model[0].weight, weight, rtol=0, atol=0)
+        output = model(batch)
+        quantizer = model[0].weight_quantizer
+        if (
+            method == "kl_div"
+            and quantizer.is_enabled
+            and quantizer.num_bits == format_name
+            and pinned_packed_weight(quantizer, format_name) is not None
+        ):
+            torch.testing.assert_close(output, reference(batch), rtol=0, atol=0)
+        return output
+
+    def search():
+        return mtq.auto_quantize(
+            copy.deepcopy(original),
+            constraints={"effective_bits": ggml_format.effective_bits},
+            quantization_formats=[(config, format_name), mtq.FP8_DEFAULT_CFG],
+            data_loader=[inputs],
+            forward_step=forward_step,
+            method=method,
+            loss_func=lambda output, batch: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=str(tmp_path / "search.pt"),
+            verbose=False,
+        )
+
+    model, state = search()
+    assert state["best"]["is_satisfied"]
+    torch.testing.assert_close(model(inputs), reference(inputs), rtol=0, atol=0)
+    packed = ggml_format.pack(model[0].weight, model[0].weight_quantizer)
+    assert torch.equal(packed, ggml_format.pack(reference[0].weight, reference[0].weight_quantizer))
+    resumed, _ = search()
+    torch.testing.assert_close(resumed(inputs), model(inputs), rtol=0, atol=0)
+    buffer = io.BytesIO()
+    mto.save(model, buffer)
+    buffer.seek(0)
+    restored = mto.restore(copy.deepcopy(original), buffer)
+    torch.testing.assert_close(restored(inputs), model(inputs), rtol=0, atol=0)
+
+
 class _AttentionLayer(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, projection_names=("q_proj", "k_proj", "v_proj", "o_proj")):
         super().__init__()
-        self.q_proj = torch.nn.Linear(32, 32)
-        self.k_proj = torch.nn.Linear(32, 32)
-        self.v_proj = torch.nn.Linear(32, 32)
-        self.o_proj = torch.nn.Linear(32, 32)
+        self.projection_names = projection_names
+        for name in projection_names:
+            setattr(self, name, torch.nn.Linear(32, 32))
 
     def forward(self, x):
-        for layer in [self.q_proj, self.k_proj, self.v_proj, self.o_proj]:
-            x = layer(x)
+        for name in self.projection_names:
+            x = getattr(self, name)(x)
         return x
 
 
@@ -726,8 +847,17 @@ def test_auto_quantize_rejects_infeasible_resolved_module_search_space(monkeypat
         )
 
 
-def test_auto_quantize_module_search_space_cannot_split_runtime_group():
+@pytest.mark.parametrize(
+    "projection_names",
+    [
+        ("q_proj", "k_proj", "v_proj", "o_proj"),
+        ("q_proj", "kv_a_proj_with_mqa"),
+        ("q_a_proj", "kv_a_proj_with_mqa"),
+    ],
+)
+def test_auto_quantize_module_search_space_cannot_split_runtime_group(projection_names):
     model = TransformerBlock()
+    model.attn = _AttentionLayer(projection_names)
 
     with pytest.raises(ValueError, match="partially matches runtime-grouped modules"):
         mtq.auto_quantize(
@@ -739,7 +869,7 @@ def test_auto_quantize_module_search_space_cannot_split_runtime_group():
             ],
             module_search_spaces=[
                 {
-                    "module_name_patterns": ["*q_proj"],
+                    "module_name_patterns": [f"*{projection_names[0]}"],
                     "quantization_formats": [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG],
                     "allow_no_quant": False,
                 }

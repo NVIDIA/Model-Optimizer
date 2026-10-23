@@ -18,6 +18,8 @@
 import math
 import weakref
 from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
 from typing import NamedTuple
@@ -28,6 +30,22 @@ GGML_BLOCK_SIZE = 256
 _SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
 # Columns hashed at a time, bounding _row_keys' int64 temporaries to this slice of the weight.
 _ROW_KEY_CHUNK = 256
+_PRESERVE_SOURCE_WEIGHTS = ContextVar("ggml_preserve_source_weights", default=False)
+
+
+@contextmanager
+def preserve_source_weights():
+    """Keep calibration results in packed quantizer buffers during recipe search."""
+    token = _PRESERVE_SOURCE_WEIGHTS.set(True)
+    try:
+        yield
+    finally:
+        _PRESERVE_SOURCE_WEIGHTS.reset(token)
+
+
+def preserving_source_weights() -> bool:
+    """Whether calibration should leave the shared source parameters untouched."""
+    return _PRESERVE_SOURCE_WEIGHTS.get()
 
 
 class _CacheKey(NamedTuple):
@@ -146,6 +164,11 @@ def pin_packed_weight(quantizer, format_name: str, packed_weights: torch.Tensor)
     decoding, and encode afresh otherwise -- including once the quantizer is given another format.
     """
     quantizer._set_buffer(_pin_name(format_name), packed_weights)
+    source_name = f"{_pin_name(format_name)}_source"
+    if preserving_source_weights():
+        quantizer._set_buffer(source_name, packed_weights.new_empty(0))
+    elif hasattr(quantizer, source_name):
+        delattr(quantizer, source_name)
     quantizer._quantizer_cache = None
 
 
@@ -225,6 +248,10 @@ def fake_quantize_with_cache(
         dtype=inputs.dtype,
         block_chunk_size=decode_chunk_size,
     )
+    if hasattr(quantizer, f"{_pin_name(format_name)}_source"):
+        # Adding the quantization error to a different source weight rounds again.
+        # Scoring must see exactly the payload that will be materialized for export.
+        return reconstructed.detach() + (inputs - inputs.detach())
     return inputs + (reconstructed - inputs).detach()
 
 
@@ -357,6 +384,15 @@ class GGMLFormat:
         syncs, but it only runs for weights the identity cache has not seen.
         """
         pinned = pinned_packed_weight(quantizer, self.name)
+        if hasattr(quantizer, f"{_pin_name(self.name)}_source"):
+            if (
+                pinned is None
+                or pinned.numel() * self.block_size != weight.numel() * self.block_bytes
+            ):
+                raise ValueError("Calibrated GGML payload does not match the search weight shape")
+            return pinned.to(weight.device).reshape(
+                *weight.shape[:-1], weight.shape[-1] // self.block_size, self.block_bytes
+            )
         width = weight.shape[-1] // self.block_size
         if (
             pinned is None
@@ -387,6 +423,16 @@ class GGMLFormat:
             if index is not None:
                 return pinned[index].reshape(*weight.shape[:-1], width, self.block_bytes)
         return None
+
+    def materialize_search_weight(self, quantizer, weight: torch.Tensor) -> None:
+        """Write only the selected candidate back before export can split its weight into rows."""
+        source_name = f"{_pin_name(self.name)}_source"
+        if not hasattr(quantizer, source_name):
+            return
+        packed = self._pinned_rows(quantizer, weight)
+        weight.copy_(self.dequantize(packed, torch.tensor(weight.shape), dtype=weight.dtype))
+        delattr(quantizer, source_name)
+        quantizer._quantizer_cache = None
 
 
 def dequantize_blocks(

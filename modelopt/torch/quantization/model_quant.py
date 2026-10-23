@@ -433,6 +433,8 @@ _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
     "awq_lite",
     "awq_full",
     "awq_clip",
+    "gptq",
+    "imatrix",
 }
 
 
@@ -802,6 +804,11 @@ def auto_quantize(
 
     .. note::
 
+        GPTQ and imatrix calibration are supported for GGML weight candidates. They retain each
+        candidate's packed payload without changing source weights during calibration or scoring.
+        Searched parameters must be untied; excluded modules can still share weights. Export the
+        returned calibrated model to preserve the selected payloads.
+
         ``auto_quantize`` groups certain layers and restricts the quantization formats for them to be same. For example,
         Q, K, V linear layers belonging to the same transformer layer will have the same quantization format.
         This is to ensure compatibility with TensorRT-LLM which fuses these three linear layers into a single linear
@@ -957,15 +964,66 @@ def auto_quantize(
             for quant_format in search_space["quantization_formats"]
         ),
     ]
+    mutating_recipes: set[str] = set()
     for quant_cfg, name in all_processed_formats:
-        algo = QuantRecipe(quant_cfg, name=name).config.algorithm
-        algo_method = algo["method"] if isinstance(algo, dict) else algo
-        if algo_method not in _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
-            raise ValueError(
-                f"Algorithm '{algo_method}' in '{name}' is not supported by auto_quantize yet. "
-                "Please run auto_quantize with 'max' or 'mse' calibration and use "
-                "get_auto_quantize_config() to obtain a config for mtq.quantize()."
-            )
+        recipe = QuantRecipe(quant_cfg, name=name)
+        algorithms = recipe.config.algorithm
+        for algo in algorithms if isinstance(algorithms, list) else [algorithms]:
+            algo_method = algo["method"] if isinstance(algo, dict) else algo
+            if algo_method not in _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
+                raise ValueError(
+                    f"Algorithm '{algo_method}' in '{name}' is not supported by auto_quantize yet. "
+                    "Please run auto_quantize with 'max' or 'mse' calibration and use "
+                    "get_auto_quantize_config() to obtain a config for mtq.quantize()."
+                )
+            if algo_method in {"gptq", "imatrix"}:
+                weight_cfgs = [
+                    entry.get("cfg")
+                    for entry in recipe.config.model_dump()["quant_cfg"]
+                    if entry.get("enable", True) and "weight_quantizer" in entry["quantizer_name"]
+                ]
+                if not weight_cfgs or any(
+                    not isinstance(cfg, dict) or cfg.get("backend") != "ggml" for cfg in weight_cfgs
+                ):
+                    raise ValueError(
+                        f"AutoQuantize {algo_method} currently requires GGML weight quantizers "
+                        f"in recipe '{name}' so calibrated candidates preserve source weights."
+                    )
+                mutating_recipes.add(name)
+
+    if mutating_recipes:
+        # Selected GGML payloads are materialized before export. A shared parameter would
+        # also change another module's independently calibrated candidate or BF16 reference.
+        parameter_owners: dict[int, list[tuple[str, nn.Module]]] = {}
+        for module_name, module in model.named_modules():
+            for _, parameter in module.named_parameters(recurse=False, remove_duplicate=False):
+                if parameter.ndim >= 2:
+                    parameter_owners.setdefault(id(parameter), []).append((module_name, module))
+        disabled_patterns = (
+            [disabled_layers] if isinstance(disabled_layers, str) else disabled_layers or []
+        )
+        for owners in parameter_owners.values():
+            if len(owners) < 2:
+                continue
+            for module_name, module in owners:
+                if isinstance(module, nn.Embedding) or any(
+                    fnmatch.fnmatch(module_name, pattern) for pattern in disabled_patterns
+                ):
+                    continue
+                formats = processed_fixed_quantization_configs or processed_quantization_formats
+                for search_space in processed_module_search_spaces:
+                    if any(
+                        fnmatch.fnmatch(module_name, pattern)
+                        for pattern in search_space["module_name_patterns"]
+                    ):
+                        formats = search_space["quantization_formats"]
+                        break
+                if any(name in mutating_recipes for _, name in formats):
+                    raise ValueError(
+                        "AutoQuantize GPTQ/imatrix does not support tied parameters in searched "
+                        f"module '{module_name}'. Exclude the tied modules or untie their weights "
+                        "before searching."
+                    )
 
     # Select the appropriate searcher based on method
     if method_name not in AUTO_QUANTIZE_SEARCHERS:

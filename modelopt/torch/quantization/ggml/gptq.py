@@ -20,7 +20,7 @@ from collections.abc import Callable
 import torch
 
 from ..utils.calib_utils import GPTQHelper, register_gptq_helper
-from .common import floored_second_moments, pin_packed_weight
+from .common import floored_second_moments, pin_packed_weight, preserving_source_weights
 from .registry import GGML_FORMAT_REGISTRY
 
 __all__ = ["GGMLGPTQHelper", "gptq_group_update"]
@@ -80,7 +80,9 @@ class GGMLGPTQHelper(GPTQHelper):
 
     def update_weights(self, block_size, perc_damp, weight=None):
         """Run the GPTQ update, then pin the chosen payload to the weight quantizer."""
-        super().update_weights(block_size, perc_damp, weight)
+        super().update_weights(
+            block_size, perc_damp, weight, writeback=not preserving_source_weights()
+        )
         quantizer = self.weight_quantizer
         pin_packed_weight(quantizer, quantizer.num_bits, self._packed)
         self._packed = None
