@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   check-file-changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       any_changed: ${{ steps.changed.outputs.any_modified || steps.non-pr.outputs.any_changed }}
     steps:
@@ -58,7 +58,7 @@ jobs:
             .agents/skills/**
             plugins/modelopt/skills/**
   linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
@@ -126,7 +126,7 @@ jobs:
   multi-version:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -159,7 +159,7 @@ jobs:
   partial-install:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -173,7 +173,7 @@ jobs:
   launcher:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -189,7 +189,7 @@ jobs:
   mcp:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -212,7 +212,7 @@ jobs:
   skills:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -230,7 +230,7 @@ jobs:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}
     needs: [check-file-changes, linux, windows, multi-version, partial-install, launcher, mcp, skills]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Required unit tests did not succeed
         # windows is deliberately absent from this condition. It still runs and is still visible,
