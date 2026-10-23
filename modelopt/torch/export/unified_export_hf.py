@@ -1328,7 +1328,13 @@ def _export_diffusers_checkpoint(
             # dummy forward fails for it, fail loudly rather than silently skipping
             # fusion (which would export un-unified amax values).
             is_qwen_component = "qwen" in type(component).__name__.lower()
-            _fuse_qkv_linears_diffusion(component, strict=is_qwen_component)
+            # Image-conditioned Wan also requires a successful dummy forward for fusion.
+            is_wan_i2v_component = (
+                HAS_DIFFUSERS
+                and isinstance(component, getattr(diffusers, "WanTransformer3DModel", ()))
+                and getattr(getattr(component, "config", None), "image_dim", None) is not None
+            )
+            _fuse_qkv_linears_diffusion(component, strict=is_qwen_component or is_wan_i2v_component)
 
             # Process quantized modules (convert weights, register scales)
             _process_quantized_modules(component, component_dtype, is_modelopt_qlora=False)

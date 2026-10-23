@@ -50,7 +50,7 @@ jobs:
           contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association)
         )
       )
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write

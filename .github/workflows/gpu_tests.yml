@@ -137,7 +137,7 @@ jobs:
     # Run even if gpu-tests is skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
     needs: [pr-gate, gpu-tests]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Stacked PR, GPU tests deferred
         if: needs.pr-gate.outputs.stacked == 'true'

@@ -286,6 +286,50 @@ def test_flux2_dummy_inputs_shape():
     assert "guidance" in inputs
 
 
+@pytest.mark.parametrize("pos_embed_seq_len", [None, 514], ids=["i2v", "flf2v"])
+@torch.no_grad()
+def test_wan_dummy_inputs_support_qkv_fusion(pos_embed_seq_len):
+    torch.manual_seed(0)
+    model = get_tiny_wan22_transformer(
+        image_dim=32, added_kv_proj_dim=24, pos_embed_seq_len=pos_embed_seq_len
+    ).eval()
+    inputs = generate_diffusion_dummy_inputs(model, torch.device("cpu"), torch.float32)
+    assert inputs is not None
+    image_batch_size = 1 if pos_embed_seq_len is None else 2
+    assert inputs["encoder_hidden_states_image"].shape == (image_batch_size, 257, 32)
+    assert inputs["encoder_hidden_states"].shape == (1, 512, 32)
+
+    # Per-tensor INT8 exercises both input and weight amax fusion on CPU.
+    quant_cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+    quant_cfg["quant_cfg"].append(
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": None}}
+    )
+    mtq.quantize(model, quant_cfg, lambda m: m(**inputs))
+
+    groups = []
+    for block in model.blocks:
+        groups.extend(
+            [
+                (block.attn1.to_q, block.attn1.to_k, block.attn1.to_v),
+                (block.attn2.to_k, block.attn2.to_v),
+                (block.attn2.add_k_proj, block.attn2.add_v_proj),
+            ]
+        )
+    # Distinct values ensure a skipped fusion cannot pass on already-equal scales.
+    for group in groups:
+        for index, module in enumerate(group, start=1):
+            module.input_quantizer.amax = torch.tensor(float(index))
+            module.weight_quantizer.amax = torch.tensor(float(index))
+
+    unified_export_hf._fuse_qkv_linears_diffusion(model, strict=True)
+
+    for group in groups:
+        expected_amax = torch.tensor(float(len(group)))
+        for module in group:
+            torch.testing.assert_close(module.input_quantizer.amax, expected_amax)
+            torch.testing.assert_close(module.weight_quantizer.amax, expected_amax)
+
+
 @pytest.mark.parametrize(
     ("model_factory", "export_attention_quantizers", "expect_attention_quantizers"),
     [
