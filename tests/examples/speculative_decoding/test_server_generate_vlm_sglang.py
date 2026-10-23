@@ -16,6 +16,7 @@
 """Tests for the multimodal SGLang generation client."""
 
 import base64
+import copy
 import importlib.util
 from pathlib import Path
 
@@ -173,3 +174,145 @@ def test_openai_media_value_prefers_remote_urls_over_inlining(tmp_path):
     assert (
         server_generate_vlm_sglang._as_openai_media_value(remote, None, None, None, True) == remote
     )
+
+
+def test_context_overflow_is_recognised_only_from_the_message():
+    """A 400 covers many problems; only the context message should trigger a retry."""
+
+    assert server_generate_vlm_sglang._is_context_overflow(
+        "This model's maximum context length is 32768 tokens. However, you requested 40000"
+    )
+    assert server_generate_vlm_sglang._is_context_overflow(
+        "Input is longer than the maximum supported length"
+    )
+    assert not server_generate_vlm_sglang._is_context_overflow("Invalid value for 'top_k'")
+    assert not server_generate_vlm_sglang._is_context_overflow("")
+
+
+def _fake_requests(monkeypatch, responses):
+    """Install a requests stub that returns ``responses`` in order, recording payloads."""
+
+    sent = []
+
+    class _Resp:
+        def __init__(self, status, body):
+            self.status_code = status
+            self.text = body
+            self._body = body
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    queue = list(responses)
+
+    class _Requests:
+        @staticmethod
+        def post(url, json=None, timeout=None):
+            # Snapshot: the caller mutates one payload dict across retries, so recording
+            # the reference would make every entry show the final budget.
+            sent.append(copy.deepcopy(json))
+            return _Resp(*queue.pop(0))
+
+    monkeypatch.setitem(__import__("sys").modules, "requests", _Requests)
+    return sent
+
+
+def test_enable_thinking_is_passed_as_chat_template_kwargs(monkeypatch):
+    """Without this the target answers in non-thinking mode and nothing says so."""
+
+    sent = _fake_requests(monkeypatch, [(200, "")])
+    request = {"prompt": "hi", "image_path": "https://example.com/a.jpg"}
+    answer, err = server_generate_vlm_sglang._openai_generate_one(
+        request,
+        "http://x/v1/chat/completions",
+        "m",
+        0.7,
+        2048,
+        60,
+        None,
+        None,
+        None,
+        False,
+        enable_thinking=True,
+    )
+
+    assert err is None and answer == "ok"
+    assert sent[0]["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_thinking_is_absent_unless_requested(monkeypatch):
+    sent = _fake_requests(monkeypatch, [(200, "")])
+    request = {"prompt": "hi", "image_path": "https://example.com/a.jpg"}
+    server_generate_vlm_sglang._openai_generate_one(
+        request, "http://x/v1/chat/completions", "m", 0.7, 2048, 60, None, None, None, False
+    )
+
+    assert "chat_template_kwargs" not in sent[0]
+
+
+def test_budget_shrinks_until_the_request_fits(monkeypatch):
+    """An over-budget request is retried smaller, not dropped.
+
+    The samples that overflow are the longest-context ones -- long videos -- so dropping
+    them biases the dataset against exactly the data a multimodal drafter needs.
+    """
+
+    overflow = (400, "This model's maximum context length is 32768 tokens.")
+    sent = _fake_requests(monkeypatch, [overflow, overflow, (200, "")])
+    request = {"prompt": "hi", "video_path": "https://example.com/a.mp4"}
+
+    answer, err = server_generate_vlm_sglang._openai_generate_one(
+        request,
+        "http://x/v1/chat/completions",
+        "m",
+        0.7,
+        8192,
+        60,
+        None,
+        None,
+        None,
+        False,
+        enable_thinking=False,
+        min_max_tokens=256,
+    )
+
+    assert err is None and answer == "ok"
+    assert [p["max_tokens"] for p in sent] == [8192, 4096, 2048]
+
+
+def test_budget_shrinking_stops_at_the_floor(monkeypatch):
+    """Below the floor a completion is too stunted to keep, so report instead of looping."""
+
+    overflow = (400, "This model's maximum context length is 32768 tokens.")
+    sent = _fake_requests(monkeypatch, [overflow, overflow])
+    request = {"prompt": "hi", "video_path": "https://example.com/a.mp4"}
+
+    answer, err = server_generate_vlm_sglang._openai_generate_one(
+        request,
+        "http://x/v1/chat/completions",
+        "m",
+        0.7,
+        512,
+        60,
+        None,
+        None,
+        None,
+        False,
+        enable_thinking=False,
+        min_max_tokens=256,
+    )
+
+    assert answer == "" and "maximum context length" in err
+    assert [p["max_tokens"] for p in sent] == [512, 256]
+
+
+def test_non_context_errors_are_not_retried(monkeypatch):
+    sent = _fake_requests(monkeypatch, [(400, "Invalid value for 'top_k'")])
+    request = {"prompt": "hi", "image_path": "https://example.com/a.jpg"}
+
+    answer, err = server_generate_vlm_sglang._openai_generate_one(
+        request, "http://x/v1/chat/completions", "m", 0.7, 8192, 60, None, None, None, False
+    )
+
+    assert answer == "" and "top_k" in err
+    assert len(sent) == 1
