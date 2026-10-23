@@ -30,7 +30,10 @@ CONFIG_KEYS so a gate can confirm what actually ran.
 
 At concurrency 1 and temperature 0 the row also gets an exact-match comparison of A and B
 outputs. Above concurrency 1, batching alone breaks bitwise equality; with sampling, a
-mismatch is expected. Neither reports a match.
+mismatch is expected. Neither reports a match. The same row's "a_self_match" compares A with
+A at the next concurrency of the repeat, also at temperature 0: how far the target alone
+drifts with batch shape, the noise floor for the A-vs-B rate (some hybrid targets agree
+with themselves on few turns).
 
 A row lists "problems" when an arm is missing, has no configuration.json, a result file has
 other than exactly one entry (run.py appends to an existing save_dir), an arm produced no
@@ -229,6 +232,13 @@ def summarize(root):
             and a["temperature"] == b["temperature"] == 0
         ):
             row["match"] = compare_outputs(a["_responses"], b["_responses"])
+            higher = sorted(c for r, c, n in arms if r == repeat and n == "A" and c > conc)
+            control = arms[(repeat, higher[0], "A")] if higher else None
+            if control is not None and control["temperature"] == 0:
+                row["a_self_match"] = {
+                    "against_concurrency": higher[0],
+                    **compare_outputs(a["_responses"], control["_responses"]),
+                }
         rows.append(row)
     return {
         "root": os.path.abspath(root),

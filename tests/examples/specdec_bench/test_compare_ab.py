@@ -72,8 +72,10 @@ def test_summary_reports_speedup_and_matches_only_at_concurrency_1(
         "gpu": "NVIDIA GB300",
         "serving_config": {},
     }
+    a_turns_c8 = {1: ["x", "y"], 2: ["DRIFT", "w"]}  # the target alone drifts with batch shape
     for conc in (1, 8):
-        _write_arm(base / f"A_c{conc}", [100.0 * conc], 1.0, a_turns, responses_file, config_a)
+        turns = a_turns if conc == 1 else a_turns_c8
+        _write_arm(base / f"A_c{conc}", [100.0 * conc], 1.0, turns, responses_file, config_a)
         _write_arm(base / f"B_c{conc}", [140.0 * conc], 1.77, b_turns, responses_file, config_b)
 
     summary = summarize(str(tmp_path))
@@ -97,8 +99,12 @@ def test_summary_reports_speedup_and_matches_only_at_concurrency_1(
         "first_turn_pairs": 2,
         "first_turn_exact_match_rate": 1.0,
     }
+    assert rows[1]["a_self_match"]["against_concurrency"] == 8
+    assert rows[1]["a_self_match"]["exact_match_rate"] == 0.75
+    assert rows[1]["a_self_match"]["first_turn_exact_match_rate"] == 0.5
     # Batching alone breaks bitwise equality above concurrency 1, so no match there.
     assert "match" not in rows[8]
+    assert "a_self_match" not in rows[8]
 
 
 @pytest.mark.parametrize(
