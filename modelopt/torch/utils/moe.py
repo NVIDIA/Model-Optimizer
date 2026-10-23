@@ -225,6 +225,10 @@ def torch_a2a_experts_forward(self, hidden_states, top_k_index, top_k_weights, p
     `_grouped_linear` so per-expert weight + shared input quantizers attach over the dispatched
     (global) token pool. `process_group` (the EP group) is injected by the `torch_a2a_experts` TP style's
     `_prepare_input_fn`; the router must emit GLOBAL ids unmasked (`torch_a2a_router`).
+
+    ``self.num_experts`` is this rank's share of the experts: the expert-parallel loader loads them
+    through transformers' expert-parallel sharding (the ``grouped_gemm`` / packed styles), which slices
+    the experts' weights along dim 0 and sets ``num_experts`` to the per-rank count.
     """
     from transformers.integrations.moe import _grouped_linear
 
