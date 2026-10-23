@@ -357,7 +357,15 @@ def calculate_attention_memory(
     ):
         seq_len = min(seq_len, attention_chunk_size)
 
-    kv_dim = calculate_kv_dim(attention_config.num_key_value_heads, n_head, n_embd)
+    lm_config = descriptor.get_language_model_config(model_config)
+    head_dim = getattr(attention_config, "qk_head_dim", None) or getattr(lm_config, "head_dim", None)
+
+    kv_dim = calculate_kv_dim(
+    attention_config.num_key_value_heads,
+    n_head,
+    n_embd,
+    head_dim=head_dim,
+)
     total_num_tokens = seq_len * (batch_size + prefill_queue_size)
     kv_cache_size = total_num_tokens * kv_dim
     query_prefill_size = seq_len * n_embd if allocate_prefill_query else 0
