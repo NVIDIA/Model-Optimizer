@@ -16,7 +16,9 @@
 """Shared graph queries, shape resolution, and initializer contracts."""
 
 import copy
+import io
 import os
+from pathlib import Path
 
 import numpy as np
 import onnx
@@ -784,3 +786,79 @@ def test_inline_save_failure_preserves_existing_model(
     assert not saved.graph.initializer[0].external_data
     assert model.SerializeToString() == before
     assert sidecar.read_bytes() == b"existing sidecar"
+
+
+@pytest.mark.parametrize("external_metadata", [False, True])
+@pytest.mark.parametrize("failure_stage", ["write", "close"])
+def test_external_save_preserves_payloads_when_buffered_writes_fail(
+    tmp_path, monkeypatch, external_metadata, failure_stage
+):
+    """Keep loaded payloads and prior files intact when a buffered sidecar write fails."""
+    path = tmp_path / "model.onnx"
+    sidecar = tmp_path / "weights" / "data.bin"
+    values = np.arange(8, dtype=np.float32)
+    model = helper.make_model(
+        helper.make_graph(
+            [],
+            "buffered_failure",
+            [],
+            [helper.make_tensor_value_info("w", TensorProto.FLOAT, [8])],
+            [
+                numpy_helper.from_array(values, "w"),
+                numpy_helper.from_array(values + 1, "other"),
+            ],
+        )
+    )
+    save_onnx_model(
+        model, str(path), external_data_name="weights/data.bin", size_threshold=0, verbose=False
+    )
+    original, original_weights = path.read_bytes(), sidecar.read_bytes()
+    candidate = onnx.load(path)
+    candidate.graph.initializer[0].CopyFrom(numpy_helper.from_array(values + 10, "w"))
+    if external_metadata:
+        onnx.external_data_helper.set_external_data(
+            candidate.graph.initializer[0], "original.weights", offset=7, length=values.nbytes
+        )
+    before = candidate.SerializeToString()
+    failure = OSError("Injected buffered sidecar failure")
+    open_path = Path.open
+
+    class FailingFile(io.FileIO):
+        """Leave a real partial sidecar when the buffered writer flushes."""
+
+        def write(self, data):
+            """Write a single byte before reporting an injected I/O error."""
+            super().write(data[:1])
+            raise failure
+
+    def open_sidecar(file_path, mode="r", *args, **kwargs):
+        """Fail a real buffer flush during the second write or during close."""
+        if mode == "wb" and file_path.name == "data.bin":
+            buffer_size = 48 if failure_stage == "write" else 128
+            return io.BufferedWriter(FailingFile(file_path, "w"), buffer_size=buffer_size)
+        return open_path(file_path, mode, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", open_sidecar)
+        with pytest.raises(OSError) as error:
+            save_onnx_model(
+                candidate,
+                str(path),
+                external_data_name="weights/data.bin",
+                size_threshold=0,
+                verbose=False,
+            )
+    assert candidate.SerializeToString() == before
+    assert error.value is failure
+    assert path.read_bytes() == original
+    assert sidecar.read_bytes() == original_weights
+    assert {entry for entry in tmp_path.rglob("*") if entry.is_file()} == {path, sidecar}
+    assert {entry for entry in tmp_path.rglob("*") if entry.is_dir()} == {sidecar.parent}
+    onnx.checker.check_model(onnx.load(path))
+    save_onnx_model(
+        candidate, str(path), external_data_name="weights/data.bin", size_threshold=0, verbose=False
+    )
+    saved = onnx.load(path)
+    onnx.checker.check_model(saved)
+    for tensor, expected in zip(saved.graph.initializer, (values + 10, values + 1), strict=True):
+        assert numpy_helper.to_array(tensor).tobytes() == expected.tobytes()

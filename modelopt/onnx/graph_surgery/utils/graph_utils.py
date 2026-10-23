@@ -257,6 +257,7 @@ def _save_external_weights(model, model_path, weights_path, location, size_thres
         ]
         if tensors:
             # ONNX 1.21 reopens sidecars in Windows text mode, truncating trailing 0x1A.
+            staged_payloads = []
             with weights_path.open("wb") as stream:
                 for tensor in tensors:
                     data, offset = tensor.raw_data, stream.tell()
@@ -264,9 +265,12 @@ def _save_external_weights(model, model_path, weights_path, location, size_thres
                     onnx.external_data_helper.set_external_data(
                         tensor, location, offset=offset, length=len(data)
                     )
-                    payloads.append((tensor, offset, len(data)))
-                    tensor.ClearField("raw_data")
+                    staged_payloads.append((tensor, offset, len(data)))
                     del data
+            # A buffered close may fail; retain caller payloads until it succeeds.
+            payloads = staged_payloads
+            for tensor, _, _ in payloads:
+                tensor.ClearField("raw_data")
         onnx.save(model, model_path)
         yield
     except BaseException:
