@@ -240,10 +240,8 @@ torchrun --nproc_per_node 8 main.py \
 | Epochs | 1 |
 | Serving policy | top-k 20, top-p 0.95, temperature 1.0 |
 
-> **Note on the learning rate:** the vocabulary-matched drafts trained against the same dump
-> used 1.0e-5 (4B) and 2.0e-6 (0.8B). Each rate was selected by sweeping against held-out
-> acceptance; the ordering does not transfer to another target or dump, so re-sweep for your
-> own pair.
+> **Note on the learning rate:** we recommend sweeping against held-out acceptance to find
+> the best rate for your own draft and target.
 
 ## Open Items
 
