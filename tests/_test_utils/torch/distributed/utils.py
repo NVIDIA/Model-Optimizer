@@ -15,6 +15,7 @@
 
 import contextlib
 import faulthandler
+import gc
 import os
 import queue
 import signal
@@ -96,6 +97,36 @@ def get_live_pool(pools, key, make_pool):
     return pool
 
 
+_BASELINE_TORCH_FLAGS = {}
+
+
+def _capture_baseline_torch_flags():
+    """Remember the torch settings a freshly spawned worker starts with."""
+    _BASELINE_TORCH_FLAGS.update(
+        cudnn_deterministic=torch.backends.cudnn.deterministic,
+        cudnn_benchmark=torch.backends.cudnn.benchmark,
+        cudnn_tf32=torch.backends.cudnn.allow_tf32,
+        matmul_tf32=torch.backends.cuda.matmul.allow_tf32,
+        deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
+    )
+
+
+def reset_worker_state(rank, world_size):
+    """Return a persistent worker to the state it had right after spawning.
+
+    ``set_seed`` and similar helpers change process-global torch settings; run this job at the
+    boundary between test modules that share workers.
+    """
+    torch.backends.cudnn.deterministic = _BASELINE_TORCH_FLAGS["cudnn_deterministic"]
+    torch.backends.cudnn.benchmark = _BASELINE_TORCH_FLAGS["cudnn_benchmark"]
+    torch.backends.cudnn.allow_tf32 = _BASELINE_TORCH_FLAGS["cudnn_tf32"]
+    torch.backends.cuda.matmul.allow_tf32 = _BASELINE_TORCH_FLAGS["matmul_tf32"]
+    torch.use_deterministic_algorithms(_BASELINE_TORCH_FLAGS["deterministic_algorithms"])
+    torch.manual_seed(1234)
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
 def default_worker_teardown(rank, world_size):
     """Minimal cleanup between tests in persistent workers."""
     try:
@@ -132,7 +163,7 @@ class DistributedWorkerPool:
     """
 
     def __init__(
-        self, world_size, backend="nccl", teardown_fn=default_worker_teardown, ready_timeout=120
+        self, world_size, backend="nccl", teardown_fn=default_worker_teardown, ready_timeout=300
     ):
         assert world_size > 0, "World size must be greater than 0"
         self.world_size = world_size
@@ -162,6 +193,8 @@ class DistributedWorkerPool:
             p.start()
             self._processes.append(p)
 
+        # ready_timeout is 300 s: cold imports of the Megatron/TE/modelopt stack take 75-100 s
+        # under coverage in CI
         try:
             for _ in range(world_size):
                 msg = self._get(ready_timeout)
@@ -207,6 +240,7 @@ class DistributedWorkerPool:
         if backend == "nccl" and torch.cuda.is_available():
             torch.cuda.set_device(rank)
         torch.manual_seed(1234)
+        _capture_baseline_torch_flags()
         result_queue.put("ready")
 
         while True:

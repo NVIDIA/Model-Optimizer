@@ -19,11 +19,18 @@ from _test_utils.examples.hf_ptq_utils import PTQCommand
 from _test_utils.examples.models import MIXTRAL_PATH, T5_PATH, TINY_LLAMA_PATH
 
 
+def _run_sharing_the_gpu(command: PTQCommand, model_path: str):
+    # Sharing the GPU, so set a batch size: hf_ptq sizes one to fill the free GPU memory.
+    if command.calib_batch_size is None:
+        command = dataclasses.replace(command, calib_batch_size=command.calib)
+    command.run(model_path)
+
+
 # Encoder-decoder representative; BART shares the same export path.
 @pytest.mark.parametrize("command", [PTQCommand(quant="fp8", min_sm=89)], ids=PTQCommand.param_str)
-@pytest.mark.usefixtures("exclusive_gpu")
+@pytest.mark.usefixtures("shared_gpu")
 def test_ptq_t5(command):
-    command.run(T5_PATH)
+    _run_sharing_the_gpu(command, T5_PATH)
 
 
 @pytest.mark.parametrize(
@@ -33,9 +40,9 @@ def test_ptq_t5(command):
     ],
     ids=PTQCommand.param_str,
 )
-@pytest.mark.usefixtures("exclusive_gpu")
+@pytest.mark.usefixtures("shared_gpu")
 def test_ptq_mixtral(command):
-    command.run(MIXTRAL_PATH)
+    _run_sharing_the_gpu(command, MIXTRAL_PATH)
 
 
 # Per-format export on tiny models (int8_weight_only, nvfp4_awq_lite, ...) is covered by
@@ -77,7 +84,4 @@ def test_ptq_mixtral(command):
 )
 @pytest.mark.usefixtures("shared_gpu")
 def test_ptq_llama(command):
-    # Sharing the GPU, so set a batch size: hf_ptq sizes one to fill the free GPU memory.
-    if command.calib_batch_size is None:
-        command = dataclasses.replace(command, calib_batch_size=command.calib)
-    command.run(TINY_LLAMA_PATH)
+    _run_sharing_the_gpu(command, TINY_LLAMA_PATH)

@@ -25,6 +25,10 @@ from typing import Any
 import torch
 import yaml
 
+from modelopt.torch.export.plugins.vllm_fakequant_hf import (
+    QUANTIZER_RECIPE_FORMAT,
+    QUANTIZER_RECIPE_VERSION,
+)
 from modelopt.torch.export.quant_format import QUANTIZATION_NONE
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.nn import GroupedQuantizer, SequentialQuantizer, TensorQuantizer
@@ -141,7 +145,9 @@ def gather_mcore_vllm_fq_quantizer_recipe(
     quantizer_state_by_name: dict[str, dict],
     save_directory: str | os.PathLike,
 ) -> None:
-    """Sync each rank's captured quantizer configs and save as ``quant_recipe.yaml``.
+    """Sync each rank's captured quantizer configs and save as a versioned ``quant_recipe.yaml``.
+
+    Removes both sidecars instead when no rank captured a quantizer.
 
     Args:
         quantizer_state_by_name: HF-prefixed quantizer name -> resolved config, collected in
@@ -153,10 +159,23 @@ def gather_mcore_vllm_fq_quantizer_recipe(
         DistributedProcessGroup(None),
         _merge_quantizer_states,
     )
+    if not merged:
+        # Nothing to reload (the loader rejects an empty recipe): write no sidecars, like
+        # Megatron-Bridge, and drop those of an earlier export.
+        for name in ("quantizer_state.pth", "quant_recipe.yaml"):
+            _save_quantizer_state(
+                Path(save_directory) / name, lambda path: path.unlink(missing_ok=True)
+            )
+        return
 
+    recipe = {
+        "format": QUANTIZER_RECIPE_FORMAT,
+        "version": QUANTIZER_RECIPE_VERSION,
+        "quantizers": merged,
+    }
     _save_quantizer_state(
         Path(save_directory) / "quant_recipe.yaml",
-        lambda path: path.write_text(yaml.safe_dump(merged, sort_keys=False)),
+        lambda path: path.write_text(yaml.safe_dump(recipe, sort_keys=False)),
     )
 
 

@@ -159,6 +159,36 @@ def test_document_boundaries_cu_seqlens(monkeypatch, tokens, cu_seqlens):
     assert sample["max_seqlen_q"] == (expected[1:] - expected[:-1]).max()
 
 
+def test_distill_uneven_pipeline_per_stage_recompute(tmp_path, num_gpus):
+    """An uneven student/teacher layer split with a different recompute depth on each stage."""
+    if num_gpus < 2:
+        pytest.skip("needs 2 GPUs for pipeline parallelism")
+    teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True, num_hidden_layers=3)
+    distill_output_dir = tmp_path / "distill_output"
+    distill_cmd_parts = extend_cmd_parts(
+        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"],
+        student_hf_path=teacher_hf_path,
+        teacher_hf_path=teacher_hf_path,
+        output_dir=distill_output_dir,
+        pp_size=2,
+        num_layers_in_first_pipeline_stage=2,
+        num_layers_in_last_pipeline_stage=1,
+        recompute_granularity="full",
+        recompute_method="block",
+        seq_length=16,
+        mbs=1,
+        gbs=4,
+        train_iters=2,
+        lr_warmup_iters=1,
+        eval_interval=2,
+        eval_iters=1,
+        log_interval=1,
+    )
+    distill_cmd_parts += ["--recompute_num_layers_per_stage", "2", "0"]
+    run_example_command(distill_cmd_parts, example_path="megatron_bridge", setup_free_port=True)
+    assert (distill_output_dir / "checkpoints" / "iter_0000002").exists()
+
+
 def test_distill_llm_sft(tmp_path, num_gpus):
     """--sft distills from prompt-completion jsonl instead of pre-tokenized --data_paths."""
     teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
