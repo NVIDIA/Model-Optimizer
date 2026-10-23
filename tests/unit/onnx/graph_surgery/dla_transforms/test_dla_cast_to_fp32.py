@@ -13,11 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Unit tests for :mod:`modelopt.onnx.graph_surgery.dla_transforms.dla_cast_to_fp32`.
-
 """ORT CPU parity tests for ``dla_cast_to_fp32``.
 
 Transform rule
@@ -45,7 +40,6 @@ No Cast nodes: graph unchanged, ORT output unchanged
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 
 import numpy as np
 import onnx
@@ -54,10 +48,7 @@ from onnx import TensorProto, helper, numpy_helper
 
 from modelopt.onnx.graph_surgery.dla_transforms import dla_cast_to_fp32 as _mod
 
-pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
-
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-_SAVED_MODELS_DIR = _REPO_ROOT / "scratch_space" / "cast_to_fp32_test_models"
+ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 _OPSET_VERSION = 17
 _MAX_IR_VERSION_FOR_ORT = 9
 
@@ -69,15 +60,19 @@ _apply = _mod._apply_cast_to_fp32
 
 
 def _vi(name: str, elem_type: int, shape: list) -> onnx.ValueInfoProto:
+    """Build a typed tensor descriptor for a test graph."""
     return helper.make_tensor_value_info(name, elem_type, shape)
 
 
 def _clamp_ir(model: onnx.ModelProto) -> None:
+    """Keep the test model compatible with the supported ORT versions."""
     model.ir_version = min(model.ir_version, _MAX_IR_VERSION_FOR_ORT)
 
 
 def _prepare_model(model: onnx.ModelProto) -> None:
+    """Populate intermediate shapes when the optional ORT tool is available."""
     try:
+        # The tool submodule is optional; model execution only requires ORT itself.
         from onnxruntime.tools.symbolic_shape_infer import (
             SymbolicShapeInference,  # type: ignore[import-untyped]
         )
@@ -91,8 +86,7 @@ def _prepare_model(model: onnx.ModelProto) -> None:
 
 
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
-    import onnxruntime as ort  # type: ignore[import-untyped]
-
+    """Execute a small test graph on the CPU and return named outputs."""
     _clamp_ir(model)
     sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
     return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
@@ -128,10 +122,12 @@ def test_cast_int64_redirected_to_float():
         [cast_node],
         "cast_int64",
         [_vi("X", TensorProto.FLOAT, shape)],
-        [_vi("Y", TensorProto.FLOAT, shape)],
+        [_vi("Y", TensorProto.INT64, shape)],
+        value_info=[_vi("Y", TensorProto.INT64, shape)],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
+    onnx.checker.check_model(model, full_check=True)
 
     x = _RNG.standard_normal(shape).astype(np.float32)
     # After redirect: Cast(to=FLOAT) is identity for float input
@@ -140,7 +136,7 @@ def test_cast_int64_redirected_to_float():
     tr = copy.deepcopy(model)
     _prepare_model(tr)
     tr = _apply(tr)
-    _prepare_model(tr)
+    onnx.checker.check_model(tr, full_check=True)
     got = _run_ort(tr, {"X": x})
 
     assert _cast_to_attr(tr, "cast_i64") == TensorProto.FLOAT
@@ -164,10 +160,11 @@ def test_cast_int32_redirected_to_float():
         [cast_node],
         "cast_int32",
         [_vi("X", TensorProto.FLOAT, shape)],
-        [_vi("Y", TensorProto.FLOAT, shape)],
+        [_vi("Y", TensorProto.INT32, shape)],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
+    onnx.checker.check_model(model, full_check=True)
 
     x = _RNG.standard_normal(shape).astype(np.float32)
     ref = x.copy()
@@ -175,7 +172,7 @@ def test_cast_int32_redirected_to_float():
     tr = copy.deepcopy(model)
     _prepare_model(tr)
     tr = _apply(tr)
-    _prepare_model(tr)
+    onnx.checker.check_model(tr, full_check=True)
     got = _run_ort(tr, {"X": x})
 
     assert _cast_to_attr(tr, "cast_i32") == TensorProto.FLOAT
@@ -265,46 +262,219 @@ def test_cast_to_gather_indices_skipped():
 # ── 5. Cast → GatherElements indices: skipped ────────────────────────────────
 
 
-def test_cast_to_gatherelements_indices_skipped():
-    """Cast feeding GatherElements input[1] (indices) must NOT be redirected."""
+@pytest.mark.parametrize(
+    ("op_type", "index_dtype"),
+    [("GatherElements", TensorProto.INT32), ("GatherND", TensorProto.INT64)],
+)
+def test_cast_to_gather_indices_remain_executable(op_type, index_dtype):
+    """Index casts keep their required dtype and produce the same gathered values."""
     shape = [3, 4]
+    index_shape = shape if op_type == "GatherElements" else [2, 1]
     cast_node = helper.make_node(
         "Cast",
         inputs=["idx_i64"],
         outputs=["idx_i32"],
         name="cast_geidx",
-        to=TensorProto.INT32,
+        to=index_dtype,
     )
     ge_node = helper.make_node(
-        "GatherElements",
+        op_type,
         inputs=["X", "idx_i32"],
         outputs=["Y"],
         name="gather_elements",
-        axis=0,
+        **({"axis": 0} if op_type == "GatherElements" else {}),
     )
     graph = helper.make_graph(
         [cast_node, ge_node],
         "cast_gatherelements",
         [
             _vi("X", TensorProto.FLOAT, shape),
-            _vi("idx_i64", TensorProto.INT64, shape),
+            _vi("idx_i64", TensorProto.INT64, index_shape),
         ],
-        [_vi("Y", TensorProto.FLOAT, shape)],
-        value_info=[_vi("idx_i32", TensorProto.INT32, shape)],
+        [_vi("Y", TensorProto.FLOAT, shape if op_type == "GatherElements" else [2, 4])],
+        value_info=[_vi("idx_i32", index_dtype, index_shape)],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir(model)
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {
+        "X": np.arange(12, dtype=np.float32).reshape(shape),
+        "idx_i64": np.zeros(index_shape, dtype=np.int64),
+    }
+    ref = _run_ort(model, feeds)
 
     tr = copy.deepcopy(model)
     _prepare_model(tr)
     tr = _apply(tr)
-
-    assert _cast_to_attr(tr, "cast_geidx") == TensorProto.INT32, (
-        "Cast feeding GatherElements indices must keep INT32"
-    )
+    onnx.checker.check_model(tr, full_check=True)
+    assert _cast_to_attr(tr, "cast_geidx") == index_dtype
+    np.testing.assert_array_equal(_run_ort(tr, feeds)["Y"], ref["Y"])
 
 
 # ── 6. Cast → GQA input: skipped ─────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "op_type", ["Reshape", "Expand", "Tile", "TopK", "Slice", "Not", "And", "Or", "Xor", "Where"]
+)
+def test_protected_control_casts_remain_executable(op_type):
+    """Shape controls and boolean predicates retain their types and runtime values."""
+    boolean = op_type in {"Not", "And", "Or", "Xor", "Where"}
+    dtype = TensorProto.BOOL if boolean else TensorProto.INT64
+    control = [1, 0] if boolean else [2, 2]
+    initializers = [numpy_helper.from_array(np.arange(4, dtype=np.float32).reshape(2, 2), "data")]
+    inputs = ["data", "control"]
+    outputs = [_vi("Y", TensorProto.FLOAT, [2, 2])]
+    if boolean:
+        inputs = ["control"]
+        outputs = [_vi("Y", TensorProto.BOOL, [2])]
+        if op_type in {"And", "Or", "Xor"}:
+            inputs.append("other")
+            initializers = [numpy_helper.from_array(np.array([False, True]), "other")]
+        elif op_type == "Where":
+            inputs.extend(["data", "other"])
+            initializers.append(numpy_helper.from_array(np.ones((2, 2), dtype=np.float32), "other"))
+            outputs = [_vi("Y", TensorProto.FLOAT, [2, 2])]
+    elif op_type == "Tile":
+        control = [1, 1]
+    elif op_type == "TopK":
+        control = [1]
+        outputs = [_vi("Y", TensorProto.FLOAT, [2, 1]), _vi("indices", TensorProto.INT64, [2, 1])]
+    elif op_type == "Slice":
+        control = [0]
+        inputs.append("ends")
+        initializers.append(numpy_helper.from_array(np.array([1], dtype=np.int64), "ends"))
+        outputs = [_vi("Y", TensorProto.FLOAT, [1, 2])]
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Cast", ["X"], ["control"], name="control_cast", to=dtype),
+                helper.make_node(op_type, inputs, [value.name for value in outputs]),
+            ],
+            "protected_controls",
+            [_vi("X", TensorProto.FLOAT, [len(control)])],
+            outputs,
+            initializer=initializers,
+            value_info=[_vi("control", dtype, [len(control)])],
+        ),
+        opset_imports=[helper.make_opsetid("", _OPSET_VERSION)],
+    )
+    _clamp_ir(model)
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"X": np.array(control, dtype=np.float32)}
+    expected = _run_ort(model, feeds)
+    transformed = _apply(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    assert _cast_to_attr(transformed, "control_cast") == dtype
+    for name, value in _run_ort(transformed, feeds).items():
+        np.testing.assert_array_equal(value, expected[name])
+
+
+@pytest.mark.parametrize("peer", ["initializer", "input", "cast", "identity", "reshape"])
+def test_cast_conversion_respects_shared_operand_types(peer):
+    """Coupled operands stay compatible, including through intermediate operations."""
+    nodes = [helper.make_node("Cast", ["X"], ["cast"], name="cast", to=TensorProto.INT64)]
+    inputs = [_vi("X", TensorProto.FLOAT, [2])]
+    initializers = []
+    feeds = {"X": np.array([1, 3], dtype=np.float32)}
+    left = "cast"
+    if peer == "cast":
+        inputs.append(_vi("peer", TensorProto.FLOAT, [2]))
+        feeds["peer"] = np.array([2, 4], dtype=np.float32)
+        nodes.append(helper.make_node("Cast", ["peer"], ["right"], to=TensorProto.INT64))
+    elif peer == "input":
+        inputs.append(_vi("right", TensorProto.INT64, [2]))
+        feeds["right"] = np.array([2, 4], dtype=np.int64)
+    else:
+        initializers.append(numpy_helper.from_array(np.array([2, 4], dtype=np.int64), "right"))
+        if peer == "identity":
+            nodes.append(helper.make_node("Identity", ["cast"], ["left"]))
+            left = "left"
+        elif peer == "reshape":
+            initializers.append(numpy_helper.from_array(np.array([2], dtype=np.int64), "shape"))
+            nodes.append(helper.make_node("Reshape", ["cast", "shape"], ["left"]))
+            left = "left"
+    nodes.append(helper.make_node("Add", [left, "right"], ["Y"]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "coupled_types",
+            inputs,
+            [_vi("Y", TensorProto.INT64, [2])],
+            initializer=initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", _OPSET_VERSION)],
+    )
+    _clamp_ir(model)
+    model = onnx.shape_inference.infer_shapes(model)
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)["Y"]
+    transformed = _apply(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    target_dtype = TensorProto.FLOAT if peer == "cast" else TensorProto.INT64
+    assert _cast_to_attr(transformed, "cast") == target_dtype
+    assert transformed.graph.output[0].type.tensor_type.elem_type == target_dtype
+    np.testing.assert_array_equal(_run_ort(transformed, feeds)["Y"], expected)
+
+
+def test_cast_preserves_implicitly_derived_output_dtype():
+    """A generator's default output dtype can depend on a separately typed input."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Cast", ["X"], ["cast"], name="cast", to=TensorProto.INT64),
+                helper.make_node("EyeLike", ["cast"], ["Y"]),
+            ],
+            "implicit_dtype",
+            [_vi("X", TensorProto.FLOAT, [2, 2])],
+            [_vi("Y", TensorProto.INT64, [2, 2])],
+        ),
+        opset_imports=[helper.make_opsetid("", _OPSET_VERSION)],
+        ir_version=_MAX_IR_VERSION_FOR_ORT,
+    )
+    model = onnx.shape_inference.infer_shapes(model)
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"X": np.ones((2, 2), dtype=np.float32)}
+    expected = _run_ort(model, feeds)["Y"]
+    transformed = _apply(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    assert _cast_to_attr(transformed, "cast") == TensorProto.INT64
+    np.testing.assert_array_equal(_run_ort(transformed, feeds)["Y"], expected)
+
+
+def test_custom_cast_function_keeps_its_target_type():
+    """A custom Cast function is opaque even when it forwards a standard Cast attribute."""
+    body = helper.make_node("Cast", ["X"], ["Y"])
+    body.attribute.append(helper.make_attribute_ref("to", onnx.AttributeProto.INT))
+    body.attribute[0].ref_attr_name = "to"
+    function = helper.make_function(
+        "local",
+        "Cast",
+        ["X"],
+        ["Y"],
+        [body],
+        [helper.make_opsetid("", _OPSET_VERSION)],
+        attributes=["to"],
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Cast", ["X"], ["Y"], domain="local", to=TensorProto.INT64)],
+            "custom_cast",
+            [_vi("X", TensorProto.FLOAT, [2])],
+            [_vi("Y", TensorProto.INT64, [2])],
+        ),
+        functions=[function],
+        opset_imports=[helper.make_opsetid("", _OPSET_VERSION), helper.make_opsetid("local", 1)],
+    )
+    _clamp_ir(model)
+    onnx.checker.check_model(model, full_check=True)
+    before = model.SerializeToString()
+    feeds = {"X": np.array([1.5, -2.5], dtype=np.float32)}
+    expected = _run_ort(model, feeds)
+    _apply(model)
+    assert model.SerializeToString() == before
+    onnx.checker.check_model(model, full_check=True)
+    np.testing.assert_array_equal(_run_ort(model, feeds)["Y"], expected["Y"])
 
 
 def test_cast_to_gqa_input_skipped():

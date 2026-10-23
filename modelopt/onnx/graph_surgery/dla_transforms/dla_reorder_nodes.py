@@ -34,10 +34,12 @@ PRIORITIZED_OPS = {
 
 
 def _node_label(node: onnx.NodeProto, index: int) -> str:
+    """Identify a node in an error even when its optional name is absent."""
     return node.name or f"<unnamed {node.op_type} #{index}>"
 
 
 def _build_edges(nodes: list[onnx.NodeProto]) -> tuple[list[set[int]], list[list[int]]]:
+    """Collect unique dependencies, including values captured by nested subgraphs."""
     output_to_node: dict[str, int] = {}
     for index, node in enumerate(nodes):
         for output in node.output:
@@ -65,6 +67,7 @@ def _build_edges(nodes: list[onnx.NodeProto]) -> tuple[list[set[int]], list[list
 
 
 def _unresolved_dependency_error(nodes: list[onnx.NodeProto], indegrees: list[int]) -> ValueError:
+    """Describe nodes left blocked after a topological traversal."""
     remaining = [
         _node_label(nodes[index], index) for index, indegree in enumerate(indegrees) if indegree > 0
     ]
@@ -78,6 +81,7 @@ def _compute_depths(
     dependencies: list[set[int]],
     consumers: list[list[int]],
 ) -> list[int]:
+    """Compute each node's longest dependency depth and reject cycles."""
     depths = [0] * len(nodes)
     indegrees = [len(node_dependencies) for node_dependencies in dependencies]
     ready = [index for index, indegree in enumerate(indegrees) if indegree == 0]
@@ -116,6 +120,7 @@ def priority_topological_order(
     sink_priority = max(depths, default=0) + 1
 
     def node_priority(index: int) -> int:
+        """Delay support nodes toward their first consumer's dependency depth."""
         if nodes[index].op_type not in PRIORITIZED_OPS:
             return 0
         if consumers[index]:

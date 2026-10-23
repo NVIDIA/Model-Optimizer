@@ -44,7 +44,6 @@ __all__ = []
 DLA_TRANSFORMS = (
     ("Cast", _apply_cast_to_fp32),
     ("ShapeInference", infer_shapes),
-    ("ShapeInference", infer_shapes),
     ("RemoveUnusedInitializers", _remove_unused_initializers),
 )
 
@@ -60,6 +59,10 @@ def _transform_make_dla_compatible(
     started = time.perf_counter()
     if remove_all_qdq and qdq_quantized_dtypes is not None:
         raise ValueError("Specify remove_all_qdq or qdq_quantized_dtypes, not both")
+    if (remove_all_qdq or qdq_quantized_dtypes is not None) and not any(
+        name == "RemoveQDQ" for name, _ in DLA_TRANSFORMS
+    ):
+        raise NotImplementedError("QDQ removal is not available in this pipeline")
     quant_types = (
         DEFAULT_QDQ_REMOVE_QUANT_TYPES
         if qdq_quantized_dtypes is None

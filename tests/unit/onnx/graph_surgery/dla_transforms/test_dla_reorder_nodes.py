@@ -28,14 +28,17 @@ from modelopt.onnx.graph_surgery.dla_transforms.dla_reorder_nodes import (
 
 
 def _vi(name: str, dtype: int = TensorProto.FLOAT, shape: list[int] | None = None):
+    """Build a tensor descriptor for a small ordering fixture."""
     return helper.make_tensor_value_info(name, dtype, shape or [1])
 
 
 def _node_names(model) -> list[str]:
+    """Read node names in their current serialized order."""
     return [node.name for node in model.graph.node]
 
 
 def test_priority_reorder_preserves_dependencies_and_delays_support_nodes():
+    """Support nodes stay close to their consumers without breaking dependencies."""
     model = helper.make_model(
         helper.make_graph(
             [
@@ -69,6 +72,7 @@ def test_priority_reorder_preserves_dependencies_and_delays_support_nodes():
 
 
 def test_duplicate_producer_consumer_edges_are_counted_once():
+    """Using the same producer twice does not leave a consumer blocked."""
     model = helper.make_model(
         helper.make_graph(
             [
@@ -87,6 +91,7 @@ def test_duplicate_producer_consumer_edges_are_counted_once():
 
 
 def test_unresolved_dependency_error_uses_fallback_label_for_unnamed_nodes():
+    """Cycle diagnostics identify unnamed nodes as well as named nodes."""
     graph = helper.make_graph(
         [
             helper.make_node("Identity", ["b"], ["a"]),
