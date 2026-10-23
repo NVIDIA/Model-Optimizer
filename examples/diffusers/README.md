@@ -16,7 +16,7 @@ Cache Diffusion is a technique that reuses cached outputs from previous diffusio
 | :------------: | :------------: | :------------: | :------------: |
 | Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
 | Getting Started | Learn how to optimize your models using quantization/cache diffusion to reduce precision and improve inference efficiency | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
-| Support Matrix | View the support matrix to see quantization/cahce diffusion compatibility and feature availability across different models | \[[Link](#support-matrix)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
+| Support Matrix | View the support matrix to see quantization/cache diffusion compatibility and feature availability across different models | \[[Link](#support-matrix)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Sparse Attention (Skip-Softmax) | Skip-softmax sparse attention for diffusion models | \[[Link](#sparse-attention-skip-softmax)\] | |
 | Cache Diffusion | Caching technique to accelerate inference without compromising quality | \[[Link](#cache-diffusion)\] | |
 | Post Training Quantization (PTQ) | Example scripts on how to run PTQ on diffusion models | \[[Link](#post-training-quantization-ptq)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
@@ -97,7 +97,7 @@ We support calibration for INT8, FP8 and FP4 precision and for both weights and 
 We also provide instructions on deploying and running E2E diffusion pipelines with Model Optimizer quantized INT8 and FP8 Backbone to generate images and measure latency on target GPUs. Note, Jetson devices are not supported at this time due to the incompatibility of the software.
 
 > [!NOTE]
-> Model calibration requires relatively more GPU computing power then deployment. It does not need to be on the same GPUs as the deployment target GPUs. Deprecated ONNX export and TensorRT engine instructions remain available in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
+> Model calibration requires relatively more GPU computing power than deployment. It does not need to be on the same GPUs as the deployment target GPUs. Deprecated ONNX export and TensorRT engine instructions remain available in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
 
 ### Quantize scripts
 
@@ -123,6 +123,17 @@ python quantize.py \
     --n-steps 20 --quantized-torch-ckpt-save-path ./{MODEL_NAME}.pt --collect-method default \
     --hf-ckpt-dir ./hf_ckpt
 ```
+
+HF exports omit attention quantizer state by default, including when calibration uses
+`--quantize-mha`, except for FLUX.1. Qwen-Image's TRT-LLM loader requires this clean
+checkpoint. FLUX.1 retains enabled Q/K/V `_amax` keys by default for compatibility with
+the static FP8 attention path in [TensorRT-LLM PR #18396](https://github.com/NVIDIA/TensorRT-LLM/pull/18396).
+Use `--extra-param export_attention_quantizers=true` to retain enabled Q/K/V quantizers
+explicitly, or `export_attention_quantizers=false` to omit them, including for FLUX.1.
+Disabled quantizers are always omitted. The equivalent Python option is
+`export_hf_checkpoint(pipe, export_dir="./hf_ckpt", export_attention_quantizers=True)`.
+Diffusion attention quantization, including native LTX-2 components, is not exported
+as KV-cache quantization. Transformers components retain their KV-cache metadata.
 
 #### Wan 2.2 VAE NVFP4 (Conv3D Implicit GEMM)
 
@@ -478,7 +489,7 @@ compile(
     engine_path=Path("./engine"),
 )
 
-cachify.prepare(pipe, num_inference_steps, SDXL_DEFAULT_CONFIG)
+cachify.prepare(pipe, SDXL_DEFAULT_CONFIG)
 ```
 
 Afterward, use it as a standard cache diffusion pipeline to generate the image.
@@ -497,7 +508,7 @@ SDXL_DEFAULT_CONFIG = [
     }
 ]
 
-cachify.prepare(pipe, num_inference_steps, SDXL_DEFAULT_CONFIG)
+cachify.prepare(pipe, SDXL_DEFAULT_CONFIG)
 ```
 
 Two parameters are essential: `wildcard_or_filter_func` and `select_cache_step_func`.

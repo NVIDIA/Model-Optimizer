@@ -33,49 +33,49 @@ Release notes, technical updates, examples, and deployment stories from the Mode
    <div class="announcement-grid" id="announcement-grid">
      <article class="announcement-card" data-date="2026-10-08" data-title="AutoQuant KV: Automatic Mixed-Precision KV Cache Quantization" data-summary="Learn how AutoQuant selects per-layer KV formats under a storage budget and combines with GEMM quantization, with Qwen3-8B as a case study." data-tags="autoquantize kv-cache quantization mixed-precision modelopt">
        <div class="announcement-card-meta">October 8, 2026 &middot; Model Optimizer Team</div>
-       <h2><a href="announcements/autoquant-kv.html">AutoQuant KV: Automatic Mixed-Precision KV Cache Quantization</a></h2>
+       <h2><a href="announcements/20261008-autoquant-kv.html">AutoQuant KV: Automatic Mixed-Precision KV Cache Quantization</a></h2>
        <p>Learn how AutoQuant selects per-layer KV formats under a storage budget and combines with GEMM quantization, with Qwen3-8B as a case study.</p>
        <div class="announcement-card-tags"><span>autoquantize</span><span>kv-cache</span><span>quantization</span><span>mixed-precision</span><span>modelopt</span></div>
      </article>
      <article class="announcement-card" data-date="2026-09-28" data-title="Quantizing a 4.9 TB Qwen3.8 Model on a Single GPU" data-summary="Layerwise calibration and per-layer shard export drop the memory floor for PTQ from one model to one layer: a 4.9 TB Qwen3.8 checkpoint quantized on a single GB300." data-tags="quantization nvfp4 layerwise moe single-gpu modelopt">
        <div class="announcement-card-meta">September 28, 2026 &middot; Model Optimizer Team</div>
-       <h2><a href="announcements/single-gpu-ptq.html">Quantizing a 4.9 TB Qwen3.8 Model on a Single GPU</a></h2>
+       <h2><a href="announcements/20260928-single-gpu-ptq.html">Quantizing a 4.9 TB Qwen3.8 Model on a Single GPU</a></h2>
        <p>Layerwise calibration and per-layer shard export drop the memory floor for PTQ from one model to one layer: a 4.9 TB Qwen3.8 checkpoint quantized on a single GB300.</p>
        <div class="announcement-card-tags"><span>quantization</span><span>nvfp4</span><span>layerwise</span><span>moe</span><span>single-gpu</span><span>modelopt</span></div>
      </article>
      <article class="announcement-card" data-date="2026-09-16" data-title="Scale Learning: Training NVFP4 Block Scales to Recover Accuracy" data-summary="How ModelOpt learns NVFP4 per-block weight scales with gradients instead of setting them with a calibration rule, and what that recovers." data-tags="scale-learning quantization nvfp4 qad modelopt">
        <div class="announcement-card-meta">September 16, 2026 &middot; Model Optimizer Team</div>
-       <h2><a href="announcements/scale-learning.html">Scale Learning: Training NVFP4 Block Scales to Recover Accuracy</a></h2>
+       <h2><a href="announcements/20260916-scale-learning.html">Scale Learning: Training NVFP4 Block Scales to Recover Accuracy</a></h2>
        <p>How ModelOpt learns NVFP4 per-block weight scales with gradients instead of setting them with a calibration rule, and what that recovers.</p>
        <div class="announcement-card-tags"><span>scale-learning</span><span>quantization</span><span>nvfp4</span><span>qad</span><span>modelopt</span></div>
      </article>
      <article class="announcement-card" data-date="2026-09-16" data-title="Recovering W4A4 NVFP4 Accuracy with Quantization-Aware Distillation" data-summary="Weight-only NVFP4 is slower than BF16 on Blackwell; W4A4 unlocks the FP4 kernels, and QAD recovers the accuracy it costs." data-tags="quantization nvfp4 w4a4 qad distillation megatron-bridge">
        <div class="announcement-card-meta">September 16, 2026 &middot; Model Optimizer Team</div>
-       <h2><a href="announcements/qwen36-w4a4-qad.html">Recovering W4A4 NVFP4 Accuracy with Quantization-Aware Distillation</a></h2>
+       <h2><a href="announcements/20260916-qwen36-w4a4-qad.html">Recovering W4A4 NVFP4 Accuracy with Quantization-Aware Distillation</a></h2>
        <p>Weight-only NVFP4 is <em>slower</em> than BF16 on Blackwell. W4A4 beats it in 9 of 12 shapes, and QAD recovers the accuracy W4A4 costs on Qwen3.6-35B-A3B.</p>
        <div class="announcement-card-tags"><span>quantization</span><span>nvfp4</span><span>w4a4</span><span>qad</span><span>distillation</span><span>megatron-bridge</span></div>
      </article>
      <article class="announcement-card" data-date="2026-09-09" data-title="Improving NVFP4 Accuracy with Local-Hessian Weight Scales" data-summary="How Local-Hessian selects NVFP4 block scales to minimize layer output error, and how it compares with max, MSE, Four-over-six, and GPTQ." data-tags="local-hessian quantization nvfp4 calibration modelopt">
        <div class="announcement-card-meta">September 9, 2026 &middot; Model Optimizer Team</div>
-       <h2><a href="announcements/local-hessian.html">Improving NVFP4 Accuracy with Local-Hessian Weight Scales</a></h2>
+       <h2><a href="announcements/20260909-local-hessian.html">Improving NVFP4 Accuracy with Local-Hessian Weight Scales</a></h2>
        <p>How Local-Hessian selects NVFP4 block scales to minimize layer output error, and how it compares with max, MSE, Four-over-six, and GPTQ.</p>
        <div class="announcement-card-tags"><span>local-hessian</span><span>quantization</span><span>nvfp4</span><span>calibration</span><span>modelopt</span></div>
      </article>
      <article class="announcement-card" data-date="2026-08-24" data-title="AutoQuantize: A Fast Automatic Mixed-Precision Assignment" data-summary="AutoQuantize finds low-sensitivity mixed-precision assignments with gradient-based scoring under a modeled effective-bits budget." data-tags="autoquantize quantization mixed-precision modelopt">
        <div class="announcement-card-meta">August 24, 2026 &middot; Model Optimizer Team</div>
-       <h2><a href="announcements/autoquantize.html">AutoQuantize: A Fast Automatic Mixed-Precision Assignment</a></h2>
+       <h2><a href="announcements/20260824-autoquantize.html">AutoQuantize: A Fast Automatic Mixed-Precision Assignment</a></h2>
        <p>AutoQuantize finds low-sensitivity mixed-precision assignments with gradient-based scoring under a modeled effective-bits budget.</p>
        <div class="announcement-card-tags"><span>autoquantize</span><span>quantization</span><span>mixed-precision</span><span>modelopt</span></div>
      </article>
      <article class="announcement-card" data-date="2026-08-13" data-title="Model Optimizer announcements are moving to GitHub Pages" data-summary="The public Model Optimizer site is gaining a PR-updated announcements landing page within the existing Sphinx documentation." data-tags="release docs github-pages">
        <div class="announcement-card-meta">August 13, 2026 &middot; Model Optimizer Team</div>
-       <h2><a href="announcements/github-pages-announcements.html">Model Optimizer announcements are moving to GitHub Pages</a></h2>
+       <h2><a href="announcements/20260813-github-pages-announcements.html">Model Optimizer announcements are moving to GitHub Pages</a></h2>
        <p>The GitHub Pages site now starts with announcements while the existing API documentation remains available in the docs navigation.</p>
        <div class="announcement-card-tags"><span>release</span><span>docs</span><span>github-pages</span></div>
      </article>
      <article class="announcement-card" data-date="2026-07-13" data-title="DSpark vs Domino: Same DFlash Backbone, Different Correction Heads" data-summary="DSpark and Domino both build on block-parallel DFlash draft generation but diverge in their token-level correction heads." data-tags="speculative-decoding dflash dspark domino architecture">
        <div class="announcement-card-meta">July 13, 2026 &middot; Model Optimizer Team</div>
-       <h2><a href="announcements/dspark-vs-domino.html">DSpark vs Domino: Same DFlash Backbone, Different Correction Heads</a></h2>
+       <h2><a href="announcements/20260713-dspark-vs-domino.html">DSpark vs Domino: Same DFlash Backbone, Different Correction Heads</a></h2>
        <p>DSpark and Domino share a DFlash backbone but make different correction-head tradeoffs: ModelOpt's <code>vanilla</code> Markov head versus a GRU.</p>
        <div class="announcement-card-tags"><span>speculative-decoding</span><span>dflash</span><span>dspark</span><span>domino</span><span>architecture</span></div>
      </article>

@@ -112,6 +112,10 @@ If adding a new PIP dependency to any of these, make sure to verify the LICENSE 
 
 Do not regenerate or commit `uv.lock` in your PR, even when changing dependencies in `pyproject.toml`. A [weekly workflow](./.github/workflows/bump_uv_lock.yml) refreshes it automatically.
 
+## Using a third-party GitHub Action or container image
+
+Pin third-party actions in `.github/` to a full commit SHA with the version in a trailing comment, e.g. `uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1`. Tags such as `@v7` or `@v7.1.1` can be moved to different code by the action's owner or anyone who compromises it, while a commit SHA cannot. GitHub-owned `actions/*` may stay on major tags. Pin Docker Hub images by digest (`image:tag@sha256:...`). [Dependabot](./.github/dependabot.yml) bumps the pinned actions monthly.
+
 ## 🔒 Security coding practices
 
 All contributors must follow the security coding practices documented in *Security Coding Practices for

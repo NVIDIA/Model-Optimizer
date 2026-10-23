@@ -21,6 +21,8 @@ import dataclasses
 import pytest
 import torch
 import torch.nn.functional as F
+from _test_utils.torch.quantization.models import TOY_MOE_EXPERTS as NUM_EXPERTS
+from _test_utils.torch.quantization.models import TOY_MOE_HIDDEN as HIDDEN
 from _test_utils.torch.transformers_models import get_tiny_llama
 from torch import nn
 
@@ -29,7 +31,6 @@ from modelopt.recipe import load_recipe
 from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
-from modelopt.torch.quantization.nn import QuantModuleRegistry
 
 IQ2_XXS = GGML_FORMAT_REGISTRY["iq2_xxs"]
 IMATRIX = {"method": "imatrix"}
@@ -172,62 +173,6 @@ def test_a_module_calibration_never_reached_gets_the_plain_search():
     plain = IQ2_XXS.dequantize(packed, shape, dtype=torch.float32)
     assert torch.equal(model["unused"].weight.detach(), plain)
     assert torch.equal(_decoded(model["unused"].weight_quantizer, original.shape), plain)
-
-
-NUM_EXPERTS = 4
-HIDDEN = 256
-INTERMEDIATE = 256
-
-
-class _FusedExperts(nn.Module):
-    """HF transformers 5 fused-experts layout: one ``F.linear`` pair per routed expert."""
-
-    def __init__(self):
-        super().__init__()
-        self.num_experts = NUM_EXPERTS
-        self.gate_up_proj = nn.Parameter(torch.randn(NUM_EXPERTS, 2 * INTERMEDIATE, HIDDEN) * 0.02)
-        self.down_proj = nn.Parameter(torch.randn(NUM_EXPERTS, HIDDEN, INTERMEDIATE) * 0.02)
-
-    def forward(self, hidden_states, expert_of_token):
-        output = torch.zeros_like(hidden_states)
-        for idx in range(self.num_experts):
-            tokens = (expert_of_token == idx).nonzero().squeeze(-1)
-            if len(tokens) == 0:
-                continue
-            gate, up = F.linear(hidden_states[tokens], self.gate_up_proj[idx]).chunk(2, dim=-1)
-            output[tokens] = F.linear(F.silu(gate) * up, self.down_proj[idx])
-        return output
-
-
-class _MoEBlock(nn.Module):
-    """Routes token ``t`` to expert ``t % 3``, so the last expert receives no token."""
-
-    def __init__(self):
-        super().__init__()
-        self.experts = _FusedExperts()
-        self.shared_expert = nn.Linear(HIDDEN, HIDDEN, bias=False)
-
-    def forward(self, hidden_states):
-        routed = self.experts(hidden_states, torch.arange(len(hidden_states)) % 3)
-        return routed + self.shared_expert(hidden_states)
-
-
-class _MoE(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.mlp = _MoEBlock()
-
-    def forward(self, hidden_states):
-        return self.mlp(hidden_states)
-
-
-@pytest.fixture
-def moe():
-    torch.manual_seed(0)
-    model = _MoE()
-    yield model
-    if QuantModuleRegistry.get(_FusedExperts) is not None:
-        QuantModuleRegistry.unregister(_FusedExperts)
 
 
 def test_imatrix_weights_each_fused_expert_by_its_own_tokens(monkeypatch, moe):

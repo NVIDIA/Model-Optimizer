@@ -146,8 +146,20 @@ class DFlashConfig(ModeloptBaseConfig):
     )
 
     dflash_use_torch_compile: bool = ModeloptField(
-        default=True,
-        description="Whether to use torch.compile on DFlash forward/loss methods.",
+        default=False,
+        description=(
+            "Whether to torch.compile the draft decoder stack and the DSpark TVD chunk in "
+            "training. Compiles once, on the first step, and needs a working Inductor "
+            "toolchain."
+        ),
+    )
+
+    dflash_use_flex_attention: bool = ModeloptField(
+        default=False,
+        description=(
+            "Compute the draft's attention with FlexAttention over a block-sparse BlockMask "
+            "instead of SDPA with a dense [B, 1, Q, KV] mask, skipping fully-masked tiles."
+        ),
     )
 
     dflash_swa_window_size: int | None = ModeloptField(
@@ -487,6 +499,17 @@ class ExternalDraftConfig(ModeloptBaseConfig):
             "deployed pair will see: ``alpha = 1 - TVD``. ``tvd_ce`` adds a cross-entropy "
             "term. Sparse data requires one of the TVD objectives, since the dump is "
             "already a truncated policy and ``soft_ce`` needs full base logits."
+        ),
+    )
+
+    external_vocab_swap: bool = ModeloptField(
+        default=False,
+        description=(
+            "Re-index the draft onto the base model's vocabulary when the two tokenizers "
+            "differ, instead of raising. Rebuilds the draft's embeddings, carrying over "
+            "rows for tokens both tokenizers spell identically. The replacement matrix is "
+            "``base_vocab_size * hidden_size`` parameters, so this is a large change to a "
+            "small draft; validate with an acceptance measurement, not a loss curve."
         ),
     )
 
