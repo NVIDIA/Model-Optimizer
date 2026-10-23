@@ -219,7 +219,9 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     # (_COMBINE_SLICE_ELEMENTS); a whole [P, H] fp32 copy reaches GiBs at calibration batch sizes.
     _acc = torch.zeros(T, H, device=dev, dtype=torch.float32)
     slice_rows = max(1, _COMBINE_SLICE_ELEMENTS // max(H, 1))
-    for r0 in range(0, out_pair.size(0), slice_rows):
+    # At least one slice, empty on a rank that sent nothing: its index_add_ ties the result to the
+    # combine's graph, so backward still runs this rank's reverse all-to-all, which its peers wait in.
+    for r0 in range(0, max(out_pair.size(0), 1), slice_rows):
         r1 = r0 + slice_rows
         weighted = out_pair[r0:r1] * w[r0:r1, None]
         _acc.index_add_(0, token_rows[r0:r1], weighted.float())

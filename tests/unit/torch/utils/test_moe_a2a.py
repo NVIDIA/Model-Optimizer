@@ -27,6 +27,7 @@ travel, and weight their tokens' expert results on the rank that holds them.
 
 import copy
 import warnings
+from datetime import timedelta
 
 import pytest
 import torch
@@ -208,6 +209,25 @@ def test_experts_that_receive_no_tokens_run_on_an_empty_batch(cpu_dist_workers):
     if Version(transformers.__version__) < Version("5.6"):
         pytest.skip("expert parallelism needs transformers >= 5.6")
     cpu_dist_workers.run(_no_tokens_for_rank1_job)
+
+
+def _no_routes_from_rank1_job(rank, size):
+    # A rank left waiting in the backward's all-to-all gives up in seconds on this group.
+    group = dist.new_group(timeout=timedelta(seconds=10))
+    torch.manual_seed(0)
+    x = torch.randn(2, H).requires_grad_(True)
+    routes = torch.tensor([[0, 1], [0, 1]]) if rank == 0 else torch.full((2, 2), -1)
+    out = a2a_moe(group, x, routes, torch.ones(2, 2), 1, _identity_experts)
+    (out + x).square().sum().backward()
+    # Rank 0's tokens come back from both ranks' identity experts, out = 2x: d/dx (3x)^2 = 18x.
+    # Rank 1 routes nothing, out = 0: d/dx x^2 = 2x.
+    torch.testing.assert_close(x.grad, (18 if rank == 0 else 2) * x.detach())
+
+
+def test_a_rank_that_routes_no_tokens_still_joins_the_backward(cpu_dist_workers):
+    """Every routing slot on rank 1 is -1, so it sends nothing, but it serves rank 0's tokens. Its
+    backward must still run the reverse all-to-all, or rank 0 waits in its own."""
+    cpu_dist_workers.run(_no_routes_from_rank1_job)
 
 
 def _split_qwen3_moe_experts(rank, size):
