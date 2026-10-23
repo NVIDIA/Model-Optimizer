@@ -34,7 +34,7 @@ from modelopt.torch.utils.distributed import size as world_size
 __all__ = ["auto_quantize"]
 
 _FSDP2_AUTOQUANT_WARNING = (
-    "AutoQuantize with --use_fsdp2 is experimental; use at your own risk. "
+    "AutoQuantize with --use_fsdp2 is experimental. "
     "Resume with the same world size, model, recipe, and calibration data."
 )
 

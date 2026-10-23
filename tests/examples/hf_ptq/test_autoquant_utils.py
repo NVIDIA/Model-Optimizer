@@ -361,7 +361,7 @@ def test_autoquant_retains_fsdp2_warning(autoquant_utils, monkeypatch, domain):
         auto_quantize_checkpoint=None,
     )
 
-    with pytest.warns(UserWarning, match="use at your own risk"):
+    with pytest.warns(UserWarning, match="experimental"):
         assert autoquant_utils.auto_quantize(args, model, [None] * 8, SimpleNamespace()) is model
     assert observed["num_calib_steps"] == 8
     assert observed["num_score_steps"] == 4
