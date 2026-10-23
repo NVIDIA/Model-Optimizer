@@ -47,7 +47,11 @@ from transformers import (
 from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
 from modelopt.torch.models import hf_model_type
-from modelopt.torch.models.hf import checkpoint_has_mtp, prepare_model_for_loading
+from modelopt.torch.models.hf import (
+    checkpoint_has_mtp,
+    prefers_bundled_code,
+    prepare_model_for_loading,
+)
 from modelopt.torch.utils import distributed as dist_utils
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
 from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
@@ -523,24 +527,6 @@ def _resolve_init_config(hf_config, auto_model_module, ckpt_path, config_kwargs)
         return hf_config
 
 
-def _builtin_config_unavailable(hf_config, ckpt_path, config_kwargs):
-    """True when ``hf_config`` is a remote-code config whose built-in counterpart can't be built.
-
-    A built-in transformers model class may exist for the architecture yet only cover a subset
-    of it (e.g. built-in Nemotron-H implements the MoE variant only, so dense checkpoints fail
-    to parse). In that case the checkpoint's bundled modeling code must be used instead.
-    """
-    if not type(hf_config).__module__.startswith("transformers_modules"):
-        return False
-    builtin_config_kwargs = {k: v for k, v in config_kwargs.items() if k != "trust_remote_code"}
-    try:
-        AutoConfig.from_pretrained(ckpt_path, **builtin_config_kwargs)
-    except (KeyError, ValueError, TypeError, AttributeError):
-        # Config-parsing incompatibilities only; e.g. an OSError from the Hub must propagate.
-        return True
-    return False
-
-
 def _get_config_dtype(config):
     config_dtype = (
         getattr(config, "dtype", None) or getattr(config, "torch_dtype", None) or torch.bfloat16
@@ -731,14 +717,13 @@ def get_model(
 
         # DeepSeek ships bundled modeling code, but the built-in class is what the
         # disk-offload and streaming-export paths are validated against.
-        # Also use the bundled code when the built-in class covers only part of the architecture,
-        # i.e. the checkpoint's config cannot be re-derived as a built-in one (built-in Nemotron-H
-        # implements the MoE variant only, so dense checkpoints would hit a KeyError on 'mlp').
+        # Also use it when the model plugin says the built-in class can't represent the checkpoint
+        # (dense Nemotron-H on Transformers 5.5, whose built-in class is MoE-only).
         use_bundled_code = trust_remote_code and (
             "Deepseek" in architecture
             or (
                 hasattr(transformers, architecture)
-                and _builtin_config_unavailable(hf_config, ckpt_path, config_kwargs)
+                and prefers_bundled_code(hf_config.model_type, hf_config, ckpt_path, config_kwargs)
             )
         )
 
