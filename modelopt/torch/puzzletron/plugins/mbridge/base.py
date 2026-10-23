@@ -122,7 +122,9 @@ class HeterogeneousBridgeMixin:
         # use model-specific parameters not supported by GenericHeterogeneousProvider (e.g.,
         # scale_factor, yarn_rotary_scaling_factor, moe_* parameters). In such cases, create a
         # model-specific heterogeneous provider that inherits from the model-specific provider.
-        # Newer Megatron-Bridge derives some fields in __post_init__ (init=False).
+        # Newer Megatron-Bridge computes some fields in __post_init__ and excludes them from the
+        # constructor (init=False). asdict() still includes them, so filter them out to avoid a
+        # TypeError in GenericHeterogeneousProvider(**provider_kwargs).
         valid_fields = {f.name for f in fields(GenericHeterogeneousProvider) if f.init}
 
         # Only keep kwargs that are valid fields

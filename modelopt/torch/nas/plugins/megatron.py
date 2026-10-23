@@ -1269,7 +1269,13 @@ class _DynamicMambaMixer(DynamicModule):
 
 
 def _resize_mamba_decode_cache(mixer: torch.nn.Module) -> None:
-    """Keep newer MCore's per-head ``-exp(A_log)`` decode cache the size of ``A_log``."""
+    """Resize newer MCore's decode cache when ModelOpt changes the active head count.
+
+    ModelOpt slices ``A_log``, but MCore's ``_A_neg_exp_cache`` keeps its original shape. Allocate
+    matching storage and mark it stale so MCore's ``refresh_cache()`` recomputes ``-exp(A_log)``
+    from the active heads before using the cache.
+    """
+    # TODO: Consider resizing and invalidating the cache whenever ModelOpt changes the active heads.
     cache = getattr(mixer, "_A_neg_exp_cache", None)
     if cache is not None and cache.shape != mixer.A_log.shape:
         mixer._A_neg_exp_cache = torch.empty_like(mixer.A_log, dtype=torch.float32)
