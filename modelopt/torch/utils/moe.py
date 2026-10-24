@@ -18,7 +18,7 @@
 The DP=EP all-to-all expert transport (``torch_a2a``).
 
 The all-to-all transport is plain ``torch.distributed.all_to_all_single`` (NCCL) wrapped around
-transformers' ``_grouped_linear``. ``register_torch_a2a()`` registers it into
+transformers' quantizable ``_grouped_linear``. ``register_torch_a2a()`` registers it into
 transformers' ``ExpertsInterface`` lazily -- never at import time, so importing this module has no
 transformers-``ExpertsInterface`` side effect.
 """
@@ -34,8 +34,8 @@ from torch.distributed.nn.functional import all_to_all_single as autograd_all_to
 #
 # The throughput-correct MoE parallelism for calibration: dense+router run data-parallel (each rank its
 # own batch), experts are EP-sharded, and tokens are routed to the expert-owning rank by an all-to-all
-# (dispatch) / reduce (combine). The expert matmul stays on transformers' `_grouped_linear`, so each
-# expert sees the tokens routed to it from every rank.
+# (dispatch) / reduce (combine). The expert matmul stays on transformers' `_grouped_linear`, so
+# ModelOpt's per-expert quantizers attach and collect amax over the *global* (dispatched) token pool.
 # Transport is plain `torch.distributed.all_to_all_single` (NCCL) -- works cross-node at any rank count.
 # ---------------------------------------------------------------------------------------------------
 
@@ -57,7 +57,7 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     Works cross-node at any rank count, with explicit token permute/unpermute.
 
     Flow: expand (token, expert) pairs -> route each to dest_rank = global_expert // num_local ->
-    all_to_all the tokens (+ local-expert id) -> local grouped_mm -> all_to_all back ->
+    all_to_all the tokens (+ local-expert id) -> local grouped_mm (quantizable) -> all_to_all back ->
     weight by the routing weights and sum each token's top_k results.
 
     Tokens travel and the result returns in ``hidden_states``' dtype -- the model's, so its residual
@@ -173,7 +173,7 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     recv_eid = torch.empty(Q, device=dev, dtype=torch.int64)
     dist.all_to_all_single(recv_eid, local_eid_s.contiguous(), out_list, in_list, group=group)
 
-    # group received tokens by local expert -> grouped_mm; weighted back home
+    # group received tokens by local expert -> grouped_mm (quantizable); weighted back home
     rorder = torch.argsort(recv_eid, stable=True)
     counts = torch.bincount(recv_eid[rorder], minlength=num_local_experts)
     offsets = torch.cumsum(counts, dim=0).to(torch.int32)
@@ -214,10 +214,10 @@ def torch_a2a_experts_forward(self, hidden_states, top_k_index, top_k_weights, p
     Registered as the `"torch_a2a"` experts implementation on transformers' `ExpertsInterface`.
 
     Dense+router run data-parallel; experts are EP-sharded; tokens are routed to the expert-owning
-    rank by the NCCL all-to-all above. Local experts run through transformers' `_grouped_linear` on
-    the tokens dispatched to them from every rank. `process_group` (the EP group) is injected by the
-    `torch_a2a_experts` TP style's `_prepare_input_fn`; the router must emit GLOBAL ids unmasked
-    (`torch_a2a_router`).
+    rank by the NCCL all-to-all above. Local experts run through the ModelOpt-quantizable
+    `_grouped_linear` so per-expert weight + shared input quantizers attach over the dispatched
+    (global) token pool. `process_group` (the EP group) is injected by the `torch_a2a_experts` TP style's
+    `_prepare_input_fn`; the router must emit GLOBAL ids unmasked (`torch_a2a_router`).
 
     ``self.num_experts`` is this rank's share of the experts: the expert-parallel loader loads them
     through transformers' expert-parallel sharding (the ``grouped_gemm`` / packed styles), which slices
@@ -234,7 +234,8 @@ def torch_a2a_experts_forward(self, hidden_states, top_k_index, top_k_weights, p
     # Per-expert biases (e.g. GPT-OSS ``gate_up_proj_bias`` / ``down_proj_bias``) are indexed by local
     # expert id below, so the plan must shard them over dim 0 like the weights (grouped_gemm): left
     # whole, every rank but the first would add other experts' biases. transformers'
-    # ``_grouped_linear`` adds them after each expert's grouped GEMM.
+    # ``_grouped_linear`` (and ModelOpt's quantized override) add them after each expert's grouped GEMM,
+    # unquantized.
     has_bias = getattr(self, "has_bias", False)
     if has_bias:
         for name in ("gate_up_proj_bias" if self.has_gate else "up_proj_bias", "down_proj_bias"):
