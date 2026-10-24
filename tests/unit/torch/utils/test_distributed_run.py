@@ -149,11 +149,17 @@ def _no_plan_on_several_ranks_job(rank, size):
     plan = DistributionPlan(world_size=size, dense="fsdp")
     set_distribution_plan(model, plan)
     assert distribution_plan(model) is plan
+    model = _model()
+    set_distribution_plan(model, DistributionPlan(world_size=size))
+    model.add_module("added", nn.Linear(2, 2))
+    _, error = _outcome(lambda: distribution_plan(model.added))
+    assert isinstance(error, RuntimeError), error
 
 
 def test_a_model_with_no_plan_raises_in_a_run_of_several_ranks(cpu_dist_workers):
     """Held whole or FSDP2-sharded, rather than be taken for a single process's; once a plan is
-    recorded, that plan is what it reads."""
+    recorded, that plan is what it reads. A module added after the plan was recorded has none, and
+    raises too, rather than read as a single process's."""
     cpu_dist_workers.run(_no_plan_on_several_ranks_job)
 
 

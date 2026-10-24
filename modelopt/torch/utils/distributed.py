@@ -375,7 +375,9 @@ def distribution_plan(model: torch.nn.Module) -> DistributionPlan:
     """How ``model`` is distributed: the plan recorded on it (:func:`set_distribution_plan`).
 
     A model with no plan recorded is a single process's, unless it shows otherwise: one that is
-    FSDP2-sharded, or held in a run of several ranks, raises rather than be taken for one.
+    FSDP2-sharded, or held in a run of several ranks, raises rather than be taken for one. That
+    includes a module added to a model after its plan was recorded: a module does not know the
+    model it was added to, so read the plan off that model.
     """
     plan = getattr(model, _PLAN_ATTR, None)
     if plan is not None:
@@ -385,7 +387,9 @@ def distribution_plan(model: torch.nn.Module) -> DistributionPlan:
         how = "is FSDP2-sharded" if sharded else f"is held in a run of {size()} ranks"
         raise RuntimeError(
             f"{type(model).__name__} {how}, but has no distribution plan recorded. Load it with "
-            "load_pretrained, or record how it is distributed with set_distribution_plan()."
+            "load_pretrained, or record how it is distributed with set_distribution_plan(); a "
+            "module added to a model after its plan was recorded has none, so read the plan off "
+            "that model."
         )
     return DistributionPlan()
 
