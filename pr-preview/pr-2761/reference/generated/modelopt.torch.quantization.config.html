@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>config - Model Optimizer 0.0.1.dev1+g2786a6ce8</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="conversion" href="modelopt.torch.quantization.conversion.html" /><link rel="prev" title="modelopt.torch.quantization.compress" href="modelopt.torch.quantization.compress.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>config - Model Optimizer 0.0.1.dev1+g7d991fd69</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="conversion" href="modelopt.torch.quantization.conversion.html" /><link rel="prev" title="modelopt.torch.quantization.compress" href="modelopt.torch.quantization.compress.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -211,6 +211,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_format.html">quant_format</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quantized_weight_export.html">quantized_weight_export</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.registry.html">registry</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
@@ -334,6 +335,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.config.html">config</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.dflash.html">dflash</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.external.html">external</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.medusa.html">medusa</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.mode.html">mode</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.plugins.html">plugins</a></li>
@@ -359,6 +361,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.moe.html">moe</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.network.html">network</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
@@ -435,6 +438,11 @@ data-aria-dark="Switch to auto color mode">
 <li><a class="reference internal" href="#modelopt.torch.quantization.config.GPTQCalibConfig.method"><code class="docutils literal notranslate"><span class="pre">GPTQCalibConfig.method</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.config.GPTQCalibConfig.model_config"><code class="docutils literal notranslate"><span class="pre">GPTQCalibConfig.model_config</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.config.GPTQCalibConfig.perc_damp"><code class="docutils literal notranslate"><span class="pre">GPTQCalibConfig.perc_damp</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.quantization.config.ImatrixCalibConfig"><code class="docutils literal notranslate"><span class="pre">ImatrixCalibConfig</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.quantization.config.ImatrixCalibConfig.method"><code class="docutils literal notranslate"><span class="pre">ImatrixCalibConfig.method</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.quantization.config.ImatrixCalibConfig.model_config"><code class="docutils literal notranslate"><span class="pre">ImatrixCalibConfig.model_config</span></code></a></li>
 </ul>
 </li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.config.LSQConfig"><code class="docutils literal notranslate"><span class="pre">LSQConfig</span></code></a><ul>
@@ -764,43 +772,46 @@ the layer named <code class="docutils literal notranslate"><span class="pre">lm_
 <tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.GPTQCalibConfig" title="modelopt.torch.quantization.config.GPTQCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">GPTQCalibConfig</span></code></a></p></td>
 <td><p>The config for GPTQ quantization.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.LSQConfig" title="modelopt.torch.quantization.config.LSQConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">LSQConfig</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.ImatrixCalibConfig" title="modelopt.torch.quantization.config.ImatrixCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ImatrixCalibConfig</span></code></a></p></td>
+<td><p>The config for imatrix calibration.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.LSQConfig" title="modelopt.torch.quantization.config.LSQConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">LSQConfig</span></code></a></p></td>
 <td><p>Config for LSQ (Learnt Scale Quantization) and Dual-LSQ algorithms.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.LayerwiseConfig" title="modelopt.torch.quantization.config.LayerwiseConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">LayerwiseConfig</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.LayerwiseConfig" title="modelopt.torch.quantization.config.LayerwiseConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">LayerwiseConfig</span></code></a></p></td>
 <td><p>Nested config for layer-by-layer calibration behavior.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.LocalHessianCalibConfig" title="modelopt.torch.quantization.config.LocalHessianCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">LocalHessianCalibConfig</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.LocalHessianCalibConfig" title="modelopt.torch.quantization.config.LocalHessianCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">LocalHessianCalibConfig</span></code></a></p></td>
 <td><p>Configuration for local Hessian-weighted MSE calibration.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.MaxCalibConfig" title="modelopt.torch.quantization.config.MaxCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">MaxCalibConfig</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.MaxCalibConfig" title="modelopt.torch.quantization.config.MaxCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">MaxCalibConfig</span></code></a></p></td>
 <td><p>The config for max calibration algorithm.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.MseCalibConfig" title="modelopt.torch.quantization.config.MseCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">MseCalibConfig</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.MseCalibConfig" title="modelopt.torch.quantization.config.MseCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">MseCalibConfig</span></code></a></p></td>
 <td><p>Configuration for per-tensor MSE calibration.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.NVFP4ActHeadroomCalibConfig" title="modelopt.torch.quantization.config.NVFP4ActHeadroomCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">NVFP4ActHeadroomCalibConfig</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.NVFP4ActHeadroomCalibConfig" title="modelopt.torch.quantization.config.NVFP4ActHeadroomCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">NVFP4ActHeadroomCalibConfig</span></code></a></p></td>
 <td><p>Config for the <code class="docutils literal notranslate"><span class="pre">nvfp4_act_headroom</span></code> calibration algorithm.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig" title="modelopt.torch.quantization.config.QuantizeAlgorithmConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">QuantizeAlgorithmConfig</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig" title="modelopt.torch.quantization.config.QuantizeAlgorithmConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">QuantizeAlgorithmConfig</span></code></a></p></td>
 <td><p>Calibration algorithm config base.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeConfig" title="modelopt.torch.quantization.config.QuantizeConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">QuantizeConfig</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeConfig" title="modelopt.torch.quantization.config.QuantizeConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">QuantizeConfig</span></code></a></p></td>
 <td><p>Default configuration for <code class="docutils literal notranslate"><span class="pre">quantize</span></code> mode.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a></p></td>
 <td><p>Quantizer attribute type.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-obj docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-obj docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a></p></td>
 <td><p>A single entry in a <code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> list.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.RotateConfig" title="modelopt.torch.quantization.config.RotateConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">RotateConfig</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.RotateConfig" title="modelopt.torch.quantization.config.RotateConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">RotateConfig</span></code></a></p></td>
 <td><p>Configuration for rotating quantizer input via Hadamard transform (RHT/QuaRot/SpinQuant).</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.SVDQuantConfig" title="modelopt.torch.quantization.config.SVDQuantConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">SVDQuantConfig</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.SVDQuantConfig" title="modelopt.torch.quantization.config.SVDQuantConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">SVDQuantConfig</span></code></a></p></td>
 <td><p>The config for SVDQuant.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.SmoothQuantCalibConfig" title="modelopt.torch.quantization.config.SmoothQuantCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">SmoothQuantCalibConfig</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.SmoothQuantCalibConfig" title="modelopt.torch.quantization.config.SmoothQuantCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">SmoothQuantCalibConfig</span></code></a></p></td>
 <td><p>The config for <code class="docutils literal notranslate"><span class="pre">smoothquant</span></code> algorithm (SmoothQuant).</p></td>
 </tr>
 </tbody>
@@ -987,6 +998,32 @@ the quantization of preceding layers.</p>
 <dt class="sig sig-object py" id="modelopt.torch.quantization.config.GPTQCalibConfig.perc_damp">
 <span class="sig-name descname"><span class="pre">perc_damp</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.GPTQCalibConfig.perc_damp" title="Link to this definition">#</a></dt>
 <dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.ImatrixCalibConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">ImatrixCalibConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.ImatrixCalibConfig" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig" title="modelopt.torch.quantization.config.QuantizeAlgorithmConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizeAlgorithmConfig</span></code></a></p>
+<p>The config for imatrix calibration.</p>
+<p>Encodes each weight once, its codebook search weighted by the square root of its inputs’
+per-column second moment <code class="docutils literal notranslate"><span class="pre">E[x_j^2]</span></code> – llama.cpp’s importance matrix. Covers the GGML formats
+with a weighted search,
+on dense linears and on each expert of HF fused-MoE experts. A weight that already holds final
+codes, such as GPTQ’s, is left alone, so <code class="docutils literal notranslate"><span class="pre">[{method:</span> <span class="pre">gptq},</span> <span class="pre">{method:</span> <span class="pre">imatrix}]</span></code> runs GPTQ
+where it applies and imatrix on any weight it leaves.
+By default the statistics come from a single forward pass, as llama.cpp collects them; with
+<code class="docutils literal notranslate"><span class="pre">layerwise</span></code> enabled, each layer’s are collected after the earlier layers are quantized.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.ImatrixCalibConfig.method">
+<span class="sig-name descname"><span class="pre">method</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'imatrix'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.config.ImatrixCalibConfig.method" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.ImatrixCalibConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.ImatrixCalibConfig.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
 
 </dd></dl>
 

@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>mode - Model Optimizer 0.0.1.dev1+g2786a6ce8</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="plugins" href="modelopt.torch.speculative.plugins.html" /><link rel="prev" title="medusa_model" href="modelopt.torch.speculative.medusa.medusa_model.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>mode - Model Optimizer 0.0.1.dev1+g7d991fd69</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="plugins" href="modelopt.torch.speculative.plugins.html" /><link rel="prev" title="medusa_model" href="modelopt.torch.speculative.medusa.medusa_model.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -211,6 +211,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_format.html">quant_format</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quantized_weight_export.html">quantized_weight_export</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.registry.html">registry</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
@@ -334,6 +335,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.config.html">config</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.dflash.html">dflash</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.external.html">external</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.medusa.html">medusa</a></li>
 <li class="toctree-l4 current"><a class="current reference internal" href="#">mode</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.plugins.html">plugins</a></li>
@@ -359,6 +361,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.moe.html">moe</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.network.html">network</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
@@ -404,6 +407,13 @@ data-aria-dark="Switch to auto color mode">
 <li><a class="reference internal" href="#modelopt.torch.speculative.mode.EagleModeDescriptor.convert"><code class="docutils literal notranslate"><span class="pre">EagleModeDescriptor.convert</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.speculative.mode.EagleModeDescriptor.name"><code class="docutils literal notranslate"><span class="pre">EagleModeDescriptor.name</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.speculative.mode.EagleModeDescriptor.restore"><code class="docutils literal notranslate"><span class="pre">EagleModeDescriptor.restore</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.speculative.mode.ExternalDraftModeDescriptor"><code class="docutils literal notranslate"><span class="pre">ExternalDraftModeDescriptor</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.speculative.mode.ExternalDraftModeDescriptor.config_class"><code class="docutils literal notranslate"><span class="pre">ExternalDraftModeDescriptor.config_class</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.speculative.mode.ExternalDraftModeDescriptor.convert"><code class="docutils literal notranslate"><span class="pre">ExternalDraftModeDescriptor.convert</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.speculative.mode.ExternalDraftModeDescriptor.name"><code class="docutils literal notranslate"><span class="pre">ExternalDraftModeDescriptor.name</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.speculative.mode.ExternalDraftModeDescriptor.restore"><code class="docutils literal notranslate"><span class="pre">ExternalDraftModeDescriptor.restore</span></code></a></li>
 </ul>
 </li>
 <li><a class="reference internal" href="#modelopt.torch.speculative.mode.MedusaModeDescriptor"><code class="docutils literal notranslate"><span class="pre">MedusaModeDescriptor</span></code></a><ul>
@@ -468,7 +478,10 @@ data-aria-dark="Switch to auto color mode">
 <tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.speculative.mode.EagleModeDescriptor" title="modelopt.torch.speculative.mode.EagleModeDescriptor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">EagleModeDescriptor</span></code></a></p></td>
 <td><p>Class to describe the <code class="docutils literal notranslate"><span class="pre">&quot;eagle&quot;</span></code> mode.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.speculative.mode.MedusaModeDescriptor" title="modelopt.torch.speculative.mode.MedusaModeDescriptor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">MedusaModeDescriptor</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.speculative.mode.ExternalDraftModeDescriptor" title="modelopt.torch.speculative.mode.ExternalDraftModeDescriptor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ExternalDraftModeDescriptor</span></code></a></p></td>
+<td><p>Class to describe the <code class="docutils literal notranslate"><span class="pre">&quot;external&quot;</span></code> mode.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.speculative.mode.MedusaModeDescriptor" title="modelopt.torch.speculative.mode.MedusaModeDescriptor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">MedusaModeDescriptor</span></code></a></p></td>
 <td><p>Class to describe the <code class="docutils literal notranslate"><span class="pre">&quot;medusa&quot;</span></code> mode.</p></td>
 </tr>
 </tbody>
@@ -533,6 +546,38 @@ data-aria-dark="Switch to auto color mode">
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.speculative.mode.EagleModeDescriptor.restore">
 <span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">restore</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Callable</span><span class="p"><span class="pre">[</span></span><span class="p"><span class="pre">[</span></span><span class="pre">Module</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><span class="pre">ModeloptBaseConfig</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Module</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.speculative.mode.EagleModeDescriptor.restore" title="Link to this definition">#</a></dt>
+<dd><p>The mode’s entrypoint for restoring a model.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.speculative.mode.ExternalDraftModeDescriptor">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">ExternalDraftModeDescriptor</span></span><a class="headerlink" href="#modelopt.torch.speculative.mode.ExternalDraftModeDescriptor" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.mode.html#modelopt.torch.opt.mode.ModeDescriptor" title="modelopt.torch.opt.mode.ModeDescriptor"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeDescriptor</span></code></a></p>
+<p>Class to describe the <code class="docutils literal notranslate"><span class="pre">&quot;external&quot;</span></code> mode.</p>
+<p>The properties of this mode can be inspected via the source code.</p>
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.speculative.mode.ExternalDraftModeDescriptor.config_class">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">config_class</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.EMAConfig.type" title="modelopt.torch.fastgen.config.EMAConfig.type"><span class="pre">type</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><span class="pre">ModeloptBaseConfig</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.speculative.mode.ExternalDraftModeDescriptor.config_class" title="Link to this definition">#</a></dt>
+<dd><p>Specifies the config class for the mode.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.speculative.mode.ExternalDraftModeDescriptor.convert">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">convert</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Callable</span><span class="p"><span class="pre">[</span></span><span class="p"><span class="pre">[</span></span><span class="pre">Module</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><span class="pre">ModeloptBaseConfig</span></a><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">Module</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">Callable</span><span class="p"><span class="pre">[</span></span><span class="p"><span class="pre">[</span></span><span class="pre">Module</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><span class="pre">ModeloptBaseConfig</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">Module</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.speculative.mode.ExternalDraftModeDescriptor.convert" title="Link to this definition">#</a></dt>
+<dd><p>The mode’s entrypoint for converting a model.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.speculative.mode.ExternalDraftModeDescriptor.name">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.speculative.mode.ExternalDraftModeDescriptor.name" title="Link to this definition">#</a></dt>
+<dd><p>Returns the value (str representation) of the mode.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.speculative.mode.ExternalDraftModeDescriptor.restore">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">restore</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Callable</span><span class="p"><span class="pre">[</span></span><span class="p"><span class="pre">[</span></span><span class="pre">Module</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><span class="pre">ModeloptBaseConfig</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Module</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.speculative.mode.ExternalDraftModeDescriptor.restore" title="Link to this definition">#</a></dt>
 <dd><p>The mode’s entrypoint for restoring a model.</p>
 </dd></dl>
 

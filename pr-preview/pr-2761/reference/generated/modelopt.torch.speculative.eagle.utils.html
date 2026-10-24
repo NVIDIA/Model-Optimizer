@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>utils - Model Optimizer 0.0.1.dev1+g2786a6ce8</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="medusa" href="modelopt.torch.speculative.medusa.html" /><link rel="prev" title="eagle_model" href="modelopt.torch.speculative.eagle.eagle_model.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>utils - Model Optimizer 0.0.1.dev1+g7d991fd69</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="external" href="modelopt.torch.speculative.external.html" /><link rel="prev" title="eagle_model" href="modelopt.torch.speculative.eagle.eagle_model.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -211,6 +211,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_format.html">quant_format</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quantized_weight_export.html">quantized_weight_export</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.registry.html">registry</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
@@ -334,6 +335,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.config.html">config</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.dflash.html">dflash</a></li>
 <li class="toctree-l4 current"><a class="reference internal" href="modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.external.html">external</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.medusa.html">medusa</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.mode.html">mode</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.plugins.html">plugins</a></li>
@@ -359,6 +361,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.moe.html">moe</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.network.html">network</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
@@ -502,7 +505,9 @@ a dict with the following keys:</p>
 <ul class="simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">input_ids</span></code>: token IDs of shape <code class="docutils literal notranslate"><span class="pre">(seq_len,)</span></code></p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">hidden_states</span></code>: base model last hidden states of shape <code class="docutils literal notranslate"><span class="pre">(seq_len,</span> <span class="pre">hidden_size)</span></code></p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">aux_hidden_states</span></code>: auxiliary hidden states of shape <code class="docutils literal notranslate"><span class="pre">(seq_len,</span> <span class="pre">hidden_size)</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">aux_hidden_states</span></code>: auxiliary hidden states of shape <code class="docutils literal notranslate"><span class="pre">(seq_len,</span> <span class="pre">hidden_size)</span></code>.
+Absent from dumps written with <code class="docutils literal notranslate"><span class="pre">--no-aux-hidden-states</span></code>; reading one of those
+requires <code class="docutils literal notranslate"><span class="pre">aux_hidden_states_optional=True</span></code>.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">loss_mask</span></code> (optional): per-token assistant mask of shape <code class="docutils literal notranslate"><span class="pre">(seq_len,)</span></code>,
 present when the dump was produced with <code class="docutils literal notranslate"><span class="pre">--answer-only-loss</span></code>.</p></li>
 </ul>
@@ -520,16 +525,23 @@ If False (default), a uniform all-ones mask is used regardless of what
 is stored in the file (backward compatible).</p></li>
 <li><p><strong>tokenizer</strong> – Optional tokenizer used to recover the assistant mask for dumps
 that lack a stored <code class="docutils literal notranslate"><span class="pre">loss_mask</span></code>.</p></li>
+<li><p><strong>aux_hidden_states_optional</strong> (<em>bool</em>) – Tolerate dumps written with
+<code class="docutils literal notranslate"><span class="pre">--no-aux-hidden-states</span></code>, yielding an empty <code class="docutils literal notranslate"><span class="pre">(seq_len,</span> <span class="pre">0)</span></code> plane in
+their place. Only modes that never read the aux planes may set this; for
+the others a missing key must still raise.</p></li>
 </ul>
 </dd>
 </dl>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.speculative.eagle.utils.OfflineSupervisedDataset.__init__">
-<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dumped_files</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">answer_only_loss</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tokenizer</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.speculative.eagle.utils.OfflineSupervisedDataset.__init__" title="Link to this definition">#</a></dt>
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dumped_files</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">answer_only_loss</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tokenizer</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">aux_hidden_states_optional</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.speculative.eagle.utils.OfflineSupervisedDataset.__init__" title="Link to this definition">#</a></dt>
 <dd><p>Initialize with a list of .pt file paths.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><p><strong>answer_only_loss</strong> (<em>bool</em>)</p>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>answer_only_loss</strong> (<em>bool</em>)</p></li>
+<li><p><strong>aux_hidden_states_optional</strong> (<em>bool</em>)</p></li>
+</ul>
 </dd>
 </dl>
 </dd></dl>
@@ -581,10 +593,10 @@ that lack a stored <code class="docutils literal notranslate"><span class="pre">
         <span>Previous</span><div class="title">eagle_model</div></div>
     </a>
   </div><div class="navigation-next">
-    <a href="modelopt.torch.speculative.medusa.html">
+    <a href="modelopt.torch.speculative.external.html">
       <div class="page-info">
         <span>Next</span>
-        <div class="title">medusa</div>
+        <div class="title">external</div>
       </div>
       <i class="i-lucide chevron-right"></i>
     </a>

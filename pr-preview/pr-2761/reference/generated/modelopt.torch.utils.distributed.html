@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>distributed - Model Optimizer 0.0.1.dev1+g2786a6ce8</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="graph" href="modelopt.torch.utils.graph.html" /><link rel="prev" title="dataset_utils" href="modelopt.torch.utils.dataset_utils.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>distributed - Model Optimizer 0.0.1.dev1+g7d991fd69</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="graph" href="modelopt.torch.utils.graph.html" /><link rel="prev" title="dataset_utils" href="modelopt.torch.utils.dataset_utils.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -211,6 +211,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_format.html">quant_format</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quantized_weight_export.html">quantized_weight_export</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.registry.html">registry</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
@@ -334,6 +335,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.config.html">config</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.dflash.html">dflash</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.external.html">external</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.medusa.html">medusa</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.mode.html">mode</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.plugins.html">plugins</a></li>
@@ -359,6 +361,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.moe.html">moe</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.network.html">network</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
@@ -407,6 +410,8 @@ data-aria-dark="Switch to auto color mode">
 <li><a class="reference internal" href="#modelopt.torch.utils.distributed.backend"><code class="docutils literal notranslate"><span class="pre">backend()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.utils.distributed.barrier"><code class="docutils literal notranslate"><span class="pre">barrier()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.utils.distributed.fsdp2_wrap"><code class="docutils literal notranslate"><span class="pre">fsdp2_wrap()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.utils.distributed.gather_bytes"><code class="docutils literal notranslate"><span class="pre">gather_bytes()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.utils.distributed.gather_state_dicts"><code class="docutils literal notranslate"><span class="pre">gather_state_dicts()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.utils.distributed.is_available"><code class="docutils literal notranslate"><span class="pre">is_available()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.utils.distributed.is_fsdp2_model"><code class="docutils literal notranslate"><span class="pre">is_fsdp2_model()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.utils.distributed.is_initialized"><code class="docutils literal notranslate"><span class="pre">is_initialized()</span></code></a></li>
@@ -483,6 +488,12 @@ data-aria-dark="Switch to auto color mode">
 </tr>
 <tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.utils.distributed.fsdp2_wrap" title="modelopt.torch.utils.distributed.fsdp2_wrap"><code class="xref py py-obj docutils literal notranslate"><span class="pre">fsdp2_wrap</span></code></a></p></td>
 <td><p>Auto-detect a HF causal-LM's decoder layers and FSDP2 <code class="docutils literal notranslate"><span class="pre">fully_shard</span></code> each one.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.utils.distributed.gather_bytes" title="modelopt.torch.utils.distributed.gather_bytes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">gather_bytes</span></code></a></p></td>
+<td><p>Gathers byte strings to global rank <code class="docutils literal notranslate"><span class="pre">dst</span></code> only, without unpickling anything on the way.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.utils.distributed.gather_state_dicts" title="modelopt.torch.utils.distributed.gather_state_dicts"><code class="xref py py-obj docutils literal notranslate"><span class="pre">gather_state_dicts</span></code></a></p></td>
+<td><p>Gathers <code class="docutils literal notranslate"><span class="pre">state</span></code> from every rank of <code class="docutils literal notranslate"><span class="pre">group</span></code> to global rank <code class="docutils literal notranslate"><span class="pre">dst</span></code>, loaded with <code class="docutils literal notranslate"><span class="pre">weights_only</span></code>.</p></td>
 </tr>
 <tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.utils.distributed.is_available" title="modelopt.torch.utils.distributed.is_available"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_available</span></code></a></p></td>
 <td><p>Returns whether the distributed package is available.</p></td>
@@ -633,6 +644,45 @@ params it ignores.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>cpu_offload</strong> (<em>bool</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.utils.distributed.gather_bytes">
+<span class="sig-name descname"><span class="pre">gather_bytes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">data</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dst</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">group</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">chunk_bytes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">268435456</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.utils.distributed.gather_bytes" title="Link to this definition">#</a></dt>
+<dd><p>Gathers byte strings to global rank <code class="docutils literal notranslate"><span class="pre">dst</span></code> only, without unpickling anything on the way.</p>
+<p>Unlike <code class="docutils literal notranslate"><span class="pre">torch.distributed.gather_object</span></code> it never runs pickle, and it moves <code class="docutils literal notranslate"><span class="pre">chunk_bytes</span></code> per
+rank at a time to bound device memory. Returns the per-rank bytes on <code class="docutils literal notranslate"><span class="pre">dst</span></code> and <code class="docutils literal notranslate"><span class="pre">None</span></code> elsewhere.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>data</strong> (<em>bytes</em>)</p></li>
+<li><p><strong>dst</strong> (<em>int</em>)</p></li>
+<li><p><strong>chunk_bytes</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<em>bytearray</em>] | <em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.utils.distributed.gather_state_dicts">
+<span class="sig-name descname"><span class="pre">gather_state_dicts</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dst</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">group</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.utils.distributed.gather_state_dicts" title="Link to this definition">#</a></dt>
+<dd><p>Gathers <code class="docutils literal notranslate"><span class="pre">state</span></code> from every rank of <code class="docutils literal notranslate"><span class="pre">group</span></code> to global rank <code class="docutils literal notranslate"><span class="pre">dst</span></code>, loaded with <code class="docutils literal notranslate"><span class="pre">weights_only</span></code>.</p>
+<p>Yields one rank’s dict at a time on <code class="docutils literal notranslate"><span class="pre">dst</span></code> (to bound host memory) and nothing elsewhere. The collective
+runs eagerly, so every rank must call this before iterating.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>state</strong> (<em>dict</em>)</p></li>
+<li><p><strong>dst</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Iterator</em>[<em>dict</em>]</p>
 </dd>
 </dl>
 </dd></dl>

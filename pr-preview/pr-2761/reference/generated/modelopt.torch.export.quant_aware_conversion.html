@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>quant_aware_conversion - Model Optimizer 0.0.1.dev1+g2786a6ce8</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="quant_format" href="modelopt.torch.export.quant_format.html" /><link rel="prev" title="plugins" href="modelopt.torch.export.plugins.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>quant_aware_conversion - Model Optimizer 0.0.1.dev1+g7d991fd69</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="quant_format" href="modelopt.torch.export.quant_format.html" /><link rel="prev" title="plugins" href="modelopt.torch.export.plugins.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -211,6 +211,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4 current"><a class="current reference internal" href="#">quant_aware_conversion</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_format.html">quant_format</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quantized_weight_export.html">quantized_weight_export</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.registry.html">registry</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
@@ -334,6 +335,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.config.html">config</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.dflash.html">dflash</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.external.html">external</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.medusa.html">medusa</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.mode.html">mode</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.plugins.html">plugins</a></li>
@@ -359,6 +361,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.moe.html">moe</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.network.html">network</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
@@ -636,13 +639,16 @@ are chunked. NVFP4 <code class="docutils literal notranslate"><span class="pre">
 
 <dl class="py function">
 <dt class="sig sig-object py" id="modelopt.torch.export.quant_aware_conversion.apply_reverse_rules">
-<span class="sig-name descname"><span class="pre">apply_reverse_rules</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state_dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">split_rules</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rename_rules</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">merge_rules</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.apply_reverse_rules" title="Link to this definition">#</a></dt>
+<span class="sig-name descname"><span class="pre">apply_reverse_rules</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state_dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">split_rules</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rename_rules</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">merge_rules</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">source_keys</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.apply_reverse_rules" title="Link to this definition">#</a></dt>
 <dd><p>Apply quant-aware reverse conversion: tensor transforms first, then renames.</p>
 <p>Splits and merges run on the in-memory (post-conversion) names; renames then map
 the resulting keys back to the original hub names. Renames are applied in order.
 <code class="docutils literal notranslate"><span class="pre">merge_rules</span></code> is an internal hook for model-derived rules: unlike the public
 rename/split descriptors, each rule retains a live transformers converter for
 scoped matching. Call <a class="reference internal" href="#modelopt.torch.export.quant_aware_conversion.revert_weight_conversion_quant_aware" title="modelopt.torch.export.quant_aware_conversion.revert_weight_conversion_quant_aware"><code class="xref py py-func docutils literal notranslate"><span class="pre">revert_weight_conversion_quant_aware()</span></code></a> to derive them.</p>
+<p><code class="docutils literal notranslate"><span class="pre">source_keys</span></code> are the tensor names of the checkpoint the model was loaded from.
+They let a rename that would otherwise invent a name resolve to the spelling the
+checkpoint actually carries; omitting them applies the rules unchanged.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
@@ -650,6 +656,7 @@ scoped matching. Call <a class="reference internal" href="#modelopt.torch.export
 <li><p><strong>split_rules</strong> (<em>list</em><em>[</em><a class="reference internal" href="#modelopt.torch.export.quant_aware_conversion.SplitRule" title="modelopt.torch.export.quant_aware_conversion.SplitRule"><em>SplitRule</em></a><em>]</em>)</p></li>
 <li><p><strong>rename_rules</strong> (<em>list</em><em>[</em><a class="reference internal" href="#modelopt.torch.export.quant_aware_conversion.RenameRule" title="modelopt.torch.export.quant_aware_conversion.RenameRule"><em>RenameRule</em></a><em>]</em>)</p></li>
 <li><p><strong>merge_rules</strong> (<em>list</em><em>[</em><em>_MergeRule</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>source_keys</strong> (<em>set</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>)</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>

@@ -36,6 +36,7 @@ config
       AWQLiteCalibConfig
       CompressConfig
       GPTQCalibConfig
+      ImatrixCalibConfig
       LSQConfig
       LayerwiseConfig
       LocalHessianCalibConfig

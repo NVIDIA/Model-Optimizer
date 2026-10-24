@@ -48,6 +48,8 @@ distributed
       backend
       barrier
       fsdp2_wrap
+      gather_bytes
+      gather_state_dicts
       is_available
       is_fsdp2_model
       is_initialized

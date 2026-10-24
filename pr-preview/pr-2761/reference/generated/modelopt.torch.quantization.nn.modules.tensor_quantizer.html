@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>tensor_quantizer - Model Optimizer 0.0.1.dev1+g2786a6ce8</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="plugins" href="modelopt.torch.quantization.plugins.html" /><link rel="prev" title="quant_rnn" href="modelopt.torch.quantization.nn.modules.quant_rnn.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>tensor_quantizer - Model Optimizer 0.0.1.dev1+g7d991fd69</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="plugins" href="modelopt.torch.quantization.plugins.html" /><link rel="prev" title="quant_rnn" href="modelopt.torch.quantization.nn.modules.quant_rnn.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -211,6 +211,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_format.html">quant_format</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quantized_weight_export.html">quantized_weight_export</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.registry.html">registry</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
@@ -334,6 +335,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.config.html">config</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.dflash.html">dflash</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.external.html">external</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.medusa.html">medusa</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.mode.html">mode</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.plugins.html">plugins</a></li>
@@ -359,6 +361,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.moe.html">moe</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.network.html">network</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
@@ -424,6 +427,7 @@ data-aria-dark="Switch to auto color mode">
 <li><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><code class="docutils literal notranslate"><span class="pre">TensorQuantizer</span></code></a><ul>
 <li><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.__init__"><code class="docutils literal notranslate"><span class="pre">TensorQuantizer.__init__()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.amax"><code class="docutils literal notranslate"><span class="pre">TensorQuantizer.amax</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.attribute_config_from_modelopt_state"><code class="docutils literal notranslate"><span class="pre">TensorQuantizer.attribute_config_from_modelopt_state()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.axis"><code class="docutils literal notranslate"><span class="pre">TensorQuantizer.axis</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias"><code class="docutils literal notranslate"><span class="pre">TensorQuantizer.bias</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_axis"><code class="docutils literal notranslate"><span class="pre">TensorQuantizer.bias_axis</span></code></a></li>
@@ -833,6 +837,22 @@ which can be used to construct amax tensor.</p></li>
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.amax">
 <span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">amax</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.amax" title="Link to this definition">#</a></dt>
 <dd><p>Return amax for quantization.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.attribute_config_from_modelopt_state">
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">attribute_config_from_modelopt_state</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.attribute_config_from_modelopt_state" title="Link to this definition">#</a></dt>
+<dd><p>Return the <code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code> fields of a properties-only quantizer state.</p>
+<p>Inverts <a class="reference internal" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.set_from_attribute_config" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.set_from_attribute_config"><code class="xref py py-meth docutils literal notranslate"><span class="pre">set_from_attribute_config()</span></code></a> for the state saved by
+<code class="docutils literal notranslate"><span class="pre">get_modelopt_state(properties_only=True)</span></code>; keys that are not config fields are ignored.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>state</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
 </dd></dl>
 
 <dl class="py property">

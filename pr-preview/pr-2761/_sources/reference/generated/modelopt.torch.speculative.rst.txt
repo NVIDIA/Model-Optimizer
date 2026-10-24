@@ -25,6 +25,10 @@ speculative
 
 
 
+   modelopt.torch.speculative.external
+
+
+
    modelopt.torch.speculative.medusa
 
 

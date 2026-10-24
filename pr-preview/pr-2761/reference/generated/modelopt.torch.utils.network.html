@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>network - Model Optimizer 0.0.1.dev1+g2786a6ce8</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="perf" href="modelopt.torch.utils.perf.html" /><link rel="prev" title="nemotron_vlm_dataset_utils" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>network - Model Optimizer 0.0.1.dev1+g7d991fd69</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="perf" href="modelopt.torch.utils.perf.html" /><link rel="prev" title="nemotron_vlm_dataset_utils" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -211,6 +211,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_format.html">quant_format</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quantized_weight_export.html">quantized_weight_export</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.registry.html">registry</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
@@ -334,6 +335,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.config.html">config</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.dflash.html">dflash</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.external.html">external</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.medusa.html">medusa</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.mode.html">mode</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.plugins.html">plugins</a></li>
@@ -359,6 +361,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.moe.html">moe</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
 <li class="toctree-l4 current"><a class="current reference internal" href="#">network</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
@@ -550,7 +553,7 @@ data-aria-dark="Switch to auto color mode">
 <span class="sig-name descname"><span class="pre">create_param_grad_clear_hook</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">param</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.utils.network.create_param_grad_clear_hook" title="Link to this definition">#</a></dt>
 <dd><p>Create a hook to clear gradients for a parameter.</p>
 <p>The hook will be fired after the gradient is accumulated for the parameter.
-Important: For this to work, <code class="docutils literal notranslate"><span class="pre">accum_grad</span></code> should be kept alive as longs as this utility is needed.</p>
+Important: For this to work, <code class="docutils literal notranslate"><span class="pre">accum_grad</span></code> should be kept alive as long as this utility is needed.</p>
 </dd></dl>
 
 <dl class="py function">
@@ -736,7 +739,7 @@ forward pass.</p>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>model</strong> – The model with which we run forward.</p></li>
 <li><p><strong>data_loader</strong> (<em>Iterable</em>) – An iterator with data samples.</p></li>
-<li><p><strong>max_iters</strong> (<em>int</em><em> | </em><em>None</em>) – Number of batches to run; by default it is infiinite or until <code class="docutils literal notranslate"><span class="pre">data_loader</span></code>
+<li><p><strong>max_iters</strong> (<em>int</em><em> | </em><em>None</em>) – Number of batches to run; by default it is infinite or until <code class="docutils literal notranslate"><span class="pre">data_loader</span></code>
 is exhausted.</p></li>
 <li><p><strong>collect_func</strong> (<em>Callable</em><em>[</em><em>[</em><em>Any</em><em>]</em><em>, </em><em>Any</em><em> | </em><em>tuple</em><em>] </em><em>| </em><em>None</em>) – <p>A <code class="docutils literal notranslate"><span class="pre">Callable</span></code> that takes a batch of data from the <code class="docutils literal notranslate"><span class="pre">data_loader</span></code>
 as input and returns the input to <code class="docutils literal notranslate"><span class="pre">model.forward()</span></code> such that the return value
@@ -893,7 +896,7 @@ are processed via variable keyword arguments in the model’s <code class="docut
 </dl>
 <dl class="simple">
 <dt>Returns: A tuple (args_normalized, args_with_default) where</dt><dd><dl class="simple">
-<dt>args_normalized is a dictionary of ordered model args where the key represents a unique</dt><dd><p>serialized string based on the the argument’s name in the function signature and the
+<dt>args_normalized is a dictionary of ordered model args where the key represents a unique</dt><dd><p>serialized string based on the argument’s name in the function signature and the
 value contains the actual argument,</p>
 </dd>
 <dt>args_with_default is a set indicating whether the argument was retrieved from the default</dt><dd><p>value in the function signature of the model’s <code class="docutils literal notranslate"><span class="pre">forward()</span></code> method or whether the

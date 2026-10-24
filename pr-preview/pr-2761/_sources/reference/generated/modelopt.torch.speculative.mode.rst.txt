@@ -33,6 +33,7 @@ mode
    
       DFlashModeDescriptor
       EagleModeDescriptor
+      ExternalDraftModeDescriptor
       MedusaModeDescriptor
    
    

@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ggml - Model Optimizer 0.0.1.dev1+g2786a6ce8</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="kv_cache_auto_quant" href="modelopt.torch.quantization.kv_cache_auto_quant.html" /><link rel="prev" title="extensions" href="modelopt.torch.quantization.extensions.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ggml - Model Optimizer 0.0.1.dev1+g7d991fd69</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="kv_cache_auto_quant" href="modelopt.torch.quantization.kv_cache_auto_quant.html" /><link rel="prev" title="extensions" href="modelopt.torch.quantization.extensions.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -211,6 +211,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_format.html">quant_format</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quantized_weight_export.html">quantized_weight_export</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.registry.html">registry</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
@@ -334,6 +335,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.config.html">config</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.dflash.html">dflash</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.external.html">external</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.medusa.html">medusa</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.mode.html">mode</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.plugins.html">plugins</a></li>
@@ -359,6 +361,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.moe.html">moe</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.network.html">network</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
@@ -398,12 +401,15 @@ data-aria-dark="Switch to auto color mode">
 <li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.block_chunk_size"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.block_chunk_size</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.block_size"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.block_size</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.decode_chunk_size"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.decode_chunk_size</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.decode_int8"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.decode_int8()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.dequantize"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.dequantize</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.effective_bits"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.effective_bits</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.fake_quant"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.fake_quant()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.int8_group_size"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.int8_group_size</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.name"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.name</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.pack"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.pack()</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.quantize"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.quantize</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.unpack_int8"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.unpack_int8</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.quantization.ggml.GGMLFormat.weighted"><code class="docutils literal notranslate"><span class="pre">GGMLFormat.weighted</span></code></a></li>
 </ul>
 </li>
@@ -572,7 +578,7 @@ per-format pieces – codebook, search, payload layout – stay in the format’
 lives here is the part every format does the same way.</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.GGMLFormat.__init__">
-<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_bytes</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantize</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dequantize</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_chunk_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">decode_chunk_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weighted</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.ggml.GGMLFormat.__init__" title="Link to this definition">#</a></dt>
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_bytes</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantize</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dequantize</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_chunk_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">decode_chunk_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">int8_group_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">unpack_int8</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weighted</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.ggml.GGMLFormat.__init__" title="Link to this definition">#</a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
@@ -583,6 +589,8 @@ lives here is the part every format does the same way.</p>
 <li><p><strong>dequantize</strong> (<em>Callable</em><em>[</em><em>[</em><em>...</em><em>]</em><em>, </em><em>Tensor</em><em>]</em>)</p></li>
 <li><p><strong>block_chunk_size</strong> (<em>int</em>)</p></li>
 <li><p><strong>decode_chunk_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>int8_group_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>unpack_int8</strong> (<em>Callable</em><em>[</em><em>[</em><em>Tensor</em><em>]</em><em>, </em><em>tuple</em><em>[</em><em>Tensor</em><em>, </em><em>Tensor</em><em>]</em><em>]</em>)</p></li>
 <li><p><strong>weighted</strong> (<em>bool</em>)</p></li>
 </ul>
 </dd>
@@ -611,6 +619,29 @@ lives here is the part every format does the same way.</p>
 <dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.GGMLFormat.decode_chunk_size">
 <span class="sig-name descname"><span class="pre">decode_chunk_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.quantization.ggml.GGMLFormat.decode_chunk_size" title="Link to this definition">#</a></dt>
 <dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.GGMLFormat.decode_int8">
+<span class="sig-name descname"><span class="pre">decode_int8</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">packed_weights</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weight_shape</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.ggml.GGMLFormat.decode_int8" title="Link to this definition">#</a></dt>
+<dd><p>Decode a payload into int8 levels and the float32 step of each <code class="docutils literal notranslate"><span class="pre">int8_group_size</span></code>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">levels</span> <span class="pre">*</span> <span class="pre">steps</span></code> (each step repeated over its group) equals <code class="docutils literal notranslate"><span class="pre">dequantize</span></code> in float32
+exactly, so a weight-only integer kernel with these group scales reproduces the format.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p><code class="docutils literal notranslate"><span class="pre">levels</span></code> shaped like the weight and <code class="docutils literal notranslate"><span class="pre">steps</span></code> shaped
+<code class="docutils literal notranslate"><span class="pre">[*weight_shape[:-1],</span> <span class="pre">weight_shape[-1]</span> <span class="pre">//</span> <span class="pre">int8_group_size]</span></code>.</p>
+</dd>
+<dt class="field-even">Parameters<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><strong>packed_weights</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>weight_shape</strong> (<em>Tensor</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>tuple</em>[<em>Tensor</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.GGMLFormat.dequantize">
@@ -642,6 +673,11 @@ lives here is the part every format does the same way.</p>
 </dd></dl>
 
 <dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.GGMLFormat.int8_group_size">
+<span class="sig-name descname"><span class="pre">int8_group_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.quantization.ggml.GGMLFormat.int8_group_size" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.GGMLFormat.name">
 <span class="sig-name descname"><span class="pre">name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.quantization.ggml.GGMLFormat.name" title="Link to this definition">#</a></dt>
 <dd></dd></dl>
@@ -667,6 +703,11 @@ pinned to <code class="docutils literal notranslate"><span class="pre">quantizer
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.GGMLFormat.quantize">
 <span class="sig-name descname"><span class="pre">quantize</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Callable</span><span class="p"><span class="pre">[</span></span><span class="p"><span class="pre">[</span></span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">Tensor</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Tensor</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.ggml.GGMLFormat.quantize" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.ggml.GGMLFormat.unpack_int8">
+<span class="sig-name descname"><span class="pre">unpack_int8</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Callable</span><span class="p"><span class="pre">[</span></span><span class="p"><span class="pre">[</span></span><span class="pre">Tensor</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">Tensor</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Tensor</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.ggml.GGMLFormat.unpack_int8" title="Link to this definition">#</a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">

@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Autotune (ONNX) - Model Optimizer 0.0.1.dev1+g2786a6ce8</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Recipes" href="10_recipes.html" /><link rel="prev" title="AutoCast (ONNX)" href="8_autocast.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Autotune (ONNX) - Model Optimizer 0.0.1.dev1+g7d991fd69</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Recipes" href="10_recipes.html" /><link rel="prev" title="AutoCast (ONNX)" href="8_autocast.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
@@ -211,6 +211,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_format.html">quant_format</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quantized_weight_export.html">quantized_weight_export</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.registry.html">registry</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
@@ -334,6 +335,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.config.html">config</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.dflash.html">dflash</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.external.html">external</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.medusa.html">medusa</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.mode.html">mode</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.plugins.html">plugins</a></li>
@@ -359,6 +361,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.moe.html">moe</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.network.html">network</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.perf.html">perf</a></li>
@@ -775,17 +778,22 @@ data-aria-dark="Switch to auto color mode">
 </span><span data-line="3"><span class="w">    </span>--output_dir<span class="w"> </span>./model_remote_autotuned<span class="w"> </span><span class="se">\</span>
 </span><span data-line="4"><span class="w">    </span>--schemes_per_region<span class="w"> </span><span class="m">50</span><span class="w"> </span><span class="se">\</span>
 </span><span data-line="5"><span class="w">    </span>--use_trtexec<span class="w"> </span><span class="se">\</span>
-</span><span data-line="6"><span class="w">    </span>--trtexec_benchmark_args<span class="w"> </span><span class="s2">"--remoteAutoTuningConfig=\"&lt;remote autotuning config&gt;\" --safe --skipInference"</span>
+</span><span data-line="6"><span class="w">    </span>--trtexec_benchmark_args<span class="w"> </span><span class="s2">"--remoteAutoTuningConfig=\"ssh://user@192.0.2.10:22?remote_exec_path=/opt/tensorrt/bin/timing_server&amp;remote_lib_path=/opt/tensorrt/lib\" --safe --skipInference"</span>
 </span></pre></div>
 </div>
 <p><strong>Requirements:</strong></p>
 <ul class="simple">
 <li><p>TensorRT 10.15 or later</p></li>
-<li><p>Valid remote autotuning configuration</p></li>
+<li><p>Valid <code class="docutils literal notranslate"><span class="pre">ssh://</span></code> remote autotuning configuration without a password</p></li>
+<li><p>Non-interactive SSH key authentication from the host to the target</p></li>
+<li><p>The target host key provisioned in the user’s trusted <code class="docutils literal notranslate"><span class="pre">known_hosts</span></code> file; ModelOpt enforces strict host-key checking</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">trtexec_safe</span></code> on the target, alongside the configured <code class="docutils literal notranslate"><span class="pre">remote_exec_path</span></code></p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">--use_trtexec</span></code> must be set (benchmarking uses <code class="docutils literal notranslate"><span class="pre">trtexec</span></code> instead of the TensorRT Python API)</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">--safe</span> <span class="pre">--skipInference</span></code> must be enabled via <code class="docutils literal notranslate"><span class="pre">--trtexec_benchmark_args</span></code></p></li>
 </ul>
-<p>Replace <code class="docutils literal notranslate"><span class="pre">&lt;remote</span> <span class="pre">autotuning</span> <span class="pre">config&gt;</span></code> with an actual remote autotuning configuration string (see <code class="docutils literal notranslate"><span class="pre">trtexec</span> <span class="pre">--help</span></code> for more details). Other TensorRT benchmark options (e.g. <code class="docutils literal notranslate"><span class="pre">--timing_cache</span></code>, <code class="docutils literal notranslate"><span class="pre">--warmup_runs</span></code>, <code class="docutils literal notranslate"><span class="pre">--timing_runs</span></code>, <code class="docutils literal notranslate"><span class="pre">--plugin_libraries</span></code>) are also available; run <code class="docutils literal notranslate"><span class="pre">--help</span></code> for details.</p>
+<p>The example uses <code class="docutils literal notranslate"><span class="pre">user</span></code> on the reserved documentation address <code class="docutils literal notranslate"><span class="pre">192.0.2.10</span></code>. Replace the user, target address, and TensorRT paths with values for your target (see <code class="docutils literal notranslate"><span class="pre">trtexec</span> <span class="pre">--help</span></code> for configuration details). ModelOpt uses the configuration to build the engine with remote autotuning, copies the generated engine to an internal temporary path on the target, and runs <code class="docutils literal notranslate"><span class="pre">trtexec_safe</span></code> there to measure GPU compute time. ModelOpt attempts to remove the temporary engine after each benchmark.</p>
+<p>Other TensorRT benchmark options (e.g. <code class="docutils literal notranslate"><span class="pre">--timing_cache</span></code>, <code class="docutils literal notranslate"><span class="pre">--warmup_runs</span></code>, <code class="docutils literal notranslate"><span class="pre">--timing_runs</span></code>, <code class="docutils literal notranslate"><span class="pre">--plugin_libraries</span></code>) are also available; run <code class="docutils literal notranslate"><span class="pre">--help</span></code> for details.</p>
+<p><code class="docutils literal notranslate"><span class="pre">--plugin_libraries</span></code> applies to the host-side engine build only. ModelOpt does not transfer or load custom plugin libraries on the remote target, so this workflow does not support plugin-dependent remote safety engines.</p>
 </section>
 </section>
 <section id="low-level-api-usage">
@@ -1170,30 +1178,27 @@ data-aria-dark="Switch to auto color mode">
 </span><span data-line="4"><span class="c1"># Create builder and logger</span>
 </span><span data-line="5"><span class="n">logger</span> <span class="o">=</span> <span class="n">trt</span><span class="o">.</span><span class="n">Logger</span><span class="p">(</span><span class="n">trt</span><span class="o">.</span><span class="n">Logger</span><span class="o">.</span><span class="n">WARNING</span><span class="p">)</span>
 </span><span data-line="6"><span class="n">builder</span> <span class="o">=</span> <span class="n">trt</span><span class="o">.</span><span class="n">Builder</span><span class="p">(</span><span class="n">logger</span><span class="p">)</span>
-</span><span data-line="7"><span class="n">network</span> <span class="o">=</span> <span class="n">builder</span><span class="o">.</span><span class="n">create_network</span><span class="p">(</span>
-</span><span data-line="8">    <span class="mi">1</span> <span class="o">&lt;&lt;</span> <span class="nb">int</span><span class="p">(</span><span class="n">trt</span><span class="o">.</span><span class="n">NetworkDefinitionCreationFlag</span><span class="o">.</span><span class="n">EXPLICIT_BATCH</span><span class="p">)</span>
-</span><span data-line="9">    <span class="o">|</span> <span class="mi">1</span> <span class="o">&lt;&lt;</span> <span class="nb">int</span><span class="p">(</span><span class="n">trt</span><span class="o">.</span><span class="n">NetworkDefinitionCreationFlag</span><span class="o">.</span><span class="n">STRONGLY_TYPED</span><span class="p">)</span>
-</span><span data-line="10"><span class="p">)</span>
-</span><span data-line="11"><span class="n">parser</span> <span class="o">=</span> <span class="n">trt</span><span class="o">.</span><span class="n">OnnxParser</span><span class="p">(</span><span class="n">network</span><span class="p">,</span> <span class="n">logger</span><span class="p">)</span>
-</span><span data-line="12">
-</span><span data-line="13"><span class="c1"># Parse optimized ONNX model</span>
-</span><span data-line="14"><span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"optimized_final.onnx"</span><span class="p">,</span> <span class="s2">"rb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
-</span><span data-line="15">    <span class="k">if</span> <span class="ow">not</span> <span class="n">parser</span><span class="o">.</span><span class="n">parse</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">read</span><span class="p">()):</span>
-</span><span data-line="16">        <span class="k">for</span> <span class="n">error</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">parser</span><span class="o">.</span><span class="n">num_errors</span><span class="p">):</span>
-</span><span data-line="17">            <span class="nb">print</span><span class="p">(</span><span class="n">parser</span><span class="o">.</span><span class="n">get_error</span><span class="p">(</span><span class="n">error</span><span class="p">))</span>
-</span><span data-line="18">        <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">"Failed to parse ONNX"</span><span class="p">)</span>
-</span><span data-line="19">
-</span><span data-line="20"><span class="c1"># Build engine</span>
-</span><span data-line="21"><span class="n">config</span> <span class="o">=</span> <span class="n">builder</span><span class="o">.</span><span class="n">create_builder_config</span><span class="p">()</span>
-</span><span data-line="22"><span class="n">engine</span> <span class="o">=</span> <span class="n">builder</span><span class="o">.</span><span class="n">build_serialized_network</span><span class="p">(</span><span class="n">network</span><span class="p">,</span> <span class="n">config</span><span class="p">)</span>
-</span><span data-line="23"><span class="k">if</span> <span class="n">engine</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-</span><span data-line="24">    <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">"TensorRT engine build failed"</span><span class="p">)</span>
-</span><span data-line="25">
-</span><span data-line="26"><span class="c1"># Save engine</span>
-</span><span data-line="27"><span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"model.engine"</span><span class="p">,</span> <span class="s2">"wb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
-</span><span data-line="28">    <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">engine</span><span class="p">)</span>
-</span><span data-line="29">
-</span><span data-line="30"><span class="nb">print</span><span class="p">(</span><span class="s2">"TensorRT engine built successfully!"</span><span class="p">)</span>
+</span><span data-line="7"><span class="n">network</span> <span class="o">=</span> <span class="n">builder</span><span class="o">.</span><span class="n">create_network</span><span class="p">(</span><span class="mi">1</span> <span class="o">&lt;&lt;</span> <span class="nb">int</span><span class="p">(</span><span class="n">trt</span><span class="o">.</span><span class="n">NetworkDefinitionCreationFlag</span><span class="o">.</span><span class="n">STRONGLY_TYPED</span><span class="p">))</span>
+</span><span data-line="8"><span class="n">parser</span> <span class="o">=</span> <span class="n">trt</span><span class="o">.</span><span class="n">OnnxParser</span><span class="p">(</span><span class="n">network</span><span class="p">,</span> <span class="n">logger</span><span class="p">)</span>
+</span><span data-line="9">
+</span><span data-line="10"><span class="c1"># Parse optimized ONNX model</span>
+</span><span data-line="11"><span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"optimized_final.onnx"</span><span class="p">,</span> <span class="s2">"rb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+</span><span data-line="12">    <span class="k">if</span> <span class="ow">not</span> <span class="n">parser</span><span class="o">.</span><span class="n">parse</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">read</span><span class="p">()):</span>
+</span><span data-line="13">        <span class="k">for</span> <span class="n">error</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">parser</span><span class="o">.</span><span class="n">num_errors</span><span class="p">):</span>
+</span><span data-line="14">            <span class="nb">print</span><span class="p">(</span><span class="n">parser</span><span class="o">.</span><span class="n">get_error</span><span class="p">(</span><span class="n">error</span><span class="p">))</span>
+</span><span data-line="15">        <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">"Failed to parse ONNX"</span><span class="p">)</span>
+</span><span data-line="16">
+</span><span data-line="17"><span class="c1"># Build engine</span>
+</span><span data-line="18"><span class="n">config</span> <span class="o">=</span> <span class="n">builder</span><span class="o">.</span><span class="n">create_builder_config</span><span class="p">()</span>
+</span><span data-line="19"><span class="n">engine</span> <span class="o">=</span> <span class="n">builder</span><span class="o">.</span><span class="n">build_serialized_network</span><span class="p">(</span><span class="n">network</span><span class="p">,</span> <span class="n">config</span><span class="p">)</span>
+</span><span data-line="20"><span class="k">if</span> <span class="n">engine</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+</span><span data-line="21">    <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">"TensorRT engine build failed"</span><span class="p">)</span>
+</span><span data-line="22">
+</span><span data-line="23"><span class="c1"># Save engine</span>
+</span><span data-line="24"><span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"model.engine"</span><span class="p">,</span> <span class="s2">"wb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+</span><span data-line="25">    <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">engine</span><span class="p">)</span>
+</span><span data-line="26">
+</span><span data-line="27"><span class="nb">print</span><span class="p">(</span><span class="s2">"TensorRT engine built successfully!"</span><span class="p">)</span>
 </span></pre></div>
 </div>
 </section>

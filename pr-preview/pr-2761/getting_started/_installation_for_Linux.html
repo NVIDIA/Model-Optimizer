@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Installation for Linux - Model Optimizer 0.0.1.dev1+g2786a6ce8</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Installation for Windows" href="windows/_installation_for_Windows.html" /><link rel="prev" title="Installation" href="2_installation.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Installation for Linux - Model Optimizer 0.0.1.dev1+g7d991fd69</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Installation for Windows" href="windows/_installation_for_Windows.html" /><link rel="prev" title="Installation" href="2_installation.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
@@ -211,6 +211,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_format.html">quant_format</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quantized_weight_export.html">quantized_weight_export</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.registry.html">registry</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
@@ -334,6 +335,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.config.html">config</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.dflash.html">dflash</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.external.html">external</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.medusa.html">medusa</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.mode.html">mode</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.plugins.html">plugins</a></li>
@@ -359,6 +361,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.moe.html">moe</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.network.html">network</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.perf.html">perf</a></li>
@@ -457,7 +460,7 @@ data-aria-dark="Switch to auto color mode">
 <td><p>&gt;=1.0</p></td>
 </tr>
 <tr class="row-odd"><td><p>ONNX Runtime (Optional)</p></td>
-<td><p>1.24</p></td>
+<td><p>See CUDA notes below</p></td>
 </tr>
 <tr class="row-even"><td><p>TensorRT (Optional)</p></td>
 <td><p>&gt;=10.0</p></td>
@@ -573,8 +576,29 @@ need to be installed to correctly use the corresponding modules:</p>
 </div>
 <p><strong>CUDA specific dependencies</strong></p>
 <ul class="simple">
-<li><p>By default, <code class="docutils literal notranslate"><span class="pre">cupy-cuda12x</span></code> is installed for INT4 ONNX quantization. If you have CUDA 13, you need to run <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">uninstall</span> <span class="pre">-y</span> <span class="pre">cupy-cuda12x</span></code> and <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">cupy-cuda13x</span></code> after installing <code class="docutils literal notranslate"><span class="pre">nvidia-modelopt[onnx]</span></code>.</p></li>
+<li><p>On Linux x86-64 with Python 3.11 and later, <code class="docutils literal notranslate"><span class="pre">nvidia-modelopt[onnx]</span></code> installs <code class="docutils literal notranslate"><span class="pre">cupy-cuda13x</span></code> and ONNX Runtime GPU 1.30.x for CUDA 13. Python 3.10 retains the CUDA 12 packages and ONNX Runtime 1.22.x. See the CUDA 12 alternative below if you need CUDA 12 on Python 3.11 or later.</p></li>
 </ul>
+<p>On Linux aarch64, Python 3.11 and later retains ONNX Runtime 1.24.x.</p>
+<p><strong>CUDA 12.8 alternative for Python 3.11+ on Linux x86-64</strong></p>
+<p>The stable CUDA 12.8 ONNX Runtime Python wheel is currently 1.29.0. Start from a
+Python 3.11+ environment with CUDA 12-compatible PyTorch, then install the base
+ModelOpt package and its ONNX dependencies explicitly, because the default <code class="docutils literal notranslate"><span class="pre">[onnx]</span></code>
+extra requires <code class="docutils literal notranslate"><span class="pre">cupy-cuda13x</span></code>. Use the Microsoft CUDA 12 package feed for the ONNX
+Runtime wheel; the 1.29.0 wheel on PyPI uses CUDA 13.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">python<span class="w"> </span>-m<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>nvidia-modelopt
+</span><span data-line="2">python<span class="w"> </span>-m<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>cppimport<span class="w"> </span>cupy-cuda12x<span class="w"> </span>flatbuffers<span class="w"> </span>lief<span class="w"> </span>ml_dtypes<span class="w"> </span><span class="se">\</span>
+</span><span data-line="3"><span class="w">    </span><span class="s2">"onnx-graphsurgeon&gt;=0.6.1"</span><span class="w"> </span><span class="s2">"onnx~=1.21.0"</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">    </span><span class="s2">"onnxconverter-common~=1.16.0"</span><span class="w"> </span>onnxscript<span class="w"> </span><span class="se">\</span>
+</span><span data-line="5"><span class="w">    </span><span class="s2">"onnxslim&gt;=0.1.76"</span><span class="w"> </span><span class="s2">"polygraphy&gt;=0.53.4"</span>
+</span><span data-line="6">python<span class="w"> </span>-m<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>--no-deps<span class="w"> </span><span class="se">\</span>
+</span><span data-line="7"><span class="w">    </span>--index-url<span class="w"> </span>https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/<span class="w"> </span><span class="se">\</span>
+</span><span data-line="8"><span class="w">    </span><span class="s2">"onnxruntime-gpu==1.29.0"</span>
+</span><span data-line="9">python<span class="w"> </span>-m<span class="w"> </span>pip<span class="w"> </span>check
+</span></pre></div>
+</div>
+<p>This path needs CUDA 12.8 or later in the CUDA 12 series, cuDNN 9, and a compatible
+NVIDIA driver. The CUDA version is a requirement of the quantization host, not of the
+exported ONNX model.</p>
 <p><strong>Accelerated Quantization with Triton Kernels</strong></p>
 <p>ModelOpt includes optimized quantization kernels implemented with Triton language that accelerate quantization
 operations by approximately 40% compared to the default implementation. These kernels are particularly

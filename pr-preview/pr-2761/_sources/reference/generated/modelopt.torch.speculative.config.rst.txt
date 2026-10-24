@@ -33,6 +33,7 @@ config
    
       DFlashConfig
       EagleConfig
+      ExternalDraftConfig
       MedusaConfig
    
    

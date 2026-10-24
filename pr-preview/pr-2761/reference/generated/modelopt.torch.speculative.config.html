@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>config - Model Optimizer 0.0.1.dev1+g2786a6ce8</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="dflash" href="modelopt.torch.speculative.dflash.html" /><link rel="prev" title="speculative" href="modelopt.torch.speculative.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>config - Model Optimizer 0.0.1.dev1+g7d991fd69</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="dflash" href="modelopt.torch.speculative.dflash.html" /><link rel="prev" title="speculative" href="modelopt.torch.speculative.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -211,6 +211,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_format.html">quant_format</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quantized_weight_export.html">quantized_weight_export</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.registry.html">registry</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
@@ -334,6 +335,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4 current"><a class="current reference internal" href="#">config</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.dflash.html">dflash</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.external.html">external</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.medusa.html">medusa</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.mode.html">mode</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.plugins.html">plugins</a></li>
@@ -359,6 +361,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.moe.html">moe</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.network.html">network</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
@@ -424,6 +427,7 @@ data-aria-dark="Switch to auto color mode">
 <li><a class="reference internal" href="#modelopt.torch.speculative.config.DFlashConfig.dflash_selector_loss_alpha"><code class="docutils literal notranslate"><span class="pre">DFlashConfig.dflash_selector_loss_alpha</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.speculative.config.DFlashConfig.dflash_self_logit_distillation"><code class="docutils literal notranslate"><span class="pre">DFlashConfig.dflash_self_logit_distillation</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.speculative.config.DFlashConfig.dflash_swa_window_size"><code class="docutils literal notranslate"><span class="pre">DFlashConfig.dflash_swa_window_size</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.speculative.config.DFlashConfig.dflash_use_flex_attention"><code class="docutils literal notranslate"><span class="pre">DFlashConfig.dflash_use_flex_attention</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.speculative.config.DFlashConfig.dflash_use_torch_compile"><code class="docutils literal notranslate"><span class="pre">DFlashConfig.dflash_use_torch_compile</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.speculative.config.DFlashConfig.model_config"><code class="docutils literal notranslate"><span class="pre">DFlashConfig.model_config</span></code></a></li>
 </ul>
@@ -452,6 +456,17 @@ data-aria-dark="Switch to auto color mode">
 <li><a class="reference internal" href="#modelopt.torch.speculative.config.EagleConfig.eagle_ttt_steps"><code class="docutils literal notranslate"><span class="pre">EagleConfig.eagle_ttt_steps</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.speculative.config.EagleConfig.eagle_use_torch_compile"><code class="docutils literal notranslate"><span class="pre">EagleConfig.eagle_use_torch_compile</span></code></a></li>
 <li><a class="reference internal" href="#modelopt.torch.speculative.config.EagleConfig.model_config"><code class="docutils literal notranslate"><span class="pre">EagleConfig.model_config</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.speculative.config.ExternalDraftConfig"><code class="docutils literal notranslate"><span class="pre">ExternalDraftConfig</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.speculative.config.ExternalDraftConfig.external_ce_alpha"><code class="docutils literal notranslate"><span class="pre">ExternalDraftConfig.external_ce_alpha</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.speculative.config.ExternalDraftConfig.external_loss"><code class="docutils literal notranslate"><span class="pre">ExternalDraftConfig.external_loss</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.speculative.config.ExternalDraftConfig.external_report_acc"><code class="docutils literal notranslate"><span class="pre">ExternalDraftConfig.external_report_acc</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.speculative.config.ExternalDraftConfig.external_top_k"><code class="docutils literal notranslate"><span class="pre">ExternalDraftConfig.external_top_k</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.speculative.config.ExternalDraftConfig.external_top_p"><code class="docutils literal notranslate"><span class="pre">ExternalDraftConfig.external_top_p</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.speculative.config.ExternalDraftConfig.external_tvd_alpha"><code class="docutils literal notranslate"><span class="pre">ExternalDraftConfig.external_tvd_alpha</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.speculative.config.ExternalDraftConfig.external_vocab_swap"><code class="docutils literal notranslate"><span class="pre">ExternalDraftConfig.external_vocab_swap</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.speculative.config.ExternalDraftConfig.model_config"><code class="docutils literal notranslate"><span class="pre">ExternalDraftConfig.model_config</span></code></a></li>
 </ul>
 </li>
 <li><a class="reference internal" href="#modelopt.torch.speculative.config.MedusaConfig"><code class="docutils literal notranslate"><span class="pre">MedusaConfig</span></code></a><ul>
@@ -515,7 +530,10 @@ data-aria-dark="Switch to auto color mode">
 <tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.speculative.config.EagleConfig" title="modelopt.torch.speculative.config.EagleConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">EagleConfig</span></code></a></p></td>
 <td><p>Eagle config.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.speculative.config.MedusaConfig" title="modelopt.torch.speculative.config.MedusaConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">MedusaConfig</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.speculative.config.ExternalDraftConfig" title="modelopt.torch.speculative.config.ExternalDraftConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ExternalDraftConfig</span></code></a></p></td>
+<td><p>External (standalone) draft model config.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.speculative.config.MedusaConfig" title="modelopt.torch.speculative.config.MedusaConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">MedusaConfig</span></code></a></p></td>
 <td><p>Medusa config.</p></td>
 </tr>
 </tbody>
@@ -682,6 +700,11 @@ data-aria-dark="Switch to auto color mode">
 <dd></dd></dl>
 
 <dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.speculative.config.DFlashConfig.dflash_use_flex_attention">
+<span class="sig-name descname"><span class="pre">dflash_use_flex_attention</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.speculative.config.DFlashConfig.dflash_use_flex_attention" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.speculative.config.DFlashConfig.dflash_use_torch_compile">
 <span class="sig-name descname"><span class="pre">dflash_use_torch_compile</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.speculative.config.DFlashConfig.dflash_use_torch_compile" title="Link to this definition">#</a></dt>
 <dd></dd></dl>
@@ -812,6 +835,57 @@ data-aria-dark="Switch to auto color mode">
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.speculative.config.EagleConfig.model_config">
 <span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.speculative.config.EagleConfig.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.speculative.config.ExternalDraftConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">ExternalDraftConfig</span></span><a class="headerlink" href="#modelopt.torch.speculative.config.ExternalDraftConfig" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>External (standalone) draft model config.</p>
+<p>The converted module is a pretrained causal LM used directly as the draft. It
+keeps its own embeddings and lm_head; the base model contributes only cached
+hidden states, projected by the base lm_head to obtain teacher logits.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.speculative.config.ExternalDraftConfig.external_ce_alpha">
+<span class="sig-name descname"><span class="pre">external_ce_alpha</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.speculative.config.ExternalDraftConfig.external_ce_alpha" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.speculative.config.ExternalDraftConfig.external_loss">
+<span class="sig-name descname"><span class="pre">external_loss</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'soft_ce'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'tvd'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'tvd_deploy'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'tvd_ce'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.speculative.config.ExternalDraftConfig.external_loss" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.speculative.config.ExternalDraftConfig.external_report_acc">
+<span class="sig-name descname"><span class="pre">external_report_acc</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.speculative.config.ExternalDraftConfig.external_report_acc" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.speculative.config.ExternalDraftConfig.external_top_k">
+<span class="sig-name descname"><span class="pre">external_top_k</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.speculative.config.ExternalDraftConfig.external_top_k" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.speculative.config.ExternalDraftConfig.external_top_p">
+<span class="sig-name descname"><span class="pre">external_top_p</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.speculative.config.ExternalDraftConfig.external_top_p" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.speculative.config.ExternalDraftConfig.external_tvd_alpha">
+<span class="sig-name descname"><span class="pre">external_tvd_alpha</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.speculative.config.ExternalDraftConfig.external_tvd_alpha" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.speculative.config.ExternalDraftConfig.external_vocab_swap">
+<span class="sig-name descname"><span class="pre">external_vocab_swap</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.speculative.config.ExternalDraftConfig.external_vocab_swap" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.speculative.config.ExternalDraftConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.speculative.config.ExternalDraftConfig.model_config" title="Link to this definition">#</a></dt>
 <dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
 </dd></dl>
 
