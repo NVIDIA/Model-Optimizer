@@ -24,6 +24,7 @@ to adjust axes.
 from __future__ import annotations
 
 import time
+from functools import partial
 from typing import TYPE_CHECKING
 
 import onnx
@@ -32,6 +33,9 @@ from ..logging_config import logger
 from .dla_transforms.dla_cast_to_fp32 import _apply_cast_to_fp32
 from .dla_transforms.dla_constants_to_initializers import _constants_to_initializers_from_model
 from .dla_transforms.dla_graph_cleanup import _remove_unused_initializers
+from .dla_transforms.dla_matmul_to_transpose_conv_transpose import (
+    _apply_matmul_to_transpose_conv_transpose,
+)
 from .dla_transforms.dla_remove_deqlin import _apply_remove_deqlin
 from .dla_transforms.dla_remove_qdq import _remove_qdq_from_model
 from .dla_transforms.dla_reorder_nodes import _apply_reorder_nodes
@@ -76,6 +80,10 @@ DLA_TRANSFORMS = (
     ("ReshapeTransposeReshape", _apply_reshape_transpose_reshape),
     ("ReshapeQDQReduceSum", _apply_reshape_qdq_reduce_sum),
     ("ReshapeReduceSum", _apply_reshape_reduce_sum),
+    (
+        "MatMulToTransposeConvTranspose",
+        partial(_apply_matmul_to_transpose_conv_transpose, defer_rank_conversion=True),
+    ),
     ("ShapeInference", infer_shapes),
     ("RemoveUnusedInitializers", _remove_unused_initializers),
 )
