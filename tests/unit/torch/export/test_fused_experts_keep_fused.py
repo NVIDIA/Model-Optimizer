@@ -198,6 +198,13 @@ def _unquantized(experts, projections):
             quantizer.disable()
 
 
+def _with_source_scales(experts, projections):
+    """A native-FP8 checkpoint's experts keep their source block and activation scales."""
+    for proj in projections:
+        experts.register_buffer(f"{proj}_scale_inv", torch.ones(NUM_EXPERTS, 1, 1))
+        experts.register_buffer(f"{proj}_activation_scale", torch.ones(()))
+
+
 def _export_cases():
     layouts = [(_KeepFusedGatedExperts, "gated"), (_KeepFusedUngatedExperts, "ungated")]
     cfgs = [
@@ -217,6 +224,16 @@ def _export_cases():
             _uncalibrated,
             ("first", "down_proj"),
             id=f"{name}-uncalibrated",
+        )
+        for cls, name in layouts
+    ]
+    cases += [
+        pytest.param(
+            cls,
+            mtq.FP8_DEFAULT_CFG,
+            _with_source_scales,
+            ("first", "down_proj"),
+            id=f"{name}-source-scales",
         )
         for cls, name in layouts
     ]

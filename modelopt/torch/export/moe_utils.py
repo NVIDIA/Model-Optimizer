@@ -255,12 +255,18 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
         if input_scale is not None:
             module.register_buffer(f"{proj}_input_scale", input_scale)
 
-    # Drop the quantizer modules -- their info now lives in the fused weight + scale buffers.
+    # Drop the quantizer modules -- their info now lives in the fused weight + scale buffers -- and
+    # the source checkpoint's scales, which described the weights the fold replaced, as the
+    # per-expert export does (_delete_fused_moe_source_attrs).
     for attr in (
         f"{first}_weight_quantizers",
         f"{first}_input_quantizer",
         "down_proj_weight_quantizers",
         "down_proj_input_quantizer",
+        f"{first}_scale_inv",
+        "down_proj_scale_inv",
+        f"{first}_activation_scale",
+        "down_proj_activation_scale",
     ):
         if hasattr(module, attr):
             delattr(module, attr)
