@@ -58,7 +58,7 @@ def distributed_save_hf_checkpoint(
     max_shard_size: "str | int" = "10GB",
     is_modelopt_qlora: bool = False,
     extra_state_dict: "dict[str, torch.Tensor] | None" = None,
-) -> None:
+) -> bool:
     """No-gather distributed HF export.
 
     Thin wrapper: hf_ptq exports under ``torch.inference_mode()``, so run the entire write with inference mode DISABLED
@@ -68,9 +68,13 @@ def distributed_save_hf_checkpoint(
     ``inference_mode(False)`` re-ENABLES autograd, so a bare ``clone()``/``detach()`` on an inference tensor would try
     to set up grad and read its (missing) version counter -- ``no_grad`` avoids that while the clones still land as
     normal tensors because inference mode is off.
+
+    Returns:
+        Whether the tensors carry their original checkpoint names. The reverse conversion is all or
+        nothing across ranks, so this is the same on every rank.
     """
     with torch.inference_mode(False), torch.no_grad():
-        _distributed_save_hf_checkpoint_impl(
+        return _distributed_save_hf_checkpoint_impl(
             model,
             export_dir,
             maxbound,
@@ -676,7 +680,7 @@ def _distributed_save_hf_checkpoint_impl(
     max_shard_size: "str | int" = "10GB",
     is_modelopt_qlora: bool = False,
     extra_state_dict: "dict[str, torch.Tensor] | None" = None,
-) -> None:
+) -> bool:
     """Distributed HF safetensors export -- no rank-0 full-model host-RAM gather.
 
     Writes an already-processed, FSDP2-sharded model to ``export_dir`` as HF safetensors, entirely
@@ -714,13 +718,6 @@ def _distributed_save_hf_checkpoint_impl(
 
     export_dir = Path(export_dir)
     rank, world = dist.get_rank(), dist.get_world_size()
-    # Where the expert input-scale all-reduce below runs: on the GPU under NCCL (distributed_run
-    # sets up "cpu:gloo,cuda:nccl"), on the CPU under a gloo-only group.
-    device = (
-        torch.device("cpu")
-        if dist.get_backend() == "gloo"
-        else torch.device("cuda", torch.cuda.current_device())
-    )
 
     # This writer targets a FULLY FSDP2-sharded model -- no expert parallelism. FSDP2
     # shards the fused 3-D expert weight on dim 0 (the expert axis), so fused experts are just
@@ -804,20 +801,13 @@ def _distributed_save_hf_checkpoint_impl(
                         return True
         return False
 
-    # Probe the DTensor placement of a sample expert + dense weight: directly shows what state the
-    # generation forwards left the sharded params in -- FSDP2 (Shard(0)/Replicate/gathered) or EP
-    # (expert dim-0 Shard, or a plain local shard for the a2a transport).
-
     # Sync the shared per-module activation (input) scales across ranks (global max), so every
-    # expert of a module gets the same input_scale regardless of which rank owns it.
+    # expert of a module gets the same input_scale regardless of which rank owns it. Reduced on the
+    # scales' own device, as the shard transport moves every tensor: the GPU in a GPU run, the CPU
+    # under gloo.
     in_keys = sorted(k for k in sharded_sd if k.endswith("_input_scale") and _is_expert_key(k))
     if in_keys:
-        stacked = torch.stack(
-            [
-                sharded_sd[k].detach().to(device=device, dtype=torch.float32).reshape(())
-                for k in in_keys
-            ]
-        )
+        stacked = torch.stack([sharded_sd[k].detach().reshape(()).float() for k in in_keys])
         dist.all_reduce(stacked, op=dist.ReduceOp.MAX)
         for j, k in enumerate(in_keys):
             sharded_sd[k] = stacked[j].clone()
@@ -861,7 +851,7 @@ def _distributed_save_hf_checkpoint_impl(
     # transformers conversion ops are written against whole tensors and cannot express a placement.
     # The reverse must precede the shard layout, since it renames keys and splits tensors.
     _materialize_owned(local_sd, expert_key_set, rank, world)
-    _revert_whole_sd(model, local_sd)
+    reverted = _revert_whole_sd(model, local_sd)
     # Tensors the model does not own -- whatever the caller hands in via extra_state_dict, e.g.
     # weights read straight off the source checkpoint that the FSDP2 loader drops. They are plain
     # CPU tensors, already whole and identical on every rank, so ONE rank adds them to its
@@ -890,3 +880,4 @@ def _distributed_save_hf_checkpoint_impl(
     if extra_state_dict and rank == 0:
         local_sd.update(extra_state_dict)
     _write_even_shards(local_sd, export_dir, max_shard_size, rank, world)
+    return reverted

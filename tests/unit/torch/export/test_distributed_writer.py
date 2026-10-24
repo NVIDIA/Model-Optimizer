@@ -148,6 +148,23 @@ def _llama_config():
     )
 
 
+def _qwen2_moe_config():
+    """A tiny Qwen2-MoE: four fused experts and a shared expert in one decoder layer."""
+    return Qwen2MoeConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=32,
+        moe_intermediate_size=32,
+        shared_expert_intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=32,
+    )
+
+
 def _fsdp2_shard(model, mesh, wrap_root=True):
     """Shard each decoder layer, and the root too unless ``wrap_root`` is off (as expert parallelism
     leaves it, sharding only the dense layers), and record that the model is FSDP2-sharded."""
@@ -846,6 +863,29 @@ def test_nogather_export_rejects_save_modelopt_state(gloo_world_of_one, tmp_path
         _nogather_export(model, tmp_path / "export", save_modelopt_state=True)
 
 
+def test_nogather_export_names_modules_in_the_quant_config_as_the_weights_do(
+    gloo_world_of_one, tmp_path
+):
+    """When the weights keep their in-memory names, as every rank's do once one rank cannot revert
+    its own, the quant config keeps them too: hub names there would exclude no written module."""
+    model = _load(_save(_mixtral_config(), tmp_path / "src"))
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randint(0, 64, (2, 8))))
+    failure = mock.patch.object(
+        quant_aware_conversion,
+        "revert_weight_conversion_quant_aware",
+        side_effect=RuntimeError("incomplete merge"),
+    )
+
+    with failure, pytest.warns(UserWarning, match="incomplete merge"):
+        _nogather_export(_fsdp2_shard(model, gloo_world_of_one), tmp_path / "export")
+
+    modules = {key.rsplit(".", 1)[0] for key in _load_checkpoint(tmp_path / "export")}
+    config = json.loads((tmp_path / "export" / "hf_quant_config.json").read_text())
+    excluded = config["quantization"]["exclude_modules"]
+    assert "model.layers.0.mlp.gate" in excluded
+    assert set(excluded) <= modules, sorted(set(excluded) - modules)
+
+
 @pytest.mark.parametrize(
     "quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG], ids=["fp8", "nvfp4"]
 )
@@ -853,23 +893,7 @@ def test_nogather_export_writes_moe_experts_quantized(gloo_world_of_one, tmp_pat
     """Qwen2-MoE's shared expert follows its experts in the same FSDP2 unit, and packing it opens a
     weight window on that unit. Unless the experts were folded inside a window of their own, which
     hands FSDP2 the packed weights, that window's reshard puts FSDP2's unquantized shards back."""
-    config = Qwen2MoeConfig(
-        vocab_size=64,
-        hidden_size=32,
-        intermediate_size=32,
-        moe_intermediate_size=32,
-        shared_expert_intermediate_size=32,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        num_experts=4,
-        num_experts_per_tok=2,
-        max_position_embeddings=32,
-    )
-    model = _load(_save(config, tmp_path / "src"))
-    # Weight-only experts: expert input scales would need the writer's CUDA-only all-reduce.
-    quant_cfg = copy.deepcopy(quant_cfg)
-    quant_cfg["quant_cfg"].append({"quantizer_name": "*experts*input_quantizer", "enable": False})
+    model = _load(_save(_qwen2_moe_config(), tmp_path / "src"))
     want = _quantize_with_reference(model, quant_cfg)
 
     _nogather_export(_fsdp2_shard(model, gloo_world_of_one), tmp_path / "export")
@@ -985,3 +1009,24 @@ def test_two_ranks_write_one_checkpoint_and_reject_inconsistent_state(cpu_dist_w
     assert shards == [f"model-{i:05d}-of-{n:05d}.safetensors" for i in range(1, n + 1)]
     want = {**load_file(str(src / "model.safetensors")), **_mtp_tail()}
     _assert_byte_identical(_load_checkpoint(tmp_path / "moe_export"), want)
+
+
+def _expert_input_scale_job(rank, world_size, tmp_dir):
+    mesh = init_device_mesh("cpu", (world_size,))
+    model = _load(tmp_dir / "src")
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randint(0, 64, (2, 8))))
+    # As if each rank calibrated the experts' shared input quantizer on its own data: each rank folds
+    # its own experts with its own scale, and only the writer's reduce makes them agree.
+    model.model.layers[0].mlp.experts.gate_up_proj_input_quantizer.amax = torch.tensor(1.0 + rank)
+    _nogather_export(_fsdp2_shard(model, mesh), tmp_dir / "export")
+
+
+def test_two_ranks_write_every_expert_with_the_largest_input_scale(cpu_dist_workers, tmp_path):
+    """The experts' shared input scale is reduced across the ranks that fold them, to its max."""
+    _save(_qwen2_moe_config(), tmp_path / "src")
+
+    cpu_dist_workers.run(_expert_input_scale_job, tmp_dir=tmp_path)
+
+    exported = _load_checkpoint(tmp_path / "export")
+    scales = [exported[f"model.layers.0.mlp.experts.{e}.gate_proj.input_scale"] for e in range(4)]
+    assert all(torch.allclose(s, torch.tensor(2.0 / 448)) for s in scales), scales
