@@ -744,18 +744,16 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
     load one with ``num_workers=0``.
 
     Forwards all non-sampler DataLoader settings from ``loader`` (batching, workers, pinning,
-    prefetch, init fn, generator, ...). A loader with auto-batching off (``batch_size=None``) is
-    refused.
+    prefetch, init fn, generator, ...).
     """
     batching = loader.batch_sampler
-    if batching is None:
-        raise ValueError(
-            "shard_dataloader: the loader has auto-batching off (batch_size=None), so each rank "
-            "would calibrate on one dataset item per step; pass a loader that batches by batch_size."
-        )
     if not isinstance(loader.dataset, IterableDataset):
-        # A plain BatchSampler, built from batch_size or passed in, batches what its sampler picks.
-        picker = batching.sampler if type(batching) is BatchSampler else batching
+        # A plain BatchSampler, built from batch_size or passed in, batches what its sampler picks;
+        # with auto-batching off there is none, and the loader's sampler picks each item.
+        if type(batching) is BatchSampler:
+            picker = batching.sampler
+        else:
+            picker = loader.sampler if batching is None else batching
         if type(picker) not in (SequentialSampler, RandomSampler, DistributedSampler):
             raise ValueError(
                 f"shard_dataloader: the loader's {type(picker).__name__} picks which samples it "
@@ -787,8 +785,8 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
     )
     return DataLoader(
         loader.dataset,
-        batch_size=batching.batch_size,
-        drop_last=batching.drop_last,
+        batch_size=loader.batch_size if batching is None else batching.batch_size,
+        drop_last=loader.drop_last if batching is None else batching.drop_last,
         sampler=sampler,
         collate_fn=loader.collate_fn,
         num_workers=loader.num_workers,

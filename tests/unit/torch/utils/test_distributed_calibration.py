@@ -160,36 +160,49 @@ def test_iterable_shards_split_their_groups_across_worker_processes(monkeypatch)
 
 
 @pytest.mark.parametrize(
-    ("loader_kwargs", "refusal"),
+    "picker",
     [
-        ({"sampler": SubsetRandomSampler(range(4)), "batch_size": 2}, "picks which samples"),
-        ({"batch_sampler": [[0, 1], [2, 3]]}, "picks which samples"),
-        (
-            {"batch_sampler": BatchSampler(SubsetRandomSampler(range(4)), 2, drop_last=False)},
-            "picks which samples",
-        ),
-        ({"batch_size": None}, "auto-batching off"),
+        {"sampler": SubsetRandomSampler(range(4)), "batch_size": 2},
+        {"sampler": SubsetRandomSampler(range(4)), "batch_size": None},
+        {"batch_sampler": [[0, 1], [2, 3]]},
+        {"batch_sampler": BatchSampler(SubsetRandomSampler(range(4)), 2, drop_last=False)},
     ],
-    ids=["subset-sampler", "batch-sampler", "subset-in-a-plain-batch-sampler", "auto-batching-off"],
+    ids=[
+        "subset-sampler",
+        "subset-sampler-unbatched",
+        "batch-sampler",
+        "subset-in-a-plain-batch-sampler",
+    ],
 )
-def test_a_loader_the_shard_cannot_reproduce_is_refused(loader_kwargs, refusal):
-    """The rank's DistributedSampler would replace what the loader picks, silently calibrating on
-    the whole dataset instead, also when a plain BatchSampler batches the picks. A loader with
-    auto-batching off would calibrate one dataset item per step."""
-    loader = DataLoader(list(range(8)), collate_fn=_collate, **loader_kwargs)
+def test_a_loader_that_picks_its_own_samples_is_refused(picker):
+    """The rank's DistributedSampler would replace what it picks, silently calibrating on the whole
+    dataset instead, however the loader batches the picks."""
+    loader = DataLoader(list(range(8)), collate_fn=_collate, **picker)
 
-    with pytest.raises(ValueError, match=refusal):
+    with pytest.raises(ValueError, match="picks which samples it reads"):
         shard_dataloader(loader, 0, 2)
 
 
-def test_a_plain_batch_sampler_keeps_its_batching_in_the_shard():
-    """A loader given a BatchSampler reports ``batch_size=None``; its shard still batches by the
-    sampler's size and drop_last."""
-    dataset = list(range(10))
-    batch_sampler = BatchSampler(SequentialSampler(dataset), 2, drop_last=True)
-    loader = DataLoader(dataset, batch_sampler=batch_sampler, collate_fn=_collate)
+@pytest.mark.parametrize(
+    ("kind", "batching", "batches"),
+    [
+        (
+            "map-style",
+            {"batch_sampler": BatchSampler(SequentialSampler(range(10)), 2, drop_last=True)},
+            [[1, 3], [5, 7]],
+        ),
+        ("map-style", {"batch_size": None}, [[1], [3], [5], [7], [9]]),
+        ("iterable", {"batch_size": None}, [[1], [3], [5], [7], [9]]),
+    ],
+    ids=["plain-batch-sampler", "auto-batching-off", "auto-batching-off-stream"],
+)
+def test_the_shard_batches_as_the_loader_does(kind, batching, batches):
+    """A loader given a plain BatchSampler reports ``batch_size=None``; its shard still batches by the
+    sampler's size and drop_last. A loader with auto-batching off reads one item per step, and so
+    does its shard."""
+    loader = DataLoader(_dataset(kind, 10), collate_fn=_collate, **batching)
 
-    assert _batches(shard_dataloader(loader, 1, 2)) == [[1, 3], [5, 7]]
+    assert _batches(shard_dataloader(loader, 1, 2)) == batches
 
 
 @pytest.mark.parametrize("dataset", [list(range(8)), _Stream(8)], ids=["map-style", "iterable"])
