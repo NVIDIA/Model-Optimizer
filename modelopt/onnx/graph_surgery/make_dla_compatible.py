@@ -32,6 +32,7 @@ import onnx
 from ..logging_config import logger
 from .dla_transforms.dla_cast_to_fp32 import _apply_cast_to_fp32
 from .dla_transforms.dla_constants_to_initializers import _constants_to_initializers_from_model
+from .dla_transforms.dla_decompose_lstm import _apply_decompose_lstm
 from .dla_transforms.dla_graph_cleanup import _remove_unused_initializers
 from .dla_transforms.dla_matmul_to_transpose_conv_transpose import (
     _apply_matmul_to_transpose_conv_transpose,
@@ -80,6 +81,7 @@ DLA_TRANSFORMS = (
     ("ReshapeTransposeReshape", _apply_reshape_transpose_reshape),
     ("ReshapeQDQReduceSum", _apply_reshape_qdq_reduce_sum),
     ("ReshapeReduceSum", _apply_reshape_reduce_sum),
+    ("DecomposeLstm", partial(_apply_decompose_lstm, defer_rank_conversion=True)),
     (
         "MatMulToTransposeConvTranspose",
         partial(_apply_matmul_to_transpose_conv_transpose, defer_rank_conversion=True),
