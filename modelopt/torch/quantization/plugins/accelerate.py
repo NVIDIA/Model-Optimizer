@@ -233,6 +233,9 @@ def init_quantized_weights(
                 "dtype", kwargs.get("torch_dtype", getattr(config, "torch_dtype", torch.float16))
             )
             model = cls.from_config(config, dtype=torch_dtype)
+        # init_empty_weights re-wraps every registered parameter, so the tie made inside
+        # from_config is lost; without it the absent tied checkpoint key (e.g. lm_head) stays meta.
+        model.tie_weights()
 
         mtq.quantize(model, quant_cfg)
         mtq.compress(model, config=mtq.CompressConfig(quant_gemm=quant_gemm))

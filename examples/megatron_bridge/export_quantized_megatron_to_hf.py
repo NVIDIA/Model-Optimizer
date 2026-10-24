@@ -23,7 +23,7 @@ The process is as follows:
 The HuggingFace unified exporter does not gather tensor-parallel-sharded weights, so this script
 always loads the checkpoint at tensor_model_parallel_size=1 (re-sharding from whatever TP was used
 during quantization). Use --pp_size and/or --ep_size to shard a large model across GPUs for
-export; --ep_size needs grouped-GEMM experts (not --no_moe_grouped_gemm).
+export.
 
 Example usage to export an FP8 checkpoint produced by quantize.py:
 
@@ -52,7 +52,8 @@ from mlflow_utils import (
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.export import export_mcore_gpt_to_hf
+from modelopt.torch.export import ensure_local_checkpoint, export_mcore_gpt_to_hf
+from modelopt.torch.export.plugins.vllm_fakequant_megatron import export_mcore_gpt_to_hf_vllm_fq
 from modelopt.torch.utils import print_args, print_rank_0
 from modelopt.torch.utils.mlflow import Tool, masked_args
 from modelopt.torch.utils.plugins.mbridge import (
@@ -107,6 +108,15 @@ def get_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--vllm_fakequant_export",
+        action="store_true",
+        help=(
+            "Fold the weight quantizers into BF16 weights, for accuracy evaluation in a stock vLLM "
+            "of formats it has no kernels for (e.g. GGML IQ2). Activation quantizers go to a "
+            "quantizer_state.pth sidecar."
+        ),
+    )
+    parser.add_argument(
         "--export_extra_modules",
         action="store_true",
         help="Export extra modules such as Medusa heads, EAGLE, or MTP.",
@@ -118,7 +128,7 @@ def get_args() -> argparse.Namespace:
         "--ep_size",
         type=int,
         default=1,
-        help="Expert parallel size (grouped-GEMM experts only); shards the experts across ranks",
+        help="Expert parallel size; shards the experts across ranks",
     )
     parser.add_argument(
         "--num_layers_in_first_pipeline_stage",
@@ -148,16 +158,22 @@ def get_args() -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace):
+    # --hf_model_name_or_path stays as given. Later steps read the local copy of the whole
+    # checkpoint in local_checkpoint_path, since exporters read the source's files from local disk
+    # only; hub_model_id is the Hub ID, or None for a local path.
+    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
+        args.hf_model_name_or_path
+    )
     trust_remote_code = is_safe_repo(
-        trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_name_or_path
+        trust_remote_code=args.trust_remote_code, hf_path=args.local_checkpoint_path
     )
 
     # Build the model structure from HF
     _bridge, _provider, model, _unwrapped_model, _tokenizer = load_mbridge_model_from_hf(
-        hf_model_name_or_path=args.hf_model_name_or_path,
+        hf_model_name_or_path=args.local_checkpoint_path,
         trust_remote_code=trust_remote_code,
         moe_grouped_gemm=use_moe_grouped_gemm(
-            args.hf_model_name_or_path,
+            args.local_checkpoint_path,
             trust_remote_code=trust_remote_code,
             force_sequential=args.no_moe_grouped_gemm,
         ),
@@ -199,9 +215,12 @@ def main(args: argparse.Namespace):
         f"Exporting to HuggingFace (unified) checkpoint at {args.export_unified_hf_path}..."
     )
     # TODO: Gemma3-VL is not in export_mcore_gpt_to_hf's per-arch mappings yet.
-    export_mcore_gpt_to_hf(
+    export_fn = (
+        export_mcore_gpt_to_hf_vllm_fq if args.vllm_fakequant_export else export_mcore_gpt_to_hf
+    )
+    export_fn(
         unwrapped_model,
-        args.hf_model_name_or_path,
+        args.local_checkpoint_path,
         export_extra_modules=export_extra_modules,
         dtype=torch.bfloat16,
         export_dir=args.export_unified_hf_path,

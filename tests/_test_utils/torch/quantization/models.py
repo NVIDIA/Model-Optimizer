@@ -164,3 +164,54 @@ class OneLayerLinear(torch.nn.Module):
 
     def get_input(self, batch_size=2):
         return torch.randn(batch_size, self.in_features)
+
+
+TOY_MOE_EXPERTS = 4
+TOY_MOE_HIDDEN = 256
+TOY_MOE_INTERMEDIATE = 256
+
+
+class ToyFusedExperts(nn.Module):
+    """HF transformers 5 fused-experts layout: one ``F.linear`` pair per routed expert."""
+
+    def __init__(self):
+        super().__init__()
+        self.num_experts = TOY_MOE_EXPERTS
+        self.gate_up_proj = nn.Parameter(
+            torch.randn(TOY_MOE_EXPERTS, 2 * TOY_MOE_INTERMEDIATE, TOY_MOE_HIDDEN) * 0.02
+        )
+        self.down_proj = nn.Parameter(
+            torch.randn(TOY_MOE_EXPERTS, TOY_MOE_HIDDEN, TOY_MOE_INTERMEDIATE) * 0.02
+        )
+
+    def forward(self, hidden_states, expert_of_token):
+        output = torch.zeros_like(hidden_states)
+        for idx in range(self.num_experts):
+            tokens = (expert_of_token == idx).nonzero().squeeze(-1)
+            if len(tokens) == 0:
+                continue
+            gate, up = F.linear(hidden_states[tokens], self.gate_up_proj[idx]).chunk(2, dim=-1)
+            output[tokens] = F.linear(F.silu(gate) * up, self.down_proj[idx])
+        return output
+
+
+class ToyMoEBlock(nn.Module):
+    """Routes token ``t`` to expert ``t % 3``, so the last expert receives no token."""
+
+    def __init__(self):
+        super().__init__()
+        self.experts = ToyFusedExperts()
+        self.shared_expert = nn.Linear(TOY_MOE_HIDDEN, TOY_MOE_HIDDEN, bias=False)
+
+    def forward(self, hidden_states):
+        routed = self.experts(hidden_states, torch.arange(len(hidden_states)) % 3)
+        return routed + self.shared_expert(hidden_states)
+
+
+class ToyMoE(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mlp = ToyMoEBlock()
+
+    def forward(self, hidden_states):
+        return self.mlp(hidden_states)

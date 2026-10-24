@@ -31,6 +31,8 @@ import argparse
 from pathlib import Path
 
 import torch
+from datasets import load_dataset
+from transformers import AutoTokenizer
 
 _DFLASH_DEFAULT_NUM_DRAFT_LAYERS = 5
 
@@ -113,6 +115,42 @@ def add_answer_only_loss_args(parser: argparse.ArgumentParser) -> None:
             "{% generation %} / {% endgeneration %} tags."
         ),
     )
+
+
+REMOVE_THINK_CHAT_TEMPLATE = (
+    "{% if '</think>' in content %}{% set content = content.split('</think>')[-1] %}{% endif %}"
+)
+
+
+def load_conversations(input_data: Path, dp_rank: int = 0, dp_world_size: int = 1):
+    """Conversations from a ``.jsonl`` file or a directory of them, sharded for ``dp_rank``."""
+    input_data = Path(input_data)
+    if input_data.is_file() and input_data.suffix == ".jsonl":
+        data_files = str(input_data)
+    elif input_data.is_dir():
+        data_files = {"train": f"{input_data}/*.jsonl"}
+    else:
+        raise ValueError(f"input_data must be a .jsonl file or directory, got: {input_data}")
+    dataset = load_dataset("json", data_files=data_files, split="train")
+    print(f"Loaded {len(dataset)} conversations from {input_data}")
+    if dp_world_size > 1:
+        dataset = dataset.shard(num_shards=dp_world_size, index=dp_rank)
+    return dataset
+
+
+def load_tokenizer(args: argparse.Namespace):
+    """The base tokenizer, with the same chat-template handling in every dumper."""
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    override_template = load_chat_template(args.chat_template)
+    if override_template is not None:
+        tokenizer.chat_template = override_template
+    if tokenizer.chat_template is not None:
+        tokenizer.chat_template = tokenizer.chat_template.replace(REMOVE_THINK_CHAT_TEMPLATE, "")
+    if args.answer_only_loss:
+        verify_generation_tags(tokenizer.chat_template)
+    return tokenizer
 
 
 def load_chat_template(path: Path | None) -> str | None:

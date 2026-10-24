@@ -50,7 +50,7 @@ from modelopt.torch.models import hf_model_type
 from modelopt.torch.models.hf import checkpoint_has_mtp, prepare_model_for_loading
 from modelopt.torch.utils import distributed as dist_utils
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
-from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
+from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +299,12 @@ def build_quant_cfg(
             }
         elif isinstance(quant_cfg["algorithm"], dict):
             quant_cfg["algorithm"]["moe_calib_experts_ratio"] = moe_calib_experts_ratio
+        elif isinstance(quant_cfg["algorithm"], list) and all(
+            isinstance(algorithm, dict) for algorithm in quant_cfg["algorithm"]
+        ):
+            # e.g. [gptq, imatrix]: each algorithm runs its own calibration, so each gets the ratio.
+            for algorithm in quant_cfg["algorithm"]:
+                algorithm["moe_calib_experts_ratio"] = moe_calib_experts_ratio
         else:
             warnings.warn(
                 f"Quantization algorithm: {quant_cfg['algorithm']} does not support setting moe_calib_experts_ratio"
@@ -547,35 +553,6 @@ def _fmt_max_memory(max_memory: dict) -> str:
     return "\n".join(parts)
 
 
-def _from_pretrained_recording(auto_class, ckpt_path, *, model_type=None, **kwargs):
-    """``from_pretrained`` that records what the loader could not place.
-
-    ``output_loading_info=True`` makes Transformers return its own accounting of the load;
-    ``unexpected_keys`` -- keys present in the checkpoint but not in the model's architecture --
-    is exactly the set the export has to carry over (an MTP head, an auxiliary tower). Taking it
-    from the loader means no name patterns and no second pass over the index, and it already
-    accounts for on-the-fly key conversion, which a set re-derived afterwards would have to
-    replay to avoid mistaking a renamed key for an unplaced one.
-    """
-    with prepare_model_for_loading(
-        model_type,
-        ckpt_path,
-        kwargs.get("trust_remote_code", False),
-        model_class=None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class,
-    ):
-        model, loading_info = auto_class.from_pretrained(
-            ckpt_path, output_loading_info=True, **kwargs
-        )
-    unexpected = loading_info.get("unexpected_keys") or []
-    record_unplaced_source_keys(model, str(ckpt_path), unexpected)
-    if unexpected:
-        print(
-            f"✓ {len(unexpected)} checkpoint key(s) the model has no parameter for "
-            f"(e.g. {min(unexpected)}); the export will carry them over unchanged."
-        )
-    return model
-
-
 def get_model(
     ckpt_path,
     device="cuda",
@@ -685,9 +662,9 @@ def get_model(
         )
 
     if is_speculative(hf_config):
-        model = _from_pretrained_recording(
-            AutoModelForCausalLM,
+        model = load_pretrained(
             ckpt_path,
+            AutoModelForCausalLM,
             model_type=hf_config.model_type,
             device_map=device_map,
             **model_kwargs,
@@ -696,9 +673,9 @@ def get_model(
         from modelopt.torch.quantization.plugins.huggingface import patch_compressed_linear_loading
 
         with patch_compressed_linear_loading():
-            model = _from_pretrained_recording(
-                AutoModelForCausalLM,
+            model = load_pretrained(
                 ckpt_path,
+                AutoModelForCausalLM,
                 model_type=hf_config.model_type,
                 device_map="auto",
                 trust_remote_code=trust_remote_code,
@@ -722,9 +699,9 @@ def get_model(
         # materialization. Sequential keeps each shard's dequant on a single device
         # (the whole model lands on one GPU when it fits there).
         model_kwargs["quantization_config"] = Mxfp4Config(dequantize=True)
-        model = _from_pretrained_recording(
-            AutoModelForCausalLM,
+        model = load_pretrained(
             ckpt_path,
+            AutoModelForCausalLM,
             model_type=hf_config.model_type,
             device_map="cpu" if device == "cpu" else "sequential",
             **model_kwargs,
@@ -822,9 +799,9 @@ def get_model(
         model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, architecture)
         if _disk_offload:
             model_kwargs2["offload_folder"] = offload_folder
-        model = _from_pretrained_recording(
-            auto_model_module,
+        model = load_pretrained(
             ckpt_path,
+            auto_model_module,
             model_type=hf_config.model_type,
             device_map=device_map,
             **model_kwargs2,

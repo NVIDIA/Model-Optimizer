@@ -8,13 +8,8 @@ on:
         description: "Docker image to use for tests"
         required: true
         type: string
-      container_options:
-        description: "Docker options for the test container"
-        required: false
-        type: string
-        default: "--shm-size=2gb"
       example:
-        description: "Example name to test (e.g. 'hf_ptq')"
+        description: "Example name to test (e.g. 'hf_ptq'), or up to 3 names separated by spaces: they share the job (one container start and one base install) and run one after the other, each in its own step, in the order given. List an example that pins or upgrades packages last."
         required: true
         type: string
       timeout_minutes:
@@ -32,11 +27,11 @@ on:
         required: false
         type: string
         default: "linux-amd64-gpu-rtxpro6000-latest-1"
-      allow_failure:
-        description: "If true, test failures are reported as a warning and do not fail the job (used to keep a known-broken example non-blocking)"
+      allow_failure_examples:
+        description: "Comma-separated example names whose test failures are reported as a warning and do not fail the job (used to keep a known-broken example non-blocking)"
         required: false
-        type: boolean
-        default: false
+        type: string
+        default: ""
 
 jobs:
   run-test:
@@ -46,21 +41,37 @@ jobs:
       contents: read
     container:
       image: ${{ inputs.docker_image }}
-      options: ${{ inputs.container_options }} # TRT-LLM tests on 2-GPU runner need more shared memory
+      # Fixed rather than caller-supplied so no caller can pass e.g. --privileged or host mounts.
+      # TRT-LLM tests on 2-GPU runner need more shared memory; the vLLM image needs root.
+      options: --shm-size=2gb ${{ (startsWith(inputs.docker_image, 'vllm/') || startsWith(inputs.docker_image, 'docker.io/vllm/')) && '--user 0' || '' }}
       env:
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
         # Build CUDA kernels only for the runner's RTX PRO 6000 (sm_120), not the image's ~6 archs.
         TORCH_CUDA_ARCH_LIST: "12.0"
     steps:
+      - name: Split the examples of this job
+        id: examples
+        shell: bash
+        env:
+          EXAMPLES: ${{ inputs.example }}
+        run: |
+          max=3  # the cap; the "Example N" steps and the final failure check below must match it
+          read -ra examples <<< "$EXAMPLES"
+          (( ${#examples[@]} >= 1 && ${#examples[@]} <= max )) || { echo "::error::A job runs 1 to $max examples, got: '$EXAMPLES'"; exit 1; }
+          for (( i = 0; i < max; i++ )); do echo "e$i=${examples[$i]:-}" >> "$GITHUB_OUTPUT"; done
+          # Expressions have no replace(), and a cache key is better without spaces
+          echo "key=$(IFS=+; echo "${examples[*]}")" >> "$GITHUB_OUTPUT"
       - name: Install git for vLLM image
         if: startsWith(inputs.docker_image, 'vllm/') || startsWith(inputs.docker_image, 'docker.io/vllm/')
         run: apt-get update && apt-get install -y git
       - uses: actions/checkout@v6
-      - uses: nv-gha-runners/setup-proxy-cache@main
+      - uses: nv-gha-runners/setup-proxy-cache@eadc57871cde0c92a223d0f486ab669a2360f978 # main
       - uses: ./.github/actions/cache-extensions
+        id: ext-cache
         with:
-          cache-key: rtxpro6000-${{ inputs.docker_image }}
+          # Per job (its examples): jobs sharing an image build different extensions, and the first to save wins the key.
+          cache-key: rtxpro6000-example-${{ steps.examples.outputs.key }}-${{ inputs.docker_image }}
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu:/usr/local/tensorrt/targets/x86_64-linux-gnu/lib" >> $GITHUB_ENV
@@ -76,55 +87,47 @@ jobs:
           if [[ "${{ inputs.docker_image }}" == *"/tensorrt:"* ]]; then
             echo "torch<2.14" > /tmp/pip-constraints.txt
             export PIP_CONSTRAINT=/tmp/pip-constraints.txt
+            # The requirements of each example are installed later, in their own step
+            echo "PIP_CONSTRAINT=/tmp/pip-constraints.txt" >> "$GITHUB_ENV"
           fi
 
           # Use `python3 -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
           # Editable install so example scripts launched as subprocesses resolve modelopt to the same source path as the test process
           python3 -m pip install -e ".${{ inputs.pip_install_extras }}"
 
-          if [[ "${{ inputs.example }}" == *"diffusers"* ]]; then
-            echo "Uninstalling apex for diffusers: T5 Int8 (PixArt) + Apex is not supported as per https://github.com/huggingface/transformers/issues/21391"
-            python3 -m pip uninstall -y apex || true
-          fi
-
-          find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do python3 -m pip install -r "$req_file" || exit 1; done
-      - name: Run tests
-        id: run_tests
-        shell: bash
-        continue-on-error: ${{ inputs.allow_failure }}
-        env:
-          # Absolute paths so subprocesses running from different working directories
-          # all find the config and write .coverage.* files to the same location.
-          COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
-          COVERAGE_FILE: ${{ github.workspace }}/.coverage
-          # sys.monitoring records the same lines as the default C tracer at a fraction of the
-          # overhead; the tracer slowed each hf_ptq example run by ~60%. Needs Python 3.12+.
-          COVERAGE_CORE: sysmon
-        run: |
-          echo "Running tests for: ${{ inputs.example }}"
-          pytest_args=()
-          if [[ "${{ inputs.example }}" == "diffusers" ]]; then
-            # Keep legacy ONNX/TRT tests available manually during deprecation.
-            pytest_args+=(--ignore=tests/examples/diffusers/test_diffusers_onnx_trt.py)
-          fi
-          if [[ "${{ inputs.example }}" == "hf_ptq" && "${{ github.ref }}" == refs/heads/pull-request/* ]]; then
-            # One GPU on PR runners: small-model tests share it and the rest run alone on it
-            # (tests/examples/hf_ptq/conftest.py). The 2-GPU nightly stays serial.
-            pytest_args+=(-n 4)
-          fi
-          python3 -m pytest tests/examples/${{ inputs.example }} --cov "${pytest_args[@]}"
-      - name: Flag allowed failure
-        if: ${{ inputs.allow_failure && steps.run_tests.outcome == 'failure' }}
-        run: |
-          echo "::warning title=Allowed example failure::'${{ inputs.example }}' failed but is in the allow-failure list (vars.ALLOW_FAILURE_EXAMPLE_TESTS); not blocking. Remove it from the variable once fixed."
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7
+      # One step per example. A failing example does not fail its step (the action reports `failed`
+      # instead, because a failed step would end the job at once), so the examples after it still run, as
+      # when each had its own job, and the last step of the job fails it. These three steps and that final
+      # check hold the job's cap of 3 (`max` in the first step).
+      - name: "Example 1: ${{ steps.examples.outputs.e0 }}"
+        id: example0
+        uses: ./.github/actions/run-example
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage.xml
-          # One flag per example, not a shared `examples`: carryforward only applies to a flag
-          # with no upload, so a shared flag would replace every lane's coverage with the subset
-          # that ran once lanes are gated independently.
-          flags: examples-${{ inputs.example }}
-          fail_ci_if_error: false # test may be skipped if relevant file changes are not detected
-          verbose: true
+          example: ${{ steps.examples.outputs.e0 }}
+          allow-failure-examples: ${{ inputs.allow_failure_examples }}
+          codecov-token: ${{ secrets.CODECOV_TOKEN }}
+      - name: "Example 2: ${{ steps.examples.outputs.e1 || '-' }}"
+        id: example1
+        if: steps.examples.outputs.e1 != ''
+        uses: ./.github/actions/run-example
+        with:
+          example: ${{ steps.examples.outputs.e1 }}
+          allow-failure-examples: ${{ inputs.allow_failure_examples }}
+          codecov-token: ${{ secrets.CODECOV_TOKEN }}
+      - name: "Example 3: ${{ steps.examples.outputs.e2 || '-' }}"
+        id: example2
+        if: steps.examples.outputs.e2 != ''
+        uses: ./.github/actions/run-example
+        with:
+          example: ${{ steps.examples.outputs.e2 }}
+          allow-failure-examples: ${{ inputs.allow_failure_examples }}
+          codecov-token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Save extensions
+        # Not tied to the tests passing, see the action description
+        if: always() && steps.ext-cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/save-extensions
+        with:
+          cache-key: ${{ steps.ext-cache.outputs.cache-key }}
+      - name: Fail the job for an example that failed
+        if: steps.example0.outputs.failed == 'true' || steps.example1.outputs.failed == 'true' || steps.example2.outputs.failed == 'true'
+        run: exit 1

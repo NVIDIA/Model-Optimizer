@@ -52,7 +52,7 @@ This writes `train.jsonl` (35,800 conversations) and `validation.jsonl` (1,000) 
 
 ### 2. Quantization
 
-The recipe is [`model_type/nemotron_h/ptq/nvfp4-aggressive-mse`](../../../../modelopt_recipes/model_type/nemotron_h/ptq/nvfp4-aggressive-mse.yaml), the same file `hf_ptq.py` uses: its rules list both the Hugging Face and the Megatron-Core module names where they differ.
+The recipe is [`models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/ptq/nvfp4-mse`](../../../../modelopt_recipes/models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/ptq/nvfp4-mse.yaml), the PTQ stage for NVIDIA Nemotron 3.5 Super VL and the same file `hf_ptq.py` uses: its rules list both the Hugging Face and the Megatron-Core module names where they differ.
 
 | Component | Precision |
 | --- | --- |
@@ -74,7 +74,7 @@ PTQ runs on **one 4-GPU GB300 node** with 512 calibration samples.
 torchrun --nproc_per_node 4 /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
     --hf_model_name_or_path <nemotron_h_omni-checkpoint> \
     --trust_remote_code \
-    --recipe model_type/nemotron_h/ptq/nvfp4-aggressive-mse \
+    --recipe models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/ptq/nvfp4-mse \
     --tp_size 1 --ep_size 4 --pp_size 1 \
     --calib_dataset_name cnn_nemotron_v2_mix \
     --calib_num_samples 512 \

@@ -295,6 +295,7 @@ def generate_diffusion_dummy_inputs(
         # Requires: hidden_states, encoder_hidden_states, timestep
         in_channels = getattr(cfg, "in_channels", 16)
         text_dim = getattr(cfg, "text_dim", 4096)
+        image_dim = getattr(cfg, "image_dim", None)
         max_seq_len = getattr(cfg, "rope_max_seq_len", 512)
 
         patch_dtype = getattr(getattr(model, "patch_embedding", None), "weight", None)
@@ -308,13 +309,14 @@ def generate_diffusion_dummy_inputs(
 
         # Wan expects num_frames = 4 * n + 1; keep n small for dummy forward
         num_frames = 5
-        text_seq_len = min(max_seq_len, 512)
+        # I2V attention splits image context from the final 512 text tokens.
+        text_seq_len = 512 if image_dim is not None else min(max_seq_len, 512)
 
         # Keep spatial dims small and divisible by patch size (default 2x2)
         height = 8
         width = 8
 
-        return {
+        dummy_inputs = {
             "hidden_states": torch.randn(
                 batch_size, in_channels, num_frames, height, width, device=device, dtype=patch_dtype
             ),
@@ -324,6 +326,21 @@ def generate_diffusion_dummy_inputs(
             "timestep": torch.randint(0, 1000, (batch_size,), device=device),
             "return_dict": False,
         }
+        if image_dim is not None:
+            image_embedder = model.condition_embedder.image_embedder
+            # The projection bias retains its compute dtype when weights are packed.
+            image_dtype = image_embedder.ff.net[0].proj.bias.dtype
+            image_batch_size = batch_size
+            image_seq_len = 257
+            pos_embed_seq_len = getattr(cfg, "pos_embed_seq_len", None)
+            if pos_embed_seq_len is not None:
+                # FLF2V concatenates first/last-frame features inside the image embedder.
+                image_batch_size *= 2
+                image_seq_len = pos_embed_seq_len // 2
+            dummy_inputs["encoder_hidden_states_image"] = torch.randn(
+                image_batch_size, image_seq_len, image_dim, device=device, dtype=image_dtype
+            )
+        return dummy_inputs
 
     def _qwen_inputs() -> dict[str, Any]:
         # QwenImageTransformer2DModel does NOT take the standard
@@ -717,7 +734,7 @@ get_diffusers_components = get_diffusion_components
 
 
 @contextmanager
-def hide_quantizers_from_state_dict(model: nn.Module):
+def hide_quantizers_from_state_dict(model: nn.Module, export_attention_quantizers: bool = False):
     """Context manager that temporarily removes quantizer modules from the model.
 
     This allows save_pretrained to save the model without quantizer buffers like _amax.
@@ -725,6 +742,8 @@ def hide_quantizers_from_state_dict(model: nn.Module):
 
     Args:
         model: The model with quantizers to temporarily hide.
+        export_attention_quantizers: Keep enabled Q/K/V BMM quantizers for runtimes
+            that consume their legacy ``*_bmm_quantizer._amax`` keys.
 
     Yields:
         None - the model can be saved within the context.
@@ -739,8 +758,23 @@ def hide_quantizers_from_state_dict(model: nn.Module):
     # first since we mutate the module tree while iterating.
     for name, module in list(model.named_modules()):
         backup = {}
-        for attr in ["weight_quantizer", "input_quantizer", "output_quantizer"]:
+        for attr in [
+            "weight_quantizer",
+            "input_quantizer",
+            "output_quantizer",
+            "q_bmm_quantizer",
+            "k_bmm_quantizer",
+            "v_bmm_quantizer",
+            "softmax_quantizer",
+            "bmm2_output_quantizer",
+        ]:
             child = getattr(module, attr, None)
+            if (
+                export_attention_quantizers
+                and attr in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer")
+                and getattr(child, "is_enabled", False)
+            ):
+                continue
             if isinstance(child, nn.Module):
                 backup[attr] = child
                 delattr(module, attr)

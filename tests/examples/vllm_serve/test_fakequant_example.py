@@ -20,6 +20,7 @@ import copy
 import importlib.util
 import os
 import sys
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -34,6 +35,7 @@ from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.opt.config_loader import load_config
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.vllm import VllmMLAAttention
@@ -245,21 +247,51 @@ def test_recipe_path_rejects_manual_quant_config(conflicting_field):
 
 
 @pytest.mark.parametrize(
-    ("contents", "error"),
+    ("contents", "error", "match"),
     [
-        ("", ValueError),
-        ("quantize: [", yaml.YAMLError),
-        ("- not\n- a mapping\n", ValueError),
+        ("", ValueError, None),
+        ("quantize: [", yaml.YAMLError, None),
+        ("- not\n- a mapping\n", ValueError, None),
+        ("format: modelopt_quantizer_recipe\nversion: 2\nquantizers: {}\n", ValueError, "version"),
+        # Rejected as a quantizer recipe, not handed to the PTQ recipe parser.
+        (
+            "format: modelopt_quantizer_recipe\nversion: 1\nquantizers: {}\n",
+            ValueError,
+            "quantizer names",
+        ),
     ],
 )
-def test_invalid_recipe_yaml_is_rejected(tmp_path, contents, error):
+def test_invalid_recipe_yaml_is_rejected(tmp_path, contents, error, match):
     ptq_utils = _load_example_module("vllm_ptq_utils")
     recipe_path = tmp_path / "recipe.yaml"
     recipe_path.write_text(contents)
     config = {"recipe_path": str(recipe_path), "quant_cfg": None, "kv_quant_cfg": None}
 
-    with pytest.raises(error):
+    with pytest.raises(error, match=match):
         ptq_utils.get_quant_config(config, model=None)
+
+
+def test_versioned_recipe_restores_full_quantizer_state(monkeypatch, tmp_path):
+    monkeypatch.syspath_prepend(str(_EXAMPLES_DIR))
+    ptq_utils = _load_example_module("vllm_ptq_utils")
+    source = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=(4, 3), axis=None, use_constant_amax=True)
+    )
+    recipe = {
+        "format": ptq_utils.QUANTIZER_RECIPE_FORMAT,
+        "version": ptq_utils.QUANTIZER_RECIPE_VERSION,
+        "quantizers": {"k_bmm_quantizer": source.get_modelopt_state(properties_only=True)},
+    }
+    recipe_path = tmp_path / "quant_recipe.yaml"
+    recipe_path.write_text(yaml.safe_dump(recipe))
+    model = torch.nn.Module()
+    model.k_bmm_quantizer = TensorQuantizer()
+    model.v_bmm_quantizer = TensorQuantizer()
+    config = {"recipe_path": str(recipe_path), "quant_cfg": None, "kv_quant_cfg": None}
+    mtq.quantize(model, {**ptq_utils.get_quant_config(config, model), "algorithm": None})
+    assert model.k_bmm_quantizer.is_enabled and model.k_bmm_quantizer._use_constant_amax
+    assert model.k_bmm_quantizer.num_bits == (4, 3)
+    assert not model.v_bmm_quantizer.is_enabled
 
 
 def _calibration_worker(
@@ -954,6 +986,26 @@ def test_recipe_metadata_and_tensor_reload_share_module_mapping(
         hf_state, model.hf_to_vllm_mapper.apply_dict
     )
     assert converted["modelopt_state_dict"][0][1]["metadata"]["quantizer_state"].keys() == expected
+
+
+@pytest.mark.parametrize("checkpoint_name_first", [True, False])
+def test_aliased_quantizer_keeps_the_loaded_range(reload_utils, tmp_path, checkpoint_name_first):
+    # vLLM's MoE runner also registers the shared expert as ``experts._shared_experts._layer``;
+    # either name may come first in ``named_modules``.
+    model = torch.nn.Module()
+    shared_expert = torch.nn.Module()
+    shared_expert.input_quantizer = TensorQuantizer(amax=9.0)
+    if checkpoint_name_first:
+        model.shared_expert = shared_expert
+    model.experts = torch.nn.Module()
+    model.experts.shared = shared_expert
+    model.shared_expert = shared_expert
+    path = tmp_path / "quantizer_state.pth"
+    torch.save({"shared_expert.input_quantizer._amax": torch.tensor(1.001)}, path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        model.load_state_dict(reload_utils.load_state_dict_from_path(str(path), model))
+    assert torch.equal(model.shared_expert.input_quantizer.amax, torch.tensor(1.001))
 
 
 def test_constant_amax_kv_recipe_reloads_without_calibration_buffers(reload_utils, tmp_path):

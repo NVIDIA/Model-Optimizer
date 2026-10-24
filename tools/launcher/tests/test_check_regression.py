@@ -16,6 +16,7 @@
 """Regression-gate behaviour, especially the unevaluated-threshold case."""
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -33,30 +34,40 @@ def _clear_thresholds(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
-def test_threshold_with_no_metric_fails(monkeypatch):
+def test_threshold_with_no_metric_fails():
     """A configured threshold whose metric never reached trainer_state.json must fail.
 
     The DFlash/EAGLE trainers print accuracy every log step but did not persist it, so
     this path used to warn and pass -- stamping PASS on a run nothing had checked.
     """
-    monkeypatch.setenv("MIN_FINAL_ACC", "0.15")
-    passed, messages = check_regression_mod.check_regression({"loss": 0.4})
+    passed, messages = check_regression_mod.check_regression({"loss": 0.4}, {"MIN_FINAL_ACC": 0.15})
     assert not passed
     assert any("never evaluated" in m for m in messages)
 
 
 def test_unset_threshold_is_not_a_failure():
     """Only a threshold the operator actually set is enforced."""
-    passed, messages = check_regression_mod.check_regression({"loss": 0.4})
+    passed, messages = check_regression_mod.check_regression({"loss": 0.4}, {})
     assert passed
     assert not messages
 
 
+def test_empty_threshold_var_is_unset(tmp_path, monkeypatch):
+    """An empty MIN_FINAL_ACC disables that check instead of crashing on float('')."""
+    monkeypatch.setenv("MAX_FINAL_LOSS", "5.0")
+    monkeypatch.setenv("MIN_FINAL_ACC", "")
+    (tmp_path / "trainer_state.json").write_text('{"log_history": [{"loss": 1.0}]}')
+    verdict = check_regression_mod.evaluate(str(tmp_path))
+    assert verdict["pass"]
+    assert verdict["thresholds"] == {"MAX_FINAL_LOSS": 5.0}
+
+
 @pytest.mark.parametrize(("acc", "expected"), [(0.52, True), (0.10, False)])
-def test_accuracy_threshold_is_enforced_when_present(monkeypatch, acc, expected):
+def test_accuracy_threshold_is_enforced_when_present(acc, expected):
     """A present metric is compared against the threshold in both directions."""
-    monkeypatch.setenv("MIN_FINAL_ACC", "0.15")
-    passed, _ = check_regression_mod.check_regression({"loss": 0.4, "accuracy": acc})
+    passed, _ = check_regression_mod.check_regression(
+        {"loss": 0.4, "accuracy": acc}, {"MIN_FINAL_ACC": 0.15}
+    )
     assert passed is expected
 
 
@@ -69,3 +80,56 @@ def test_metrics_pick_up_any_accuracy_key(tmp_path):
     metrics = check_regression_mod.get_final_metrics(state)
     assert metrics["loss"] == pytest.approx(0.39)
     assert metrics["accuracy"] == pytest.approx(0.5153)
+
+
+def test_latest_checkpoint_is_chosen_by_step_number(tmp_path):
+    """checkpoint-12000 is newer than checkpoint-8000, though it sorts first as a string."""
+    for step in (8000, 12000):
+        ckpt = tmp_path / f"checkpoint-{step}"
+        ckpt.mkdir()
+        (ckpt / "trainer_state.json").write_text("{}")
+    latest = check_regression_mod.find_trainer_state(str(tmp_path))
+    assert Path(latest).parent.name == "checkpoint-12000"
+
+
+@pytest.mark.parametrize(
+    ("state_text", "exit_code", "failure_class"),
+    [
+        (None, 1, "METRICS_MISSING"),  # no trainer_state.json at all
+        ('{"log_hist', 1, "METRICS_MISSING"),  # truncated by a job killed mid-save
+        ("[]", 1, "METRICS_MISSING"),  # valid JSON, wrong shape
+        ('{"log_history": [{"loss": null}]}', 1, "METRICS_MISSING"),
+        ('{"log_history": [{"loss": NaN}]}', 1, "TRAIN_REGRESSION"),  # a diverged run
+        # An unchecked non-finite metric still serializes, as null.
+        ('{"log_history": [{"loss": 4.5, "acc": Infinity}]}', 0, None),
+        (json.dumps({"log_history": [{"loss": 6.5}]}), 1, "TRAIN_REGRESSION"),
+        (json.dumps({"log_history": [{"loss": 4.5}]}), 0, None),
+    ],
+)
+def test_cli_exit_code_and_json_verdict(
+    tmp_path, monkeypatch, state_text, exit_code, failure_class
+):
+    """With a threshold set, the CLI fails both a regression and a run it cannot read."""
+    monkeypatch.setenv("MAX_FINAL_LOSS", "5.0")
+    if state_text is not None:
+        ckpt = tmp_path / "checkpoint-2000"
+        ckpt.mkdir()
+        (ckpt / "trainer_state.json").write_text(state_text)
+    verdict_path = tmp_path / "verdict.json"
+    assert check_regression_mod.main([str(tmp_path), "--json", str(verdict_path)]) == exit_code
+    # Strict JSON: NaN/Infinity would break non-Python readers of the verdict.
+    verdict = json.loads(verdict_path.read_text(), parse_constant=pytest.fail)
+    assert verdict["pass"] is (exit_code == 0)
+    assert verdict["failure_class"] == failure_class
+    assert verdict["thresholds"] == {"MAX_FINAL_LOSS": 5.0}
+
+
+@pytest.mark.parametrize("raw", ["7,0", "nan", "inf"])
+def test_invalid_threshold_writes_failed_verdict(tmp_path, monkeypatch, raw):
+    """A malformed or non-finite threshold fails as a readable verdict, not a traceback."""
+    monkeypatch.setenv("MAX_FINAL_LOSS", raw)
+    verdict_path = tmp_path / "verdict.json"
+    assert check_regression_mod.main([str(tmp_path), "--json", str(verdict_path)]) == 1
+    verdict = json.loads(verdict_path.read_text(), parse_constant=pytest.fail)
+    assert verdict["failure_class"] == "METRICS_MISSING"
+    assert verdict["thresholds"] == {}

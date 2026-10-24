@@ -25,6 +25,10 @@ from typing import Any
 import torch
 import yaml
 
+from modelopt.torch.export.plugins.vllm_fakequant_hf import (
+    QUANTIZER_RECIPE_FORMAT,
+    QUANTIZER_RECIPE_VERSION,
+)
 from modelopt.torch.export.quant_format import QUANTIZATION_NONE
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.nn import GroupedQuantizer, SequentialQuantizer, TensorQuantizer
@@ -141,7 +145,9 @@ def gather_mcore_vllm_fq_quantizer_recipe(
     quantizer_state_by_name: dict[str, dict],
     save_directory: str | os.PathLike,
 ) -> None:
-    """Sync each rank's captured quantizer configs and save as ``quant_recipe.yaml``.
+    """Sync each rank's captured quantizer configs and save as a versioned ``quant_recipe.yaml``.
+
+    Removes both sidecars instead when no rank captured a quantizer.
 
     Args:
         quantizer_state_by_name: HF-prefixed quantizer name -> resolved config, collected in
@@ -153,10 +159,23 @@ def gather_mcore_vllm_fq_quantizer_recipe(
         DistributedProcessGroup(None),
         _merge_quantizer_states,
     )
+    if not merged:
+        # Nothing to reload (the loader rejects an empty recipe): write no sidecars, like
+        # Megatron-Bridge, and drop those of an earlier export.
+        for name in ("quantizer_state.pth", "quant_recipe.yaml"):
+            _save_quantizer_state(
+                Path(save_directory) / name, lambda path: path.unlink(missing_ok=True)
+            )
+        return
 
+    recipe = {
+        "format": QUANTIZER_RECIPE_FORMAT,
+        "version": QUANTIZER_RECIPE_VERSION,
+        "quantizers": merged,
+    }
     _save_quantizer_state(
         Path(save_directory) / "quant_recipe.yaml",
-        lambda path: path.write_text(yaml.safe_dump(merged, sort_keys=False)),
+        lambda path: path.write_text(yaml.safe_dump(recipe, sort_keys=False)),
     )
 
 
@@ -322,7 +341,15 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             index: self._get_quantizer_state(state_dict)
             for index, state_dict in enumerate([*self.layer_state_dicts.values(), self._state_dict])
         }
+
+        # The weights are written in BF16, so a source checkpoint's own quantization (e.g. FP8)
+        # no longer describes them.
+        if hasattr(self._hf_config, "quantization_config"):
+            del self._hf_config.quantization_config
+
         super().save_pretrained(save_directory, pretrained_model_name_or_path)
+        # The base exporter copies a pre-quantized source's hf_quant_config.json along with it.
+        (Path(save_directory) / "hf_quant_config.json").unlink(missing_ok=True)
 
         # Save fresh quantizer files after the base exporter copies source files.
         recipe = self._extract_quantizer_recipe_markers(quantizer_state_dicts)
@@ -501,6 +528,10 @@ def export_mcore_gpt_to_hf_vllm_fq(
             pretrained model hosted inside a model repo on huggingface.co; or
             a *directory* containing model weights saved using
             [`~PreTrainedModel.save_pretrained`], e.g., `./my_model_directory/`.
+            The source's non-model files (tokenizer, processor, generation config, remote code)
+            are copied into the export from a local directory only; for a model ID they are
+            skipped with a warning. Get a local copy first with
+            `modelopt.torch.export.ensure_local_checkpoint` to include them.
         export_extra_modules: If True, export extra modules like medusa_heads or
             eagle_module. Otherwise, only export the base model.
         dtype: The weights data type to export the unquantized layers.
