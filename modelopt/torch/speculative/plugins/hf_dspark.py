@@ -63,56 +63,26 @@ import logging
 
 import torch
 import torch.nn.functional as F
-import torch.utils.checkpoint
 from transformers import PreTrainedModel
 from transformers.trainer_pt_utils import LabelSmoother
 from transformers.utils import ModelOutput
 
 from ..dflash.conversion import DSparkDMRegistry
-from .hf_dflash import (
-    HFDFlashModel,
+from .dflash_losses import (
     _block_position_weights,
     _block_targets,
     _block_tokens,
     _masked_top1,
+    _tvd_chunk,
+    _tvd_per_token,
 )
+from .hf_dflash import HFDFlashModel
 from .modeling_dflash import DFlashBaseModelOutput
 from .modeling_dspark import DSparkModule
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["HFDSparkModel"]
-
-
-def _tvd_chunk(a, b):
-    """Per-token TVD for one row chunk: ``(softmax(a) - softmax(b)).abs().sum(-1)``."""
-    return (torch.softmax(a.float(), dim=-1) - torch.softmax(b.float(), dim=-1)).abs().sum(dim=-1)
-
-
-def _tvd_per_token(final_logits, teacher_logits, chunk_size=1024, chunk_fn=None):
-    """Total-variation distance ||softmax(a)-softmax(b)||_1 / ... per token, memory-lean.
-
-    Materializing both [N, vocab] float32 softmax tensors at once OOMs at large
-    N (num_anchors*block_size) and a 150k vocab. We compute it in row chunks and
-    gradient-checkpoint each chunk so the wide softmaxes are recomputed in backward
-    rather than held — peak memory ~ chunk_size*vocab instead of N*vocab. The math
-    is identical to ``(softmax(final)-softmax(teacher)).abs().sum(-1)``.
-
-    Chunks with ``Tensor.split``, not slicing (each slice's backward zero-fills a full
-    [N, vocab] tensor) nor ``torch.chunk`` (different chunk shapes, so recompiles).
-    """
-    _chunk = chunk_fn or _tvd_chunk
-    outs = []
-    for a, b in zip(
-        final_logits.split(chunk_size, dim=0),
-        teacher_logits.split(chunk_size, dim=0),
-        strict=True,
-    ):
-        if torch.is_grad_enabled() and a.requires_grad:
-            outs.append(torch.utils.checkpoint.checkpoint(_chunk, a, b, use_reentrant=False))
-        else:
-            outs.append(_chunk(a, b))
-    return torch.cat(outs, dim=0)
 
 
 @DSparkDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})

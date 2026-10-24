@@ -340,7 +340,7 @@ class DFlashConfig(ModeloptBaseConfig):
             "absolute — there is no outer multiplier scaling the three terms as a group — so "
             "each is the coefficient with which its term enters the total, and "
             "`loss == origin_loss + lilicorr_loss` holds exactly. Both halves and all three "
-            "weights are reported in the `lilicorr_metrics` dict the model attaches to its "
+            "weights are reported in the `draft_metrics` dict the model attaches to its "
             "forward output, so a consumer of those metrics can check the identity per step "
             "and read which composition produced a checkpoint. The three weights are validated "
             "all-or-nothing (a negative value means unset): a config that sets some but not "

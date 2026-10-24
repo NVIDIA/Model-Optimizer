@@ -26,6 +26,7 @@ training objective, and the export format against the SGLang/vLLM
 
 import json
 from copy import deepcopy
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -312,7 +313,7 @@ class TestDFlash2Forward:
         out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
         # Carried out on the forward output, not left on a private attribute, so the
         # trainer can log them; and kept as tensors to avoid a per-step CPU-GPU sync.
-        metrics = out["selector_metrics"]
+        metrics = out["draft_metrics"]
         for key in ("selector_accuracy", "selector_coverage"):
             assert torch.is_tensor(metrics[key])
             assert 0.0 <= metrics[key].item() <= 1.0
@@ -373,16 +374,16 @@ class TestDFlash2Forward:
             optimizer.step()
 
         assert out.train_acc[0][0] > 0.9
-        assert out["selector_metrics"]["selector_accuracy"].item() > 0.9
-        assert out["selector_metrics"]["selector_coverage"].item() > 0.9
+        assert out["draft_metrics"]["selector_accuracy"].item() > 0.9
+        assert out["draft_metrics"]["selector_coverage"].item() > 0.9
 
         # Candidate selection is a topk over draft logits; check it in bf16, the training dtype.
         model.to(torch.bfloat16)
         torch.manual_seed(0)
         with torch.no_grad():
             out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        assert out["selector_metrics"]["selector_accuracy"].item() > 0.9
-        assert out["selector_metrics"]["selector_coverage"].item() > 0.9
+        assert out["draft_metrics"]["selector_accuracy"].item() > 0.9
+        assert out["draft_metrics"]["selector_coverage"].item() > 0.9
 
 
 class TestCandidateSelectorAlignment:
@@ -539,6 +540,31 @@ class TestDFlash2BlockObjective:
         """1 - q(gold) is a weighted mean of probabilities, so it cannot leave [0, 1]."""
         loss = self._loss(dflash_lk_loss_type="tv", dflash_selector_loss_alpha=0.0)
         assert 0.0 <= loss <= 1.0
+
+    @pytest.mark.parametrize(
+        ("loss_type", "distill", "ce_grad"),
+        [("ce", False, True), ("tv", False, True), ("lambda", False, True), ("ce", True, False)],
+        ids=["ce", "tv", "lambda", "kd"],
+    )
+    def test_cross_entropy_gradient_follows_the_objective(self, loss_type, distill, ce_grad):
+        """The per-token CE keeps its graph exactly when the objective backpropagates through it.
+
+        D-PACE reads it first, under no_grad. A tv or lambda objective computed on that would
+        train the backbone through the selector alone; KD would hold a vocab-wide graph unused.
+        """
+        config = _get_dflash2_config()
+        config.update(
+            dflash_lk_loss_type=loss_type,
+            dflash_self_logit_distillation=distill,
+            dflash_loss_objective="dpace",
+        )
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", config)])
+        model.float().train()
+        input_ids, attention_mask, labels = _make_batch(model.dflash_config.vocab_size)
+        with patch.object(model, "_compute_loss", wraps=model._compute_loss) as compute_loss:
+            model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        assert compute_loss.call_args.args[0].ce("final").requires_grad is ce_grad
 
     @pytest.mark.parametrize("loss_type", ["tv", "lambda"])
     def test_distillation_conflict_is_rejected(self, loss_type):

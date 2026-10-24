@@ -119,6 +119,7 @@ repos:
               modelopt/torch/quantization/plugins/attention.py|
               modelopt/torch/sparsity/attention_sparsity/methods/vsa_utils.py|
               modelopt/torch/speculative/eagle/utils.py|
+              modelopt/torch/speculative/plugins/dflash_losses.py|
               modelopt/torch/speculative/plugins/hf_domino.py|
               modelopt/torch/speculative/plugins/modeling_domino.py|
               modelopt/torch/speculative/plugins/hf_dflash.py|

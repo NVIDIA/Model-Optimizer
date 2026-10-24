@@ -22,7 +22,7 @@ import json
 import logging
 import os
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -39,13 +39,17 @@ import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
 import modelopt.torch.speculative.plugins.dflash_flex_attention as dflash_flex_attention
 import modelopt.torch.speculative.plugins.hf_dflash as hf_dflash
+from modelopt.torch.speculative.plugins.dflash_losses import (
+    DraftLogits,
+    _block_targets,
+    _dpace_position_weights,
+)
 from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashAttention,
     DFlashBaseModelOutput,
     DFlashModule,
+    DraftBatch,
     HFDFlashModel,
-    _block_targets,
-    _dpace_position_weights,
     build_target_layer_ids,
 )
 from modelopt.torch.speculative.plugins.hf_dflash2 import HFDFlash2Model
@@ -62,6 +66,15 @@ from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollat
 BLOCK_SIZE = 4
 NUM_DRAFT_LAYERS = 2
 SEQ_LEN = 16  # must be multiple of BLOCK_SIZE
+
+
+def _compute_loss(model, logits, input_ids, anchors, keep, loss_mask, base_outputs=None):
+    """``model._compute_loss`` on given draft logits [B, N * bs, V]: (loss, accuracy)."""
+    batch = DraftBatch(input_ids, loss_mask, anchors, keep, base_outputs, hidden=None)
+    block_logits = logits.view(*anchors.shape, BLOCK_SIZE, -1)
+    with patch.object(model, "_draft_logits", return_value=DraftLogits(block_logits, block_logits)):
+        out = model._compute_loss(model._loss_context(batch))
+    return out.loss, out.accuracy
 
 
 class TestDFlashConvert:
@@ -274,7 +287,7 @@ class TestDPaceLossIntegration:
     def test_compute_loss_dpace_branch(self):
         """Default dpace objective produces a finite loss and valid accuracy."""
         model = self._converted_model("dpace", dflash_self_logit_distillation=False)
-        loss, acc = model._compute_loss(*self._make_inputs())
+        loss, acc = _compute_loss(model, *self._make_inputs())
         assert torch.isfinite(loss).item() and loss.item() > 0
         assert 0.0 <= acc <= 1.0
 
@@ -283,7 +296,7 @@ class TestDPaceLossIntegration:
         model = self._converted_model(
             "decay", dflash_loss_decay_factor=4.0, dflash_self_logit_distillation=False
         )
-        loss, acc = model._compute_loss(*self._make_inputs())
+        loss, acc = _compute_loss(model, *self._make_inputs())
         assert torch.isfinite(loss).item() and loss.item() > 0
         assert 0.0 <= acc <= 1.0
 
@@ -293,15 +306,15 @@ class TestDPaceLossIntegration:
         model = self._converted_model("dpace")
         inputs = self._make_inputs(vocab=vocab)
         teacher = DFlashBaseModelOutput(None, logits=torch.randn(1, SEQ_LEN, vocab))
-        loss, acc = model._compute_loss(*inputs, base_outputs=teacher)
+        loss, acc = _compute_loss(model, *inputs, base_outputs=teacher)
         assert torch.isfinite(loss).item()
         assert 0.0 <= acc <= 1.0
 
-    def test_kd_without_base_outputs_raises(self):
+    def test_kd_without_a_teacher_raises(self):
         """KD is decided by the config, so a missing teacher cannot fall back to CE."""
         model = self._converted_model("dpace")
-        with pytest.raises(ValueError, match="base_outputs"):
-            model._compute_loss(*self._make_inputs())
+        with pytest.raises(ValueError, match="base model's distribution"):
+            _compute_loss(model, *self._make_inputs(), base_outputs=DFlashBaseModelOutput(None))
 
 
 class TestDFlashSaveRestore:
@@ -1481,8 +1494,9 @@ class TestAnchorSamplingStaticShape:
         anchors = torch.tensor([[0, BLOCK_SIZE]])[:, :n_blocks]
         keep = torch.ones(bsz, n_blocks)
 
-        base_loss, base_acc = model._compute_loss(logits, input_ids, anchors, keep, loss_mask)
-        padded_loss, padded_acc = model._compute_loss(
+        base_loss, base_acc = _compute_loss(model, logits, input_ids, anchors, keep, loss_mask)
+        padded_loss, padded_acc = _compute_loss(
+            model,
             torch.cat([logits, torch.randn(bsz, pad * BLOCK_SIZE, vocab)], dim=1),
             input_ids,
             torch.cat([anchors, torch.zeros(bsz, pad, dtype=anchors.dtype)], dim=1),
@@ -1652,9 +1666,9 @@ class TestTeacherLogits:
         hidden = self._hidden(model, bsz=1)
         inputs = TestDPaceLossIntegration._make_inputs(vocab=model.config.vocab_size)
         full = DFlashBaseModelOutput(None, logits=model._base_model_lm_head(hidden))
-        loss_full, _ = model._compute_loss(*inputs, base_outputs=full)
-        loss, _ = model._compute_loss(
-            *inputs, base_outputs=DFlashBaseModelOutput(None, base_hidden=hidden)
+        loss_full, _ = _compute_loss(model, *inputs, base_outputs=full)
+        loss, _ = _compute_loss(
+            model, *inputs, base_outputs=DFlashBaseModelOutput(None, base_hidden=hidden)
         )
         torch.testing.assert_close(loss, loss_full)
 

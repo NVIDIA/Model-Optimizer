@@ -39,7 +39,8 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ..dflash.conversion import DFlash2DMRegistry
-from .hf_dflash import HFDFlashModel, _block_targets, _block_tokens
+from .dflash_losses import LossOutput, _block_tokens
+from .hf_dflash import HFDFlashModel
 from .modeling_dflash2 import DFlash2Module
 
 __all__ = ["HFDFlash2Model"]
@@ -83,22 +84,6 @@ class HFDFlash2Model(HFDFlashModel):
                 "optimizes a soft target instead. Set dflash_self_logit_distillation=false, "
                 "or dflash_lk_loss_type='ce' to keep distillation."
             )
-        self._selector_metrics = None
-
-    def forward(self, *args, **kwargs):
-        """Run the DFlash training forward and attach the candidate-selector metrics.
-
-        The variant is the objective, so the pipeline above it is inherited verbatim;
-        this only carries out what ``_compute_loss`` produced. Without it
-        ``selector_coverage`` -- the only signal distinguishing a selector that is
-        choosing from one being handed the gold token -- never reaches the logs.
-        """
-        self._selector_metrics = None
-        outputs = super().forward(*args, **kwargs)
-        if self._selector_metrics is not None:
-            outputs["selector_metrics"] = self._selector_metrics
-            self._selector_metrics = None
-        return outputs
 
     def get_exporter(self):
         """Get the exporter for the DFlash2 draft model."""
@@ -163,7 +148,7 @@ class HFDFlash2Model(HFDFlashModel):
         # every training step. The trainer converts them at the logging boundary.
         return loss, accuracy.detach(), coverage.detach()
 
-    def _lk_loss(self, terms):
+    def _lk_loss(self, ctx):
         """Re-weight the block objective between cross-entropy and acceptance.
 
         Both terms are read off the same per-position cross-entropy the backbone loss
@@ -181,66 +166,34 @@ class HFDFlash2Model(HFDFlashModel):
         The blend weight is detached, so it reshapes the objective without adding a
         gradient path of its own.
         """
-        ce, weights, weight_sum = terms.ce_per_token, terms.weights, terms.weight_sum
-        assert ce is not None, (
-            "the KD path produced no per-position cross-entropy, so q(gold) is "
-            "unavailable and the blend would silently fall back to it; modify() is "
-            "supposed to have rejected this combination at convert time"
-        )
+        ce, weights, weight_sum = ctx.ce("final"), ctx.weights.view(-1), ctx.weight_sum
         gold_probability = torch.exp(-ce)
         tv_loss = ((1.0 - gold_probability) * weights).sum() / weight_sum
         if self.dflash_lk_loss_type == "tv":
             return tv_loss
 
         ce_loss = (ce * weights).sum() / weight_sum
-        mask = terms.supervised_mask
+        mask = ctx.targets.mask.view(-1)
         acceptance = (gold_probability.detach() * mask).sum() / (mask.sum() + 1e-6)
         ce_share = self.dflash_lk_ce_scale * torch.exp(-self.dflash_lk_ce_decay * acceptance)
         return ce_share * ce_loss + (1.0 - ce_share) * tv_loss
 
-    def _compute_loss(
-        self,
-        logits,
-        input_ids,
-        anchor_positions,
-        block_keep_mask,
-        loss_mask,
-        *,
-        draft_hidden=None,
-        base_outputs=None,
-    ):
+    def _compute_loss(self, ctx):
         """Backbone DFlash loss plus the candidate-selector cross-entropy.
 
-        Reuses ``HFDFlashModel._compute_loss`` for the backbone term, then rebuilds
-        the same target/weight alignment for the selector term. Reported accuracy
-        stays the backbone's top-1, so DFlash and DFlash2 runs remain comparable;
-        the selector's own accuracy is logged separately.
+        Reported accuracy stays the backbone's top-1, so DFlash and DFlash2 runs remain
+        comparable; the selector's own accuracy and coverage are added to the metrics.
         """
-        loss, accuracy, terms = super()._compute_loss(
-            logits,
-            input_ids,
-            anchor_positions,
-            block_keep_mask,
-            loss_mask,
-            draft_hidden=draft_hidden,
-            base_outputs=base_outputs,
-            return_terms=True,
-        )
+        out = super()._compute_loss(ctx)
+        loss = out.loss
         if self.dflash_lk_loss_type != "ce":
-            loss = self._lk_loss(terms)
-        if self.dflash_selector_loss_alpha <= 0 or draft_hidden is None:
-            return loss, accuracy
+            loss = self._lk_loss(ctx)
+        if self.dflash_selector_loss_alpha <= 0:
+            return out._replace(loss=loss)
 
-        bsz = input_ids.shape[0]
+        batch, targets = ctx.batch, ctx.targets
+        bsz, n_blocks = batch.anchors.shape
         block_size = self.dflash_block_size
-        n_blocks = anchor_positions.shape[1]
-
-        # The backbone's supervision mask, without its position weighting (decay/D-PACE):
-        # that shapes *where* the backbone spends capacity, while the selector should learn
-        # every position's transition equally.
-        targets = _block_targets(
-            input_ids, anchor_positions, block_keep_mask, loss_mask, block_size, self._label_shift
-        )
 
         # Teacher-forced predecessor of block position k is the real token at anchor+k-1.
         # Only offsets 1..block_size-1 are supervised (the mask zeroes slot 0), so the
@@ -251,18 +204,24 @@ class HFDFlash2Model(HFDFlashModel):
         # from the anchor token, so ITS position 0 corresponds to block offset 1. A caller
         # that hands greedy_path the full 0..block_size-1 candidate set is off by one.
         predecessor_ids = _block_tokens(
-            input_ids, anchor_positions, block_size, self._label_shift - 1
+            batch.input_ids, batch.anchors, block_size, self._label_shift - 1
         )
 
+        # The backbone's supervision mask, without its position weighting (decay/D-PACE):
+        # that shapes *where* the backbone spends capacity, while the selector should learn
+        # every position's transition equally.
         selector_loss, selector_accuracy, selector_coverage = self._selector_loss(
-            logits.reshape(bsz, n_blocks, block_size, -1),
+            ctx.logits.backbone,
             targets.token_ids,
-            draft_hidden.reshape(bsz, n_blocks, block_size, -1),
+            batch.hidden.reshape(bsz, n_blocks, block_size, -1),
             predecessor_ids,
             targets.mask,
         )
-        self._selector_metrics = {
+        metrics = {
+            **out.metrics,
             "selector_accuracy": selector_accuracy,
             "selector_coverage": selector_coverage,
         }
-        return loss + self.dflash_selector_loss_alpha * selector_loss, accuracy
+        return LossOutput(
+            loss + self.dflash_selector_loss_alpha * selector_loss, out.accuracy, metrics
+        )

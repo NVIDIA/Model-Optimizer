@@ -77,7 +77,8 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ..dflash.conversion import LiLiCorrDMRegistry
-from .hf_dflash import HFDFlashModel, _block_positions, _block_targets
+from .dflash_losses import LossOutput, _block_positions
+from .hf_dflash import HFDFlashModel
 from .modeling_lilicorr import LiLiCorrModule
 
 logger = logging.getLogger(__name__)
@@ -173,7 +174,6 @@ class HFLiLiCorrModel(HFDFlashModel):
             self.dflash_lilicorr_w_cal,
             self.dflash_lilicorr_margin,
         )
-        self._lilicorr_metrics = None
 
     @property
     def _needs_base_logits(self) -> bool:
@@ -190,77 +190,33 @@ class HFLiLiCorrModel(HFDFlashModel):
 
         return LiLiCorrExporter(self)
 
-    def _compute_loss(
-        self,
-        logits,
-        input_ids,
-        anchor_positions,
-        block_keep_mask,
-        loss_mask,
-        *,
-        draft_hidden=None,
-        base_outputs=None,
-    ):
+    def _compute_loss(self, ctx):
         """Add the LiLiCorr lattice terms to the DFlash block loss.
 
         The returned accuracy is the reranker's greedy path-prefix fraction — the
         quantity that tracks acceptance length — rather than the backbone's per-token
         accuracy, which is reported as ``origin_accuracy`` in the metrics instead.
-
-        The two things this needs beyond the shared signature -- the target-layer hidden
-        states it anchors on, and the target distribution its penalty and calibration
-        terms read -- both come from ``base_outputs``, the container
-        ``HFDFlashModel.forward`` already builds for them.
         """
-        target_hidden = base_outputs.target_hidden if base_outputs is not None else None
-        if draft_hidden is None or target_hidden is None:
-            raise ValueError(
-                "LiLiCorr requires draft_hidden and target_hidden in _compute_loss: the "
-                "reranker reads the draft's per-slot hidden states and anchors on a "
-                "committed target row."
-            )
-
-        origin_loss, origin_accuracy = super()._compute_loss(
-            logits,
-            input_ids,
-            anchor_positions,
-            block_keep_mask,
-            loss_mask,
-            base_outputs=base_outputs,
-        )
+        out = super()._compute_loss(ctx)
+        batch, targets = ctx.batch, ctx.targets
         # The backbone's own supervision, before its position weighting, so both losses
         # train the same positions.
-        targets = _block_targets(
-            input_ids,
-            anchor_positions,
-            block_keep_mask,
-            loss_mask,
-            self.dflash_block_size,
-            self._label_shift,
-        )
         lilicorr_loss, accuracy, metrics = self._compute_lilicorr_loss(
-            logits=logits,
+            logits=ctx.logits.final,
             target_ids=targets.token_ids,
             # Block position 0 is the anchor -- the one row whose input embedding is a real
             # verified token -- so the lattice covers positions 1..bs-1.
             slot_mask=targets.mask[:, :, 1:] > 0.5,
-            anchor_positions=anchor_positions,
-            draft_hidden=draft_hidden,
-            target_hidden=target_hidden,
-            base_outputs=base_outputs,
+            anchor_positions=batch.anchors,
+            draft_hidden=batch.hidden,
+            target_hidden=batch.base_outputs.target_hidden,
+            base_outputs=batch.base_outputs,
         )
         # The identity `loss == origin_loss + lilicorr_loss` is the cheap parity check
         # on this objective, so both halves are reported next to the total.
-        # Batched into one device-to-host sync rather than two per-step float() calls.
-        origin_scalars = torch.stack(
-            [
-                origin_loss.detach().reshape(()).float(),
-                torch.as_tensor(origin_accuracy, dtype=torch.float32, device=origin_loss.device),
-            ]
-        ).tolist()
-        metrics["origin_loss"], metrics["origin_accuracy"] = origin_scalars
-        self._lilicorr_metrics = metrics
-        return origin_loss + lilicorr_loss, accuracy
+        metrics["origin_loss"] = out.loss.detach().float()
+        metrics["origin_accuracy"] = torch.full((), out.accuracy, device=out.loss.device)
+        return LossOutput(out.loss + lilicorr_loss, accuracy, metrics)
 
     def _compute_lilicorr_loss(
         self,
@@ -277,7 +233,7 @@ class HFLiLiCorrModel(HFDFlashModel):
 
         Returns ``(loss, accuracy, metrics)``. ``loss`` already carries the absolute
         term weights, ``accuracy`` is the greedy path-prefix fraction, and ``metrics``
-        holds Python floats read back in a single device sync.
+        holds detached 0-dim tensors.
         """
         module = self.dflash_module
         head = module.lilicorr
@@ -448,17 +404,18 @@ class HFLiLiCorrModel(HFDFlashModel):
         raw_metrics["lilicorr_penalty"] = penalty_loss
         raw_metrics["lilicorr_calibration"] = cal_loss
 
-        # One device sync for every scalar, rather than one per metric.
-        names = list(raw_metrics)
-        stacked = torch.stack([raw_metrics[name].detach().reshape(()).float() for name in names])
-        metrics = dict(zip(names, stacked.tolist(), strict=True))
+        metrics = {name: value.detach().reshape(()).float() for name, value in raw_metrics.items()}
         # Weights recorded alongside the terms so a run states its own composition
-        # without the reader expanding the config.
-        metrics["lilicorr_w_ce"] = self.dflash_lilicorr_w_ce
-        metrics["lilicorr_w_margin"] = self.dflash_lilicorr_w_margin
-        metrics["lilicorr_w_pen"] = self.dflash_lilicorr_w_pen
-        metrics["lilicorr_w_cal"] = self.dflash_lilicorr_w_cal
-        accuracy = metrics["lilicorr_selected_prefix"] / float(num_slots)
+        # without the reader expanding the config. float64 holds the configured values exactly.
+        weights = {
+            "lilicorr_w_ce": self.dflash_lilicorr_w_ce,
+            "lilicorr_w_margin": self.dflash_lilicorr_w_margin,
+            "lilicorr_w_pen": self.dflash_lilicorr_w_pen,
+            "lilicorr_w_cal": self.dflash_lilicorr_w_cal,
+        }
+        for name, weight in weights.items():
+            metrics[name] = torch.full((), weight, dtype=torch.float64, device=loss.device)
+        accuracy = metrics["lilicorr_selected_prefix"].item() / float(num_slots)
         return loss, accuracy, metrics
 
     def _distractor_penalty(
@@ -676,18 +633,3 @@ class HFLiLiCorrModel(HFDFlashModel):
             / supervised_count,
         }
         return metrics
-
-    def forward(self, *args, **kwargs):
-        """Run the DFlash training forward and attach the LiLiCorr metrics.
-
-        The whole variant is the objective, so the pipeline above it is inherited
-        verbatim rather than reimplemented; this only carries the metrics that
-        ``_compute_loss`` produced out to the caller, the way DSpark and Domino do
-        from their own forwards.
-        """
-        self._lilicorr_metrics = None
-        outputs = super().forward(*args, **kwargs)
-        if self._lilicorr_metrics is not None:
-            outputs["lilicorr_metrics"] = self._lilicorr_metrics
-            self._lilicorr_metrics = None
-        return outputs
