@@ -126,10 +126,12 @@ def test_the_loader_refuses_a_plan_for_another_world(gloo_world_of_one):
         load_and_prepare_ep("unused", DistributionPlan(2, ep_size=2))
 
 
-def test_a_hub_id_is_made_local_before_the_weights_load(monkeypatch):
+@pytest.mark.parametrize("quant_method", [None, "fp8", "mxfp4"])
+def test_a_hub_id_is_made_local_before_the_weights_load(monkeypatch, quant_method):
     """The export reads the tensors the load could not place back from the checkpoint it records,
     which must be a local directory: a Hub ID there leaves the export nothing to read. The load
-    resolves it once the plan and the config pass, before anything reads a weight."""
+    resolves it once the plan and the config pass, before anything reads a weight: a checkpoint
+    unquantized or in a format the load dequantizes (block FP8, MXFP4) passes the format check."""
 
     class _ResolvedError(Exception):
         """Stops the load where it resolves the checkpoint."""
@@ -146,10 +148,12 @@ def test_a_hub_id_is_made_local_before_the_weights_load(monkeypatch):
     monkeypatch.setattr(moe, "require_transformers", lambda *args: None)
     monkeypatch.setattr(model_load_utils, "_resolve_checkpoint_dir", resolve)
 
+    config = SimpleNamespace()
+    if quant_method is not None:
+        config.quantization_config = {"quant_method": quant_method}
+
     with pytest.raises(_ResolvedError):
-        load_and_prepare_ep(
-            "org/model", DistributionPlan(2, ep_size=2), hf_config=SimpleNamespace()
-        )
+        load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
 
     assert resolved == ["org/model"]
 
