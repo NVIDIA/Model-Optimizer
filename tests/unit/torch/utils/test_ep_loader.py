@@ -105,12 +105,17 @@ def _model_with_decoder_at(prefix):
 @pytest.mark.parametrize(
     ("plan", "error", "match"),
     [
-        (DistributionPlan(2), ValueError, "shards no routed experts"),
-        (DistributionPlan(2, ep_size=2, dense="fsdp"), NotImplementedError, "replicates the dense"),
+        pytest.param(DistributionPlan(2), ValueError, "shards no routed experts", id="no-experts"),
+        # FSDP2 within each of several expert-parallel groups: a layout the export cannot write.
+        pytest.param(
+            DistributionPlan(4, 2, "fsdp"),
+            NotImplementedError,
+            "expert-data-parallel",
+            id="dense-hsdp",
+        ),
     ],
-    ids=["no-expert-parallelism", "sharded-dense"],
 )
-def test_the_loader_refuses_a_plan_it_cannot_load_by(plan, error, match):
+def test_the_loader_refuses_a_plan_it_cannot_carry_out(plan, error, match):
     """Before anything else: no process group, transformers release or checkpoint is looked at."""
     with pytest.raises(error, match=match):
         load_and_prepare_ep("unused", plan)

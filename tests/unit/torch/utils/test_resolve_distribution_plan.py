@@ -442,6 +442,27 @@ def test_only_what_expert_parallelism_leaves_whole_must_fit(run_as, serve, gpu_m
 
 
 @needs_qwen3_moe_ep_plan
+def test_a_block_fp8_moes_dense_part_is_not_sharded_expert_parallel(
+    run_as, serve, gpu_memory, tmp_path
+):
+    """The expert-parallel load shards the dense part through DCP, which cannot dequantize block-fp8.
+    Left to decide, the plan replicates it however big; asked to shard it, it refuses. Without
+    expert parallelism the rule does not apply."""
+    run_as(4)
+    config = _qwen3_moe(num_experts=8)
+    config.quantization_config = {"quant_method": "fp8"}
+    serve(config)
+    gpu_memory(1)
+
+    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 4)
+    with pytest.raises(NotImplementedError, match="block-fp8"):
+        resolve_distribution_plan(str(tmp_path), dense="fsdp")
+    assert resolve_distribution_plan(str(tmp_path), ep_size=1)[0] == DistributionPlan(
+        4, dense="fsdp"
+    )
+
+
+@needs_qwen3_moe_ep_plan
 def test_the_env_knobs_override_the_automatic_plan(run_as, serve, monkeypatch, tmp_path):
     monkeypatch.setenv("MODELOPT_EP_DEGREE", "2")
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
