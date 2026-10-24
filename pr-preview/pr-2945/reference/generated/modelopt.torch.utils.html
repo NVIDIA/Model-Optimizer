@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>utils - Model Optimizer 0.0.1.dev1+ge6f8f29fc</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="cpp_extension" href="modelopt.torch.utils.cpp_extension.html" /><link rel="prev" title="tracer" href="modelopt.torch.trace.tracer.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>utils - Model Optimizer 0.0.1.dev1+gbd1b69514</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="cpp_extension" href="modelopt.torch.utils.cpp_extension.html" /><link rel="prev" title="tracer" href="modelopt.torch.trace.tracer.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -361,6 +361,7 @@ data-aria-dark="Switch to auto color mode">
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.moe.html">moe</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.network.html">network</a></li>
 <li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
@@ -466,37 +467,40 @@ data-aria-dark="Switch to auto color mode">
 <tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.utils.mlflow.html#module-modelopt.torch.utils.mlflow" title="modelopt.torch.utils.mlflow"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.mlflow</span></code></a></p></td>
 <td><p>Record a script run on an MLflow tracking server.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html#module-modelopt.torch.utils.nemotron_vlm_dataset_utils" title="modelopt.torch.utils.nemotron_vlm_dataset_utils"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.nemotron_vlm_dataset_utils</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.utils.moe.html#module-modelopt.torch.utils.moe" title="modelopt.torch.utils.moe"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.moe</span></code></a></p></td>
+<td><p>HuggingFace-coupled MoE expert-parallel (EP) helpers.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html#module-modelopt.torch.utils.nemotron_vlm_dataset_utils" title="modelopt.torch.utils.nemotron_vlm_dataset_utils"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.nemotron_vlm_dataset_utils</span></code></a></p></td>
 <td><p>Nemotron VLM dataset utilities.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.utils.network.html#module-modelopt.torch.utils.network" title="modelopt.torch.utils.network"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.network</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.utils.network.html#module-modelopt.torch.utils.network" title="modelopt.torch.utils.network"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.network</span></code></a></p></td>
 <td><p>Utility functions for PyTorch models.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.utils.perf.html#module-modelopt.torch.utils.perf" title="modelopt.torch.utils.perf"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.perf</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.utils.perf.html#module-modelopt.torch.utils.perf" title="modelopt.torch.utils.perf"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.perf</span></code></a></p></td>
 <td><p>Utility functions for performance measurement.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.utils.plugins.html#module-modelopt.torch.utils.plugins" title="modelopt.torch.utils.plugins"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.plugins</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.utils.plugins.html#module-modelopt.torch.utils.plugins" title="modelopt.torch.utils.plugins"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.plugins</span></code></a></p></td>
 <td><p>Handles utility plugins for third-party modules.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.utils.random.html#module-modelopt.torch.utils.random" title="modelopt.torch.utils.random"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.random</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.utils.random.html#module-modelopt.torch.utils.random" title="modelopt.torch.utils.random"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.random</span></code></a></p></td>
 <td><p>Random number generator with a deterministic, synchronized seed for sampling.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.utils.regex.html#module-modelopt.torch.utils.regex" title="modelopt.torch.utils.regex"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.regex</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.utils.regex.html#module-modelopt.torch.utils.regex" title="modelopt.torch.utils.regex"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.regex</span></code></a></p></td>
 <td><p>Utilities for pattern matching on module and layer names.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.utils.robust_json.html#module-modelopt.torch.utils.robust_json" title="modelopt.torch.utils.robust_json"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.robust_json</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.utils.robust_json.html#module-modelopt.torch.utils.robust_json" title="modelopt.torch.utils.robust_json"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.robust_json</span></code></a></p></td>
 <td><p>Provides a robust JSON encoder that can handle various types of objects.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.utils.serialization.html#module-modelopt.torch.utils.serialization" title="modelopt.torch.utils.serialization"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.serialization</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.utils.serialization.html#module-modelopt.torch.utils.serialization" title="modelopt.torch.utils.serialization"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.serialization</span></code></a></p></td>
 <td><p>Serialization utilities for secure checkpoint saving and loading.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.utils.speech_dataset_utils.html#module-modelopt.torch.utils.speech_dataset_utils" title="modelopt.torch.utils.speech_dataset_utils"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.speech_dataset_utils</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.utils.speech_dataset_utils.html#module-modelopt.torch.utils.speech_dataset_utils" title="modelopt.torch.utils.speech_dataset_utils"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.speech_dataset_utils</span></code></a></p></td>
 <td><p>Utility functions for getting samples and forward loop function for different speech datasets.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.utils.tensor.html#module-modelopt.torch.utils.tensor" title="modelopt.torch.utils.tensor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.tensor</span></code></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.utils.tensor.html#module-modelopt.torch.utils.tensor" title="modelopt.torch.utils.tensor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.tensor</span></code></a></p></td>
 <td><p>Utility functions for PyTorch tensors.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.utils.vlm_dataset_utils.html#module-modelopt.torch.utils.vlm_dataset_utils" title="modelopt.torch.utils.vlm_dataset_utils"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.vlm_dataset_utils</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.utils.vlm_dataset_utils.html#module-modelopt.torch.utils.vlm_dataset_utils" title="modelopt.torch.utils.vlm_dataset_utils"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.utils.vlm_dataset_utils</span></code></a></p></td>
 <td><p>Utility functions for getting samples and dataloader for different VLM calibration datasets.</p></td>
 </tr>
 </tbody>

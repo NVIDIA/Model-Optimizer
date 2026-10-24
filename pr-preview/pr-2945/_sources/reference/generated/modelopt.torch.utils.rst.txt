@@ -53,6 +53,10 @@ utils
 
 
 
+   modelopt.torch.utils.moe
+
+
+
    modelopt.torch.utils.nemotron_vlm_dataset_utils
 
 
