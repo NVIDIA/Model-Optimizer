@@ -32,7 +32,8 @@ Changelog
 
 - The ``evaluation`` agent skill can stop looping ("doom loop") reasoning early: ask it to avoid doom loops and it adds vLLM's ``repetition_detection`` request field (vLLM 0.17.0 or later) to every task, ending a request once its output repeats. Use the same setting for baseline and candidate runs.
 - Add the DLA graph-surgery pipeline with explicitly ordered transforms and a
-  ``--remove-all-qdq`` option.
+  ``--remove-all-qdq`` option. Use ``--force-fp16-activations`` for FP16 internal
+  computation with FP32 model boundaries.
 
 **Backward Breaking Changes**
 
