@@ -230,7 +230,7 @@ def test_get_model_uses_expected_dtype_kwarg(
         torch_dtype=torch.bfloat16,
     )
 
-    class FakeModel:
+    class FakeModel(torch.nn.Module):  # load_pretrained records its plan on every module
         def eval(self):
             calls["eval"] = True
 
@@ -315,7 +315,7 @@ def test_get_model_device_map_for_diffusion_gemma(
         torch_dtype=torch.bfloat16,
     )
 
-    class FakeModel:
+    class FakeModel(torch.nn.Module):  # load_pretrained records its plan on every module
         def eval(self):
             calls["eval"] = True
 
@@ -410,7 +410,7 @@ def test_get_model_deepseek_honors_trust_remote_code(
         torch_dtype=torch.bfloat16,
     )
 
-    class FakeModel:
+    class FakeModel(torch.nn.Module):  # load_pretrained records its plan on every module
         def eval(self):
             return None
 
