@@ -27,13 +27,13 @@ RUN cd Model-Optimizer && \
 # Llama4 requires this
 RUN pip install flash-attn==2.7.4.post1 --no-build-isolation
 
-# Pre-compile CUDA extensions into a world-accessible directory so the vllm
-# user can use the cache at runtime.
+# Pre-compile CUDA extensions so the vllm user can use the cache at runtime.
 ENV TORCH_EXTENSIONS_DIR=/workspace/torch_extensions
 RUN python3 -c "import modelopt.torch.quantization.extensions as ext; ext.precompile()" || true
 
-# Allow the non-root vllm user to access the workspace
-RUN chmod -R 777 /workspace
+# Only the vllm user may write here, since this code is loaded into the serving process. The base
+# image's vllm user has GID 0 and no vllm group exists, so chown the user only.
+RUN chown -R vllm /workspace && chmod -R go-w /workspace
 
 USER vllm
 
