@@ -224,6 +224,17 @@ class PipelineManager:
         params.pop("enable_swizzle_layout", None)
         params.pop("padding_strategy", None)
         params.pop("enable_layerwise_quant_metadata", None)
+        # Calibration-only knobs read in calibration.py; the pipeline constructor rejects them.
+        for key in (
+            "height",
+            "width",
+            "num_frames",
+            "frame_rate",
+            "seed",
+            "images",
+            "tiling_config",
+        ):
+            params.pop(key, None)
 
         if not checkpoint_path:
             raise ValueError("Missing required extra_param: checkpoint_path.")

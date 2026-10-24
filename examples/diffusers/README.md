@@ -165,6 +165,14 @@ python quantize.py \
 > (including quantized or distilled checkpoints) remain subject to the LTX Community License
 > Agreement and are **not** covered by Apache 2.0.
 
+> [!NOTE]
+> This example targets the LTX-2 packages at commit
+> [`28c3c73`](https://github.com/Lightricks/LTX-2/commit/28c3c73fe557666c3de176e1e50a5220152ccfca)
+> (`QuantizationPolicy.fp8_cast()` and `checkpoint_path`/`gemma_root` pipeline arguments), e.g.
+> `pip install "ltx-core @ git+https://github.com/Lightricks/LTX-2.git@28c3c73#subdirectory=packages/ltx-core" "ltx-pipelines @ git+https://github.com/Lightricks/LTX-2.git@28c3c73#subdirectory=packages/ltx-pipelines"`.
+> Newer LTX-2 releases removed `fp8_cast()` and changed the pipeline constructor, so this example does
+> not run on them yet.
+
 This example produces three outputs: a PyTorch checkpoint (`--quantized-torch-ckpt-save-path`), a Hugging Face checkpoint (`--hf-ckpt-dir`), and a ComfyUI-compatible merged safetensor (`--extra-param merged_base_safetensor_path`).
 
 ```sh
