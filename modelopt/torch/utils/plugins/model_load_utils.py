@@ -452,8 +452,14 @@ def _route(plan: DistributionPlan) -> str | None:
     from modelopt.torch.utils import distributed as dist
 
     if plan.world_size != dist.size():
+        unset = (
+            f" This process is one of a {os.environ['WORLD_SIZE']}-rank launch whose process "
+            "group is not set up: set it up first, with distributed_run()."
+            if dist.is_distributed_launch() and not dist.is_initialized()
+            else ""
+        )
         raise ValueError(
-            f"{plan!r} is for {plan.world_size} ranks, but this run has {dist.size()}."
+            f"{plan!r} is for {plan.world_size} ranks, but this run has {dist.size()}.{unset}"
         )
     if plan.is_expert_parallel:
         raise NotImplementedError(
@@ -477,6 +483,12 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
     kwargs = dict(kwargs)
     if kwargs.get("dtype", "auto") == "auto":
         kwargs.pop("dtype", None)  # A sharded load keeps the checkpoint's dtype.
+    if "dtype" in kwargs:
+        raise TypeError(
+            f"The {route} load reads the checkpoint's tensors as stored and keeps their dtype, so "
+            f"dtype={kwargs['dtype']!r} does not apply to it; FSDP2's mp_policy sets the dtype "
+            "it computes in."
+        )
     unknown = sorted(set(kwargs) - _SHARDED_LOAD_OPTIONS[route])
     if unknown:
         whole = (
@@ -515,6 +527,12 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
                 f"The {route} load shards through a process group, even on one rank, which a "
                 "process started without a launcher cannot set up; launch it with "
                 "`torchrun --nproc_per_node=1`."
+            )
+        if dist.is_distributed_launch():
+            # Its group would be the launch's, over ranks this plan was not decided for.
+            raise RuntimeError(
+                f"The {route} load needs this {os.environ['WORLD_SIZE']}-rank launch's process "
+                "group, which is not set up yet; set it up first, with distributed_run()."
             )
         dist.setup()
     return parallel_load_and_prepare_fsdp2(

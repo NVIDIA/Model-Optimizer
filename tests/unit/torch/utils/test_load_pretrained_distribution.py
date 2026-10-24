@@ -279,6 +279,7 @@ def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path):
     ("change", "error", "match"),
     [
         ({"kwargs": {"device_map": "auto"}}, TypeError, r"\['device_map'\] do not apply"),
+        ({"kwargs": {"dtype": torch.bfloat16}}, TypeError, "keeps their dtype"),
         ({"auto_class": AutoModel}, NotImplementedError, "builds its model class itself"),
         ({"mtp": True}, NotImplementedError, "cannot build the MTP head"),
         (
@@ -287,7 +288,7 @@ def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path):
             "config and hf_config both name",
         ),
     ],
-    ids=["placement", "model_class", "mtp_head", "two_configs"],
+    ids=["placement", "dtype", "model_class", "mtp_head", "two_configs"],
 )
 def test_a_sharded_load_refuses_what_it_cannot_honor(
     run_as, serve, loaders, process_group, monkeypatch, tmp_path, change, error, match
@@ -391,15 +392,27 @@ def test_a_single_process_fsdp2_load_sets_up_its_group_of_one(
     assert (call["rank"], call["world_size"]) == (0, 1)
 
 
-def test_a_single_process_fsdp2_load_needs_a_launcher(monkeypatch, serve, loaders, tmp_path):
+@pytest.mark.parametrize(
+    ("launch", "match"),
+    [(None, "torchrun --nproc_per_node=1"), ("8", "8-rank launch's process group")],
+    ids=["no-launcher", "launch-without-its-group"],
+)
+def test_a_single_process_fsdp2_load_needs_a_launcher(
+    monkeypatch, serve, loaders, tmp_path, launch, match
+):
     """Started without one, the process cannot set its group of one up; it is told to launch with
-    torchrun rather than fail inside init_process_group."""
+    torchrun rather than fail inside init_process_group. One of a multi-rank launch whose group is
+    not up yet would set up the launch's group instead, over ranks its plan was not decided for."""
     serve(LlamaConfig(**_TINY))
-    monkeypatch.delenv("RANK", raising=False)
+    if launch is None:
+        monkeypatch.delenv("RANK", raising=False)
+    else:
+        monkeypatch.setenv("RANK", "0")
+        monkeypatch.setenv("WORLD_SIZE", launch)
     monkeypatch.setattr(dist, "is_initialized", lambda: False)
     monkeypatch.setattr(dist, "setup", lambda timeout=None: pytest.fail("set a group up"))
 
-    with pytest.raises(RuntimeError, match="torchrun --nproc_per_node=1"):
+    with pytest.raises(RuntimeError, match=match):
         load_pretrained(str(tmp_path), distribution=DistributionPlan(dense="fsdp"))
     assert loaders == {}
 
