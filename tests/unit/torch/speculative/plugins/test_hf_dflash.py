@@ -1291,6 +1291,56 @@ class TestDFlashDraftActivationCheckpointing:
             assert torch.equal(grad, grads[True][name]), name
 
 
+# The variants with their own training forward, each of which must weight the loss alike.
+_DRAFT_HEADS = {
+    "dflash": {},
+    "dspark": {"projector_type": "dspark", "markov_rank": 16, "shift_label": True},
+    "domino": {
+        "projector_type": "domino",
+        "gru_hidden_dim": 32,
+        "emb_dim": 16,
+        "shift_label": True,
+    },
+}
+
+
+@pytest.mark.parametrize("head", sorted(_DRAFT_HEADS))
+def test_every_anchor_position_weighs_the_same(head, monkeypatch):
+    """Answers with 13 and 8 anchor positions, 2 sampled anchors each: in one micro-batch, the
+    loss is each answer's mean loss weighted by its positions, over ``num_items_in_batch``."""
+    config = get_dflash_config()
+    config["dflash_self_logit_distillation"] = False
+    config["dflash_loss_objective"] = "decay"
+    config["dflash_loss_decay_factor"] = 0.0  # every supervised row weighs the same
+    config["dflash_architecture_config"].update(_DRAFT_HEADS[head])
+    model = get_tiny_llama(num_hidden_layers=4, dtype=torch.float32)
+    mtsp.convert(model, [("dflash", config)])
+    model.train()
+
+    torch.manual_seed(0)
+    input_ids = torch.randint(1, model.dflash_config.vocab_size, (2, SEQ_LEN))
+    labels = input_ids.clone()
+    labels[1, 8:] = -100
+    anchors = torch.tensor([[0, 4], [0, 3]])  # every row of these blocks is supervised
+
+    def loss(rows, num_items=None):
+        keep = torch.ones(len(rows), 2, dtype=torch.bool)
+        monkeypatch.setattr(model, "_sample_anchor_positions", lambda *_: (anchors[rows], keep))
+        ids = input_ids[rows]
+        out = model(
+            input_ids=ids,
+            attention_mask=torch.ones_like(ids),
+            labels=labels[rows],
+            num_items_in_batch=num_items,
+        )
+        return out.loss.item()
+
+    alone = loss([0]), loss([1])
+    assert loss([0, 1], num_items=30) == pytest.approx(
+        (13 * alone[0] + 8 * alone[1]) / 30, rel=1e-5
+    )
+
+
 def _legacy_sample_anchor_positions(model, seq_len, loss_mask, device):
     """Verbatim copy of the pre-static implementation, kept as the semantic reference."""
     bs = model.dflash_block_size
