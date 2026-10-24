@@ -92,8 +92,13 @@ class StaticLossBalancer(DistillationLossBalancer):
             ValueError if kd_loss_weight is out of bounds.
         """
         super().__init__()
-        if isinstance(kd_loss_weight, float):
-            kd_loss_weight = [kd_loss_weight]
+        if isinstance(kd_loss_weight, (int, float)):
+            kd_loss_weight = [float(kd_loss_weight)]
+
+        if any(w < 0.0 for w in kd_loss_weight):
+            raise ValueError(
+                f"Individual kd_loss_weight values must be non-negative, got {kd_loss_weight}"
+            )
 
         sum_kd_loss_weight = sum(kd_loss_weight)
         if sum_kd_loss_weight < 0.0 or sum_kd_loss_weight > 1.0:
