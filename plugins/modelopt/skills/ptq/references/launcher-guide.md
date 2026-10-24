@@ -26,10 +26,15 @@ pipeline:
       - EXPORT_PATH: /scratchspace/exported_model
     slurm_config:
       _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/pytorch:26.09-py3
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: <num_gpus>
 ```
+
+Set `container` explicitly for HF PTQ, or use a matching cached `.sqsh`.
+The factory's TRT-LLM default is not the PTQ recommendation. Check dependencies
+per `slurm-setup-ptq.md` and record the resolved image digest and package versions.
 
 > **Match `gpus_per_node` to the cluster's node GPU count / QOS minimum.** If it
 > is below what the QOS requires (many clusters mandate a full node), `sbatch`
@@ -46,8 +51,9 @@ pipeline:
 > `transformers>=4.57,<4.58` is mangled by shell redirection (`>`/`<`) and
 > silently dropped — the deps never install. Use exact `==` pins (no `>`/`<`).
 > The right version is **model-specific** — a brand-new architecture may need a
-> newer transformers than the repo's library pin (e.g. Qwen3.5's `qwen3_5` needs
-> `EXTRA_PIP_DEPS: "transformers==5.5.0"`); pick what the target model requires.
+> newer Transformers than the image provides. For Qwen3.5/3.8 (`qwen3_5`), use
+> `EXTRA_PIP_DEPS: "transformers==5.14.1"` within the current ModelOpt range;
+> 5.5.4 misclassifies VLM weights during export. Validate other models separately.
 
 Extra `hf_ptq.py` flags can be passed via `args`:
 
