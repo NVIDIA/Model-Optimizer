@@ -44,9 +44,10 @@ def _get_generator(seed: int | None = None) -> _random.Random:
         delattr(_get_generator, "generator")
     if not hasattr(_get_generator, "generator"):
         # synchronizing random seed and initialize generator
-        seed = dist.broadcast(seed or _random.getrandbits(64))
+        is_manual = seed is not None
+        seed = dist.broadcast(seed if is_manual else _random.getrandbits(64))
         _get_generator.generator = _random.Random(seed)  # type: ignore[attr-defined]
-        _get_generator.is_manual = seed is not None  # type: ignore[attr-defined]
+        _get_generator.is_manual = is_manual  # type: ignore[attr-defined]
         _get_generator.is_synced = dist.size() > 1  # type: ignore[attr-defined]
     return _get_generator.generator  # type: ignore[attr-defined]
 
