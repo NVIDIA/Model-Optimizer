@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 37 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 42 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -68,6 +68,11 @@ supported combinations.
 | `iq2_xs_experts_only` | IQ2_XS W2A16 (2.31 bpw), MoE routed experts only | none | imatrix |
 | `iq2_s` | IQ2_S W2A16 (2.56 bpw), MLP + MoE weights only | none | GPTQ (layerwise), then imatrix for weights GPTQ left |
 | `iq2_s_experts_only` | IQ2_S W2A16 (2.56 bpw), MoE routed experts only | none | imatrix |
+| `iq1_s_w1a4` | IQ1_S W1A4 (NVFP4 activations), MLP + MoE | none | GPTQ (layerwise) on the NVFP4-transcoded weight, then imatrix |
+| `iq1_m_w1a4` | IQ1_M W1A4 (NVFP4 activations), MLP + MoE | none | GPTQ (layerwise) on the NVFP4-transcoded weight, then imatrix |
+| `iq2_xxs_w2a4` | IQ2_XXS W2A4 (NVFP4 activations), MLP + MoE | none | GPTQ (layerwise) on the NVFP4-transcoded weight, then imatrix |
+| `iq2_xs_w2a4` | IQ2_XS W2A4 (NVFP4 activations), MLP + MoE | none | GPTQ (layerwise) on the NVFP4-transcoded weight, then imatrix |
+| `iq2_s_w2a4` | IQ2_S W2A4 (NVFP4 activations), MLP + MoE | none | GPTQ (layerwise) on the NVFP4-transcoded weight, then imatrix |
 | `q8_0` | Q8_0 W8A16 (8.5 bpw), eligible linears | none | none (no calibration) |
 
 </details>
@@ -163,6 +168,11 @@ activations and tensor-core math are what deliver the throughput.
   `iq2_xs_experts_only` / `iq2_s_experts_only`** — the same IQ formats on the MoE routed
   experts only (`*.experts.*`, `*block_sparse_moe*`), calibrated with imatrix alone; shared
   experts, dense layers and attention stay in BF16.
+- **`iq1_s_w1a4` / … / `iq2_s_w2a4`** — not weight-only: the IQ recipes' weights
+  with dynamic NVFP4 activations (W1A4/W2A4). An FP4 GEMM takes NVFP4 weights too, so fake quant
+  transcodes each decoded IQ weight to NVFP4 and GPTQ compensates that error. The export adds NVFP4
+  `input_scale`s beside the GGML blocks; `examples/hf_ptq/convert_ggml_to_nvfp4.py` turns it into
+  an NVFP4 W4A4 checkpoint for vLLM. Megatron export does not support them yet.
 - **`q8_0`** — GGML-compatible weight-only quantization on eligible linear layers,
   with BF16 activations; `lm_head`, MoE routers, `conv1d` and the vision branch stay
   in BF16. Q8_0 uses 8.5 bits per weight and requires no calibration data. Quantized

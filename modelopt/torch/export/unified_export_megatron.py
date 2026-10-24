@@ -1323,6 +1323,13 @@ class GPTModelExporter:
         # along its contraction axis, so the CUDA packer can be used. A weight that keeps pinned
         # scales goes on as the decoding of its codes, whose row slices pack to the pinned rows.
         if is_iq:
+            input_quantizer = getattr(module, "input_quantizer", None)
+            if input_quantizer is not None and input_quantizer.is_enabled:
+                # Every rank holds the same layers (GGML export requires TP=PP=1), so all raise.
+                raise NotImplementedError(
+                    "Megatron GGML export does not write activation scales yet; export GGML "
+                    "layers with NVFP4 inputs from the Hugging Face model instead."
+                )
             name_to_value["weight"] = GGML_FORMAT_REGISTRY[qformat].pin_current_codes(
                 module.weight,
                 getattr(module, "weight_quantizer", None),
