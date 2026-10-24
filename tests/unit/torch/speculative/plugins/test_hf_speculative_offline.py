@@ -31,6 +31,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_tokenizer
+from transformers import TrainingArguments
+from transformers.utils import ModelOutput
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.eagle.default_config import default_eagle_config
@@ -765,3 +767,54 @@ def test_collator_batches_multiple(tmp_path):
         train_len,
         HIDDEN_SIZE,
     )
+
+
+# ---------------------------------------------------------------------------
+# EagleTrainerWithAccLog: draft metrics
+# ---------------------------------------------------------------------------
+
+
+class _DraftMetricsModel(torch.nn.Module):
+    """A DFlash-family training forward's outputs; step 2 has nothing to train, so no metrics."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(()))
+        self.calls = 0
+
+    def forward(self, x):
+        self.calls += 1
+        out = ModelOutput(loss=(self.weight * x).sum(), train_acc=[[0.5]])
+        if self.calls != 2:
+            out["draft_metrics"] = {
+                "step": torch.tensor(float(self.calls)),
+                "scheduled": torch.tensor(0.1, dtype=torch.float64),
+            }
+        return out
+
+
+def test_trainer_logs_each_draft_metric_mean_per_window(tmp_path):
+    """Each window logs the mean over the steps that reported it, before the reporters run.
+
+    ``log_history`` records the logs dict exactly as the HF reporters (TensorBoard, wandb)
+    receive it, which a callback's ``on_log`` cannot add to in time.
+    """
+    args = TrainingArguments(
+        output_dir=str(tmp_path),
+        max_steps=4,
+        logging_steps=2,
+        per_device_train_batch_size=1,
+        report_to="none",
+        save_strategy="no",
+        use_cpu=True,
+        disable_tqdm=True,
+    )
+    trainer = _eagle_utils.EagleTrainerWithAccLog(
+        model=_DraftMetricsModel(), args=args, train_dataset=[{"x": torch.tensor(1.0)}] * 4
+    )
+    trainer.train()
+
+    logged = [h for h in trainer.state.log_history if "loss" in h]
+    assert [h["draft/step"] for h in logged] == [1.0, 3.5]
+    # float64 survives to the log: a scheduled weight reads back exactly.
+    assert [h["draft/scheduled"] for h in logged] == [0.1, 0.1]

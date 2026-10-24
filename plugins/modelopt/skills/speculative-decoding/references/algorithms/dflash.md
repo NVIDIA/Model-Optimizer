@@ -130,7 +130,7 @@ DFlash gates in three places rather than on one acceptance-rate number.
 | Env var | Meaning |
 | --- | --- |
 | `MAX_FINAL_LOSS` | Final loss must be below this |
-| `MIN_FINAL_ACC` | Final accuracy must be above this (any log key containing `acc`) |
+| `MIN_FINAL_ACC` | Final accuracy must be above this (any log key containing `acc`, except `draft/*`) |
 
 Qwen3-8B online reference uses `MAX_FINAL_LOSS=5.0`, `MIN_FINAL_ACC=0.15`. Its
 convergence baseline (8×B200, bs=1, seq_len=4096, 5-layer draft, block_size=16, 100K

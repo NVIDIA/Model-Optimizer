@@ -21,9 +21,9 @@ catch regressions in CI.
 
 Environment variables (all optional — no check if unset):
     MAX_FINAL_LOSS:  Final loss must be below this value
-    MIN_FINAL_ACC:   Final accuracy must be above this value (any key containing 'acc').
-                     A threshold whose metric is absent fails the check rather than
-                     passing unevaluated.
+    MIN_FINAL_ACC:   Final accuracy must be above this value (any key containing 'acc',
+                     other than the draft/* metrics). A threshold whose metric is absent
+                     fails the check rather than passing unevaluated.
     MAX_FINAL_PERPLEXITY: Final perplexity must be below this value
 
 An empty variable counts as unset, and one that isn't a finite number fails the check.
@@ -92,9 +92,10 @@ def get_final_metrics(trainer_state_path):
     last = logs[-1]
     metrics = {"loss": float(last["loss"])}
 
-    # Find any accuracy key (train_acc/parallel_0_step_0, eval_accuracy, etc.)
+    # Find any accuracy key (train_acc/parallel_0_step_0, eval_accuracy, etc.). draft/* are a
+    # draft variant's diagnostics, e.g. Domino's backbone_accuracy, not the run's accuracy.
     for key, value in last.items():
-        if "acc" in key.lower():
+        if "acc" in key.lower() and not key.startswith("draft/"):
             metrics["accuracy"] = float(value)
             break
 

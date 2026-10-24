@@ -18,6 +18,7 @@ Changelog
 *Speculative Decoding*
 
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
+- ``examples/speculative_decoding`` now logs the DFlash family's training metrics -- e.g. DFlash2's ``selector_coverage``, LiLiCorr's lattice diagnostics and Domino's ``lambda_base`` -- as ``draft/<name>``, averaged over each logging interval, to TensorBoard, wandb and ``trainer_state.json``.
 
 *Megatron Framework (M-LM / M-Bridge)*
 

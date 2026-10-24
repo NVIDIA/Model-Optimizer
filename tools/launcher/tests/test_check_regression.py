@@ -82,6 +82,15 @@ def test_metrics_pick_up_any_accuracy_key(tmp_path):
     assert metrics["accuracy"] == pytest.approx(0.5153)
 
 
+def test_draft_metrics_are_not_the_accuracy(tmp_path):
+    """A draft/* diagnostic, e.g. DFlash2's selector_accuracy, is not the run's train_acc."""
+    entry = {"loss": 6.5, "draft/selector_accuracy": 0.09, "train_acc/parallel_0_step_0": 0.17}
+    state = tmp_path / "trainer_state.json"
+    # Sorted, as TrainerState.save_to_json writes it: draft/* comes before train_acc.
+    state.write_text(json.dumps({"log_history": [entry]}, sort_keys=True))
+    assert check_regression_mod.get_final_metrics(state)["accuracy"] == pytest.approx(0.17)
+
+
 def test_latest_checkpoint_is_chosen_by_step_number(tmp_path):
     """checkpoint-12000 is newer than checkpoint-8000, though it sorts first as a string."""
     for step in (8000, 12000):

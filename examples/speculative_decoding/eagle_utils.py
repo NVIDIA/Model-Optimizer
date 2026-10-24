@@ -225,7 +225,7 @@ def make_speculative_data_module(
 
 
 class EagleTrainerWithAccLog(Trainer):
-    """Wrapper around Trainer that logs training accuracy."""
+    """Wrapper around Trainer that logs training accuracy and the model's ``draft_metrics``."""
 
     def __init__(
         self,
@@ -235,6 +235,8 @@ class EagleTrainerWithAccLog(Trainer):
     ):
         super().__init__(*args, **kwargs)
         self.lora_lr_multiplier = lora_lr_multiplier
+        # name -> (sum, count) of each draft metric since the last log
+        self._draft_metric_sums = {}
 
     def create_optimizer(self, model=None):
         """Override to give LoRA parameters a higher learning rate.
@@ -316,7 +318,7 @@ class EagleTrainerWithAccLog(Trainer):
         return self.optimizer
 
     def compute_loss(self, *args, **kwargs):
-        """Override compute_loss to save train accs and per-component losses in trainer state."""
+        """Override compute_loss to record train accs, per-component losses and draft metrics."""
         if not hasattr(self.state, "training_accs"):
             self.state.training_accs = []
         if not hasattr(self.state, "component_losses"):
@@ -333,7 +335,24 @@ class EagleTrainerWithAccLog(Trainer):
             val = getattr(outputs, attr, None)
             if val is not None:
                 self.state.component_losses[key].append(val.item())
+        # Summed as tensors: reading the values here would sync the host on every step.
+        for name, value in (getattr(outputs, "draft_metrics", None) or {}).items():
+            total, count = self._draft_metric_sums.get(name, (0.0, 0))
+            self._draft_metric_sums[name] = (total + value, count + 1)
         return loss
+
+    def log(self, logs, *args, **kwargs):
+        """Log ``logs`` with each draft metric's mean since the last log, as ``draft/<name>``.
+
+        Each rank averages its own steps, as for ``train_acc``; nothing is reduced across ranks.
+        """
+        # Not in EagleTrainingPlot.on_log: the HF reporters are callbacks that run before it.
+        if self._draft_metric_sums:
+            sums = self._draft_metric_sums
+            means = torch.stack([total / count for total, count in sums.values()]).tolist()
+            logs.update({f"draft/{name}": mean for name, mean in zip(sums, means)})
+            self._draft_metric_sums = {}
+        super().log(logs, *args, **kwargs)
 
 
 class LoRAWarmupCallback(TrainerCallback):
@@ -484,7 +503,8 @@ class EagleTrainingPlot(TrainerCallback):
             print_rank_0(f"Step {state.global_step} Training Acc: [{acc_str}]")
         except Exception:
             print_rank_0(f"Step {state.global_step} Training Acc: {average_acc}")
-        # Log accuracy to HF Trainer's logs dict (picked up by TensorBoard)
+        # The HF reporters (TensorBoard) have already run: these reach only the console,
+        # wandb below and, through the log_history update, trainer_state.json.
         logs = kwargs.get("logs")
         if logs is None:
             logs = {}
