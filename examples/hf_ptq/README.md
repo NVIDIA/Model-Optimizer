@@ -804,6 +804,18 @@ After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build c
 - Deployable on [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang)
 - More models coming soon!
 
+## Reproducible PTQ
+
+Repeating a run with the same model, data, recipe, batch size, hardware and software gives the same scales. What moves them is the calibration batch size: the default `--batch_size 0` probes it from free GPU memory, so another GPU or memory state silently calibrates with another batch size. `--deterministic` pins what the run still depends on: it requires an explicit `--batch_size`, seeds every random number generator and selects deterministic torch kernels (an op without one only warns). It costs some run time.
+
+```bash
+python hf_ptq.py ... --batch_size 8 --deterministic --export_path run_a
+python hf_ptq.py ... --batch_size 8 --deterministic --export_path run_b
+python -m modelopt.torch.quantization.utils.scale_compare run_a run_b
+```
+
+`scale_compare` lists, per scale kind (`input_scale`, `weight_scale`, ...), how many tensors differ and by how much, and exits non-zero when a scale differs by more than `--rtol` / `--atol` (default 0: identical). Run it on checkpoints that differ in batch size or GPU layout to see how far the scales move.
+
 ## Tracking runs with MLflow
 
 Set MLflow's own `MLFLOW_TRACKING_URI`, or pass `--mlflow <tracking-uri>`, to record a PTQ
