@@ -27,6 +27,7 @@ from modelopt.torch.export import export_hf_checkpoint
 
 _VISION_RECIPE = "fp8_vision-kv_none"
 _JOINT_RECIPE = "fp8_vision_lm-kv_fp8_cast"
+_NVFP4_VISUAL_QAD_RECIPE = "general/qad/nvfp4_lsq-mse_init-fp8_kv-visual-linear"
 
 
 def _get_tiny_qwen_vlm(model_type):
@@ -102,3 +103,57 @@ def test_qwen_vision_recipe_calibrates_and_exports(
     assert (
         any(name.startswith("model.language_model.") for name in scale_names) is quantizes_language
     )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() < (8, 9),
+    reason="NVFP4 visual QAD export requires compute capability 8.9 or newer",
+)
+@pytest.mark.parametrize(
+    ("model_type", "architecture"),
+    [
+        ("qwen3_vl", "Qwen3VLForConditionalGeneration"),
+        ("qwen3_5", "Qwen3_5ForConditionalGeneration"),
+    ],
+)
+def test_nvfp4_lsq_visual_recipe_calibrates_and_exports(tmp_path, model_type, architecture):
+    model = _get_tiny_qwen_vlm(model_type).to("cuda").eval()
+    model.config.architectures = [architecture]
+    quant_cfg = load_recipe(_NVFP4_VISUAL_QAD_RECIPE).quantize.model_dump()
+    vision_config = model.config.vision_config
+    pixel_width = (
+        vision_config.in_channels * vision_config.temporal_patch_size * vision_config.patch_size**2
+    )
+    pixel_values = torch.randn(4, pixel_width, dtype=torch.bfloat16, device="cuda")
+    image_grid_thw = torch.tensor([[1, 2, 2]], device="cuda")
+    input_ids = torch.randint(5, 16, (1, 4), device="cuda")
+
+    def calibration_forward(_model):
+        model.model.visual(pixel_values, image_grid_thw)
+        model(input_ids=input_ids)
+
+    mtq.quantize(model, quant_cfg, forward_loop=calibration_forward)
+
+    export_path = tmp_path / f"{model_type}-nvfp4-visual-qad"
+    export_hf_checkpoint(model, export_dir=export_path)
+
+    with (export_path / "hf_quant_config.json").open() as config_file:
+        quantization = json.load(config_file)["quantization"]
+    assert quantization["quant_algo"] == "NVFP4"
+    assert quantization["kv_cache_quant_algo"] == "FP8"
+    assert "quantized_layers" not in quantization
+
+    tensor_names = set()
+    for checkpoint_path in export_path.glob("*.safetensors"):
+        with safe_open(str(checkpoint_path), framework="pt") as checkpoint:
+            tensor_names.update(checkpoint.keys())
+    scale_names = {
+        name
+        for name in tensor_names
+        if name.endswith(("input_scale", "weight_scale", "weight_scale_2"))
+    }
+    assert any(name.startswith("model.visual.") for name in scale_names)
+    assert any(".attn.qkv.weight_scale" in name for name in scale_names)
+    assert any(".merger.linear_fc1.weight_scale" in name for name in scale_names)
+    assert any(name.startswith("model.language_model.") for name in scale_names)
+    assert not any("patch_embed" in name for name in scale_names)

@@ -239,6 +239,31 @@ class TestNVFP4StaticVsDynamicEquivalence:
         assert torch.allclose(static_ws_2, dynamic_ws_2)
 
 
+def test_lsq_export_uses_post_amax_for_tied_and_dual_lsq():
+    weight = torch.ones(2, BLOCK_SIZE, dtype=torch.bfloat16)
+
+    for tied_amax in (False, True):
+        quantizer = _make_static_quantizer(
+            torch.ones(2, 1),
+            torch.tensor(6.0),
+        )
+        quantizer.enable_lsq(
+            learnable_amax=["pre", "post"],
+            tied_amax=tied_amax,
+        )
+        quantizer._amax_post.data.fill_(3.0)
+        if not tied_amax:
+            quantizer._amax_pre.data.fill_(1.0)
+
+        scale, _ = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
+            quantizer,
+            weight,
+            keep_high_precision=True,
+        )
+
+        assert torch.equal(scale, torch.full((2, 1), 0.5))
+
+
 class TestNVFP4StaticManualRoundTrip:
     """Cross-check the export path against a manual per-block computation.
 
