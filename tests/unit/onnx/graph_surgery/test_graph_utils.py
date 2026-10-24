@@ -16,6 +16,9 @@
 """Shared graph queries, shape resolution, and initializer contracts."""
 
 import copy
+import io
+import os
+from pathlib import Path
 
 import numpy as np
 import onnx
@@ -34,6 +37,7 @@ from modelopt.onnx.graph_surgery.utils.graph_utils import (
     insert_nodes_at_position,
     parse_qdq_quantized_dtype_list,
     resolve_reshape_shape,
+    save_onnx_model,
 )
 
 
@@ -378,3 +382,483 @@ def test_qdq_dtype_filters_normalize_aliases_and_reject_unknown_types():
     ) == frozenset({TensorProto.INT16, TensorProto.UINT16})
     with pytest.raises(ValueError):
         parse_qdq_quantized_dtype_list(["int16", "unit16"])
+
+
+@pytest.mark.parametrize("dtype", [np.float16, np.float32, np.int8])
+def test_repeated_external_save_keeps_sidecar_bounded(tmp_path, monkeypatch, dtype):
+    """Round-trip adjacent payloads, including a Windows text-mode EOF byte."""
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "model.onnx"
+    location = "weights/data.bin" if dtype == np.float32 else "model.onnx_data"
+    values = np.arange(2048, dtype=np.float32).astype(dtype)
+    for offset in [0, 1]:
+        first, second = values + offset, np.full_like(values, 39 + offset)
+        first.view(np.uint8)[-1] = 0x1A
+        model = helper.make_model(
+            helper.make_graph(
+                [],
+                "weights",
+                [],
+                [
+                    helper.make_tensor_value_info(
+                        name, helper.np_dtype_to_tensor_dtype(np.dtype(dtype)), [2048]
+                    )
+                    for name in ("w", "other")
+                ],
+                [numpy_helper.from_array(first, "w"), numpy_helper.from_array(second, "other")],
+            )
+        )
+        save_onnx_model(model, str(path), external_data_name=location, verbose=False)
+        assert all(
+            tensor.data_location == TensorProto.EXTERNAL and not tensor.HasField("raw_data")
+            for tensor in model.graph.initializer
+        )
+        assert (tmp_path / location).stat().st_size == 2 * values.nbytes
+        saved = onnx.load(path)
+        onnx.checker.check_model(saved)
+        for tensor, expected in zip(saved.graph.initializer, (first, second), strict=True):
+            assert numpy_helper.to_array(tensor).tobytes() == expected.tobytes()
+
+
+@pytest.mark.parametrize(
+    "location", ["../weights.bin", "absolute", "model.onnx", "", "directory", "model_alias"]
+)
+def test_invalid_external_location_preserves_model_and_existing_output(tmp_path, location):
+    """Reject invalid sidecar paths before changing caller tensors or existing files."""
+    model = helper.make_model(
+        helper.make_graph(
+            [], "save", [], [], [numpy_helper.from_array(np.ones(2048, np.float32), "w")]
+        )
+    )
+    before = model.SerializeToString()
+    path = tmp_path / "model.onnx"
+    path.write_bytes(b"unchanged")
+    if location == "absolute":
+        location = str(tmp_path / "weights.bin")
+    elif location == "directory":
+        (tmp_path / location).mkdir()
+        (tmp_path / location / "existing.bin").write_bytes(b"existing weights")
+    elif location == "model_alias":
+        try:
+            (tmp_path / "alias").symlink_to(tmp_path, target_is_directory=True)
+        except OSError as error:
+            pytest.skip(f"Directory symlinks are unavailable: {error}")
+        location = "alias/model.onnx"
+    with pytest.raises(ValueError):
+        save_onnx_model(model, str(path), external_data_name=location, verbose=False)
+    assert model.SerializeToString() == before
+    assert path.read_bytes() == b"unchanged"
+    if location == "directory":
+        assert (tmp_path / location / "existing.bin").read_bytes() == b"existing weights"
+
+
+@pytest.mark.parametrize(
+    ("link_kind", "contained"),
+    [
+        ("directory", False),
+        ("directory", True),
+        ("file", False),
+        ("file", True),
+        ("dangling", True),
+        ("hardlink", True),
+    ],
+)
+def test_external_save_checks_sidecar_links(tmp_path, link_kind, contained):
+    """Allow contained directory links and reject file links without changing existing data."""
+    output = tmp_path / "output"
+    output.mkdir()
+    target = output / "target" if contained else tmp_path / "outside"
+    target.mkdir()
+    sidecar = target / "data.bin"
+    if link_kind != "dangling":
+        sidecar.write_bytes(b"existing weights")
+    destination = output / "weights" / "data.bin"
+    try:
+        if link_kind == "directory":
+            destination.parent.symlink_to(target, target_is_directory=True)
+        else:
+            destination.parent.mkdir()
+            if link_kind == "hardlink":
+                destination.hardlink_to(sidecar)
+            else:
+                destination.symlink_to(sidecar)
+    except OSError as error:
+        pytest.skip(f"{link_kind} links are unavailable: {error}")
+    path = output / "model.onnx"
+    path.write_bytes(b"existing model")
+    values = np.ones(2048, np.float32)
+    model = helper.make_model(
+        helper.make_graph([], "save", [], [], [numpy_helper.from_array(values, "w")])
+    )
+    before = model.SerializeToString()
+    if link_kind == "directory" and contained:
+        save_onnx_model(model, str(path), external_data_name="weights/data.bin", verbose=False)
+        assert sidecar.read_bytes() == values.tobytes()
+        saved = onnx.load(path, load_external_data=False)
+        assert saved.graph.initializer[0].data_location == TensorProto.EXTERNAL
+    else:
+        with pytest.raises(ValueError):
+            save_onnx_model(model, str(path), external_data_name="weights/data.bin", verbose=False)
+        assert model.SerializeToString() == before
+        assert path.read_bytes() == b"existing model"
+        if link_kind == "dangling":
+            assert destination.is_symlink()
+            assert not sidecar.exists()
+        else:
+            assert sidecar.read_bytes() == b"existing weights"
+            assert destination.read_bytes() == b"existing weights"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 filename aliases and alternate data streams")
+@pytest.mark.parametrize("existing_output", [False, True])
+@pytest.mark.parametrize(
+    "location", ["MODEL.onnx", "model.onnx.", "model.onnx ", "model.onnx:weights"]
+)
+def test_external_save_rejects_windows_model_aliases(tmp_path, existing_output, location):
+    """Reject Win32 aliases without losing caller payloads or the existing model."""
+    path = tmp_path / "model.onnx"
+    if existing_output:
+        path.write_bytes(b"original model")
+    model = helper.make_model(
+        helper.make_graph(
+            [], "alias", [], [], [numpy_helper.from_array(np.ones(2048, np.float32), "w")]
+        )
+    )
+    before = model.SerializeToString()
+    with pytest.raises((OSError, ValueError)):
+        save_onnx_model(model, str(path), external_data_name=location, verbose=False)
+    assert model.SerializeToString() == before
+    if existing_output:
+        assert path.read_bytes() == b"original model"
+    else:
+        assert not path.exists()
+    assert list(tmp_path.iterdir()) == ([path] if existing_output else [])
+
+
+@pytest.mark.parametrize("existing_sidecar", [False, True])
+@pytest.mark.parametrize("failure_stage", ["weights", "model", "short_read"])
+@pytest.mark.parametrize("external_metadata", [False, True])
+def test_external_save_rolls_back_failed_replacement(
+    tmp_path, monkeypatch, existing_sidecar, failure_stage, external_metadata
+):
+    """Keep the previous model and weights usable when either replacement fails."""
+    path = tmp_path / "model.onnx"
+    sidecar = tmp_path / "weights" / "data.bin"
+    values = np.ones(2048, np.float32)
+    original = helper.make_model(
+        helper.make_graph(
+            [],
+            "save",
+            [],
+            [helper.make_tensor_value_info("w", TensorProto.FLOAT, [2048])],
+            [
+                numpy_helper.from_array(values, "w"),
+                numpy_helper.from_array(values + 2, "other"),
+            ],
+        )
+    )
+    save_onnx_model(
+        original,
+        str(path),
+        use_external_data=existing_sidecar,
+        external_data_name="weights/data.bin",
+        verbose=False,
+    )
+    original_bytes = path.read_bytes()
+    original_weights = sidecar.read_bytes() if existing_sidecar else None
+    candidate = onnx.load(path)
+    candidate.graph.initializer[0].CopyFrom(numpy_helper.from_array(values + 1, "w"))
+    candidate.graph.initializer[1].data_location = TensorProto.DEFAULT
+    if external_metadata:
+        onnx.external_data_helper.set_external_data(
+            candidate.graph.initializer[0],
+            "original.weights",
+            offset=17,
+            length=values.nbytes,
+            checksum="original-checksum",
+            basepath="original-directory",
+        )
+    candidate_bytes = candidate.SerializeToString()
+    failure_path = sidecar if failure_stage == "weights" else path
+    short_read = failure_stage == "short_read"
+    failure = PermissionError("Replacement denied")
+    replace = os.replace
+    failed = False
+
+    def fail_selected_replacement(source, destination):
+        """Fail one selected replacement to verify tensor and file rollback."""
+        nonlocal failed
+        if not failed and os.fspath(destination) == str(failure_path):
+            failed = True
+            if short_read:
+                with sidecar.open("r+b") as stream:
+                    stream.truncate(values.nbytes - 1)
+            raise failure
+        return replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", fail_selected_replacement)
+    with pytest.raises(OSError) as error:
+        save_onnx_model(candidate, str(path), external_data_name="weights/data.bin", verbose=False)
+    if short_read:
+        assert not candidate.graph.initializer[0].HasField("raw_data")
+        assert error.value.__context__ is failure
+    else:
+        assert error.value is failure
+        assert candidate.SerializeToString() == candidate_bytes
+    assert path.read_bytes() == original_bytes
+    if existing_sidecar:
+        assert sidecar.read_bytes() == original_weights
+    else:
+        assert not sidecar.exists()
+    restored = onnx.load(path)
+    onnx.checker.check_model(restored)
+    assert numpy_helper.to_array(restored.graph.initializer[0]).tobytes() == values.tobytes()
+    expected_files = {path, sidecar} if existing_sidecar else {path}
+    assert {entry for entry in tmp_path.rglob("*") if entry.is_file()} == expected_files
+    if short_read:
+        return
+    save_onnx_model(candidate, str(path), external_data_name="weights/data.bin", verbose=False)
+    assert candidate.graph.initializer[0].data_location == TensorProto.EXTERNAL
+    assert not candidate.graph.initializer[0].HasField("raw_data")
+    retried = onnx.load(path)
+    onnx.checker.check_model(retried)
+    assert numpy_helper.to_array(retried.graph.initializer[0]).tobytes() == (values + 1).tobytes()
+    assert numpy_helper.to_array(retried.graph.initializer[1]).tobytes() == (values + 2).tobytes()
+
+
+@pytest.mark.parametrize("existing_output", [False, True])
+@pytest.mark.parametrize("use_external_data", [False, True])
+def test_save_rejects_unloaded_external_tensors_before_changes(
+    tmp_path, existing_output, use_external_data
+):
+    """Reject partially loaded models before creating directories or changing existing outputs."""
+    values = np.ones(2048, np.float32)
+    source = tmp_path / "source" / "model.onnx"
+    model = helper.make_model(
+        helper.make_graph(
+            [],
+            "save",
+            [],
+            [helper.make_tensor_value_info("first", TensorProto.FLOAT, [2048])],
+            [numpy_helper.from_array(values, name) for name in ("first", "missing")],
+        )
+    )
+    save_onnx_model(model, str(source), verbose=False)
+    unloaded = onnx.load(source, load_external_data=False)
+    unloaded.graph.initializer[0].CopyFrom(numpy_helper.from_array(values, "first"))
+    before = unloaded.SerializeToString()
+    output = tmp_path / "output"
+    path = output / "model.onnx"
+    if existing_output:
+        output.mkdir()
+        path.write_bytes(b"existing model")
+        (output / "model.onnx_data").write_bytes(b"existing weights")
+    files_before = {entry: entry.read_bytes() for entry in tmp_path.rglob("*") if entry.is_file()}
+    with pytest.raises(ValueError):
+        save_onnx_model(unloaded, str(path), use_external_data=use_external_data, verbose=False)
+    assert unloaded.SerializeToString() == before
+    assert output.exists() == existing_output
+    assert {
+        entry: entry.read_bytes() for entry in tmp_path.rglob("*") if entry.is_file()
+    } == files_before
+
+
+@pytest.mark.parametrize("storage", ["initializer", "attribute", "subgraph"])
+@pytest.mark.parametrize("write_failure", [False, True])
+def test_inline_save_preserves_loaded_external_tensors(tmp_path, storage, write_failure):
+    """Inline loaded external payloads without changing caller state or existing sidecars."""
+    values = np.arange(2048, dtype=np.float32)
+    values.view(np.uint8)[-1] = 0x1A
+    weight = numpy_helper.from_array(values, "weight")
+    onnx.external_data_helper.set_external_data(
+        weight, "original.weights", offset=7, length=values.nbytes, checksum="original-checksum"
+    )
+    value = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2048])
+    if storage == "initializer":
+        graph = helper.make_graph(
+            [],
+            "inline",
+            [],
+            [helper.make_tensor_value_info("weight", TensorProto.FLOAT, [2048])],
+            [weight],
+        )
+    elif storage == "attribute":
+        graph = helper.make_graph(
+            [helper.make_node("Constant", [], ["y"], value=weight)], "inline", [], [value]
+        )
+    else:
+        branch = helper.make_graph(
+            [helper.make_node("Constant", [], ["y"], value=weight)], "branch", [], [value]
+        )
+        graph = helper.make_graph(
+            [helper.make_node("If", ["condition"], ["y"], then_branch=branch, else_branch=branch)],
+            "inline",
+            [],
+            [value],
+            [numpy_helper.from_array(np.asarray(True), "condition")],
+        )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=9)
+    before = model.SerializeToString()
+    sidecar = tmp_path / "original.weights"
+    sidecar.write_bytes(b"original sidecar")
+    path = tmp_path / "inline.onnx"
+    if write_failure:
+        path.mkdir()
+        with pytest.raises(OSError):
+            save_onnx_model(model, str(path), use_external_data=False, verbose=False)
+    else:
+        save_onnx_model(model, str(path), use_external_data=False, verbose=False)
+        saved = onnx.load(path, load_external_data=False)
+        onnx.checker.check_model(saved)
+        weights = [
+            tensor
+            for tensor in onnx.external_data_helper._get_all_tensors(saved)
+            if tensor.name == "weight"
+        ]
+        assert len(weights) == (2 if storage == "subgraph" else 1)
+        for tensor in weights:
+            assert tensor.data_location != TensorProto.EXTERNAL
+            assert not tensor.external_data
+            assert numpy_helper.to_array(tensor).tobytes() == values.tobytes()
+    assert model.SerializeToString() == before
+    assert sidecar.read_bytes() == b"original sidecar"
+    assert {entry for entry in tmp_path.iterdir() if entry.is_file()} == (
+        {sidecar} if write_failure else {sidecar, path}
+    )
+
+
+@pytest.mark.parametrize("external_metadata", [False, True])
+@pytest.mark.parametrize("failure_stage", ["write", "replace"])
+def test_inline_save_failure_preserves_existing_model(
+    tmp_path, monkeypatch, external_metadata, failure_stage
+):
+    """Preserve existing files and caller tensors after partial writes or replacement errors."""
+    path = tmp_path / "model.onnx"
+    values = np.arange(2048, dtype=np.float32)
+    model = helper.make_model(
+        helper.make_graph(
+            [],
+            "inline_failure",
+            [],
+            [helper.make_tensor_value_info("w", TensorProto.FLOAT, [2048])],
+            [numpy_helper.from_array(values, "w")],
+        )
+    )
+    onnx.save(model, path)
+    original = path.read_bytes()
+    model.graph.initializer[0].CopyFrom(numpy_helper.from_array(values + 1, "w"))
+    sidecar = tmp_path / "original.weights"
+    sidecar.write_bytes(b"existing sidecar")
+    if external_metadata:
+        onnx.external_data_helper.set_external_data(
+            model.graph.initializer[0], "original.weights", offset=7, length=values.nbytes
+        )
+    before = model.SerializeToString()
+    failure = OSError("Injected inline save failure")
+    write_bytes = onnx._save_bytes
+
+    def fail_write(content, destination):
+        """Use the real writer to leave partial serialized bytes before failing."""
+        write_bytes(content[: len(content) // 2], destination)
+        raise failure
+
+    def fail_replace(source, destination):
+        """Inject a replacement failure after the staged model was saved."""
+        raise failure
+
+    with monkeypatch.context() as patch:
+        if failure_stage == "write":
+            patch.setattr(onnx, "_save_bytes", fail_write)
+        else:
+            patch.setattr(os, "replace", fail_replace)
+        with pytest.raises(OSError) as error:
+            save_onnx_model(model, str(path), use_external_data=False, verbose=False)
+        assert error.value is failure
+    assert path.read_bytes() == original
+    assert model.SerializeToString() == before
+    assert sidecar.read_bytes() == b"existing sidecar"
+    assert {entry.name for entry in tmp_path.iterdir()} == {"model.onnx", "original.weights"}
+    onnx.checker.check_model(onnx.load(path))
+    save_onnx_model(model, str(path), use_external_data=False, verbose=False)
+    saved = onnx.load(path, load_external_data=False)
+    onnx.checker.check_model(saved)
+    assert numpy_helper.to_array(saved.graph.initializer[0]).tobytes() == (values + 1).tobytes()
+    assert not saved.graph.initializer[0].external_data
+    assert model.SerializeToString() == before
+    assert sidecar.read_bytes() == b"existing sidecar"
+
+
+@pytest.mark.parametrize("external_metadata", [False, True])
+@pytest.mark.parametrize("failure_stage", ["write", "close"])
+def test_external_save_preserves_payloads_when_buffered_writes_fail(
+    tmp_path, monkeypatch, external_metadata, failure_stage
+):
+    """Keep loaded payloads and prior files intact when a buffered sidecar write fails."""
+    path = tmp_path / "model.onnx"
+    sidecar = tmp_path / "weights" / "data.bin"
+    values = np.arange(8, dtype=np.float32)
+    model = helper.make_model(
+        helper.make_graph(
+            [],
+            "buffered_failure",
+            [],
+            [helper.make_tensor_value_info("w", TensorProto.FLOAT, [8])],
+            [
+                numpy_helper.from_array(values, "w"),
+                numpy_helper.from_array(values + 1, "other"),
+            ],
+        )
+    )
+    save_onnx_model(
+        model, str(path), external_data_name="weights/data.bin", size_threshold=0, verbose=False
+    )
+    original, original_weights = path.read_bytes(), sidecar.read_bytes()
+    candidate = onnx.load(path)
+    candidate.graph.initializer[0].CopyFrom(numpy_helper.from_array(values + 10, "w"))
+    if external_metadata:
+        onnx.external_data_helper.set_external_data(
+            candidate.graph.initializer[0], "original.weights", offset=7, length=values.nbytes
+        )
+    before = candidate.SerializeToString()
+    failure = OSError("Injected buffered sidecar failure")
+    open_path = Path.open
+
+    class FailingFile(io.FileIO):
+        """Leave a real partial sidecar when the buffered writer flushes."""
+
+        def write(self, data):
+            """Write a single byte before reporting an injected I/O error."""
+            super().write(data[:1])
+            raise failure
+
+    def open_sidecar(file_path, mode="r", *args, **kwargs):
+        """Fail a real buffer flush during the second write or during close."""
+        if mode == "wb" and file_path.name == "data.bin":
+            buffer_size = 48 if failure_stage == "write" else 128
+            return io.BufferedWriter(FailingFile(file_path, "w"), buffer_size=buffer_size)
+        return open_path(file_path, mode, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", open_sidecar)
+        with pytest.raises(OSError) as error:
+            save_onnx_model(
+                candidate,
+                str(path),
+                external_data_name="weights/data.bin",
+                size_threshold=0,
+                verbose=False,
+            )
+    assert candidate.SerializeToString() == before
+    assert error.value is failure
+    assert path.read_bytes() == original
+    assert sidecar.read_bytes() == original_weights
+    assert {entry for entry in tmp_path.rglob("*") if entry.is_file()} == {path, sidecar}
+    assert {entry for entry in tmp_path.rglob("*") if entry.is_dir()} == {sidecar.parent}
+    onnx.checker.check_model(onnx.load(path))
+    save_onnx_model(
+        candidate, str(path), external_data_name="weights/data.bin", size_threshold=0, verbose=False
+    )
+    saved = onnx.load(path)
+    onnx.checker.check_model(saved)
+    for tensor, expected in zip(saved.graph.initializer, (values + 10, values + 1), strict=True):
+        assert numpy_helper.to_array(tensor).tobytes() == expected.tobytes()
