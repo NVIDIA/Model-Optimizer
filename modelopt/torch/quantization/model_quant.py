@@ -1109,6 +1109,7 @@ def auto_quantize(
             )
         # Every candidate, before the search calibrates any: calibrate() would refuse mid-search.
         _refuse_awq_on_a_sharded_fsdp2_model(model, algo, candidate=name)
+        _refuse_rank_local_calibration(model, algo)
 
     # Select the appropriate searcher based on method
     if method_name not in AUTO_QUANTIZE_SEARCHERS:

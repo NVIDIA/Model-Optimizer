@@ -29,7 +29,13 @@ from collections import Counter
 import pytest
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, IterableDataset, SubsetRandomSampler
+from torch.utils.data import (
+    BatchSampler,
+    DataLoader,
+    IterableDataset,
+    SequentialSampler,
+    SubsetRandomSampler,
+)
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as mto_dist
@@ -154,18 +160,36 @@ def test_iterable_shards_split_their_groups_across_worker_processes(monkeypatch)
 
 
 @pytest.mark.parametrize(
-    "picker",
-    [{"sampler": SubsetRandomSampler(range(4))}, {"batch_sampler": [[0, 1], [2, 3]]}],
-    ids=["subset-sampler", "batch-sampler"],
+    ("loader_kwargs", "refusal"),
+    [
+        ({"sampler": SubsetRandomSampler(range(4)), "batch_size": 2}, "picks which samples"),
+        ({"batch_sampler": [[0, 1], [2, 3]]}, "picks which samples"),
+        (
+            {"batch_sampler": BatchSampler(SubsetRandomSampler(range(4)), 2, drop_last=False)},
+            "picks which samples",
+        ),
+        ({"batch_size": None}, "auto-batching off"),
+    ],
+    ids=["subset-sampler", "batch-sampler", "subset-in-a-plain-batch-sampler", "auto-batching-off"],
 )
-def test_a_loader_that_picks_its_own_samples_is_refused(picker):
-    """The rank's DistributedSampler would replace what it picks, silently calibrating on the whole
-    dataset instead."""
-    batching = {} if "batch_sampler" in picker else {"batch_size": 2}
-    loader = DataLoader(list(range(8)), collate_fn=_collate, **batching, **picker)
+def test_a_loader_the_shard_cannot_reproduce_is_refused(loader_kwargs, refusal):
+    """The rank's DistributedSampler would replace what the loader picks, silently calibrating on
+    the whole dataset instead, also when a plain BatchSampler batches the picks. A loader with
+    auto-batching off would calibrate one dataset item per step."""
+    loader = DataLoader(list(range(8)), collate_fn=_collate, **loader_kwargs)
 
-    with pytest.raises(ValueError, match="picks which samples it reads"):
+    with pytest.raises(ValueError, match=refusal):
         shard_dataloader(loader, 0, 2)
+
+
+def test_a_plain_batch_sampler_keeps_its_batching_in_the_shard():
+    """A loader given a BatchSampler reports ``batch_size=None``; its shard still batches by the
+    sampler's size and drop_last."""
+    dataset = list(range(10))
+    batch_sampler = BatchSampler(SequentialSampler(dataset), 2, drop_last=True)
+    loader = DataLoader(dataset, batch_sampler=batch_sampler, collate_fn=_collate)
+
+    assert _batches(shard_dataloader(loader, 1, 2)) == [[1, 3], [5, 7]]
 
 
 @pytest.mark.parametrize("dataset", [list(range(8)), _Stream(8)], ids=["map-style", "iterable"])
@@ -472,6 +496,15 @@ def test_the_ep_mesh_comes_with_an_expert_parallel_plan_only(plan, mesh):
         distributed_forward_loop(model, [{"input_ids": torch.zeros(1, 1)}], ep_mesh=mesh)
 
 
+def test_forward_loop_refuses_a_batch_that_is_not_a_mapping():
+    """The loop runs ``model(**batch)``; a loader of bare tensors is refused as such at its first
+    batch, rather than failing on ``batch.items()`` inside the loop."""
+    model = _Recorder()
+
+    with pytest.raises(TypeError, match="yields Tensor"):
+        distributed_forward_loop(model, [torch.zeros(1, 1)], device="meta")(model)
+
+
 # ------------------------------------------------------------------------ rank-local calibration
 
 
@@ -490,8 +523,9 @@ def test_the_ep_mesh_comes_with_an_expert_parallel_plan_only(plan, mesh):
             {"method": "max", "distributed_sync": False},
             "max with distributed_sync=False",
         ),
+        ("auto_quantize", {"method": "awq_lite"}, "awq_lite"),
     ],
-    ids=["quantize", "calibrate", "for-the-weight-scales", "max-without-its-sync"],
+    ids=["quantize", "calibrate", "for-the-weight-scales", "max-without-its-sync", "auto_quantize"],
 )
 def test_rank_local_calibration_is_refused_before_it_changes_a_distributed_model(
     entry, algorithm, refused
@@ -510,8 +544,17 @@ def test_rank_local_calibration_is_refused_before_it_changes_a_distributed_model
         if entry == "quantize":
             config = {**mtq.INT4_AWQ_CFG, "algorithm": algorithm}
             mtq.quantize(model, config, lambda m: m(torch.randn(2, 16)))
-        else:
+        elif entry == "calibrate":
             mtq.calibrate(model, algorithm, lambda m: m(torch.randn(2, 16)))
+        else:
+            mtq.auto_quantize(
+                model,
+                constraints={"effective_bits": 8.0},
+                quantization_formats=[({**mtq.INT4_AWQ_CFG, "algorithm": algorithm}, "awq")],
+                data_loader=[torch.randn(2, 16)],
+                forward_step=lambda m, batch: m(batch),
+                loss_func=lambda output, batch: output.sum(),
+            )
 
     assert [type(module) for module in model.modules()] == modules
     after = model.state_dict()
