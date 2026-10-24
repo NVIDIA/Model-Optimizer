@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>moe - Model Optimizer 0.0.1.dev1+gb68a2bd37</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="nemotron_vlm_dataset_utils" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html" /><link rel="prev" title="mlflow" href="modelopt.torch.utils.mlflow.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>moe - Model Optimizer 0.0.1.dev1+g904c480ea</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="nemotron_vlm_dataset_utils" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html" /><link rel="prev" title="mlflow" href="modelopt.torch.utils.mlflow.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -471,32 +471,31 @@ transformers-<code class="docutils literal notranslate"><span class="pre">Expert
 <p>Works cross-node at any rank count, with explicit token permute/unpermute.</p>
 <p>Flow: expand (token, expert) pairs -&gt; route each to dest_rank = global_expert // num_local -&gt;
 all_to_all the tokens (+ local-expert id) -&gt; local grouped_mm (quantizable) -&gt; all_to_all back -&gt;
-weight by the routing weights and scatter-sum to original tokens.</p>
+weight by the routing weights and sum each token’s top_k results.</p>
 <p>Tokens travel and the result returns in <code class="docutils literal notranslate"><span class="pre">hidden_states</span></code>’ dtype – the model’s, so its residual
 stream keeps one dtype. The routing weights never travel: the rank that holds a token weights its
-experts’ results in the weights’ own dtype, and the per-token combine accumulates in fp32.</p>
+experts’ results in the weights’ own dtype and sums them as transformers’ grouped_mm forward does.</p>
 </dd></dl>
 
 <dl class="py function">
 <dt class="sig sig-object py" id="modelopt.torch.utils.moe.register_torch_a2a">
 <span class="sig-name descname"><span class="pre">register_torch_a2a</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.utils.moe.register_torch_a2a" title="Link to this definition">#</a></dt>
 <dd><p>Register everything the torch_a2a path needs into stock transformers (idempotent).</p>
-<p>Done lazily from <code class="docutils literal notranslate"><span class="pre">load_and_prepare_ep</span></code> – NOT at import time, so importing this module has no
+<p>Done lazily from <code class="docutils literal notranslate"><span class="pre">load_and_prepare_ep</span></code>, not at import time, so importing this module has no
 transformers side effect:</p>
 <ul class="simple">
-<li><p>the <code class="docutils literal notranslate"><span class="pre">torch_a2a</span></code> experts FORWARD into <code class="docutils literal notranslate"><span class="pre">ExpertsInterface</span></code> (<code class="docutils literal notranslate"><span class="pre">ALL_EXPERTS_FUNCTIONS</span></code>);</p></li>
-<li><p>two EP parallel STYLES into <code class="docutils literal notranslate"><span class="pre">ALL_PARALLEL_STYLES</span></code>:</p>
+<li><p>the <code class="docutils literal notranslate"><span class="pre">torch_a2a</span></code> experts forward into <code class="docutils literal notranslate"><span class="pre">ExpertsInterface</span></code> (<code class="docutils literal notranslate"><span class="pre">ALL_EXPERTS_FUNCTIONS</span></code>);</p></li>
+<li><p>two EP parallel styles into <code class="docutils literal notranslate"><span class="pre">ALL_PARALLEL_STYLES</span></code>:</p>
 <ul>
-<li><p><code class="docutils literal notranslate"><span class="pre">torch_a2a_router</span></code> – emit GLOBAL unmasked expert ids (skip <code class="docutils literal notranslate"><span class="pre">RouterParallel</span></code>’s
+<li><p><code class="docutils literal notranslate"><span class="pre">torch_a2a_router</span></code> – emit global, unmasked expert ids (skip <code class="docutils literal notranslate"><span class="pre">RouterParallel</span></code>’s
 per-EP-rank masking) so the a2a dispatch can route each (token, expert) to its owning rank;</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">torch_a2a_experts</span></code> – inject the EP <code class="docutils literal notranslate"><span class="pre">process_group</span></code> into the experts forward (4th arg)
 and skip the all-reduce (the a2a combine does the reduction).</p></li>
 </ul>
 </li>
 </ul>
-<p>These two styles are functionally the stock <code class="docutils literal notranslate"><span class="pre">megamoe_router</span></code> / <code class="docutils literal notranslate"><span class="pre">megamoe_experts</span></code> (which were
-added for DeepGEMM Mega-MoE in transformers 5.10.4), reimplemented here – ~5 lines each – so the
-a2a path OWNS its EP styles and does NOT depend on megamoe (i.e. it stays portable below 5.10.4).
+<p>These two styles are functionally transformers’ <code class="docutils literal notranslate"><span class="pre">megamoe_router</span></code> / <code class="docutils literal notranslate"><span class="pre">megamoe_experts</span></code> (added
+in 5.10.4 for DeepGEMM Mega-MoE), reimplemented here so the transport works below 5.10.4 too.
 The base classes (<code class="docutils literal notranslate"><span class="pre">RouterParallel</span></code>, <code class="docutils literal notranslate"><span class="pre">TensorParallelLayer</span></code>) are stock wherever the EP infra
 exists (transformers &gt;= 5.6, the framework floor enforced in <code class="docutils literal notranslate"><span class="pre">load_and_prepare_ep</span></code>), so this
 works on any such version; <code class="docutils literal notranslate"><span class="pre">grouped_gemm</span></code> (expert weight sharding) is stock too.</p>
