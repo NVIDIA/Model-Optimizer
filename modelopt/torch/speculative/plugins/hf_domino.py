@@ -205,29 +205,17 @@ class HFDominoModel(HFDFlashModel):
         before it. From ``pure_draft_prefix_len`` on, its backbone logits get the correction
         from the GRU state over exactly those tokens.
         """
-        base_token, hidden_states = self._generation_base(input_ids)
-        if steps < 1:
-            return base_token, None
-        draft_hidden = self._draft_block(base_token, hidden_states)
-        device = draft_hidden.device
-        # Under device_map="auto" the embedding table and a tied lm_head sit on the first GPU,
-        # not the draft's, and their outputs stay there.
-        backbone_logits = self._base_model_lm_head(draft_hidden).to(device)  # [B, block_size, V]
+        return self._decode_left_to_right(input_ids, steps)
 
+    def _correction_step(self, k, prev_token, hidden, state):
+        """The GRU's correction to block position ``k``; none before ``pure_draft_prefix_len``."""
         m = self.dflash_module
-        prev_token = base_token.squeeze(-1).to(device)
-        gru_state = None
-        draft_tokens = []
-        for k in range(min(steps, self.dflash_block_size)):
-            prev_emb = self._base_model_embeddings(prev_token).to(device)
-            gru_out, gru_state = m.prefix_gru(prev_emb.unsqueeze(1), gru_state)
-            logits = backbone_logits[:, k, :]
-            if k >= m.pure_draft_prefix_len:
-                correction = m.embed_proj(torch.cat([draft_hidden[:, k, :], gru_out[:, 0, :]], -1))
-                logits = logits + correction
-            prev_token = logits.argmax(dim=-1)
-            draft_tokens.append(prev_token)
-        return base_token, torch.stack(draft_tokens, dim=1).to(input_ids.device)
+        # Under device_map="auto" the embedding table sits on the first GPU, not the draft's.
+        prev_emb = self._base_model_embeddings(prev_token).to(hidden.device)
+        gru_out, state = m.prefix_gru(prev_emb.unsqueeze(1), state)
+        if k < m.pure_draft_prefix_len:
+            return None, state
+        return m.embed_proj(torch.cat([hidden, gru_out[:, 0, :]], -1)), state
 
 
 class DominoLambdaCallback(TrainerCallback):

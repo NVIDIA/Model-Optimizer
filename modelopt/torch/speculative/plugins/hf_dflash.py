@@ -1156,3 +1156,39 @@ class HFDFlashModel(DFlashModel):
         # produced on the draft's device, and callers cat both onto the running sequence.
         num_tokens = min(steps, self.dflash_block_size - first)
         return base_token, draft_tokens[:, :num_tokens].to(input_ids.device)
+
+    def _decode_left_to_right(self, input_ids, steps):
+        """``pseudo_speculative_generate`` for a sequential head, drafting the block left to right.
+
+        Block position ``k`` drafts the token after the anchor and the ``k`` tokens drafted before
+        it (``_label_shift = 1``): the argmax of its backbone logits plus the head's correction.
+        """
+        base_token, hidden_states = self._generation_base(input_ids)
+        if steps < 1:
+            return base_token, None
+        draft_hidden = self._draft_block(base_token, hidden_states)
+        device = draft_hidden.device
+        # Under device_map="auto" a tied lm_head sits with the embedding table on the first GPU,
+        # not the draft's, and its output stays there.
+        backbone_logits = self._base_model_lm_head(draft_hidden).to(device)
+
+        prev_token = base_token.squeeze(-1).to(device)
+        state = None
+        draft_tokens = []
+        for k in range(min(steps, self.dflash_block_size)):
+            correction, state = self._correction_step(k, prev_token, draft_hidden[:, k, :], state)
+            logits = backbone_logits[:, k, :]
+            if correction is not None:
+                logits = logits + correction
+            prev_token = logits.argmax(dim=-1)
+            draft_tokens.append(prev_token)
+        return base_token, torch.stack(draft_tokens, dim=1).to(input_ids.device)
+
+    def _correction_step(self, k, prev_token, hidden, state):
+        """A sequential head's correction to block position ``k``'s logits, and its new ``state``.
+
+        ``prev_token`` [B] is the token decoded at ``k - 1`` (the anchor for ``k = 0``), ``hidden``
+        [B, H] the draft's hidden state at ``k``, and ``state`` the head's carry, None at ``k = 0``.
+        The correction is [B, vocab], or None to leave the backbone's logits as they are.
+        """
+        raise NotImplementedError

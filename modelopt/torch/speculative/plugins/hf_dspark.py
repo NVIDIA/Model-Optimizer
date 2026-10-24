@@ -193,23 +193,8 @@ class HFDSparkModel(HFDFlashModel):
         (the anchor for k=0). Without this override DSpark would fall back to the
         DFlash backbone-only generate, under-reporting acceptance length.
         """
-        base_token, hidden_states = self._generation_base(input_ids)
-        if steps < 1:
-            return base_token, None
-        draft_hidden = self._draft_block(base_token, hidden_states)
-        # Under device_map="auto" a tied lm_head sits with the embedding table, not the draft.
-        backbone_logits = self._base_model_lm_head(draft_hidden).to(draft_hidden.device)
+        return self._decode_left_to_right(input_ids, steps)
 
-        # Autoregressive Markov sampling over the block.
-        m = self.dflash_module
-        num_tokens = min(steps, self.dflash_block_size)
-        # anchor precedes block position 0
-        prev_token = base_token.squeeze(-1).to(draft_hidden.device)
-        state = None
-        draft_tokens = []
-        for k in range(num_tokens):
-            bias, state = m.markov_step(prev_token, draft_hidden[:, k, :], state)
-            tok = (backbone_logits[:, k, :] + bias).argmax(dim=-1)
-            draft_tokens.append(tok)
-            prev_token = tok
-        return base_token, torch.stack(draft_tokens, dim=1).to(input_ids.device)
+    def _correction_step(self, k, prev_token, hidden, state):
+        """Block position ``k``'s Markov bias; only the rnn head carries ``state``."""
+        return self.dflash_module.markov_step(prev_token, hidden, state)

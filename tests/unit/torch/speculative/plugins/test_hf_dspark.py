@@ -269,6 +269,40 @@ class TestDSparkSwa:
         assert draft_tokens.shape == (1, 3)
 
 
+class TestDSparkGenerate:
+    """AR validation drafts with the head that is trained and exported."""
+
+    @pytest.mark.parametrize("head_type", HEAD_TYPES)
+    def test_drafts_are_the_training_head_argmax(self, head_type):
+        """Greedy drafts equal the training head's argmax when it is teacher-forced on them."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", _get_dspark_config(head_type=head_type))])
+        model.float().eval()
+        torch.manual_seed(0)
+        with torch.no_grad():
+            # Large enough to overturn the backbone's argmax, so a draft that skips the bias or
+            # feeds the head the wrong prefix, hidden state or recurrent state disagrees.
+            for name, p in model.dflash_module.named_parameters():
+                if name.startswith(("markov_", "gate_proj.", "joint_proj.")):
+                    p.normal_()
+        input_ids = torch.randint(1, model.dflash_config.vocab_size, (2, SEQ_LEN))
+
+        base_token, drafts = model.pseudo_speculative_generate(input_ids, steps=BLOCK_SIZE)
+
+        with torch.no_grad():
+            _, hidden_states = model._generation_base(input_ids)
+            batch = DraftBatch(
+                torch.cat([base_token, drafts], dim=1),  # the anchor, then the drafts
+                loss_mask=None,
+                anchors=torch.zeros(2, 1, dtype=torch.long),
+                keep=None,
+                base_outputs=None,
+                hidden=model._draft_block(base_token, hidden_states),
+            )
+            final_logits = model._draft_logits(batch).final  # [B, 1 block, bs, V]
+        assert torch.equal(final_logits[:, 0].argmax(dim=-1), drafts)
+
+
 class TestDSparkExporter:
     """Test vanilla serving exports and the native gated/recurrent formats."""
 
