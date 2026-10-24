@@ -41,6 +41,10 @@
 A training step's supervision: which token each block position is trained on and where
 (:func:`_block_targets`), how the positions are weighted (:func:`_block_position_weights`),
 and :class:`LossContext`, which carries them with the draft's logits to the loss.
+
+The divergences a block objective is built from live in :data:`DIVERGENCES`. An objective
+is an ordered list of ``(name, weight, term)`` entries, summed left to right by
+:func:`objective_loss`.
 """
 
 import functools
@@ -50,7 +54,14 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
-__all__ = ["DraftLogits", "LossContext", "LossOutput"]
+__all__ = [
+    "DIVERGENCES",
+    "DraftLogits",
+    "LossContext",
+    "LossOutput",
+    "objective_loss",
+    "objective_term",
+]
 
 
 def _block_positions(anchor_positions, block_size, offset, seq_len):
@@ -228,7 +239,7 @@ class LossContext:
     objective backpropagates through it; otherwise it runs under ``no_grad``.
     """
 
-    def __init__(self, batch, logits, targets, *, weighting, teacher, ce_grad):
+    def __init__(self, batch, logits, targets, *, weighting, teacher, ce_grad, tvd_chunk):
         """Weigh the step's block positions.
 
         Args:
@@ -238,13 +249,16 @@ class LossContext:
             weighting: ``_block_position_weights``' scheme, first, decay_factor and dpace_alpha.
             teacher: Returns the base model's logits for every label position.
             ce_grad: Whether the objective backpropagates through ``ce``.
+            tvd_chunk: The per-chunk kernel ``tvd`` runs, possibly compiled.
         """
         self.batch = batch
         self.logits = logits
         self.targets = targets
         self._teacher_fn = teacher
         self._ce_grad = ce_grad and torch.is_grad_enabled()
+        self._tvd_chunk = tvd_chunk
         self._ce = {}
+        self._tvd = {}
         self._teacher = None
         self.weights = _block_position_weights(
             targets.mask,
@@ -277,3 +291,121 @@ class LossContext:
         if self._teacher is None:
             self._teacher = self._teacher_fn()
         return self._teacher
+
+    def tvd(self, source):
+        """Per-token ``||softmax(logits.<source>) - softmax(teacher)||_1``: [B * N * bs]."""
+        if source not in self._tvd:
+            logits = self.flat_logits(source)
+            self._tvd[source] = _tvd_per_token(
+                logits, self.teacher().reshape(logits.shape), chunk_fn=self._tvd_chunk
+            )
+        return self._tvd[source]
+
+
+class _Divergence:
+    """A loss term on one logits source: ``term(ctx, source)`` -> 0-dim loss.
+
+    Each term reduces under the step's position weights itself. ``needs_teacher``: it reads
+    the base model's distribution. ``needs_ce_grad``: it backpropagates through ``ctx.ce``.
+    """
+
+    needs_teacher = False
+    needs_ce_grad = False
+
+
+class _CrossEntropy(_Divergence):
+    """``-log q(gold)``: cross-entropy on the labels."""
+
+    needs_ce_grad = True
+
+    def __call__(self, ctx, source):
+        return (ctx.ce(source) * ctx.weights.view(-1)).sum() / ctx.weight_sum
+
+
+class _SoftCrossEntropy(_Divergence):
+    """Cross-entropy against the base model's distribution (logit distillation)."""
+
+    needs_teacher = True
+
+    def __call__(self, ctx, source):
+        logits = ctx.flat_logits(source)
+        target_soft = torch.softmax(ctx.teacher().reshape(logits.shape), dim=-1)
+        draft_logsoft = torch.log_softmax(logits, dim=-1)
+        per_token = -(target_soft * draft_logsoft).sum(dim=-1)
+        return (per_token * ctx.weights.view(-1)).sum() / ctx.weight_sum
+
+
+class _TeacherTotalVariation(_Divergence):
+    """``||softmax(draft) - softmax(teacher)||_1``: the L1 distance to the base model's distribution."""
+
+    needs_teacher = True
+
+    def __call__(self, ctx, source):
+        return (ctx.tvd(source) * ctx.weights.view(-1)).sum() / ctx.weight_sum
+
+
+class _LabelTotalVariation(_Divergence):
+    """``1 - q(gold)``: total variation to the one-hot label, the per-position rejection rate."""
+
+    needs_ce_grad = True
+
+    def __call__(self, ctx, source):
+        gold_probability = torch.exp(-ctx.ce(source))
+        return ((1.0 - gold_probability) * ctx.weights.view(-1)).sum() / ctx.weight_sum
+
+
+class _AcceptanceBlend(_Divergence):
+    """Cross-entropy and label total variation, blended by how often the draft is accepted.
+
+    ::
+
+        q     = exp(-ce)                 draft probability of the gold token
+        L_ce  = <ce>_w                   the cross-entropy term
+        L_tv  = <1 - q>_w                the label total-variation term
+        a     = <q>_mask                 mean acceptance over supervised positions
+        L     = s*exp(-d*a) * L_ce + (1 - s*exp(-d*a)) * L_tv
+
+    ``<.>_w`` averages under the position weights, ``<.>_mask`` under the unweighted
+    supervision mask, as the reported accuracy is. The blend weight is detached, so it
+    reshapes the objective without adding a gradient path of its own.
+    """
+
+    needs_ce_grad = True
+
+    def __init__(self, scale, decay):
+        """Blend with ``s = scale`` and ``d = decay``."""
+        self.scale = scale
+        self.decay = decay
+
+    def __call__(self, ctx, source):
+        tv_loss = _LabelTotalVariation()(ctx, source)
+        ce_loss = _CrossEntropy()(ctx, source)
+        mask = ctx.targets.mask.view(-1)
+        acceptance = (torch.exp(-ctx.ce(source)).detach() * mask).sum() / (mask.sum() + 1e-6)
+        ce_share = self.scale * torch.exp(-self.decay * acceptance)
+        return ce_share * ce_loss + (1.0 - ce_share) * tv_loss
+
+
+# The closed set of terms an objective is built from, by the name its metric reports.
+DIVERGENCES = {
+    "ce": _CrossEntropy,
+    "kd": _SoftCrossEntropy,
+    "tvd": _TeacherTotalVariation,
+    "tv": _LabelTotalVariation,
+    "lambda": _AcceptanceBlend,
+}
+
+
+def objective_term(name, weight, **params):
+    """One objective entry, ``(name, weight, term)``, with ``params`` bound to the term."""
+    return name, weight, DIVERGENCES[name](**params)
+
+
+def objective_loss(objective, ctx, source):
+    """The objective on ``logits.<source>``, and each term's value as ``loss_<name>``.
+
+    Summed left to right from 0, so a single term of weight 1.0 is that term exactly.
+    """
+    values = [(name, weight, term(ctx, source)) for name, weight, term in objective]
+    loss = sum(weight * value for _, weight, value in values)
+    return loss, {f"loss_{name}": value.detach() for name, _, value in values}

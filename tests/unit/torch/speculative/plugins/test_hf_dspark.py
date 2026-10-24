@@ -37,7 +37,7 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.dflash_losses import _tvd_chunk, _tvd_per_token
-from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
+from modelopt.torch.speculative.plugins.hf_dflash import DraftBatch, HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel
 from modelopt.torch.speculative.plugins.modeling_dflash import (
     DFlashBaseModelOutput,
@@ -174,9 +174,9 @@ class TestDSparkForward:
         assert out.loss.requires_grad
         assert out.loss.dim() == 0
         # three-term loss bookkeeping
-        for key in ("ce_loss", "l1_loss", "confidence_loss", "base_accuracy"):
-            assert key in out.dspark_metrics
-        assert out.dspark_metrics["confidence_loss"] == 0.0  # no confidence head here
+        for key in ("loss_ce", "loss_tvd", "confidence_loss", "backbone_accuracy"):
+            assert key in out.draft_metrics
+        assert out.draft_metrics["confidence_loss"] == 0.0  # no confidence head here
 
         out.loss.backward()
         head_grad = model.dflash_module.markov_w2.weight.grad
@@ -196,7 +196,7 @@ class TestDSparkForward:
 
         input_ids, attention_mask, labels = self._make_batch(model.dflash_config.vocab_size)
         out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        assert out.dspark_metrics["confidence_loss"] > 0.0
+        assert out.draft_metrics["confidence_loss"] > 0.0
 
         out.loss.backward()
         conf_grad = model.dflash_module.confidence_proj.weight.grad
@@ -1063,25 +1063,15 @@ class TestDdpGradientCoverage:
     def test_loss_branch_with_zero_total_weight(self):
         """Anchors exist but every label position is masked, so the three terms are skipped."""
         model = self._model()
-        m = model.dflash_module
         n_blocks, bsz = 2, 1
-        input_ids, anchors, _, args = _draft_args(model, n_blocks=n_blocks, bsz=bsz)
-        hidden = m(*args)
-        vocab = model.dflash_config.vocab_size
-        backbone_logits = torch.randn(bsz, n_blocks * BLOCK_SIZE, vocab, dtype=hidden.dtype)
-        base_outputs = DFlashBaseModelOutput(args[1])  # no base distribution: not read here
-        final_logits, confidence_logits = model._apply_markov_head(
-            hidden, backbone_logits, input_ids, anchors, n_blocks
-        )
-        loss, _, _ = model._compute_dspark_loss(
-            backbone_logits,
-            final_logits,
-            confidence_logits,
+        input_ids, anchors, keep, args = _draft_args(model, n_blocks=n_blocks, bsz=bsz)
+        batch = DraftBatch(
             input_ids,
+            torch.zeros(bsz, SEQ_LEN),  # blocks are kept, but no label position carries weight
             anchors,
-            torch.ones(bsz, n_blocks),  # blocks are kept ...
-            torch.zeros(bsz, SEQ_LEN),  # ... but no label position carries weight
-            base_outputs,
+            keep,
+            DFlashBaseModelOutput(args[1]),  # no base distribution: not read here
+            model.dflash_module(*args),
         )
-        loss.backward()
+        model._compute_loss(model._loss_context(batch)).loss.backward()
         assert not self._ungraded(model), f"no gradient for {self._ungraded(model)}"

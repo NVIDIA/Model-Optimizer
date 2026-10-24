@@ -85,7 +85,16 @@ from transformers.utils import ModelOutput
 from ..dflash.conversion import DFlashDMRegistry
 from ..dflash.dflash_model import DFlashModel
 from .dflash_flex_attention import build_draft_block_mask
-from .dflash_losses import DraftLogits, LossContext, LossOutput, _block_targets, _masked_top1
+from .dflash_losses import (
+    DraftLogits,
+    LossContext,
+    LossOutput,
+    _block_targets,
+    _masked_top1,
+    _tvd_chunk,
+    objective_loss,
+    objective_term,
+)
 from .modeling_dflash import (  # noqa: F401
     DFlashAttention,
     DFlashBaseModelOutput,
@@ -220,7 +229,7 @@ class HFDFlashModel(DFlashModel):
     @property
     def _needs_base_logits(self) -> bool:
         """Whether the loss reads the target's logits; offline training then reconstructs them."""
-        return bool(self.dflash_self_logit_distillation)
+        return any(term.needs_teacher for _, _, term in self._objective)
 
     @property
     def _base_llm_config(self):
@@ -450,9 +459,21 @@ class HFDFlashModel(DFlashModel):
         if self.dflash_use_torch_compile:
             self.dflash_module.compile_body()
 
+        self._objective = self._build_objective(config)
+        # Compiling fuses the TVD chunk's six vocab-wide elementwise passes.
+        self._tvd_chunk_fn = (
+            torch.compile(_tvd_chunk, dynamic=False, fullgraph=True)
+            if self.dflash_use_torch_compile
+            else _tvd_chunk
+        )
+
     def _build_draft_module(self, dflash_config):
         """Build the draft module. Subclasses override to use an augmented module."""
         return DFlashModule(dflash_config)
+
+    def _build_objective(self, config):
+        """The block objective, ``[(name, weight, term)]``: KD from the base model, or CE."""
+        return [objective_term("kd" if config.dflash_self_logit_distillation else "ce", 1.0)]
 
     def _base_device(self):
         """Device the frozen base model sits on. ``meta`` during a from_pretrained restore."""
@@ -900,33 +921,36 @@ class HFDFlashModel(DFlashModel):
                 "dpace_alpha": self.dflash_dpace_alpha,
             },
             teacher=functools.partial(self._teacher_logits, batch.base_outputs, targets.positions),
-            # The KD path optimizes the soft target; its D-PACE confidences need no gradient.
-            ce_grad=not self.dflash_self_logit_distillation,
+            ce_grad=any(term.needs_ce_grad for _, _, term in self._objective),
+            tvd_chunk=self._tvd_chunk_fn,
         )
 
     def _compute_loss(self, ctx):
-        """The weighted cross-entropy (or KD) loss on the served logits, and its accuracy.
+        """The objective on the served logits and its accuracy.
 
-        A step whose position weights leave nothing to train returns a zero loss and
-        accuracy 0.0.
+        Metrics: each objective term, and the backbone's accuracy when a head sits on it.
+        A step whose position weights leave nothing to train gets ``_zero_output``.
         """
-        final = ctx.logits.final
+        final, backbone = ctx.logits
         if not ctx.trainable:
             # Through the draft's output, so an FSDP unit around the draft still runs its backward.
-            return LossOutput(final.sum() * 0.0, 0.0, {})
-
-        if self.dflash_self_logit_distillation:
-            flat_logits = ctx.flat_logits("final")
-            target_soft = torch.softmax(ctx.teacher().reshape(flat_logits.shape), dim=-1)
-            draft_logsoft = torch.log_softmax(flat_logits, dim=-1)
-            per_token = -(target_soft * draft_logsoft).sum(dim=-1)
-        else:
-            per_token = ctx.ce("final")
-        loss = (per_token * ctx.weights.view(-1)).sum() / ctx.weight_sum
-
+            return self._zero_output(ctx, final.sum() * 0.0)
+        loss, metrics = objective_loss(self._objective, ctx, "final")
         with torch.no_grad():
             accuracy = _masked_top1(final, ctx.targets.token_ids, ctx.targets.mask)
-        return LossOutput(loss, accuracy.item(), {})
+            if backbone is not final:
+                metrics["backbone_accuracy"] = _masked_top1(
+                    backbone, ctx.targets.token_ids, ctx.targets.mask
+                )
+        return LossOutput(loss, accuracy.item(), metrics)
+
+    def _zero_output(self, ctx, loss):
+        """``loss``, a zero, for a step with nothing to train; accuracy and metrics read 0."""
+        zero = torch.zeros((), device=loss.device)
+        names = [f"loss_{name}" for name, _, _ in self._objective]
+        if ctx.logits.backbone is not ctx.logits.final:
+            names.append("backbone_accuracy")
+        return LossOutput(loss, 0.0, dict.fromkeys(names, zero))
 
     def forward(
         self,

@@ -36,7 +36,7 @@ Changelog
 
 - ``export_mcore_gpt_to_hf`` given a Hugging Face Hub model ID no longer writes the tokenizer, processor, generation config or remote-code files. Pass a local directory instead, e.g. from ``modelopt.torch.export.ensure_local_checkpoint``.
 - Diffusion HF exports now omit attention quantizer buffers by default, except for FLUX.1, which retains enabled Q/K/V ``_amax`` keys for runtime compatibility; other consumers of those keys can opt in with ``export_attention_quantizers=True`` (CLI: ``--extra-param export_attention_quantizers=true``). Disabled attention quantizers remain excluded, and diffusion components, including LTX-2, no longer emit KV-cache quantization metadata.
-- The DFlash2 and LiLiCorr training forwards now return their metrics in one ``draft_metrics`` dict of detached 0-dim tensors (call ``.item()`` for a Python float), replacing ``selector_metrics`` and ``lilicorr_metrics``.
+- The DFlash2, LiLiCorr, DSpark and Domino training forwards now return their metrics in one ``draft_metrics`` dict of detached 0-dim tensors (call ``.item()`` for a Python float), replacing ``selector_metrics``, ``lilicorr_metrics``, ``dspark_metrics`` and ``domino_metrics``. DSpark's ``ce_loss``/``l1_loss``/``base_accuracy`` are now ``loss_ce``/``loss_tvd``/``backbone_accuracy``, and Domino's ``final_loss``/``base_loss``/``base_accuracy`` are now ``loss_final``/``loss_backbone``/``backbone_accuracy``.
 
 **Deprecations**
 

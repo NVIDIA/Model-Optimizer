@@ -31,7 +31,7 @@ from safetensors.torch import load_file
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
-from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
+from modelopt.torch.speculative.plugins.hf_dflash import DraftBatch, HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_domino import HFDominoModel, compute_lambda_base
 from modelopt.torch.speculative.plugins.modeling_dflash import DFlashModule
 from modelopt.torch.speculative.plugins.modeling_domino import DominoModule
@@ -132,10 +132,10 @@ class TestDominoForward:
         assert out.loss.requires_grad
         assert out.loss.dim() == 0
         # dual-loss bookkeeping
-        assert "base_loss" in out.domino_metrics
-        assert "final_loss" in out.domino_metrics
-        assert "base_accuracy" in out.domino_metrics
-        assert out.domino_metrics["lambda_base"] == 1.0  # default before any callback
+        assert "loss_backbone" in out.draft_metrics
+        assert "loss_final" in out.draft_metrics
+        assert "backbone_accuracy" in out.draft_metrics
+        assert out.draft_metrics["lambda_base"] == 1.0  # default before any callback
 
         out.loss.backward()
         gru_grad = model.dflash_module.prefix_gru.weight_ih_l0.grad
@@ -146,7 +146,7 @@ class TestDominoForward:
         assert backbone_grad is not None and torch.isfinite(backbone_grad).all()
 
     def test_lambda_zero_uses_final_only(self):
-        """With lambda_base=0 the loss equals final_loss (correction head only)."""
+        """With lambda_base=0 the loss equals loss_final (correction head only)."""
         model = get_tiny_llama(num_hidden_layers=4)
         mtsp.convert(model, [("dflash", _get_domino_config())])
         model.train()
@@ -155,7 +155,7 @@ class TestDominoForward:
         vocab = model.dflash_config.vocab_size
         input_ids, attention_mask, labels = self._make_batch(vocab)
         out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        assert abs(out.loss.item() - out.domino_metrics["final_loss"]) < 1e-4
+        assert abs(out.loss.item() - out.draft_metrics["loss_final"].item()) < 1e-4
 
 
 class TestDominoSwa:
@@ -213,15 +213,16 @@ class TestDominoGenerate:
 
         with torch.no_grad():
             _, hidden_states = model._generation_base(input_ids)
-            hidden = model._draft_block(base_token, hidden_states)
-            final_logits = model._apply_domino_head(
-                hidden,
-                model._base_model_lm_head(hidden),
+            batch = DraftBatch(
                 torch.cat([base_token, drafts], dim=1),  # the anchor, then the drafts
-                torch.zeros(2, 1, dtype=torch.long),
-                1,
+                loss_mask=None,
+                anchors=torch.zeros(2, 1, dtype=torch.long),
+                keep=None,
+                base_outputs=None,
+                hidden=model._draft_block(base_token, hidden_states),
             )
-        assert torch.equal(final_logits.argmax(dim=-1), drafts)
+            final_logits = model._draft_logits(batch).final  # [B, 1 block, bs, V]
+        assert torch.equal(final_logits[:, 0].argmax(dim=-1), drafts)
 
 
 class TestLambdaSchedule:

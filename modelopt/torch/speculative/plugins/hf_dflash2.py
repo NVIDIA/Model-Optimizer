@@ -18,7 +18,7 @@
 DFlash2 differs from DFlash only in the draft module (grouped dynamic convolutions
 around every sublayer, plus a candidate selector) and in one extra loss term, so
 this wrapper reuses ``HFDFlashModel``'s forward wholesale and overrides just
-:meth:`_compute_loss`.
+:meth:`_build_objective` and :meth:`_compute_loss`.
 
 The convolutions need no supervision of their own: they sit inside the backbone
 and are trained by the backbone loss. The selector does, because at serving time
@@ -39,7 +39,7 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ..dflash.conversion import DFlash2DMRegistry
-from .dflash_losses import LossOutput, _block_tokens
+from .dflash_losses import LossOutput, _block_tokens, objective_term
 from .hf_dflash import HFDFlashModel
 from .modeling_dflash2 import DFlash2Module
 
@@ -74,12 +74,9 @@ class HFDFlash2Model(HFDFlashModel):
             )
         super().modify(config)
         self.dflash_selector_loss_alpha = config.dflash_selector_loss_alpha
-        self.dflash_lk_loss_type = config.dflash_lk_loss_type
-        self.dflash_lk_ce_scale = config.dflash_lk_ce_scale
-        self.dflash_lk_ce_decay = config.dflash_lk_ce_decay
-        if self.dflash_lk_loss_type != "ce" and self.dflash_self_logit_distillation:
+        if config.dflash_lk_loss_type != "ce" and self.dflash_self_logit_distillation:
             raise ValueError(
-                f"dflash_lk_loss_type={self.dflash_lk_loss_type!r} needs the draft's "
+                f"dflash_lk_loss_type={config.dflash_lk_loss_type!r} needs the draft's "
                 "probability of the gold token, which the KD path never forms -- it "
                 "optimizes a soft target instead. Set dflash_self_logit_distillation=false, "
                 "or dflash_lk_loss_type='ce' to keep distillation."
@@ -148,35 +145,17 @@ class HFDFlash2Model(HFDFlashModel):
         # every training step. The trainer converts them at the logging boundary.
         return loss, accuracy.detach(), coverage.detach()
 
-    def _lk_loss(self, ctx):
-        """Re-weight the block objective between cross-entropy and acceptance.
-
-        Both terms are read off the same per-position cross-entropy the backbone loss
-        already produced, so the target alignment and position weighting are shared::
-
-            q     = exp(-ce)                 draft probability of the gold token
-            L_ce  = <ce>_w                   today's objective
-            L_tv  = <1 - q>_w                total variation to the one-hot target,
-                                             i.e. the per-position acceptance loss
-            a     = <q>_mask                 mean acceptance over supervised positions
-            L     = s*exp(-d*a) * L_ce + (1 - s*exp(-d*a)) * L_tv
-
-        ``<.>_w`` averages under the position weighting, ``<.>_mask`` under the
-        unweighted supervised mask, matching how the reported accuracy is normalized.
-        The blend weight is detached, so it reshapes the objective without adding a
-        gradient path of its own.
-        """
-        ce, weights, weight_sum = ctx.ce("final"), ctx.weights.view(-1), ctx.weight_sum
-        gold_probability = torch.exp(-ce)
-        tv_loss = ((1.0 - gold_probability) * weights).sum() / weight_sum
-        if self.dflash_lk_loss_type == "tv":
-            return tv_loss
-
-        ce_loss = (ce * weights).sum() / weight_sum
-        mask = ctx.targets.mask.view(-1)
-        acceptance = (gold_probability.detach() * mask).sum() / (mask.sum() + 1e-6)
-        ce_share = self.dflash_lk_ce_scale * torch.exp(-self.dflash_lk_ce_decay * acceptance)
-        return ce_share * ce_loss + (1.0 - ce_share) * tv_loss
+    def _build_objective(self, config):
+        """DFlash's objective, or the label TV / CE-TV blend ``dflash_lk_loss_type`` selects."""
+        if config.dflash_lk_loss_type == "tv":
+            return [objective_term("tv", 1.0)]
+        if config.dflash_lk_loss_type == "lambda":
+            return [
+                objective_term(
+                    "lambda", 1.0, scale=config.dflash_lk_ce_scale, decay=config.dflash_lk_ce_decay
+                )
+            ]
+        return super()._build_objective(config)
 
     def _compute_loss(self, ctx):
         """Backbone DFlash loss plus the candidate-selector cross-entropy.
@@ -185,11 +164,8 @@ class HFDFlash2Model(HFDFlashModel):
         comparable; the selector's own accuracy and coverage are added to the metrics.
         """
         out = super()._compute_loss(ctx)
-        loss = out.loss
-        if self.dflash_lk_loss_type != "ce":
-            loss = self._lk_loss(ctx)
         if self.dflash_selector_loss_alpha <= 0:
-            return out._replace(loss=loss)
+            return out
 
         batch, targets = ctx.batch, ctx.targets
         bsz, n_blocks = batch.anchors.shape
@@ -223,5 +199,5 @@ class HFDFlash2Model(HFDFlashModel):
             "selector_coverage": selector_coverage,
         }
         return LossOutput(
-            loss + self.dflash_selector_loss_alpha * selector_loss, out.accuracy, metrics
+            out.loss + self.dflash_selector_loss_alpha * selector_loss, out.accuracy, metrics
         )

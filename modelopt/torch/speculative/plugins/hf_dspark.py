@@ -64,18 +64,9 @@ import logging
 import torch
 import torch.nn.functional as F
 from transformers import PreTrainedModel
-from transformers.trainer_pt_utils import LabelSmoother
-from transformers.utils import ModelOutput
 
 from ..dflash.conversion import DSparkDMRegistry
-from .dflash_losses import (
-    _block_position_weights,
-    _block_targets,
-    _block_tokens,
-    _masked_top1,
-    _tvd_chunk,
-    _tvd_per_token,
-)
+from .dflash_losses import DraftLogits, LossOutput, _block_tokens, objective_term
 from .hf_dflash import HFDFlashModel
 from .modeling_dflash import DFlashBaseModelOutput
 from .modeling_dspark import DSparkModule
@@ -100,7 +91,7 @@ class HFDSparkModel(HFDFlashModel):
         return DSparkModule(dflash_config)
 
     def modify(self, config):
-        """Initialize the DSpark draft module and read the loss-mixing weights."""
+        """Initialize the DSpark draft module and read the confidence term's weight."""
         arch_config = config.dflash_architecture_config
         if arch_config.get("markov_rank") is None:
             raise ValueError(
@@ -108,22 +99,12 @@ class HFDSparkModel(HFDFlashModel):
                 "dflash_architecture_config (the Markov head's low-rank dimension)."
             )
         super().modify(config)
-        # Three-term loss weights (DSpark only). Defaults follow the DeepSpec recipe
-        # (L1/TVD-dominant) so a config that only sets the head still trains sensibly.
-        self.dflash_ce_loss_alpha = config.dflash_ce_loss_alpha
-        self.dflash_l1_loss_alpha = config.dflash_l1_loss_alpha
         self.dflash_confidence_head_alpha = config.dflash_confidence_head_alpha
         if self.dflash_confidence_head_alpha > 0 and not self.dflash_module.use_confidence_head:
             raise ValueError(
                 "dflash_confidence_head_alpha > 0 but the confidence head was not built; "
                 "set dflash_architecture_config.use_confidence_head=true."
             )
-        # Compiling fuses the chunk's six vocab-wide elementwise passes.
-        self._tvd_chunk_fn = (
-            torch.compile(_tvd_chunk, dynamic=False, fullgraph=True)
-            if self.dflash_use_torch_compile
-            else _tvd_chunk
-        )
 
     def get_exporter(self):
         """Get the exporter for the DSpark draft model."""
@@ -131,247 +112,74 @@ class HFDSparkModel(HFDFlashModel):
 
         return DSparkExporter(self)
 
-    def _apply_markov_head(self, hidden, backbone_logits, input_ids, anchor_positions, n_blocks):
-        """Add the Markov transition bias to the backbone base logits.
+    def _build_objective(self, config):
+        """CE plus TVD to the base model; the DeepSpec defaults are TVD-dominant."""
+        return [
+            objective_term("ce", config.dflash_ce_loss_alpha),
+            objective_term("tvd", config.dflash_l1_loss_alpha),
+        ]
 
-        Returns ``(final_logits [B, N, bs, V], confidence_logits [B, N, bs] | None)``.
-        """
-        bsz = input_ids.shape[0]
-        bs = self.dflash_block_size
-
-        hidden4d = hidden.reshape(bsz, n_blocks, bs, hidden.size(-1))
-        base4d = backbone_logits.reshape(bsz, n_blocks, bs, -1)
-
-        # Teacher-forced previous token for block position k: the real token at
-        # anchor+k (so position 0's predecessor is the anchor itself).
-        prev_ids = _block_tokens(input_ids, anchor_positions, bs, self._label_shift - 1)
-
-        bias = self.dflash_module.compute_markov_bias(prev_ids, hidden4d)
-        final4d = base4d + bias
-
-        confidence_logits = None
-        if self.dflash_module.use_confidence_head:
-            confidence_logits = self.dflash_module.compute_confidence_logits(prev_ids, hidden4d)
-        return final4d, confidence_logits
-
-    def _compute_dspark_loss(
-        self,
-        backbone_logits,
-        final_logits,
-        confidence_logits,
-        input_ids,
-        anchor_positions,
-        block_keep_mask,
-        loss_mask,
-        base_outputs,
-    ):
-        """Compute the three-term DSpark loss (CE + TVD + confidence BCE) and metrics.
-
-        Uses next-token (shift_label) alignment: block position k predicts the token
-        at anchor+k+1; the aligned target distribution is the base model's own
-        next-token distribution at position anchor+k (= label index - 1), read from
-        ``base_outputs``.
-        """
-        vocab = final_logits.size(-1)
-        targets = _block_targets(
-            input_ids,
-            anchor_positions,
-            block_keep_mask,
-            loss_mask,
-            self.dflash_block_size,
-            self._label_shift,
-        )
-        binary_eval_mask = targets.mask.view(-1)
+    @property
+    def _position_weighting(self):
         # dflash_loss_objective is not wired for DSpark yet: it always decays.
-        weight_mask = _block_position_weights(
-            targets.mask,
-            "decay",
-            1 - self._label_shift,
-            self.dflash_loss_decay_factor,
-            self.dflash_dpace_alpha,
+        return "decay"
+
+    def _online_base_outputs(self, input_ids, attention_mask, **kwargs):
+        """The target hidden states, and the base's final hidden for the loss to project."""
+        # The inner model, not the CausalLM: the loss projects only the rows it reads.
+        with torch.no_grad():
+            base_out = self._base_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+            )
+        return DFlashBaseModelOutput(
+            target_hidden=self._target_hidden(base_out.hidden_states),
+            base_hidden=base_out.last_hidden_state,
         )
 
-        flat_final = final_logits.reshape(-1, vocab)
-        flat_base = backbone_logits.reshape(-1, vocab)
-        flat_targets = targets.token_ids.reshape(-1)
-        flat_weights = weight_mask.reshape(-1)
-        valid_count = flat_weights.sum() + 1e-6
+    def _head_inputs(self, batch):
+        """Each block position's teacher-forced previous token, and the draft's hidden states.
 
-        if valid_count <= 1.0:
+        The previous token of position k is the real token at anchor+k (the anchor itself
+        for position 0). Returns ``prev_ids [B, N, bs]`` and ``hidden [B, N, bs, H]``.
+        """
+        bsz, n_blocks = batch.anchors.shape
+        bs = self.dflash_block_size
+        prev_ids = _block_tokens(batch.input_ids, batch.anchors, bs, self._label_shift - 1)
+        return prev_ids, batch.hidden.reshape(bsz, n_blocks, bs, -1)
+
+    def _draft_logits(self, batch):
+        """The backbone's logits plus the Markov transition bias."""
+        backbone = super()._draft_logits(batch).backbone
+        prev_ids, hidden = self._head_inputs(batch)
+        bias = self.dflash_module.compute_markov_bias(prev_ids, hidden)
+        return DraftLogits(final=backbone + bias, backbone=backbone)
+
+    def _compute_loss(self, ctx):
+        """The CE + TVD objective plus the confidence head's BCE against the accept rate."""
+        if not ctx.trainable:
             # As forward()'s early return: DDP still reduces the confidence head's gradient.
-            loss = self._draft_zero_loss(flat_final.device)
-            metrics = {"ce_loss": 0.0, "l1_loss": 0.0, "confidence_loss": 0.0, "base_accuracy": 0.0}
-            return loss, 0.0, metrics
+            out = self._zero_output(ctx, self._draft_zero_loss(ctx.logits.final.device))
+            zero = torch.zeros((), device=out.loss.device)
+            return out._replace(metrics={**out.metrics, "confidence_loss": zero})
 
-        # Aligned target distribution: the base model's own prediction of each label.
-        flat_teacher = self._teacher_logits(base_outputs, targets.positions).reshape(-1, vocab)
-
-        # Term 1: cross-entropy on the corrected (final) logits.
-        ce_per_token = F.cross_entropy(flat_final, flat_targets, reduction="none")
-        ce_loss = (ce_per_token * flat_weights).sum() / valid_count
-
-        # Term 2: total-variation distance between the corrected draft and target.
-        # Chunked + checkpointed to avoid materializing two [N, vocab] softmaxes at once.
-        l1_per_token = _tvd_per_token(
-            flat_final,
-            flat_teacher,
-            chunk_fn=self._tvd_chunk_fn,
-        )
-        l1_loss = (l1_per_token * flat_weights).sum() / valid_count
-
-        # Term 3: confidence head BCE against the analytical accept rate c* = 1 - 0.5*TVD.
-        confidence_loss = ce_loss.new_zeros(())
-        if confidence_logits is not None and self.dflash_confidence_head_alpha > 0:
-            accept_rate = (1.0 - 0.5 * l1_per_token).clamp(0.0, 1.0).detach()
+        out = super()._compute_loss(ctx)
+        confidence_loss = out.loss.new_zeros(())
+        if self.dflash_confidence_head_alpha > 0:
+            prev_ids, hidden = self._head_inputs(ctx.batch)
+            confidence_logits = self.dflash_module.compute_confidence_logits(prev_ids, hidden)
+            # The analytical accept rate c* = 1 - 0.5 * TVD.
+            accept_rate = (1.0 - 0.5 * ctx.tvd("final")).clamp(0.0, 1.0).detach()
             conf_bce = F.binary_cross_entropy_with_logits(
                 confidence_logits.reshape(-1).float(), accept_rate, reduction="none"
             )
-            confidence_loss = (conf_bce * flat_weights).sum() / valid_count
-
-        loss = (
-            self.dflash_ce_loss_alpha * ce_loss
-            + self.dflash_l1_loss_alpha * l1_loss
-            + self.dflash_confidence_head_alpha * confidence_loss
+            confidence_loss = (conf_bce * ctx.weights.view(-1)).sum() / ctx.weight_sum
+        return LossOutput(
+            out.loss + self.dflash_confidence_head_alpha * confidence_loss,
+            out.accuracy,
+            {**out.metrics, "confidence_loss": confidence_loss.detach()},
         )
-
-        with torch.no_grad():
-            acc = _masked_top1(flat_final, flat_targets, binary_eval_mask)
-            base_acc = _masked_top1(flat_base, flat_targets, binary_eval_mask)
-            # One device sync for all five scalars instead of one per .item().
-            acc_v, base_acc_v, ce_v, l1_v, conf_v = torch.stack(
-                [acc, base_acc, ce_loss.detach(), l1_loss.detach(), confidence_loss.detach()]
-            ).tolist()
-            metrics = {
-                "ce_loss": ce_v,
-                "l1_loss": l1_v,
-                "confidence_loss": conf_v,
-                "base_accuracy": base_acc_v,
-            }
-        return loss, acc_v, metrics
-
-    def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        position_ids=None,
-        past_key_values=None,
-        inputs_embeds=None,
-        labels=None,
-        use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        cache_position=None,
-        **kwargs,
-    ):
-        """DSpark training forward: DFlash backbone + Markov head + three-term loss.
-
-        Mirrors ``HFDFlashModel.forward`` for data preparation (reusing the inherited
-        anchor/noise/mask/position helpers), then applies the Markov head and the
-        DSpark loss. Eval/offline-eval is delegated to the DFlash parent.
-        """
-        if not self.training:
-            return super().forward(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                cache_position=cache_position,
-                **kwargs,
-            )
-
-        bsz, seq_len = input_ids.shape
-        block_size = self.dflash_block_size
-        device = input_ids.device
-
-        if seq_len % block_size != 0:
-            raise ValueError(
-                f"seq_len ({seq_len}) must be divisible by block_size ({block_size}). "
-                f"Adjust training_seq_len or use padding."
-            )
-
-        # 1. Target hidden states, plus what the TVD/confidence terms read the base
-        #    distribution from (the loss projects only the rows it uses).
-        if self.dflash_offline:
-            assert "base_model_outputs" in kwargs
-            base_outputs = DFlashBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
-        else:
-            # Call the inner base model directly (NOT super().forward(), which during
-            # training runs the full DFlash pipeline).
-            with torch.no_grad():
-                base_out = self._base_model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    output_hidden_states=True,
-                )
-            base_outputs = DFlashBaseModelOutput(
-                target_hidden=self._target_hidden(base_out.hidden_states),
-                base_hidden=base_out.last_hidden_state,
-            )
-        target_hidden = base_outputs.target_hidden
-
-        # 2. Build loss mask (same convention as DFlash/Domino).
-        if labels is not None:
-            loss_mask = (labels != LabelSmoother.ignore_index).float()
-        elif attention_mask is not None:
-            loss_mask = attention_mask.float()
-        else:
-            loss_mask = torch.ones(bsz, seq_len, device=device)
-        if kwargs.get("loss_mask") is not None:
-            loss_mask = loss_mask * kwargs["loss_mask"]
-
-        # 3. Random anchor sampling (inherited).
-        anchor_positions, block_keep_mask = self._sample_anchor_positions(
-            seq_len, loss_mask, device
-        )
-        n_blocks = anchor_positions.shape[1]
-
-        if n_blocks == 0 or not block_keep_mask.any():
-            return ModelOutput(loss=self._draft_zero_loss(device), logits=None, train_acc=[[0.0]])
-
-        # 4. Build draft inputs (inherited helpers).
-        noise_embedding = self._build_noise_embedding(
-            input_ids, anchor_positions, block_keep_mask, n_blocks
-        )
-        full_pos = self._build_position_ids(seq_len, anchor_positions, device)
-        attn_mask = self._build_draft_attention_mask(
-            seq_len,
-            anchor_positions,
-            block_keep_mask,
-            n_blocks,
-            target_hidden.dtype,
-            device,
-            window=self.dflash_swa_window_size,
-        )
-
-        # 5. Draft backbone forward.
-        hidden = self.dflash_module(
-            noise_embedding=noise_embedding,
-            target_hidden=target_hidden,
-            position_ids=full_pos,
-            attention_mask=attn_mask,
-        )
-
-        # 6. Backbone logits → Markov correction → three-term loss.
-        backbone_logits = self._base_model_lm_head(hidden).reshape(bsz, n_blocks, block_size, -1)
-        final_logits, confidence_logits = self._apply_markov_head(
-            hidden, backbone_logits, input_ids, anchor_positions, n_blocks
-        )
-        loss, accuracy, metrics = self._compute_dspark_loss(
-            backbone_logits,
-            final_logits,
-            confidence_logits,
-            input_ids,
-            anchor_positions,
-            block_keep_mask,
-            loss_mask,
-            base_outputs,
-        )
-
-        return ModelOutput(loss=loss, logits=None, train_acc=[[accuracy]], dspark_metrics=metrics)
 
     @torch.no_grad()
     def pseudo_speculative_generate(self, input_ids, steps=1):

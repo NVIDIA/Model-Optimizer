@@ -26,6 +26,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+import torch.nn.functional as F
 from _test_utils.torch.speculative.dflash import get_dflash_config
 from _test_utils.torch.transformers_models import (
     get_tiny_llama,
@@ -41,8 +42,11 @@ import modelopt.torch.speculative.plugins.dflash_flex_attention as dflash_flex_a
 import modelopt.torch.speculative.plugins.hf_dflash as hf_dflash
 from modelopt.torch.speculative.plugins.dflash_losses import (
     DraftLogits,
+    _block_position_weights,
     _block_targets,
     _dpace_position_weights,
+    _tvd_per_token,
+    objective_term,
 )
 from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashAttention,
@@ -262,6 +266,22 @@ class TestDPaceWeights:
         assert any("dflash_loss_decay_factor" in r.message for r in caplog.records)
 
 
+def _legacy_term_loss(name, flat_logits, flat_targets, flat_teacher, flat_weights):
+    """Verbatim copy of the divergences' pre-refactor reductions, kept as the semantic reference."""
+    valid_count = flat_weights.sum() + 1e-6
+    if name == "kd":
+        target_soft = torch.softmax(flat_teacher, dim=-1)
+        draft_logsoft = torch.log_softmax(flat_logits, dim=-1)
+        per_token = -(target_soft * draft_logsoft).sum(dim=-1)
+    elif name == "tvd":
+        per_token = _tvd_per_token(flat_logits, flat_teacher)
+    else:
+        per_token = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+        if name == "tv":
+            per_token = 1.0 - torch.exp(-per_token)
+    return (per_token * flat_weights).sum() / valid_count
+
+
 class TestDPaceLossIntegration:
     """Exercise the _compute_loss block-weighting branches on CPU."""
 
@@ -315,6 +335,28 @@ class TestDPaceLossIntegration:
         model = self._converted_model("dpace")
         with pytest.raises(ValueError, match="base model's distribution"):
             _compute_loss(model, *self._make_inputs(), base_outputs=DFlashBaseModelOutput(None))
+
+    @pytest.mark.parametrize("name", ["ce", "kd", "tvd", "tv"])
+    def test_each_term_reduces_as_before(self, name):
+        """Under non-uniform position weights, each divergence is bitwise its legacy reduction."""
+        vocab = 32
+        model = self._converted_model("decay", dflash_loss_decay_factor=4.0)
+        model._objective = [objective_term(name, 1.0)]
+        logits, input_ids, anchors, keep, loss_mask = self._make_inputs(vocab=vocab)
+        base_outputs = DFlashBaseModelOutput(None, logits=torch.randn(1, SEQ_LEN, vocab))
+        loss, _ = _compute_loss(model, logits, input_ids, anchors, keep, loss_mask, base_outputs)
+
+        targets = _block_targets(input_ids, anchors, keep, loss_mask, BLOCK_SIZE, 0)
+        weights = _block_position_weights(targets.mask, "decay", 1, 4.0, model.dflash_dpace_alpha)
+        teacher = model._teacher_logits(base_outputs, targets.positions)
+        legacy = _legacy_term_loss(
+            name,
+            logits.view(-1, vocab),
+            targets.token_ids.view(-1),
+            teacher.reshape(-1, vocab),
+            weights.view(-1),
+        )
+        assert torch.equal(loss, legacy)
 
 
 class TestDFlashSaveRestore:

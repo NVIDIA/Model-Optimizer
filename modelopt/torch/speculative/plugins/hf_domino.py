@@ -61,14 +61,11 @@ parallel backbone first, then the causal correction). The schedule is driven by
 import logging
 
 import torch
-import torch.nn.functional as F
 from transformers import PreTrainedModel
 from transformers.trainer_callback import TrainerCallback
-from transformers.trainer_pt_utils import LabelSmoother
-from transformers.utils import ModelOutput
 
 from ..dflash.conversion import DominoDMRegistry
-from .dflash_losses import _block_position_weights, _block_targets, _block_tokens, _masked_top1
+from .dflash_losses import DraftLogits, LossOutput, _block_tokens, objective_loss, objective_term
 from .hf_dflash import HFDFlashModel
 from .modeling_dflash import DFlashBaseModelOutput
 from .modeling_domino import DominoModule
@@ -137,28 +134,35 @@ class HFDominoModel(HFDFlashModel):
     def _current_lambda_base(self) -> float:
         return float(getattr(self, "_lambda_base", self.dflash_lambda_base_start))
 
-    def _apply_domino_head(self, hidden, base_logits, input_ids, anchor_positions, n_blocks):
-        """Add the GRU causal correction to the suffix positions of each block.
+    def _build_objective(self, config):
+        """CE on the labels, for the corrected logits and for the backbone's."""
+        return [objective_term("ce", 1.0)]
 
-        Args:
-            hidden: Draft backbone output [B, N*block_size, H].
-            base_logits: Backbone logits [B, N*block_size, vocab].
-            input_ids: Original token IDs [B, seq_len].
-            anchor_positions: Anchor positions per block [B, N].
-            n_blocks: Number of blocks N.
+    @property
+    def _position_weighting(self):
+        # dflash_loss_objective is not wired for Domino yet: it always decays.
+        return "decay"
 
-        Returns:
-            Corrected logits [B, N*block_size, vocab].
-        """
-        bsz = input_ids.shape[0]
-        bs = self.dflash_block_size
+    def _online_base_outputs(self, input_ids, attention_mask, **kwargs):
+        """The target hidden states; Domino does not use target-logit KD."""
+        with torch.no_grad():
+            base_out = self._base_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+            )
+        return DFlashBaseModelOutput(target_hidden=self._target_hidden(base_out.hidden_states))
+
+    def _draft_logits(self, batch):
+        """The backbone's logits with the GRU causal correction added to each block's suffix."""
+        backbone = super()._draft_logits(batch).backbone
+        bsz, n_blocks, bs, _ = backbone.shape
         suffix_start = self.dflash_module.pure_draft_prefix_len
 
-        hidden4d = hidden.reshape(bsz, n_blocks, bs, hidden.size(-1))
-        base4d = base_logits.reshape(bsz, n_blocks, bs, -1)
+        hidden4d = batch.hidden.reshape(bsz, n_blocks, bs, -1)
 
         # Teacher-forced previous tokens: the real token at anchor+j for j in [0, bs).
-        prev_ids = _block_tokens(input_ids, anchor_positions, bs, self._label_shift - 1)
+        prev_ids = _block_tokens(batch.input_ids, batch.anchors, bs, self._label_shift - 1)
 
         block_emb = self._base_model_embeddings(prev_ids)  # [B, N, bs, H]
         gru_in = block_emb.reshape(bsz * n_blocks, bs, block_emb.size(-1))
@@ -170,183 +174,28 @@ class HFDominoModel(HFDFlashModel):
         z_n = hidden4d[:, :, suffix_start:, :]
         logits_e = self.dflash_module.embed_proj(torch.cat([z_n, prefix_states], dim=-1))
 
-        prefix_logits = base4d[:, :, :suffix_start, :]
-        suffix_logits = base4d[:, :, suffix_start:, :] + logits_e
-        final4d = torch.cat([prefix_logits, suffix_logits], dim=2)
-        return final4d.reshape(bsz, n_blocks * bs, -1)
-
-    def _compute_domino_loss(
-        self, base_logits, final_logits, input_ids, anchor_positions, block_keep_mask, loss_mask
-    ):
-        """Compute the (1-lambda)*final + lambda*base weighted CE loss and accuracies.
-
-        Uses next-token (shift_label) alignment: position k predicts the token at
-        anchor+k+1, and position 0 is *not* excluded (unlike base DFlash).
-        """
-        targets = _block_targets(
-            input_ids,
-            anchor_positions,
-            block_keep_mask,
-            loss_mask,
-            self.dflash_block_size,
-            self._label_shift,
-        )
-        binary_eval_mask = targets.mask.view(-1)
-        # dflash_loss_objective is not wired for Domino yet: it always decays.
-        weight_mask = _block_position_weights(
-            targets.mask,
-            "decay",
-            1 - self._label_shift,
-            self.dflash_loss_decay_factor,
-            self.dflash_dpace_alpha,
+        prefix_logits = backbone[:, :, :suffix_start, :]
+        suffix_logits = backbone[:, :, suffix_start:, :] + logits_e
+        return DraftLogits(
+            final=torch.cat([prefix_logits, suffix_logits], dim=2), backbone=backbone
         )
 
-        flat_final = final_logits.reshape(-1, final_logits.size(-1))
-        flat_base = base_logits.reshape(-1, base_logits.size(-1))
-        flat_targets = targets.token_ids.reshape(-1)
-        flat_weights = weight_mask.reshape(-1)
-        valid_count = flat_weights.sum() + 1e-6
-
+    def _compute_loss(self, ctx):
+        """``(1 - lambda_base) * objective(final) + lambda_base * objective(backbone)``."""
+        out = super()._compute_loss(ctx)
         lambda_base = self._current_lambda_base()
-
-        if valid_count > 1.0:
-            final_loss = (
-                F.cross_entropy(flat_final, flat_targets, reduction="none") * flat_weights
-            ).sum() / valid_count
-            base_loss = (
-                F.cross_entropy(flat_base, flat_targets, reduction="none") * flat_weights
-            ).sum() / valid_count
-            loss = (1.0 - lambda_base) * final_loss + lambda_base * base_loss
-
-            with torch.no_grad():
-                accuracy = _masked_top1(flat_final, flat_targets, binary_eval_mask).item()
-                base_accuracy = _masked_top1(flat_base, flat_targets, binary_eval_mask).item()
-        else:
-            loss = flat_final.sum() * 0.0
-            final_loss = loss
-            base_loss = loss
-            accuracy = 0.0
-            base_accuracy = 0.0
-
+        loss = backbone_loss = out.loss
+        if ctx.trainable:
+            backbone_loss, _ = objective_loss(self._objective, ctx, "backbone")
+            loss = (1.0 - lambda_base) * out.loss + lambda_base * backbone_loss
         metrics = {
-            "final_loss": final_loss.detach().item(),
-            "base_loss": base_loss.detach().item(),
-            "base_accuracy": base_accuracy,
-            "lambda_base": lambda_base,
+            "loss_final": out.loss.detach(),
+            "loss_backbone": backbone_loss.detach(),
+            "backbone_accuracy": out.metrics["backbone_accuracy"],
+            # float64 holds the scheduled value exactly.
+            "lambda_base": torch.full((), lambda_base, dtype=torch.float64, device=out.loss.device),
         }
-        return loss, accuracy, metrics
-
-    def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        position_ids=None,
-        past_key_values=None,
-        inputs_embeds=None,
-        labels=None,
-        use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        cache_position=None,
-        **kwargs,
-    ):
-        """Domino training forward: DFlash backbone + causal correction head + dual loss.
-
-        Mirrors ``HFDFlashModel.forward`` for data preparation (reusing the inherited
-        anchor/noise/mask/position helpers), then applies the Domino head and the
-        two-term loss. Eval/offline-eval is delegated to the DFlash parent.
-        """
-        if not self.training:
-            return super().forward(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
-                labels=labels,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                cache_position=cache_position,
-                **kwargs,
-            )
-
-        bsz, seq_len = input_ids.shape
-        block_size = self.dflash_block_size
-        device = input_ids.device
-
-        if seq_len % block_size != 0:
-            raise ValueError(
-                f"seq_len ({seq_len}) must be divisible by block_size ({block_size}). "
-                f"Adjust training_seq_len or use padding."
-            )
-
-        # 1. Target hidden states (Domino does not use target-logit KD).
-        if self.dflash_offline:
-            assert "base_model_outputs" in kwargs
-            base_outputs = DFlashBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
-            target_hidden = base_outputs.target_hidden
-        else:
-            with torch.no_grad():
-                base_out = self._base_model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    output_hidden_states=True,
-                )
-            target_hidden = self._target_hidden(base_out.hidden_states)
-
-        # 2. Build loss mask (same convention as DFlash).
-        if labels is not None:
-            loss_mask = (labels != LabelSmoother.ignore_index).float()
-        elif attention_mask is not None:
-            loss_mask = attention_mask.float()
-        else:
-            loss_mask = torch.ones(bsz, seq_len, device=device)
-        if kwargs.get("loss_mask") is not None:
-            loss_mask = loss_mask * kwargs["loss_mask"]
-
-        # 3. Random anchor sampling (inherited).
-        anchor_positions, block_keep_mask = self._sample_anchor_positions(
-            seq_len, loss_mask, device
-        )
-        n_blocks = anchor_positions.shape[1]
-
-        if n_blocks == 0 or not block_keep_mask.any():
-            return ModelOutput(loss=self._draft_zero_loss(device), logits=None, train_acc=[[0.0]])
-
-        # 4. Build draft inputs (inherited helpers).
-        noise_embedding = self._build_noise_embedding(
-            input_ids, anchor_positions, block_keep_mask, n_blocks
-        )
-        full_pos = self._build_position_ids(seq_len, anchor_positions, device)
-        attn_mask = self._build_draft_attention_mask(
-            seq_len,
-            anchor_positions,
-            block_keep_mask,
-            n_blocks,
-            target_hidden.dtype,
-            device,
-            window=self.dflash_swa_window_size,
-        )
-
-        # 5. Draft backbone forward.
-        hidden = self.dflash_module(
-            noise_embedding=noise_embedding,
-            target_hidden=target_hidden,
-            position_ids=full_pos,
-            attention_mask=attn_mask,
-        )
-
-        # 6. Base + corrected logits, then dual loss.
-        base_logits = self._base_model_lm_head(hidden)
-        final_logits = self._apply_domino_head(
-            hidden, base_logits, input_ids, anchor_positions, n_blocks
-        )
-        loss, accuracy, metrics = self._compute_domino_loss(
-            base_logits, final_logits, input_ids, anchor_positions, block_keep_mask, loss_mask
-        )
-
-        return ModelOutput(loss=loss, logits=None, train_acc=[[accuracy]], domino_metrics=metrics)
+        return LossOutput(loss, out.accuracy, metrics)
 
     @torch.no_grad()
     def pseudo_speculative_generate(self, input_ids, steps=1):

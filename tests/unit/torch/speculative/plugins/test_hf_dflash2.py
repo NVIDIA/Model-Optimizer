@@ -541,6 +541,34 @@ class TestDFlash2BlockObjective:
         loss = self._loss(dflash_lk_loss_type="tv", dflash_selector_loss_alpha=0.0)
         assert 0.0 <= loss <= 1.0
 
+    @pytest.mark.parametrize("loss_type", ["ce", "tv", "lambda"])
+    def test_a_step_with_nothing_to_train_is_gated(self, monkeypatch, loss_type):
+        """Every objective takes the zero loss when the position weights sum to <= 1.
+
+        The one label sits three positions after the anchor, so its decay weight is < 1.
+        """
+        config = _get_dflash2_config(selector_loss_alpha=0.0)
+        config.update(
+            dflash_lk_loss_type=loss_type,
+            dflash_loss_objective="decay",
+            dflash_loss_decay_factor=4.0,
+        )
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", config)])
+        model.float().train()
+        monkeypatch.setattr(
+            model,
+            "_sample_anchor_positions",
+            lambda *_: (torch.tensor([[1]]), torch.tensor([[True]])),
+        )
+        input_ids = _make_batch(model.dflash_config.vocab_size)[0][:1]
+        loss_mask = torch.zeros(1, SEQ_LEN)
+        loss_mask[0, 4] = 1.0
+        out = model(
+            input_ids=input_ids, attention_mask=torch.ones_like(input_ids), loss_mask=loss_mask
+        )
+        assert out.loss.item() == 0.0
+
     @pytest.mark.parametrize(
         ("loss_type", "distill", "ce_grad"),
         [("ce", False, True), ("tv", False, True), ("lambda", False, True), ("ce", True, False)],
