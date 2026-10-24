@@ -23,7 +23,7 @@ import os
 import sys
 import time
 import traceback
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import timedelta
@@ -736,21 +736,26 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
     counts equal (else a rank exits calibration early and hangs the others on the per-step collectives),
     at the cost of the sampler repeating up to ``world_size - 1`` samples to pad the even split. It
     replaces the loader's sampler, so a shuffling one becomes the rank's unshuffled share, and one that
-    picks samples itself (a subset, or a batch sampler) is refused rather than silently widened. For
-    streaming ``IterableDataset`` datasets (which have no ``len()`` and so can't use a sampler) each rank
-    strides its own deterministic copy of the stream via :class:`_StridedIterableShard`. Every DataLoader
-    worker must see that whole stream: a dataset that splits itself across workers by
-    ``get_worker_info()`` would be split twice and lose samples, so load one with ``num_workers=0``.
+    picks samples itself (a subset, or a batch sampler other than a plain ``BatchSampler``) is refused
+    rather than silently widened. For streaming ``IterableDataset`` datasets (which have no ``len()``
+    and so can't use a sampler) each rank strides its own deterministic copy of the stream via
+    :class:`_StridedIterableShard`. Every DataLoader worker must see that whole stream: a dataset that
+    splits itself across workers by ``get_worker_info()`` would be split twice and lose samples, so
+    load one with ``num_workers=0``.
 
-    Forwards all non-sampler DataLoader settings from ``loader`` (workers, pinning,
-    prefetch, init fn, generator, ...).
+    Forwards all non-sampler DataLoader settings from ``loader`` (batching, workers, pinning,
+    prefetch, init fn, generator, ...). A loader with auto-batching off (``batch_size=None``) is
+    refused.
     """
-    if not isinstance(loader.dataset, IterableDataset):
-        picker = (
-            loader.batch_sampler
-            if loader.batch_sampler is not None and type(loader.batch_sampler) is not BatchSampler
-            else loader.sampler
+    batching = loader.batch_sampler
+    if batching is None:
+        raise ValueError(
+            "shard_dataloader: the loader has auto-batching off (batch_size=None), so each rank "
+            "would calibrate on one dataset item per step; pass a loader that batches by batch_size."
         )
+    if not isinstance(loader.dataset, IterableDataset):
+        # A plain BatchSampler, built from batch_size or passed in, batches what its sampler picks.
+        picker = batching.sampler if type(batching) is BatchSampler else batching
         if type(picker) not in (SequentialSampler, RandomSampler, DistributedSampler):
             raise ValueError(
                 f"shard_dataloader: the loader's {type(picker).__name__} picks which samples it "
@@ -782,8 +787,8 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
     )
     return DataLoader(
         loader.dataset,
-        batch_size=loader.batch_size,
-        drop_last=loader.drop_last,
+        batch_size=batching.batch_size,
+        drop_last=batching.drop_last,
         sampler=sampler,
         collate_fn=loader.collate_fn,
         num_workers=loader.num_workers,
@@ -885,7 +890,7 @@ def distributed_forward_loop(
 
     The forwards run without gradients and with KV/state caching disabled (``_disable_use_cache``), as
     the single-node ``_forward_loop`` runs them: a hybrid Mamba/attention model mutates its cache in
-    place.
+    place. Each batch is a mapping of the forward's keyword arguments, as ``model(**batch)`` takes.
     """
     # Local import to avoid any import cycle within modelopt.torch.utils.
     from modelopt.torch.utils.dataset_utils import _disable_use_cache
@@ -903,6 +908,11 @@ def distributed_forward_loop(
             # Hand the caching allocator's unused pool back: NCCL allocates its buffers outside it.
             _release_cached_cuda_memory()
             for batch in tqdm(dataloader, desc="Calibrating", disable=not is_master()):
+                if not isinstance(batch, Mapping):
+                    raise TypeError(
+                        f"distributed_forward_loop: the loader yields {type(batch).__name__}, not a "
+                        "mapping of the forward's keyword arguments."
+                    )
                 if device is not None:
                     batch = {
                         k: (v.to(device) if isinstance(v, torch.Tensor) else v)
