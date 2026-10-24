@@ -470,6 +470,10 @@ def _map_ckpt_keys_to_model(model: "torch.nn.Module", ckpt_keys, model_keys) -> 
     key the model has no place for (an MTP layer's ``model.layers.61.shared_head.norm.weight``, a layer a
     truncated model lacks) lands on ``model.norm.weight`` by suffix alone and overwrites it, with set order
     picking the winner.
+
+    It does not resolve keys through :func:`_target_param`: a model built on meta has no record of what
+    ``from_pretrained`` ran, and the stock mapping lacks a remote-code model's renames. The loader instead
+    refuses a mapping that fills a tensor the model's load recorded as unplaced, which the export carries.
     """
     from collections import defaultdict
 
@@ -588,7 +592,83 @@ def _meta_dcp_load(
             "safetensors (a config-only / incomplete HF revision; e.g. refs/main pointing at a weightless "
             "snapshot). Re-download the checkpoint or pass a complete local snapshot dir / pinned revision."
         )
+    from torch.distributed.fsdp import FSDPModule
 
+    if isinstance(model, FSDPModule):
+        raise RuntimeError(
+            "meta+DCP load: the root module is fully_shard-ed. The load materializes module by module, "
+            "so already-real params survive, which a root-sharded FSDP2 state does not take: shard the "
+            "decoder layers only."
+        )
+    meta_buffers = sorted(n for n, b in model.named_buffers() if b.is_meta)
+    if meta_buffers:
+        raise RuntimeError(
+            f"meta+DCP load: {len(meta_buffers)} buffer(s) are on meta, which a checkpoint of params "
+            f"cannot fill (a non-persistent buffer is not in it): {meta_buffers[:3]}. Build the model "
+            "with its buffers materialized, as accelerate's init_empty_weights does."
+        )
+
+    # ``dcp.load`` matches state_dict entries to checkpoint entries BY NAME, but a checkpoint's stored key
+    # names can differ from the built model's ``state_dict`` names, and from_pretrained bridges the gap on
+    # load. E.g. Qwen2.5-VL's checkpoint stores ``model.layers.*`` / ``visual.*`` while transformers>=5 nests
+    # them as ``model.language_model.layers.*`` / ``model.visual.*`` -- a pure prefix-insertion with the leaf
+    # path preserved, which the model carries no ``_checkpoint_conversion_mapping`` attribute for. A raw by-name
+    # match would SILENTLY skip every renamed weight (they stay ``to_empty`` garbage -> a wrecked model that
+    # only surfaces as a confusing downstream crash). Reproduce from_pretrained's result generically via
+    # :func:`_map_ckpt_keys_to_model`: exact -> conversion-mapping regexes -> longest UNIQUE suffix.
+    model_keys = list(model.state_dict())  # (sharded or plain) params + persistent buffers
+    target_names = set(load_names) & set(model_keys)
+    # {ckpt_key: model_key}, mapped against the WHOLE model and then cut to what this load fills: a suffix
+    # unique among the targets alone can still belong to a key outside them (an expert's, when only the
+    # dense part loads here).
+    key_map = {
+        ck: mk
+        for ck, mk in _map_ckpt_keys_to_model(model, ckpt_keys, set(model_keys)).items()
+        if mk in target_names
+    }
+    # The export carries the checkpoint tensors the model has no parameter for over raw, as the load
+    # that built the model recorded them (record_unplaced_source_keys): filling one here too would
+    # write it twice, once quantized.
+    carried = sorted(
+        set(key_map) & set(getattr(model, "_modelopt_unplaced_source_keys", None) or ())
+    )
+    if carried:
+        raise RuntimeError(
+            f"meta+DCP load: {len(carried)} checkpoint tensor(s) map onto this model's params by name, "
+            f"but its load recorded them as having no param, for the export to carry over raw: "
+            f"{carried[:3]}. The two would write them twice."
+        )
+    # Build load_sd in the model's state_dict ORDER (identical on every rank) -- NOT key_map/set iteration
+    # order, which is hash-randomized per process. dcp.load's collective load planner deadlocks if ranks
+    # present the same keys in different orders, so a deterministic, rank-consistent order is required.
+    inv = {mk: ck for ck, mk in key_map.items()}  # model_key -> ckpt_key (1:1 on model keys)
+    mapped_names = set(key_map.values())
+    # Fail fast, BEFORE the load, if the mapping left over half of the TARGET WEIGHT unloaded -- a key scheme
+    # this path did not resolve. Weight by NUMEL, not param COUNT: a fused-expert MoE (Qwen3-MoE: per-expert
+    # checkpoint -> grouped ``experts.gate_up_proj``/``down_proj`` model params DCP can't fuse) leaves only
+    # ~2 params/layer unloaded but they are ~95% of the weight, so a count-based guard misses it. A smaller
+    # shortfall can be tied weights, which ``tie_weights`` fills after the load; whatever it does not fill
+    # fails there.
+    numel = {n: p.numel() for n, p in model.named_parameters() if n in target_names}
+    want_params = set(numel)
+    unloaded = want_params - mapped_names
+    total_nel = max(1, sum(numel.values()))
+    unloaded_nel = sum(numel[n] for n in unloaded)
+    if 2 * unloaded_nel > total_nel:
+        raise RuntimeError(
+            f"meta+DCP load: {len(unloaded)}/{len(want_params)} params ({100 * unloaded_nel / total_nel:.0f}% "
+            f"of the target weight) matched no checkpoint key -- the checkpoint's key naming was not resolved "
+            f"to this model's state_dict (exact + conversion-mapping + suffix match all missed), or it needs a "
+            f"weight conversion DCP can't do (FUSED EXPERTS, split qkv, on-the-fly dequant). Unloaded e.g.: "
+            f"{sorted(unloaded)[:5]}. Replicating the dense part (MODELOPT_FSDP_SIZE=1) loads it through "
+            "from_pretrained instead."
+        )
+    loaded_bufs = mapped_names - {n for n, _ in model.named_parameters()}
+    if loaded_bufs:
+        warn_rank_0(
+            f"meta+DCP load: loaded {len(loaded_bufs)} persistent buffer(s) from checkpoint: "
+            f"{sorted(loaded_bufs)[:5]}"
+        )
     # Snapshot real buffers (to_empty re-empties them), materialize params, restore buffers. Materialize
     # selectively, module by module, so the real experts are not re-emptied. That is safe only because no
     # root is fully_shard-ed: a per-module loop corrupts a ROOT-sharded FSDP state (its state_dict then
@@ -620,58 +700,8 @@ def _meta_dcp_load(
     kept_names = set(saved_params)
     del saved_buffers, saved_params
 
-    # ``dcp.load`` matches state_dict entries to checkpoint entries BY NAME, but a checkpoint's stored key
-    # names can differ from the built model's ``state_dict`` names, and from_pretrained bridges the gap on
-    # load. E.g. Qwen2.5-VL's checkpoint stores ``model.layers.*`` / ``visual.*`` while transformers>=5 nests
-    # them as ``model.language_model.layers.*`` / ``model.visual.*`` -- a pure prefix-insertion with the leaf
-    # path preserved, and there is NO ``_checkpoint_conversion_mapping`` on the model to read. A raw by-name
-    # match would SILENTLY skip every renamed weight (they stay ``to_empty`` garbage -> a wrecked model that
-    # only surfaces as a confusing downstream crash). Reproduce from_pretrained's result generically via
-    # :func:`_map_ckpt_keys_to_model`: exact -> conversion-mapping regexes -> longest UNIQUE suffix.
-    full_sd = (
-        model.state_dict()
-    )  # (sharded ``DTensor`` or plain) params + replicated persistent buffers
-    target_names = set(load_names) & set(full_sd)
-    # {ckpt_key: model_key}, mapped against the WHOLE model and then cut to what this load fills: a suffix
-    # unique among the targets alone can still belong to a key outside them (an expert's, when only the
-    # dense part loads here).
-    key_map = {
-        ck: mk
-        for ck, mk in _map_ckpt_keys_to_model(model, ckpt_keys, set(full_sd)).items()
-        if mk in target_names
-    }
-    # Build load_sd in the model's state_dict ORDER (identical on every rank) -- NOT key_map/set iteration
-    # order, which is hash-randomized per process. dcp.load's collective load planner deadlocks if ranks
-    # present the same keys in different orders, so a deterministic, rank-consistent order is required.
-    inv = {mk: ck for ck, mk in key_map.items()}  # model_key -> ckpt_key (1:1 on model keys)
+    full_sd = model.state_dict()  # the materialized tensors: to_empty replaced the meta params
     load_sd = {inv[mk]: full_sd[mk] for mk in full_sd if mk in inv}
-    mapped_names = set(key_map.values())
-    # Fail fast, BEFORE the load, if the mapping left over half of the TARGET WEIGHT unloaded -- a key scheme
-    # this path did not resolve. Weight by NUMEL, not param COUNT: a fused-expert MoE (Qwen3-MoE: per-expert
-    # checkpoint -> grouped ``experts.gate_up_proj``/``down_proj`` model params DCP can't fuse) leaves only
-    # ~2 params/layer unloaded but they are ~95% of the weight, so a count-based guard misses it. A smaller
-    # shortfall can be tied weights, which ``tie_weights`` fills after the load; whatever it does not fill
-    # fails there.
-    numel = {n: p.numel() for n, p in model.named_parameters() if n in target_names}
-    want_params = set(numel)
-    unloaded = want_params - mapped_names
-    total_nel = max(1, sum(numel.values()))
-    unloaded_nel = sum(numel[n] for n in unloaded)
-    if 2 * unloaded_nel > total_nel:
-        raise RuntimeError(
-            f"meta+DCP load: {len(unloaded)}/{len(want_params)} params ({100 * unloaded_nel / total_nel:.0f}% "
-            f"of the target weight) matched no checkpoint key -- the checkpoint's key naming was not resolved "
-            f"to this model's state_dict (exact + conversion-mapping + suffix match all missed), or it needs a "
-            f"weight conversion DCP can't do (FUSED EXPERTS, split qkv, on-the-fly dequant). Unloaded e.g.: "
-            f"{sorted(unloaded)[:5]}. Replicating the dense part (MODELOPT_FSDP_SIZE=1) loads it through "
-            "from_pretrained instead."
-        )
-    loaded_bufs = mapped_names - {n for n, _ in model.named_parameters()}
-    if loaded_bufs:
-        warn_rank_0(
-            f"meta+DCP load: loaded {len(loaded_bufs)} persistent buffer(s) from checkpoint: "
-            f"{sorted(loaded_bufs)[:5]}"
-        )
     dcp.load(load_sd, storage_reader=reader)
     # Taken before tying, which can swap a filled param out of its module; in state_dict order, the
     # same on every rank, so every rank keeps the same param of a tied group.

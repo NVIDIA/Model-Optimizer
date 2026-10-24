@@ -471,6 +471,47 @@ def test_fsdp2_sharded_params_are_filled_in_place(tmp_path, gloo_world_of_one):
         assert torch.equal(loaded, ref[name]), name
     for name, buf in model.named_buffers():
         assert torch.equal(buf, buffers[name]), name
+    # FSDP2 all-gathers the shards it tracks, which full_tensor() does not read: the forward shows
+    # the loaded values reach the computation.
+    ids = torch.randint(0, src.config.vocab_size, (2, 8))
+    with torch.no_grad():
+        assert torch.equal(model(ids).logits, src(ids).logits)
+
+
+def _root_sharded(model):
+    fully_shard(model, mesh=init_device_mesh("cpu", (1,)))
+
+
+def _with_a_meta_buffer(model):
+    model.model.register_buffer("scratch", torch.empty(2, device="meta"), persistent=False)
+
+
+def _recorded_as_carried_over(model):
+    model._modelopt_unplaced_source_keys = ["model.norm.weight"]
+
+
+@pytest.mark.parametrize(
+    ("change", "match"),
+    [
+        (_root_sharded, "root module is fully_shard-ed"),
+        (_with_a_meta_buffer, r"buffer\(s\) are on meta"),
+        (_recorded_as_carried_over, "recorded them as having no param"),
+    ],
+    ids=["root-sharded", "meta-buffer", "carried-over-raw"],
+)
+def test_a_load_it_cannot_do_rightly_is_refused_before_anything_changes(
+    tmp_path, gloo_world_of_one, change, match
+):
+    """A root-sharded model, which the module-by-module materialization would corrupt; a buffer on
+    meta, which a checkpoint of params cannot fill; a tensor the export carries over raw, which
+    filling would write twice. Each is refused with every param still on meta."""
+    ckpt_dir = _save(tmp_path, get_tiny_llama().state_dict())
+    model = _meta_twin(get_tiny_llama)
+    change(model)
+
+    with pytest.raises(RuntimeError, match=match):
+        _meta_dcp_load(model, ckpt_dir, "cpu", load_names=_every_name(model))
+    assert all(p.is_meta for p in model.parameters())
 
 
 def _tie_pair(layout):
