@@ -641,10 +641,22 @@ def _export_quantized_weight(
                 "GGML unified export currently supports modules with a standard 'weight' "
                 f"attribute, got {weight_name!r} on {type(sub_module).__name__}"
             )
+        ggml_input_quantizer = getattr(sub_module, quantizer_attrs.input_quantizer, None)
+        input_scale = None
+        if ggml_input_quantizer is not None and ggml_input_quantizer.is_enabled:
+            # W1A4/W2A4: NVFP4 activations take the scale amax / (6 * 448).
+            input_scale = NVFP4QTensor.get_activation_scaling_factor(ggml_input_quantizer)
+            if input_scale is None:
+                raise ValueError(
+                    f"The NVFP4 input quantizer of a GGML {type(sub_module).__name__} has no "
+                    "calibrated amax, so it has no input_scale to export."
+                )
         packed_weight = GGML_FORMAT_REGISTRY[quantization_format].pack(
             weight.to(dtype), getattr(sub_module, quantizer_attrs.weight_quantizer, None)
         )
         setattr(sub_module, weight_name, nn.Parameter(packed_weight, requires_grad=False))
+        if input_scale is not None:
+            sub_module.register_buffer(quantizer_attrs.input_scale, input_scale.squeeze())
         maybe_clear_cuda_cache()
         return
 
