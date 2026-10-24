@@ -40,8 +40,8 @@ from torch.distributed.nn.functional import all_to_all_single as autograd_all_to
 # ---------------------------------------------------------------------------------------------------
 
 
-# all_to_all_single addresses its flattened buffers with int32 element offsets, so a hop larger than
-# this overflows them; a2a_moe chunks such transfers along the hidden dim.
+# all_to_all_single addresses its flattened buffers with int32 element offsets; a2a_moe sends a larger
+# hop as hidden-column slices, so every hop stays within them.
 _A2A_MAX_HOP_ELEMENTS = 2**31 - 1
 # The combine weights and sums each token's top_k results a slice of tokens at a time, so its
 # temporaries stay within this many elements however many tokens the layer routes.
@@ -91,9 +91,9 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     def _all_to_all(output, input_, out_split, in_split, step=None):
         """All-to-all in hidden-column slices ``step`` wide; in one hop if ``step`` is None or covers H.
 
-        all_to_all_single addresses the flattened ``[rows, H]`` buffers with int32 element offsets, so a
-        hop past 2**31 elements overflows them and hangs. Every slice has the same row splits, and
-        concatenating the slices is autograd-safe.
+        all_to_all_single addresses the flattened ``[rows, H]`` buffers with int32 element offsets;
+        slicing keeps every hop within them. Every slice has the same row splits, and concatenating the
+        slices is autograd-safe.
         """
         hdim = input_.shape[-1]
         if step is None or step >= hdim:
