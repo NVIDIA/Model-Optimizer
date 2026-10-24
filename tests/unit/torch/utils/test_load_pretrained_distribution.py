@@ -231,6 +231,7 @@ def test_a_config_passed_for_the_load_is_the_one_it_decides_from(
 
     assert reads == []
     assert loaders["fsdp2"]["hf_config"].num_hidden_layers == 2
+    assert loaders["fsdp2"]["hf_config"] is not config  # building it writes to it
     assert config.to_dict() == as_passed
     assert distribution_plan(model) == DistributionPlan(2, dense="fsdp")
 
@@ -368,6 +369,7 @@ def test_a_single_process_fsdp2_load_sets_up_its_group_of_one(
     config = serve(LlamaConfig(**_TINY))
     if quantized:
         config.quantization_config = {"quant_method": "fp8"}
+    monkeypatch.setenv("RANK", "0")  # torchrun --nproc_per_node=1
     live = []
     monkeypatch.setattr(dist, "is_initialized", lambda: bool(live))
     monkeypatch.setattr(dist, "setup", lambda timeout=None: live.append(0))
@@ -387,6 +389,19 @@ def test_a_single_process_fsdp2_load_sets_up_its_group_of_one(
     assert live == [0]
     call = loaders.pop("fsdp2")
     assert (call["rank"], call["world_size"]) == (0, 1)
+
+
+def test_a_single_process_fsdp2_load_needs_a_launcher(monkeypatch, serve, loaders, tmp_path):
+    """Started without one, the process cannot set its group of one up; it is told to launch with
+    torchrun rather than fail inside init_process_group."""
+    serve(LlamaConfig(**_TINY))
+    monkeypatch.delenv("RANK", raising=False)
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(dist, "setup", lambda timeout=None: pytest.fail("set a group up"))
+
+    with pytest.raises(RuntimeError, match="torchrun --nproc_per_node=1"):
+        load_pretrained(str(tmp_path), distribution=DistributionPlan(dense="fsdp"))
+    assert loaders == {}
 
 
 # --------------------------------------------------------------------------------- fsdp2_wrap
