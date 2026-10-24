@@ -68,7 +68,9 @@ dflash:
   # DSpark computes the target distribution internally for its TVD/confidence
   # terms; the DFlash KD path is unused.
   dflash_self_logit_distillation: false
-  # gamma for exponential loss decay (block_size=16 -> 7).
+  # Static exponential position decay, gamma=7 for block_size=16: the weighting this recipe
+  # was tuned with. The default objective, 'dpace', would ignore the decay factor.
+  dflash_loss_objective: decay
   dflash_loss_decay_factor: 7.0
   # Qwen3 has no native mask token; 151669 is an unused id used by the reference.
   dflash_mask_token_id: 151669

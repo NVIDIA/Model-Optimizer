@@ -1615,6 +1615,51 @@ def test_next_token_variants_refuse_shift_label_false_at_convert(head_fields):
         mtsp.convert(get_tiny_llama(num_hidden_layers=4), [("dflash", config)])
 
 
+@pytest.mark.parametrize("objective", ["dpace", "decay"])
+@pytest.mark.parametrize(
+    ("head_fields", "metric", "source"),
+    [
+        ({"projector_type": "dspark", "markov_rank": 4}, "loss_ce", "final"),
+        (
+            {"projector_type": "domino", "emb_dim": 8, "gru_hidden_dim": 8},
+            "loss_backbone",
+            "backbone",
+        ),
+    ],
+    ids=["dspark", "domino"],
+)
+def test_next_token_variants_weight_positions_by_the_objective(
+    objective, head_fields, metric, source
+):
+    """Weights follow dflash_loss_objective from block position 0; D-PACE reads the served logits.
+
+    Every objective term is reduced under them, Domino's backbone CE included.
+    """
+    config = get_dflash_config()
+    config["dflash_architecture_config"].update(head_fields)
+    config.update(dflash_loss_objective=objective, dflash_loss_decay_factor=4.0)
+    model = get_tiny_llama(num_hidden_layers=4)
+    mtsp.convert(model, [("dflash", config)])
+    model.float().train()
+    with patch.object(model, "_compute_loss", wraps=model._compute_loss) as compute_loss:
+        out = model(**_dflash_batch(model.config.vocab_size))
+    ctx = compute_loss.call_args.args[0]
+    assert not torch.equal(ctx.logits.final, ctx.logits.backbone)
+
+    def ce(logits):
+        return F.cross_entropy(
+            logits.flatten(0, 2), ctx.targets.token_ids.flatten(), reduction="none"
+        )
+
+    mask = ctx.targets.mask
+    weights = _block_position_weights(
+        mask, objective, 0, 4.0, 0.5, target_ce=lambda: ce(ctx.logits.final).view_as(mask)
+    )
+    assert torch.equal(ctx.weights, weights)
+    want = (ce(getattr(ctx.logits, source)) * weights.flatten()).sum() / (weights.sum() + 1e-6)
+    assert torch.equal(out.draft_metrics[metric], want)
+
+
 class TestTeacherLogits:
     """The base distribution is projected only at the rows, and vocab entries, asked for.
 

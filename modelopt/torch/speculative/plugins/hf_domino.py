@@ -138,11 +138,6 @@ class HFDominoModel(HFDFlashModel):
         """CE on the labels, for the corrected logits and for the backbone's."""
         return [objective_term("ce", 1.0)]
 
-    @property
-    def _position_weighting(self):
-        # dflash_loss_objective is not wired for Domino yet: it always decays.
-        return "decay"
-
     def _online_base_outputs(self, input_ids, attention_mask, **kwargs):
         """The target hidden states; Domino does not use target-logit KD."""
         with torch.no_grad():
@@ -181,7 +176,10 @@ class HFDominoModel(HFDFlashModel):
         )
 
     def _compute_loss(self, ctx):
-        """``(1 - lambda_base) * objective(final) + lambda_base * objective(backbone)``."""
+        """``(1 - lambda_base) * objective(final) + lambda_base * objective(backbone)``.
+
+        Both share the step's position weights; D-PACE reads them off the served logits.
+        """
         out = super()._compute_loss(ctx)
         lambda_base = self._current_lambda_base()
         loss = backbone_loss = out.loss

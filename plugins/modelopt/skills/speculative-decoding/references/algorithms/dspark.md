@@ -91,7 +91,8 @@ Total loss is `ce_alpha*CE + l1_alpha*TVD + conf_alpha*confidence_BCE`.
 `dflash_self_logit_distillation` is **false** for DSpark — it computes the target
 distribution internally for the TVD and confidence terms, so the DFlash KD path is
 unused. Recipe defaults also differ from DFlash's: `block_size` 16, `num_anchors` 256,
-`num_train_epochs` 6, `training_seq_len` 3072, `warmup_ratio` 0.04.
+`num_train_epochs` 6, `training_seq_len` 3072, `warmup_ratio` 0.04, and the static position
+decay (`dflash_loss_objective: decay`, `dflash_loss_decay_factor` 7.0) instead of D-PACE.
 
 ## Per-model adjustments
 
@@ -149,6 +150,7 @@ failures (`seq_len` divisibility, offline eval, mask token, chat template) are i
 | `shift_label=False is not supported: projector_type 'dspark' trains only next-token alignment` | `dflash_architecture_config.shift_label: false` | Remove it; DSpark only trains next-token alignment |
 | `dflash_confidence_head_alpha > 0 but the confidence head was not built` | Loss term enabled without the head | Set `dflash_architecture_config.use_confidence_head=true`, or set the alpha to 0 |
 | `An offline DFlash-family model cannot run AR validation / pseudo_speculative_generate` | Offline/streaming conversion deleted base layers | Keep `estimate_ar=false` and `ar_validate_steps=0`; evaluate after export |
+| `dflash_loss_decay_factor=7.0 is ignored when dflash_loss_objective='dpace'` (warning) when resuming a run started on an earlier ModelOpt version | That version saved the unset objective as `dpace` but trained with the static decay; resuming restores the saved `dpace`, not the recipe's `decay` pin | Finish the run on the version that started it |
 | Draft trains but acceptance length is poor | Draft dims left at defaults instead of matching the base | Set the GQA/FFN dims explicitly (see *Per-model adjustments*) |
 | Acceptance length capped despite clean training (streaming) | `EAGLE_CAPTURE_IDS` final layer wrong, or the vLLM aux-capture fix (vllm#46788) missing | Correct the ids; use a container with the fix |
 | Trainer init crash on a serve container | tensorboard absent | `training.report_to=none` |

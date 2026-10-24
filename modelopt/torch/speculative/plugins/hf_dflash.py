@@ -895,11 +895,6 @@ class HFDFlashModel(DFlashModel):
         logits = logits.view(*batch.anchors.shape, self.dflash_block_size, -1)
         return DraftLogits(final=logits, backbone=logits)
 
-    @property
-    def _position_weighting(self):
-        """How block positions are weighted in the loss: ``"dpace"`` or ``"decay"``."""
-        return self.dflash_loss_objective
-
     def _loss_context(self, batch):
         """The step's labels, the draft's logits and the position weights."""
         targets = _block_targets(
@@ -915,7 +910,7 @@ class HFDFlashModel(DFlashModel):
             self._draft_logits(batch),
             targets,
             weighting={
-                "scheme": self._position_weighting,
+                "scheme": self.dflash_loss_objective,
                 "first": 1 - self._label_shift,
                 "decay_factor": self.dflash_loss_decay_factor,
                 "dpace_alpha": self.dflash_dpace_alpha,
@@ -975,7 +970,7 @@ class HFDFlashModel(DFlashModel):
         - Position weighting by D-PACE or exponential decay
 
         A variant changes the step only through its hooks: ``_online_base_outputs``,
-        ``_draft_logits`` (its head), ``_position_weighting`` and ``_compute_loss``.
+        ``_draft_logits`` (its head) and ``_compute_loss``.
         """
         if not self.training:
             if self.dflash_offline:

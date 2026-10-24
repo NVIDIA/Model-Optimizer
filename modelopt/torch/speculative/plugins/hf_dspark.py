@@ -119,11 +119,6 @@ class HFDSparkModel(HFDFlashModel):
             objective_term("tvd", config.dflash_l1_loss_alpha),
         ]
 
-    @property
-    def _position_weighting(self):
-        # dflash_loss_objective is not wired for DSpark yet: it always decays.
-        return "decay"
-
     def _online_base_outputs(self, input_ids, attention_mask, **kwargs):
         """The target hidden states, and the base's final hidden for the loss to project."""
         # The inner model, not the CausalLM: the loss projects only the rows it reads.

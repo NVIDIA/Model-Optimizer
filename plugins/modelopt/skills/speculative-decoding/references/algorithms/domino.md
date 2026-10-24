@@ -52,7 +52,8 @@ Everything in `dflash.md` applies. Domino adds:
 `dflash_self_logit_distillation` is **false** — Domino trains its own base/final CE
 losses rather than distilling target logits. Recipe defaults also differ from
 DFlash's: `block_size` 16, `num_anchors` 256, `num_train_epochs` 6,
-`training_seq_len` 3072, `warmup_ratio` 0.04, `dflash_loss_decay_factor` 7.0.
+`training_seq_len` 3072, `warmup_ratio` 0.04, and the static position decay
+(`dflash_loss_objective: decay`, `dflash_loss_decay_factor` 7.0) instead of D-PACE.
 `max_grad_norm: 1.0` is stated explicitly in the recipe but is *not* a delta — it is the
 `transformers.TrainingArguments` default that `dflash.yaml` inherits by not setting it.
 
@@ -101,5 +102,6 @@ failures (`seq_len` divisibility, offline eval, mask token, chat template) are i
 | `shift_label=False is not supported: projector_type 'domino' trains only next-token alignment` | `shift_label: false` | Leave it at `true` |
 | `pure_draft_prefix_len must be in [0, N] (block_size=B), got X` | Prefix length >= block size | Lower it below `block_size` |
 | `DominoLambdaCallback: state.max_steps unset (<=0); lambda_base curriculum disabled` (warning) | `training.max_steps` not set | Set `training.max_steps`, else the curriculum never runs |
+| `dflash_loss_decay_factor=7.0 is ignored when dflash_loss_objective='dpace'` (warning) when resuming a run started on an earlier ModelOpt version | That version saved the unset objective as `dpace` but trained with the static decay; resuming restores the saved `dpace`, not the recipe's `decay` pin | Finish the run on the version that started it |
 | DDP error about unused parameters | `ddp_find_unused_parameters` turned off | Keep it `true` |
 | Draft trains but quality is poor | Draft dims left at `Qwen3Config` defaults instead of matching the base | Set the GQA/FFN dims explicitly |
