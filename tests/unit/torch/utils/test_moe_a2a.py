@@ -54,7 +54,6 @@ def _keeps_dtype_job(rank, size, dtype, tol):
     The model's residual stream adds it to the hidden states, so any other dtype breaks the next
     layer (fp16 + bf16 promotes to fp32) or silently rounds the model (fp32 through bf16).
     """
-    group, _ = dist.new_subgroups(1)
     gen = torch.Generator().manual_seed(0)
     x = torch.randn(T, H, generator=gen).to(dtype)
     w = (torch.randn(E, H, H, generator=gen) / H**0.5).to(dtype)
@@ -67,8 +66,12 @@ def _keeps_dtype_job(rank, size, dtype, tol):
             [sorted_tok[s:e] @ w[i] for i, (s, e) in enumerate(zip([0, *ends[:-1]], ends))]
         )
 
-    with torch.no_grad():
-        out = a2a_moe(group, x, ti, tw, E, experts)
+    group, _ = dist.new_subgroups(1)
+    try:
+        with torch.no_grad():
+            out = a2a_moe(group, x, ti, tw, E, experts)
+    finally:
+        dist.destroy_process_group(group)
     want = sum(
         tw[:, k, None].float() * torch.einsum("th,thj->tj", x.float(), w[ti[:, k]].float())
         for k in range(TOP_K)
@@ -134,20 +137,21 @@ def _bounded_combine_job(rank, size):
                     self.numel = max(self.numel, t.numel())
             return out
 
-    group, _ = dist.new_subgroups(1)
     gen = torch.Generator().manual_seed(0)
     x = torch.randn(T, H, generator=gen).to(COMPUTE_DTYPE)
     ti = torch.randint(0, E, (T, TOP_K), generator=gen)
     tw = torch.rand(T, TOP_K, generator=gen)
     default = moe._COMBINE_SLICE_ELEMENTS
-    with torch.no_grad():
-        whole = a2a_moe(group, x, ti, tw, E, _identity_experts)
-        moe._COMBINE_SLICE_ELEMENTS = TOP_K * H  # one token a slice
-        try:
+    group, _ = dist.new_subgroups(1)
+    try:
+        with torch.no_grad():
+            whole = a2a_moe(group, x, ti, tw, E, _identity_experts)
+            moe._COMBINE_SLICE_ELEMENTS = TOP_K * H  # one token a slice
             with LargestFp32() as largest:
                 sliced = a2a_moe(group, x, ti, tw, E, _identity_experts)
-        finally:
-            moe._COMBINE_SLICE_ELEMENTS = default
+    finally:
+        moe._COMBINE_SLICE_ELEMENTS = default
+        dist.destroy_process_group(group)
     # The fp32 routing weights make the weighted results fp32, one token's at a time.
     assert largest.numel <= TOP_K * H
     torch.testing.assert_close(sliced, whole, rtol=0, atol=0)
@@ -257,14 +261,17 @@ def test_experts_that_receive_no_tokens_run_on_an_empty_batch(cpu_dist_workers):
 
 
 def _no_routes_from_rank1_job(rank, size, rank1_tokens):
-    # A rank left waiting in the backward's all-to-all gives up in seconds on this group.
-    group = dist.new_group(timeout=timedelta(seconds=10))
     tokens = 2 if rank == 0 else rank1_tokens
     torch.manual_seed(0)
     x = torch.randn(tokens, H).requires_grad_(True)
     routes = torch.tensor([[0, 1], [0, 1]]) if rank == 0 else torch.full((tokens, 2), -1)
-    out = a2a_moe(group, x, routes, torch.ones(tokens, 2), 1, _identity_experts)
-    (out + x).square().sum().backward()
+    # A rank left waiting in the backward's all-to-all gives up in seconds on this group.
+    group = dist.new_group(timeout=timedelta(seconds=10))
+    try:
+        out = a2a_moe(group, x, routes, torch.ones(tokens, 2), 1, _identity_experts)
+        (out + x).square().sum().backward()
+    finally:
+        dist.destroy_process_group(group)
     # Rank 0's tokens come back from both ranks' identity experts, out = 2x: d/dx (3x)^2 = 18x.
     # Rank 1 routes nothing, out = 0: d/dx x^2 = 2x.
     torch.testing.assert_close(x.grad, (18 if rank == 0 else 2) * x.detach())
@@ -373,14 +380,17 @@ def test_fused_experts_backward_through_torch_a2a_matches_the_whole_module(cpu_d
 
 def _fp32_routing_weights_job(rank, size):
     moe.register_torch_a2a()
-    group, _ = dist.new_subgroups(1)
     whole, local, _ = _split_qwen3_moe_experts(0, 1)
     x, weights, index = _routed_tokens(1, weights_dtype=torch.float32)
     whole.config._experts_implementation = "grouped_mm"
     local.config._experts_implementation = "torch_a2a"
-    with torch.no_grad():
-        want = whole(x, index, weights)
-        got = local(x, index, weights, group)
+    group, _ = dist.new_subgroups(1)
+    try:
+        with torch.no_grad():
+            want = whole(x, index, weights)
+            got = local(x, index, weights, group)
+    finally:
+        dist.destroy_process_group(group)
     torch.testing.assert_close(got, want, rtol=0, atol=0)
 
 
