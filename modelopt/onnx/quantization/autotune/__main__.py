@@ -17,10 +17,10 @@
 
 import argparse
 import sys
-import tempfile
 from pathlib import Path
 
 from modelopt.onnx.logging_config import logger
+from modelopt.onnx.quantization.autotune.benchmark import default_timing_cache_file
 from modelopt.onnx.quantization.autotune.utils import (
     DEFAULT_NUM_SCHEMES,
     DEFAULT_TIMING_RUNS,
@@ -38,7 +38,6 @@ from modelopt.onnx.quantization.autotune.workflows import (
 DEFAULT_OUTPUT_DIR = "./autotuner_output"
 DEFAULT_QUANT_TYPE = "int8"
 DEFAULT_DQ_DTYPE = "float32"
-DEFAULT_TIMING_CACHE = str(Path(tempfile.gettempdir()) / "trtexec_timing.cache")
 
 
 def apply_mode_presets(args) -> None:
@@ -94,6 +93,7 @@ def run_autotune() -> int:
     """
     args = get_parser().parse_args()
     apply_mode_presets(args)
+    args.timing_cache = args.timing_cache or default_timing_cache_file()
     model_path = validate_file_path(args.onnx_path, "Model file")
     validate_file_path(args.qdq_baseline, "QDQ baseline model")
     output_dir = Path(args.output_dir)
@@ -279,8 +279,8 @@ Examples:
     trt_group.add_argument(
         "--timing_cache",
         type=str,
-        default=DEFAULT_TIMING_CACHE,
-        help=f"TensorRT timing cache file (default: {DEFAULT_TIMING_CACHE})",
+        default=None,
+        help="TensorRT timing cache file (default: ~/.cache/modelopt/trtexec_timing.cache)",
     )
     trt_group.add_argument(
         "--warmup_runs",

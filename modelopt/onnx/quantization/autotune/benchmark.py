@@ -57,6 +57,19 @@ TORCH_CUDA_AVAILABLE = torch.cuda.is_available()
 _SSH_OPTIONS = ("-oBatchMode=yes", "-oStrictHostKeyChecking=yes")
 
 
+def default_timing_cache_file() -> str:
+    """Return the default timing-cache path, in a private per-user location.
+
+    A fixed file under the shared temp dir could be pre-planted or symlinked by another local user.
+    """
+    try:
+        cache_dir = Path.home() / ".cache" / "modelopt"
+        cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except (OSError, RuntimeError):  # no usable home directory
+        cache_dir = Path(tempfile.mkdtemp(prefix="modelopt_autotune_"))
+    return str(cache_dir / "trtexec_timing.cache")
+
+
 def _validate_shape_range(min_shape: list, opt_shape: list, max_shape: list) -> None:
     """Raise ValueError if shape lengths differ or if min <= opt <= max fails at any dimension."""
     if len(min_shape) != len(opt_shape) or len(opt_shape) != len(max_shape):
@@ -208,7 +221,7 @@ class Benchmark(ABC):
 
         Args:
             timing_cache_file: Path to timing cache file to accelerate engine builds.
-                             If None, uses '/tmp/trtexec_timing.cache' as default.
+                             If None, uses '~/.cache/modelopt/trtexec_timing.cache'.
             warmup_runs: Number of warmup iterations before timing measurements.
             timing_runs: Number of iterations for latency measurement. Results
                         are averaged across these runs.
@@ -216,7 +229,7 @@ class Benchmark(ABC):
                              These plugins will be loaded during engine building.
                              If None, no custom plugins are loaded.
         """
-        self.timing_cache_file = timing_cache_file or "/tmp/trtexec_timing.cache"  # nosec B108
+        self.timing_cache_file = timing_cache_file or default_timing_cache_file()
         self.warmup_runs = warmup_runs
         self.timing_runs = timing_runs
         self.plugin_libraries = plugin_libraries or []
@@ -563,7 +576,7 @@ class TensorRTPyBenchmark(Benchmark):
 
         Args:
             timing_cache_file: Path to TensorRT timing cache file. If None,
-                              defaults to '/tmp/trtexec_timing.cache'.
+                              defaults to '~/.cache/modelopt/trtexec_timing.cache'.
             warmup_runs: Number of warmup iterations before timing measurements.
             timing_runs: Number of iterations for latency measurement.
             plugin_libraries: List of paths to TensorRT plugin shared libraries (.so files).
