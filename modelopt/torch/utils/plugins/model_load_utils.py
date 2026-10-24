@@ -889,14 +889,15 @@ def parallel_load_and_prepare_fsdp2(
     return model
 
 
-def _auto_class(hf_config) -> Any:
+def _auto_class(hf_config, trust_remote_code: bool = False) -> Any:
     """The auto class that builds ``hf_config``'s whole model, LM head included.
 
     A causal LM builds through ``AutoModelForCausalLM``. A VLM -- a nested text config, a vision
     config, or a ``*ForConditionalGeneration`` architecture -- builds through the remote
-    ``AutoModelForCausalLM`` when the checkpoint registers its ``*ForConditionalGeneration`` there
-    and no image-text class, else through ``AutoModelForImageTextToText`` if that recognizes the
-    config, else through ``AutoModel``, which leaves the head out.
+    ``AutoModelForCausalLM`` when the checkpoint registers its ``*ForConditionalGeneration`` there,
+    its code is trusted and it registers no image-text class, else through
+    ``AutoModelForImageTextToText`` if that recognizes the config, else through ``AutoModel``, which
+    leaves the head out.
     """
     architectures = getattr(hf_config, "architectures", None) or []
     is_vlm = (
@@ -908,7 +909,8 @@ def _auto_class(hf_config) -> Any:
         return AutoModelForCausalLM
     auto_map = getattr(hf_config, "auto_map", None) or {}
     remote_with_head = (
-        "conditionalgeneration" in str(auto_map.get("AutoModelForCausalLM", "")).lower()
+        trust_remote_code
+        and "conditionalgeneration" in str(auto_map.get("AutoModelForCausalLM", "")).lower()
     )
     if remote_with_head and "AutoModelForImageTextToText" not in auto_map:
         return AutoModelForCausalLM
@@ -948,6 +950,18 @@ def _dense_from_env(world_size: int) -> str:
     )
 
 
+def _ep_degree(ep_size) -> int | str:
+    """``ep_size`` as an EP degree or ``"auto"``; ``None`` reads ``MODELOPT_EP_DEGREE``."""
+    value = env.ep_degree() if ep_size is None else ep_size
+    if str(value) in ("auto", "0"):
+        return "auto"
+    try:
+        return int(value)
+    except ValueError:
+        name = "MODELOPT_EP_DEGREE" if ep_size is None else "ep_size"
+        raise ValueError(f"{name}={value!r}: expected auto, 0 (auto) or an EP degree.") from None
+
+
 def _decide_distribution(
     ckpt_path: str, hf_config, world_size: int, ep_size, dense, trust_remote_code: bool
 ) -> DistributionPlan:
@@ -967,12 +981,15 @@ def _decide_distribution(
             ep_size=1 if ep_size is None or str(ep_size) in ("auto", "0") else int(ep_size),
             dense="replicate" if dense in (None, "auto") else dense,
         )
-    ep_size = env.ep_degree() if ep_size is None else ep_size
-    ep_size = "auto" if str(ep_size) in ("auto", "0") else int(ep_size)
+    ep_size = _ep_degree(ep_size)
     dense = _dense_from_env(world_size) if dense is None else dense
     try:
         model = build_meta_causal_lm(
-            ckpt_path, trust_remote_code, None, hf_config, auto_class=_auto_class(hf_config)
+            ckpt_path,
+            trust_remote_code,
+            None,
+            hf_config,
+            auto_class=_auto_class(hf_config, trust_remote_code),
         )
     except Exception as e:
         raise RuntimeError(

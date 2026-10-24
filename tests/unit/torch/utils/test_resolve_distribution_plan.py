@@ -281,23 +281,31 @@ def _tiny_qwen2_5_vl():
     )
 
 
+_REMOTE_VLM = {"AutoModelForCausalLM": "m.KimiK25ForConditionalGeneration"}
+
+
 @pytest.mark.parametrize(
-    ("config", "expected"),
+    ("config", "trust_remote_code", "expected"),
     [
-        (SimpleNamespace(architectures=["LlamaForCausalLM"]), AutoModelForCausalLM),
-        (
-            _vlm_config(auto_map={"AutoModelForCausalLM": "m.KimiK25ForConditionalGeneration"}),
-            AutoModelForCausalLM,
-        ),
-        (_tiny_qwen2_5_vl(), AutoModelForImageTextToText),
-        (_vlm_config(), AutoModel),
+        (SimpleNamespace(architectures=["LlamaForCausalLM"]), False, AutoModelForCausalLM),
+        (_vlm_config(auto_map=_REMOTE_VLM), True, AutoModelForCausalLM),
+        (_vlm_config(auto_map=_REMOTE_VLM), False, AutoModel),
+        (_tiny_qwen2_5_vl(), False, AutoModelForImageTextToText),
+        (_vlm_config(), False, AutoModel),
     ],
-    ids=["causal-lm", "remote-vlm-with-head", "native-vlm-with-head", "unknown-vlm"],
+    ids=[
+        "causal-lm",
+        "remote-vlm-with-head",
+        "remote-vlm-untrusted",
+        "native-vlm-with-head",
+        "unknown-vlm",
+    ],
 )
-def test_the_class_that_builds_the_whole_model(config, expected):
+def test_the_class_that_builds_the_whole_model(config, trust_remote_code, expected):
     """A VLM's AutoModel leaves the LM head out: it builds through the class that carries the head,
-    keeping the headless backbone only when no class recognizes the config."""
-    assert _auto_class(config) is expected
+    keeping the headless backbone only when no class recognizes the config. A remote class counts
+    only when the checkpoint's code is trusted."""
+    assert _auto_class(config, trust_remote_code) is expected
 
 
 # -------------------------------------------------------------------------------- the decision
@@ -366,6 +374,15 @@ def test_an_moe_without_an_ep_plan_is_not_expert_parallel(run_as, serve, tmp_pat
     serve(config)
 
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4)
+
+
+def test_an_ep_degree_that_is_not_a_number_names_the_knob(run_as, serve, monkeypatch, tmp_path):
+    monkeypatch.setenv("MODELOPT_EP_DEGREE", "world")
+    run_as(4)
+    serve(LlamaConfig(**_TINY))
+
+    with pytest.raises(ValueError, match="MODELOPT_EP_DEGREE='world'"):
+        resolve_distribution_plan(str(tmp_path))
 
 
 @needs_qwen3_moe_ep_plan
