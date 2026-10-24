@@ -72,8 +72,8 @@ def _write(model, export_dir, **kwargs):
     )
 
 
-def _nogather_export(model, export_dir, **kwargs):
-    with mock.patch.dict(os.environ, {"MODELOPT_FSDP2_EXPORT": "nogather"}):
+def _nogather_export(model, export_dir, knob="nogather", **kwargs):
+    with mock.patch.dict(os.environ, {"MODELOPT_FSDP2_EXPORT": knob}):
         export_hf_checkpoint(
             model, dtype=torch.bfloat16, export_dir=export_dir, max_shard_size="16KB", **kwargs
         )
@@ -157,6 +157,27 @@ def _fsdp2_shard(model, mesh, wrap_root=True):
         fully_shard(model, mesh=mesh)
     set_distribution_plan(model, DistributionPlan(mesh.size(), dense="fsdp"))
     return model
+
+
+# FP8 weights, with an FP8 KV cache in layer 0 and an NVFP4 one in layer 1: a mixed-precision KV
+# cache, whose per-layer formats the export reads from the quantization config.
+_FP8_MIXED_KV_CFG = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+_FP8_MIXED_KV_CFG["quant_cfg"] += [
+    {
+        "quantizer_name": "*layers.0.*[kv]_bmm_quantizer",
+        "cfg": {"num_bits": (4, 3), "axis": None},
+        "enable": True,
+    },
+    {
+        "quantizer_name": "*layers.1.*[kv]_bmm_quantizer",
+        "cfg": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+        },
+        "enable": True,
+    },
+]
 
 
 def _quantize_with_reference(model, quant_cfg):
@@ -796,7 +817,9 @@ def test_distributed_save_writes_the_hub_checkpoint_of_a_sharded_moe(
 
 @pytest.mark.parametrize("wrap_root", [True, False], ids=["root-wrapped", "layers-only"])
 @pytest.mark.parametrize(
-    "quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG], ids=["fp8", "nvfp4"]
+    "quant_cfg",
+    [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG, _FP8_MIXED_KV_CFG],
+    ids=["fp8", "nvfp4", "fp8-mixed-kv-cache"],
 )
 def test_nogather_export_writes_what_the_single_process_export_writes(
     gloo_world_of_one, tmp_path, quant_cfg, wrap_root
@@ -882,7 +905,12 @@ def _two_rank_job(rank, world_size, tmp_dir):
     # export of its own copy is the reference.
     model = _load(tmp_dir / "dense")
     want = _quantize_with_reference(model, mtq.FP8_DEFAULT_CFG)
-    _nogather_export(_fsdp2_shard(model, mesh), tmp_dir / "dense_export")
+    # Only rank 0's environment picks the no-gather writer: its choice holds on every rank.
+    _nogather_export(
+        _fsdp2_shard(model, mesh),
+        tmp_dir / "dense_export",
+        knob="nogather" if rank == 0 else "streaming",
+    )
 
     # Each dense tensor ends up whole and plain on exactly one rank, whatever its layout, and the
     # owners are spread out. A zero-row tensor has no rows to move: its owner writes it as it is.
