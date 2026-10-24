@@ -244,11 +244,21 @@ def torch_a2a_experts_forward(self, hidden_states, top_k_index, top_k_weights, p
             "TP style, which injects it via _prepare_input_fn)."
         )
     num_local = self.num_experts
-    # Per-expert biases (e.g. GPT-OSS ``gate_up_proj_bias`` / ``down_proj_bias``, shape [num_local, out],
-    # EP-sharded dim-0 by grouped_gemm like the weights). transformers' ``_grouped_linear`` (and ModelOpt's
-    # quantized override) already accept ``bias`` and do ``out += bias`` -- transposed-safe. Bias is added
-    # AFTER each expert's grouped GEMM, unquantized.
+    # Per-expert biases (e.g. GPT-OSS ``gate_up_proj_bias`` / ``down_proj_bias``) are indexed by local
+    # expert id below, so the plan must shard them over dim 0 like the weights (grouped_gemm): left
+    # whole, every rank but the first would add other experts' biases. transformers'
+    # ``_grouped_linear`` (and ModelOpt's quantized override) add them after each expert's grouped GEMM,
+    # unquantized.
     has_bias = getattr(self, "has_bias", False)
+    if has_bias:
+        for name in ("gate_up_proj_bias" if self.has_gate else "up_proj_bias", "down_proj_bias"):
+            rows = getattr(self, name).shape[0]
+            if rows != num_local:
+                raise ValueError(
+                    f"torch_a2a: {name} holds {rows} experts' biases for this rank's {num_local} "
+                    "experts; the expert-parallel plan must shard the experts' biases with their "
+                    "weights (grouped_gemm)."
+                )
 
     def expert_fn(sorted_tok, offsets):
         # ``sorted_tok`` rows are grouped by local expert with cumulative ``offsets``; the per-ROW local

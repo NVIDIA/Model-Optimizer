@@ -209,6 +209,37 @@ def test_the_router_style_registers_under_transformers_5_16_0s_name(monkeypatch)
     assert isinstance(tp.ALL_PARALLEL_STYLES["torch_a2a_router"], tp.EpRouterParallel)
 
 
+def test_experts_whose_biases_the_plan_left_whole_are_refused():
+    """A plan that shards GPT-OSS's expert weights but not their biases leaves every rank all the
+    experts' biases, which the forward indexes by local expert id; it refuses them instead."""
+    transformers = pytest.importorskip("transformers")
+    if Version(transformers.__version__) < Version("5.6"):
+        pytest.skip("expert parallelism needs transformers >= 5.6")
+    from transformers import GptOssConfig
+    from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts
+
+    config = GptOssConfig(
+        hidden_size=H,
+        intermediate_size=2 * H,
+        num_local_experts=E,
+        num_experts_per_tok=TOP_K,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=4,
+        vocab_size=32,
+    )
+    whole = GptOssExperts(config)
+    local_config = copy.deepcopy(config)
+    local_config.num_local_experts = E // 2
+    local = GptOssExperts(local_config)
+    local.gate_up_proj_bias = whole.gate_up_proj_bias
+    x, weights, index = torch.randn(T, H), torch.rand(T, TOP_K), torch.randint(0, E, (T, TOP_K))
+    # The refusal comes before any collective, so it needs no process group to reach.
+    with pytest.raises(ValueError):
+        moe.torch_a2a_experts_forward(local, x, index, weights, process_group=object())
+
+
 def _no_tokens_for_rank1_job(rank, size):
     moe.register_torch_a2a()
     whole, local, owned = _split_qwen3_moe_experts(rank, size)
