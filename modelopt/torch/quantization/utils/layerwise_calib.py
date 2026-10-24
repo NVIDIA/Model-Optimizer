@@ -361,6 +361,16 @@ class LayerActivationCollector:
                     if depth[0] > 1:
                         raise
                     return None
+                except torch.cuda.OutOfMemoryError as e:
+                    # The forward loop would split the data batch and retry, but the layer in 'run'
+                    # mode replays the batch it cached at full size, one cached batch per call: a
+                    # retry cannot shrink it and would replay the next batch's inputs instead.
+                    raise RuntimeError(
+                        "Layerwise calibration ran out of GPU memory while a decoder layer replayed "
+                        "a cached calibration batch. Splitting the batch now cannot help, since the "
+                        "layer replays it at the size it was cached with; rerun with a smaller "
+                        "calibration batch size."
+                    ) from e
                 except RuntimeError as e:
                     if "meta" not in str(e).lower():
                         raise

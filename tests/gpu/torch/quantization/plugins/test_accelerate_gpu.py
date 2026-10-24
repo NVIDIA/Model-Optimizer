@@ -39,6 +39,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils import (
     enable_weight_access_and_writeback,
     is_quantized_linear,
@@ -183,6 +184,20 @@ def test_layerwise_calibrate_cpu_offloaded(tmp_path, use_checkpoint):
                 )
 
     assert torch.allclose(output_ref.logits, output_test.logits)
+
+    # Between uses, the offloaded layer's quantizer state stays off the GPU like its weights.
+    offloaded_state = [
+        tensor
+        for quantizer in model.model.layers[0].modules()
+        if isinstance(quantizer, TensorQuantizer)
+        for tensor in [
+            *quantizer.buffers(recurse=False),
+            *(vars(quantizer._calibrator).values() if quantizer._calibrator is not None else ()),
+        ]
+        if isinstance(tensor, torch.Tensor)
+    ]
+    assert offloaded_state
+    assert all(tensor.device.type == "cpu" for tensor in offloaded_state)
 
     if use_checkpoint:
         manifest_path = os.path.join(ckpt_dir, "manifest.json")

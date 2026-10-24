@@ -79,6 +79,77 @@ def _writeback_params_to_weights_map(module, align_hook):
             w_map[key] = tensor.detach().cpu()
 
 
+def _own_quantizers(module):
+    """Quantizers whose state belongs with ``module``'s weights, not with a hooked descendant's."""
+    from ..nn import TensorQuantizer
+
+    for child in module.children():
+        if isinstance(child, TensorQuantizer):
+            yield child
+        elif not hasattr(child, "_hf_hook"):
+            yield from _own_quantizers(child)
+
+
+def _quantizer_tensors(module):
+    """``(key, tensor)`` for the state of ``module``'s own quantizers and their calibrators."""
+    for quantizer in _own_quantizers(module):
+        calibrator = getattr(quantizer, "_calibrator", None)
+        sources = {
+            "_parameters": quantizer._parameters,
+            "_buffers": quantizer._buffers,
+            "_calibrator": vars(calibrator) if calibrator is not None else {},
+        }
+        for source, tensors in sources.items():
+            for name, tensor in tensors.items():
+                if isinstance(tensor, torch.Tensor):
+                    yield (id(quantizer), source, name), tensor
+
+
+def _carry_quantizers_with_offload(hook):
+    """Make an offload ``hook`` move its module's quantizer state on and off the GPU with the weights.
+
+    Accelerate only manages the tensors a module had when it was dispatched, so calibration state
+    such as NVFP4's per-block ``_amax``, and its calibrator's copy, stayed on the execution device
+    for every offloaded layer and added up over the model. The CPU tensors stay the master copy:
+    a forward gets GPU copies, and after it the CPU tensors come back, once any tensor the forward
+    modified or replaced is copied back. The packed-weight cache is keyed to the weight just
+    released, so it is dropped.
+    """
+    if getattr(hook, "_modelopt_carries_quantizers", False):
+        return
+    pre_forward, post_forward = hook.pre_forward, hook.post_forward
+    onloaded: dict[tuple, tuple[torch.Tensor, torch.Tensor, int]] = {}
+
+    def carrying_pre_forward(module, *args, **kwargs):
+        result = pre_forward(module, *args, **kwargs)
+        if hook.offload:
+            for key, tensor in _quantizer_tensors(module):
+                if tensor.device.type == "cpu":
+                    master = tensor.data
+                    tensor.data = master.to(hook.execution_device)
+                    onloaded[key] = (tensor, master, tensor._version)
+        return result
+
+    def carrying_post_forward(module, output):
+        output = post_forward(module, output)
+        if hook.offload:
+            for key, tensor in _quantizer_tensors(module):
+                # meta: a hook that places submodules offloaded it already.
+                if tensor.device.type in ("cpu", "meta"):
+                    continue
+                entry = onloaded.pop(key, None)
+                if entry is not None and entry[0] is tensor and entry[2] == tensor._version:
+                    tensor.data = entry[1]
+                else:
+                    tensor.data = tensor.data.cpu()
+            for quantizer in _own_quantizers(module):
+                quantizer._quantizer_cache = None
+        return output
+
+    hook.pre_forward, hook.post_forward = carrying_pre_forward, carrying_post_forward
+    hook._modelopt_carries_quantizers = True
+
+
 @contextmanager
 def weight_access_and_writeback_context(module, writeback: bool = True):
     """Context manager for weight access and writeback for modules managed by accelerate.
@@ -102,6 +173,7 @@ def weight_access_and_writeback_context(module, writeback: bool = True):
         # weights would be overwritten with stale CPU state_dict values.
         needs_materialize = any(p.device.type == "meta" for p in mod.parameters())
         if needs_materialize:
+            _carry_quantizers_with_offload(hook)
             hook.pre_forward(mod)
         hook.offload = False
         materialized.append((mod, hook, needs_materialize))
