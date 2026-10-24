@@ -30,7 +30,9 @@ import onnx
 
 from ..logging_config import logger
 from .dla_transforms.dla_cast_to_fp32 import _apply_cast_to_fp32
+from .dla_transforms.dla_constants_to_initializers import _constants_to_initializers_from_model
 from .dla_transforms.dla_graph_cleanup import _remove_unused_initializers
+from .dla_transforms.dla_remove_qdq import _remove_qdq_from_model
 from .dla_transforms.dla_reorder_nodes import _apply_reorder_nodes
 from .utils.graph_utils import (
     DEFAULT_QDQ_REMOVE_QUANT_TYPES,
@@ -41,7 +43,23 @@ from .utils.graph_utils import (
 if TYPE_CHECKING:
     from collections.abc import Iterable
 __all__ = []
+
+
+def _apply_remove_qdq(model, **options):
+    """Run QDQ removal while retaining the model result for ordered stage dispatch."""
+    _remove_qdq_from_model(model, **options)
+    return model
+
+
+def _apply_constants_to_initializers(model, **options):
+    """Fold constants while retaining the model result for ordered stage dispatch."""
+    _constants_to_initializers_from_model(model, **options)
+    return model
+
+
 DLA_TRANSFORMS = (
+    ("RemoveQDQ", _apply_remove_qdq),
+    ("ConstantsToInitializers", _apply_constants_to_initializers),
     ("Cast", _apply_cast_to_fp32),
     ("ShapeInference", infer_shapes),
     ("RemoveUnusedInitializers", _remove_unused_initializers),
