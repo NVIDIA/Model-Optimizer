@@ -1572,13 +1572,13 @@ def main(args: argparse.Namespace):
     if not torch.cuda.is_available():
         raise OSError("GPU is required for inference.")
 
+    setup_distributed_args(args)
+
     if args.deterministic:
         enable_determinism(RAND_SEED)
     else:
         random.seed(RAND_SEED)
         np.random.seed(RAND_SEED)
-
-    setup_distributed_args(args)
 
     try:
         # Entered inside the try: opening the run is fatal by design, and skipping

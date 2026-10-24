@@ -36,9 +36,9 @@ from safetensors import safe_open
 
 __all__ = ["ScaleDiff", "TensorDiff", "compare_scales", "load_checkpoint_scales", "main"]
 
-# Exported scales (input_scale, weight_scale, weight_scale_2, pre_quant_scale, k_scale, v_scale)
-# and the quantizer buffers (_amax) they come from.
-_SCALE_NAME = re.compile(r"(_scale|_scale_2|_amax)$")
+# Exported scales (input_scale, weight_scale, weight_scale_2, weight_scale_inv, pre_quant_scale,
+# k_scale, v_scale) and the quantizer buffers (_amax) they come from.
+_SCALE_NAME = re.compile(r"(_scale(_2|_inv)?|_amax)$")
 
 
 @dataclass
@@ -75,7 +75,12 @@ class ScaleDiff:
         )
 
     def summary(self, top: int = 5) -> str:
-        """Per-kind table (kind = last component of the tensor name) and the worst tensors."""
+        """Per-kind table (kind = last component of the tensor name) and the worst tensors.
+
+        ``differing`` counts the tensors outside the tolerance and ``median rel`` is the median of
+        their largest relative differences; ``max rel`` is the largest over all tensors of the
+        kind, including those inside the tolerance.
+        """
         by_kind: dict[str, list[TensorDiff]] = {}
         for t in self.tensors:
             by_kind.setdefault(t.kind, []).append(t)
@@ -148,6 +153,8 @@ class _CheckpointScales(Mapping[str, torch.Tensor]):
 
     def __init__(self, path: str | Path):
         path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"{path} does not exist")
         files = sorted(path.glob("*.safetensors")) if path.is_dir() else [path]
         if not files:
             raise FileNotFoundError(f"No .safetensors files in {path}")

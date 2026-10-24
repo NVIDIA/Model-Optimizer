@@ -49,3 +49,7 @@ def test_enable_determinism():
     assert torch.are_deterministic_algorithms_enabled()
     assert torch.is_deterministic_algorithms_warn_only_enabled()
     assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
+
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":0:0"
+    with pytest.warns(UserWarning, match="CUBLAS_WORKSPACE_CONFIG=:0:0"):
+        enable_determinism(7)
