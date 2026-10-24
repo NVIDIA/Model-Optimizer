@@ -28,6 +28,8 @@ Changelog
 *Speculative Decoding*
 
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
+- With ``training.dataloader_num_workers`` > 0, ``examples/speculative_decoding/main.py`` now yields each training batch as soon as a worker finishes it, so one slow sample, such as a slow hidden-state fetch in streaming training, no longer stalls every DDP rank. Sample order within the prefetch window is then no longer deterministic; set ``training.dataloader_in_order=true`` to restore it (context-parallel runs always keep it).
+- The ``general/speculative_decoding/dflash2`` recipe now enables ``dflash_use_torch_compile`` and ``dflash_use_flex_attention``. With PyTorch 2.9 or 2.10 its ``tf32: true`` makes Inductor fail on the first step; set ``training.tf32=false`` or ``dflash.dflash_use_torch_compile=false`` there.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
