@@ -15,20 +15,20 @@
 """End-to-end checks on the checkpoint written by the no-gather FSDP2 distributed export.
 
 With ``MODELOPT_FSDP2_EXPORT=nogather``, ``export_hf_checkpoint`` routes an FSDP2-sharded model under
-``torch.distributed`` to ``distributed_save_hf_checkpoint`` -- the writer every expert-parallel model
-takes: every rank writes its own DCP shards and the files are consolidated in parallel, with no
-full-model host-RAM gather on rank 0. That writer reconstructs
-the checkpoint from per-rank pieces, so the failure modes it can introduce are structural rather
-than numerical -- a key silently dropped, a rank-local shard written where the full tensor belongs,
-a sidecar or the weight index never emitted. Those all produce a checkpoint that *looks* fine (no
-error, plausible file sizes) but is wrong or unloadable, so they are asserted here explicitly:
+``torch.distributed`` to ``distributed_save_hf_checkpoint``: every rank writes its own final
+safetensors shards in parallel and rank 0 unions the weight index, with no full-model host-RAM
+gather on rank 0. That writer reconstructs the checkpoint from per-rank pieces, so the failure modes
+it can introduce are structural rather than numerical -- a key silently dropped, a rank-local shard
+written where the full tensor belongs, a sidecar or the weight index never emitted. Those all
+produce a checkpoint that *looks* fine (no error, plausible file sizes) but is wrong or unloadable,
+so they are asserted here explicitly:
 
 1. every source parameter survives the round trip, and nothing extra is left behind;
 2. each quantized weight carries the scales its format needs;
 3. every tensor has its full, unsharded shape;
 4. the non-weight files are all present -- the ones the exporter writes (config, generation config,
    quant config, weight index) and the source's own (tokenizer, vocab, chat template), which the
-   exporter copies over after the writer has removed its ``sharded/`` staging dir.
+   exporter copies over.
 
 The dense model ties its embeddings, so the expected keys also check that the writer drops the
 alias. What needs no GPU -- tensors handed in through ``extra_state_dict``, a linear left
@@ -60,7 +60,7 @@ from modelopt.torch.utils.distributed import (
 
 # Small enough to force the tiny model across several shards, so the multi-file layout -- and the
 # weight index that makes it loadable -- are exercised rather than collapsing to one model.safetensors.
-# Not smaller: each extra shard is another DCP write + consolidation round trip on a toy model.
+# Not smaller: each extra shard is one more file to write for a toy model.
 MAX_SHARD_SIZE = "512KB"
 
 # The default tiny Qwen3 is too degenerate to shard: head_dim = hidden_size / num_heads = 32/16 = 2,
@@ -260,7 +260,6 @@ def test_fsdp2_distributed_export_is_complete(dist_workers, tmp_path, moe, quant
     # special-tokens map, ...) is in the export; only the weight files are rewritten.
     lost = sorted(sidecars - exported_files)
     assert not lost, f"sidecar file(s) missing from the export: {lost}"
-    assert not (export_dir / "sharded").exists(), "per-rank staging dir left behind"
 
     # A multi-file checkpoint is unloadable without the index, so require it whenever the writer
     # emitted sharded names, and require it to describe every tensor actually on disk.
