@@ -98,6 +98,18 @@ _QUANT_STATE_SUFFIXES = (
 )
 _LEAF_SUFFIXES = (".weight", *_QUANT_STATE_SUFFIXES, ".bias")
 
+# Checkpoint tensors a load-time rewrite folds into a weight -- compressed-tensors' stored
+# parameters, FP8's activation scale -- and so lists as sources next to it. They name the same
+# module as that weight; here they only matter for reading the module's leaf off a pattern.
+_LOAD_SIBLING_SUFFIXES = (
+    ".weight_packed",
+    ".weight_global_scale",
+    ".weight_shape",
+    ".weight_zero_point",
+    ".weight_g_idx",
+    ".activation_scale",
+)
+
 # Leaves that are per-tensor scalars (0-d) and must be *duplicated*, not split, when
 # a fused module is un-fused.
 _SCALAR_LEAF_SUFFIXES = (".weight_scale_2", ".input_scale")
@@ -716,6 +728,38 @@ def _drop_shadowed_prefix_renames(model, rules: list[RenameRule]) -> list[Rename
     return kept
 
 
+def _quantization_codec_ops() -> tuple[type, ...]:
+    """Transformers' ops that decode or encode a weight's on-disk quantization in place.
+
+    Includes the identity op, which is what older releases (5.5, 5.6) reverse ``Fp8Dequantize``
+    into; later ones reverse it into ``Fp8Quantize``.
+    """
+    try:
+        from transformers import core_model_loading
+        from transformers.integrations import finegrained_fp8
+    except Exception:  # transformers without the FP8 integration
+        return ()
+    names = ("Fp8Dequantize", "Fp8Quantize", "Fp8DecodeScale", "Fp8EncodeScale")
+    ops = [getattr(finegrained_fp8, n, None) for n in names]
+    ops.append(getattr(core_model_loading, "_IdentityOp", None))
+    return tuple(op for op in ops if op is not None)
+
+
+def _decodes_in_place(rev, ops) -> bool:
+    """Whether a reversed converter only re-encodes a weight's quantization, under the same name.
+
+    A dequantizing load (FineGrainedFP8 ``dequantize=True``) decodes each weight in place, and
+    its reverse would re-encode the weight in the source's format. The export never wants that:
+    it writes ModelOpt's own quantized weights and scales. Such a converter renames nothing.
+    """
+    codec_ops = _quantization_codec_ops()
+    if not ops or not codec_ops or not all(isinstance(op, codec_ops) for op in ops):
+        return False
+    sources = [p.strip("^$") for p in _as_list(rev.source_patterns)]
+    targets = [p.strip("^$") for p in _as_list(rev.target_patterns)]
+    return bool(sources) and sources[:1] == targets[:1]
+
+
 def _build_reverse_rules(
     model,
 ) -> tuple[list[SplitRule], list[_MergeRule], list[RenameRule], list[str], set[str] | None]:
@@ -738,6 +782,8 @@ def _build_reverse_rules(
       survives in the state dict, so it is un-fused via a :class:`SplitRule`.
     * Dense splitting ``WeightConverter`` (reverse is ``Concatenate`` only): the split
       tensors are re-fused under the transform's original sub-model scope.
+    * A dequantizing load's ``WeightConverter`` (quantization codec ops only, same name): no
+      rule -- the export writes ModelOpt's own quantization, not the source's.
 
     Raises :class:`QuantConversionUnsupportedError` for any op shape not covered, so
     the caller falls back to the legacy (in-memory-name) behavior.
@@ -813,6 +859,8 @@ def _build_reverse_rules(
                         dim=ops[0].dim,
                     )
                 )
+            elif _decodes_in_place(rev, ops):
+                continue
             else:
                 raise QuantConversionUnsupportedError(
                     f"unsupported reverse ops: {[type(o).__name__ for o in ops]}"
@@ -855,7 +903,7 @@ def _expert_leaf_renames(rev) -> list[RenameRule]:
     fused leaf as per-expert parts, mapped back to the hub leaves positionally.
     """
     src_leaf = _leaf(_as_list(rev.source_patterns)[0])
-    hub_leaves = [_leaf(t) for t in _as_list(rev.target_patterns)]
+    hub_leaves = _distinct_leaves(_as_list(rev.target_patterns))
     part_leaves = _FUSED_EXPERT_PART_NAMES.get(src_leaf, [src_leaf])
     if len(part_leaves) != len(hub_leaves):
         raise QuantConversionUnsupportedError(
@@ -874,7 +922,7 @@ def _expert_leaf_renames(rev) -> list[RenameRule]:
 def _dense_split_rule(rev, ops) -> SplitRule:
     """Un-fuse a dense (non-expert) fused linear that survives in the state dict."""
     fused = _leaf_suffix(_as_list(rev.source_patterns)[0])
-    parts = tuple(_leaf_suffix(t) for t in _as_list(rev.target_patterns))
+    parts = tuple("." + leaf for leaf in _distinct_leaves(_as_list(rev.target_patterns)))
     dim = next((op.dim for op in ops if hasattr(op, "dim")), 0)
     return SplitRule(fused_suffix=fused, part_suffixes=parts, dim=dim)
 
@@ -883,10 +931,21 @@ def _as_list(x) -> list:
     return list(x) if isinstance(x, (list, tuple)) else [x]
 
 
+def _distinct_leaves(patterns: list[str]) -> list[str]:
+    """The module leaves ``patterns`` name, each once, in order.
+
+    A converter that loading rewrote lists every checkpoint tensor it consumes per module: a
+    dequantizing quantizer adds each weight's ``weight_scale_inv``, an on-the-fly decompressor the
+    stored ``weight_packed`` / ``weight_scale`` / ``weight_global_scale``. Those all name the same
+    module, so repeated leaves collapse to it.
+    """
+    return list(dict.fromkeys(_leaf(p) for p in patterns))
+
+
 def _leaf(pattern: str) -> str:
     """Bare leaf name from a conversion pattern, e.g. ``.experts.*.w1.weight`` -> ``w1``."""
-    p = pattern
-    for suffix in _LEAF_SUFFIXES:
+    p = pattern.removesuffix("$")
+    for suffix in (*_LEAF_SUFFIXES, *_LOAD_SIBLING_SUFFIXES):
         if p.endswith(suffix):
             p = p[: -len(suffix)]
             break

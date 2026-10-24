@@ -18,9 +18,11 @@
 import importlib.util
 import json
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
     wrap_in_parent_with_tied_keys,
@@ -28,6 +30,7 @@ from _test_utils.torch.quantization.tied_modules import (
 from safetensors.torch import save_file
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export import distributed_writer, unified_export_hf
 from modelopt.torch.export.model_utils import (
     TiedWeightMap,
     get_language_model_from_vl,
@@ -42,9 +45,12 @@ from modelopt.torch.export.unified_export_hf import (
     _copy_non_model_files_from_source,
     _resolve_export_dtype,
     _source_checkpoint,
+    _write_base_config,
+    export_hf_checkpoint,
     read_unplaced_weights,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
 def test_multimodal_detection_accepts_null_architectures():
@@ -1027,3 +1033,195 @@ def test_source_checkpoint_is_none_for_a_model_built_from_config(tmp_path, monke
 
     assert _source_checkpoint(model) is None
     assert not any(export_dir.iterdir())
+
+
+@pytest.mark.parametrize("source_plan", [None, {"layers.*.feed_forward.experts": "grouped_gemm"}])
+def test_distributed_export_writes_the_config_a_single_gpu_export_writes(tmp_path, source_plan):
+    """The EP load's DistributedConfig and torch_a2a plan stay out of config.json, the source's own
+    plan survives, and the live configs keep the run's values afterwards."""
+    pytest.importorskip("transformers")
+    # Local import: optional dependency, guarded by the importorskip above.
+    from transformers import AutoConfig, Llama4Config
+    from transformers.distributed import DistributedConfig
+
+    source = tmp_path / "source"
+    Llama4Config().save_pretrained(source)
+    if source_plan is not None:
+        config_json = json.loads((source / "config.json").read_text())
+        config_json["text_config"]["base_model_ep_plan"] = source_plan
+        (source / "config.json").write_text(json.dumps(config_json))
+    AutoConfig.from_pretrained(source).save_pretrained(tmp_path / "single_gpu")
+
+    # What the EP load leaves behind: the stamped DistributedConfig and the swapped plan.
+    config = AutoConfig.from_pretrained(source)
+    distributed_config = DistributedConfig(enable_expert_parallel=True)
+    swapped_plan = {"layers.*.feed_forward.experts": "torch_a2a_experts"}
+    config.distributed_config = distributed_config
+    config.text_config.base_model_ep_plan = swapped_plan
+    model = SimpleNamespace(
+        config=config, _modelopt_source_checkpoint=str(source), can_generate=lambda: False
+    )
+
+    _write_base_config(model, tmp_path / "export")
+
+    written = json.loads((tmp_path / "export" / "config.json").read_text())
+    assert written == json.loads((tmp_path / "single_gpu" / "config.json").read_text())
+    assert written["text_config"].get("base_model_ep_plan") == source_plan
+    assert config.distributed_config is distributed_config
+    assert config.text_config.base_model_ep_plan is swapped_plan
+
+
+def _one_rank_fails_after_the_write_job(rank, size, tmp_dir):
+    model = torch.nn.Linear(2, 2)
+    set_distribution_plan(model, DistributionPlan(size, ep_size=size))
+    raised = None
+    with (
+        bounded_collectives(),
+        mock.patch.object(unified_export_hf, "_process_hf_model_for_export", return_value={}),
+        mock.patch.object(distributed_writer, "distributed_save_hf_checkpoint") as write,
+        # Rank 0 alone writes config.json, once every rank has written its shards.
+        mock.patch.object(
+            unified_export_hf, "_write_base_config", side_effect=OSError("disk full")
+        ),
+    ):
+        # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
+        # the shared worker down instead of failing this test alone.
+        try:
+            unified_export_hf.export_hf_checkpoint(model, export_dir=tmp_dir)
+        except (OSError, RuntimeError) as e:
+            raised = e
+    assert write.called
+    assert raised is not None and "disk full" in str(raised), raised
+
+
+def test_every_rank_fails_an_export_that_one_rank_failed_after_the_write(
+    cpu_dist_workers, tmp_path
+):
+    """The ranks that wrote their shards must not return as if the checkpoint were whole while rank 0
+    failed to finish it: a barrier alone would let them."""
+    cpu_dist_workers.run(_one_rank_fails_after_the_write_job, tmp_dir=tmp_path)
+
+
+def _one_rank_fails_processing_job(rank, size, tmp_dir):
+    model = torch.nn.Linear(2, 2)
+    set_distribution_plan(model, DistributionPlan(size, ep_size=size))
+    failure = NotImplementedError("rank 1's experts mix quantized and unquantized ones")
+
+    def process(*args):
+        if rank == 1:
+            raise failure
+        return {}
+
+    raised = None
+    with (
+        bounded_collectives(),
+        mock.patch.object(unified_export_hf, "_process_hf_model_for_export", process),
+        mock.patch.object(distributed_writer, "distributed_save_hf_checkpoint") as write,
+    ):
+        # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
+        # the shared worker down instead of failing this test alone.
+        try:
+            unified_export_hf.export_hf_checkpoint(model, export_dir=tmp_dir)
+        except (NotImplementedError, RuntimeError) as e:
+            raised = e
+    # Rank 1 raises its own error, and rank 0 one that names rank 1, before either writes.
+    if rank == 1:
+        assert raised is failure, raised
+    else:
+        assert isinstance(raised, RuntimeError) and "rank 1" in str(raised), raised
+    write.assert_not_called()
+
+
+def test_every_rank_stops_before_the_write_when_one_ranks_processing_failed(
+    cpu_dist_workers, tmp_path
+):
+    """Each rank folds only its own shard, so its processing can fail alone; the others must not
+    go on into the writer's collectives without it."""
+    cpu_dist_workers.run(_one_rank_fails_processing_job, tmp_dir=tmp_path)
+
+
+class _FusedExpertsQuantizers(torch.nn.Module):
+    """What the export reads of a fused-experts container: each projection's weight quantizers."""
+
+    def __init__(self, enabled, down_enabled=None):
+        super().__init__()
+        down_enabled = enabled if down_enabled is None else down_enabled
+        self.gate_up_proj_weight_quantizers = [SimpleNamespace(is_enabled=e) for e in enabled]
+        self.down_proj_weight_quantizers = [SimpleNamespace(is_enabled=e) for e in down_enabled]
+
+
+def _expert_quantization_job(rank, size, tmp_dir, enabled_per_rank, down_enabled_per_rank, refused):
+    model = torch.nn.Module()
+    down_enabled = None if down_enabled_per_rank is None else down_enabled_per_rank[rank]
+    model.experts = _FusedExpertsQuantizers(enabled_per_rank[rank], down_enabled)
+    set_distribution_plan(model, DistributionPlan(size, ep_size=size))
+    raised = None
+    with (
+        mock.patch.object(
+            unified_export_hf, "_process_hf_model_for_export", return_value={}
+        ) as fold,
+        mock.patch.object(distributed_writer, "distributed_save_hf_checkpoint") as write,
+        mock.patch.object(unified_export_hf, "_write_base_config"),
+        mock.patch.object(unified_export_hf, "_write_hf_export_config"),
+        bounded_collectives(),
+    ):
+        # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
+        # the shared worker down instead of failing this test alone.
+        try:
+            unified_export_hf.export_hf_checkpoint(model, export_dir=tmp_dir)
+        except NotImplementedError as e:
+            raised = str(e)
+    if refused is None:
+        assert raised is None, raised
+    else:
+        assert raised is not None and refused in raised, raised
+    # Refused before any rank folds or writes; agreed states export as usual.
+    assert fold.called == write.called == (refused is None)
+
+
+@pytest.mark.parametrize(
+    ("enabled_per_rank", "down_enabled_per_rank", "refused"),
+    [
+        (((False, False), (True, True)), None, "experts.gate_up_proj"),
+        (((True, False), (False, True)), None, "experts.gate_up_proj"),
+        (((True, True), (True, True)), ((False, False), (True, True)), "experts.down_proj"),
+        (((True, True), (True, True)), None, None),
+        (((False, False), (False, False)), None, None),
+    ],
+    ids=[
+        "ranks-disagree",
+        "every-rank-mixed",
+        "down-proj-disagrees",
+        "all-quantized",
+        "all-unquantized",
+    ],
+)
+def test_expert_parallel_ranks_agree_on_their_experts_quantization_before_folding(
+    cpu_dist_workers, tmp_path, enabled_per_rank, down_enabled_per_rank, refused
+):
+    """Each rank sees only its own experts' quantizers. Ranks that disagree would fold differently,
+    and only the quantized ones would join the writer's input-scale all-reduce."""
+    cpu_dist_workers.run(
+        _expert_quantization_job,
+        tmp_dir=tmp_path,
+        enabled_per_rank=enabled_per_rank,
+        down_enabled_per_rank=down_enabled_per_rank,
+        refused=refused,
+    )
+
+
+def test_an_expert_parallel_plan_with_replicated_dense_shards_is_refused_before_folding(tmp_path):
+    """Below the world size, EP leaves FSDP2's dense shards replicated across the expert-parallel
+    groups, which the no-gather writer cannot write: refused before the export folds anything."""
+    model = torch.nn.Sequential(torch.nn.Linear(16, 16))
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))
+    set_distribution_plan(model, DistributionPlan(4, ep_size=2, dense="fsdp"))
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+
+    with pytest.raises(NotImplementedError, match=r"MODELOPT_EP_DEGREE=4 .* MODELOPT_FSDP_SIZE=1"):
+        export_hf_checkpoint(model, export_dir=tmp_path / "export")
+
+    after = model.state_dict()
+    assert after.keys() == before.keys()
+    assert all(torch.equal(after[k], v) for k, v in before.items())
+    assert not (tmp_path / "export").exists()
