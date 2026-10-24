@@ -29,7 +29,7 @@ from collections import Counter
 import pytest
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader, IterableDataset, SubsetRandomSampler
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as mto_dist
@@ -151,6 +151,21 @@ def test_iterable_shards_split_their_groups_across_worker_processes(monkeypatch)
             yielded += list(shard)
 
         assert sorted(yielded) == list(range(rank, n, world_size))
+
+
+@pytest.mark.parametrize(
+    "picker",
+    [{"sampler": SubsetRandomSampler(range(4))}, {"batch_sampler": [[0, 1], [2, 3]]}],
+    ids=["subset-sampler", "batch-sampler"],
+)
+def test_a_loader_that_picks_its_own_samples_is_refused(picker):
+    """The rank's DistributedSampler would replace what it picks, silently calibrating on the whole
+    dataset instead."""
+    batching = {} if "batch_sampler" in picker else {"batch_size": 2}
+    loader = DataLoader(list(range(8)), collate_fn=_collate, **batching, **picker)
+
+    with pytest.raises(ValueError, match="picks which samples it reads"):
+        shard_dataloader(loader, 0, 2)
 
 
 @pytest.mark.parametrize("dataset", [list(range(8)), _Stream(8)], ids=["map-style", "iterable"])
