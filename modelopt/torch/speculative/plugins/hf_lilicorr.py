@@ -175,13 +175,12 @@ class HFLiLiCorrModel(HFDFlashModel):
             self.dflash_lilicorr_margin,
         )
 
-    @property
-    def _needs_base_logits(self) -> bool:
+    def _reads_teacher(self, config) -> bool:
         """The distractor penalty and the calibration term both read the target's logits."""
         return (
-            super()._needs_base_logits
-            or self.dflash_lilicorr_w_pen > 0.0
-            or self.dflash_lilicorr_w_cal > 0.0
+            super()._reads_teacher(config)
+            or config.dflash_lilicorr_w_pen > 0.0
+            or config.dflash_lilicorr_w_cal > 0.0
         )
 
     def get_exporter(self):

@@ -16,9 +16,9 @@
 """Configurations for speculative decoding modes."""
 
 from copy import deepcopy
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
@@ -75,6 +75,17 @@ DFLASH_DEFAULT_CFG = {
     },
 }
 
+# The terms a DFlash-family block objective is built from; plugins/dflash_losses.py implements them.
+DFlashLossTerm = Literal["ce", "kd", "tvd", "tv", "lambda"]
+
+# The per-projector_type selectors of the block objective that dflash_loss_terms replaces.
+_LEGACY_OBJECTIVE_FIELDS = (
+    "dflash_self_logit_distillation",
+    "dflash_lk_loss_type",
+    "dflash_ce_loss_alpha",
+    "dflash_l1_loss_alpha",
+)
+
 
 class DFlashConfig(ModeloptBaseConfig):
     """DFlash config for block-wise parallel speculative decoding."""
@@ -98,8 +109,46 @@ class DFlashConfig(ModeloptBaseConfig):
         default=True, description="Whether to freeze base model during DFlash module training."
     )
 
+    dflash_loss_terms: (
+        dict[DFlashLossTerm, Annotated[float, Field(ge=0.0, allow_inf_nan=False)]] | None
+    ) = ModeloptField(
+        default=None,
+        description=(
+            "The block objective as ``{term: weight}``, summed in the order given, e.g. "
+            "``{ce: 0.1, tvd: 0.9}``. Terms: ``ce`` (cross-entropy on the labels), ``kd`` "
+            "(cross-entropy against the base model's distribution), ``tvd`` (total variation "
+            "to the base model's distribution), ``tv`` (``1 - q(gold)``, total variation to "
+            "the label) and ``lambda`` (``ce`` and ``tv`` blended by acceptance, see "
+            "dflash_lk_ce_scale). Any term works with any projector_type, online and offline; "
+            "``kd`` and ``tvd`` read the base model's distribution, which offline batches must "
+            "then carry. Weights are >= 0 with at least one > 0; a term of weight 0 is "
+            "reported without being trained on. None (default) keeps each projector_type's "
+            "objective: ``kd`` or ``ce`` per dflash_self_logit_distillation for DFlash and "
+            "LiLiCorr, the same or dflash_lk_loss_type's term for DFlash2, "
+            "dflash_ce_loss_alpha * ``ce`` + dflash_l1_loss_alpha * ``tvd`` for DSpark, and "
+            "``ce`` for Domino. Setting it requires those selectors to keep their defaults. "
+            "The terms a variant adds itself (the DFlash2 selector, the LiLiCorr lattice, the "
+            "DSpark confidence head) and Domino's blend of the objective on its corrected and "
+            "backbone logits keep their own settings."
+        ),
+    )
+
     dflash_self_logit_distillation: bool = ModeloptField(
         default=True, description="Whether to use logit distillation from base model."
+    )
+
+    dflash_teacher_softcap: bool = ModeloptField(
+        default=False,
+        description=(
+            "Cap the teacher's logits the way the base model caps its own, "
+            "``cap * tanh(logits / cap)`` with ``cap`` the base config's "
+            "``final_logit_softcapping`` (Gemma family). The teacher is the base's ``lm_head`` "
+            "applied to its final hidden state for every batch, text or multimodal, online or "
+            "offline, which leaves that cap out unless this is set. Other scaling a base applies "
+            "at its ``lm_head``, such as ``logits_scaling`` or ``logit_scale``, stays out; "
+            "conversion warns about it. Requires a base config that sets "
+            "``final_logit_softcapping``. The draft's own logits are never capped."
+        ),
     )
 
     dflash_loss_decay_factor: float = ModeloptField(
@@ -148,7 +197,7 @@ class DFlashConfig(ModeloptBaseConfig):
     dflash_use_torch_compile: bool = ModeloptField(
         default=False,
         description=(
-            "Whether to torch.compile the draft decoder stack and the DSpark TVD chunk in "
+            "Whether to torch.compile the draft decoder stack and the TVD term's chunk in "
             "training. Compiles once, on the first step, and needs a working Inductor "
             "toolchain."
         ),
@@ -424,8 +473,9 @@ class DFlashConfig(ModeloptBaseConfig):
         default=1.0,
         ge=0.0,
         description=(
-            "DFlash2 only: scale of the CE share in the dflash_lk_loss_type='lambda' "
-            "blend. 1.0 starts the run as pure CE. Ignored for other loss types."
+            "Scale of the CE share in the 'lambda' blend (dflash_lk_loss_type='lambda', or the "
+            "'lambda' term of dflash_loss_terms). 1.0 starts the run as pure CE. Ignored "
+            "without that term."
         ),
     )
 
@@ -433,9 +483,8 @@ class DFlashConfig(ModeloptBaseConfig):
         default=1.0,
         ge=0.0,
         description=(
-            "DFlash2 only: how fast the CE share decays as acceptance rises in the "
-            "dflash_lk_loss_type='lambda' blend. 0 pins the blend at dflash_lk_ce_scale. "
-            "Ignored for other loss types."
+            "How fast the CE share decays as acceptance rises in the 'lambda' blend. 0 pins "
+            "the blend at dflash_lk_ce_scale. Ignored without that term."
         ),
     )
 
@@ -464,6 +513,28 @@ class DFlashConfig(ModeloptBaseConfig):
                     f"dflash_swa_window_size ({self.dflash_swa_window_size}) must be >= "
                     f"dflash_block_size ({self.dflash_block_size})."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _check_loss_terms(self) -> "DFlashConfig":
+        if self.dflash_loss_terms is None:
+            return self
+        if not any(self.dflash_loss_terms.values()):
+            raise ValueError(
+                f"dflash_loss_terms needs a term of weight > 0, got {self.dflash_loss_terms}."
+            )
+        # Against the defaults, not model_fields_set: main.py converts from model_dump() and
+        # modelopt_state restores from it, which marks every field as set.
+        moved = [
+            name
+            for name in _LEGACY_OBJECTIVE_FIELDS
+            if getattr(self, name) != type(self).model_fields[name].default
+        ]
+        if moved:
+            raise ValueError(
+                f"dflash_loss_terms sets the block objective, so {moved} must keep their "
+                "defaults; express the objective in dflash_loss_terms alone."
+            )
         return self
 
 

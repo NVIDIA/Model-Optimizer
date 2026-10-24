@@ -81,7 +81,6 @@ dflash:
   # --- training knobs ---
   dflash_num_anchors: 64
   dflash_use_torch_compile: false
-  dflash_self_logit_distillation: false
   dflash_loss_objective: dpace
   dflash_ce_loss_alpha: 0.1
   dflash_l1_loss_alpha: 0.9

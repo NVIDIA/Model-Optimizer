@@ -92,6 +92,15 @@ _BASE_MODEL_PATHS = [
     "language_model.backbone",
 ]
 _VLM_CONFIG_ATTRS = ["text_config", "llm_config"]
+# Base config fields by which a CausalLM scales its logits at lm_head (1.0: no scaling). The
+# DFlash teacher is lm_head's raw projection and leaves them out, so conversion warns about them.
+_LOGIT_SCALING_FIELDS = (
+    "logits_scaling",  # Granite family, HyperCLOVA X, MiniCPM3
+    "logit_scale",  # Cohere family
+    "lm_head_multiplier",  # Falcon-H1
+    "output_multiplier",  # MuseGlimmer
+    "logits_mup_width_multiplier",  # Inkling
+)
 _SAFETENSORS_INDEX_FILENAME = "model.safetensors.index.json"
 # Single-file safetensors names to try, in order.  Mistral native checkpoints
 # use ``consolidated.safetensors`` instead of the HF-standard ``model.safetensors``.
@@ -118,11 +127,14 @@ class FakeBaseConfig(PretrainedConfig):
         rms_norm_eps=1e-6,
         rope_theta=None,
         final_norm_type=None,
+        final_logit_softcapping=None,
         **kwargs,
     ):
         """Initialize FakeBaseConfig with minimal model configuration parameters."""
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
         self.rms_norm_eps = rms_norm_eps
+        # The base's logit cap (Gemma family), for dflash_teacher_softcap.
+        self.final_logit_softcapping = final_logit_softcapping
         # Which self-implemented final-norm class FakeBaseModel builds, or None to build no norm
         # (model whose final-norm type we don't know). See _FINAL_NORM_CLASSES /
         # _FINAL_NORM_TYPE_BY_MODEL_TYPE. Persisted so a reloaded config rebuilds the same norm.
@@ -242,6 +254,13 @@ class FakeBaseModel(PreTrainedModel):
             final_norm_type=_select_final_norm_type(
                 getattr(base_cfg, "model_type", None), base_cfg
             ),
+            final_logit_softcapping=getattr(base_cfg, "final_logit_softcapping", None),
+            # So that DFlash's conversion warns about them on a fake base too.
+            **{
+                name: getattr(base_cfg, name)
+                for name in _LOGIT_SCALING_FIELDS
+                if getattr(base_cfg, name, None) is not None
+            },
         )
         model = cls(config)
         # Load lm_head, embed_tokens, and (for known models) the final norm into the model.

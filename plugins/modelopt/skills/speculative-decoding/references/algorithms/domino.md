@@ -49,7 +49,7 @@ Everything in `dflash.md` applies. Domino adds:
 | `dflash.dflash_lambda_base_start` | 1.0 | Curriculum start weight on the base loss |
 | `dflash.dflash_lambda_base_decay_ratio` | 1.0 | Fraction of training over which `lambda_base` decays to 0 |
 
-`dflash_self_logit_distillation` is **false** — Domino trains its own base/final CE
+Domino ignores `dflash_self_logit_distillation` — it trains its own base/final CE
 losses rather than distilling target logits. Recipe defaults also differ from
 DFlash's: `block_size` 16, `num_anchors` 256, `num_train_epochs` 6,
 `training_seq_len` 3072, `warmup_ratio` 0.04, `dflash_loss_decay_factor` 7.0.

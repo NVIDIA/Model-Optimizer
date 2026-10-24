@@ -65,7 +65,6 @@ pipeline:
       - dflash.dflash_num_anchors=512
       - dflash.dflash_loss_decay_factor=7
       - dflash.dflash_mask_token_id=151669
-      - dflash.dflash_self_logit_distillation=false
       - dflash.dflash_lambda_base_start=1.0
       - dflash.dflash_lambda_base_decay_ratio=1.0
     environment:

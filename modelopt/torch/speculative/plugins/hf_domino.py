@@ -51,7 +51,8 @@ Training uses next-token (shift_label) alignment and a two-term loss::
 
     loss = (1 - lambda_base) * final_loss + lambda_base * base_loss
 
-where ``final_loss`` is CE on the corrected logits and ``base_loss`` is CE on the
+where ``final_loss`` is the block objective (CE unless ``dflash_loss_terms`` sets
+another) on the corrected logits and ``base_loss`` the same objective on the
 backbone-only logits. ``lambda_base`` decays linearly from ``lambda_base_start``
 to 0 over ``lambda_base_decay_ratio`` of training (curriculum: learn a good
 parallel backbone first, then the causal correction). The schedule is driven by
@@ -65,9 +66,8 @@ from transformers import PreTrainedModel
 from transformers.trainer_callback import TrainerCallback
 
 from ..dflash.conversion import DominoDMRegistry
-from .dflash_losses import DraftLogits, LossOutput, _block_tokens, objective_loss, objective_term
+from .dflash_losses import DraftLogits, LossOutput, _block_tokens, objective_loss
 from .hf_dflash import HFDFlashModel
-from .modeling_dflash import DFlashBaseModelOutput
 from .modeling_domino import DominoModule
 
 logger = logging.getLogger(__name__)
@@ -134,24 +134,14 @@ class HFDominoModel(HFDFlashModel):
     def _current_lambda_base(self) -> float:
         return float(getattr(self, "_lambda_base", self.dflash_lambda_base_start))
 
-    def _build_objective(self, config):
+    def _default_loss_terms(self, config):
         """CE on the labels, for the corrected logits and for the backbone's."""
-        return [objective_term("ce", 1.0)]
+        return {"ce": 1.0}
 
     @property
     def _position_weighting(self):
         # dflash_loss_objective is not wired for Domino yet: it always decays.
         return "decay"
-
-    def _online_base_outputs(self, input_ids, attention_mask, **kwargs):
-        """The target hidden states; Domino does not use target-logit KD."""
-        with torch.no_grad():
-            base_out = self._base_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
-            )
-        return DFlashBaseModelOutput(target_hidden=self._target_hidden(base_out.hidden_states))
 
     def _draft_logits(self, batch):
         """The backbone's logits with the GRU causal correction added to each block's suffix."""
@@ -189,9 +179,9 @@ class HFDominoModel(HFDFlashModel):
             backbone_loss, _ = objective_loss(self._objective, ctx, "backbone")
             loss = (1.0 - lambda_base) * out.loss + lambda_base * backbone_loss
         metrics = {
+            **out.metrics,
             "loss_final": out.loss.detach(),
             "loss_backbone": backbone_loss.detach(),
-            "backbone_accuracy": out.metrics["backbone_accuracy"],
             # float64 holds the scheduled value exactly.
             "lambda_base": torch.full((), lambda_base, dtype=torch.float64, device=out.loss.device),
         }

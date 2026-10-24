@@ -18,10 +18,13 @@
 GPU-dependent tests (training forward, module forward) are in tests/gpu/.
 """
 
+import copy
 import json
 import logging
 import os
+import warnings
 from types import SimpleNamespace
+from typing import get_args
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -30,17 +33,26 @@ import torch.nn.functional as F
 from _test_utils.torch.speculative.dflash import get_dflash_config
 from _test_utils.torch.transformers_models import (
     get_tiny_llama,
+    get_tiny_qwen3vl,
     tf_modelopt_state_and_output_tester,
 )
 from torch.nn.attention.flex_attention import create_mask
-from transformers import AutoModelForCausalLM
+from transformers import (
+    AutoModelForCausalLM,
+    Gemma4Config,
+    Gemma4ForConditionalGeneration,
+    GraniteConfig,
+    GraniteForCausalLM,
+)
 from transformers.modeling_layers import GradientCheckpointingLayer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
 import modelopt.torch.speculative.plugins.dflash_flex_attention as dflash_flex_attention
 import modelopt.torch.speculative.plugins.hf_dflash as hf_dflash
+from modelopt.torch.speculative.config import DFlashConfig, DFlashLossTerm
 from modelopt.torch.speculative.plugins.dflash_losses import (
+    DIVERGENCES,
     DraftLogits,
     _block_position_weights,
     _block_targets,
@@ -64,7 +76,8 @@ from modelopt.torch.speculative.plugins.master_weight_adamw import (
     MasterWeightAdamW,
     VerifyMasterWeightsCallback,
 )
-from modelopt.torch.speculative.utils import AcceptanceRateValidation
+from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
+from modelopt.torch.speculative.utils import AcceptanceRateValidation, load_vlm_or_llm
 from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
 
 BLOCK_SIZE = 4
@@ -357,6 +370,189 @@ class TestDPaceLossIntegration:
             weights.view(-1),
         )
         assert torch.equal(loss, legacy)
+
+
+# What each variant's conversion requires beyond get_dflash_config(), sized for the tiny
+# model: its dflash_architecture_config fields, then its other config fields.
+_VARIANTS = {
+    "dflash": ({}, {}),
+    "dflash2": (
+        {"conv_kernel_size": 2, "conv_group_size": 4, "selector_rank": 8, "selector_top_k": 5},
+        {},
+    ),
+    "lilicorr": (
+        {
+            "lilicorr_candidate_topk": 4,
+            "lilicorr_num_layers": 1,
+            "lilicorr_num_heads": 4,
+            "lilicorr_mlp_ratio": 2.0,
+            "lilicorr_factor_dim": 8,
+            "lilicorr_vector_eps": 1e-4,
+            "lilicorr_logit_scale": 8.0,
+        },
+        {
+            "dflash_lilicorr_w_ce": 0.25,
+            "dflash_lilicorr_w_margin": 0.0,
+            "dflash_lilicorr_w_pen": 0.25,
+        },
+    ),
+    "dspark": ({"markov_rank": 16}, {}),
+    # lambda_base below 1, so that Domino's corrected logits train too.
+    "domino": ({"emb_dim": 16, "gru_hidden_dim": 32}, {"dflash_lambda_base_start": 0.5}),
+}
+
+
+def _variant_model(projector_type, offline=False, arch=None, **overrides):
+    """A tiny model converted to ``projector_type``, with ``arch`` and ``overrides`` applied."""
+    arch_fields, fields = _VARIANTS[projector_type]
+    config = get_dflash_config(offline=offline)
+    config["dflash_architecture_config"].update(
+        projector_type=projector_type, **arch_fields, **(arch or {})
+    )
+    config.update(fields, **overrides)
+    model = get_tiny_llama(num_hidden_layers=4)
+    model.config.num_orig_hidden_layers = 4
+    mtsp.convert(model, [("dflash", config)])
+    return model
+
+
+def _objective_spec(model):
+    """The objective as data: each term's name, weight, class and bound parameters."""
+    return [(name, weight, type(term), vars(term)) for name, weight, term in model._objective]
+
+
+class TestLossTerms:
+    """``dflash_loss_terms`` composes the block objective of any variant from the registry."""
+
+    def test_every_configurable_term_is_implemented(self):
+        assert set(get_args(DFlashLossTerm)) == set(DIVERGENCES)
+
+    @pytest.mark.parametrize(
+        ("terms", "match"),
+        [
+            ({"ce": 1.0, "l1": 1.0}, "'ce', 'kd', 'tvd', 'tv' or 'lambda'"),
+            ({"ce": -0.5}, "greater than or equal to 0"),
+            ({"ce": 0.0}, "weight > 0"),
+        ],
+        ids=["unknown", "negative", "all-zero"],
+    )
+    def test_bad_terms_are_rejected(self, terms, match):
+        with pytest.raises(ValueError, match=match):
+            DFlashConfig(dflash_loss_terms=terms)
+
+    @pytest.mark.parametrize(
+        ("selector", "value"),
+        [
+            ("dflash_self_logit_distillation", False),
+            ("dflash_lk_loss_type", "tv"),
+            ("dflash_ce_loss_alpha", 0.5),
+            ("dflash_l1_loss_alpha", 0.5),
+        ],
+    )
+    def test_terms_and_a_legacy_selector_are_rejected(self, selector, value):
+        """One source for the objective."""
+        with pytest.raises(ValueError, match=selector):
+            DFlashConfig(dflash_loss_terms={"ce": 1.0}, **{selector: value})
+
+    @pytest.mark.parametrize(
+        ("projector_type", "legacy", "terms"),
+        [
+            ("dflash", {}, {"kd": 1.0}),
+            ("dflash", {"dflash_self_logit_distillation": False}, {"ce": 1.0}),
+            (
+                "dflash2",
+                {"dflash_self_logit_distillation": False, "dflash_lk_loss_type": "tv"},
+                {"tv": 1.0},
+            ),
+            (
+                "dflash2",
+                {"dflash_self_logit_distillation": False, "dflash_lk_loss_type": "lambda"},
+                {"lambda": 1.0},
+            ),
+            ("lilicorr", {}, {"kd": 1.0}),
+            ("dspark", {"dflash_ce_loss_alpha": 0.3}, {"ce": 0.3, "tvd": 0.9}),
+            ("domino", {}, {"ce": 1.0}),
+        ],
+        ids=[
+            "dflash-kd",
+            "dflash-ce",
+            "dflash2-tv",
+            "dflash2-lambda",
+            "lilicorr",
+            "dspark",
+            "domino",
+        ],
+    )
+    def test_unset_terms_keep_each_variants_objective(self, projector_type, legacy, terms):
+        """Unset, each variant builds its own objective, which the same terms reproduce."""
+        blend = {"dflash_lk_ce_scale": 0.8, "dflash_lk_ce_decay": 2.0}
+        model = _variant_model(projector_type, **legacy, **blend)
+        assert [(name, weight) for name, weight, _ in model._objective] == list(terms.items())
+        explicit = _variant_model(projector_type, dflash_loss_terms=terms, **blend)
+        assert _objective_spec(explicit) == _objective_spec(model)
+
+    def test_terms_survive_the_config_round_trips(self):
+        """main.py converts from a model_dump() and a restore reads one back: all fields set."""
+        config = DFlashConfig(**get_dflash_config(), dflash_loss_terms={"tvd": 0.5, "ce": 0.5})
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", config.model_dump())])
+        restored = mto.restore_from_modelopt_state(
+            get_tiny_llama(num_hidden_layers=4), mto.modelopt_state(model)
+        )
+        assert [name for name, _, _ in restored._objective] == ["tvd", "ce"]
+        assert _objective_spec(restored) == _objective_spec(model)
+
+    @pytest.mark.parametrize(
+        ("projector_type", "terms"),
+        [
+            ("dflash", {"ce": 0.5, "tvd": 0.5}),
+            ("dflash2", {"tv": 0.5, "kd": 0.5}),
+            ("lilicorr", {"tvd": 1.0}),
+            ("dspark", {"kd": 1.0}),
+            ("domino", {"kd": 0.5, "lambda": 0.5, "tvd": 0.0}),
+        ],
+        ids=["dflash", "dflash2", "lilicorr", "dspark", "domino"],
+    )
+    def test_a_composed_objective_trains_every_variant(self, projector_type, terms):
+        """Online, the teacher every variant now has; every draft parameter gets a gradient.
+
+        Every term is reported, one of weight 0 too.
+        """
+        model = _variant_model(projector_type, dflash_loss_terms=terms).float()
+        model.train()
+        out = model(**_dflash_batch(model.config.vocab_size))
+        assert torch.isfinite(out.loss)
+        assert {f"loss_{name}" for name in terms} <= out.draft_metrics.keys()
+        out.loss.backward()
+        ungraded = [
+            name
+            for name, p in model.dflash_module.named_parameters()
+            if p.requires_grad and (p.grad is None or not torch.isfinite(p.grad).all())
+        ]
+        assert not ungraded, ungraded
+
+    @pytest.mark.parametrize(
+        ("projector_type", "terms", "confidence", "needs"),
+        [
+            ("dspark", {"ce": 1.0}, 0.0, False),
+            ("dspark", {"ce": 1.0}, 0.5, True),
+            ("domino", None, 0.0, False),
+            ("domino", {"kd": 1.0}, 0.0, True),
+        ],
+        ids=["dspark-ce", "dspark-ce-confidence", "domino", "domino-kd"],
+    )
+    def test_offline_needs_the_teacher_only_for_terms_that_read_it(
+        self, projector_type, terms, confidence, needs
+    ):
+        """Objective terms and variant terms declare it; nothing else does."""
+        model = _variant_model(
+            projector_type,
+            offline=True,
+            arch={"use_confidence_head": bool(confidence)},
+            dflash_loss_terms=terms,
+            dflash_confidence_head_alpha=confidence,
+        )
+        assert model._needs_base_logits is needs
 
 
 class TestDFlashSaveRestore:
@@ -1622,9 +1818,14 @@ class TestTeacherLogits:
     """
 
     @staticmethod
-    def _model():
+    def _model(softcap=None):
+        """A converted tiny model; ``softcap`` sets the base's cap and turns the switch on."""
         model = get_tiny_llama(num_hidden_layers=4)
-        mtsp.convert(model, [("dflash", get_dflash_config())])
+        config = get_dflash_config()
+        if softcap is not None:
+            model.config.final_logit_softcapping = softcap
+            config["dflash_teacher_softcap"] = True
+        mtsp.convert(model, [("dflash", config)])
         return model
 
     @staticmethod
@@ -1667,8 +1868,28 @@ class TestTeacherLogits:
             model._teacher_logits(outputs, labels, token_ids), rows.gather(-1, token_ids)
         )
 
-    def test_handed_over_logits_are_gathered_not_recomputed(self):
-        model = self._model()
+    @pytest.mark.parametrize("narrow", [False, True], ids=["full", "token_ids"])
+    def test_softcap_caps_the_projected_teacher(self, narrow):
+        cap = 0.5
+        model = self._model(softcap=cap).float()
+        hidden = 10 * self._hidden(model)
+        labels = self._labels()
+        rows = self._rows(model._base_model_lm_head(hidden), labels - 1)
+        assert rows.abs().max() > cap, "fixture does not reach the cap"
+        want = cap * torch.tanh(rows / cap)
+        token_ids = None
+        if narrow:
+            token_ids = torch.randint(0, model.config.vocab_size, (*labels.shape, 5))
+            want = want.gather(-1, token_ids)
+        got = model._teacher_logits(
+            DFlashBaseModelOutput(None, base_hidden=hidden), labels, token_ids
+        )
+        torch.testing.assert_close(got, want)
+
+    @pytest.mark.parametrize("softcap", [None, 0.5], ids=["uncapped", "capped"])
+    def test_handed_over_logits_are_gathered_not_recomputed(self, softcap):
+        """Handed-over logits are the model's own: gathered as they are, never capped again."""
+        model = self._model(softcap)
         logits = torch.randn(2, SEQ_LEN, model.config.vocab_size)
         outputs = DFlashBaseModelOutput(None, logits=logits)
         labels = self._labels()
@@ -1714,11 +1935,12 @@ class TestTeacherLogits:
         )
         torch.testing.assert_close(loss, loss_full)
 
-    def test_offline_step_never_projects_the_full_sequence(self):
-        """Offline/streaming with KD on, lm_head only ever sees draft rows and teacher rows."""
+    @pytest.mark.parametrize("offline", [False, True], ids=["online", "offline"])
+    def test_step_never_projects_the_full_sequence(self, offline):
+        """With KD on, lm_head only ever sees draft rows and teacher rows."""
         model = get_tiny_llama(num_hidden_layers=4)
         model.config.num_orig_hidden_layers = 4
-        mtsp.convert(model, [("dflash", get_dflash_config(offline=True))])
+        mtsp.convert(model, [("dflash", get_dflash_config(offline=offline))])
         assert model.dflash_self_logit_distillation
         model.train()
         seen = []
@@ -1727,17 +1949,382 @@ class TestTeacherLogits:
         )
         bsz, hidden = 2, model.config.hidden_size
         dtype = next(model.dflash_module.parameters()).dtype
-        base_model_outputs = {
-            "aux_hidden_states": torch.randn(
-                bsz, SEQ_LEN, len(model.target_layer_ids) * hidden, dtype=dtype
-            ),
-            "base_model_hidden_states": torch.randn(bsz, SEQ_LEN, hidden, dtype=dtype),
-        }
+        kwargs = {}
+        if offline:
+            kwargs["base_model_outputs"] = {
+                "aux_hidden_states": torch.randn(
+                    bsz, SEQ_LEN, len(model.target_layer_ids) * hidden, dtype=dtype
+                ),
+                "base_model_hidden_states": torch.randn(bsz, SEQ_LEN, hidden, dtype=dtype),
+            }
         input_ids = torch.randint(1, model.config.vocab_size, (bsz, SEQ_LEN))
         model(
-            input_ids=input_ids,
-            attention_mask=torch.ones_like(input_ids),
-            base_model_outputs=base_model_outputs,
+            input_ids=input_ids, attention_mask=torch.ones_like(input_ids), **kwargs
         ).loss.backward()
         assert len(seen) == 2, seen  # the draft's logits, then the KD teacher rows
         assert (bsz, SEQ_LEN, hidden) not in seen, seen
+
+    def test_online_teacher_is_the_causal_lm_distribution(self):
+        """The rows projected from the inner model's final hidden are the CausalLM's logits."""
+        model = self._model().float()
+        labels = self._labels()
+        input_ids = torch.randint(1, model.config.vocab_size, (2, SEQ_LEN))
+        attention_mask = torch.ones_like(input_ids)
+        outputs = model._online_base_outputs(input_ids, attention_mask)
+        model.eval()
+        with torch.no_grad():
+            full = model(input_ids=input_ids, attention_mask=attention_mask).logits
+        torch.testing.assert_close(
+            model._teacher_logits(outputs, labels), self._rows(full, labels - 1)
+        )
+
+
+# Qwen3-VL's vision placeholder ids, moved inside get_tiny_qwen3vl's 32-token vocab.
+_VISION_START, _IMAGE = 28, 30
+
+
+def _tiny_vlm(arch=None, softcap=None):
+    """A tiny Qwen3-VL converted online, in fp32; ``arch`` updates the draft's architecture.
+
+    ``softcap`` names a cap in its text config, which Qwen3-VL's own forward never applies, and
+    turns ``dflash_teacher_softcap`` on.
+    """
+    model = get_tiny_qwen3vl(num_hidden_layers=4)
+    model.config.vision_start_token_id, model.config.image_token_id = _VISION_START, _IMAGE
+    config = get_dflash_config()
+    config["dflash_architecture_config"].update(arch or {})
+    if softcap is not None:
+        model.config.text_config.final_logit_softcapping = softcap
+        config["dflash_teacher_softcap"] = True
+    mtsp.convert(model, [("dflash", config)])
+    return model.float()
+
+
+def _image_batch():
+    """Two sequences, each holding a 2x2-patch image at positions 4-7, and its pixels."""
+    g = torch.Generator().manual_seed(0)
+    input_ids = torch.randint(1, _VISION_START, (2, SEQ_LEN), generator=g)
+    input_ids[:, 3] = _VISION_START
+    input_ids[:, 4:8] = _IMAGE
+    return {
+        "input_ids": input_ids,
+        "attention_mask": torch.ones_like(input_ids),
+        # One row per 4x4 patch of 3 channels: get_tiny_qwen3vl merges no patches.
+        "pixel_values": torch.randn(2 * 4, 3 * 4 * 4, generator=g),
+        "image_grid_thw": torch.tensor([[1, 2, 2], [1, 2, 2]]),
+        "mm_token_type_ids": (input_ids == _IMAGE).long(),
+    }
+
+
+def _tiny_gemma4_and_batch(modality):
+    """A tiny Gemma 4 VLM converted online, in fp32, and a batch with an image or a video at 3-6."""
+    torch.manual_seed(0)
+    image_token, video_token = 62, 63
+    text_config = {
+        "vocab_size": 64,
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "max_position_embeddings": 64,
+        "sliding_window": 8,
+        "vocab_size_per_layer_input": 64,
+        "hidden_size_per_layer_input": 8,
+    }
+    vision_config = {
+        "hidden_size": 16,
+        "intermediate_size": 16,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "patch_size": 4,
+        "position_embedding_size": 64,
+    }
+    model = Gemma4ForConditionalGeneration(
+        Gemma4Config(
+            text_config=text_config,
+            vision_config=vision_config,
+            image_token_id=image_token,
+            # The other special tokens, inside the tiny vocabulary too.
+            boi_token_id=60,
+            eoi_token_id=61,
+            video_token_id=video_token,
+            audio_token_id=57,
+            boa_token_id=59,
+            eoa_token_index=58,
+        )
+    )
+    mtsp.convert(model, [("dflash", get_dflash_config())])
+    g = torch.Generator().manual_seed(1)
+    input_ids = torch.randint(1, 56, (2, SEQ_LEN), generator=g)
+    # 6x6 patches of 4x4 pixels, pooled to 2x2 tokens; a video has one such frame.
+    input_ids[:, 3:7] = image_token if modality == "image" else video_token
+    ys, xs = torch.meshgrid(torch.arange(6), torch.arange(6), indexing="ij")
+    pixels = torch.randn(2, 6 * 6, 3 * 4 * 4, generator=g)
+    positions = torch.stack([xs.flatten(), ys.flatten()], -1).expand(2, -1, -1)
+    if modality == "image":
+        visual = {"pixel_values": pixels, "image_position_ids": positions}
+    else:
+        visual = {"pixel_values_videos": pixels[:, None], "video_position_ids": positions[:, None]}
+    batch = {
+        "input_ids": input_ids,
+        "attention_mask": torch.ones_like(input_ids),
+        **visual,
+        # Gemma 4's processor marks image tokens 1 and video tokens 2.
+        "mm_token_type_ids": (input_ids == image_token).long() + 2 * (input_ids == video_token),
+    }
+    return model.float(), batch
+
+
+class TestMultimodalTeacher:
+    """An image batch gets a text batch's teacher: lm_head projecting the inner model's output.
+
+    The top-level forward inserts the image, and a hook reads the inner model's output during it.
+    """
+
+    @staticmethod
+    def _labels():
+        torch.manual_seed(0)
+        return torch.randint(1, SEQ_LEN, (2, 3, BLOCK_SIZE))
+
+    @staticmethod
+    def _own_rows(model, batch, positions):
+        """Rows of the model's own logits, which for Qwen3-VL are lm_head's output as it is."""
+        model.eval()
+        with torch.no_grad():
+            logits = model(**batch).logits
+        return logits[torch.arange(positions.shape[0]).view(-1, 1, 1), positions]
+
+    def test_teacher_projects_the_final_hidden_state_over_the_whole_sequence(self):
+        model = _tiny_vlm()
+        batch = _image_batch()
+        lm_head_inputs = []
+        model._base_model_lm_head.register_forward_pre_hook(
+            lambda _module, args: lm_head_inputs.append(args[0])
+        )
+        outputs = model._online_base_outputs(**batch)
+        assert outputs.logits is None
+        # Qwen3-VL feeds the inner model's output to lm_head as it is.
+        assert torch.equal(outputs.base_hidden, lm_head_inputs[0])
+        labels = self._labels()
+        torch.testing.assert_close(
+            model._teacher_logits(outputs, labels), self._own_rows(model, batch, labels - 1)
+        )
+
+    def test_text_and_image_batches_read_the_same_final_hidden_state(self):
+        """Up to the image, also when the CausalLM rescales lm_head's input, as Inkling does."""
+        model = _tiny_vlm()
+        model._base_model_lm_head.register_forward_pre_hook(lambda _module, args: (args[0] / 24,))
+        batch = _image_batch()
+        image = model._online_base_outputs(**batch).base_hidden
+        text = model._online_base_outputs(batch["input_ids"], batch["attention_mask"]).base_hidden
+        torch.testing.assert_close(image[:, :4], text[:, :4])
+
+    def test_softcap_caps_the_image_batch_teacher(self):
+        cap = 0.1
+        model = _tiny_vlm(softcap=cap)
+        batch = _image_batch()
+        outputs = model._online_base_outputs(**batch)
+        labels = self._labels()
+        rows = self._own_rows(model, batch, labels - 1)
+        assert rows.abs().max() > cap, "fixture does not reach the cap"
+        torch.testing.assert_close(
+            model._teacher_logits(outputs, labels), cap * torch.tanh(rows / cap)
+        )
+
+    @pytest.mark.parametrize(
+        "arch",
+        [
+            {},
+            {"projector_type": "dspark", "markov_rank": 16},
+            {"projector_type": "domino", "emb_dim": 16, "gru_hidden_dim": 32},
+        ],
+        ids=["dflash", "dspark", "domino"],
+    )
+    def test_every_variant_trains_on_the_image(self, arch):
+        """Another image in the same text changes the base's rows from the image on, not before."""
+        model = _tiny_vlm(arch)
+        batch = _image_batch()
+        other = {**batch, "pixel_values": torch.randn_like(batch["pixel_values"])}
+        first, second = (model._online_base_outputs(**b) for b in (batch, other))
+        for name in ("target_hidden", "base_hidden"):
+            a, b = getattr(first, name), getattr(second, name)
+            torch.testing.assert_close(a[:, :4], b[:, :4], msg=name)
+            assert not torch.allclose(a[:, 4:], b[:, 4:]), name
+        model.train()
+        out = model(**batch)
+        assert torch.isfinite(out.loss)
+        out.loss.backward()
+
+    @pytest.mark.parametrize("modality", ["image", "video"])
+    def test_a_gemma4_image_or_video_reaches_the_base(self, modality):
+        """Gemma 4's vision tower reads the patch positions its processor sends with the pixels."""
+        model, batch = _tiny_gemma4_and_batch(modality)
+        pixels = "pixel_values" if modality == "image" else "pixel_values_videos"
+        other = {**batch, pixels: torch.randn_like(batch[pixels])}
+        first, second = (model._online_base_outputs(**b).base_hidden for b in (batch, other))
+        torch.testing.assert_close(first[:, :3], second[:, :3])
+        assert not torch.allclose(first[:, 3:], second[:, 3:])
+
+    def test_the_inner_model_is_hooked_only_inside_an_image_batch_forward(self):
+        """Never for a text batch; an image batch's hook goes even when its forward fails."""
+        model = _tiny_vlm()
+        base = model._base_model
+        hooks_seen = []
+        base.register_forward_pre_hook(
+            lambda module, _args: hooks_seen.append(len(module._forward_hooks))
+        )
+        batch = _image_batch()
+        model._online_base_outputs(batch["input_ids"], batch["attention_mask"])
+        model._online_base_outputs(**batch)
+        assert hooks_seen == [0, 1]
+        assert not base._forward_hooks
+        with pytest.raises(RuntimeError):  # pixels that do not fit the vision tower
+            model._online_base_outputs(**{**batch, "pixel_values": torch.randn(3, 5)})
+        assert not base._forward_hooks
+
+    def test_logits_to_keep_does_not_narrow_the_teacher(self, monkeypatch):
+        """It narrows lm_head's input, not the inner model's output that the teacher reads."""
+        model = _tiny_vlm()
+        batch = _image_batch()
+        want = model._online_base_outputs(**batch).base_hidden
+        monkeypatch.setattr(
+            hf_dflash,
+            "_MULTIMODAL_FORWARD_KWARGS",
+            hf_dflash._MULTIMODAL_FORWARD_KWARGS | {"logits_to_keep"},
+        )
+        assert torch.equal(model._online_base_outputs(**batch, logits_to_keep=1).base_hidden, want)
+
+    @pytest.mark.parametrize("run", ["twice", "short"])
+    def test_the_inner_model_must_run_once_over_the_whole_sequence(self, run):
+        """Otherwise the forward gives the teacher no one final hidden state for every row."""
+        model = _tiny_vlm()
+        batch = _image_batch()
+        base = model._base_model
+
+        def run_it_again(_module, _args):
+            base(input_ids=batch["input_ids"])
+
+        def drop_the_last_row(_module, _args, output):
+            output.last_hidden_state = output.last_hidden_state[:, :-1]
+
+        if run == "twice":
+            model._base_model_lm_head.register_forward_pre_hook(run_it_again)
+        else:
+            base.register_forward_hook(drop_the_last_row)
+        hooks = dict(base._forward_hooks)
+        with pytest.raises(RuntimeError, match="once over the whole sequence"):
+            model._online_base_outputs(**batch)
+        assert base._forward_hooks == hooks
+
+
+class TestTeacherSoftcapAtConvert:
+    """``dflash_teacher_softcap`` alone decides the cap, checked against the base at build time."""
+
+    @staticmethod
+    def _base(multimodal=True, cap=30.0):
+        """A tiny base capping its logits at ``cap``; a nested text config marks a multimodal one."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        model.config.num_orig_hidden_layers = 4
+        text_config = model.config
+        if multimodal:
+            text_config = model.config.text_config = copy.deepcopy(model.config)
+        text_config.final_logit_softcapping = cap
+        return model
+
+    def test_a_base_without_a_cap_is_rejected(self):
+        config = get_dflash_config()
+        config["dflash_teacher_softcap"] = True
+        with pytest.raises(ValueError, match="final_logit_softcapping"):
+            mtsp.convert(get_tiny_llama(num_hidden_layers=4), [("dflash", config)])
+
+    @pytest.mark.parametrize("switch", [False, True], ids=["switch-off", "switch-on"])
+    @pytest.mark.parametrize("multimodal", [False, True], ids=["text-only", "multimodal"])
+    def test_a_capping_base_converts_with_the_cap_the_switch_sets(self, multimodal, switch):
+        """Online, with KD reading the teacher: a multimodal base gets the same rule."""
+        model = self._base(multimodal)
+        config = get_dflash_config()
+        config["dflash_teacher_softcap"] = switch
+        mtsp.convert(model, [("dflash", config)])
+        assert model.dflash_self_logit_distillation
+        assert model._teacher_softcap == (30.0 if switch else None)
+
+    @pytest.mark.parametrize(
+        ("saved", "cap"),
+        [(True, 30.0), (False, None), (None, None)],
+        ids=["on", "off", "saved-before-the-switch"],
+    )
+    def test_restore_reads_the_switch_from_the_saved_config(self, saved, cap):
+        """A checkpoint saved before the switch existed restores with it off."""
+        model = self._base()
+        config = get_dflash_config()
+        config["dflash_teacher_softcap"] = bool(saved)
+        mtsp.convert(model, [("dflash", config)])
+        state = mto.modelopt_state(model)
+        if saved is None:
+            del state["modelopt_state_dict"][0][1]["config"]["dflash_teacher_softcap"]
+        restored = mto.restore_from_modelopt_state(self._base(), state)
+        assert restored._teacher_softcap == cap
+
+
+class TestLogitScalingWarning:
+    """Conversion names the logit scaling that the teacher, lm_head's raw projection, leaves out.
+
+    Once, on rank 0, and only when a loss term reads the teacher.
+    """
+
+    @staticmethod
+    def _granite(logits_scaling):
+        """A tiny Granite, whose CausalLM divides its logits by ``logits_scaling``."""
+        config = GraniteConfig(
+            vocab_size=32,
+            hidden_size=32,
+            intermediate_size=32,
+            num_hidden_layers=4,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=64,
+            logits_scaling=logits_scaling,
+        )
+        return GraniteForCausalLM(config)
+
+    @staticmethod
+    def _warnings(model, kd=True, offline=None):
+        config = get_dflash_config(offline=offline)
+        config["dflash_self_logit_distillation"] = kd
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            mtsp.convert(model, [("dflash", config)])
+        return [str(w.message) for w in caught if "teacher does not apply" in str(w.message)]
+
+    def test_a_scaling_base_warns_once(self):
+        (message,) = self._warnings(self._granite(8.0))
+        assert "logits_scaling=8.0" in message
+
+    def test_an_offline_fake_base_warns_too(self, tmp_path):
+        """Offline VLMs always train on a fake base, which carries the scaling fields over."""
+        self._granite(8.0).save_pretrained(tmp_path)
+        model = load_vlm_or_llm(str(tmp_path), use_fake_base=True, use_offline_training=True)
+        assert isinstance(model, FakeBaseModel)
+        (message,) = self._warnings(model, offline=True)
+        assert "logits_scaling=8.0" in message
+
+    @pytest.mark.parametrize(
+        ("base", "kd"),
+        [("llama", True), ("granite-unscaled", True), ("granite", False)],
+        ids=["llama", "identity-scaling", "teacher-unread"],
+    )
+    def test_no_warning_otherwise(self, base, kd):
+        model = {
+            "llama": lambda: get_tiny_llama(num_hidden_layers=4),
+            "granite-unscaled": lambda: self._granite(1.0),
+            "granite": lambda: self._granite(8.0),
+        }[base]()
+        assert not self._warnings(model, kd)
+
+    def test_only_rank_0_warns(self, monkeypatch):
+        monkeypatch.setattr("modelopt.torch.utils.distributed.is_master", lambda group=None: False)
+        assert not self._warnings(self._granite(8.0))

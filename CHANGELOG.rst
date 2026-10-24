@@ -18,6 +18,8 @@ Changelog
 *Speculative Decoding*
 
 - Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
+- Add ``dflash_loss_terms`` to compose the DFlash-family block objective from weighted loss terms (``ce``, ``kd``, ``tvd``, ``tv`` and ``lambda``), e.g. ``{ce: 0.1, tvd: 0.9}``, for any ``projector_type``, online or offline. Left unset, each variant keeps its own objective.
+- Add ``dflash_teacher_softcap`` to cap the distillation teacher with the base model's ``final_logit_softcapping`` (Gemma family), the way the model caps its own logits.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
@@ -37,6 +39,8 @@ Changelog
 - ``export_mcore_gpt_to_hf`` given a Hugging Face Hub model ID no longer writes the tokenizer, processor, generation config or remote-code files. Pass a local directory instead, e.g. from ``modelopt.torch.export.ensure_local_checkpoint``.
 - Diffusion HF exports now omit attention quantizer buffers by default, except for FLUX.1, which retains enabled Q/K/V ``_amax`` keys for runtime compatibility; other consumers of those keys can opt in with ``export_attention_quantizers=True`` (CLI: ``--extra-param export_attention_quantizers=true``). Disabled attention quantizers remain excluded, and diffusion components, including LTX-2, no longer emit KV-cache quantization metadata.
 - The DFlash2, LiLiCorr, DSpark and Domino training forwards now return their metrics in one ``draft_metrics`` dict of detached 0-dim tensors (call ``.item()`` for a Python float), replacing ``selector_metrics``, ``lilicorr_metrics``, ``dspark_metrics`` and ``domino_metrics``. DSpark's ``ce_loss``/``l1_loss``/``base_accuracy`` are now ``loss_ce``/``loss_tvd``/``backbone_accuracy``, and Domino's ``final_loss``/``base_loss``/``base_accuracy`` are now ``loss_final``/``loss_backbone``/``backbone_accuracy``.
+- Online DFlash, DFlash2 and LiLiCorr training now distills text and multimodal batches alike from the base model's ``lm_head`` applied to its final hidden state, as offline training and DSpark already did. The teacher therefore leaves out the logit scaling some bases apply at the ``lm_head`` (``logits_scaling``, ``logit_scale``, ``lm_head_multiplier``: Granite, Cohere, Falcon-H1 and others), which conversion now warns about.
+- On a base that caps its logits with ``final_logit_softcapping`` (Gemma family, including the Gemma 3n and Gemma 4 VLMs), online DFlash, DFlash2 and LiLiCorr training now needs ``dflash_teacher_softcap: true`` to keep a capped teacher. A run resumed from an HF-format checkpoint saved before this release restores that checkpoint's config, in which the switch is off, and so continues uncapped; a run resumed from an FSDP-sharded checkpoint takes the switch from the recipe.
 
 **Deprecations**
 
@@ -55,6 +59,8 @@ Changelog
 - Fix ONNX remote AutoQDQ safety benchmarks returning infinite latency by running the generated engine with ``trtexec_safe`` on the configured target.
 - Fix ``INT8_DEFAULT_CFG``, ``FP8_DEFAULT_CFG``, ``NVFP4_DEFAULT_CFG`` and the other presets and recipes that import ``configs/ptq/units/default_disabled_quantizers`` and enable ``*input_quantizer``: since 0.44 they also quantized ``nn.LayerNorm`` inputs, which adds quantization error to the residual stream of models built on ``nn.LayerNorm`` such as BERT-style encoders. Re-quantize affected models; a recipe that wants ``nn.LayerNorm`` quantizers must enable them after importing that unit.
 - Fix ONNX quantization with the default ``concat_elimination`` pass crashing in calibration with ``KeyError: '<tensor>_ReduceMin'`` when a ``Concat`` input is a constant, such as the class token of a ViT.
+- Fix online DSpark and Domino training on multimodal batches, which ran the base model's language model on the raw token ids and so dropped the image and video features; they now run the base model's multimodal forward, as DFlash's do. Like DFlash's, their Gemma 3 and PaliGemma image batches reach that forward without ``token_type_ids``, so on transformers 5.5 it raises and on 5.12 and later it attends causally over the image.
+- Fix online DFlash-family training on Gemma 4 image and video batches, which failed in the vision tower because their ``image_position_ids`` and ``video_position_ids`` were not passed on.
 
 0.48.0 (2026-10-xx)
 ^^^^^^^^^^^^^^^^^^^

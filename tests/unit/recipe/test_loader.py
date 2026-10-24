@@ -59,6 +59,7 @@ from modelopt.torch.opt.config_loader import (
 )
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, normalize_quant_cfg_list
 from modelopt.torch.quantization.mode import CalibrateModeRegistry, get_modelike_from_algo_cfg
+from modelopt.torch.speculative.config import DFlashConfig
 
 # ---------------------------------------------------------------------------
 # Static YAML fixtures
@@ -329,13 +330,13 @@ def test_import_resolution_honors_huggingface_alias():
 _PTQ_SCHEMA = "modelopt.recipe.config.ModelOptPTQRecipe"
 
 
-def _all_shipped_ptq_recipe_paths():
-    """Every shipped PTQ recipe, discovered from disk rather than a hardcoded list.
+def _all_shipped_recipe_paths(recipe_type):
+    """Every shipped recipe of ``recipe_type``, discovered from disk rather than a hardcoded list.
 
     A recipe says it is PTQ with ``metadata.recipe_type``, with a ``# modelopt-schema:``
     comment naming :class:`ModelOptPTQRecipe`, or -- for a checkpoint alias, which states
     neither -- by delegating to a recipe that does. All three are picked up, so every
-    shipped recipe is swept by the tests below.
+    shipped recipe is swept by the tests below. Other recipe types state theirs the same way.
     """
     root = files("modelopt_recipes")
     paths = []
@@ -351,7 +352,7 @@ def _all_shipped_ptq_recipe_paths():
         # Ask the loader's own resolver rather than re-deriving the rules here: a
         # top-level ``$import`` does not imply PTQ (an alias of a speculative recipe
         # delegates the same way), and this cannot drift from what load_recipe does.
-        if _peek_recipe_type(path) == RecipeType.PTQ:
+        if _peek_recipe_type(path) == recipe_type:
             paths.append(str(rel.with_suffix("")))
     return paths
 
@@ -359,7 +360,7 @@ def _all_shipped_ptq_recipe_paths():
 # Discovered from disk (not hardcoded) so the smoke tests cover every shipped PTQ
 # recipe — general/, model_type/<model_type>/, and models/<org>/<model_id>/ — and
 # never drift as recipes are added, moved, or removed.
-_BUILTIN_PTQ_RECIPES = _all_shipped_ptq_recipe_paths()
+_BUILTIN_PTQ_RECIPES = _all_shipped_recipe_paths(RecipeType.PTQ)
 
 
 def test_ptq_recipes_are_discovered():
@@ -1057,6 +1058,25 @@ def test_load_recipe_dflash_builtin():
     assert recipe.dflash.dflash_num_anchors == 512
     # Full-pipeline recipe also carries typed HF trainer sections.
     assert recipe.training.training_seq_len == 4096
+
+
+def test_dspark_and_domino_recipes_take_loss_terms_alone():
+    """Neither variant reads ``dflash_self_logit_distillation``, so none of their recipes pins it.
+
+    ``dflash_loss_terms`` needs the old loss selectors at their defaults; a pin there would have
+    to be undone before a user could set the terms.
+    """
+    checked = []
+    for path in _all_shipped_recipe_paths(RecipeType.SPECULATIVE_DFLASH):
+        projector_type = load_recipe(path).dflash.dflash_architecture_config.get("projector_type")
+        if projector_type not in ("dspark", "domino"):
+            continue
+        recipe = load_recipe(path, overrides=["dflash.dflash_loss_terms={ce: 0.5, tvd: 0.5}"])
+        # main.py converts from a model_dump(), which marks every field as set.
+        dumped = DFlashConfig(**recipe.dflash.model_dump())
+        assert dumped.dflash_loss_terms == {"ce": 0.5, "tvd": 0.5}, path
+        checked.append(path)
+    assert len(checked) >= 3, f"too few DSpark/Domino recipes discovered: {checked}"
 
 
 def test_load_recipe_dflash_missing_section_raises(tmp_path):

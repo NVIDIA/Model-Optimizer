@@ -165,6 +165,8 @@ See [`modelopt_recipes/general/speculative_decoding/dflash.yaml`](../../../model
 | `dflash.dflash_loss_objective` | `dpace` | Position weighting: `decay` (static) or `dpace` (dynamic, see below) |
 | `dflash.dflash_dpace_alpha` | 0.5 | D-PACE smoothing factor in (0, 1]; only used when objective is `dpace` |
 | `dflash.dflash_self_logit_distillation` | true | Use target model logits as soft labels (vs hard CE) |
+| `dflash.dflash_loss_terms` | unset | Block objective as `{term: weight}` over `ce`, `kd`, `tvd`, `tv` and `lambda`, e.g. `{ce: 0.1, tvd: 0.9}`; unset keeps the variant's own |
+| `dflash.dflash_teacher_softcap` | false | Cap the teacher with the base's `final_logit_softcapping` (Gemma family) |
 | `dflash.dflash_mask_token_id` | auto | Token ID for masked positions (see note below) |
 | `dflash.dflash_architecture_config.num_hidden_layers` | 5 | Draft decoder layers |
 | `training.answer_only_loss` | false | Mask loss on non-assistant tokens |

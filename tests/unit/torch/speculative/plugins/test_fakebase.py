@@ -25,6 +25,7 @@ pytest.importorskip("transformers")
 import transformers
 
 from modelopt.torch.speculative.plugins.modeling_fakebase import (
+    _LOGIT_SCALING_FIELDS,
     FakeBaseConfig,
     FakeBaseModel,
     find_final_norm_path,
@@ -69,6 +70,20 @@ def test_fakebase_local_happy_path(fake_checkpoint):
     model = FakeBaseModel.from_source(str(fake_checkpoint))
     assert model.lm_head.weight.shape == torch.Size([_VOCAB_SIZE, _HIDDEN_SIZE])
     assert model.embed_tokens.weight.shape == torch.Size([_VOCAB_SIZE, _HIDDEN_SIZE])
+
+
+@pytest.mark.parametrize("softcap", [None, 30.0])
+def test_fakebase_carries_the_logit_softcap(fake_checkpoint, fake_config, softcap):
+    """dflash_teacher_softcap reads the cap off the base config, a fake one included."""
+    fake_config.final_logit_softcapping = softcap
+    assert FakeBaseModel.from_source(str(fake_checkpoint)).config.final_logit_softcapping == softcap
+
+
+@pytest.mark.parametrize("field", _LOGIT_SCALING_FIELDS)
+def test_fakebase_carries_the_logit_scaling(fake_checkpoint, fake_config, field):
+    """DFlash's conversion warns about logit scaling off the base config, a fake one included."""
+    setattr(fake_config, field, 8.0)
+    assert getattr(FakeBaseModel.from_source(str(fake_checkpoint)).config, field) == 8.0
 
 
 def test_fakebase_missing_index_raises(tmp_path, fake_config):

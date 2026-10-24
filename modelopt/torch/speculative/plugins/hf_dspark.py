@@ -57,6 +57,7 @@ token at ``anchor+k+1`` and position 0 is *not* excluded — and a three-term lo
 where ``TVD`` is the total-variation distance between the corrected draft
 distribution and the target (base-model) distribution at the aligned position,
 and the confidence target is ``c* = 1 - 0.5 * TVD`` (the analytical accept rate).
+``dflash_loss_terms`` replaces the first two terms with any composition.
 """
 
 import logging
@@ -66,9 +67,8 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ..dflash.conversion import DSparkDMRegistry
-from .dflash_losses import DraftLogits, LossOutput, _block_tokens, objective_term
+from .dflash_losses import DraftLogits, LossOutput, _block_tokens
 from .hf_dflash import HFDFlashModel
-from .modeling_dflash import DFlashBaseModelOutput
 from .modeling_dspark import DSparkModule
 
 logger = logging.getLogger(__name__)
@@ -112,31 +112,18 @@ class HFDSparkModel(HFDFlashModel):
 
         return DSparkExporter(self)
 
-    def _build_objective(self, config):
+    def _default_loss_terms(self, config):
         """CE plus TVD to the base model; the DeepSpec defaults are TVD-dominant."""
-        return [
-            objective_term("ce", config.dflash_ce_loss_alpha),
-            objective_term("tvd", config.dflash_l1_loss_alpha),
-        ]
+        return {"ce": config.dflash_ce_loss_alpha, "tvd": config.dflash_l1_loss_alpha}
+
+    def _reads_teacher(self, config) -> bool:
+        # The confidence head's target, the accept rate 1 - TVD / 2, reads the base distribution.
+        return super()._reads_teacher(config) or config.dflash_confidence_head_alpha > 0
 
     @property
     def _position_weighting(self):
         # dflash_loss_objective is not wired for DSpark yet: it always decays.
         return "decay"
-
-    def _online_base_outputs(self, input_ids, attention_mask, **kwargs):
-        """The target hidden states, and the base's final hidden for the loss to project."""
-        # The inner model, not the CausalLM: the loss projects only the rows it reads.
-        with torch.no_grad():
-            base_out = self._base_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
-            )
-        return DFlashBaseModelOutput(
-            target_hidden=self._target_hidden(base_out.hidden_states),
-            base_hidden=base_out.last_hidden_state,
-        )
 
     def _head_inputs(self, batch):
         """Each block position's teacher-forced previous token, and the draft's hidden states.

@@ -88,7 +88,7 @@ Everything in `dflash.md` applies. DSpark adds:
 
 Total loss is `ce_alpha*CE + l1_alpha*TVD + conf_alpha*confidence_BCE`.
 
-`dflash_self_logit_distillation` is **false** for DSpark — it computes the target
+DSpark ignores `dflash_self_logit_distillation` — it computes the target
 distribution internally for the TVD and confidence terms, so the DFlash KD path is
 unused. Recipe defaults also differ from DFlash's: `block_size` 16, `num_anchors` 256,
 `num_train_epochs` 6, `training_seq_len` 3072, `warmup_ratio` 0.04.

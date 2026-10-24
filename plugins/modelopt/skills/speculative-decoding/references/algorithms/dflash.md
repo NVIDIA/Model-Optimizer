@@ -87,6 +87,7 @@ in `examples/speculative_decoding/README.md#dflash-block-diffusion-for-speculati
 | `dflash.dflash_num_anchors` | 512 | Random anchor positions sampled per sequence |
 | `dflash.dflash_loss_decay_factor` | 4.0 | Exponential decay gamma; 0 disables |
 | `dflash.dflash_self_logit_distillation` | true | Logit distillation from the target |
+| `dflash.dflash_loss_terms` | unset | `{term: weight}` over `ce`/`kd`/`tvd`/`tv`/`lambda`, any variant; unset keeps the variant's objective. Leave the variant's own loss selectors at their defaults with it |
 | `dflash.dflash_architecture_config.num_hidden_layers` | 5 | Draft decoder layers — must equal the dump's draft depth (`--num-draft-layers` on vLLM; hardcoded 5 on HF / TRT-LLM) |
 | `dflash.dflash_mask_token_id` | auto | See *Per-model adjustments* |
 | `dflash.dflash_swa_window_size` | unset | Sliding-window attention for the draft; must be >= `dflash_block_size` |
@@ -108,6 +109,7 @@ Export is automatic: after training, rank 0 exports every `checkpoint-<step>` to
 | `trust_remote_code` MoE with an older transformers pin | Set `OVERRIDE_TRANSFORMERS` in the task environment (MiniMax-M2.7 needs 4.57.1). Set `ACCELERATE_CONFIG` when the model needs FSDP2 via accelerate config rather than transformers-native `ParallelismConfig`. |
 | Very large MoE base | Use the offline variant with `model.use_fake_base_for_offline=true`; plain DDP suffices, so no FSDP2 patches. Set `MIXED_PRECISION: "no"` with `training.bf16=false` if the model requires it. |
 | Draft trained at short context, served long | Set `dflash.dflash_export_rope_scaling` (YaRN); factor = target context / `training_seq_len`. |
+| Base with `final_logit_softcapping` (Gemma family) and a loss term reading the target's distribution (`kd`, `tvd`; DFlash, DSpark and LiLiCorr by default) | Set `dflash.dflash_teacher_softcap=true` to distill from the capped distribution, text and image batches alike. |
 | Multi-node | Set `NUM_NODES` in the environment; `HEAD_NODE_IP` is auto-detected from Slurm. |
 
 ## Success markers

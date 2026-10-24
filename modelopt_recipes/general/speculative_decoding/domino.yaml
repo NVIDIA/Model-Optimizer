@@ -62,8 +62,6 @@ dflash:
   dflash_block_size: 16
   dflash_num_anchors: 256
   dflash_use_torch_compile: false
-  # Domino does not use target-logit KD; it trains its own base/final CE losses.
-  dflash_self_logit_distillation: false
   # gamma for exponential loss decay (block_size=16 -> 7).
   dflash_loss_decay_factor: 7.0
   # Qwen3 has no native mask token; 151669 is an unused id used by the reference.

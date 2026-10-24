@@ -18,7 +18,7 @@
 DFlash2 differs from DFlash only in the draft module (grouped dynamic convolutions
 around every sublayer, plus a candidate selector) and in one extra loss term, so
 this wrapper reuses ``HFDFlashModel``'s forward wholesale and overrides just
-:meth:`_build_objective` and :meth:`_compute_loss`.
+:meth:`_default_loss_terms` and :meth:`_compute_loss`.
 
 The convolutions need no supervision of their own: they sit inside the backbone
 and are trained by the backbone loss. The selector does, because at serving time
@@ -39,7 +39,7 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ..dflash.conversion import DFlash2DMRegistry
-from .dflash_losses import LossOutput, _block_tokens, objective_term
+from .dflash_losses import LossOutput, _block_tokens
 from .hf_dflash import HFDFlashModel
 from .modeling_dflash2 import DFlash2Module
 
@@ -145,17 +145,11 @@ class HFDFlash2Model(HFDFlashModel):
         # every training step. The trainer converts them at the logging boundary.
         return loss, accuracy.detach(), coverage.detach()
 
-    def _build_objective(self, config):
-        """DFlash's objective, or the label TV / CE-TV blend ``dflash_lk_loss_type`` selects."""
-        if config.dflash_lk_loss_type == "tv":
-            return [objective_term("tv", 1.0)]
-        if config.dflash_lk_loss_type == "lambda":
-            return [
-                objective_term(
-                    "lambda", 1.0, scale=config.dflash_lk_ce_scale, decay=config.dflash_lk_ce_decay
-                )
-            ]
-        return super()._build_objective(config)
+    def _default_loss_terms(self, config):
+        """DFlash's terms, or the label TV / CE-TV blend ``dflash_lk_loss_type`` selects."""
+        if config.dflash_lk_loss_type == "ce":
+            return super()._default_loss_terms(config)
+        return {config.dflash_lk_loss_type: 1.0}
 
     def _compute_loss(self, ctx):
         """Backbone DFlash loss plus the candidate-selector cross-entropy.

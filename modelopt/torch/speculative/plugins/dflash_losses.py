@@ -42,9 +42,9 @@ A training step's supervision: which token each block position is trained on and
 (:func:`_block_targets`), how the positions are weighted (:func:`_block_position_weights`),
 and :class:`LossContext`, which carries them with the draft's logits to the loss.
 
-The divergences a block objective is built from live in :data:`DIVERGENCES`. An objective
-is an ordered list of ``(name, weight, term)`` entries, summed left to right by
-:func:`objective_loss`.
+The divergences a block objective is built from live in :data:`DIVERGENCES`, under the
+names ``dflash_loss_terms`` takes. An objective is an ordered list of
+``(name, weight, term)`` entries, summed left to right by :func:`objective_loss`.
 """
 
 import functools
@@ -53,6 +53,8 @@ from typing import NamedTuple
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
+
+from ..config import DFlashLossTerm
 
 __all__ = [
     "DIVERGENCES",
@@ -387,7 +389,7 @@ class _AcceptanceBlend(_Divergence):
 
 
 # The closed set of terms an objective is built from, by the name its metric reports.
-DIVERGENCES = {
+DIVERGENCES: dict[DFlashLossTerm, type[_Divergence]] = {
     "ce": _CrossEntropy,
     "kd": _SoftCrossEntropy,
     "tvd": _TeacherTotalVariation,

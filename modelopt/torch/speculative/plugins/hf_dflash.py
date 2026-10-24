@@ -82,6 +82,8 @@ from transformers.models.qwen3.configuration_qwen3 import Qwen3Config as _Qwen3C
 from transformers.trainer_pt_utils import LabelSmoother
 from transformers.utils import ModelOutput
 
+from modelopt.torch.utils import warn_rank_0
+
 from ..dflash.conversion import DFlashDMRegistry
 from ..dflash.dflash_model import DFlashModel
 from .dflash_flex_attention import build_draft_block_mask
@@ -105,6 +107,7 @@ from .modeling_fakebase import (
     _BASE_MODEL_PATHS,
     _EMBED_TOKENS_PATHS,
     _LM_HEAD_PATHS,
+    _LOGIT_SCALING_FIELDS,
     find_final_norm_path,
 )
 from .modeling_final_norm import _apply_base_final_norm
@@ -120,6 +123,8 @@ _MULTIMODAL_FORWARD_KWARGS = frozenset(
         "pixel_values_videos",
         "image_grid_thw",
         "video_grid_thw",
+        "image_position_ids",
+        "video_position_ids",
         "mm_token_type_ids",
         "image_sizes",
         "images",
@@ -226,9 +231,12 @@ class HFDFlashModel(DFlashModel):
         path = getattr(self, "base_model_norm_path", None)
         return self.get_submodule(path) if path else None
 
-    @property
-    def _needs_base_logits(self) -> bool:
-        """Whether the loss reads the target's logits; offline training then reconstructs them."""
+    def _reads_teacher(self, config) -> bool:
+        """Whether a loss term reads the base distribution; offline batches must then carry it.
+
+        Becomes ``_needs_base_logits`` at convert time. A variant that adds a term reading the
+        teacher declares it here, from ``config``.
+        """
         return any(term.needs_teacher for _, _, term in self._objective)
 
     @property
@@ -280,6 +288,14 @@ class HFDFlashModel(DFlashModel):
         self.dflash_fp32_master_weights = config.dflash_fp32_master_weights
 
         base_config = self._base_llm_config
+        base_softcap = getattr(base_config, "final_logit_softcapping", None)
+        if config.dflash_teacher_softcap and base_softcap is None:
+            raise ValueError(
+                "dflash_teacher_softcap=True, but the base config sets no "
+                "final_logit_softcapping to cap the teacher's logits with."
+            )
+        self._teacher_softcap = base_softcap if config.dflash_teacher_softcap else None
+
         # Use Qwen3Config (not generic PretrainedConfig) so rope_parameters is
         # auto-populated from rope_theta. DFlash draft uses Qwen3 components.
         self.dflash_config = _Qwen3Config(**config.dflash_architecture_config)
@@ -460,6 +476,18 @@ class HFDFlashModel(DFlashModel):
             self.dflash_module.compile_body()
 
         self._objective = self._build_objective(config)
+        self._needs_base_logits = self._reads_teacher(config)
+        scaling = {
+            name: getattr(base_config, name)
+            for name in _LOGIT_SCALING_FIELDS
+            if getattr(base_config, name, None) not in (None, 1.0)
+        }
+        if self._needs_base_logits and scaling:
+            warn_rank_0(
+                f"The base config sets {', '.join(f'{k}={v}' for k, v in scaling.items())}, "
+                "which the distillation teacher does not apply: the teacher is lm_head's raw "
+                "projection of the base model's final hidden state."
+            )
         # Compiling fuses the TVD chunk's six vocab-wide elementwise passes.
         self._tvd_chunk_fn = (
             torch.compile(_tvd_chunk, dynamic=False, fullgraph=True)
@@ -472,8 +500,19 @@ class HFDFlashModel(DFlashModel):
         return DFlashModule(dflash_config)
 
     def _build_objective(self, config):
-        """The block objective, ``[(name, weight, term)]``: KD from the base model, or CE."""
-        return [objective_term("kd" if config.dflash_self_logit_distillation else "ce", 1.0)]
+        """The block objective, ``[(name, weight, term)]``, from ``dflash_loss_terms`` if set."""
+        terms = config.dflash_loss_terms
+        if terms is None:
+            terms = self._default_loss_terms(config)
+        blend = {"scale": config.dflash_lk_ce_scale, "decay": config.dflash_lk_ce_decay}
+        return [
+            objective_term(name, weight, **(blend if name == "lambda" else {}))
+            for name, weight in terms.items()
+        ]
+
+    def _default_loss_terms(self, config):
+        """The variant's ``{term: weight}`` without ``dflash_loss_terms``: KD from the base, or CE."""
+        return {"kd" if config.dflash_self_logit_distillation else "ce": 1.0}
 
     def _base_device(self):
         """Device the frozen base model sits on. ``meta`` during a from_pretrained restore."""
@@ -817,7 +856,8 @@ class HFDFlashModel(DFlashModel):
         Next-token logits: the ones that predict the token at position ``i`` sit at ``i - 1``.
         Only those rows of the base hidden go through the final norm and lm_head, so no
         full-sequence logits are built from it; ``token_ids`` ([B, ..., k]) narrows the
-        projection to just those vocab entries.
+        projection to just those vocab entries. ``dflash_teacher_softcap`` caps what is
+        projected; logits handed over in ``base_outputs`` are the model's own and only gathered.
         """
         positions = (label_positions - 1).clamp(min=0)
         if base_outputs.logits is not None:
@@ -837,10 +877,15 @@ class HFDFlashModel(DFlashModel):
         rows = _gather_rows(base_outputs.base_hidden, positions).to(lm_head.weight.dtype)
         rows = _apply_base_final_norm(rows, base_outputs.base_hidden_prenorm, self._base_model_norm)
         if token_ids is None:
-            return lm_head(rows)
-        logits = torch.einsum("...h,...kh->...k", rows, lm_head.weight[token_ids])
-        bias = getattr(lm_head, "bias", None)
-        return logits if bias is None else logits + bias[token_ids]
+            logits = lm_head(rows)
+        else:
+            logits = torch.einsum("...h,...kh->...k", rows, lm_head.weight[token_ids])
+            bias = getattr(lm_head, "bias", None)
+            if bias is not None:
+                logits = logits + bias[token_ids]
+        cap = self._teacher_softcap
+        # In the base model's op order, so the cap rounds as the base's own does.
+        return logits if cap is None else torch.tanh(logits / cap) * cap
 
     def _online_base_outputs(
         self,
@@ -853,13 +898,32 @@ class HFDFlashModel(DFlashModel):
         cache_position=None,
         **kwargs,
     ):
-        """Run the frozen base model: the target hidden states, and its logits for KD."""
-        # Multimodal models need the top-level conditional-generation forward so their
-        # image/video features are inserted before the language model runs.  Keep the
-        # long-standing narrow call for text-only models.
+        """Run the frozen base model: the target hidden states, and its final hidden state.
+
+        The final hidden state is the inner model's output for every batch, and
+        ``_teacher_logits`` projects it only at the rows the loss reads. A text batch runs the
+        inner model once. A multimodal batch needs the top-level forward to insert its
+        image/video features, and a hook on the inner model reads its output during it.
+        """
         base_forward_kwargs = _multimodal_forward_kwargs(kwargs)
-        with torch.no_grad():
-            if base_forward_kwargs:
+        if not base_forward_kwargs:
+            with torch.no_grad():
+                base_out = self._base_model(
+                    input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True
+                )
+            return DFlashBaseModelOutput(
+                target_hidden=self._target_hidden(base_out.hidden_states),
+                base_hidden=base_out.last_hidden_state,
+            )
+
+        # Read where a text batch reads it, not at lm_head's input, which a CausalLM may rescale
+        # first (Inkling divides it by a multiplier).
+        base_hidden = []
+        hook = self._base_model.register_forward_hook(
+            lambda _module, _args, output: base_hidden.append(output[0])
+        )
+        try:
+            with torch.no_grad():
                 raw_outputs = super().forward(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -873,20 +937,22 @@ class HFDFlashModel(DFlashModel):
                     return_dict=True,
                     **base_forward_kwargs,
                 )
-            else:
-                raw_outputs = super().forward(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    output_hidden_states=True,
-                )
-
+        finally:
+            hook.remove()
         if not getattr(raw_outputs, "hidden_states", None):
             raise RuntimeError(
                 "The base model did not return hidden states required for DFlash training. "
                 "Ensure its top-level multimodal forward supports output_hidden_states=True."
             )
+        if len(base_hidden) != 1 or base_hidden[0].shape[:2] != input_ids.shape:
+            raise RuntimeError(
+                "The teacher reads the base model's final hidden state off its inner model, so the "
+                "multimodal forward must run that once over the whole sequence; it ran it on "
+                f"{[tuple(h.shape) for h in base_hidden]} for input_ids {tuple(input_ids.shape)}."
+            )
         return DFlashBaseModelOutput(
-            target_hidden=self._target_hidden(raw_outputs.hidden_states), logits=raw_outputs.logits
+            target_hidden=self._target_hidden(raw_outputs.hidden_states),
+            base_hidden=base_hidden[0],
         )
 
     def _draft_logits(self, batch):
@@ -974,8 +1040,8 @@ class HFDFlashModel(DFlashModel):
         - Label alignment: position k predicts the token at anchor + k + ``_label_shift``
         - Position weighting by D-PACE or exponential decay
 
-        A variant changes the step only through its hooks: ``_online_base_outputs``,
-        ``_draft_logits`` (its head), ``_position_weighting`` and ``_compute_loss``.
+        A variant changes the step only through its hooks: ``_draft_logits`` (its head),
+        ``_position_weighting`` and ``_compute_loss``.
         """
         if not self.training:
             if self.dflash_offline:
