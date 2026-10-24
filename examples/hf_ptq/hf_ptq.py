@@ -18,6 +18,7 @@ import os
 import random
 import time
 import warnings
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,7 @@ from example_utils import (
     HF_PTQ,
     _prepare_quant_cfg,
     build_quant_cfg,
-    cleanup_distributed,
+    create_vlm_calibration_forward,
     create_vlm_calibration_loop,
     generate_excludes_prompt,
     get_model,
@@ -45,16 +46,16 @@ from example_utils import (
     get_tokenizer,
     is_nemotron_vl,
     is_trtllm_enc_dec_export,
+    keep_the_experts_implementation,
     mlflow_run,
+    preview_generate_kwargs,
     recipe_layerwise_blocks,
     run_nemotron_vl_preview,
     save_source_config,
-    setup_distributed_args,
     validate_fsdp2_supported,
 )
 from torch.utils.data import DataLoader
 from transformers import (
-    AutoConfig,
     AutoModelForCausalLM,
     AutoProcessor,
     PreTrainedTokenizer,
@@ -100,17 +101,20 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     get_supported_datasets,
 )
-from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
+from modelopt.torch.utils.distributed import (
+    distributed_forward_loop,
+    distributed_run,
+    distribution_plan,
+    shard_dataloader,
+)
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.mlflow import add_mlflow_args, resolve_mlflow_args
+from modelopt.torch.utils.moe import expert_parallel_mesh
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     ensure_local_checkpoint,
 )
-from modelopt.torch.utils.plugins.model_load_utils import (
-    load_pretrained,
-    parallel_load_and_prepare_fsdp2,
-)
+from modelopt.torch.utils.plugins.model_load_utils import load_pretrained, resolve_distribution_plan
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
@@ -270,13 +274,14 @@ def make_calib_dataloader(
             max_sample_length=args.calib_seq,
             device=device,
             include_labels=include_labels,
-            distributed=args.use_fsdp2,
-            sampler_kwargs=(
-                {"num_replicas": args.dist_state.world_size, "rank": args.dist_state.rank}
-                if args.use_fsdp2
-                else None
-            ),
         )
+    world_size = distribution_plan(language_model).world_size
+    if world_size > 1 and calib_dataloader is not None and isinstance(calib_dataloader, DataLoader):
+        # Every distributed calibration path is data-parallel over the world, so each rank calibrates
+        # on its own per-rank shard (and the quantizer amax is synced across ranks): MoE expert-parallel
+        # a2a routes each token to its expert-owning rank; dense DP replicates the model per rank; FSDP2
+        # shards the params but still feeds each rank its own data.
+        calib_dataloader = shard_dataloader(calib_dataloader, args.dist_state.rank, world_size)
     return calib_dataloader, first_text_speech_dataset
 
 
@@ -318,34 +323,84 @@ def _validate_recipe_calibration(args: argparse.Namespace, recipe) -> None:
         )
 
 
+def _resolve_distribution(args: argparse.Namespace):
+    """Decide how this run distributes the model: ``(plan, hf_config)``.
+
+    ``resolve_distribution_plan`` decides, and --use_fsdp2 asks it for FSDP2 and no expert
+    parallelism. Without --use_fsdp2 a plan that FSDP2-shards the whole model is refused: the
+    FSDP2 run is the flag's, which checks what this script cannot do with it.
+    """
+    plan, hf_config = resolve_distribution_plan(
+        args.local_checkpoint_path,
+        trust_remote_code=args.trust_remote_code,
+        ep_size=1 if args.use_fsdp2 else None,
+        dense="fsdp" if args.use_fsdp2 else None,
+    )
+    if plan.is_fsdp_dense and not plan.is_expert_parallel and not args.use_fsdp2:
+        raise RuntimeError(
+            f"{plan!r} FSDP2-shards the model, which this script does under --use_fsdp2. Pass it, "
+            "or set MODELOPT_FSDP_SIZE=1 if the model does fit one GPU; an MoE can instead shard its "
+            "experts (MODELOPT_EP_DEGREE above 1)."
+        )
+    if plan.is_expert_parallel and plan.is_fsdp_dense and plan.edp > 1:
+        # Refused before the load: the export, after the whole calibration, is what cannot do it.
+        raise NotImplementedError(
+            f"{plan!r} FSDP2-shards the dense part within each of {plan.edp} expert-data-parallel "
+            "replicas, a layout the export cannot write yet. Set MODELOPT_EP_DEGREE to the world "
+            "size if it divides the expert count, or MODELOPT_FSDP_SIZE=1 if the dense part fits "
+            "one GPU."
+        )
+    if plan.world_size > 1 and _exports_tensorrt_llm_checkpoint(args, hf_model_type(hf_config)):
+        # That exporter reads the process count as Megatron's training tensor parallelism. Rank 0
+        # alone waits in its barrier for ranks that never arrive, and every rank would merge
+        # whole replicas as if they were shards. Refused before the load, like the layout above.
+        raise NotImplementedError(
+            f"{plan!r}: the TensorRT-LLM checkpoint export (encoder-decoder models, "
+            "--sparsity_fmt, int8_smoothquant) runs in a single process; launch hf_ptq without "
+            "torchrun for it."
+        )
+    return plan, hf_config
+
+
+def _exports_tensorrt_llm_checkpoint(args: argparse.Namespace, model_type: str | None) -> bool:
+    """Whether the run exports through the deprecated TensorRT-LLM checkpoint exporter."""
+    return (
+        is_trtllm_enc_dec_export(model_type)
+        or args.sparsity_fmt != "dense"
+        or "int8_smoothquant" in args.qformat
+    )
+
+
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
     if args.use_fsdp2 and _recipe_is_kv_auto_quantize(args.recipe):
         raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
-    if args.use_fsdp2:
-        hf_config = AutoConfig.from_pretrained(
-            args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
-        )
+    plan, hf_config = _resolve_distribution(args)
+    if plan.is_fsdp_dense and not plan.is_expert_parallel:
         validate_fsdp2_supported(args, hf_config)
-        full_model = parallel_load_and_prepare_fsdp2(
+    if plan.is_expert_parallel:
+        full_model = load_pretrained(
             args.local_checkpoint_path,
-            args.dist_state.device,
-            args.dist_state.rank,
-            args.dist_state.world_size,
+            distribution=plan,
+            hf_config=hf_config,
+            trust_remote_code=args.trust_remote_code,
+            attn_implementation=args.attn_implementation,
+        )
+    elif plan.is_fsdp_dense:
+        full_model = load_pretrained(
+            args.local_checkpoint_path,
+            distribution=plan,
+            hf_config=hf_config,
             trust_remote_code=args.trust_remote_code,
             cpu_offload=args.cpu_offload,
             attn_implementation=args.attn_implementation,
-            hf_config=hf_config,
-        )
-        # Calibration sizes its batch, and the export writes, by how the model is distributed.
-        set_distribution_plan(
-            full_model, DistributionPlan(args.dist_state.world_size, dense="fsdp")
         )
     elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
             args.local_checkpoint_path,
             args.dist_state.device,
+            distribution=plan,
             gpu_mem_percentage=args.gpu_max_mem_percentage,
             trust_remote_code=args.trust_remote_code,
             use_seq_device_map=args.use_seq_device_map,
@@ -369,9 +424,6 @@ def load_model(args: argparse.Namespace):
         with init_quantized_weights(
             quant_cfg, gpu_mem_percentage=args.gpu_max_mem_percentage, quant_gemm=False
         ):
-            hf_config = AutoConfig.from_pretrained(
-                args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
-            )
             model_kwargs = {"trust_remote_code": args.trust_remote_code}
             if args.attn_implementation is not None:
                 model_kwargs["attn_implementation"] = args.attn_implementation
@@ -379,6 +431,7 @@ def load_model(args: argparse.Namespace):
                 args.local_checkpoint_path,
                 AutoModelForCausalLM,
                 model_type=hf_config.model_type,
+                distribution=plan,
                 **model_kwargs,
             )
         calibration_only = True
@@ -390,7 +443,7 @@ def load_model(args: argparse.Namespace):
     # model reports its own sub-config's type, which varies across transformers versions.
     model_type = hf_model_type(full_model)
 
-    if args.use_fsdp2:
+    if plan.is_fsdp_dense:
         device = args.dist_state.device
     else:
         device = full_model.device
@@ -557,7 +610,29 @@ def mono_quantize(
             # Image calibration batches contain multimodal kwargs (for example pixel_values).
             # They must be consumed by the complete VLM even when only a nested component is the
             # quantization target; the full forward still exercises that component's quantizers.
-            if args.calib_with_images:
+            if distribution_plan(full_model).is_expert_parallel:
+                # An expert-parallel run has to calibrate through distributed_forward_loop, not the
+                # plain one: it is the only caller of _reinstall_a2a_forwards, which re-plants the
+                # torch_a2a expert/router forward wrappers that quantizer insertion clobbers on
+                # transformers >= 5.16 (where the styles install a forward rather than a pre-hook).
+                # Without it the experts forward runs with process_group=None and raises
+                # "torch_a2a experts forward requires the EP `process_group`" at calibration step 0.
+                # On <= 5.13 the wrappers are pre-hooks that survive, so the reinstall is a no-op --
+                # which is why this is invisible on older transformers and fatal on newer.
+                # It also restores the use_cache guard the plain loop does not apply. Other
+                # distributed runs (FSDP2) keep the plain loop and its split-on-OOM retry. Image
+                # batches go through the VLM's own forward, as they do without expert parallelism:
+                # Nemotron-H Omni, for one, calibrates on images by default.
+                calibrate_loop = distributed_forward_loop(
+                    full_model if args.calib_with_images else language_model,
+                    calib_dataloader,
+                    device=args.dist_state.device,
+                    ep_mesh=expert_parallel_mesh(full_model),
+                    forward=create_vlm_calibration_forward(full_model)
+                    if args.calib_with_images
+                    else None,
+                )
+            elif args.calib_with_images:
                 calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
             else:
                 calibrate_loop = create_forward_loop(
@@ -660,6 +735,11 @@ def export_quantized(
     language_model: torch.nn.Module,
     model_type: str | None,
 ):
+    plan = distribution_plan(full_model)
+    if not (args.dist_state.is_main or plan.is_fsdp_dense or plan.is_expert_parallel):
+        # Replicated over the ranks, the model is whole on each: rank 0 writes it, and the rest
+        # would race it into the same directory. A sharded model needs every rank for its part.
+        return
     # Not inference_mode: the FSDP2 path gathers full params in this context and
     # inference tensors break the subsequent state_dict() -> param.detach().
     with torch.no_grad():
@@ -675,17 +755,13 @@ def export_quantized(
 
         if is_multimodal_model(full_model):
             # Per-layer export writes its own config.json with quantization_config, which
-            # the source config would replace; it never writes a processor config.
-            if not args.layerwise_export:
+            # the source config would replace; it never writes a processor config. Rank 0's
+            # export writes config.json, so no other rank may write the source config after it.
+            if not args.layerwise_export and args.dist_state.is_main:
                 save_source_config(args, export_path)
 
         start_time = time.time()
-        is_tensorrt_llm_export = (
-            is_trtllm_enc_dec_export(model_type)
-            or args.sparsity_fmt != "dense"
-            or "int8_smoothquant" in args.qformat
-        )
-        if is_tensorrt_llm_export:
+        if _exports_tensorrt_llm_checkpoint(args, model_type):
             if (
                 args.inference_tensor_parallel != 1 or args.inference_pipeline_parallel != 1
             ) and args.qformat == "nvfp4_svdquant":
@@ -804,11 +880,13 @@ def pre_quantize(
             trust_remote_code=args.trust_remote_code,
         )
     else:
-        generated_ids_before_ptq = full_model.generate(
-            preview_input_ids,
-            attention_mask=preview_attention_mask,
-            max_new_tokens=100,
-        )
+        with keep_the_experts_implementation(full_model):
+            generated_ids_before_ptq = full_model.generate(
+                preview_input_ids,
+                attention_mask=preview_attention_mask,
+                max_new_tokens=100,
+                **preview_generate_kwargs(full_model),
+            )
 
     return preview_input_ids, preview_attention_mask, generated_ids_before_ptq
 
@@ -862,11 +940,13 @@ def post_quantize(
         # quantized layer run on CPU, which some kernels (e.g. NVFP4 dynamic block
         # quantization) don't support. Don't let that discard the completed calibration.
         try:
-            generated_ids_after_ptq = full_model.generate(
-                preview_input_ids,
-                attention_mask=preview_attention_mask,
-                max_new_tokens=100,
-            )
+            with keep_the_experts_implementation(full_model):
+                generated_ids_after_ptq = full_model.generate(
+                    preview_input_ids,
+                    attention_mask=preview_attention_mask,
+                    max_new_tokens=100,
+                    **preview_generate_kwargs(full_model),
+                )
         except Exception as e:
             warnings.warn(f"Post-quantization generation sanity check failed, skipping it: {e}")
     elif is_nemotron_vl_model and tokenizer is not None:
@@ -1507,27 +1587,45 @@ def main(args: argparse.Namespace):
     random.seed(RAND_SEED)
     np.random.seed(RAND_SEED)
 
-    setup_distributed_args(args)
+    # A distributed launch owns its process group for the whole run, and the run takes this
+    # process's rank, size and device from it. Entered here rather than inside load_model so
+    # cleanup still runs if loading raises -- otherwise the surviving ranks block on the first
+    # collective until the NCCL timeout.
+    with distributed_run(timeout=timedelta(hours=3), device=args.device) as dist_state:
+        args.dist_state = dist_state
+        _main_inner(args)
 
-    try:
-        # Entered inside the try: opening the run is fatal by design, and skipping
-        # cleanup_distributed would leave the other ranks blocked on the first collective
-        # until the NCCL timeout.
-        with mlflow_run(args):
-            # --pyt_ckpt_path stays as given. Every later step reads the local copy of the whole
-            # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local
-            # path.
-            args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
-                args.pyt_ckpt_path
-            )
 
-            # launch a memory monitor to read the currently used GPU memory.
-            launch_memory_monitor()
+def _main_inner(args: argparse.Namespace):
+    with mlflow_run(args):
+        # --pyt_ckpt_path stays as given. Every later step reads the local copy of the whole
+        # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local
+        # path.
+        args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(args.pyt_ckpt_path)
 
-            # Force eager execution for all model types.
-            torch.compiler.set_stance("force_eager")
+        # launch a memory monitor to read the currently used GPU memory.
+        launch_memory_monitor()
 
-            (
+        # Force eager execution for all model types.
+        torch.compiler.set_stance("force_eager")
+
+        (
+            full_model,
+            language_model,
+            model_type,
+            calibration_only,
+            processor,
+            tokenizer,
+            device,
+        ) = load_model(args)
+
+        if args.sparsity_fmt != "dense":
+            # Sparse
+            sparsity_main(args, full_model, tokenizer, device)
+        else:
+            # Quantize
+            quantize_main(
+                args,
                 full_model,
                 language_model,
                 model_type,
@@ -1535,25 +1633,7 @@ def main(args: argparse.Namespace):
                 processor,
                 tokenizer,
                 device,
-            ) = load_model(args)
-
-            if args.sparsity_fmt != "dense":
-                # Sparse
-                sparsity_main(args, full_model, tokenizer, device)
-            else:
-                # Quantize
-                quantize_main(
-                    args,
-                    full_model,
-                    language_model,
-                    model_type,
-                    calibration_only,
-                    processor,
-                    tokenizer,
-                    device,
-                )
-    finally:
-        cleanup_distributed(args)
+            )
 
 
 if __name__ == "__main__":

@@ -725,14 +725,15 @@ def _release_cached_cuda_memory():
         torch.cuda.empty_cache()
 
 
-def distributed_forward_loop(model, dataloader, device=None, ep_mesh=None):
+def distributed_forward_loop(model, dataloader, device=None, ep_mesh=None, forward=None):
     """Build an ``mtq.quantize`` ``forward_loop`` for a distributed (e.g. expert-parallel) model.
 
     Moves each batch onto ``device``, when given, and runs the captured ``model`` forward (the EP
-    all-reduce / all-to-all collectives fire inside that forward). A model whose plan
-    (:func:`distribution_plan`) is expert-parallel passes the ``ep_mesh`` its experts are sharded
-    over, for the all-to-all forwards that quantizer insertion drops to be re-installed before the
-    first forward; any other model passes none. ``mtq.quantize`` hands the
+    all-reduce / all-to-all collectives fire inside that forward), or ``forward(batch)`` when given,
+    for batches that need their own call into ``model``, such as a VLM's image-text batches. A
+    model whose plan (:func:`distribution_plan`) is expert-parallel passes the ``ep_mesh`` its
+    experts are sharded over, for the all-to-all forwards that quantizer insertion drops to be
+    re-installed before the first forward; any other model passes none. ``mtq.quantize`` hands the
     ``forward_loop`` callback an inner module that this closure ignores, calling the captured
     top-level ``model`` instead so the full distributed forward (and its collectives) runs.
 
@@ -767,7 +768,10 @@ def distributed_forward_loop(model, dataloader, device=None, ep_mesh=None):
                         k: (v.to(device) if isinstance(v, torch.Tensor) else v)
                         for k, v in batch.items()
                     }
-                model(**batch)
+                if forward is None:
+                    model(**batch)
+                else:
+                    forward(batch)
             # Symmetric to the pre-forward reclaim above, and for the same reason one stage later:
             # the calibration forwards leave their activations in the caching allocator's reserved
             # pool, so whatever runs next (amax sync, export collectives) can find the device full

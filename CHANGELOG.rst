@@ -15,6 +15,7 @@ Changelog
 - Add a checkpoint-specific NVIDIA Nemotron 3.5 Super VL AutoQuantize recipe with a 4.9-effective-bit NVFP4-MSE/FP8/BF16 search and fixed NVFP4 MTP experts. Select it under ``models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/auto_quantize/``.
 - Add ``examples/hf_ptq/convert_ggml_to_int8.py`` to expand a checkpoint exported with a GGML recipe (IQ formats, ``q8_0``) into an INT8 weight-only compressed-tensors checkpoint. Stock vLLM serves it with its integer kernels at about half the BF16 weight memory, reproducing the GGML weights up to rounding their scales to the model dtype.
 - Add an opt-in no-gather HuggingFace export for FSDP2-sharded models: with ``MODELOPT_FSDP2_EXPORT=nogather``, ``export_hf_checkpoint`` sends each tensor to a single owner rank and every rank writes its own shards in parallel, instead of gathering the full state dict on one host. MoE experts stay sharded through the export, so each rank only materializes its own experts.
+- Add expert-parallel PTQ for HuggingFace MoE models to ``examples/hf_ptq/hf_ptq.py``: under ``torchrun``, each rank holds only its share of the routed experts, tokens reach them by all-to-all, and every rank calibrates on its own slice of the data. ``MODELOPT_EP_DEGREE`` and ``MODELOPT_FSDP_SIZE`` override the automatic choice of expert-parallel degree and of FSDP2-sharding the dense layers, and the quantized checkpoint is written by every rank in parallel without gathering the model.
 
 *Speculative Decoding*
 
