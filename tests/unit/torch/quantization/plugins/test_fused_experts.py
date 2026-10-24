@@ -1675,6 +1675,8 @@ def _local_hessian_grouped_capture_job(rank, size, impl):
     finally:
         if QuantModuleRegistry.get(_SyntheticGroupedExperts) is not None:
             QuantModuleRegistry.unregister(_SyntheticGroupedExperts)
+        if ep_group is not None:
+            dist.destroy_process_group(ep_group)
 
 
 # ---------------------------------------------------------------------------
