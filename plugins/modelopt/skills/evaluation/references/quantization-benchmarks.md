@@ -32,7 +32,8 @@ a published AA Index.
 | `tasks/aa/scicode.md` | SciCode | Multi-step scientific code + sandbox execution | Very high — reasoning + code + sandbox stacked; errors compound across subtasks |
 | `tasks/aa/ifbench.md` | IFBench | Instruction following | Low — format-compliance is robust; even aggressive FP4 usually shows only small drops |
 | `tasks/aa/mmmu_pro.md` | MMMU-Pro | Multimodal reasoning | VLM-only; usually Low/Medium when only the LLM is quantized (vision encoder/adapter typically stay BF16) |
-| `tasks/aa/tau2_bench_telecom.md` | Tau2-Bench Telecom | Agentic tool use (user-simulator + judge) | Medium-high — tool-call JSON is brittle, but user-sim + judge variance often dominates the signal |
+| `tasks/gym/tau3_banking.md` | Tau3-Banking (`nemo_gym` tau2 agent, **standalone config**, AA) | Agentic tool use + retrieval over a banking knowledge base (GPT-5.4 Mini user simulator, 97 tasks × 5, no judge) | Medium-high — tool-call JSON is brittle; user-sim variance (~±0.02 between repeat runs) sets the noise floor |
+| `tasks/aa/tau2_bench_telecom.md` | Tau2-Bench Telecom (**superseded** by Tau3-Banking) | Agentic tool use (user-simulator + judge) | Medium-high — only for continuity with earlier Tau2 results |
 | `tasks/aa/omniscience.md` | AA-Omniscience | Knowledge reliability (`ns_omniscience`, nemo-skills, `num_repeats: 10`) — correct vs hallucinate vs abstain on obscure facts, judge-scored | Medium — measures the hallucination/abstention balance; aggressive precision loss can erode factual recall and shift the omni-index |
 | `tasks/gym/mrcr.md` | MRCR (`nemo_gym` simple agent, **standalone config**, **not AA**) | Long-context co-reference retrieval up to 1M tokens; deterministic prefix-gated `SequenceMatcher` grading, stratified by needle count | Very high — the longest-context task available here; KV-cache and attention quant error accumulate over the full window. No judge, so the signal is clean. Opt-in: only when the user asks for MRCR or long-context coverage |
 
@@ -42,13 +43,14 @@ a published AA Index.
 |----------|-----------|
 | Quick sanity check | GPQA |
 | Standard quant validation (text LLM) | GPQA, SciCode, LCR |
-| AA / Artificial Analysis suite (text LLM) | All `tasks/aa/` text tasks: GPQA, HLE, LCR, SciCode, IFBench, Tau2-Bench Telecom, AA-Omniscience (GDPVal is an AA member but unsupported here) |
+| AA / Artificial Analysis suite (text LLM) | `tasks/aa/` text tasks: GPQA, HLE, LCR, SciCode, IFBench, AA-Omniscience, plus Tau3-Banking as its own gym config (GDPVal is an AA member but unsupported here) |
 | AA / Artificial Analysis suite (multimodal) | AA text suite + MMMU-Pro |
 | Code-focused model | LiveCodeBench, SciCode |
 | Reasoning model | AIME 2025, GPQA, HLE |
 
 > If the user asks for "AA" or "Artificial Analysis", generate the
-> `recipes/tasks/aa/` tasks as one multi-task config. Do not silently add
+> `recipes/tasks/aa/` tasks (except the superseded Tau2) as one multi-task config, plus
+> Tau3-Banking as a separate gym config. Do not silently add
 > MMLU-Pro, AIME 2025, or LiveCodeBench — they live at `recipes/tasks/*.md` and
 > are a separate always-include set. Say up front that GDPVal, an AA member, is
 > not covered.
@@ -63,11 +65,11 @@ a published AA Index.
   regressions. The field name differs by harness: `n_samples` for simple-evals
   (AIME `64`) and tau2-bench (Tau2 `8`); `num_repeats` for nemo-skills
   (AA-LCR/GPQA `16`, AA-Omniscience `10`, LiveCodeBench `8`, IFBench `5`,
-  MMLU-Pro `1`). **SciCode is the exception** — `num_repeats: 1` x 8+ separate
+  MMLU-Pro `1`), Tau3-Banking its declared `5`. **SciCode is the exception** — `num_repeats: 1` x 8+ separate
   submissions, averaged (`tasks/aa/scicode.md`).
 - **Judge / user-simulator endpoints** are required by AA-LCR, HLE AA,
-  AA-Omniscience, and Tau2-Bench Telecom. Keep the judge and (for Tau2)
-  user-simulator models fixed across baseline and quantized runs for
+  AA-Omniscience, Tau3-Banking (user simulator only) and Tau2-Bench Telecom. Keep
+  the judge and user-simulator models fixed across baseline and quantized runs for
   apples-to-apples comparison.
 - **IFBench** is the least quant-sensitive in the set but still useful as a
   regression check for aggressive formats (NVFP4, INT4-AWQ).
