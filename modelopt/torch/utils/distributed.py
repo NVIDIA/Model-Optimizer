@@ -412,8 +412,9 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
     if sending:
         try:
             value = fn()
-        except Exception as e:
-            # Still send: the other ranks would otherwise wait in the broadcast for this one.
+        except BaseException as e:
+            # Still send: the other ranks would otherwise wait in the broadcast for this one. A
+            # SystemExit or KeyboardInterrupt too, which argparse-style checks raise.
             error = e
     # One message from the sending rank: its label, so a rank broadcasting another learns the two
     # are out of step, and its value or its error. The error goes as text: the other ranks only
@@ -447,8 +448,9 @@ def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _
     value, error = None, None
     try:
         value = fn()
-    except Exception as e:
-        # Still join the gather: the other ranks would otherwise wait in it for this one.
+    except BaseException as e:
+        # Still join the gather: the other ranks would otherwise wait in it for this one, a
+        # SystemExit or KeyboardInterrupt included.
         error = e
     mine = (label, value, None if error is None else f"{type(error).__name__}: {error}")
     gathered: list[Any] = [None] * torch.distributed.get_world_size()
@@ -492,9 +494,9 @@ def distributed_run(
     """Own the run's process group for the block, and yield this process's state.
 
     On a distributed launch (``WORLD_SIZE>1``) this sets the process group up, binding this rank's
-    CUDA device, with ``timeout``. It yields this rank's :class:`DistributedState`, on that CUDA
-    device, and refuses any other ``device``. A single process sets nothing up and is rank 0 of a run
-    of one, on ``device``.
+    CUDA device, with ``timeout``, unless the caller set one up already. It yields this rank's
+    :class:`DistributedState`, on that CUDA device, and refuses any other ``device``. A single
+    process sets nothing up and is rank 0 of a run of one, on ``device``.
 
     On exit, even if the body raises, it destroys the group the run set up: the launch's, or one the
     body set up, such as the one-rank group a single process's FSDP2 load shards through. A group
@@ -504,13 +506,13 @@ def distributed_run(
     rank never reaches.
     """
     launched = is_distributed_launch()
-    if launched and torch.device(device).type != "cuda":
+    if launched and torch.device(device) != torch.device("cuda"):
         raise ValueError(
             f"distributed_run(device={device!r}): a distributed launch runs each rank on its own "
-            "CUDA device; run a single process for another device."
+            "CUDA device, chosen from LOCAL_RANK; pass device='cuda' or run a single process."
         )
     group_was_there = is_initialized()
-    if launched:
+    if launched and not group_was_there:
         setup(timeout=timeout)
     try:
         yield (
@@ -526,13 +528,14 @@ def distributed_run(
         # group therefore aborts the rank: abort() prints the traceback and exits.
         exc = sys.exc_info()[1]
         owns_group = not group_was_there and is_initialized()
-        if exc is not None:
+        # Every rank reaches a SystemExit, an intentional exit: it is not an error to report.
+        if exc is not None and not isinstance(exc, SystemExit):
             print(
                 f"[distributed_run][rank {os.environ.get('RANK', '?')}] body raised "
                 f"{type(exc).__name__}: {exc}",
                 flush=True,
             )
-            if owns_group and not isinstance(exc, SystemExit) and size() > 1:
+            if owns_group and size() > 1:
                 abort()
             traceback.print_exc()
             sys.stderr.flush()

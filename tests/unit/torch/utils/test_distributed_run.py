@@ -19,6 +19,7 @@ that fail together, the process group's lifetime."""
 
 from contextlib import nullcontext
 from datetime import timedelta
+from unittest import mock
 
 import pytest
 import torch.distributed
@@ -247,17 +248,19 @@ def test_broadcast_from_gives_every_rank_the_sending_ranks_value(cpu_dist_worker
     cpu_dist_workers.run(_broadcast_from_job)
 
 
-def test_the_sending_rank_failing_still_reaches_the_broadcast(monkeypatch):
-    """The sending rank must still send on failure, or every other rank hangs in the broadcast. A
-    stand-in broadcast catches that at once, where a real one would wait out its timeout."""
+@pytest.mark.parametrize("error", [ValueError, SystemExit])
+def test_the_sending_rank_failing_still_reaches_the_broadcast(monkeypatch, error):
+    """The sending rank must still send on failure, or every other rank hangs in the broadcast; a
+    SystemExit from an argparse-style check too. A stand-in broadcast catches that at once, where a
+    real one would wait out its timeout."""
     sent = _as_rank(monkeypatch, 0)
 
     def fail():
-        raise ValueError("bad degrees")
+        raise error("bad degrees")
 
-    with pytest.raises(ValueError, match="bad degrees"):
+    with pytest.raises(error, match="bad degrees"):
         broadcast_from("x", fail)
-    assert sent == [(("x", None, "ValueError: bad degrees"), 0)]
+    assert sent == [(("x", None, f"{error.__name__}: bad degrees"), 0)]
 
 
 def _all_reduce_job(rank, size):
@@ -287,17 +290,36 @@ def test_all_reduce_gives_every_rank_the_combined_value(cpu_dist_workers):
     cpu_dist_workers.run(_all_reduce_job)
 
 
-def test_a_rank_failing_to_compute_still_joins_the_gather(monkeypatch):
-    """A failing rank must still reach the gather, or every other rank waits in it. A stand-in
-    gather catches that at once, where a real one would wait out its timeout."""
+@pytest.mark.parametrize("error", [ValueError, SystemExit])
+def test_a_rank_failing_to_compute_still_joins_the_gather(monkeypatch, error):
+    """A failing rank must still reach the gather, or every other rank waits in it; a SystemExit
+    too. A stand-in gather catches that at once, where a real one would wait out its timeout."""
     sent = _gather_as_rank(monkeypatch, 1, others=[("smallest", 8, None)])
 
     def fail():
-        raise ValueError("no memory reading")
+        raise error("no memory reading")
 
-    with pytest.raises(ValueError, match="no memory reading"):
+    with pytest.raises(error, match="no memory reading"):
         all_reduce("smallest", fail, min)
-    assert sent == [("smallest", None, "ValueError: no memory reading")]
+    assert sent == [("smallest", None, f"{error.__name__}: no memory reading")]
+
+
+def _bounded_barrier_job(rank, size):
+    groups = []
+    with (
+        mock.patch.object(
+            torch.distributed, "barrier", lambda *a, group=None, **k: groups.append(group)
+        ),
+        bounded_collectives(),
+    ):
+        torch.distributed.barrier(group=None)  # as modelopt's barrier() calls it
+    assert groups and groups[0] is not None, groups
+
+
+def test_bounded_collectives_bound_a_barrier_called_with_group_none(cpu_dist_workers):
+    """modelopt's ``barrier()`` names ``group=None`` explicitly; the bound holds for it too, or a
+    rank left waiting in it would wait out the default group's timeout."""
+    cpu_dist_workers.run(_bounded_barrier_job)
 
 
 # ---------------------------------------------------------------------------------- process group
@@ -327,12 +349,13 @@ def test_a_distributed_launch_yields_this_ranks_state_on_its_cuda_device(monkeyp
     assert timeouts == [timedelta(hours=1)]
 
 
-def test_a_distributed_launch_refuses_another_device(monkeypatch):
-    """Every rank runs on its own CUDA device, so another device is refused, before any setup,
-    rather than ignored."""
+@pytest.mark.parametrize("device", ["cpu", "cuda:3"])
+def test_a_distributed_launch_refuses_another_device(monkeypatch, device):
+    """Every rank runs on the CUDA device its LOCAL_RANK names, so another device, or another index,
+    is refused, before any setup, rather than ignored."""
     monkeypatch.setenv("WORLD_SIZE", "2")
     monkeypatch.setattr(dist, "setup", lambda **kwargs: pytest.fail("set a group up"))
-    with pytest.raises(ValueError, match="device='cpu'"), distributed_run(device="cpu"):
+    with pytest.raises(ValueError, match=f"device='{device}'"), distributed_run(device=device):
         pass
 
 
@@ -351,7 +374,7 @@ class _ExitedError(Exception):
     ],
     ids=["launch", "launch-raises", "launch-exits", "single-process", "single-process-raises"],
 )
-def test_the_run_ends_the_group_it_set_up(monkeypatch, launch, body_raises, ends_by):
+def test_the_run_ends_the_group_it_set_up(monkeypatch, capsys, launch, body_raises, ends_by):
     """The launch's group, or the one a single process's FSDP2 load sets up mid-run, is destroyed on
     the way out. A rank of several whose body raised exits through abort() instead, and torchrun tears
     the job down: the cleanup's barrier and destroy_process_group would wait on peers that may sit in
@@ -383,6 +406,8 @@ def test_the_run_ends_the_group_it_set_up(monkeypatch, launch, body_raises, ends
             raise body_raises
 
     assert ended == [ends_by]
+    # An intentional exit is not reported as an error.
+    assert ("body raised" in capsys.readouterr().out) == (body_raises is ValueError)
 
 
 @pytest.mark.parametrize("raises", [False, True], ids=["returns", "raises"])
@@ -394,7 +419,7 @@ def test_the_run_leaves_a_group_it_found_alone(monkeypatch, world_size, raises):
         monkeypatch.delenv("WORLD_SIZE", raising=False)
     else:
         monkeypatch.setenv("WORLD_SIZE", world_size)
-        monkeypatch.setattr(dist, "setup", lambda timeout=None: None)
+        monkeypatch.setattr(dist, "setup", lambda timeout=None: pytest.fail("set it up again"))
         monkeypatch.setattr(dist, "rank", lambda group=None: 0)
         monkeypatch.setattr(dist, "size", lambda group=None: 2)
         monkeypatch.setattr(dist, "local_rank", lambda: 0)

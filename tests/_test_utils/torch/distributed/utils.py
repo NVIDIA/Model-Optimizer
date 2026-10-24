@@ -154,6 +154,12 @@ def reseeding_worker_teardown(rank, world_size):
     torch.manual_seed(1234)
 
 
+def _on_group(collective, bound, /, *args, **kwargs):
+    """``collective`` on ``bound``, whatever group the caller named: modelopt's ``barrier()`` passes
+    ``group=None`` explicitly, which would override a ``partial``'s keyword."""
+    return collective(*args, **{**kwargs, "group": bound})
+
+
 @contextmanager
 def bounded_collectives(seconds: float = 10):
     """Run the object collectives on a new group that gives up after ``seconds``, within the block.
@@ -167,7 +173,7 @@ def bounded_collectives(seconds: float = 10):
     try:
         with ExitStack() as stack:
             for name in ("broadcast_object_list", "all_gather_object", "barrier"):
-                collective = partial(getattr(dist, name), group=group)
+                collective = partial(_on_group, getattr(dist, name), group)
                 stack.enter_context(mock.patch.object(dist, name, collective))
             yield
     finally:
