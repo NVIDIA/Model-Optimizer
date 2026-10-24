@@ -356,17 +356,20 @@ def test_persistent_buffers_load_from_the_checkpoint_and_others_survive(tmp_path
     assert torch.equal(model.proj.weight, ckpt["proj.weight"])
 
 
-def test_an_untied_param_the_checkpoint_lacks_fails_the_load(tmp_path):
+@pytest.mark.parametrize("named", [True, False], ids=["named", "left-out-of-load-names"])
+def test_an_untied_param_the_checkpoint_lacks_fails_the_load(tmp_path, named):
     """``proj.bias`` has no checkpoint tensor and tying fills nothing: it still holds the memory
-    ``to_empty`` gave it, so the load fails naming it instead of returning the model."""
+    ``to_empty`` gave it, so the load fails naming it instead of returning the model, also when
+    ``load_names`` leaves it out."""
     ckpt = {"proj.weight": torch.randn(4, 4), "scale": torch.full((4,), 3.0)}
     with init_empty_weights():
         model = _WithBuffers()
+    load_names = _every_name(model) - ({"proj.bias"} if not named else set())
 
     with pytest.raises(
         RuntimeError, match=r"1 param\(s\) have no checkpoint tensor.*\['proj.bias'\]"
     ):
-        _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu", load_names=_every_name(model))
+        _meta_dcp_load(model, _save(tmp_path, ckpt), "cpu", load_names=load_names)
 
 
 class _OneBigManySmall(nn.Module):
