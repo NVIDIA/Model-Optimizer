@@ -14,6 +14,7 @@ Changelog
 - GPTQ no longer runs a max-calibration forward when no activation quantizer needs one, and ``hf_ptq.py`` now sizes the default layerwise calibration batch at 8,192 tokens (16 samples at ``--calib_seq 512``) instead of 1. Layerwise GPTQ on HF fused-MoE models runs over 10x faster; pass ``--batch_size 1`` for the old batching, which pads no sample.
 - Add a checkpoint-specific NVIDIA Nemotron 3.5 Super VL AutoQuantize recipe with a 4.9-effective-bit NVFP4-MSE/FP8/BF16 search and fixed NVFP4 MTP experts. Select it under ``models/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/auto_quantize/``.
 - Add ``examples/hf_ptq/convert_ggml_to_int8.py`` to expand a checkpoint exported with a GGML recipe (IQ formats, ``q8_0``) into an INT8 weight-only compressed-tensors checkpoint. Stock vLLM serves it with its integer kernels at about half the BF16 weight memory, reproducing the GGML weights up to rounding their scales to the model dtype.
+- Add an opt-in no-gather HuggingFace export for FSDP2-sharded models: with ``MODELOPT_FSDP2_EXPORT=nogather``, ``export_hf_checkpoint`` sends each tensor to a single owner rank and every rank writes its own shards in parallel, instead of gathering the full state dict on one host. MoE experts stay sharded through the export, so each rank only materializes its own experts.
 
 *Speculative Decoding*
 
@@ -38,6 +39,7 @@ Changelog
 - ``export_mcore_gpt_to_hf`` given a Hugging Face Hub model ID no longer writes the tokenizer, processor, generation config or remote-code files. Pass a local directory instead, e.g. from ``modelopt.torch.export.ensure_local_checkpoint``.
 - Diffusion HF exports now omit attention quantizer buffers by default, except for FLUX.1, which retains enabled Q/K/V ``_amax`` keys for runtime compatibility; other consumers of those keys can opt in with ``export_attention_quantizers=True`` (CLI: ``--extra-param export_attention_quantizers=true``). Disabled attention quantizers remain excluded, and diffusion components, including LTX-2, no longer emit KV-cache quantization metadata.
 - Hugging Face MoE calibration now runs fused experts on the ``grouped_mm`` backend Transformers selects by default instead of forcing ``eager``, so calibrated activation scales can differ from earlier releases: some of Qwen3-30B-A3B's moved by up to about 10%. Load the model with ``experts_implementation="eager"`` to calibrate exactly as earlier releases did.
+- ``export_hf_checkpoint`` and ``modelopt.torch.utils.dataset_utils.get_max_batch_size`` now read how a model is distributed from the plan ``load_pretrained`` records on it, and raise for an FSDP2-sharded model, or one in a multi-rank run, that carries none. If you distribute a model yourself, for example with ``fsdp2_wrap``, which records no plan, record one with ``modelopt.torch.utils.distributed.set_distribution_plan`` before calibrating or exporting it.
 
 **Deprecations**
 
