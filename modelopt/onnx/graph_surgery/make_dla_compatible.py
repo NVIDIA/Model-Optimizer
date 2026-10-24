@@ -71,6 +71,8 @@ from .dla_transforms.dla_reshape_patterns import (
     _apply_reshape_reduce_sum,
     _apply_reshape_transpose_reshape,
 )
+from .dla_transforms.dla_topk import _apply_topk
+from .dla_transforms.dla_unsqueeze import _apply_unsqueeze
 from .dla_transforms.dla_where import _apply_where
 from .utils.graph_utils import (
     DEFAULT_QDQ_REMOVE_QUANT_TYPES,
@@ -133,8 +135,10 @@ DLA_TRANSFORMS = (
     ("UpdateAxis", _apply_update_axis),
     ("Where", _apply_where),
     ("Not", _apply_not),
+    ("Unsqueeze", _apply_unsqueeze),
     ("Greater", _apply_greater),
     ("ShapeInference", infer_shapes),
+    ("TopK", partial(_apply_topk, rank_converted=True)),
     ("RemoveUnusedInitializers", _remove_unused_initializers),
 )
 
