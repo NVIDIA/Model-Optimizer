@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="green" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>GLM-5.3-Flash at 2-3 Bits per Expert Weight: IQ2_S PTQ Recipes and QAD - Model Optimizer 0.0.1.dev1+g09474ca99</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=2ceb65ce" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+    <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+    <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=948f803c" />
+    <link rel="stylesheet" type="text/css" href="../_static/announcements.css?v=7f656fee" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="GLM-5.3-Flash at 2-3 Bits per Expert Weight: IQ2_S PTQ Recipes and QAD"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      
+      
+      <strong>Model Optimizer</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials"></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="1"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Announcements</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../index.html">Announcements</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../getting_started/_installation_for_Linux.html">Installation for Linux</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../getting_started/windows/_installation_for_Windows.html">Installation for Windows</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_standalone.html">Install ModelOpt-Windows as a Standalone Toolkit</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_windows_arm64.html">Install ModelOpt on Windows on Arm</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_with_olive.html">Install ModelOpt-Windows with Olive</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/quantization_aware_training_and_distillation.html">Quick Start: QAT and QAD</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/1_quantization.html">Quantization</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_choosing_quant_methods.html">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_pytorch_quantization.html">PyTorch Quantization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_quant_cfg.html">Quantization Configuration (quant_cfg)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/_onnx_quantization.html">ONNX Quantization - Linux (Beta)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../guides/windows_guides/_ONNX_PTQ_guide.html">ONNX Quantization - Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/quantization_aware_training_and_distillation.html">Quantization-Aware Training and Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/9_autotune.html">Autotune (ONNX)</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../guides/11_config_system.html">ModelOpt Config System</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../reference/0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.deploy.html">deploy</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.deploy.llm.html">llm</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.deploy.llm.generate.html">generate</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.onnx.html">onnx</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.html">autocast</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.graphsanitizer.html">graphsanitizer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.logging_config.html">logging_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.nodeclassifier.html">nodeclassifier</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.precisionconverter.html">precisionconverter</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.referencerunner.html">referencerunner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.html">llm_export_utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.export_utils.html">export_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.quantization_utils.html">quantization_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.surgeon_utils.html">surgeon_utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.autotune.html">autotune</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.calib_utils.html">calib_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.fp8.html">fp8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.graph_indexing.html">graph_indexing</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.graph_rewrites.html">graph_rewrites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.graph_selection.html">graph_selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.gs_patching.html">gs_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.int4.html">int4</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.int8.html">int8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.operators.html">operators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_calibration.html">ort_calibration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_calibration_per_node.html">ort_calibration_per_node</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_patches.html">ort_patches</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_quantization.html">ort_quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_session.html">ort_session</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.precision_utils.html">precision_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.qdq_graph.html">qdq_graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.qdq_utils.html">qdq_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.quantize.html">modelopt.onnx.quantization.quantize</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.torch.html">torch</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.html">distill</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.distillation_model.html">distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.layerwise_distillation_model.html">layerwise_distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.loss_balancers.html">loss_balancers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.registry.html">registry</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.export.html">export</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.convert_hf_config.html">convert_hf_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.diffusers_utils.html">diffusers_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.hf_export_handlers.html">hf_export_handlers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.layer_utils.html">layer_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.layerwise_export.html">layerwise_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.model_utils.html">model_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.moe_utils.html">moe_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_format.html">quant_format</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quantized_weight_export.html">quantized_weight_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.trtllm.html">trtllm</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_hf.html">unified_export_hf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_hf_streaming.html">unified_export_hf_streaming</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_megatron.html">unified_export_megatron</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.html">fastgen</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.discriminators.html">discriminators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.ema.html">ema</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.factory.html">factory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.flow_matching.html">flow_matching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.loader.html">loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.methods.html">methods</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.pipeline.html">pipeline</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.html">kernels</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.common.html">common</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.quantization.html">quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.sparsity.html">sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.models.html">models</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.html">nas</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.autonas.html">autonas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.hparams.html">hparams</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.patch.html">patch</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.traced_hp.html">traced_hp</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.html">opt</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.config_loader.html">config_loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.dynamic.html">dynamic</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.hparam.html">hparam</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.searcher.html">searcher</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.html">peft</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.custom.html">custom</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.lora.html">lora</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.mode.html">mode</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.html">prune</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.fastnas.html">fastnas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.importance_hooks.html">importance_hooks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.pruning.html">pruning</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.html">puzzletron</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.build_library_and_stats.html">build_library_and_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.entrypoint.html">entrypoint</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.puzzletron_nas_plugin.html">puzzletron_nas_plugin</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.sewing_kit.html">sewing_kit</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.backends.html">backends</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.calib.html">calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.compress.html">modelopt.torch.quantization.compress</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.export_onnx.html">export_onnx</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.ggml.html">ggml</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.kv_cache_auto_quant.html">kv_cache_auto_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.linear_attention.html">linear_attention</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.lora.html">lora</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_calib.html">model_calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_quant.html">model_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.nn.html">nn</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.qtensor.html">qtensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.tensor_quant.html">tensor_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.html">sparsity</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.attention_sparsity.html">attention_sparsity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.weight_sparsity.html">weight_sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.html">speculative</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.dflash.html">dflash</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.external.html">external</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.medusa.html">medusa</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.speculative_decoding.html">speculative_decoding</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.html">trace</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.analyzer.html">analyzer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.symbols.html">symbols</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.tracer.html">tracer</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.html">utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.cpp_extension.html">cpp_extension</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.dataset_utils.html">dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.distributed.html">distributed</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.graph.html">graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.import_utils.html">import_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.list.html">list</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.logging.html">logging</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.network.html">network</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.perf.html">perf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.random.html">random</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.regex.html">regex</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.robust_json.html">robust_json</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.serialization.html">serialization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.speech_dataset_utils.html">speech_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.tensor.html">tensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.vlm_dataset_utils.html">vlm_dataset_utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#highlights">Highlights</a></li>
+<li><a class="reference internal" href="#the-two-recipes">The Two Recipes</a></li>
+<li><a class="reference internal" href="#accuracy">Accuracy</a></li>
+<li><a class="reference internal" href="#knowledge-recall-and-long-context">Knowledge Recall and Long Context</a></li>
+<li><a class="reference internal" href="#what-qad-did">What QAD Did</a></li>
+<li><a class="reference internal" href="#what-it-costs">What It Costs</a></li>
+<li><a class="reference internal" href="#reproducing">Reproducing</a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">Model Optimizer</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">GLM-5.3-Flash at 2-3 Bits per Expert Weight: IQ2_S PTQ Recipes and QAD</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue dark-code" role="main">
+          <section id="glm-5-3-flash-at-2-3-bits-per-expert-weight-iq2-s-ptq-recipes-and-qad">
+<h1>GLM-5.3-Flash at 2-3 Bits per Expert Weight: IQ2_S PTQ Recipes and QAD<a class="headerlink" href="#glm-5-3-flash-at-2-3-bits-per-expert-weight-iq2-s-ptq-recipes-and-qad" title="Link to this heading">#</a></h1>
+<dl class="field-list simple">
+<dt class="field-odd">Author<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Model Optimizer Team</p>
+</dd>
+<dt class="field-even">Date<span class="colon">:</span></dt>
+<dd class="field-even"><p>October 21, 2026</p>
+</dd>
+<dt class="field-odd">Tags<span class="colon">:</span></dt>
+<dd class="field-odd"><p>quantization, ggml, iq2, nvfp4, gptq, qad, megatron-bridge</p>
+</dd>
+</dl>
+<p>GLM-5.3-Flash is a 321B-parameter MoE, and 304B of those parameters are its 288 routed experts. We
+quantized the routed experts to GGML IQ2_S (2.56 bits per weight) with layerwise GPTQ in
+Megatron-Bridge. We then tried Quantization-Aware Distillation (QAD) to recover what PTQ lost.
+With our current data blend, QAD brought AA-LCR back to the FP8 score and cut runaway generations,
+closing over a third of the gap on the six-benchmark mean, but it did not yet restore knowledge
+recall. A small recipe change recovered nearly all of the gap without any training: NVFP4 on the
+experts’ down projections.</p>
+<p>We publish both recipes as alternatives: <strong>IQ2_S</strong>, IQ2_S on every routed-expert weight, for the
+smallest model, and <strong>IQ2_S + NVFP4</strong>, with NVFP4 on the experts’ down projections, for accuracy at
+the level of the FP8 checkpoint.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><strong>The baseline is FP8, not BF16.</strong> Every delta below is against the FP8 release,
+<code class="docutils literal notranslate"><span class="pre">zai-org/GLM-5.3-Flash</span></code>, not the BF16 checkpoint. Both recipes quantize starting from those FP8
+weights (dequantized to BF16), and the same FP8 model is the QAD teacher.</p>
+</div>
+<section id="highlights">
+<h2>Highlights<a class="headerlink" href="#highlights" title="Link to this heading">#</a></h2>
+<ul class="simple">
+<li><p><strong>IQ2_S + NVFP4 matches FP8 with no training.</strong> Over six benchmarks its mean is within 0.1
+points of FP8, and no benchmark is measurably below it. Its routed experts use 3.21 bits per
+weight: IQ2_S for gate and up, weight-only NVFP4 for down.</p></li>
+<li><p><strong>IQ2_S is 25 GB smaller</strong> (2.56 bits per weight on every routed-expert weight) and costs 2.3
+points on the mean. Most of that loss is on SciCode and AA-LCR, where generations run 2-3x
+longer than FP8’s and more often hit the token budget.</p></li>
+<li><p><strong>QAD fixes long-context runaways.</strong> 300 QAD iterations on the IQ2_S model took AA-LCR from
+70.0 to 74.0 (FP8 74.9), cut its answers that hit the token budget from 6.9% to 0.6%, and moved
+the mean from 2.3 to 1.4 points below FP8. Knowledge recall did not recover with our current data
+blend, a general chat-SFT mix reused from Qwen3.6, so a blend chosen for GLM-5.3-Flash may do
+better. Since IQ2_S + NVFP4 already matches FP8 without training, we recommend the PTQ recipes
+today.</p></li>
+<li><p><strong>The down projections carry most of the IQ2 error.</strong> Moving only them to NVFP4 (+0.65 bits per
+weight on the experts) cut per-token NLL error against FP8 by ~40% and closed the accuracy gap.</p></li>
+</ul>
+</section>
+<section id="the-two-recipes">
+<h2>The Two Recipes<a class="headerlink" href="#the-two-recipes" title="Link to this heading">#</a></h2>
+<div class="table-wrapper colwidths-given docutils container">
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 26.0%" />
+<col style="width: 25.0%" />
+<col style="width: 25.0%" />
+<col style="width: 24.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"></th>
+<th class="head"><p>FP8 checkpoint</p></th>
+<th class="head"><p>IQ2_S</p></th>
+<th class="head"><p>IQ2_S + NVFP4</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Routed experts (304B parameters)</p></td>
+<td><p>FP8</p></td>
+<td><p>IQ2_S</p></td>
+<td><p>IQ2_S gate/up, NVFP4 down</p></td>
+</tr>
+<tr class="row-odd"><td><p>Routed-expert bits per weight</p></td>
+<td><p>8</p></td>
+<td><p>2.56</p></td>
+<td><p>3.21</p></td>
+</tr>
+<tr class="row-even"><td><p>Model size</p></td>
+<td><p>328 GB</p></td>
+<td><p>~130 GB (2.5x smaller)</p></td>
+<td><p>~155 GB (2.1x smaller)</p></td>
+</tr>
+<tr class="row-odd"><td><p>Mean delta vs FP8, six benchmarks</p></td>
+<td><p>–</p></td>
+<td><p>−2.3 ± 0.4</p></td>
+<td><p><strong>−0.1 ± 0.3</strong></p></td>
+</tr>
+<tr class="row-even"><td><p>Weight formats</p></td>
+<td><p>FP8</p></td>
+<td><p>GGML only (IQ2_S, Q8_0)</p></td>
+<td><p>GGML (IQ2_S, Q8_0) + NVFP4</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Both recipes keep shared experts and the dense MLP of layers 0-2 in Q8_0. Attention (KDA and sparse
+MLA), the router, the vision tower, the MTP layer, embeddings and lm_head stay in BF16. Model sizes
+are computed from the bits per weight of each tensor, including the BF16 MTP layer and the vision
+tower. FP8 is the size on disk. At ~130-155 GB, either quantized model’s weights fit on one 288 GB
+GB300 GPU, while the FP8 weights need two.</p>
+<p>We do not report throughput. vLLM has no IQ2 kernels, and no runtime we use serves a mix of IQ2_S
+and NVFP4 experts, so every quantized evaluation here served a <em>fake-quant</em> export: the IQ2
+and NVFP4 weights decoded back to BF16. That makes the accuracy exact but the serving speed
+meaningless.</p>
+</section>
+<section id="accuracy">
+<h2>Accuracy<a class="headerlink" href="#accuracy" title="Link to this heading">#</a></h2>
+<a class="reference internal image-reference" href="../_images/glm53-flash-iq2-accuracy-delta.png"><img alt="Score difference from FP8 on six benchmarks and their mean for IQ2_S, IQ2_S + NVFP4 and IQ2_S + QAD 300" src="../_images/glm53-flash-iq2-accuracy-delta.png" style="width: 100%;" />
+</a>
+<p><strong>Figure 1. Score difference from FP8, per benchmark and on the mean.</strong> IQ2_S + NVFP4 (blue) is
+within about one standard error of FP8 everywhere except IFBench, where it is 2.9 points higher.
+IQ2_S (grey) loses most on SciCode and AA-LCR. Bars are ±1 combined sem (none for GPQA-D, one run
+of 16 repeats).</p>
+<p>The ± on a mean delta combines the per-benchmark sems of both models (GPQA-D adds none). All
+evaluations use a 131K-token generation budget and a BF16 KV cache, served by vLLM 0.31 with
+prefix caching on. vLLM 0.31 fixes a GLM-5.3-Flash prefix-caching bug that lowers long-context
+scores on earlier versions; with caching off, FP8 AA-LCR moves by 1.2 points (76.1 ± 0.8 vs
+74.9 ± 0.9, 8 runs each), within noise.</p>
+<div class="toggle docutils container">
+<p><strong>Full table</strong> (<code class="docutils literal notranslate"><span class="pre">mean</span> <span class="pre">±</span> <span class="pre">sem</span></code>; run count in brackets)</p>
+<div class="table-wrapper colwidths-given docutils container">
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 24.0%" />
+<col style="width: 19.0%" />
+<col style="width: 19.0%" />
+<col style="width: 19.0%" />
+<col style="width: 19.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Benchmark (runs)</p></th>
+<th class="head"><p>FP8</p></th>
+<th class="head"><p>IQ2_S</p></th>
+<th class="head"><p><strong>IQ2_S + NVFP4</strong></p></th>
+<th class="head"><p>IQ2_S + QAD 300</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>AA-LCR (8)</p></td>
+<td><p>74.9 ± 0.9</p></td>
+<td><p>70.0 ± 1.9</p></td>
+<td><p><strong>73.6 ± 0.8</strong></p></td>
+<td><p>74.0 ± 1.5</p></td>
+</tr>
+<tr class="row-odd"><td><p>GPQA-D (16 repeats)</p></td>
+<td><p>91.2</p></td>
+<td><p>90.2</p></td>
+<td><p><strong>90.3</strong></p></td>
+<td><p>90.0</p></td>
+</tr>
+<tr class="row-even"><td><p>IFBench (8)</p></td>
+<td><p>61.6 ± 0.3</p></td>
+<td><p>62.3 ± 0.4</p></td>
+<td><p><strong>64.5 ± 0.3</strong></p></td>
+<td><p>62.4 ± 0.5</p></td>
+</tr>
+<tr class="row-odd"><td><p>MMMU-Pro (8)</p></td>
+<td><p>76.7 ± 0.1</p></td>
+<td><p>75.2 ± 0.2</p></td>
+<td><p><strong>76.4 ± 0.2</strong></p></td>
+<td><p>75.0 ± 0.2</p></td>
+</tr>
+<tr class="row-even"><td><p>SciCode (8)</p></td>
+<td><p>53.7 ± 1.0</p></td>
+<td><p>47.2 ± 0.5</p></td>
+<td><p><strong>53.1 ± 0.7</strong></p></td>
+<td><p>48.3 ± 0.8</p></td>
+</tr>
+<tr class="row-odd"><td><p>tau2-bench Telecom (3)</p></td>
+<td><p>98.6 ± &lt;0.1</p></td>
+<td><p>98.2 ± 0.1</p></td>
+<td><p><strong>98.4 ± 0.3</strong></p></td>
+<td><p>98.3 ± 0.3</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Mean delta vs FP8</strong></p></td>
+<td><p>–</p></td>
+<td><p>−2.3 ± 0.4</p></td>
+<td><p><strong>−0.1 ± 0.3</strong></p></td>
+<td><p>−1.4 ± 0.4</p></td>
+</tr>
+<tr class="row-odd"><td><p>SciCode, <code class="docutils literal notranslate"><span class="pre">presence_penalty</span></code> 1.5 (8)</p></td>
+<td><p>54.3 ± 0.8</p></td>
+<td><p>51.6 ± 0.8</p></td>
+<td><p><strong>54.2 ± 0.7</strong></p></td>
+<td><p>49.2 ± 0.5</p></td>
+</tr>
+<tr class="row-even"><td><p>SciCode sub-steps hitting the token budget</p></td>
+<td><p>2.2%</p></td>
+<td><p>19.8%</p></td>
+<td><p>7.8%</p></td>
+<td><p>13.9%</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p><strong>The loss is mostly runaway generation.</strong> IQ2 makes the model loop: it re-derives finished
+answers until it reaches the token budget and returns nothing. A <code class="docutils literal notranslate"><span class="pre">presence_penalty</span></code> of 1.5 at
+decode time cuts IQ2_S’s capped SciCode sub-steps from 19.8% to 2.9% and recovers 4.4 points. Compare
+penalized runs only with a penalized FP8, since the penalty also helps FP8 (+0.6).</p>
+<a class="reference internal image-reference" href="../_images/glm53-flash-iq2-scicode-runaway.png"><img alt="SciCode score and share of sub-steps hitting the token budget, with and without presence_penalty 1.5" src="../_images/glm53-flash-iq2-scicode-runaway.png" style="width: 100%;" />
+</a>
+<p><strong>Figure 2. SciCode with and without</strong> <code class="docutils literal notranslate"><span class="pre">presence_penalty</span></code> <strong>1.5.</strong> Left: score, default (open)
+and with the penalty (filled), ±1 sem over 8 runs. Right: share of sub-steps that hit the 131K-token
+budget.</p>
+</section>
+<section id="knowledge-recall-and-long-context">
+<h2>Knowledge Recall and Long Context<a class="headerlink" href="#knowledge-recall-and-long-context" title="Link to this heading">#</a></h2>
+<p>Six-benchmark suites like the one above can miss what very low-bit quantization loses most:
+stored facts. We added HLE (text-only, 2,158 questions, GPT-4o judge), AA-Omniscience (600
+questions x 10 repeats, Gemini 3 Flash judge) and RULER at 1M tokens (13 subtasks, 25 samples
+each).</p>
+<a class="reference internal image-reference" href="../_images/glm53-flash-iq2-recall.png"><img alt="Points below FP8 on HLE, AA-Omniscience accuracy and hallucination rate, and RULER-1M" src="../_images/glm53-flash-iq2-recall.png" style="width: 100%;" />
+</a>
+<p><strong>Figure 3. Knowledge recall and long context, in points worse than FP8.</strong> For the hallucination
+rate, the bar is the rise over FP8’s 27.7%. HLE has a standard error of ~1.0 per model, and
+RULER-1M ~1.5.</p>
+<div class="toggle docutils container">
+<p><strong>Full table</strong></p>
+<div class="table-wrapper colwidths-given docutils container">
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 32.0%" />
+<col style="width: 17.0%" />
+<col style="width: 17.0%" />
+<col style="width: 17.0%" />
+<col style="width: 17.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"></th>
+<th class="head"><p>FP8</p></th>
+<th class="head"><p>IQ2_S</p></th>
+<th class="head"><p>IQ2_S + NVFP4</p></th>
+<th class="head"><p>IQ2_S + QAD 300</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>HLE accuracy</p></td>
+<td><p>33.5</p></td>
+<td><p>31.4</p></td>
+<td><p>32.5</p></td>
+<td><p>28.1</p></td>
+</tr>
+<tr class="row-odd"><td><p>AA-Omniscience accuracy</p></td>
+<td><p>31.8</p></td>
+<td><p>29.2</p></td>
+<td><p>29.6</p></td>
+<td><p>28.5</p></td>
+</tr>
+<tr class="row-even"><td><p>AA-Omniscience hallucination rate</p></td>
+<td><p>27.7%</p></td>
+<td><p>32.9%</p></td>
+<td><p>31.3%</p></td>
+<td><p>35.7%</p></td>
+</tr>
+<tr class="row-odd"><td><p>RULER-1M</p></td>
+<td><p>93.5</p></td>
+<td><p>90.5</p></td>
+<td><p>89.1</p></td>
+<td><p>88.0</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p><strong>Both recipes lose ~2.2-2.6 points of AA-Omniscience accuracy and hallucinate 4-5 points more
+often.</strong> This is the one place IQ2_S + NVFP4 does not reach FP8: NVFP4 on the down projections
+helps HLE (−1.0 vs −2.1) but barely moves AA-Omniscience. The hallucination rate is
+incorrect / (incorrect + abstained), so a rising rate means the model guesses where FP8 declined
+to answer.</p>
+<p><strong>QAD with the current data blend did not recover recall.</strong> Against the IQ2_S model it started
+from, QAD 300 lost a further 3.2 points on HLE (~2.3 standard errors) and traded abstentions for
+wrong answers on AA-Omniscience. It also did not recover RULER-1M. The blend is general chat SFT
+chosen for Qwen3.6, with no data aimed at stored facts, abstention or million-token contexts, so it
+may not be the best blend for GLM-5.3-Flash. We saw the same calibration loss after QAD on
+Qwen3.6-35B-A3B with the same blend.</p>
+</section>
+<section id="what-qad-did">
+<h2>What QAD Did<a class="headerlink" href="#what-qad-did" title="Link to this heading">#</a></h2>
+<p>QAD trained the IQ2_S model against the FP8 teacher on Nemotron-Cascade-2 chat-SFT data, the
+<a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B" rel="noopener noreferrer" target="_blank">Qwen3.6 tutorial’s</a>
+blend re-tokenized for GLM. It packed conversation pairs into 32K sequences with loss on assistant
+tokens only, 3,840 conversations (~16.8M tokens) per step, top-4096 logit KL, and learning rate
+1e-5 → 1e-6 over a 500-iteration cosine schedule.</p>
+<p><strong>Where QAD helps.</strong> It fixes the runaway generations that cost IQ2_S most of its long-context
+accuracy, and shortens answers elsewhere:</p>
+<a class="reference internal image-reference" href="../_images/glm53-flash-iq2-qad-effects.png"><img alt="Runaway rates on AA-LCR and SciCode, and AA-Omniscience answer length, for IQ2_S, IQ2_S + QAD 300 and FP8" src="../_images/glm53-flash-iq2-qad-effects.png" style="width: 100%;" />
+</a>
+<p><strong>Figure 4. Where QAD helps.</strong> QAD 300 matches FP8’s AA-LCR runaway rate, cuts SciCode’s by 30%
+and shortens AA-Omniscience answers. With that, AA-LCR rises from 70.0 ± 1.9 to 74.0 ± 1.5
+(FP8 74.9 ± 0.9) and the six-benchmark mean from −2.3 ± 0.4 to −1.4 ± 0.4 points.</p>
+<p><strong>What the current blend does not fix.</strong> On the six-benchmark mean, QAD 300 gains 0.8 ± 0.4 over
+IQ2_S, just under two standard errors, and most of that comes in the first 100 iterations:</p>
+<a class="reference internal image-reference" href="../_images/glm53-flash-iq2-qad-trend.png"><img alt="Mean score difference from FP8 and SciCode with presence_penalty across QAD iterations" src="../_images/glm53-flash-iq2-qad-trend.png" style="width: 100%;" />
+</a>
+<p><strong>Figure 5. QAD progress, as points below FP8.</strong> Solid: mean of the six benchmarks. Dashed: SciCode
+with <code class="docutils literal notranslate"><span class="pre">presence_penalty</span></code> 1.5, against the penalized FP8. Bars are ±1 combined sem.</p>
+<p>After iteration 100 the mean moved by less than the ~0.5-point noise. With the decode-time
+penalty in place, every QAD checkpoint trails the PTQ model on SciCode, so on SciCode QAD’s gain
+comes from fewer runaways, which the penalty also removes. Knowledge recall and RULER-1M did not
+recover (see above). On AA-LCR, where the penalty was not tested, QAD’s recovery stands on its
+own. The next step for QAD is the data: a blend with knowledge-heavy, abstention and long-context
+samples, or responses generated by GLM-5.3-Flash itself, instead of a general chat-SFT mix.</p>
+<p>Figure 6 follows each benchmark through the QAD run.</p>
+<a class="reference internal image-reference" href="../_images/glm53-flash-iq2-results.png"><img alt="Accuracy of the FP8 baseline, the IQ2_S + NVFP4 PTQ model, and the IQ2_S PTQ model through 300 QAD iterations, for six benchmarks" src="../_images/glm53-flash-iq2-results.png" style="width: 100%;" />
+</a>
+<p><strong>Figure 6. GLM-5.3-Flash accuracy for both recipes and the QAD run.</strong> Each panel follows the IQ2_S
+model (x=0) through 300 QAD iterations. The dashed line is the FP8 baseline, the dash-dot line is
+IQ2_S + NVFP4 (no QAD) and the dotted line is IQ2_S. Bars are ±1 sem.</p>
+</section>
+<section id="what-it-costs">
+<h2>What It Costs<a class="headerlink" href="#what-it-costs" title="Link to this heading">#</a></h2>
+<p>On GB300 NVL72:</p>
+<ul class="simple">
+<li><p><strong>PTQ:</strong> 16 minutes (IQ2_S) to 26 minutes (IQ2_S + NVFP4) on 4 nodes (16 GPUs, EP16),
+including GPTQ on 256 long-reasoning calibration samples of up to 32K tokens.</p></li>
+<li><p><strong>Fake-quant export:</strong> 6 minutes on the same nodes.</p></li>
+<li><p><strong>QAD:</strong> 32 nodes (128 GPUs; EP32, CP4) at ~400 s per iteration once warm, so the 300 iterations
+took about 35 hours of training, or ~4,500 GPU-hours, not counting restarts.</p></li>
+</ul>
+<a class="reference internal image-reference" href="../_images/glm53-flash-iq2-cost.png"><img alt="GPU-hours for fake-quant export, the two PTQ recipes, and 300 QAD iterations, on a log scale" src="../_images/glm53-flash-iq2-cost.png" style="width: 100%;" />
+</a>
+<p><strong>Figure 7. Compute per step, in GB300 GPU-hours (log scale).</strong></p>
+</section>
+<section id="reproducing">
+<h2>Reproducing<a class="headerlink" href="#reproducing" title="Link to this heading">#</a></h2>
+<p>The steps follow the <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B" rel="noopener noreferrer" target="_blank">Qwen3.6-35B-A3B tutorial</a>:
+PTQ with <code class="docutils literal notranslate"><span class="pre">examples/megatron_bridge/quantize.py</span></code>, QAD with <code class="docutils literal notranslate"><span class="pre">distill.py</span></code>, export with
+<code class="docutils literal notranslate"><span class="pre">export_quantized_megatron_to_hf.py</span></code>, and evaluation with NeMo Evaluator. Only the differences for
+GLM-5.3-Flash are listed here.</p>
+<p>GLM-5.3-Flash support in Megatron-Bridge and the recipes are still landing in
+<a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/pull/2539" rel="noopener noreferrer" target="_blank">Model Optimizer #2539</a> and
+<a class="reference external" href="https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/6044" rel="noopener noreferrer" target="_blank">Megatron-Bridge #6044</a>.</p>
+<p><strong>PTQ (IQ2_S; for IQ2_S + NVFP4 use</strong> <code class="docutils literal notranslate"><span class="pre">iq2_s_experts-nvfp4_down-q8_0_shared_dense-gptq</span></code> <strong>):</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">torchrun<span class="w"> </span>--nproc_per_node<span class="w"> </span><span class="m">4</span><span class="w"> </span>examples/megatron_bridge/quantize.py<span class="w"> </span>--skip_generate<span class="w"> </span>--no_moe_grouped_gemm<span class="w"> </span><span class="se">\</span>
+</span><span data-line="2"><span class="w">    </span>--hf_model_name_or_path<span class="w"> </span>&lt;glm-5.3-flash-fp8&gt;<span class="w"> </span><span class="se">\</span>
+</span><span data-line="3"><span class="w">    </span>--recipe<span class="w"> </span>models/zai-org/GLM-5.3-Flash-BF16/ptq/iq2_s_experts-q8_0_shared_dense-gptq<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">    </span>--tp_size<span class="w"> </span><span class="m">1</span><span class="w"> </span>--ep_size<span class="w"> </span><span class="m">16</span><span class="w"> </span>--pp_size<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="5"><span class="w">    </span>--calib_dataset_name<span class="w"> </span>&lt;long_reasoning_256.jsonl&gt;<span class="w"> </span>--calib_num_samples<span class="w"> </span><span class="m">256</span><span class="w"> </span>--calib_batch_size<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="6"><span class="w">    </span>--seq_length<span class="w"> </span><span class="m">32768</span><span class="w"> </span>--dsa_kernel_backend<span class="w"> </span>cudnn<span class="w"> </span><span class="se">\</span>
+</span><span data-line="7"><span class="w">    </span>--export_megatron_path<span class="w"> </span>&lt;ptq_ckpt&gt;
+</span></pre></div>
+</div>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">--no_moe_grouped_gemm</span></code>: GPTQ and the GGML formats need per-expert linears.</p></li>
+<li><p><strong>Long calibration samples matter.</strong> 256 long-reasoning traces at 32K tokens beat 512 4K-token
+samples. GPQA went from 86.7 to 89.8 and SciCode from 41.1 to 47.2, with fewer runaway
+generations.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--dsa_kernel_backend</span> <span class="pre">cudnn</span></code>: the unfused sparse-attention fallback builds dense <code class="docutils literal notranslate"><span class="pre">[seq,</span> <span class="pre">seq]</span></code>
+scores and does not fit at 32K.</p></li>
+</ul>
+<p><strong>Export for evaluation</strong> (vLLM has no IQ2 kernels):</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">torchrun<span class="w"> </span>--nproc_per_node<span class="w"> </span><span class="m">4</span><span class="w"> </span>examples/megatron_bridge/export_quantized_megatron_to_hf.py<span class="w"> </span><span class="se">\</span>
+</span><span data-line="2"><span class="w">    </span>--no_moe_grouped_gemm<span class="w"> </span>--vllm_fakequant_export<span class="w"> </span>--ep_size<span class="w"> </span><span class="m">16</span><span class="w"> </span><span class="se">\</span>
+</span><span data-line="3"><span class="w">    </span>--hf_model_name_or_path<span class="w"> </span>&lt;glm-5.3-flash-fp8&gt;<span class="w"> </span>--megatron_path<span class="w"> </span>&lt;ptq_ckpt&gt;<span class="w"> </span><span class="se">\</span>
+</span><span data-line="4"><span class="w">    </span>--export_unified_hf_path<span class="w"> </span>&lt;hf_fakequant&gt;
+</span></pre></div>
+</div>
+<p><strong>Evaluation:</strong> serve with vLLM ≥ 0.31, or 0.30 with <code class="docutils literal notranslate"><span class="pre">--no-enable-prefix-caching</span></code> (<code class="docutils literal notranslate"><span class="pre">glm47</span></code> reasoning
+and tool parsers, TP4), and use the model card’s sampling (temperature 1.0, top_p 0.95; top_p 1.0
+for tau2-bench) with <code class="docutils literal notranslate"><span class="pre">reasoning_effort:</span> <span class="pre">max</span></code> and a 131K generation budget. GLM reasons long: a
+32K budget leaves about half of GPQA answers unfinished.</p>
+<p><strong>QAD, if you try it</strong> (differences from the Qwen3.6 command):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">--sft</span> <span class="pre">--sft_hf_dataset</span> <span class="pre">&lt;pairs.jsonl&gt;</span> <span class="pre">--sft_in_batch_packing</span> <span class="pre">--mbs</span> <span class="pre">2</span> <span class="pre">--moe_aux_loss_coeff</span> <span class="pre">0</span></code>:
+with EP &gt; 1, Megatron-Bridge pads every conversation to <code class="docutils literal notranslate"><span class="pre">--seq_length</span></code>. The MoE load-balancing
+loss on that padding drove the embedding gradient to Inf.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--no_moe_grouped_gemm</span> <span class="pre">--freeze_mtp</span> <span class="pre">--ep_size</span> <span class="pre">32</span> <span class="pre">--cp_size</span> <span class="pre">4</span> <span class="pre">--recompute_granularity</span> <span class="pre">full</span>
+<span class="pre">--recompute_method</span> <span class="pre">uniform</span> <span class="pre">--recompute_num_layers</span> <span class="pre">2</span> <span class="pre">--dsa_kernel_backend</span> <span class="pre">cudnn</span></code>, plus
+<code class="docutils literal notranslate"><span class="pre">NCCL_NVLS_ENABLE=0</span></code> to leave memory for NCCL buffers.</p></li>
+</ul>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2023-2025, NVIDIA Corporation</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials"></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script src="../_static/shibuya.js?v=50760d75"></script>
+      <script src="../_static/announcements.js?v=d94b986f"></script></body>
+</html>

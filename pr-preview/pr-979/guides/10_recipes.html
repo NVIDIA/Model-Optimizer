@@ -1,0 +1,664 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Recipes &mdash; Model Optimizer 0.0.1.dev1+gfefd2a1a7</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Quantization" href="1_quantization.html" />
+    <link rel="prev" title="Support Matrix" href="0_support_matrix.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Recipes</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#motivation">Motivation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#design-overview">Design overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#recipe-format">Recipe format</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#single-file-format">Single-file format</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#directory-format">Directory format</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#metadata-section">Metadata section</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#type-specific-configuration-sections">Type-specific configuration sections</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#ptq-recipe-type-ptq">PTQ (<code class="docutils literal notranslate"><span class="pre">recipe_type:</span> <span class="pre">ptq</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#exmy-floating-point-notation">ExMy floating-point notation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#built-in-recipes">Built-in recipes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#ptq-recipes">PTQ recipes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#model-specific-recipes">Model-specific recipes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#loading-recipes">Loading recipes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#python-api">Python API</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#command-line-usage">Command-line usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#loading-standalone-configs">Loading standalone configs</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#path-resolution">Path resolution</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#writing-a-custom-recipe">Writing a custom recipe</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#recipe-repository-layout">Recipe repository layout</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#recipe-data-model">Recipe data model</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#future-directions">Future directions</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Recipes</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/guides/10_recipes.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="recipes">
+<span id="id1"></span><h1>Recipes<a class="headerlink" href="#recipes" title="Link to this heading"></a></h1>
+<p>A <strong>recipe</strong> is a declarative specification that fully describes how to optimize a model.
+A recipe can be a single YAML file or a directory containing YAML configs and other files
+that together define a model optimization workflow.
+Recipes decouple optimization settings from Python code, enabling reuse, sharing, version
+control, and reproducibility.  Instead of editing Python scripts to change optimization
+parameters, you author (or select) a recipe and pass it to the ModelOpt tooling.
+While the examples below focus on PTQ (the first supported recipe type), the recipe
+system is designed to support any optimization technique.</p>
+<nav class="contents local" id="on-this-page">
+<p class="topic-title">On this page</p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#motivation" id="id2">Motivation</a></p></li>
+<li><p><a class="reference internal" href="#design-overview" id="id3">Design overview</a></p></li>
+<li><p><a class="reference internal" href="#recipe-format" id="id4">Recipe format</a></p>
+<ul>
+<li><p><a class="reference internal" href="#single-file-format" id="id5">Single-file format</a></p></li>
+<li><p><a class="reference internal" href="#directory-format" id="id6">Directory format</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#metadata-section" id="id7">Metadata section</a></p></li>
+<li><p><a class="reference internal" href="#type-specific-configuration-sections" id="id8">Type-specific configuration sections</a></p>
+<ul>
+<li><p><a class="reference internal" href="#ptq-recipe-type-ptq" id="id9">PTQ (<code class="docutils literal notranslate"><span class="pre">recipe_type:</span> <span class="pre">ptq</span></code>)</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#exmy-floating-point-notation" id="id10">ExMy floating-point notation</a></p></li>
+<li><p><a class="reference internal" href="#built-in-recipes" id="id11">Built-in recipes</a></p>
+<ul>
+<li><p><a class="reference internal" href="#ptq-recipes" id="id12">PTQ recipes</a></p></li>
+<li><p><a class="reference internal" href="#model-specific-recipes" id="id13">Model-specific recipes</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#loading-recipes" id="id14">Loading recipes</a></p>
+<ul>
+<li><p><a class="reference internal" href="#python-api" id="id15">Python API</a></p></li>
+<li><p><a class="reference internal" href="#command-line-usage" id="id16">Command-line usage</a></p></li>
+<li><p><a class="reference internal" href="#loading-standalone-configs" id="id17">Loading standalone configs</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#path-resolution" id="id18">Path resolution</a></p></li>
+<li><p><a class="reference internal" href="#writing-a-custom-recipe" id="id19">Writing a custom recipe</a></p></li>
+<li><p><a class="reference internal" href="#recipe-repository-layout" id="id20">Recipe repository layout</a></p></li>
+<li><p><a class="reference internal" href="#recipe-data-model" id="id21">Recipe data model</a></p></li>
+<li><p><a class="reference internal" href="#future-directions" id="id22">Future directions</a></p></li>
+</ul>
+</nav>
+<section id="motivation">
+<h2><a class="toc-backref" href="#id2" role="doc-backlink">Motivation</a><a class="headerlink" href="#motivation" title="Link to this heading"></a></h2>
+<p>Without recipes, optimization settings are scattered across command-line arguments, Python
+constants, and ad-hoc code edits.  This makes it difficult to:</p>
+<ul class="simple">
+<li><p><strong>Reproduce</strong> a published result – the exact configuration is buried in script arguments.</p></li>
+<li><p><strong>Share</strong> a configuration – there is no single artifact to hand off.</p></li>
+<li><p><strong>Version-control</strong> changes – diffs are mixed in with unrelated code changes.</p></li>
+<li><p><strong>Onboard new models</strong> – engineers must read source code to discover which
+settings to tweak.</p></li>
+</ul>
+<p>Recipes solve these problems by capturing <strong>all</strong> the configuration needed to optimize a
+model in a single, portable artifact – either a YAML file or a directory of files.</p>
+</section>
+<section id="design-overview">
+<h2><a class="toc-backref" href="#id3" role="doc-backlink">Design overview</a><a class="headerlink" href="#design-overview" title="Link to this heading"></a></h2>
+<p>The recipe system is part of the <code class="xref py py-mod docutils literal notranslate"><span class="pre">modelopt.recipe</span></code> package and consists of three
+layers:</p>
+<ol class="arabic simple">
+<li><p><strong>Recipe sources</strong> – YAML files or directories stored in the <code class="docutils literal notranslate"><span class="pre">modelopt_recipes/</span></code>
+directory (shipped with the package) or on the user’s filesystem.</p></li>
+<li><p><strong>Config loader</strong> – <code class="xref py py-func docutils literal notranslate"><span class="pre">load_config()</span></code> reads YAML files, resolves
+paths, and performs automatic <code class="docutils literal notranslate"><span class="pre">ExMy</span></code> floating-point notation conversion.</p></li>
+<li><p><strong>Recipe loader</strong> – <code class="xref py py-func docutils literal notranslate"><span class="pre">load_recipe()</span></code> validates the loaded
+configuration against Pydantic models and returns a typed recipe object ready for use.</p></li>
+</ol>
+</section>
+<section id="recipe-format">
+<h2><a class="toc-backref" href="#id4" role="doc-backlink">Recipe format</a><a class="headerlink" href="#recipe-format" title="Link to this heading"></a></h2>
+<p>A recipe contains two top-level sections: <code class="docutils literal notranslate"><span class="pre">metadata</span></code> and a type-specific
+configuration section (for example, <code class="docutils literal notranslate"><span class="pre">quantize</span></code> for PTQ recipes).  These can live
+in a single YAML file or be split across files in a directory.</p>
+<section id="single-file-format">
+<h3><a class="toc-backref" href="#id5" role="doc-backlink">Single-file format</a><a class="headerlink" href="#single-file-format" title="Link to this heading"></a></h3>
+<p>The simplest form is a single <code class="docutils literal notranslate"><span class="pre">.yml</span></code> or <code class="docutils literal notranslate"><span class="pre">.yaml</span></code> file.  Here is a PTQ example:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="c1"># modelopt_recipes/general/ptq/fp8_default-fp8_kv.yml</span>
+
+<span class="nt">metadata</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">recipe_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ptq</span>
+<span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">FP8 per-tensor weight and activation (W8A8), FP8 KV cache, max calibration.</span>
+
+<span class="nt">quantize</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">algorithm</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">max</span>
+<span class="w">  </span><span class="nt">quant_cfg</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">quantizer_name</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;*&#39;</span>
+<span class="w">      </span><span class="nt">enable</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">quantizer_name</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;*input_quantizer&#39;</span>
+<span class="w">      </span><span class="nt">cfg</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">num_bits</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">e4m3</span>
+<span class="w">        </span><span class="nt">axis</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">quantizer_name</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;*weight_quantizer&#39;</span>
+<span class="w">      </span><span class="nt">cfg</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">num_bits</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">e4m3</span>
+<span class="w">        </span><span class="nt">axis</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">quantizer_name</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;*[kv]_bmm_quantizer&#39;</span>
+<span class="w">      </span><span class="nt">enable</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">      </span><span class="nt">cfg</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">num_bits</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">e4m3</span>
+<span class="w">    </span><span class="c1"># ... standard exclusions omitted for brevity</span>
+</pre></div>
+</div>
+</section>
+<section id="directory-format">
+<h3><a class="toc-backref" href="#id6" role="doc-backlink">Directory format</a><a class="headerlink" href="#directory-format" title="Link to this heading"></a></h3>
+<p>For larger recipes or when you want to keep metadata separate from the
+optimization configuration, use a directory with multiple files.  Here is a PTQ
+example:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>my_recipe/
+  recipe.yml      # metadata section
+  quantize.yml    # quantize section (quant_cfg + algorithm)
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">recipe.yml</span></code>:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">metadata</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">recipe_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ptq</span>
+<span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">My custom NVFP4 recipe.</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">quantize.yml</span></code>:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">algorithm</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">max</span>
+<span class="nt">quant_cfg</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">quantizer_name</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;*&#39;</span>
+<span class="w">    </span><span class="nt">enable</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">quantizer_name</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;*weight_quantizer&#39;</span>
+<span class="w">    </span><span class="nt">cfg</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">num_bits</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">e2m1</span>
+<span class="w">      </span><span class="nt">block_sizes</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">-1</span><span class="p">:</span><span class="w"> </span><span class="nv">16</span><span class="p p-Indicator">,</span><span class="nt"> type</span><span class="p">:</span><span class="w"> </span><span class="nv">dynamic</span><span class="p p-Indicator">,</span><span class="nt"> scale_bits</span><span class="p">:</span><span class="w"> </span><span class="nv">e4m3</span><span class="p p-Indicator">}</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">quantizer_name</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;*input_quantizer&#39;</span>
+<span class="w">    </span><span class="nt">cfg</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">num_bits</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">e4m3</span>
+<span class="w">      </span><span class="nt">axis</span><span class="p">:</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="metadata-section">
+<h2><a class="toc-backref" href="#id7" role="doc-backlink">Metadata section</a><a class="headerlink" href="#metadata-section" title="Link to this heading"></a></h2>
+<p>Every recipe must contain a <code class="docutils literal notranslate"><span class="pre">metadata</span></code> mapping with at least a <code class="docutils literal notranslate"><span class="pre">recipe_type</span></code> field:</p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 20.0%" />
+<col style="width: 15.0%" />
+<col style="width: 65.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Required</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">recipe_type</span></code></p></td>
+<td><p>Yes</p></td>
+<td><p>The optimization category.  Determines which configuration sections are
+expected (e.g., <code class="docutils literal notranslate"><span class="pre">&quot;ptq&quot;</span></code> expects a <code class="docutils literal notranslate"><span class="pre">quantize</span></code> section).  See
+<code class="xref py py-class docutils literal notranslate"><span class="pre">RecipeType</span></code> for supported values.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">description</span></code></p></td>
+<td><p>No</p></td>
+<td><p>A human-readable summary of what the recipe does.</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="type-specific-configuration-sections">
+<h2><a class="toc-backref" href="#id8" role="doc-backlink">Type-specific configuration sections</a><a class="headerlink" href="#type-specific-configuration-sections" title="Link to this heading"></a></h2>
+<p>Each recipe type defines its own configuration section.  The section name and
+schema depend on the <code class="docutils literal notranslate"><span class="pre">recipe_type</span></code> value in the metadata.</p>
+<section id="ptq-recipe-type-ptq">
+<h3><a class="toc-backref" href="#id9" role="doc-backlink">PTQ (<code class="docutils literal notranslate"><span class="pre">recipe_type:</span> <span class="pre">ptq</span></code>)</a><a class="headerlink" href="#ptq-recipe-type-ptq" title="Link to this heading"></a></h3>
+<p>PTQ recipes contain a <code class="docutils literal notranslate"><span class="pre">quantize</span></code> mapping with:</p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 20.0%" />
+<col style="width: 15.0%" />
+<col style="width: 65.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Required</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code></p></td>
+<td><p>Yes</p></td>
+<td><p>An ordered list of <a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a>
+dicts.  See <a class="reference internal" href="_quant_cfg.html#quant-cfg"><span class="std std-ref">Quantization Configuration (quant_cfg)</span></a> for the full specification of entries, ordering
+semantics, and atomicity rules.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">algorithm</span></code></p></td>
+<td><p>No</p></td>
+<td><p>The calibration algorithm: <code class="docutils literal notranslate"><span class="pre">&quot;max&quot;</span></code> (default), <code class="docutils literal notranslate"><span class="pre">&quot;mse&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;smoothquant&quot;</span></code>,
+<code class="docutils literal notranslate"><span class="pre">&quot;awq_lite&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;awq_full&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;awq_clip&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;gptq&quot;</span></code>, or <code class="docutils literal notranslate"><span class="pre">null</span></code> for
+formats that need no calibration (e.g. MX formats).</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+</section>
+<section id="exmy-floating-point-notation">
+<h2><a class="toc-backref" href="#id10" role="doc-backlink">ExMy floating-point notation</a><a class="headerlink" href="#exmy-floating-point-notation" title="Link to this heading"></a></h2>
+<p>The config loader supports a convenient shorthand for floating-point bit formats.
+This is primarily used in PTQ recipes for <code class="docutils literal notranslate"><span class="pre">num_bits</span></code> and <code class="docutils literal notranslate"><span class="pre">scale_bits</span></code> fields,
+but applies to any YAML value loaded through <code class="xref py py-func docutils literal notranslate"><span class="pre">load_config()</span></code>.
+Instead of writing a Python tuple, you write the format name directly:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">num_bits</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">e4m3</span><span class="w">       </span><span class="c1"># automatically converted to (4, 3)</span>
+<span class="nt">scale_bits</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">e8m0</span><span class="w">     </span><span class="c1"># automatically converted to (8, 0)</span>
+</pre></div>
+</div>
+<p>The notation is case-insensitive (<code class="docutils literal notranslate"><span class="pre">E4M3</span></code>, <code class="docutils literal notranslate"><span class="pre">e4m3</span></code>, <code class="docutils literal notranslate"><span class="pre">E4m3</span></code> all work).  The
+conversion is performed by <code class="xref py py-func docutils literal notranslate"><span class="pre">load_config()</span></code> when loading any
+YAML file, so it works in both recipe files and standalone config files.</p>
+<p>Common formats:</p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 15.0%" />
+<col style="width: 15.0%" />
+<col style="width: 70.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Notation</p></th>
+<th class="head"><p>Tuple</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">e4m3</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">(4,</span> <span class="pre">3)</span></code></p></td>
+<td><p>FP8 E4M3 – standard FP8 weight/activation format</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">e5m2</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">(5,</span> <span class="pre">2)</span></code></p></td>
+<td><p>FP8 E5M2 – wider dynamic range, used for gradients</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">e2m1</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">(2,</span> <span class="pre">1)</span></code></p></td>
+<td><p>FP4 E2M1 – NVFP4 weight format</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">e8m0</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">(8,</span> <span class="pre">0)</span></code></p></td>
+<td><p>E8M0 – MX block scaling format</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="built-in-recipes">
+<h2><a class="toc-backref" href="#id11" role="doc-backlink">Built-in recipes</a><a class="headerlink" href="#built-in-recipes" title="Link to this heading"></a></h2>
+<p>ModelOpt ships a library of built-in recipes under the <code class="docutils literal notranslate"><span class="pre">modelopt_recipes/</span></code> package.
+These are bundled with the Python distribution and can be referenced by their relative
+path (without the <code class="docutils literal notranslate"><span class="pre">modelopt_recipes/</span></code> prefix).</p>
+<section id="ptq-recipes">
+<h3><a class="toc-backref" href="#id12" role="doc-backlink">PTQ recipes</a><a class="headerlink" href="#ptq-recipes" title="Link to this heading"></a></h3>
+<p>General PTQ recipes are model-agnostic and apply to any supported architecture:</p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 40.0%" />
+<col style="width: 60.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Recipe path</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">general/ptq/fp8_default-fp8_kv</span></code></p></td>
+<td><p>FP8 per-tensor W8A8, FP8 KV cache, max calibration</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">general/ptq/nvfp4_default-fp8_kv</span></code></p></td>
+<td><p>NVFP4 W4A4 with FP8 KV cache, max calibration</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">general/ptq/nvfp4_mlp_only-fp8_kv</span></code></p></td>
+<td><p>NVFP4 for MLP layers only, FP8 KV cache</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">general/ptq/nvfp4_experts_only-fp8_kv</span></code></p></td>
+<td><p>NVFP4 for MoE expert layers only, FP8 KV cache</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">general/ptq/nvfp4_omlp_only-fp8_kv</span></code></p></td>
+<td><p>NVFP4 for output projection + MLP layers, FP8 KV cache</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="model-specific-recipes">
+<h3><a class="toc-backref" href="#id13" role="doc-backlink">Model-specific recipes</a><a class="headerlink" href="#model-specific-recipes" title="Link to this heading"></a></h3>
+<p>Model-specific recipes are tuned for a particular architecture and live under
+<code class="docutils literal notranslate"><span class="pre">models/&lt;model_name&gt;/</span></code>:</p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 40.0%" />
+<col style="width: 60.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Recipe path</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">models/Step3.5-Flash/nvfp4-mlp-only</span></code></p></td>
+<td><p>NVFP4 MLP-only for Step 3.5 Flash MoE model</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+</section>
+<section id="loading-recipes">
+<h2><a class="toc-backref" href="#id14" role="doc-backlink">Loading recipes</a><a class="headerlink" href="#loading-recipes" title="Link to this heading"></a></h2>
+<section id="python-api">
+<h3><a class="toc-backref" href="#id15" role="doc-backlink">Python API</a><a class="headerlink" href="#python-api" title="Link to this heading"></a></h3>
+<p>Use <code class="xref py py-func docutils literal notranslate"><span class="pre">load_recipe()</span></code> to load a recipe.  The path is resolved
+against the built-in library first, then the filesystem.  The returned object’s
+type depends on the <code class="docutils literal notranslate"><span class="pre">recipe_type</span></code> in the metadata:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.recipe</span><span class="w"> </span><span class="kn">import</span> <span class="n">load_recipe</span>
+
+<span class="c1"># Load a built-in recipe by relative path (suffix optional)</span>
+<span class="n">recipe</span> <span class="o">=</span> <span class="n">load_recipe</span><span class="p">(</span><span class="s2">&quot;general/ptq/fp8_default-fp8_kv&quot;</span><span class="p">)</span>
+
+<span class="c1"># For PTQ recipes, the quantize dict can be passed directly to mtq.quantize()</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.quantization</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtq</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">quantize</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">recipe</span><span class="o">.</span><span class="n">quantize</span><span class="p">,</span> <span class="n">forward_loop</span><span class="p">)</span>
+</pre></div>
+</div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Load a custom recipe from the filesystem (file or directory)</span>
+<span class="n">recipe</span> <span class="o">=</span> <span class="n">load_recipe</span><span class="p">(</span><span class="s2">&quot;/path/to/my_custom_recipe.yml&quot;</span><span class="p">)</span>
+<span class="c1"># or: recipe = load_recipe(&quot;/path/to/my_recipe_dir/&quot;)</span>
+</pre></div>
+</div>
+</section>
+<section id="command-line-usage">
+<h3><a class="toc-backref" href="#id16" role="doc-backlink">Command-line usage</a><a class="headerlink" href="#command-line-usage" title="Link to this heading"></a></h3>
+<p>Some example scripts accept a <code class="docutils literal notranslate"><span class="pre">--recipe</span></code> flag.  For instance, the PTQ example:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>examples/llm_ptq/hf_ptq.py<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--model<span class="w"> </span>Qwen/Qwen3-8B<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--recipe<span class="w"> </span>general/ptq/fp8_default-fp8_kv<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--export_path<span class="w"> </span>build/fp8<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--calib_size<span class="w"> </span><span class="m">512</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--export_fmt<span class="w"> </span>hf
+</pre></div>
+</div>
+<p>When <code class="docutils literal notranslate"><span class="pre">--recipe</span></code> is provided, the script loads the recipe and uses its configuration
+directly, bypassing format-specific flags (e.g., <code class="docutils literal notranslate"><span class="pre">--qformat</span></code> / <code class="docutils literal notranslate"><span class="pre">--kv_cache_qformat</span></code>
+for PTQ).</p>
+</section>
+<section id="loading-standalone-configs">
+<h3><a class="toc-backref" href="#id17" role="doc-backlink">Loading standalone configs</a><a class="headerlink" href="#loading-standalone-configs" title="Link to this heading"></a></h3>
+<p><code class="xref py py-func docutils literal notranslate"><span class="pre">load_config()</span></code> loads arbitrary YAML config files with
+automatic <code class="docutils literal notranslate"><span class="pre">ExMy</span></code> conversion and built-in path resolution.  This is useful
+for loading shared configuration fragments:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.recipe</span><span class="w"> </span><span class="kn">import</span> <span class="n">load_config</span>
+
+<span class="n">cfg</span> <span class="o">=</span> <span class="n">load_config</span><span class="p">(</span><span class="s2">&quot;configs/some_shared_config&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="path-resolution">
+<h2><a class="toc-backref" href="#id18" role="doc-backlink">Path resolution</a><a class="headerlink" href="#path-resolution" title="Link to this heading"></a></h2>
+<p>Both <code class="xref py py-func docutils literal notranslate"><span class="pre">load_recipe()</span></code> and <code class="xref py py-func docutils literal notranslate"><span class="pre">load_config()</span></code>
+resolve paths using the same strategy:</p>
+<ol class="arabic simple">
+<li><p>If the path is absolute, use it directly.</p></li>
+<li><p>If relative, check the <strong>built-in recipes library</strong> first
+(<code class="docutils literal notranslate"><span class="pre">modelopt_recipes/</span></code>), probing <code class="docutils literal notranslate"><span class="pre">.yml</span></code> and <code class="docutils literal notranslate"><span class="pre">.yaml</span></code> suffixes as well as
+directories.</p></li>
+<li><p>Then check the <strong>filesystem</strong>, probing the same suffixes and directories.</p></li>
+</ol>
+<p>This means built-in recipes can be referenced without any prefix:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># These are all equivalent:</span>
+<span class="n">load_recipe</span><span class="p">(</span><span class="s2">&quot;general/ptq/fp8_default-fp8_kv&quot;</span><span class="p">)</span>
+<span class="n">load_recipe</span><span class="p">(</span><span class="s2">&quot;general/ptq/fp8_default-fp8_kv.yml&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="writing-a-custom-recipe">
+<h2><a class="toc-backref" href="#id19" role="doc-backlink">Writing a custom recipe</a><a class="headerlink" href="#writing-a-custom-recipe" title="Link to this heading"></a></h2>
+<p>To create a custom recipe:</p>
+<ol class="arabic simple">
+<li><p>Start from an existing recipe that is close to your target configuration.</p></li>
+<li><p>Copy it and modify the type-specific configuration as needed (for PTQ recipes,
+see <a class="reference internal" href="_quant_cfg.html#quant-cfg"><span class="std std-ref">Quantization Configuration (quant_cfg)</span></a> for <code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> entry format details).</p></li>
+<li><p>Update the <code class="docutils literal notranslate"><span class="pre">metadata.description</span></code> to describe your changes.</p></li>
+<li><p>Save the file (or directory) and pass its path to <code class="docutils literal notranslate"><span class="pre">load_recipe()</span></code> or <code class="docutils literal notranslate"><span class="pre">--recipe</span></code>.</p></li>
+</ol>
+<p>Example – creating a custom PTQ recipe (INT8 per-channel):</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="c1"># my_int8_recipe.yml</span>
+<span class="nt">metadata</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">recipe_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ptq</span>
+<span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">INT8 per-channel weight, per-tensor activation.</span>
+
+<span class="nt">quantize</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">algorithm</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">max</span>
+<span class="w">  </span><span class="nt">quant_cfg</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">quantizer_name</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;*&#39;</span>
+<span class="w">      </span><span class="nt">enable</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">quantizer_name</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;*weight_quantizer&#39;</span>
+<span class="w">      </span><span class="nt">cfg</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">num_bits</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8</span>
+<span class="w">        </span><span class="nt">axis</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">quantizer_name</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;*input_quantizer&#39;</span>
+<span class="w">      </span><span class="nt">cfg</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">num_bits</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8</span>
+<span class="w">        </span><span class="nt">axis</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">quantizer_name</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;*lm_head*&#39;</span>
+<span class="w">      </span><span class="nt">enable</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">quantizer_name</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;*output_layer*&#39;</span>
+<span class="w">      </span><span class="nt">enable</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</pre></div>
+</div>
+</section>
+<section id="recipe-repository-layout">
+<h2><a class="toc-backref" href="#id20" role="doc-backlink">Recipe repository layout</a><a class="headerlink" href="#recipe-repository-layout" title="Link to this heading"></a></h2>
+<p>The <code class="docutils literal notranslate"><span class="pre">modelopt_recipes/</span></code> package is organized as follows:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>modelopt_recipes/
++-- __init__.py
++-- general/                    # Model-agnostic recipes
+|   +-- ptq/
+|       +-- fp8_default-fp8_kv.yml
+|       +-- nvfp4_default-fp8_kv.yml
+|       +-- nvfp4_mlp_only-fp8_kv.yml
+|       +-- nvfp4_experts_only-fp8_kv.yml
+|       +-- nvfp4_omlp_only-fp8_kv.yml
++-- models/                     # Model-specific recipes
+|   +-- Step3.5-Flash/
+|       +-- nvfp4-mlp-only.yaml
++-- configs/                    # Shared configuration fragments
+</pre></div>
+</div>
+</section>
+<section id="recipe-data-model">
+<h2><a class="toc-backref" href="#id21" role="doc-backlink">Recipe data model</a><a class="headerlink" href="#recipe-data-model" title="Link to this heading"></a></h2>
+<p>Recipes are validated at load time using Pydantic models:</p>
+<dl class="simple">
+<dt><code class="xref py py-class docutils literal notranslate"><span class="pre">ModelOptRecipeBase</span></code></dt><dd><p>Base class for all recipe types.  Contains <code class="docutils literal notranslate"><span class="pre">recipe_type</span></code> and <code class="docutils literal notranslate"><span class="pre">description</span></code>.</p>
+</dd>
+<dt><code class="xref py py-class docutils literal notranslate"><span class="pre">ModelOptPTQRecipe</span></code></dt><dd><p>PTQ-specific recipe.  Adds the <code class="docutils literal notranslate"><span class="pre">quantize</span></code> field (a dict with <code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> and
+<code class="docutils literal notranslate"><span class="pre">algorithm</span></code>).</p>
+</dd>
+<dt><code class="xref py py-class docutils literal notranslate"><span class="pre">RecipeType</span></code></dt><dd><p>Enum of supported recipe types.</p>
+</dd>
+</dl>
+</section>
+<section id="future-directions">
+<h2><a class="toc-backref" href="#id22" role="doc-backlink">Future directions</a><a class="headerlink" href="#future-directions" title="Link to this heading"></a></h2>
+<p>The recipe system is designed to grow:</p>
+<ul class="simple">
+<li><p><strong>QAT recipes</strong> – <code class="docutils literal notranslate"><span class="pre">recipe_type:</span> <span class="pre">qat</span></code> with training hyperparameters, distillation
+settings, and dataset configuration.</p></li>
+<li><p><strong>Sparsity recipes</strong> – structured and unstructured pruning configurations.</p></li>
+<li><p><strong>Speculative decoding recipes</strong> – draft model and vocabulary calibration settings.</p></li>
+<li><p><strong>Composite recipes</strong> – chaining multiple optimization stages
+(e.g., quantize then prune) in a single recipe.</p></li>
+<li><p><strong>Dataset configuration</strong> – standardized <code class="docutils literal notranslate"><span class="pre">dataset</span></code> section for calibration data
+specification.</p></li>
+<li><p><strong>Recipe merging and override utilities</strong> – programmatic tools to compose and
+customize recipes.</p></li>
+<li><p><strong>Unified entry point</strong> – a <code class="docutils literal notranslate"><span class="pre">nv-modelopt</span></code> CLI that accepts <code class="docutils literal notranslate"><span class="pre">--recipe</span></code> as the
+primary configuration mechanism, replacing per-example scripts.</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="0_support_matrix.html" class="btn btn-neutral float-left" title="Support Matrix" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="1_quantization.html" class="btn btn-neutral float-right" title="Quantization" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

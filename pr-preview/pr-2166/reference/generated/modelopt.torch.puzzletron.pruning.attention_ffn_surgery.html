@@ -1,0 +1,519 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>attention_ffn_surgery &mdash; Model Optimizer 0.0.1.dev1+g4d52367ca</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="compact_runtime" href="modelopt.torch.puzzletron.pruning.compact_runtime.html" />
+    <link rel="prev" title="pruning" href="modelopt.torch.puzzletron.pruning.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.fastgen.html">fastgen</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_coverage.html">artifact_coverage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import.html">artifact_import</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import_contract.html">artifact_import_contract</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_inventory.html">artifact_inventory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.benchmarks.html">benchmarks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.bypass_distillation.html">bypass_distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.campaigns.html">campaigns</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.candidates.html">candidates</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.checkpoint_transactions.html">checkpoint_transactions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.depth.html">depth</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.diagnostics.html">diagnostics</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distributed_eval.html">distributed_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.evaluation.html">evaluation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.execution_record.html">execution_record</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.export.html">export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.granularity.html">granularity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.identity.html">identity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.manifest.html">manifest</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.orchestration.html">orchestration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pipeline_config.html">pipeline_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.post_mip.html">post_mip</a></li>
+<li class="toctree-l4 current"><a class="reference internal" href="modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.rpc_eval.html">rpc_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.sampling.html">sampling</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scenarios.html">scenarios</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring_parent.html">scoring_parent</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.security_policy.html">security_policy</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.solution_registry.html">solution_registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stage_runner.html">stage_runner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stages.html">stages</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.puzzletron.html">puzzletron</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+      <li class="breadcrumb-item active">attention_ffn_surgery</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.puzzletron.pruning.attention_ffn_surgery.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="attention-ffn-surgery">
+<h1>attention_ffn_surgery<a class="headerlink" href="#attention-ffn-surgery" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.puzzletron.pruning.attention_ffn_surgery">Model-agnostic surgery primitives for FFN-channel and attention-head pruning.</p>
+<p>These are <strong>pure tensor functions</strong> — no model, descriptor, or parallelism dependency — that the
+descriptor wires up by passing the standard HF projection weights (<code class="docutils literal notranslate"><span class="pre">gate/up/down</span></code>,
+<code class="docutils literal notranslate"><span class="pre">q/k/v/o</span></code>) and a head layout. They back the whole “sorted teacher + dynamic prune” flow:</p>
+<ul class="simple">
+<li><p><strong>permute_*</strong>: reorder a contracted dim by importance. Because the reorder is applied
+consistently to every weight that touches that dim, the module’s output is <strong>unchanged</strong> — this
+is how the sorted teacher stays functionally identical to the teacher (unit-tested).</p></li>
+<li><p><strong>slice_*</strong>: keep a subset of channels/heads -&gt; physically smaller weights (bypass / realize).</p></li>
+<li><p><strong>*_keep_mask</strong>: a boolean mask over the projection’s <em>input</em> features used to prune by zeroing
+activations at the <code class="docutils literal notranslate"><span class="pre">down_proj</span></code> / <code class="docutils literal notranslate"><span class="pre">o_proj</span></code> input during scoring (exact for removal: the masked
+forward equals the sliced model’s forward).</p></li>
+</ul>
+<p>Conventions (standard HF GQA layout): <code class="docutils literal notranslate"><span class="pre">gate</span></code>/<code class="docutils literal notranslate"><span class="pre">up</span></code> are <code class="docutils literal notranslate"><span class="pre">[intermediate,</span> <span class="pre">hidden]</span></code> (rows =
+intermediate channels), <code class="docutils literal notranslate"><span class="pre">down</span></code> is <code class="docutils literal notranslate"><span class="pre">[hidden,</span> <span class="pre">intermediate]</span></code> (cols = intermediate channels);
+<code class="docutils literal notranslate"><span class="pre">q</span></code> is usually <code class="docutils literal notranslate"><span class="pre">[num_q*head_dim,</span> <span class="pre">hidden]</span></code>, <code class="docutils literal notranslate"><span class="pre">k</span></code>/<code class="docutils literal notranslate"><span class="pre">v</span></code> are
+<code class="docutils literal notranslate"><span class="pre">[num_kv*head_dim,</span> <span class="pre">hidden]</span></code>, and <code class="docutils literal notranslate"><span class="pre">o</span></code> is <code class="docutils literal notranslate"><span class="pre">[hidden,</span> <span class="pre">num_q*head_dim]</span></code>. Some
+families store multiple row groups per query head in <code class="docutils literal notranslate"><span class="pre">q</span></code> (for example Qwen3.5
+stores query and gate rows); those row groups are carried together when query
+heads are permuted or sliced. Query heads are grouped by KV head (group-major:
+<code class="docutils literal notranslate"><span class="pre">q_index</span> <span class="pre">=</span> <span class="pre">group*n_heads_in_group</span> <span class="pre">+</span> <span class="pre">head_in_group</span></code>).</p>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.ffn_permutation" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.ffn_permutation"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ffn_permutation</span></code></a></p></td>
+<td><p>Descending-importance permutation of the intermediate channels (<code class="docutils literal notranslate"><span class="pre">[intermediate]</span></code> -&gt; idx).</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.permute_ffn_weights" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.permute_ffn_weights"><code class="xref py py-obj docutils literal notranslate"><span class="pre">permute_ffn_weights</span></code></a></p></td>
+<td><p>Reorder the intermediate dim consistently.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.slice_ffn_weights" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.slice_ffn_weights"><code class="xref py py-obj docutils literal notranslate"><span class="pre">slice_ffn_weights</span></code></a></p></td>
+<td><p>Keep the <code class="docutils literal notranslate"><span class="pre">keep</span></code> intermediate channels (LongTensor / slice) -&gt; smaller weights.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.ffn_keep_mask" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.ffn_keep_mask"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ffn_keep_mask</span></code></a></p></td>
+<td><p>Boolean <code class="docutils literal notranslate"><span class="pre">[intermediate]</span></code> mask (True = keep) for masking the <code class="docutils literal notranslate"><span class="pre">down_proj</span></code> input.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.attention_permutations" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.attention_permutations"><code class="xref py py-obj docutils literal notranslate"><span class="pre">attention_permutations</span></code></a></p></td>
+<td><p>Group-major query-head permutation + KV-head permutation, both by importance.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.grouped_attention_permutations" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.grouped_attention_permutations"><code class="xref py py-obj docutils literal notranslate"><span class="pre">grouped_attention_permutations</span></code></a></p></td>
+<td><p>Sort KV groups and query heads from explicit grouped-attention scores.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.attention_permutations_from_scores" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.attention_permutations_from_scores"><code class="xref py py-obj docutils literal notranslate"><span class="pre">attention_permutations_from_scores</span></code></a></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">(q_perm</span> <span class="pre">[num_q],</span> <span class="pre">kv_perm</span> <span class="pre">[num_kv])</span></code> from either a per-query or per-KV importance vector.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.permute_query_rows_by_head" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.permute_query_rows_by_head"><code class="xref py py-obj docutils literal notranslate"><span class="pre">permute_query_rows_by_head</span></code></a></p></td>
+<td><p>Permute query-head rows, preserving any extra per-head row groups.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.permute_attention_weights" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.permute_attention_weights"><code class="xref py py-obj docutils literal notranslate"><span class="pre">permute_attention_weights</span></code></a></p></td>
+<td><p>Reorder query heads (q rows, o cols) and KV heads (k/v rows).</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.slice_query_rows_by_head" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.slice_query_rows_by_head"><code class="xref py py-obj docutils literal notranslate"><span class="pre">slice_query_rows_by_head</span></code></a></p></td>
+<td><p>Slice query-head rows, preserving any extra per-head row groups.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.slice_attention_weights" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.slice_attention_weights"><code class="xref py py-obj docutils literal notranslate"><span class="pre">slice_attention_weights</span></code></a></p></td>
+<td><p>Keep the given query heads (q rows, o cols) and KV heads (k/v rows) -&gt; smaller weights.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.sorted_attention_keep_indices" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.sorted_attention_keep_indices"><code class="xref py py-obj docutils literal notranslate"><span class="pre">sorted_attention_keep_indices</span></code></a></p></td>
+<td><p>Heads to keep when pruning a <em>sorted</em> attention layer to (target q, target kv).</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.attention_keep_mask" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.attention_keep_mask"><code class="xref py py-obj docutils literal notranslate"><span class="pre">attention_keep_mask</span></code></a></p></td>
+<td><p>Boolean <code class="docutils literal notranslate"><span class="pre">[num_q*head_dim]</span></code> mask (True = keep) for masking the <code class="docutils literal notranslate"><span class="pre">o_proj</span></code> input.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.aggregate_query_scores_to_kv" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.aggregate_query_scores_to_kv"><code class="xref py py-obj docutils literal notranslate"><span class="pre">aggregate_query_scores_to_kv</span></code></a></p></td>
+<td><p>Sum a per-query-head <code class="docutils literal notranslate"><span class="pre">[num_q]</span></code> importance into per-KV-head <code class="docutils literal notranslate"><span class="pre">[num_kv]</span></code> (group-major).</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.aggregate_query_scores_to_kv">
+<span class="sig-name descname"><span class="pre">aggregate_query_scores_to_kv</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">query_importance</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_kv_heads</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.aggregate_query_scores_to_kv" title="Link to this definition"></a></dt>
+<dd><p>Sum a per-query-head <code class="docutils literal notranslate"><span class="pre">[num_q]</span></code> importance into per-KV-head <code class="docutils literal notranslate"><span class="pre">[num_kv]</span></code> (group-major).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>query_importance</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>num_kv_heads</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.attention_keep_mask">
+<span class="sig-name descname"><span class="pre">attention_keep_mask</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">num_q_heads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">keep_q_heads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">head_dim</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">device</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.attention_keep_mask" title="Link to this definition"></a></dt>
+<dd><p>Boolean <code class="docutils literal notranslate"><span class="pre">[num_q*head_dim]</span></code> mask (True = keep) for masking the <code class="docutils literal notranslate"><span class="pre">o_proj</span></code> input.</p>
+<p>Zeroing the removed query heads’ columns at the o_proj input reproduces the pruned attention
+output exactly (each query head contributes independently to o_proj).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>num_q_heads</strong> (<em>int</em>)</p></li>
+<li><p><strong>head_dim</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.attention_permutations">
+<span class="sig-name descname"><span class="pre">attention_permutations</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">query_importance</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_kv_heads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_heads_in_group</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.attention_permutations" title="Link to this definition"></a></dt>
+<dd><p>Group-major query-head permutation + KV-head permutation, both by importance.</p>
+<p>Groups are ordered by aggregate (summed) query-head importance; query heads within each group
+are ordered by their own importance. Returns <code class="docutils literal notranslate"><span class="pre">(q_perm</span> <span class="pre">[num_q],</span> <span class="pre">kv_perm</span> <span class="pre">[num_kv])</span></code> such that
+applying them to q/o (q_perm) and k/v (kv_perm) yields the sorted, functionally-identical layout.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>query_importance</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>num_kv_heads</strong> (<em>int</em>)</p></li>
+<li><p><strong>n_heads_in_group</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<em>Tensor</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.attention_permutations_from_scores">
+<span class="sig-name descname"><span class="pre">attention_permutations_from_scores</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">attn_importance</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_q_heads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_kv_heads</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.attention_permutations_from_scores" title="Link to this definition"></a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">(q_perm</span> <span class="pre">[num_q],</span> <span class="pre">kv_perm</span> <span class="pre">[num_kv])</span></code> from either a per-query or per-KV importance vector.</p>
+<p>Legacy compatibility helper for callers that still pass one flat attention score vector.
+New Puzzletron attention scoring should prefer <a class="reference internal" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.grouped_attention_permutations" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.grouped_attention_permutations"><code class="xref py py-func docutils literal notranslate"><span class="pre">grouped_attention_permutations()</span></code></a>, which
+takes explicit KV-group and within-group query-head scores.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>attn_importance</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>num_q_heads</strong> (<em>int</em>)</p></li>
+<li><p><strong>num_kv_heads</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<em>Tensor</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.ffn_keep_mask">
+<span class="sig-name descname"><span class="pre">ffn_keep_mask</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">intermediate_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">keep</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">device</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.ffn_keep_mask" title="Link to this definition"></a></dt>
+<dd><p>Boolean <code class="docutils literal notranslate"><span class="pre">[intermediate]</span></code> mask (True = keep) for masking the <code class="docutils literal notranslate"><span class="pre">down_proj</span></code> input.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>intermediate_size</strong> (<em>int</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.ffn_permutation">
+<span class="sig-name descname"><span class="pre">ffn_permutation</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">channel_importance</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.ffn_permutation" title="Link to this definition"></a></dt>
+<dd><p>Descending-importance permutation of the intermediate channels (<code class="docutils literal notranslate"><span class="pre">[intermediate]</span></code> -&gt; idx).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>channel_importance</strong> (<em>Tensor</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.grouped_attention_permutations">
+<span class="sig-name descname"><span class="pre">grouped_attention_permutations</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">kv_group_importance</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">query_importance</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_kv_heads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_heads_in_group</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.grouped_attention_permutations" title="Link to this definition"></a></dt>
+<dd><p>Sort KV groups and query heads from explicit grouped-attention scores.</p>
+<p><code class="docutils literal notranslate"><span class="pre">kv_group_importance</span></code> ranks whole KV groups. <code class="docutils literal notranslate"><span class="pre">query_importance</span></code> ranks query
+heads within each original KV group. The returned query permutation is
+group-major after the KV group sort and prefix-sliceable for both supported
+attention operations: drop whole KV groups and keep the same number of query
+heads per surviving group.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>kv_group_importance</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>query_importance</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>num_kv_heads</strong> (<em>int</em>)</p></li>
+<li><p><strong>n_heads_in_group</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<em>Tensor</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.permute_attention_weights">
+<span class="sig-name descname"><span class="pre">permute_attention_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">q</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">k</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">o</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">q_perm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kv_perm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">head_dim</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.permute_attention_weights" title="Link to this definition"></a></dt>
+<dd><p>Reorder query heads (q rows, o cols) and KV heads (k/v rows). Output unchanged (invariant).</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.permute_ffn_weights">
+<span class="sig-name descname"><span class="pre">permute_ffn_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">gate</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">up</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">down</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">perm</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.permute_ffn_weights" title="Link to this definition"></a></dt>
+<dd><p>Reorder the intermediate dim consistently. Output is unchanged (permutation invariant).</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.permute_query_rows_by_head">
+<span class="sig-name descname"><span class="pre">permute_query_rows_by_head</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">q</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">q_perm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">head_dim</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_q_heads</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.permute_query_rows_by_head" title="Link to this definition"></a></dt>
+<dd><p>Permute query-head rows, preserving any extra per-head row groups.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>q</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>q_perm</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>head_dim</strong> (<em>int</em>)</p></li>
+<li><p><strong>num_q_heads</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.slice_attention_weights">
+<span class="sig-name descname"><span class="pre">slice_attention_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">q</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">k</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">o</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">keep_q_heads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">keep_kv_heads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">head_dim</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.slice_attention_weights" title="Link to this definition"></a></dt>
+<dd><p>Keep the given query heads (q rows, o cols) and KV heads (k/v rows) -&gt; smaller weights.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.slice_ffn_weights">
+<span class="sig-name descname"><span class="pre">slice_ffn_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">gate</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">up</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">down</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">keep</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.slice_ffn_weights" title="Link to this definition"></a></dt>
+<dd><p>Keep the <code class="docutils literal notranslate"><span class="pre">keep</span></code> intermediate channels (LongTensor / slice) -&gt; smaller weights.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.slice_query_rows_by_head">
+<span class="sig-name descname"><span class="pre">slice_query_rows_by_head</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">q</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">keep_q_heads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">head_dim</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_q_heads</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.slice_query_rows_by_head" title="Link to this definition"></a></dt>
+<dd><p>Slice query-head rows, preserving any extra per-head row groups.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>q</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>keep_q_heads</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>head_dim</strong> (<em>int</em>)</p></li>
+<li><p><strong>num_q_heads</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.sorted_attention_keep_indices">
+<span class="sig-name descname"><span class="pre">sorted_attention_keep_indices</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">target_kv_heads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_heads_in_group</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">orig_heads_in_group</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.attention_ffn_surgery.sorted_attention_keep_indices" title="Link to this definition"></a></dt>
+<dd><p>Heads to keep when pruning a <em>sorted</em> attention layer to (target q, target kv).</p>
+<p>On the sorted teacher, keeping the most important (q, kv) = the first <code class="docutils literal notranslate"><span class="pre">target_kv_heads</span></code> groups
+and, within each, its first <code class="docutils literal notranslate"><span class="pre">target_heads_in_group</span></code> query heads. Returns
+<code class="docutils literal notranslate"><span class="pre">(keep_q_heads,</span> <span class="pre">keep_kv_heads)</span></code> index tensors (the query set is blocked, not a flat prefix).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>target_kv_heads</strong> (<em>int</em>)</p></li>
+<li><p><strong>target_heads_in_group</strong> (<em>int</em>)</p></li>
+<li><p><strong>orig_heads_in_group</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<em>Tensor</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.puzzletron.pruning.html" class="btn btn-neutral float-left" title="pruning" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.puzzletron.pruning.compact_runtime.html" class="btn btn-neutral float-right" title="compact_runtime" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

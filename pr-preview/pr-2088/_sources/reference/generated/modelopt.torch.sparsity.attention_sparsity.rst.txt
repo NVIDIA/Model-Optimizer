@@ -1,0 +1,82 @@
+attention\_sparsity
+===================
+
+.. List the submodules
+
+
+
+.. rubric:: Modules
+
+.. autosummary::
+   :toctree:
+   :recursive:
+
+
+
+   modelopt.torch.sparsity.attention_sparsity.calibration
+
+
+
+   modelopt.torch.sparsity.attention_sparsity.config
+
+
+
+   modelopt.torch.sparsity.attention_sparsity.conversion
+
+
+
+   modelopt.torch.sparsity.attention_sparsity.methods
+
+
+
+   modelopt.torch.sparsity.attention_sparsity.mode
+
+
+
+   modelopt.torch.sparsity.attention_sparsity.model_sparsify
+
+
+
+   modelopt.torch.sparsity.attention_sparsity.plugins
+
+
+
+   modelopt.torch.sparsity.attention_sparsity.sparse_attention
+
+
+
+   modelopt.torch.sparsity.attention_sparsity.stats_manager
+
+
+
+   modelopt.torch.sparsity.attention_sparsity.utils
+
+
+
+
+.. Autodoc anything defined in the module itself
+
+   TODO: WE DON'T USE THIS OPTION RIGHT NOW BUT WE CAN REACTIVATE IF WANTED
+   We use :ignore-module-all: so sphinx does not document the same module twice, even if it is reimported
+   For reimports that should be documented somewhere other than where they are defined, the re-imports
+   __module__ should be manually overridden -- i.e. in the ``__init__.py`` which contains ``from xxx import YYY``,
+   add in ``YYY.__module__ = __name__``.
+
+.. automodule:: modelopt.torch.sparsity.attention_sparsity
+   :members:
+   :undoc-members:
+
+   .. Also show members without docstrings. Only members from __all__ are considered as per conf.py
+   .. Ideally we should add docstrings for these members.
+
+
+   .. Overview table of available classes in the module
+   
+   
+   
+
+
+   .. Overview table of available functions in the module
+   
+   
+   
