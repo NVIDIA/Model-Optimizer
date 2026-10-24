@@ -52,7 +52,7 @@ def _ep_config(hf_config):
     return hf_config
 
 
-def num_experts_from_config(hf_config) -> int:
+def _num_experts_from_config(hf_config) -> int:
     """Return the MoE expert count from an HF config (0 if the model is not MoE).
 
     Recurses into ``.text_config`` / ``.llm_config`` so VLMs whose nested text submodel is the MoE
@@ -72,20 +72,19 @@ def num_experts_from_config(hf_config) -> int:
     return 0
 
 
-def choose_ep_dp_degrees(world_size: int, num_experts: int) -> tuple[int, int]:
-    """Pick ``(expert_parallel, expert_data_parallel)`` degrees with ``EP * EDP == world_size``.
+def _choose_ep_degree(world_size: int, num_experts: int) -> int:
+    """The largest EP degree dividing both ``world_size`` and ``num_experts``; ``1`` if none does.
 
-    EP must divide both ``num_experts`` (whole experts per rank) and ``world_size`` (a valid mesh
-    factorization); we take the largest such EP, and each expert shard is then replicated over the
-    remaining ``EDP = world_size // EP`` ranks. Falls back to ``(1, world_size)`` when the model is not
-    MoE or no valid EP degree exists. Heuristic -- callers may override.
+    EP must divide ``num_experts`` (whole experts per rank) and ``world_size`` (a valid mesh
+    factorization). Each expert shard is then replicated over the remaining ranks
+    (``DistributionPlan.edp``). Heuristic -- callers may override.
     """
-    if num_experts <= 0 or world_size <= 1:
-        return 1, world_size
-    for ep in range(world_size, 0, -1):
-        if world_size % ep == 0 and num_experts % ep == 0:
-            return ep, world_size // ep
-    return 1, world_size
+    if num_experts <= 0:
+        return 1
+    return next(
+        (ep for ep in range(world_size, 0, -1) if world_size % ep == 0 and num_experts % ep == 0),
+        1,
+    )
 
 
 # The styles a base_model_ep_plan gives a layer's routed-experts container. A plan that styles only

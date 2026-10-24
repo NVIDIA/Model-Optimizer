@@ -923,8 +923,9 @@ def _auto_class(hf_config, trust_remote_code: bool = False) -> Any:
     return AutoModel
 
 
-# The share of one GPU's memory a replicated dense part may take. The rest is left to calibration's
-# activations and communication buffers, and to the rank's share of the experts.
+# The share of one GPU's memory a rank may take with the dense part replicated: that whole copy and
+# the rank's share of the routed experts. The rest is left to calibration's activations and
+# communication buffers.
 _REPLICATED_SHARE = 0.6
 
 
@@ -942,7 +943,7 @@ def _dense_from_env(world_size: int) -> str:
         return "auto"
     if value == "1":
         return "replicate"
-    if value in ("world", "full", str(world_size)):
+    if value in ("world", str(world_size)):
         return "fsdp"
     raise ValueError(
         f"MODELOPT_FSDP_SIZE={value!r}: expected auto, 1 (replicate the dense part) or world "
@@ -967,18 +968,19 @@ def _decide_distribution(
 ) -> DistributionPlan:
     """The plan :func:`resolve_distribution_plan` returns, decided by this rank alone."""
     from modelopt.torch.utils.moe import (
+        _choose_ep_degree,
         _ep_config,
+        _num_experts_from_config,
         _routed_expert_modules,
-        choose_ep_dp_degrees,
-        num_experts_from_config,
     )
 
     if world_size == 1:
         # Nothing to shard over, so nothing about the model matters, nor do the knobs: a shell still
         # exporting a multi-GPU run's would otherwise reshape a single process's load. The caller's
         # own arguments still count, as dense="fsdp" for FSDP2 on one rank.
+        single = 1 if ep_size is None else _ep_degree(ep_size)
         return DistributionPlan(
-            ep_size=1 if ep_size is None or str(ep_size) in ("auto", "0") else int(ep_size),
+            ep_size=single if isinstance(single, int) else 1,
             dense="replicate" if dense in (None, "auto") else dense,
         )
     ep_size = _ep_degree(ep_size)
@@ -998,24 +1000,26 @@ def _decide_distribution(
         ) from e
     ep_plan = getattr(_ep_config(hf_config), "base_model_ep_plan", None) or {}
     experts = _routed_expert_modules(model, ep_plan)
-    num_experts = num_experts_from_config(hf_config) if experts else 0
+    num_experts = _num_experts_from_config(hf_config) if experts else 0
     if ep_size == "auto":
-        ep_size = choose_ep_dp_degrees(world_size, num_experts)[0]
+        ep_size = _choose_ep_degree(world_size, num_experts)
     elif ep_size > 1 and (num_experts == 0 or num_experts % ep_size):
         raise ValueError(
             f"ep_size={ep_size} must divide the routed experts {hf_config.model_type} shards "
             f"({num_experts})."
         )
     if dense == "auto":
-        # Every rank holds a whole copy of what expert parallelism does not shard.
+        # A rank holds a whole copy of what expert parallelism does not shard, and its 1/ep_size
+        # share of the routed experts it does.
         sharded = (
             {id(p) for m in experts.values() for p in m.parameters()} if ep_size > 1 else set()
         )
-        replicated = sum(
-            p.numel() * p.element_size() for p in model.parameters() if id(p) not in sharded
+        held = sum(
+            p.numel() * p.element_size() // (ep_size if id(p) in sharded else 1)
+            for p in model.parameters()
         )
         memory = _gpu_memory()
-        too_big = memory is not None and replicated > _REPLICATED_SHARE * memory
+        too_big = memory is not None and held > _REPLICATED_SHARE * memory
         dense = "fsdp" if too_big else "replicate"
     return DistributionPlan(world_size, ep_size, dense)
 
@@ -1026,14 +1030,19 @@ def resolve_distribution_plan(
     trust_remote_code: bool = False,
     ep_size: int | str | None = None,
     dense: str | None = None,
+    revision: str | None = None,
+    token: str | bool | None = None,
+    cache_dir: str | os.PathLike | None = None,
+    local_files_only: bool = False,
+    subfolder: str | None = None,
 ) -> tuple[DistributionPlan, PretrainedConfig]:
     """Decide how this run distributes ``ckpt_path``'s model over its ranks.
 
-    The one place a run decides it. :func:`load_pretrained` loads the model by the plan this returns
-    and records it on the model, and every later step reads it back from there
+    The one place a run decides it: a distributed load loads the model by the plan this returns and
+    records it on the model (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), and
+    every later step reads it back from there
     (:func:`~modelopt.torch.utils.distributed.distribution_plan`). Returns ``(plan, hf_config)``,
-    ``hf_config`` being the config a sharded load takes back as
-    ``load_pretrained(ckpt_path, distribution=plan, hf_config=hf_config)``.
+    ``hf_config`` being the config the plan was decided from, for a sharded load to build from.
 
     Rank 0 decides, from the model built on the meta device: from its parameters rather than
     estimates of them, and from its routed experts as an expert-parallel load finds them. Every rank
@@ -1044,13 +1053,19 @@ def resolve_distribution_plan(
     * ``ep_size``: the expert-parallel degree, or ``"auto"``, the largest that divides both the
       world and the routed-expert count of a model whose config carries a ``base_model_ep_plan``.
     * ``dense``: ``"replicate"`` or ``"fsdp"`` for the rest of the model, or ``"auto"``, which
-      FSDP2-shards it when a whole copy would take more than 60% of one GPU's memory. That GPU is
-      rank 0's, by its total memory, so ``"auto"`` assumes the run's GPUs are alike.
+      FSDP2-shards it when a whole copy of it and the rank's share of the routed experts would take
+      more than 60% of one GPU's memory. That GPU is rank 0's, by its total memory, so ``"auto"``
+      assumes the run's GPUs are alike.
 
     ``None`` reads ``MODELOPT_EP_DEGREE`` and ``MODELOPT_FSDP_SIZE`` (``1`` replicates; ``world``,
     or the world size as a number, shards) from rank 0's environment, both defaulting to
     ``"auto"``. A single process reads neither and holds the whole model, unless ``dense="fsdp"``
     asks for FSDP2 on one rank.
+
+    ``revision``, ``token``, ``cache_dir``, ``local_files_only`` and ``subfolder`` locate the
+    checkpoint as :func:`load_pretrained` takes them, so the plan is decided for what the load reads:
+    all but ``subfolder`` resolve a Hub model ID (:func:`ensure_local_checkpoint`), and the config
+    read takes all but ``revision``, for custom code its ``auto_map`` names in another Hub repo.
     """
     from modelopt.torch.utils import distributed as dist
 
@@ -1059,8 +1074,22 @@ def resolve_distribution_plan(
     read: list[tuple[str, PretrainedConfig]] = []
 
     def checkpoint_read() -> bool:
-        _, local_path = ensure_local_checkpoint(ckpt_path)
-        config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        _, local_path = ensure_local_checkpoint(
+            ckpt_path,
+            revision=revision,
+            token=token,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+        )
+        if subfolder:
+            local_path = os.path.join(local_path, subfolder)
+        config = AutoConfig.from_pretrained(
+            local_path,
+            trust_remote_code=trust_remote_code,
+            token=token,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+        )
         read.append((local_path, config))
         return True
 

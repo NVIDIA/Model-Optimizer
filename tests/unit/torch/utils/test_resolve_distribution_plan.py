@@ -46,9 +46,9 @@ from transformers import (
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils.distributed import DistributionPlan
 from modelopt.torch.utils.moe import (
+    _choose_ep_degree,
+    _num_experts_from_config,
     _routed_expert_modules,
-    choose_ep_dp_degrees,
-    num_experts_from_config,
 )
 from modelopt.torch.utils.plugins import model_load_utils
 from modelopt.torch.utils.plugins.model_load_utils import _auto_class, resolve_distribution_plan
@@ -162,29 +162,21 @@ def gpu_memory(monkeypatch):
 def test_the_expert_count_is_read_under_every_spelling(config, experts):
     """Architectures disagree on the field name, and a VLM's MoE is its nested LM, whose root
     config has no expert count of its own: missing either would silently disable EP."""
-    assert num_experts_from_config(config) == experts
+    assert _num_experts_from_config(config) == experts
 
 
 # ------------------------------------------------------------------------------- degree selection
 
 
 @pytest.mark.parametrize(
-    ("world", "experts", "degrees"),
-    [
-        (8, 64, (8, 1)),
-        (8, 6, (2, 4)),
-        (8, 5, (1, 8)),
-        (8, 0, (1, 8)),
-        (1, 64, (1, 1)),
-    ],
+    ("world", "experts", "degree"),
+    [(8, 64, 8), (8, 6, 2), (8, 5, 1), (8, 0, 1), (1, 64, 1)],
     ids=["largest-valid", "divides-the-experts", "nothing-divides", "dense", "single-rank"],
 )
-def test_the_largest_ep_degree_dividing_the_world_and_the_experts_is_chosen(
-    world, experts, degrees
-):
+def test_the_largest_ep_degree_dividing_the_world_and_the_experts_is_chosen(world, experts, degree):
     """EP must divide the expert count, so every rank holds whole experts; with nothing dividing, a
     dense model, or a single rank, there is no expert parallelism."""
-    assert choose_ep_dp_degrees(world, experts) == degrees
+    assert _choose_ep_degree(world, experts) == degree
 
 
 # ---------------------------------------------------------------------------- routed experts
@@ -376,13 +368,25 @@ def test_an_moe_without_an_ep_plan_is_not_expert_parallel(run_as, serve, tmp_pat
     assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4)
 
 
-def test_an_ep_degree_that_is_not_a_number_names_the_knob(run_as, serve, monkeypatch, tmp_path):
-    monkeypatch.setenv("MODELOPT_EP_DEGREE", "world")
-    run_as(4)
+@pytest.mark.parametrize(
+    ("world_size", "source"),
+    [(4, "MODELOPT_EP_DEGREE"), (1, "ep_size")],
+    ids=["knob", "argument-in-a-single-process"],
+)
+def test_an_ep_degree_that_is_not_a_number_names_where_it_came_from(
+    run_as, serve, monkeypatch, tmp_path, world_size, source
+):
+    """A single process takes its own argument as given, but parses it as the decision does."""
+    run_as(world_size)
     serve(LlamaConfig(**_TINY))
+    arguments = {}
+    if source == "ep_size":
+        arguments["ep_size"] = "world"
+    else:
+        monkeypatch.setenv(source, "world")
 
-    with pytest.raises(ValueError, match="MODELOPT_EP_DEGREE='world'"):
-        resolve_distribution_plan(str(tmp_path))
+    with pytest.raises(ValueError, match=f"{source}='world'"):
+        resolve_distribution_plan(str(tmp_path), **arguments)
 
 
 @needs_qwen3_moe_ep_plan
@@ -411,16 +415,25 @@ def test_a_dense_model_is_fsdp_sharded_only_when_too_big_for_one_gpu(
 
 
 @needs_qwen3_moe_ep_plan
-def test_only_what_expert_parallelism_leaves_whole_must_fit(run_as, serve, gpu_memory, tmp_path):
-    """The routed experts are sharded at EP 4, so only the rest needs to fit one GPU; with no EP the
-    whole MoE does, and here it does not."""
+@pytest.mark.parametrize(
+    ("experts_fitting", "dense"),
+    [(1 / 2, "replicate"), (1 / 8, "fsdp")],
+    ids=["fits", "the-experts-share-does-not"],
+)
+def test_what_a_rank_holds_with_the_dense_part_replicated_must_fit(
+    run_as, serve, gpu_memory, tmp_path, experts_fitting, dense
+):
+    """At EP 4 a rank holds the rest of the model whole and a quarter of the routed experts, so the
+    dense part is sharded when that does not fit one GPU, however small the rest; with no EP the
+    whole MoE must fit, and here it does not."""
     run_as(4)
     config = serve(_qwen3_moe(num_experts=8))
     model = _meta(config)
     experts = sum(_bytes(layer.mlp.experts) for layer in model.model.layers)
-    gpu_memory(int((_bytes(model) - experts / 2) / 0.6))
+    # A GPU 60% of which holds the rest of the model and that share of the experts.
+    gpu_memory(int((_bytes(model) - experts + experts_fitting * experts) / 0.6))
 
-    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 4)
+    assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(4, 4, dense)
     assert resolve_distribution_plan(str(tmp_path), ep_size=1)[0] == DistributionPlan(
         4, dense="fsdp"
     )
@@ -453,12 +466,11 @@ def test_arguments_override_the_env_knobs(run_as, serve, monkeypatch, tmp_path):
     [
         ("1", "replicate"),
         ("4", "fsdp"),
-        ("full", "fsdp"),
         ("WORLD", "fsdp"),
         ("", "fsdp"),
         ("2", None),
     ],
-    ids=["1", "4", "full", "WORLD", "exported-empty", "part-of-the-world"],
+    ids=["1", "4", "WORLD", "exported-empty", "part-of-the-world"],
 )
 def test_the_dense_knob_replicates_or_shards_over_the_whole_world(
     run_as, serve, gpu_memory, monkeypatch, tmp_path, value, dense
@@ -515,6 +527,27 @@ def test_a_model_that_cannot_be_built_on_meta_names_itself(run_as, serve, monkey
 
     with pytest.raises(RuntimeError, match=r"distribute llama .* custom init touches the weights"):
         resolve_distribution_plan(str(tmp_path))
+
+
+def test_the_hub_options_locate_the_checkpoint_the_load_reads(tmp_path):
+    """``revision``, ``cache_dir``, ``local_files_only`` and ``subfolder`` find the checkpoint as
+    ``load_pretrained`` takes them, so the plan and its config are those of what the load reads."""
+    repo = tmp_path / "models--org--model"
+    (repo / "refs").mkdir(parents=True)
+    for revision, commit, hidden_size in (("main", "a" * 40, 16), ("v2", "b" * 40, 32)):
+        (repo / "refs" / revision).write_text(commit)
+        config = LlamaConfig(**{**_TINY, "hidden_size": hidden_size})
+        config.save_pretrained(repo / "snapshots" / commit / "nested")
+
+    _, config = resolve_distribution_plan(
+        "org/model",
+        revision="v2",
+        cache_dir=str(tmp_path),
+        local_files_only=True,
+        subfolder="nested",
+    )
+
+    assert config.hidden_size == 32
 
 
 # ------------------------------------------------------------------------------ rank 0 decides
