@@ -201,7 +201,8 @@ def test_the_router_style_registers_under_transformers_5_16_0s_name(monkeypatch)
     tp = pytest.importorskip("transformers.integrations.tensor_parallel")
     if not hasattr(tp, "EpRouterParallel"):
         pytest.skip("this transformers has no EpRouterParallel")
-    monkeypatch.delattr(tp, "RouterParallel")
+    # 5.16.0 itself has no RouterParallel to delete.
+    monkeypatch.delattr(tp, "RouterParallel", raising=False)
     monkeypatch.setattr(moe, "_TORCH_A2A_REGISTERED", False)
 
     moe.register_torch_a2a()
