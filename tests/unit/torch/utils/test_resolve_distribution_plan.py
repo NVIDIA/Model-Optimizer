@@ -274,6 +274,10 @@ def _tiny_qwen2_5_vl():
 
 
 _REMOTE_VLM = {"AutoModelForCausalLM": "m.KimiK25ForConditionalGeneration"}
+_REMOTE_IMAGE_TEXT_VLM = {
+    **_REMOTE_VLM,
+    "AutoModelForImageTextToText": "m.KimiK25ForConditionalGeneration",
+}
 
 
 @pytest.mark.parametrize(
@@ -282,6 +286,7 @@ _REMOTE_VLM = {"AutoModelForCausalLM": "m.KimiK25ForConditionalGeneration"}
         (SimpleNamespace(architectures=["LlamaForCausalLM"]), False, AutoModelForCausalLM),
         (_vlm_config(auto_map=_REMOTE_VLM), True, AutoModelForCausalLM),
         (_vlm_config(auto_map=_REMOTE_VLM), False, AutoModel),
+        (_vlm_config(auto_map=_REMOTE_IMAGE_TEXT_VLM), True, AutoModelForImageTextToText),
         (_tiny_qwen2_5_vl(), False, AutoModelForImageTextToText),
         (_vlm_config(), False, AutoModel),
     ],
@@ -289,6 +294,7 @@ _REMOTE_VLM = {"AutoModelForCausalLM": "m.KimiK25ForConditionalGeneration"}
         "causal-lm",
         "remote-vlm-with-head",
         "remote-vlm-untrusted",
+        "remote-image-text-vlm",
         "native-vlm-with-head",
         "unknown-vlm",
     ],

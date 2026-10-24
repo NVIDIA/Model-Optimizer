@@ -896,8 +896,8 @@ def _auto_class(hf_config, trust_remote_code: bool = False) -> Any:
     config, or a ``*ForConditionalGeneration`` architecture -- builds through the remote
     ``AutoModelForCausalLM`` when the checkpoint registers its ``*ForConditionalGeneration`` there,
     its code is trusted and it registers no image-text class, else through
-    ``AutoModelForImageTextToText`` if that recognizes the config, else through ``AutoModel``, which
-    leaves the head out.
+    ``AutoModelForImageTextToText`` if that recognizes the config or, its code trusted, the
+    checkpoint registers one, else through ``AutoModel``, which leaves the head out.
     """
     architectures = getattr(hf_config, "architectures", None) or []
     is_vlm = (
@@ -918,7 +918,9 @@ def _auto_class(hf_config, trust_remote_code: bool = False) -> Any:
         from transformers import AutoModelForImageTextToText
     except ImportError:
         return AutoModel
-    if type(hf_config) in AutoModelForImageTextToText._model_mapping:
+    if type(hf_config) in AutoModelForImageTextToText._model_mapping or (
+        trust_remote_code and "AutoModelForImageTextToText" in auto_map
+    ):
         return AutoModelForImageTextToText
     return AutoModel
 
