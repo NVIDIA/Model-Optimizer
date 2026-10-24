@@ -466,19 +466,23 @@ def _smallest_batch_size_job(rank, world_size):
     # A rank left waiting in the reduction gives up in seconds on this group.
     group = torch.distributed.new_group(timeout=timedelta(seconds=10))
     gather = partial(torch.distributed.all_gather_object, group=group)
-    with (
-        patch.object(torch.distributed, "all_gather_object", gather),
-        patch("torch.cuda.empty_cache"),
-        patch(
-            "torch.cuda.get_device_properties", return_value=SimpleNamespace(total_memory=10**12)
-        ),
-        patch("torch.cuda.device_count", return_value=4),
-        patch("torch.cuda.mem_get_info", side_effect=mem_get_info),
-        patch("torch.cuda.max_memory_allocated", return_value=0),
-    ):
-        batch_size = get_max_batch_size(
-            model, max_sample_length=8, sample_input_single_batch=torch.ones((1, 8))
-        )
+    try:
+        with (
+            patch.object(torch.distributed, "all_gather_object", gather),
+            patch("torch.cuda.empty_cache"),
+            patch(
+                "torch.cuda.get_device_properties",
+                return_value=SimpleNamespace(total_memory=10**12),
+            ),
+            patch("torch.cuda.device_count", return_value=4),
+            patch("torch.cuda.mem_get_info", side_effect=mem_get_info),
+            patch("torch.cuda.max_memory_allocated", return_value=0),
+        ):
+            batch_size = get_max_batch_size(
+                model, max_sample_length=8, sample_input_single_batch=torch.ones((1, 8))
+            )
+    finally:
+        torch.distributed.destroy_process_group(group)
 
     assert measured == [torch.device("cuda", rank)] * 2  # its own GPU (LOCAL_RANK) only
     assert model.batch_sizes == [1]  # one probe: an OOM retry would run more forwards on some ranks
