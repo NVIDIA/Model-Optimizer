@@ -96,7 +96,12 @@ from modelopt.torch.quantization.utils import (
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
-from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan, is_fsdp2_model
+from modelopt.torch.utils.distributed import (
+    DistributionPlan,
+    broadcast_from,
+    distribution_plan,
+    is_fsdp2_model,
+)
 from modelopt.torch.utils.perf import maybe_clear_cuda_cache
 
 try:
@@ -1935,6 +1940,8 @@ def _write_base_config(model: nn.Module, export_dir: "Path | str") -> None:
     ``save_pretrained`` would have. The weight half of ``save_pretrained`` must NOT run: the
     weights are already on disk and the model may still be sharded.
     """
+    # A config's save_pretrained writes only config.json: transformers reverts weight conversions
+    # in the model's, so the patch save_non_weight_artifacts takes is not needed here.
     model.config.save_pretrained(export_dir)
     if model.can_generate() and getattr(model, "generation_config", None) is not None:
         try:
@@ -2045,8 +2052,10 @@ def export_hf_checkpoint(
         return
 
     is_fsdp2_sharded = plan.is_fsdp_dense
-    use_no_gather_writer = (
-        is_fsdp2_sharded and os.environ.get("MODELOPT_FSDP2_EXPORT") == "nogather"
+    # Rank 0's choice: the two writers issue different collectives, so ranks that read their
+    # environments differently would wait in collectives the others never join.
+    use_no_gather_writer = is_fsdp2_sharded and broadcast_from(
+        "MODELOPT_FSDP2_EXPORT", lambda: os.environ.get("MODELOPT_FSDP2_EXPORT") == "nogather"
     )
     # Not the global rank: a non-FSDP2 export writes the whole checkpoint from every process.
     rank = torch.distributed.get_rank() if is_fsdp2_sharded else 0
@@ -2108,18 +2117,16 @@ def export_hf_checkpoint(
             distributed_save_hf_checkpoint(
                 model,
                 export_dir,
-                maxbound=448,
-                kv_cache_format=(hf_quant_config or {})
-                .get("quantization", {})
-                .get("kv_cache_quant_algo"),
+                maxbound=448,  # the KV cache scale is amax / 448 for FP8 and NVFP4, as above
+                kv_cache_format=_get_kv_cache_postprocess_config(
+                    (hf_quant_config or {}).get("quantization", {})
+                ),
                 max_shard_size=max_shard_size,
                 is_modelopt_qlora=_qlora,
                 extra_state_dict=extra_state_dict,
             )
             if rank == 0:
                 _write_base_config(model, export_dir)
-                if save_modelopt_state and ModeloptStateManager.is_converted(model):
-                    torch.save(modelopt_state(model), export_dir / _MODELOPT_STATE_SAVE_NAME)
                 hf_quant_config = _revert_quant_config_names_best_effort(model, hf_quant_config)
         elif is_fsdp2_sharded:
             # FSDP2 multi-rank: stream each rank's owned units straight to its own shard files, so
