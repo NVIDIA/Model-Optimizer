@@ -50,12 +50,25 @@
     enable: false
   - quantizer_name: 'output.*'
     enable: false
+  # Kimi-K3: vLLM builds the latent-expert projections around the routed experts and the
+  # scalar residual gates unquantized (quant_config=None), so it cannot load a checkpoint
+  # that quantizes them. The [1, hidden] gates gain nothing from quantization either.
+  - quantizer_name: '*routed_expert_down_proj*'
+    enable: false
+  - quantizer_name: '*routed_expert_up_proj*'
+    enable: false
+  - quantizer_name: '*self_attention_res_proj*'
+    enable: false
+  - quantizer_name: '*mlp_res_proj*'
+    enable: false
+  - quantizer_name: '*output_attn_res_proj*'
+    enable: false
   # Multimodal vision branch: keep the vision encoder (SigLIP / ViT) and any
   # multimodal embedding projection in BF16 by default. Recipes that enable bare
   # `*weight_quantizer` / `*input_quantizer` or `*mlp*` wildcards otherwise also
   # match the vision tower (`model.vision_tower.*`, `model.visual.*`,
   # Llama-4 `vision_model.*`) and the embedding projection (`model.embed_vision.*`,
-  # Llama-4 `multi_modal_projector.*`); quantizing the vision branch crashes
+  # Llama-4 `multi_modal_projector.*`, Kimi `mm_projector.*`); quantizing the vision branch crashes
   # export / produces garbage image embeddings on VL models (gemma-4,
   # Qwen3.5-VL — NVBugs 6293731, 6293762, 6294017; Llama-4-Scout — NVBugs
   # 6359097, where `vision_model.patch_embedding.linear` has in_features=588,
@@ -70,6 +83,8 @@
   - quantizer_name: '*vision_model*'
     enable: false
   - quantizer_name: '*multi_modal_projector*'
+    enable: false
+  - quantizer_name: '*mm_projector*'
     enable: false
   - parent_class: 'nn.BatchNorm1d'
     quantizer_name: '*'

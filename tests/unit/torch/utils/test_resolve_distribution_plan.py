@@ -498,7 +498,10 @@ def _remote_kimi(moe):
     return model
 
 
-@pytest.mark.parametrize(("model_type", "moe"), [("kimi_vl", "mlp"), ("kimi_k25", "mlp")])
+@pytest.mark.parametrize(
+    ("model_type", "moe"),
+    [("kimi_vl", "mlp"), ("kimi_k25", "mlp"), ("kimi_k3", "block_sparse_moe")],
+)
 def test_a_remote_moe_whose_prepare_attaches_its_plan_left_whole_is_an_error(
     run_as, serve, monkeypatch, tmp_path, model_type, moe
 ):
