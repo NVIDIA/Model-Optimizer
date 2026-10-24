@@ -154,7 +154,10 @@ class _CheckpointScales(Mapping[str, torch.Tensor]):
         self._handles: dict[str, safe_open] = {}
         for file in files:
             handle = safe_open(file, framework="pt")
-            self._handles.update(dict.fromkeys(filter(_SCALE_NAME.search, handle.keys()), handle))
+            names = list(filter(_SCALE_NAME.search, handle.keys()))
+            if duplicates := self._handles.keys() & set(names):
+                raise ValueError(f"{sorted(duplicates)[0]} is in more than one file of {path}")
+            self._handles.update(dict.fromkeys(names, handle))
         if not self._handles:
             raise ValueError(f"No quantization scale tensors in {path}")
 

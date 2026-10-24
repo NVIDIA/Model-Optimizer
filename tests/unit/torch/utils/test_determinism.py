@@ -28,9 +28,13 @@ from modelopt.torch.utils import enable_determinism
 def restore_global_state():
     deterministic = torch.are_deterministic_algorithms_enabled()
     warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    rng_states = (random.getstate(), np.random.get_state(), torch.get_rng_state())
     with mock.patch.dict(os.environ):
         yield
     torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
+    random.setstate(rng_states[0])
+    np.random.set_state(rng_states[1])
+    torch.set_rng_state(rng_states[2])
 
 
 @pytest.mark.usefixtures("restore_global_state")

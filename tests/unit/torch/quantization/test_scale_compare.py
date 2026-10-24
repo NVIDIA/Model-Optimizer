@@ -113,3 +113,11 @@ def test_nothing_to_compare_is_not_a_pass(tmp_path):
     save_file({"l0.q.weight": torch.ones(2, 2)}, tmp_path / "model.safetensors")
     with pytest.raises(ValueError, match="No quantization scale tensors"):
         main([str(tmp_path), str(tmp_path)])
+
+
+def test_a_scale_in_two_shards_is_an_error(tmp_path):
+    save_file({"l0.q.input_scale": torch.ones(1)}, tmp_path / "model-1.safetensors")
+    save_file({"l0.q.input_scale": torch.ones(1)}, tmp_path / "model-2.safetensors")
+
+    with pytest.raises(ValueError, match="more than one file"):
+        main([str(tmp_path), str(tmp_path)])

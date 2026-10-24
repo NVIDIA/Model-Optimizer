@@ -806,7 +806,7 @@ After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build c
 
 ## Reproducible PTQ
 
-Repeating a run with the same model, data, recipe, batch size, hardware and software gives the same scales. What moves them is the calibration batch size: the default `--batch_size 0` probes it from free GPU memory, so another GPU or memory state silently calibrates with another batch size. `--deterministic` pins what the run still depends on: it requires an explicit `--batch_size`, seeds every random number generator and selects deterministic torch kernels (an op without one only warns). It costs some run time.
+On the configurations we measured (Qwen3-30B-A3B NVFP4 on one and two GPUs, Qwen3-8B AWQ), repeating a run with the same model, data, recipe, batch size, hardware and software gave identical scales. What moved them was the calibration batch size: the default `--batch_size 0` probes it from free GPU memory, so another GPU or memory state silently calibrates with another batch size. `--deterministic` pins what the run still depends on: it requires an explicit `--batch_size`, seeds every random number generator and selects deterministic torch kernels. This is best effort, not a guarantee: an op without a deterministic kernel still runs and only warns. It costs some run time.
 
 ```bash
 python hf_ptq.py ... --batch_size 8 --deterministic --export_path run_a
