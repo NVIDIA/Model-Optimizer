@@ -29,10 +29,12 @@ from _test_utils.torch.distributed.utils import bounded_collectives
 
 transformers = pytest.importorskip("transformers")
 
-from transformers import AutoModel, DeepseekV3Config, LlamaConfig, LlamaForCausalLM
+from transformers import AutoModel, DeepseekV3Config, GptOssConfig, LlamaConfig, LlamaForCausalLM
 
 import modelopt.torch.models.hf as models_hf
 import modelopt.torch.utils.distributed as dist
+import modelopt.torch.utils.moe as moe
+from modelopt.torch.models import get_spec
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan
 from modelopt.torch.utils.plugins import model_load_utils
@@ -273,28 +275,88 @@ def test_hf_config_is_refused_without_the_plan_it_came_with(
 
 
 def test_an_expert_parallel_plan_loads_through_the_ep_loader(
-    run_as, serve, loaders, auto_class, tmp_path
+    run_as, serve, loaders, auto_class, monkeypatch, tmp_path
 ):
-    """An EP plan loads through load_and_prepare_ep, with the plan, and through no other load."""
+    """Decided automatically, an EP plan loads through load_and_prepare_ep -- with the plan and the
+    spec-prepared config -- and through no other load."""
+    monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
     run_as(4)
-    serve(_deepseek_v3(n_routed_experts=8))
-    plan = DistributionPlan(4, ep_size=4, dense="fsdp")
+    served = serve(_deepseek_v3(n_routed_experts=8))
 
     model = load_pretrained(
-        str(tmp_path),
-        distribution=plan,
-        trust_remote_code=True,
-        attn_implementation="eager",
-        freeze=False,
+        str(tmp_path), trust_remote_code=True, attn_implementation="eager", freeze=False
     )
 
     call = loaders.pop("ep")
+    plan = DistributionPlan(4, ep_size=4, dense="fsdp")
     assert (call["ckpt_path"], call["plan"]) == (str(tmp_path), plan)
     assert (call["trust_remote_code"], call["attn_implementation"]) == (True, "eager")
     assert call["freeze"] is False
+    assert call["hf_config"] is served
+    assert served.base_model_ep_plan == get_spec("deepseek_v3").ep_spec.base_model_ep_plan
     assert distribution_plan(model) == plan
     assert loaders == {}
     assert auto_class.calls == []
+
+
+@pytest.mark.parametrize(
+    ("planned", "passed_as", "preparations"),
+    [(False, None, 1), (True, None, 1), (True, "hf_config", 0), (True, "config", 1)],
+    ids=[
+        "decided_by_the_load",
+        "planned",
+        "planned_with_its_config",
+        "planned_with_a_config_for_the_load",
+    ],
+)
+def test_a_load_prepares_its_config_once(
+    run_as, loaders, monkeypatch, tmp_path, planned, passed_as, preparations
+):
+    """A model's EP preparation can patch its modeling code, so a load runs it once, and not at all
+    when handed the config resolve_distribution_plan prepared. A config passed for the load is the
+    caller's own, so the load prepares a copy of it. Every config it reads takes the Hub options the
+    load was given (custom code an ``auto_map`` names in another repo)."""
+    run_as(4)
+    config, reads = _deepseek_v3(n_routed_experts=8), []
+    as_passed = config.to_dict()
+    monkeypatch.setattr(
+        transformers.AutoConfig, "from_pretrained", lambda *a, **k: reads.append(k) or config
+    )
+    prepared = []
+
+    def apply_distributed_support(model_type, hf_config, **kwargs):
+        prepared.append(model_type)
+        hf_config.base_model_ep_plan = get_spec("deepseek_v3").ep_spec.base_model_ep_plan
+        return hf_config
+
+    monkeypatch.setattr(moe, "apply_distributed_support", apply_distributed_support)
+    kwargs = {"distribution": DistributionPlan(4, ep_size=4)} if planned else {}
+    if passed_as:
+        kwargs[passed_as] = config
+
+    load_pretrained(str(tmp_path), local_files_only=True, **kwargs)
+
+    assert len(prepared) == preparations
+    loaded = loaders["ep"]["hf_config"]
+    if passed_as == "config":
+        assert loaded is not config and loaded.base_model_ep_plan
+        assert config.to_dict() == as_passed
+    else:
+        assert loaded is config
+    assert all(read.get("local_files_only") is True for read in reads)
+
+
+def test_a_model_its_spec_refuses_is_refused_with_its_config_handed_in(run_as, loaders, tmp_path):
+    """Handed the config prepared with its plan, the load does not prepare it again, but a model
+    whose spec refuses expert parallelism is refused all the same, before anything loads."""
+    run_as(4)
+    config = GptOssConfig(**_TINY, num_local_experts=4)
+
+    with pytest.raises(NotImplementedError, match="gpt_oss cannot be quantized expert-parallel"):
+        load_pretrained(
+            str(tmp_path), distribution=DistributionPlan(4, ep_size=4), hf_config=config
+        )
+    assert loaders == {}
 
 
 def _every_rank_loads_rank0s_plan_job(rank, size, ckpt):

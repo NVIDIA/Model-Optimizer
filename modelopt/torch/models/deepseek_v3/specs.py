@@ -19,7 +19,7 @@ Covers the transformers-native V3 family (V3, R1, V3.1). The remote-code
 ``DeepseekMoE`` block of DeepSeek-MoE is a separate spec under ``deepseek``.
 """
 
-from ..specs import ExportSpec, ModelSpec, MoESpec, register
+from ..specs import EPSpec, ExportSpec, ModelSpec, MoESpec, register
 
 __all__: list[str] = []
 
@@ -37,6 +37,16 @@ register(
         model_type="deepseek_v3",
         min_transformers_version="5.5",
         export_spec=ExportSpec(grouped_expert_export=True),
+        ep_spec=EPSpec(
+            # Stock transformers ships no plan for deepseek_v3. No gate entry on purpose: the
+            # router is logits-only and the MoE block computes GLOBAL top-k ids, so the experts
+            # already receive unmasked global ids -- what the all-to-all dispatch wants.
+            base_model_ep_plan={
+                "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+                "layers.*.mlp.experts.down_proj": "grouped_gemm",
+                "layers.*.mlp.experts": "moe_tp_experts",
+            },
+        ),
         moe_spec=MoESpec(
             block_names=("DeepseekV3MoE",),
             expert_linear_names=("gate_proj", "down_proj", "up_proj"),

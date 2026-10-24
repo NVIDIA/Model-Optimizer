@@ -461,6 +461,21 @@ def _load_sharded(route, plan, ckpt_path, auto_class, model_type, kwargs, hub_op
     trust_remote_code = kwargs.pop("trust_remote_code", False)
     hf_config = kwargs.pop("hf_config", None)
     if route == _EXPERT_PARALLEL:
+        from modelopt.torch.utils.moe import apply_distributed_support, check_distributed_support
+
+        if hf_config is None:
+            hf_config = apply_distributed_support(
+                model_type,
+                AutoConfig.from_pretrained(
+                    ckpt_path, trust_remote_code=trust_remote_code, **hub_options
+                ),
+                ckpt_path=ckpt_path,
+                trust_remote_code=trust_remote_code,
+            )
+        else:
+            # Prepared with its plan, and preparing can patch modeling code, so it is not prepared
+            # again; a model its spec refuses is refused all the same.
+            check_distributed_support(model_type)
         return load_and_prepare_ep(
             ckpt_path, plan, trust_remote_code=trust_remote_code, hf_config=hf_config, **kwargs
         )
@@ -524,7 +539,8 @@ def load_pretrained(
     rather than ignore it. ``hf_config`` is the config :func:`resolve_distribution_plan` returned with
     the plan handed in as ``distribution``: the load builds from it as given, so without that plan
     it is refused. A ``config`` passed for the load is the one the plan is decided from, and a
-    sharded load takes it as its ``hf_config``.
+    sharded load takes it as its ``hf_config``: an expert-parallel load a copy of it the model spec
+    prepares (:func:`~modelopt.torch.utils.moe.apply_distributed_support`), as deciding does.
 
     Whatever the placement:
 
@@ -602,10 +618,6 @@ def load_pretrained(
     else:
         raise TypeError(f"distribution={distribution!r}: expected a DistributionPlan or None.")
     route = _route(plan)
-    if route is not None and config is not None:
-        # The sharded load builds the model from hf_config: the plan's copy of this one, or it.
-        del kwargs["config"]
-        kwargs.setdefault("hf_config", config)
     if model_type is None:
         # The load uses the config passed for it, if any, so the loading hook follows that one.
         model_type = getattr(hf_config or config, "model_type", None) or (
@@ -613,6 +625,21 @@ def load_pretrained(
                 ckpt_path, trust_remote_code=trust_remote_code, **hub_options
             ).model_type
         )
+    if route is not None and config is not None:
+        # The sharded load builds the model from hf_config: the plan's copy of this one, or it. With
+        # a plan handed in, an expert-parallel load prepares a copy of it, as deciding would have.
+        del kwargs["config"]
+        if "hf_config" not in kwargs:
+            if route == _EXPERT_PARALLEL:
+                from modelopt.torch.utils.moe import apply_distributed_support
+
+                config = apply_distributed_support(
+                    model_type,
+                    copy.deepcopy(config),
+                    ckpt_path=ckpt_path,
+                    trust_remote_code=trust_remote_code,
+                )
+            kwargs["hf_config"] = config
     if route is not None:
         model = _load_sharded(route, plan, ckpt_path, auto_class, model_type, kwargs, hub_options)
         # A sharded load finds the unplaced keys while it places the weights.
@@ -1175,7 +1202,9 @@ def _decide_distribution(
     """The plan :func:`resolve_distribution_plan` returns, decided by this rank alone."""
     from modelopt.torch.utils.moe import (
         _ep_config,
+        _ep_spec,
         _routed_expert_modules,
+        _spec_ep_plan,
         choose_ep_dp_degrees,
         num_experts_from_config,
     )
@@ -1236,12 +1265,28 @@ def _decide_distribution(
             f"The dense part of a block-fp8 {hf_config.model_type} checkpoint cannot be sharded "
             "expert-parallel: Distributed Checkpoint cannot dequantize its F8_E8M0 scales."
         )
-    if experts and ep_size == 1 and dense == "replicate":
+    # An EP degree of 1 skips the model's spec (resolve_distribution_plan), so a model whose plan only
+    # its spec supplies shows no routed experts above: look for them through the plan the spec would
+    # supply, or such an MoE would load whole on every rank where one carrying its own plan refuses.
+    if (
+        ep_size == 1
+        and dense == "replicate"
+        and (experts or _routed_expert_modules(model, _spec_ep_plan(hf_config.model_type)))
+    ):
+        fsdp2 = "(--use_fsdp2 in examples/hf_ptq/hf_ptq.py, or MODELOPT_FSDP_SIZE=world)"
+        ep = _ep_spec(hf_config.model_type)
+        if ep is not None and ep.unsupported:
+            # Its spec refuses an EP degree above 1, so FSDP2 is the one way left to shard it.
+            raise RuntimeError(
+                f"{hf_config.model_type} cannot be quantized expert-parallel yet, and the plan "
+                f"replicates it at world_size={world_size}, so every rank would hold the whole "
+                f"MoE. Shard the whole model with FSDP2 instead {fsdp2}."
+            )
         raise RuntimeError(
             f"{hf_config.model_type} can be expert-parallel, but the plan resolved to ep_size=1 at "
             f"world_size={world_size}, so every rank would hold the whole MoE. Shard its experts "
             "(MODELOPT_EP_DEGREE above 1, dividing both the expert count and the world size), or "
-            "shard the whole model with FSDP2."
+            f"shard the whole model with FSDP2 {fsdp2}."
         )
     return DistributionPlan(world_size, ep_size, dense)
 
@@ -1289,9 +1334,14 @@ def resolve_distribution_plan(
     ``config``, the config the load will use when the caller has one, is decided from instead of
     the checkpoint's, which is then not read: each rank takes a copy, as deciding may add to it.
 
-    A plan that leaves an expert-parallel MoE whole on every rank raises.
+    Unless rank 0's knobs rule expert parallelism out (a single process, or an EP degree of 1),
+    every rank applies the model's spec to the config first
+    (:func:`~modelopt.torch.utils.moe.apply_distributed_support`): for several models it is what
+    supplies the expert-parallel plan, and the returned config carries it. A plan that leaves an
+    expert-parallel MoE whole on every rank raises.
     """
     from modelopt.torch.utils import distributed as dist
+    from modelopt.torch.utils.moe import apply_distributed_support
 
     # Each rank reads the checkpoint for itself. One that cannot must fail every rank here, rather
     # than leave the others waiting in a broadcast below for a rank that already raised.
@@ -1317,6 +1367,20 @@ def resolve_distribution_plan(
     dist.all_reduce("checkpoint read", checkpoint_read, all)
     ckpt_path, hf_config = read[0]
     world_size = dist.size()
+    # Whether the run rules expert parallelism out is rank 0's call, as the plan is: a rank that
+    # skipped the spec while the others applied it would load without the expert-parallel plan
+    # they shard by, and fail once the mesh is up, leaving them waiting in a collective.
+    if dist.broadcast_from(
+        "spec",
+        lambda: world_size > 1 and str(env.ep_degree() if ep_size is None else ep_size) != "1",
+    ):
+        # Before deciding: deciding without the spec would read an expert-parallel MoE as dense.
+        hf_config = apply_distributed_support(
+            hf_config.model_type,
+            hf_config,
+            ckpt_path=ckpt_path,
+            trust_remote_code=trust_remote_code,
+        )
     plan = dist.broadcast_from(
         "plan",
         lambda: _decide_distribution(
