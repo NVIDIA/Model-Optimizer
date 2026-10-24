@@ -32,8 +32,14 @@ from ..logging_config import logger
 from .dla_transforms.dla_cast_to_fp32 import _apply_cast_to_fp32
 from .dla_transforms.dla_constants_to_initializers import _constants_to_initializers_from_model
 from .dla_transforms.dla_graph_cleanup import _remove_unused_initializers
+from .dla_transforms.dla_remove_deqlin import _apply_remove_deqlin
 from .dla_transforms.dla_remove_qdq import _remove_qdq_from_model
 from .dla_transforms.dla_reorder_nodes import _apply_reorder_nodes
+from .dla_transforms.dla_reshape_patterns import (
+    _apply_reshape_qdq_reduce_sum,
+    _apply_reshape_reduce_sum,
+    _apply_reshape_transpose_reshape,
+)
 from .utils.graph_utils import (
     DEFAULT_QDQ_REMOVE_QUANT_TYPES,
     infer_shapes,
@@ -43,6 +49,10 @@ from .utils.graph_utils import (
 if TYPE_CHECKING:
     from collections.abc import Iterable
 __all__ = []
+
+
+def _remove_deqlin_and_unused_initializers(model):
+    return _remove_unused_initializers(_apply_remove_deqlin(model))
 
 
 def _apply_remove_qdq(model, **options):
@@ -61,6 +71,11 @@ DLA_TRANSFORMS = (
     ("RemoveQDQ", _apply_remove_qdq),
     ("ConstantsToInitializers", _apply_constants_to_initializers),
     ("Cast", _apply_cast_to_fp32),
+    ("RemoveDeqLin", _remove_deqlin_and_unused_initializers),
+    ("ShapeInference", infer_shapes),
+    ("ReshapeTransposeReshape", _apply_reshape_transpose_reshape),
+    ("ReshapeQDQReduceSum", _apply_reshape_qdq_reduce_sum),
+    ("ReshapeReduceSum", _apply_reshape_reduce_sum),
     ("ShapeInference", infer_shapes),
     ("RemoveUnusedInitializers", _remove_unused_initializers),
 )
