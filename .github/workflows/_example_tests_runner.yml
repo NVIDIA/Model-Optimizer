@@ -76,6 +76,8 @@ jobs:
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu:/usr/local/tensorrt/targets/x86_64-linux-gnu/lib" >> $GITHUB_ENV
           echo "PATH=${PATH}:/usr/local/tensorrt/targets/x86_64-linux-gnu/bin" >> $GITHUB_ENV
+      - if: contains(inputs.docker_image, 'nvidia/nemo:')
+        uses: ./.github/actions/megatron-from-source
       - name: Install dependencies
         shell: bash
         run: |

@@ -90,6 +90,8 @@ jobs:
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+      - if: contains(matrix.container_image, 'nvidia/nemo:')
+        uses: ./.github/actions/megatron-from-source
       - name: Run gpu tests
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
