@@ -163,23 +163,36 @@ def test_a2a_moe_chunks_hops_past_the_element_limit(cpu_dist_workers):
     cpu_dist_workers.run(_chunked_hops_job)
 
 
-def _skewed_routing_job(rank, size):
-    """Rank 1 sends four times rank 0's tokens, all to an expert rank 0 owns: rank 0 receives five
-    times what it sent and warns before allocating for it; rank 1, which receives nothing, does not."""
-    tokens = T if rank == 0 else 4 * T
+def _routing_skew_job(rank, size, routing):
+    if routing == "collapsed":
+        # Rank 1 sends four times rank 0's tokens, all to an expert rank 0 owns: rank 0 receives
+        # more than any rank sent, and warns before allocating for it.
+        tokens = T if rank == 0 else 4 * T
+        ti = torch.zeros(tokens, 1, dtype=torch.int64)
+    else:
+        # Rank 1's batch is ten times rank 0's, routed evenly: rank 0 receives over five times what
+        # it sent, but less than rank 1 sent.
+        tokens = T if rank == 0 else 10 * T
+        ti = (torch.arange(tokens) % 2 * (E // size)).unsqueeze(1)
     x = torch.randn(tokens, H)
-    ti = torch.zeros(tokens, 1, dtype=torch.int64)
     tw = torch.ones(tokens, 1)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        with torch.no_grad():
-            a2a_moe(dist.group.WORLD, x, ti, tw, E // size, _identity_experts)
-    imbalance = [w for w in caught if "imbalance" in str(w.message)]
-    assert len(imbalance) == (1 if rank == 0 else 0), [str(w.message) for w in caught]
+    # Two ranks never receive twice the most any rank sent; a ratio of 1 lets them warn at all.
+    ratio, moe._A2A_SKEW_WARN_RATIO = moe._A2A_SKEW_WARN_RATIO, 1
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with torch.no_grad():
+                a2a_moe(dist.group.WORLD, x, ti, tw, E // size, _identity_experts)
+    finally:
+        moe._A2A_SKEW_WARN_RATIO = ratio
+    collapsed = [w for w in caught if "collapsed" in str(w.message)]
+    warns = routing == "collapsed" and rank == 0
+    assert len(collapsed) == int(warns), [str(w.message) for w in caught]
 
 
-def test_a2a_moe_warns_when_a_rank_receives_far_more_than_it_sent(cpu_dist_workers):
-    cpu_dist_workers.run(_skewed_routing_job)
+@pytest.mark.parametrize("routing", ["collapsed", "unequal-batches"])
+def test_a2a_moe_warns_when_a_rank_receives_more_than_any_rank_sent(cpu_dist_workers, routing):
+    cpu_dist_workers.run(_routing_skew_job, routing=routing)
 
 
 def test_the_router_style_registers_under_transformers_5_16_0s_name(monkeypatch):

@@ -46,6 +46,9 @@ _A2A_MAX_HOP_ELEMENTS = 2**31 - 1
 # The combine weights and sums each token's top_k results a slice of tokens at a time, so its
 # temporaries stay within this many elements however many tokens the layer routes.
 _COMBINE_SLICE_ELEMENTS = 2**25
+# A rank that receives more than this many times the most tokens any rank sent warns that routing has
+# collapsed. A rank can receive at most world size times that, so it fires only above 4 ranks.
+_A2A_SKEW_WARN_RATIO = 4
 
 
 def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, expert_fn):
@@ -154,29 +157,26 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     in_list, out_list = in_counts.tolist(), out_counts.tolist()
     Q = int(sum(out_list))  # noqa: N806
 
-    # Q (tokens RECEIVED) is what sizes every buffer below, and it is data-dependent: a balanced
-    # router gives Q ~= P, but a collapsed one piles the whole cluster's tokens onto a few experts
-    # and Q grows without bound. Report it HERE rather than only in the end-of-function trace --
-    # the expert stage allocates O(Q*H) immediately after, so on a bad routing draw the function
-    # OOMs before that trace can run and the one number that explains the failure is never printed.
     P_sent = int(send_hidden.size(0))  # noqa: N806
-    if 4 * max(P_sent, 1) < Q:
+    # One all-reduce, two maxima. Every rank must issue the same number of hops, but the rows a rank
+    # moves depend on its routing, so the hops' column slices are sized from the most rows any rank
+    # moves. And a rank receives about the average share, so the most tokens any rank sent, not this
+    # rank's own, tells a collapsed router from batches of different sizes.
+    most = torch.tensor([max(P_sent, Q), P_sent], device=dev, dtype=torch.int64)
+    dist.all_reduce(most, op=dist.ReduceOp.MAX, group=group)
+    most_rows, most_sent = most.tolist()
+    # Warn before the O(Q x H) allocations below: a collapsed router can run out of memory there.
+    if _A2A_SKEW_WARN_RATIO * max(most_sent, 1) < Q:
         warnings.warn(
-            f"[a2a] rank {dist.get_rank()} received Q={Q} tokens for {num_local_experts} local "
-            f"expert(s) after sending P={P_sent} -- a {Q / max(P_sent, 1):.1f}x imbalance. The "
-            f"expert stage allocates O(Q x H), so this is a likely OOM. Routing has probably "
-            f"collapsed onto few experts (check the router/hidden states for NaN or blow-up).",
+            f"[a2a] rank {dist.get_rank()} received over {_A2A_SKEW_WARN_RATIO}x the most tokens any "
+            "rank sent: routing has probably collapsed onto a few experts (check the router and the "
+            "hidden states for NaN or blow-up), and the expert stage, which allocates O(received "
+            "tokens x hidden), will likely run out of memory.",
             stacklevel=2,
         )
-    # The two [rows, H] hops (dispatch, combine) move at most max(P_sent, Q) rows; past the int32
-    # element limit they go as hidden-column slices. The slice count (the number of collective HOPS)
-    # MUST be identical on every rank, but Q is per-rank data-dependent (routing imbalance), so
-    # deciding it from LOCAL sizes desyncs the hop count and deadlocks: all-reduce the most rows any
-    # rank moves, once for both hops. A slice is then as wide as that many rows allow; splitting H
-    # evenly instead rounds each slice up, which can carry it past the limit.
-    rows = torch.tensor([max(P_sent, Q)], device=dev, dtype=torch.int64)
-    dist.all_reduce(rows, op=dist.ReduceOp.MAX, group=group)
-    step = _A2A_MAX_HOP_ELEMENTS // max(int(rows.item()), 1)
+    # A slice as wide as that many rows allow; splitting H evenly instead rounds each slice up, which
+    # can carry it past the limit.
+    step = _A2A_MAX_HOP_ELEMENTS // max(most_rows, 1)
     # dispatch hidden (autograd-aware when scoring) + local-expert id (same split sizes)
     recv_hidden = torch.empty(Q, H, device=dev, dtype=x.dtype)
     recv_hidden = _all_to_all(recv_hidden, send_hidden, out_list, in_list, step)
