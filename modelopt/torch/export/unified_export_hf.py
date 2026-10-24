@@ -2114,7 +2114,7 @@ def export_hf_checkpoint(
             pack_quantized_weights(model, _dtype, _qlora, keep_fused_experts=True)
             if getattr(model, "hf_quantizer", None) is not None:
                 model.hf_quantizer = None
-            distributed_save_hf_checkpoint(
+            reverted = distributed_save_hf_checkpoint(
                 model,
                 export_dir,
                 maxbound=448,  # the KV cache scale is amax / 448 for FP8 and NVFP4, as above
@@ -2127,7 +2127,10 @@ def export_hf_checkpoint(
             )
             if rank == 0:
                 _write_base_config(model, export_dir)
-                hf_quant_config = _revert_quant_config_names_best_effort(model, hf_quant_config)
+                # The weights keep their in-memory names when any rank could not revert them, and
+                # the quant config has to name the modules as the weights do.
+                if reverted:
+                    hf_quant_config = _revert_quant_config_names_best_effort(model, hf_quant_config)
         elif is_fsdp2_sharded:
             # FSDP2 multi-rank: stream each rank's owned units straight to its own shard files, so
             # a rank buffers its own share of the model rather than the whole checkpoint, and the
