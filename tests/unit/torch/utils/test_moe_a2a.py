@@ -88,10 +88,10 @@ def test_a2a_moe_keeps_the_dtype_it_is_given(cpu_dist_workers, dtype, tol):
     cpu_dist_workers.run(_keeps_dtype_job, dtype=dtype, tol=tol)
 
 
-def _chunked_hops_job(rank, size):
+def _chunked_hops_job(rank, size, grad):
     """Shrinking the per-hop element limit splits every 2-D hop along the hidden dim into slices
     within it -- the guard against int32 offset overflow, at a size a unit test can afford --
-    without changing the result."""
+    without changing the result or, with a graph, the gradients."""
     gen = torch.Generator().manual_seed(rank)
     x = torch.randn(T, H, generator=gen)
     # Every rank sends and receives T * TOP_K = 12 rows. A limit of 34 holds 2 of their H = 8
@@ -99,7 +99,7 @@ def _chunked_hops_job(rank, size):
     ti = (torch.arange(T * TOP_K) % E).reshape(T, TOP_K)
     tw = torch.rand(T, TOP_K, generator=gen)
     limit = 34
-    hops = []  # the elements each 2-D hop moves
+    hops = []  # the elements each 2-D hop moves, the backward's included
     real = dist.all_to_all_single
 
     def recording(output, input_, *args, **kwargs):
@@ -107,19 +107,27 @@ def _chunked_hops_job(rank, size):
             hops.append(max(output.numel(), input_.numel()))
         return real(output, input_, *args, **kwargs)
 
+    def run():
+        x_ = x.clone().requires_grad_(grad)
+        with torch.set_grad_enabled(grad):
+            out = a2a_moe(dist.group.WORLD, x_, ti, tw, E // size, _identity_experts)
+            if grad:
+                out.square().sum().backward()
+        return out.detach(), x_.grad
+
     dist.all_to_all_single = recording
     try:
-        with torch.no_grad():
-            whole = a2a_moe(dist.group.WORLD, x, ti, tw, E // size, _identity_experts)
-            whole_hops = hops.copy()
-            hops.clear()
-            moe._A2A_MAX_HOP_ELEMENTS = limit
-            chunked = a2a_moe(dist.group.WORLD, x, ti, tw, E // size, _identity_experts)
+        whole, whole_grad = run()
+        whole_hops = hops.copy()
+        hops.clear()
+        moe._A2A_MAX_HOP_ELEMENTS = limit
+        chunked, chunked_grad = run()
     finally:
         dist.all_to_all_single = real
         moe._A2A_MAX_HOP_ELEMENTS = 2**31 - 1
     assert max(hops) <= limit < max(whole_hops)
     torch.testing.assert_close(chunked, whole, atol=0, rtol=0)
+    torch.testing.assert_close(chunked_grad, whole_grad, atol=0, rtol=0)
 
 
 def _bounded_combine_job(rank, size):
@@ -164,8 +172,9 @@ def test_the_combine_works_a_slice_of_tokens_at_a_time(cpu_dist_workers):
     cpu_dist_workers.run(_bounded_combine_job)
 
 
-def test_a2a_moe_chunks_hops_past_the_element_limit(cpu_dist_workers):
-    cpu_dist_workers.run(_chunked_hops_job)
+@pytest.mark.parametrize("grad", [False, True], ids=["forward", "backward"])
+def test_a2a_moe_chunks_hops_past_the_element_limit(cpu_dist_workers, grad):
+    cpu_dist_workers.run(_chunked_hops_job, grad=grad)
 
 
 def _routing_skew_job(rank, size, routing):
