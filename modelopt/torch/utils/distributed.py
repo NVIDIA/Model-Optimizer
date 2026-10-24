@@ -34,7 +34,14 @@ import torch
 import torch.distributed
 from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, fully_shard
 from torch.distributed.tensor import DTensor
-from torch.utils.data import DataLoader, IterableDataset, get_worker_info
+from torch.utils.data import (
+    BatchSampler,
+    DataLoader,
+    IterableDataset,
+    RandomSampler,
+    SequentialSampler,
+    get_worker_info,
+)
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
@@ -722,12 +729,14 @@ class _StridedIterableShard(IterableDataset):
                 yield group[self.rank]
 
 
-def shard_dataloader(loader, rank: int, world_size: int):
+def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoader:
     """Wrap a DataLoader so each rank sees a unique shard.
 
     For map-style datasets a ``DistributedSampler`` is used. ``drop_last=False`` keeps per-rank batch
     counts equal (else a rank exits calibration early and hangs the others on the per-step collectives),
-    at the cost of the sampler repeating up to ``world_size - 1`` samples to pad the even split. For
+    at the cost of the sampler repeating up to ``world_size - 1`` samples to pad the even split. It
+    replaces the loader's sampler, so a shuffling one becomes the rank's unshuffled share, and one that
+    picks samples itself (a subset, or a batch sampler) is refused rather than silently widened. For
     streaming ``IterableDataset`` datasets (which have no ``len()`` and so can't use a sampler) each rank
     strides its own deterministic copy of the stream via :class:`_StridedIterableShard`. Every DataLoader
     worker must see that whole stream: a dataset that splits itself across workers by
@@ -736,6 +745,18 @@ def shard_dataloader(loader, rank: int, world_size: int):
     Forwards all non-sampler DataLoader settings from ``loader`` (workers, pinning,
     prefetch, init fn, generator, ...).
     """
+    if not isinstance(loader.dataset, IterableDataset):
+        picker = (
+            loader.batch_sampler
+            if loader.batch_sampler is not None and type(loader.batch_sampler) is not BatchSampler
+            else loader.sampler
+        )
+        if type(picker) not in (SequentialSampler, RandomSampler, DistributedSampler):
+            raise ValueError(
+                f"shard_dataloader: the loader's {type(picker).__name__} picks which samples it "
+                "reads, and the rank's DistributedSampler would replace it; pass a loader over "
+                "just the samples to calibrate on (a torch.utils.data.Subset) instead."
+            )
     if isinstance(loader.dataset, IterableDataset):
         return DataLoader(
             _StridedIterableShard(loader.dataset, rank, world_size),
@@ -846,7 +867,12 @@ def _release_cached_cuda_memory():
         torch.cuda.empty_cache()
 
 
-def distributed_forward_loop(model, dataloader, device=None, ep_mesh=None):
+def distributed_forward_loop(
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    device: torch.device | str | None = None,
+    ep_mesh: "torch.distributed.device_mesh.DeviceMesh | None" = None,
+) -> Callable[[torch.nn.Module], None]:
     """Build an ``mtq.quantize`` ``forward_loop`` for a distributed (e.g. expert-parallel) model.
 
     Moves each batch onto ``device``, when given, and runs the captured ``model`` forward (the EP
@@ -857,11 +883,9 @@ def distributed_forward_loop(model, dataloader, device=None, ep_mesh=None):
     ``forward_loop`` callback an inner module that this closure ignores, calling the captured
     top-level ``model`` instead so the full distributed forward (and its collectives) runs.
 
-    KV/state caching is disabled for the duration (via ``_disable_use_cache``), mirroring the
-    single-node ``_forward_loop``. This distributed path previously omitted the guard, so it ran
-    calibration at ``config.use_cache`` (default ``True``); for hybrid Mamba/attention models
-    (e.g. NemotronH) the cache is mutated in-place, which both wastes memory and breaks
-    calibration correctness.
+    The forwards run without gradients and with KV/state caching disabled (``_disable_use_cache``), as
+    the single-node ``_forward_loop`` runs them: a hybrid Mamba/attention model mutates its cache in
+    place.
     """
     # Local import to avoid any import cycle within modelopt.torch.utils.
     from modelopt.torch.utils.dataset_utils import _disable_use_cache
@@ -875,12 +899,8 @@ def distributed_forward_loop(model, dataloader, device=None, ep_mesh=None):
 
     def calibrate(_inner_model):
         _reinstall_a2a_forwards(model, ep_mesh)
-        with _disable_use_cache(model):
-            # Reclaim the caching allocator's reserved-but-unused pool left by the load/quantizer-insertion
-            # memory peak. Without this, torch hoards ~the whole GPU (e.g. 91 GB live weights vs 275 GB
-            # reserved), leaving ~0 GB free, so the distributed a2a's NCCL comm buffers cannot be allocated
-            # ("Failed to CUDA calloc") at the very first all_to_all. Freeing the cache hands that memory
-            # back to the driver for NCCL + the calibration activations.
+        with _disable_use_cache(model), torch.no_grad():
+            # Hand the caching allocator's unused pool back: NCCL allocates its buffers outside it.
             _release_cached_cuda_memory()
             for batch in tqdm(dataloader, desc="Calibrating", disable=not is_master()):
                 if device is not None:
@@ -889,13 +909,7 @@ def distributed_forward_loop(model, dataloader, device=None, ep_mesh=None):
                         for k, v in batch.items()
                     }
                 model(**batch)
-            # Symmetric to the pre-forward reclaim above, and for the same reason one stage later:
-            # the calibration forwards leave their activations in the caching allocator's reserved
-            # pool, so whatever runs next (amax sync, export collectives) can find the device full
-            # even though little is live. Measured on Kimi-K3 (EP64, 184 GiB cards) right after the
-            # single calib forward: alloc 86.0 GiB but reserved 156.6 GiB -> only 0.7 GiB free, and
-            # the job then hung until the 2 h wall clock instead of exporting. NCCL comm buffers are
-            # allocated OUTSIDE the torch allocator, so a full reserved pool starves them.
+            # Again for what runs next (amax sync, export collectives), past the forwards' pool.
             _release_cached_cuda_memory()
 
     return calibrate
