@@ -142,10 +142,6 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
         from torch.distributed.tensor import DTensor, Replicate, Shard
     except Exception:  # pragma: no cover - non-distributed install
         DTensor = None  # noqa: N806 (the optional-import fallback for a class)
-    try:
-        from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
-    except Exception:  # pragma: no cover - older torch: fall back to even-split offset
-        compute_local_shape_and_global_offset = None
 
     first = getattr(module, "_first_proj_attr", "gate_up_proj")
     n = module.num_experts
@@ -177,23 +173,20 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
         is_dt = DTensor is not None and isinstance(wdata, DTensor)
         if is_dt:
             mesh, placements = wdata.device_mesh, wdata.placements
+            # A rank holding no experts would stack none and register no input scale, so the
+            # ranks' state dicts would differ for the DCP write. Every rank chunks the experts as
+            # torch does, so every rank refuses together.
+            for mdim, p in enumerate(placements):
+                if isinstance(p, Shard) and p.dim == 0:
+                    chunk = -(-wdata.shape[0] // mesh.size(mdim))
+                    if not chunk or -(-wdata.shape[0] // chunk) < mesh.size(mdim):
+                        raise NotImplementedError(
+                            f"{type(module).__name__}.{proj}: {wdata.shape[0]} experts over "
+                            f"{mesh.size(mdim)} shards leaves a rank none; the keep-fused fold "
+                            "needs every rank to hold an expert."
+                        )
             local_w = wdata.to_local()
-            offset = None
-            if compute_local_shape_and_global_offset is not None:
-                try:
-                    _, global_offset = compute_local_shape_and_global_offset(
-                        tuple(wdata.shape), mesh, placements
-                    )
-                    offset = int(global_offset[0])
-                except Exception:
-                    offset = None
-            if offset is None:  # even-split fallback (dim-0 Shard on a 1-D mesh)
-                offset, nshards = 0, 1
-                for mdim, p in enumerate(placements):
-                    if isinstance(p, Shard) and p.dim == 0:
-                        nshards = mesh.size(mdim)
-                        offset = mesh.get_local_rank(mdim) * ((n + nshards - 1) // nshards)
-                        break
+            offset = _dtensor_dim0_offset(wdata)
             scale_placements = [
                 p if (isinstance(p, Shard) and p.dim == 0) else Replicate() for p in placements
             ]
@@ -572,14 +565,19 @@ def split_fused_experts_state_dict(state_dict: dict) -> dict:
         first_ws, first_in, first_ws2 = _scales(first)
         down_ws, down_in, down_ws2 = _scales("down_proj")
 
-        def _slice_weight_scale(ws, row_slice, fused_rows):
-            # per-tensor-per-expert scale -> scalar; per-output-channel -> slice the rows.
+        def _slice_weight_scale(ws, expert_idx, row_slice, rows):
+            # A per-expert scalar as is; else the expert's scale rows covering ``row_slice`` of its
+            # ``rows`` weight rows, in proportion: an INT4 weight packs two rows a byte while its
+            # scales stay per row, and an FP8 2-D block scale covers 128 rows.
             if ws is None:
                 return None
             if ws.dim() <= 1:  # (E,) one scalar per expert
                 return ws[expert_idx]
-            sub = ws[expert_idx]  # (fused_rows,) or (fused_rows, ...)
-            return sub if row_slice is None else sub[row_slice]
+            sub = ws[expert_idx]
+            if row_slice is None:
+                return sub
+            start, stop, _ = row_slice.indices(rows)
+            return sub[start * sub.shape[0] // rows : stop * sub.shape[0] // rows]
 
         for expert_idx in range(n_experts):
             if gated:
@@ -617,12 +615,12 @@ def split_fused_experts_state_dict(state_dict: dict) -> dict:
                 # safetensors/save_pretrained shared-tensor dedup silently drops the duplicate
                 # (e.g. up_proj.weight_scale/input_scale would go missing).
                 out[f"{base}.weight"] = weight.detach().clone().contiguous()
-                sliced_ws = _slice_weight_scale(ws, row_slice, weight.shape[0])
+                sliced_ws = _slice_weight_scale(ws, expert_idx, row_slice, first_w.shape[1])
                 if sliced_ws is not None:
                     out[f"{base}.weight_scale"] = sliced_ws.detach().clone().contiguous()
                 # weight_scale_2 is a per-expert scalar (shared by gate/up): _slice_weight_scale's
                 # dim<=1 branch returns ws2[expert_idx] regardless of row_slice. NVFP4 only; None for FP8.
-                sliced_ws2 = _slice_weight_scale(ws2, row_slice, weight.shape[0])
+                sliced_ws2 = _slice_weight_scale(ws2, expert_idx, row_slice, first_w.shape[1])
                 if sliced_ws2 is not None:
                     out[f"{base}.weight_scale_2"] = sliced_ws2.detach().clone().contiguous()
                 if ins is not None:

@@ -276,6 +276,29 @@ def test_keep_fused_then_split_writes_exactly_the_per_expert_export(
     _assert_byte_identical(got, want)
 
 
+@pytest.mark.parametrize(
+    "quant_cfg",
+    [
+        mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+        mtq.W4A8_AWQ_BETA_CFG,
+        mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
+    ],
+    ids=["int4-blockwise", "w4a8-awq", "fp8-2d-blockwise"],
+)
+def test_the_split_cuts_packed_and_block_scales_with_their_rows(monkeypatch, quant_cfg):
+    """An INT4 weight packs two rows a byte while its scales stay per row, and an FP8 2-D block
+    scale covers 128 rows: gate and up each take the scale rows of their own weight rows. Their
+    blocks need dimensions of whole 128-blocks."""
+    monkeypatch.setitem(globals(), "HIDDEN_DIM", 128)
+    monkeypatch.setitem(globals(), "INTERMEDIATE_DIM", 128)
+    experts = _quantized_experts(_KeepFusedGatedExperts, quant_cfg)
+    want = _per_expert_export(experts)
+
+    got = split_fused_experts_state_dict(_keep_fused_export(experts))
+
+    _assert_byte_identical(got, want)
+
+
 @pytest.mark.parametrize("amax_state", ["calibrated", "zero"])
 def test_the_fold_derives_a_w4a8_experts_amax_per_quantizer_stage(monkeypatch, amax_state):
     """W4A8's SequentialQuantizer has no amax of its own, and its INT4 block stage rejects a scalar:
@@ -494,10 +517,17 @@ def _two_rank_split_job(rank, world_size):
         }
         _assert_byte_identical(_split_local_fused_module(PREFIX, plain_scales), mine)
 
+    # One expert over two ranks leaves rank 1 none: both ranks refuse, rather than rank 1 alone
+    # failing while rank 0 goes on to write.
+    lone = _quantized_experts(_KeepFusedGatedExperts, mtq.FP8_DEFAULT_CFG, num_experts=1)
+    with pytest.raises(NotImplementedError, match="leaves a rank none"):
+        _export_fused_experts_keep_fused(_shard_fused_weights(lone, mesh), torch.bfloat16)
+
 
 def test_two_ranks_fold_and_split_their_own_experts_under_global_indices(cpu_dist_workers):
     """Rank 1 holds experts 2-3: each must be folded with ITS quantizer and keep its index, and the
-    fused tensors stay sharded on the expert axis at their global shape, an uneven shard included."""
+    fused tensors stay sharded on the expert axis at their global shape, an uneven shard included.
+    A layout that leaves a rank no expert is refused on every rank."""
     cpu_dist_workers.run(_two_rank_split_job)
 
 
