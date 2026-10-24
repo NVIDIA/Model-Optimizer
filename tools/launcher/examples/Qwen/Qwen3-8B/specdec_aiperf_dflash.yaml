@@ -1,0 +1,46 @@
+# SPEED-bench qualitative acceptance length for Qwen3-8B + DFlash at temperature 0 and 1, measured
+# with AIPerf against one `vllm serve` instance (common/specdec_aiperf/run.sh). Args before `--` go
+# to `vllm serve`, args after it to examples/specdec_aiperf/bench.py. Per-request spec-decode stats
+# need vLLM v0.29.0 or later. Each temperature x concurrency writes specdec_bench-format results to
+# <save_dir>/t<T>_c<C>/.
+#
+#   uv run slurm.py \
+#     --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/specdec_aiperf_dflash.yaml \
+#     --yes detach=true
+#
+# For a per-user / per-GPU throughput curve, list more values after --concurrency (e.g. 1 4 16 32 64);
+# every point reuses the server.
+
+job_name: Qwen3-8B_specdec_aiperf_dflash
+
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+    draft_model: /hf-local/modelopt/Qwen3-8B-DFlash-bs8-seq4096-150000
+
+  task_0:
+    script: common/specdec_aiperf/run.sh
+    args:
+      - --tensor-parallel-size 2
+      - --max-num-seqs 128
+      - --speculative-config.method dflash
+      - --speculative-config.model <<global_vars.draft_model>>
+      - --speculative-config.num_speculative_tokens 8
+      - --speculative-config.draft_sample_method probabilistic
+      - --
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/qualitative
+      - --temperature 0 1
+      - --concurrency 32
+      - --output_length 4096
+      - --num_gpus 2
+      - --save_dir /scratchspace/{sweep_name_default}/qualitative
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 2
+      container: vllm/vllm-openai:v0.29.0

@@ -60,7 +60,9 @@ produces an in-pipeline metric**, so what you check depends on the sheet:
   threshold **yourself**. No benchmark step in this repo enforces one:
   `common/specdec_bench/quick_check.sh` and `run.sh` pass straight through to
   `specdec_bench/run.py`, which reads no threshold and never exits non-zero on a low
-  metric, and no launcher example sets one. A green benchmark task therefore says the
+  metric, and no launcher example sets one. Neither does `common/specdec_aiperf/run.sh`,
+  which writes the same `Average_AL` per temperature and concurrency to
+  `<save_dir>/t<T>_c<C>/acceptance_rate.json`. A green benchmark task therefore says the
   run finished, not that the metric passed. Reporting PASS without having read the
   number off the log is a false PASS on the run's headline metric.
 - **Sheet defines no inference metric** (currently Domino and DSpark — their eval path

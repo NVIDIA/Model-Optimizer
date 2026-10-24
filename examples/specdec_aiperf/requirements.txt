@@ -1,0 +1,4 @@
+aiperf==0.13.0
+numpy
+pyarrow
+pyyaml
