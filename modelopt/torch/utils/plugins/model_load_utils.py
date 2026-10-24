@@ -479,9 +479,15 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
         kwargs.pop("dtype", None)  # A sharded load keeps the checkpoint's dtype.
     unknown = sorted(set(kwargs) - _SHARDED_LOAD_OPTIONS[route])
     if unknown:
+        whole = (
+            " To place the model yourself, have every rank load it whole: MODELOPT_FSDP_SIZE=1, or "
+            f"distribution=DistributionPlan({dist.size()}, dense='replicate')."
+            if route == _FSDP2
+            else ""
+        )
         raise TypeError(
             f"{unknown} do not apply to the {route} load, which places the model itself; it "
-            f"takes {sorted(_SHARDED_LOAD_OPTIONS[route])}."
+            f"takes {sorted(_SHARDED_LOAD_OPTIONS[route])}.{whole}"
         )
     if checkpoint_has_mtp(model_type, ckpt_path):
         # prepare_model_for_loading builds the head on a whole model only; carried over, the
@@ -504,6 +510,12 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
     if not dist.is_initialized():
         # FSDP2 shards through a process group even on one rank; a plan for more ranks than one
         # was refused without a group. A run (distributed_run) destroys the group on exit.
+        if "RANK" not in os.environ:
+            raise RuntimeError(
+                f"The {route} load shards through a process group, even on one rank, which a "
+                "process started without a launcher cannot set up; launch it with "
+                "`torchrun --nproc_per_node=1`."
+            )
         dist.setup()
     return parallel_load_and_prepare_fsdp2(
         ckpt_path,
@@ -531,9 +543,10 @@ def load_pretrained(
 
     * ``dense="fsdp"``: a causal LM FSDP2-sharded over the whole process group, each rank reading its
       own layers (:func:`parallel_load_and_prepare_fsdp2`, whose ``cpu_offload``, ``mp_policy`` and
-      ``broadcast_chunk_size`` ``kwargs`` may set). A single process has no group to shard through,
-      so the load sets up one of one rank, which
-      :func:`~modelopt.torch.utils.distributed.distributed_run` destroys with the run. It reads the
+      ``broadcast_chunk_size`` ``kwargs`` may set). A single process launched with
+      ``torchrun --nproc_per_node=1`` has no group to shard through, so the load sets up one of one
+      rank, which :func:`~modelopt.torch.utils.distributed.distributed_run` destroys with the run; a
+      process started without a launcher cannot set one up and is refused. It reads the
       checkpoint's tensors as stored, so it refuses a quantized checkpoint.
     * otherwise ``auto_class.from_pretrained(ckpt_path, **kwargs)`` (``auto_class`` defaults to
       ``AutoModelForCausalLM``), placed as ``kwargs`` say. Every rank of a distributed run gets the
@@ -628,9 +641,11 @@ def load_pretrained(
         raise TypeError(f"distribution={distribution!r}: expected a DistributionPlan or None.")
     route = _route(plan)
     if route is not None and config is not None:
-        # The sharded load builds the model from hf_config: the plan's copy of this one, or it.
+        # The sharded load builds the model from hf_config: the plan's copy of this one, or a copy
+        # of it, since building writes to the config.
         del kwargs["config"]
-        kwargs.setdefault("hf_config", config)
+        if "hf_config" not in kwargs:
+            kwargs["hf_config"] = copy.deepcopy(config)
     if model_type is None:
         # The load uses the config passed for it, if any, so the loading hook follows that one.
         model_type = getattr(hf_config or config, "model_type", None) or (
