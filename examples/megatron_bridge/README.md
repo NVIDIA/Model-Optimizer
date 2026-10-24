@@ -46,6 +46,22 @@ docker run \
   ${DOCKER_IMAGE} bash
 ```
 
+Some features (e.g. [`--vllm_fakequant_export`](#evaluating-a-qad-checkpoint-in-vllm-with-fake-quantization)) need a newer Megatron-Bridge than the one in `nvcr.io/nvidia/nemo:26.08`. Until a NeMo container includes it, check out Megatron-Bridge at the commit ModelOpt's CI tests against, together with its Megatron-LM submodule:
+
+```bash
+export MBRIDGE_DIR=${PWD}/Megatron-Bridge
+git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git ${MBRIDGE_DIR}
+git -C ${MBRIDGE_DIR} checkout 1d9caf7324e608aca7181de40be26a6387976210
+git -C ${MBRIDGE_DIR} submodule update --init 3rdparty/Megatron-LM
+```
+
+and add these mounts to the `docker run` command above:
+
+```bash
+  -v ${MBRIDGE_DIR}/src/megatron/bridge:/opt/Megatron-Bridge/src/megatron/bridge \
+  -v ${MBRIDGE_DIR}/3rdparty/Megatron-LM/megatron:/opt/Megatron-Bridge/3rdparty/Megatron-LM/megatron \
+```
+
 > [!WARNING]
 > Use `python -m pip` instead of `pip` to avoid conflicts with the system-wide installed packages in the NeMo containers. You may also refer to this [doc](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/docker/common/README.md#installing-packages-inside-the-container) on how to correctly install packages in the NeMo containers without breaking existing torch installation.
 
@@ -370,6 +386,27 @@ The split applies to both student and teacher, so it must be valid for each. The
 sequence length, and GPU memory: measure per-stage time and memory over a few iterations before choosing them.
 
 The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) (point `--megatron_path` at `/output/qwen3_8b_nvfp4_qad/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
+
+#### Evaluating a QAD checkpoint in vLLM with fake quantization
+
+To evaluate a format vLLM has no kernels for (e.g. NVFP4 on Hopper, GGML IQ2, or a custom research format), export with `--vllm_fakequant_export`. The weight quantizers are folded into BF16 weights and Megatron-Bridge saves the model at any TP / EP / PP, VLMs included. The enabled activation and KV-cache quantizers go to `quantizer_state.pth` (ranges) and `quant_recipe.yaml` (settings), both under HF names:
+
+```bash
+torchrun --nproc_per_node 8 export_quantized_megatron_to_hf.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --megatron_path /output/qwen3_8b_nvfp4_qad/checkpoints \
+    --tp_size 8 \
+    --vllm_fakequant_export \
+    --export_unified_hf_path /tmp/Qwen3-8B-NVFP4-QAD-vllm-fq
+```
+
+Serve the export with [vllm_serve_fakequant.py](../vllm_serve/vllm_serve_fakequant.py), which loads both sidecars automatically, then run your evaluations against the server:
+
+```bash
+python ../vllm_serve/vllm_serve_fakequant.py /tmp/Qwen3-8B-NVFP4-QAD-vllm-fq -tp 8 --port 8000
+```
+
+Weight-only formats leave no quantizer enabled after folding, so no sidecars are written and stock `vllm serve` loads the export as a plain BF16 checkpoint. This mode needs a Megatron-Bridge that writes the quantizer sidecars; see [Pre-Requisites](#pre-requisites).
 
 ### LoRA QAD
 
