@@ -119,6 +119,36 @@ def _rewrap_expert_rows(local: torch.Tensor, mesh, placements, num_experts: int)
     return DTensor.from_local(local, mesh, placements, run_check=False, shape=shape, stride=stride)
 
 
+def _refuse_unfoldable_shards(module: nn.Module, proj: str, weight, num_quantizers: int) -> None:
+    """Refuse a sharded fused expert weight the keep-fused fold cannot fold, on every rank alike.
+
+    Reads only the global shape, the mesh and the quantizer count, which every rank agrees on.
+    """
+    from torch.distributed.tensor import Shard
+
+    name = f"{type(module).__name__}.{proj}"
+    shards = 1
+    for mdim, placement in enumerate(weight.placements):
+        if isinstance(placement, Shard) and placement.dim == 0:
+            size = weight.device_mesh.size(mdim)
+            # A rank holding no experts would stack none and register no input scale, so the ranks'
+            # state dicts would differ for the DCP write. The experts are chunked as torch does.
+            chunk = -(-weight.shape[0] // size)
+            if not chunk or -(-weight.shape[0] // chunk) < size:
+                raise NotImplementedError(
+                    f"{name}: {weight.shape[0]} experts over {size} shards leaves a rank none; the "
+                    "keep-fused fold needs every rank to hold an expert."
+                )
+            shards *= size
+    # FSDP2 keeps every expert's quantizer on every rank; expert parallelism keeps only this rank's,
+    # in the order of its shard, as _QuantFusedExperts._local_experts reads them.
+    if num_quantizers != weight.shape[0] and num_quantizers * shards != weight.shape[0]:
+        raise NotImplementedError(
+            f"{name}: {num_quantizers} weight quantizers for {weight.shape[0]} experts in {shards} "
+            "shards; the keep-fused fold needs one per expert, or one per expert of this rank's shard."
+        )
+
+
 def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> None:
     """Fold per-expert quantizers into the FUSED 3-D expert weights *in place*, staying sharded.
 
@@ -127,8 +157,9 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
     fused weight (via the export handler's ``unshard``) and then materializes every expert on every
     rank, putting the whole model on each GPU (OOMs at 235B/480B). This keeps each projection a
     single fused param: on a ``Shard(0)`` DTensor it quantizes ONLY this rank's local experts
-    (``to_local()`` + the DTensor's dim-0 global offset for the matching per-expert weight quantizer)
-    and rewraps the result ``Shard(0)``, so the model stays sharded and DCP writes per-rank shards.
+    (``to_local()``, each with its own weight quantizer: by global index where every rank keeps every
+    expert's, by position in the shard where a rank keeps only its own) and rewraps the result
+    ``Shard(0)``, so the model stays sharded and DCP writes per-rank shards.
     On a plain tensor (single process) it quantizes all ``num_experts`` -- identical to the in-model
     path. Quantizing the fused ``<proj>[i]`` slice with its per-expert quantizer is byte-identical to
     the split-then-quantize, so ``_export_fused_experts_keep_fused`` + :func:`split_fused_experts_state_dict`
@@ -147,12 +178,22 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
     n = module.num_experts
     # One fused tensor cannot hold quantized and unquantized experts side by side, so a projection
     # is folded only when all its experts are quantized; one with none quantized stays as it is,
-    # which is what the per-expert export writes for it. Both are decided before either is folded,
-    # so a refusal leaves the module untouched.
+    # which is what the per-expert export writes for it. Every refusal comes before either is
+    # folded, so it leaves the module untouched.
     folded = []
     for proj in (first, "down_proj"):
-        enabled = [q.is_enabled for q in getattr(module, f"{proj}_weight_quantizers")]
+        weight_quantizers = getattr(module, f"{proj}_weight_quantizers")
+        enabled = [q.is_enabled for q in weight_quantizers]
         if all(enabled):
+            wdata = getattr(module, proj).data
+            if wdata.element_size() == 1:
+                # get_expert_weight dequantizes these with their scale_inv, which the fold drops.
+                raise NotImplementedError(
+                    f"{type(module).__name__}.{proj}: native FP8 expert weights cannot be folded "
+                    "as stored; dequantize them first (unpack_weight())."
+                )
+            if DTensor is not None and isinstance(wdata, DTensor):
+                _refuse_unfoldable_shards(module, proj, wdata, len(weight_quantizers))
             folded.append(proj)
         elif any(enabled):
             raise NotImplementedError(
@@ -171,26 +212,18 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
         # the model and OOMing the GPU at scale. Plain tensor (single process): all experts.
         wdata = weight.data
         is_dt = DTensor is not None and isinstance(wdata, DTensor)
+        quantizers_are_global = True
         if is_dt:
             mesh, placements = wdata.device_mesh, wdata.placements
-            # A rank holding no experts would stack none and register no input scale, so the
-            # ranks' state dicts would differ for the DCP write. Every rank chunks the experts as
-            # torch does, so every rank refuses together.
-            for mdim, p in enumerate(placements):
-                if isinstance(p, Shard) and p.dim == 0:
-                    chunk = -(-wdata.shape[0] // mesh.size(mdim))
-                    if not chunk or -(-wdata.shape[0] // chunk) < mesh.size(mdim):
-                        raise NotImplementedError(
-                            f"{type(module).__name__}.{proj}: {wdata.shape[0]} experts over "
-                            f"{mesh.size(mdim)} shards leaves a rank none; the keep-fused fold "
-                            "needs every rank to hold an expert."
-                        )
             local_w = wdata.to_local()
             offset = _dtensor_dim0_offset(wdata)
             scale_placements = [
                 p if (isinstance(p, Shard) and p.dim == 0) else Replicate() for p in placements
             ]
             local_indices = list(range(offset, offset + local_w.shape[0]))
+            # Every expert's quantizers (FSDP2), or only this rank's, in shard order (expert
+            # parallelism): _refuse_unfoldable_shards allows no other count.
+            quantizers_are_global = len(weight_quantizers) == wdata.shape[0]
         else:
             local_w = wdata
             local_indices = list(range(n))
@@ -200,7 +233,7 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
         weight_scale_2s: list[torch.Tensor] = []
         input_scale: torch.Tensor | None = None
         for local_idx, global_idx in enumerate(local_indices):
-            w_quantizer = weight_quantizers[global_idx]
+            w_quantizer = weight_quantizers[global_idx if quantizers_are_global else local_idx]
             w_slice = local_w[local_idx]
             # Uncalibrated-expert fallback: derive amax from this expert's local weight slice
             # (matches _export_fused_experts), so a never-routed expert still exports sane scales.
@@ -577,7 +610,15 @@ def split_fused_experts_state_dict(state_dict: dict) -> dict:
             if row_slice is None:
                 return sub
             start, stop, _ = row_slice.indices(rows)
-            return sub[start * sub.shape[0] // rows : stop * sub.shape[0] // rows]
+            n = sub.shape[0]
+            # Exact only for scale rows spread evenly over the weight rows, with the cut between
+            # two of them; otherwise a block of rows sharing one scale straddles gate and up.
+            if (rows % n and n % rows) or start * n % rows or stop * n % rows:
+                raise NotImplementedError(
+                    f"A {n}-row weight scale over {rows} weight rows cannot be split at the gate|up "
+                    f"boundary, row {start or stop}: a block of rows sharing one scale crosses it."
+                )
+            return sub[start * n // rows : stop * n // rows]
 
         for expert_idx in range(n_experts):
             if gated:

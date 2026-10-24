@@ -338,14 +338,30 @@ def test_the_fold_derives_a_w4a8_experts_amax_per_quantizer_stage(monkeypatch, a
     assert any("was not calibrated" in str(w.message) for w in caught) == (amax_state == "zero")
 
 
-@LAYOUTS
-def test_a_projection_mixing_quantized_and_unquantized_experts_is_refused_untouched(experts_cls):
-    """One fused tensor cannot hold both, and the refusal comes before the other projection folds."""
-    experts = _quantized_experts(experts_cls, mtq.FP8_DEFAULT_CFG)
+def _mixed(experts):
     experts.down_proj_weight_quantizers[1].disable()
+
+
+def _native_fp8(experts):
+    experts.down_proj = nn.Parameter(
+        experts.down_proj.data.to(torch.float8_e4m3fn), requires_grad=False
+    )
+
+
+@LAYOUTS
+@pytest.mark.parametrize(
+    ("change", "match"),
+    [(_mixed, r"down_proj: weight quantizers \[1\] of 4"), (_native_fp8, "native FP8")],
+    ids=["mixed", "native-fp8"],
+)
+def test_a_projection_the_fold_cannot_write_is_refused_untouched(experts_cls, change, match):
+    """One fused tensor cannot mix quantized and unquantized experts, and native FP8 weights need the
+    scale_inv the fold drops. The refusal comes before the other projection folds."""
+    experts = _quantized_experts(experts_cls, mtq.FP8_DEFAULT_CFG)
+    change(experts)
     before = {k: v.clone() for k, v in experts.state_dict().items()}
 
-    with pytest.raises(NotImplementedError, match=r"down_proj: weight quantizers \[1\] of 4"):
+    with pytest.raises(NotImplementedError, match=match):
         _export_fused_experts_keep_fused(experts, torch.bfloat16)
 
     _assert_byte_identical(experts.state_dict(), before)
@@ -408,6 +424,23 @@ def test_split_leaves_a_state_dict_without_fused_experts_unchanged():
 
     assert out.keys() == sd.keys()
     assert all(out[k] is sd[k] for k in sd)
+
+
+@pytest.mark.parametrize(
+    ("rows", "scale_rows"), [(6, 3), (10, 4)], ids=["block-across-the-cut", "uneven-blocks"]
+)
+def test_split_refuses_a_scale_block_gate_and_up_would_share(rows, scale_rows):
+    """Two-row blocks over 6 rows put gate's last row and up's first under one scale; three-row
+    blocks over 10 rows end in a partial block, which no proportion places. Neither half can be given
+    scales of its own, so the split refuses rather than round."""
+    sd = {
+        f"{PREFIX}.gate_up_proj": torch.zeros(1, rows, 4).to(torch.float8_e4m3fn),
+        f"{PREFIX}.gate_up_proj_weight_scale": torch.ones(1, scale_rows, 1),
+        f"{PREFIX}.down_proj": torch.zeros(1, 4, rows // 2).to(torch.float8_e4m3fn),
+    }
+
+    with pytest.raises(NotImplementedError, match=r"cannot be split at the gate\|up boundary"):
+        split_fused_experts_state_dict(sd)
 
 
 def test_fused_experts_prefixes_lists_each_fused_module_once_in_order():
@@ -523,11 +556,39 @@ def _two_rank_split_job(rank, world_size):
     with pytest.raises(NotImplementedError, match="leaves a rank none"):
         _export_fused_experts_keep_fused(_shard_fused_weights(lone, mesh), torch.bfloat16)
 
+    # Expert parallelism leaves a rank only its own experts' quantizers, in shard order, under a
+    # fused weight spanning every expert. Kept last: without that pairing rank 1 alone fails, and
+    # no collective follows for rank 0 to wait in.
+    experts = _quantized_experts(_KeepFusedGatedExperts, mtq.NVFP4_DEFAULT_CFG)
+    plain = _keep_fused_export(experts)
+    n_local = NUM_EXPERTS // world_size
+    mine = slice(rank * n_local, (rank + 1) * n_local)
+
+    def sharded_keeping_quantizers(kept):
+        sharded = _shard_fused_weights(copy.deepcopy(experts), mesh)
+        for proj in (sharded._first_proj_attr, "down_proj"):
+            name = f"{proj}_weight_quantizers"
+            setattr(sharded, name, nn.ModuleList(list(getattr(sharded, name))[kept]))
+        return sharded
+
+    with pytest.raises(NotImplementedError, match="3 weight quantizers for 4 experts in 2 shards"):
+        _export_fused_experts_keep_fused(sharded_keeping_quantizers(slice(0, 3)), torch.bfloat16)
+    sharded = sharded_keeping_quantizers(mine)
+    _export_fused_experts_keep_fused(sharded, torch.bfloat16)
+    fused = _prefixed(sharded.state_dict())
+    assert set(fused) == set(plain)
+    for key, value in fused.items():
+        if isinstance(value, DTensor):
+            assert torch.equal(_raw_bytes(value.to_local()), _raw_bytes(plain[key][mine])), key
+        else:
+            assert torch.equal(_raw_bytes(value), _raw_bytes(plain[key])), key
+
 
 def test_two_ranks_fold_and_split_their_own_experts_under_global_indices(cpu_dist_workers):
     """Rank 1 holds experts 2-3: each must be folded with ITS quantizer and keep its index, and the
     fused tensors stay sharded on the expert axis at their global shape, an uneven shard included.
-    A layout that leaves a rank no expert is refused on every rank."""
+    Its quantizers are every expert's (FSDP2) or, under expert parallelism, its own two. A layout
+    that leaves a rank no expert, or quantizers that are neither, is refused on every rank."""
     cpu_dist_workers.run(_two_rank_split_job)
 
 
@@ -584,32 +645,36 @@ def test_fused_experts_fold_in_a_weight_window_when_the_plan_shards_the_dense_pa
     assert events == (["open", "fold", "close"] if dense == "fsdp" else ["fold"])
 
 
-def test_quant_linear_handler_packs_an_fsdp2_sharded_nvfp4_weight(gloo_world_of_one):
+@pytest.mark.parametrize("root_sharded", [True, False], ids=["fsdp2", "expert-parallel"])
+def test_quant_linear_handler_packs_an_fsdp2_sharded_nvfp4_weight(gloo_world_of_one, root_sharded):
     """On the no-gather path the model is still sharded when a linear is packed.
 
     Packing NVFP4 straight off the sharded weight is not possible (the in-place cast on the
     DTensor's local view is refused under autograd), so the handler packs inside a weight-update
-    window; the sharded state dict must then carry the packed weight, as an unsharded pack has it.
+    window, on the layer's own unit where expert parallelism leaves the root unsharded; the sharded
+    state dict must then carry the packed weight, as an unsharded pack has it.
     """
     torch.manual_seed(0)
-    model = nn.Sequential(nn.Linear(32, 16, bias=False), nn.Linear(16, 8, bias=False))
+    layer = nn.Sequential(nn.Linear(32, 16, bias=False), nn.Linear(16, 8, bias=False))
+    model = nn.Sequential(layer)
     mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: m(torch.randn(4, 32)))
-    ref = copy.deepcopy(model)
-    ExportModuleRegistry.match(ref[0])("0", ref[0], ExportContext(model=ref, dtype=torch.bfloat16))
-    fully_shard(model[0], mesh=gloo_world_of_one)
-    fully_shard(model, mesh=gloo_world_of_one)
+    ref = copy.deepcopy(model)[0][0]
+    ExportModuleRegistry.match(ref)("0.0", ref, ExportContext(model=ref, dtype=torch.bfloat16))
+    fully_shard(layer, mesh=gloo_world_of_one)
+    if root_sharded:
+        fully_shard(model, mesh=gloo_world_of_one)
     set_distribution_plan(model, DistributionPlan(dense="fsdp"))
     ctx = ExportContext(model=model, dtype=torch.bfloat16, keep_fused_experts=True)
 
-    ExportModuleRegistry.match(model[0])("0", model[0], ctx)
+    ExportModuleRegistry.match(layer[0])("0.0", layer[0], ctx)
 
     sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
-    packed = sd["0.weight"]
+    packed = sd["0.0.weight"]
     assert isinstance(packed, DTensor)
     assert packed.dtype == torch.uint8
-    assert torch.equal(packed.full_tensor(), ref[0].weight)
+    assert torch.equal(packed.full_tensor(), ref.weight)
     for name in ("weight_scale", "weight_scale_2", "input_scale"):
-        assert torch.equal(_raw_bytes(sd[f"0.{name}"]), _raw_bytes(getattr(ref[0], name))), name
+        assert torch.equal(_raw_bytes(sd[f"0.0.{name}"]), _raw_bytes(getattr(ref, name))), name
 
 
 def test_nvfp4_packs_a_sharded_weight_into_the_same_codes(gloo_world_of_one):

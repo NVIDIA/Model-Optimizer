@@ -28,9 +28,13 @@ editing if/elif chains inside ``unified_export_hf.py``.
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from modelopt.torch.quantization.utils.core_utils import ModuleNames
 
 __all__ = [
     "ExportContext",
@@ -63,6 +67,10 @@ class ExportContext:
     # into full per-expert tensors, so each rank materializes only its local experts (the split
     # happens post-consolidation on the sharded fused weight). See _export_fused_experts_keep_fused.
     keep_fused_experts: bool = False
+
+    module_names: "ModuleNames | None" = None
+    """``model``'s name maps, built once per export by the first handler that looks a module up
+    (:func:`~modelopt.torch.quantization.utils.module_name_maps`)."""
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]

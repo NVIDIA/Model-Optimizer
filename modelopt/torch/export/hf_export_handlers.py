@@ -20,7 +20,8 @@ import warnings
 
 import torch.nn as nn
 
-from modelopt.torch.quantization.utils import fsdp2_aware_weight_update
+from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, module_name_maps
+from modelopt.torch.quantization.utils.core_utils import _get_enclosing_fsdp_module
 from modelopt.torch.utils.distributed import distribution_plan
 
 from .layer_utils import get_expert_linear_names, is_quantlinear, set_expert_quantizer_amax
@@ -37,28 +38,24 @@ def _has_fused_experts_quantizers(module: nn.Module) -> bool:
     return hasattr(module, f"{first_proj_attr}_weight_quantizers")
 
 
-def _fsdp2_weight_window(model: nn.Module, module: nn.Module):
+def _fsdp2_weight_window(ctx: ExportContext, module: nn.Module):
     """``fsdp2_aware_weight_update`` on the FSDP2 unit that owns ``module``'s weights.
 
-    That is ``model`` when the model itself is wrapped. Expert parallelism FSDP2-shards only the dense
+    That is the model when the model itself is wrapped. Expert parallelism FSDP2-shards only the dense
     layers and leaves the root unwrapped, and a window opened on an unwrapped root does nothing: the
     weight stays a sharded DTensor, which packing mishandles (``DTensor << int`` is a silent no-op in
-    torch 2.11, so NVFP4 packed unrelated codes next to correct scales). So open it on the enclosing
-    unit instead.
+    torch 2.11, so NVFP4 packed unrelated codes next to correct scales). So open it on the innermost
+    enclosing unit instead, found by walking up the module's name: the export calls this per module.
     """
     from torch.distributed.fsdp import FSDPModule
 
-    root = model
-    if not isinstance(model, FSDPModule):
-        root = next(
-            (
-                unit
-                for unit in model.modules()
-                if isinstance(unit, FSDPModule) and any(m is module for m in unit.modules())
-            ),
-            model,
-        )
-    return fsdp2_aware_weight_update(root, module)
+    if ctx.module_names is None:
+        ctx.module_names = module_name_maps(ctx.model)
+    if isinstance(ctx.model, FSDPModule):
+        return fsdp2_aware_weight_update(ctx.model, module, names=ctx.module_names)
+    unit = _get_enclosing_fsdp_module(module, ctx.model, ctx.module_names) or ctx.model
+    # Names relative to the unit, which the window resolves the module's parameters against.
+    return fsdp2_aware_weight_update(unit, module)
 
 
 def _export_weight(
@@ -77,7 +74,7 @@ def _export_weight(
     # reshard on the way out: a layer left unsharded holds all of its weights on every rank, and
     # FSDP2 later puts its own shards back over anything packed in it outside a window.
     if ctx.keep_fused_experts and distribution_plan(ctx.model).is_fsdp_dense:
-        with _fsdp2_weight_window(ctx.model, module):
+        with _fsdp2_weight_window(ctx, module):
             _export_quantized_weight(module, ctx.dtype, weight_name)
         return
 
@@ -186,7 +183,7 @@ def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContex
         # FSDP2 owns the fused weights here: fold them inside a weight-update window, which hands
         # FSDP2 the packed weights. Replaced behind its back, they would be overwritten with its
         # original shards the next time the layer reshards, and exported unquantized.
-        with _fsdp2_weight_window(ctx.model, module):
+        with _fsdp2_weight_window(ctx, module):
             _export_fused_experts_keep_fused(module, ctx.dtype)
     elif ctx.keep_fused_experts:
         # No-gather distributed export: fold each rank's LOCAL experts and leave the weight
