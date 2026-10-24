@@ -22,6 +22,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any, cast
 
+import torch
 import torch.nn as nn
 
 from modelopt.torch.opt.conversion import ApplyModeError, ModelLikeModule, ModeloptStateManager
@@ -39,6 +40,7 @@ from .config import (
 from .nn import (
     QuantModule,
     QuantModuleRegistry,
+    ResidueQuantLinear,
     SequentialQuantizer,
     StaticBlockScaleQuantizer,
     SVDQuantLinear,
@@ -175,6 +177,57 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
     _restore_shared_quant_state_aliases(model, config, metadata)
 
     return model
+
+
+ResidueQuantModuleRegistry = _DMRegistryCls("ResidueQuant")
+
+
+def create_and_replace_residue_linear_on_the_fly(model, names):
+    """Promote selected linears using the same dynamic-module mechanism as SVDQuant."""
+    for name in names:
+        module = model.get_submodule(name)
+        if isinstance(module, ResidueQuantLinear):
+            continue
+        if type(module) not in ResidueQuantModuleRegistry:
+            ResidueQuantModuleRegistry.register({type(module): type(module).__name__})(
+                ResidueQuantLinear
+            )
+        # Convert directly to include a root Linear.
+        ResidueQuantModuleRegistry.convert(module)
+
+
+def update_residue_metadata(model, config, metadata):
+    """Record physical weight shapes independently of salient channel buffers."""
+    update_quantize_metadata(model, config, metadata)
+    metadata["residue_modules"] = {
+        name: {
+            "in_features": module.in_features,
+            "original_in_features": getattr(module, "_original_in_features", None),
+        }
+        for name, module in model.named_modules()
+        if isinstance(module, ResidueQuantLinear)
+    }
+
+
+def restore_residue_model(model, config, metadata):
+    """Restore residue architecture and physical dimensions before loading tensor data."""
+    states = metadata["residue_modules"]
+    create_and_replace_residue_linear_on_the_fly(model, states)
+    for name, state in states.items():
+        module = model.get_submodule(name)
+        original = state["original_in_features"]
+        if original is not None:
+            module._original_in_features = original
+            module.in_features = state["in_features"]
+            module.weight = nn.Parameter(
+                torch.empty(
+                    (module.out_features, module.in_features),
+                    device=module.weight.device,
+                    dtype=module.weight.dtype,
+                ),
+                requires_grad=module.weight.requires_grad,
+            )
+    return restore_quantizer_state(model, config, metadata)
 
 
 SVDQuantModuleRegistry = _DMRegistryCls("SVDQuant")

@@ -1180,6 +1180,18 @@ class AWQFullCalibConfig(AWQLiteCalibConfig, AWQClipCalibConfig):
     )
 
 
+class ResidueMaxCalibConfig(QuantizeAlgorithmConfig):
+    """Select activation residual channels within each block for NVFP4 or MXFP4 QDQ."""
+
+    method: Literal["residue_max"] = ModeloptField("residue_max")
+    block_size: int = ModeloptField(default=8, ge=1)
+    residue_ratio: float = ModeloptField(default=0.25, ge=0.0, le=1.0)
+    salience_metric: Literal["activation_max", "nvfp4_error_weighted"] = ModeloptField(
+        default="activation_max",
+        description="Mean absolute activation per batch, or NVFP4 error times weight-column norm.",
+    )
+
+
 class SVDQuantConfig(QuantizeAlgorithmConfig):
     """The config for SVDQuant.
 
