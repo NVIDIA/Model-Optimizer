@@ -101,7 +101,7 @@ explicit dependency installation avoids selecting the Windows x64 ``onnxruntime-
 
    & $PythonExe -m pip install `
        cppimport cupy-cuda13x lief ml_dtypes `
-       "onnx~=1.21.0" "onnx-graphsurgeon>=0.6.1" `
+       "onnx~=1.23.2" "onnx-graphsurgeon>=0.6.1" `
        "onnxconverter-common~=1.16.0" onnxscript `
        "onnxslim>=0.1.76" "polygraphy>=0.49.22" `
        "onnxruntime>=1.24.2" onnxruntime-ep-nv-tensorrt-rtx-cu13
