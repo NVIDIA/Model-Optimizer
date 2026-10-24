@@ -120,17 +120,19 @@ def test_the_sync_keeps_a_calibrated_zero_apart_from_uncalibrated(cpu_dist_worke
 
 
 def _uneven_per_channel_helper(rank, size):
-    # A rank left waiting in a collective its peer never joins gives up in seconds on this group.
-    group = DistributedProcessGroup(dist.new_group(timeout=timedelta(seconds=10)))
     quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=0))
     if rank == 0:
         quantizer._set_buffer("_amax", torch.full((4,), 3.0))
+    # A rank left waiting in a collective its peer never joins gives up in seconds on this group.
+    group = dist.new_group(timeout=timedelta(seconds=10))
     try:
-        quantizer.sync_amax_across_distributed_group(group)
+        quantizer.sync_amax_across_distributed_group(DistributedProcessGroup(group))
     except RuntimeError as error:
         raised = str(error)
     else:
         raised = "no error"
+    finally:
+        dist.destroy_process_group(group)
     assert "unevenly-calibrated" in raised, raised
 
 
@@ -188,7 +190,10 @@ def _tensor_parallel_sync_helper(rank, size, kv_cache):
             for quantizer in synced:
                 quantizer(torch.ones(2, 16))
 
-    max_calibrate(model, forward_loop)
+    try:
+        max_calibrate(model, forward_loop)
+    finally:
+        dist.destroy_process_group(tp_group)
     for quantizer in synced:
         assert quantizer.amax is not None
         assert quantizer.amax.item() == 1.0
