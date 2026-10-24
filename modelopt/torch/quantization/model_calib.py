@@ -990,8 +990,9 @@ def _fused_expert_projections(module: nn.Module):
     """Yield ``(weight_name, weight, weight_quantizers, input_quantizer)`` per fused-experts projection.
 
     ``weight`` is the 3-D ``(num_experts, out, in)`` parameter, ``weight_quantizers`` holds one
-    quantizer per expert, and ``input_quantizer`` is shared by the experts and runs once per expert
-    forward with ``module._current_expert_idx`` already set to that expert.
+    quantizer per expert, and ``input_quantizer`` is shared by the experts. Under eager it runs once
+    per expert forward with ``module._current_expert_idx`` set to that expert; under grouped_mm
+    and torch_a2a once per projection, on a batch sorted by expert (``module._grouped_offs``).
     """
     first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     for weight_name, quantizers_name, input_q_name in (
@@ -1040,9 +1041,10 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
 
     ``capture(weight_quantizer, weight, inputs)`` runs on every forward of a weight whose quantizer
     is enabled: dense quantized linears hook the layer input; HF fused-MoE experts hook the shared
-    input quantizers, keyed by the active expert (``_current_expert_idx``). Weights without a hook
-    (conv, SequentialQuantizer, non-eager experts) are never captured. ``on_weight(name, weight,
-    weight_quantizer)``, if given, is called once per hooked weight. Returns removable handles.
+    input quantizers, keyed by the active expert (``_current_expert_idx``) when eager, or split per
+    expert by ``_grouped_offs`` under ``grouped_mm``. Weights without a hook (conv,
+    SequentialQuantizer) are never captured. ``on_weight(name, weight, weight_quantizer)``, if
+    given, is called once per hooked weight. Returns removable handles.
     """
     handles: list = []
 
@@ -1054,6 +1056,34 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
             if idx in enabled:
                 # Read the weight fresh (valid under accelerate/FSDP re-materialization).
                 capture(quantizers[idx], getattr(expert_module, weight_name)[idx], args[0])
+
+        return _expert_hook
+
+    def _make_grouped_expert_hook(expert_module, weight_name, quantizers, enabled):
+        """Per-expert capture for the grouped dispatchers (``grouped_mm``, ``torch_a2a``).
+
+        Both feed the input quantizer a single expert-sorted batch ``(S, cin)`` rather than
+        one call per expert, so we split it back into per-expert chunks using ``_grouped_offs``
+        (cumulative tokens-per-expert, stashed by the _QuantFusedExperts grouped interceptor).
+        Rows beyond ``offs[-1]`` (EP sentinels) belong to no expert and are skipped.
+        """
+
+        def _expert_hook(_input_quantizer, args):
+            if not args:
+                return
+            offs = expert_module._grouped_offs
+            if offs is None:
+                return
+            x = args[0]
+            # This rank's experts, in quantizer order: an expert-parallel weight is a DTensor whose
+            # index names a global expert (see ``_local_experts``).
+            weight = expert_module._local_experts(getattr(expert_module, weight_name))
+            start = 0
+            for idx, end in enumerate(offs.tolist()):
+                if end > start:
+                    if idx in enabled:
+                        capture(quantizers[idx], weight[idx], x[start:end])
+                    start = end
 
         return _expert_hook
 
@@ -1079,17 +1109,26 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
                     module
                 ):
                     if on_weight is not None:
-                        on_weight(f"{name}.{weight_name}", weight[0], quantizers[0])
+                        # This rank's first expert, the one quantizers[0] quantizes: indexing an
+                        # expert-parallel DTensor names a global expert and all-gathers every expert.
+                        on_weight(
+                            f"{name}.{weight_name}", module._local_experts(weight)[0], quantizers[0]
+                        )
                     # Snapshot which experts are enabled now, before the caching forward silences
                     # all weight quantizers — so we don't capture (and discard) disabled experts.
                     enabled = {i for i, q in enumerate(quantizers) if q.is_enabled}
                     if not enabled:
                         continue
+                    # grouped_mm and torch_a2a feed one expert-sorted batch per projection; eager
+                    # feeds one call per expert keyed by _current_expert_idx.
+                    make_hook = (
+                        _make_grouped_expert_hook
+                        if getattr(module, "_running_grouped_mm", False)
+                        else _make_expert_hook
+                    )
                     handles.append(
                         input_quantizer.register_forward_pre_hook(
-                            _WeightInputHook(
-                                _make_expert_hook(module, weight_name, quantizers, enabled)
-                            )
+                            _WeightInputHook(make_hook(module, weight_name, quantizers, enabled))
                         )
                     )
     return handles
@@ -2460,6 +2499,19 @@ def gptq(
 
     def _make_expert_hook(experts, per_expert):
         def _expert_hook(_input_quantizer, _args, output):
+            if getattr(experts, "_running_grouped_mm", False):
+                # grouped_mm and torch_a2a quantize one expert-sorted batch per projection: split
+                # it back per expert by the cumulative token counts, as the eager loop feeds it.
+                offs = experts._grouped_offs
+                if offs is None:
+                    return
+                start = 0
+                for idx, end in enumerate(offs.tolist()):
+                    handle = per_expert.get(idx)
+                    if end > start and handle is not None:
+                        handle.accumulate(output[start:end])
+                    start = end
+                return
             handle = per_expert.get(experts._current_expert_idx)
             if handle is not None:
                 handle.accumulate(output)
@@ -2471,10 +2523,13 @@ def gptq(
             for weight_name, weight, quantizers, input_quantizer in _fused_expert_projections(
                 module
             ):
-                # An expert's logged error would cost two full matmuls; gptq() logs a summary.
+                # This rank's experts, in quantizer order: an expert-parallel weight is a DTensor
+                # whose index names a global expert and all-gathers every expert. An expert's logged
+                # error would cost two full matmuls; gptq() logs a summary.
+                local = module._local_experts(weight)
                 per_expert = {
                     idx: _make_gptq_handle(
-                        f"{name}.{weight_name}.{idx}", module, q, weight[idx], log_mse=False
+                        f"{name}.{weight_name}.{idx}", module, q, local[idx], log_mse=False
                     )
                     for idx, q in enumerate(quantizers)
                     if q.is_enabled
