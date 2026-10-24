@@ -129,6 +129,9 @@ def init_distributed_env(training_args: transformers.TrainingArguments) -> None:
     """
     if training_args.cp_size < 1:
         raise ValueError(f"cp_size must be >= 1, got {training_args.cp_size}.")
+    if training_args.cp_size > 1:
+        # Every rank of a CP group loads the same batches, so all must take them in sampler order.
+        training_args.dataloader_in_order = True
     world_size = int(os.environ.get("WORLD_SIZE", torch.cuda.device_count() or 1))
     if training_args.dp_shard_size is None:
         training_args.dp_shard_size = world_size // training_args.cp_size
@@ -549,7 +552,8 @@ def train():
     # Leave training_args.ignore_data_skip at its default (False). The dataset is
     # map-style, so HF Trainer's resume skips consumed indices at the batch-sampler
     # level (accelerate.skip_first_batches) without re-fetching them, landing at the
-    # exact data position. Setting it True would restart the data order from the top.
+    # saved data position (to within the batches in flight when dataloader_in_order is
+    # off). Setting it True would restart the data order from the top.
 
     # Tell the draft model the CP degree so it skips the dense eagle mask under CP.
     model.eagle_cp_size = training_args.cp_size

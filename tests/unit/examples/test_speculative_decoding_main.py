@@ -13,13 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``setup_external_draft`` wiring in the speculative-decoding entrypoint.
+"""``setup_external_draft`` and trainer wiring in the speculative-decoding entrypoint.
 
 Lives under ``tests/unit`` rather than ``tests/examples/`` so CI runs it on every
 change: the example lanes cover a fixed allowlist.
 """
 
 import importlib.util
+import multiprocessing
 import sys
 import types
 from pathlib import Path
@@ -318,3 +319,62 @@ def test_sparse_path_skips_the_base_head_attach(main_mod, stub_tokenizers):
     assert getattr(draft, "_base_lm_head", None) is None, (
         "the sparse path attached the base head it does not use"
     )
+
+
+class _FirstIndexWaits(torch.utils.data.Dataset):
+    """Index 0 waits on ``release``, so only a loader free to reorder yields the others first."""
+
+    def __init__(self, release, timeout):
+        self.release, self.timeout = release, timeout
+
+    def __len__(self):
+        return 8
+
+    def __getitem__(self, idx):
+        if idx == 0:
+            self.release.wait(self.timeout)
+        return idx
+
+
+def _collate_ids(samples):
+    return {"idx": torch.tensor(samples)}
+
+
+@pytest.mark.parametrize("in_order", [False, True])
+def test_dataloader_in_order_reaches_the_torch_loader(main_mod, tmp_path, in_order):
+    """``Trainer`` forwards the flag only from transformers 5.15; accelerate's wrapper drops writes."""
+    if multiprocessing.get_start_method() != "fork":
+        pytest.skip("workers started without fork re-import torch, too slow for a unit test")
+    release = multiprocessing.Event()
+    # In order, nothing can overtake index 0 to release it, so it waits out a short timeout.
+    dataset = _FirstIndexWaits(release, timeout=1 if in_order else 10)
+    trainer = main_mod.EagleTrainerWithAccLog(
+        model=torch.nn.Linear(1, 1),
+        args=main_mod.HfTrainingArguments(
+            output_dir=str(tmp_path),
+            per_device_train_batch_size=1,
+            dataloader_num_workers=2,
+            dataloader_in_order=in_order,
+            train_sampling_strategy="sequential",
+            remove_unused_columns=False,
+            report_to="none",
+            use_cpu=True,
+        ),
+        train_dataset=dataset,
+        data_collator=_collate_ids,
+    )
+    order = []
+    for batch in trainer.get_train_dataloader():
+        order += batch["idx"].tolist()
+        release.set()
+    assert sorted(order) == list(range(8))
+    assert (order == sorted(order)) == in_order, order
+
+
+@pytest.mark.parametrize("cp_size", [1, 2])
+def test_context_parallelism_keeps_batches_in_order(main_mod, monkeypatch, cp_size):
+    """Ranks of a CP group load the same batches; taken out of order they would split different ones."""
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    args = types.SimpleNamespace(cp_size=cp_size, dp_shard_size=None, dataloader_in_order=False)
+    main_mod.init_distributed_env(args)
+    assert args.dataloader_in_order == (cp_size > 1)

@@ -70,7 +70,8 @@ training:
 dflash:
   dflash_block_size: 16
   dflash_num_anchors: 256
-  dflash_use_torch_compile: false
+  dflash_use_torch_compile: true
+  dflash_use_flex_attention: true
   dflash_self_logit_distillation: false
   # gamma for exponential loss decay (block_size=16 -> 7).
   dflash_loss_decay_factor: 7.0
