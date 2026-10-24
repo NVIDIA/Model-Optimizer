@@ -142,20 +142,20 @@ def _bounded_combine_job(rank, size):
     default = moe._COMBINE_SLICE_ELEMENTS
     with torch.no_grad():
         whole = a2a_moe(group, x, ti, tw, E, _identity_experts)
-        moe._COMBINE_SLICE_ELEMENTS = H  # one row a slice
+        moe._COMBINE_SLICE_ELEMENTS = TOP_K * H  # one token a slice
         try:
             with LargestFp32() as largest:
                 sliced = a2a_moe(group, x, ti, tw, E, _identity_experts)
         finally:
             moe._COMBINE_SLICE_ELEMENTS = default
-    # Only the [T, H] accumulator: the [T * TOP_K, H] results never go fp32 whole.
-    assert largest.numel <= T * H
+    # The fp32 routing weights make the weighted results fp32, one token's at a time.
+    assert largest.numel <= TOP_K * H
     torch.testing.assert_close(sliced, whole, rtol=0, atol=0)
 
 
-def test_the_combine_works_in_fp32_a_slice_of_rows_at_a_time(cpu_dist_workers):
+def test_the_combine_works_a_slice_of_tokens_at_a_time(cpu_dist_workers):
     """A whole fp32 copy of the (token, expert) results reaches GiBs at calibration batch sizes; the
-    combine weights and sums them a slice at a time, with the same result."""
+    combine weights and sums them a slice of tokens at a time, with the same result."""
     cpu_dist_workers.run(_bounded_combine_job)
 
 
@@ -211,23 +211,25 @@ def test_experts_that_receive_no_tokens_run_on_an_empty_batch(cpu_dist_workers):
     cpu_dist_workers.run(_no_tokens_for_rank1_job)
 
 
-def _no_routes_from_rank1_job(rank, size):
+def _no_routes_from_rank1_job(rank, size, rank1_tokens):
     # A rank left waiting in the backward's all-to-all gives up in seconds on this group.
     group = dist.new_group(timeout=timedelta(seconds=10))
+    tokens = 2 if rank == 0 else rank1_tokens
     torch.manual_seed(0)
-    x = torch.randn(2, H).requires_grad_(True)
-    routes = torch.tensor([[0, 1], [0, 1]]) if rank == 0 else torch.full((2, 2), -1)
-    out = a2a_moe(group, x, routes, torch.ones(2, 2), 1, _identity_experts)
+    x = torch.randn(tokens, H).requires_grad_(True)
+    routes = torch.tensor([[0, 1], [0, 1]]) if rank == 0 else torch.full((tokens, 2), -1)
+    out = a2a_moe(group, x, routes, torch.ones(tokens, 2), 1, _identity_experts)
     (out + x).square().sum().backward()
     # Rank 0's tokens come back from both ranks' identity experts, out = 2x: d/dx (3x)^2 = 18x.
     # Rank 1 routes nothing, out = 0: d/dx x^2 = 2x.
     torch.testing.assert_close(x.grad, (18 if rank == 0 else 2) * x.detach())
 
 
-def test_a_rank_that_routes_no_tokens_still_joins_the_backward(cpu_dist_workers):
-    """Every routing slot on rank 1 is -1, so it sends nothing, but it serves rank 0's tokens. Its
-    backward must still run the reverse all-to-all, or rank 0 waits in its own."""
-    cpu_dist_workers.run(_no_routes_from_rank1_job)
+@pytest.mark.parametrize("rank1_tokens", [2, 0], ids=["unrouted-slots", "no-tokens"])
+def test_a_rank_that_routes_no_tokens_still_joins_the_backward(cpu_dist_workers, rank1_tokens):
+    """Rank 1 sends nothing, its routing slots all -1 or no tokens at all, but it serves rank 0's
+    tokens. Its backward must still run the reverse all-to-all, or rank 0 waits in its own."""
+    cpu_dist_workers.run(_no_routes_from_rank1_job, rank1_tokens=rank1_tokens)
 
 
 def _split_qwen3_moe_experts(rank, size):
