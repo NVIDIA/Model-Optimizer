@@ -15,24 +15,42 @@
 
 """HuggingFace-coupled MoE expert-parallel (EP) helpers.
 
-Finding a model's routed experts, choosing the EP degree they are sharded over, and the DP=EP
-all-to-all expert transport (``torch_a2a``).
+Finding a model's routed experts, choosing the EP degree they are sharded over, the DP=EP
+all-to-all expert transport (``torch_a2a``). The expert-parallel model loader is
+:func:`~modelopt.torch.utils.plugins.model_load_utils.load_and_prepare_ep`.
 
 The all-to-all transport is plain ``torch.distributed.all_to_all_single`` (NCCL) wrapped around
-transformers' quantizable ``_grouped_linear``. ``register_torch_a2a()`` registers it into
-transformers' ``ExpertsInterface`` lazily -- never at import time, so importing this module has no
-transformers-``ExpertsInterface`` side effect.
+transformers' quantizable ``_grouped_linear``. ``register_torch_a2a()`` registers
+it into transformers' ``ExpertsInterface`` (lazily, from ``load_and_prepare_ep``'s a2a path -- never at
+import time, so importing this module has no transformers-``ExpertsInterface`` side effect).
 """
 
 import warnings
-from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from torch.distributed.nn.functional import all_to_all_single as autograd_all_to_all_single
 
-if TYPE_CHECKING:
-    from torch import nn
+from .distributed import distribution_plan
+
+
+def require_transformers(min_version: str, feature: str) -> None:
+    """Fail loudly if the installed transformers is older than ``min_version`` (the floor for ``feature``).
+
+    Callers enforce the version where the needed APIs first exist, so a too-old transformers errors
+    clearly instead of silently mis-behaving (e.g. transformers 5.5 silently shards nothing for EP).
+    See each call site for the empirically-determined floor.
+    """
+    import transformers
+    from packaging.version import parse
+
+    have = transformers.__version__
+    if parse(have) < parse(min_version):
+        raise RuntimeError(
+            f"{feature} requires transformers >= {min_version}, but {have} is installed. "
+            f"Upgrade with: pip install -U 'transformers>={min_version}'."
+        )
 
 
 def _ep_config(hf_config):
@@ -455,3 +473,16 @@ def register_torch_a2a():
     ALL_PARALLEL_STYLES.register("torch_a2a_router", TorchA2ARouter())
     ALL_PARALLEL_STYLES.register("torch_a2a_experts", TorchA2AExperts())
     _TORCH_A2A_REGISTERED = True
+
+
+def expert_parallel_mesh(model: nn.Module):
+    """The mesh ``model``'s routed experts are sharded over, or ``None`` if its plan shards none.
+
+    :func:`~modelopt.torch.utils.plugins.model_load_utils.load_and_prepare_ep` loads the model over
+    its expert-parallel submesh, which transformers keeps on the model as ``_device_mesh``.
+    Calibration takes the mesh to re-install the all-to-all forwards
+    (:func:`~modelopt.torch.utils.distributed.distributed_forward_loop`).
+    """
+    if not distribution_plan(model).is_expert_parallel:
+        return None
+    return model._device_mesh
