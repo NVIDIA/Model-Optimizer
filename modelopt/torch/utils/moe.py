@@ -73,17 +73,13 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     def _one_all_to_all(output, input_, out_split, in_split):
         """One all_to_all_single hop (hidden or expert output).
 
-        Uses the AUTOGRAD-AWARE ``torch.distributed.nn.functional.all_to_all_single`` (whose backward is
-        the reverse all-to-all) when a graph is being built AND the input needs grad -- so gradients
-        propagate through dispatch/combine to the routed experts (AutoQuantize gradient score estimation).
-        Otherwise (forward-only calibration / inference, or a frozen input) it uses the plain, no-graph
-        collective, leaving the validated production path byte-for-byte unchanged.
+        The autograd-aware collective, whose backward is the reverse all-to-all, when a graph is being
+        built and the input needs grad, so gradients reach the routed experts (AutoQuantize's gradient
+        scores); the plain collective otherwise.
         """
         if torch.is_grad_enabled() and input_.requires_grad:
-            # torch.distributed.nn.functional.all_to_all_single is the autograd-aware collective (backward =
-            # reverse all-to-all). It is deprecated in torch>=2.13 in favor of
-            # torch.distributed._functional_collectives.all_to_all_single (AsyncCollectiveTensor); migrating
-            # is a follow-up -- suppress the per-call FutureWarning here to keep score-estimation logs clean.
+            # Deprecated in torch>=2.13 for _functional_collectives.all_to_all_single; until that
+            # migration, silence its per-call FutureWarning.
             with warnings.catch_warnings():
                 warnings.filterwarnings(
                     "ignore", category=FutureWarning, message=".*all_to_all_single.*"
@@ -93,22 +89,18 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
         return output
 
     def _all_to_all(output, input_, out_split, in_split, step=None):
-        """All-to-all that chunks along the hidden dim to stay inside the int32 element limit.
+        """All-to-all in hidden-column slices ``step`` wide; in one hop if ``step`` is None or covers H.
 
-        all_to_all_single, CHUNKED into hidden-column slices ``step`` wide when a single transfer would
-        exceed the int32 element limit. ``all_to_all_single`` addresses the flattened ``[rows, H]`` buffer
-        with element offsets ``= row_offset * H``; once ``rows*H > 2**31`` that offset overflows int32 in
-        the NCCL path and the collective HANGS (observed: qwen3_5_moe_text EP calib at batch8 x seq4096 ->
-        Q*H = 327680*8192 = 2.68e9 > 2**31, all_to_all ran the full 3h NCCL timeout, then aborted). The
-        per-rank ROW split sizes are identical for every slice, and cat-ing the slices is autograd-safe.
-        A ``step`` of None, or one covering the whole hidden dim, moves the transfer in one hop.
+        all_to_all_single addresses the flattened ``[rows, H]`` buffers with int32 element offsets, so a
+        hop past 2**31 elements overflows them and hangs. Every slice has the same row splits, and
+        concatenating the slices is autograd-safe.
         """
         hdim = input_.shape[-1]
         if step is None or step >= hdim:
             return _one_all_to_all(output, input_, out_split, in_split)
         if torch.is_grad_enabled() and input_.requires_grad:
-            # Autograd (AutoQuantize scoring): cat is graph-safe (an in-place copy_ would break the
-            # reverse-all-to-all backward). Higher peak, but grad scoring uses far fewer tokens.
+            # An in-place copy_ would break the backward; cat's higher peak is fine for the few
+            # tokens gradient scoring uses.
             slices = [
                 _one_all_to_all(
                     output[..., c0 : c0 + step].contiguous(),
@@ -119,9 +111,8 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
                 for c0 in range(0, hdim, step)
             ]
             return torch.cat(slices, dim=-1)
-        # Forward-only calibration: write each hidden-column slice back into `output` IN PLACE so we
-        # never hold a full second [Q,H] copy (torch.cat would). The imbalanced-rank recv buffer is
-        # already tens of GiB at long seq x batch; the cat doubling is what tips calibration into OOM.
+        # Forward only: write each slice into ``output`` in place; torch.cat would hold a second
+        # [rows, H] copy of a buffer that is already the largest in calibration.
         for c0 in range(0, hdim, step):
             c1 = min(c0 + step, hdim)
             tmp = _one_all_to_all(
@@ -146,12 +137,8 @@ def a2a_moe(group, hidden_states, topk_idx, topk_weights, num_local_experts, exp
     in_counts = torch.bincount(dest[order], minlength=world).to(torch.int64)  # rows -> each rank
 
     out_counts = torch.empty_like(in_counts)  # rows <- each rank
-    # The host reads out_counts (.tolist()) immediately below to size the dispatch buffers (Q = sum(out)).
-    # all_to_all_single runs on the NCCL stream; a HOST read of its output must wait for the collective, or
-    # .tolist() can copy stale/uninitialized out_counts -> a garbage Q -> a size-mismatched dispatch
-    # all_to_all -> NCCL out-of-bounds -> SIGSEGV (deterministic on the qwen3_5_moe_text EP path; masked on
-    # heavier models only by pre-MoE timing, and masked everywhere by CUDA_LAUNCH_BLOCKING=1). Take the
-    # work handle and wait() so the current stream (hence the .tolist() DtoH) orders after the exchange.
+    # The host reads the counts right below to size the dispatch: wait for the exchange, or a read that
+    # races the collective's stream sizes the buffers from garbage.
     _cnt_work = dist.all_to_all_single(out_counts, in_counts, group=group, async_op=True)
     _cnt_work.wait()
     in_list, out_list = in_counts.tolist(), out_counts.tolist()
@@ -291,20 +278,19 @@ _TORCH_A2A_REGISTERED = False
 def register_torch_a2a():
     """Register everything the torch_a2a path needs into stock transformers (idempotent).
 
-    Done lazily from ``load_and_prepare_ep`` -- NOT at import time, so importing this module has no
+    Done lazily from ``load_and_prepare_ep``, not at import time, so importing this module has no
     transformers side effect:
 
-    - the ``torch_a2a`` experts FORWARD into ``ExpertsInterface`` (``ALL_EXPERTS_FUNCTIONS``);
-    - two EP parallel STYLES into ``ALL_PARALLEL_STYLES``:
+    - the ``torch_a2a`` experts forward into ``ExpertsInterface`` (``ALL_EXPERTS_FUNCTIONS``);
+    - two EP parallel styles into ``ALL_PARALLEL_STYLES``:
 
-      * ``torch_a2a_router`` -- emit GLOBAL unmasked expert ids (skip ``RouterParallel``'s
+      * ``torch_a2a_router`` -- emit global, unmasked expert ids (skip ``RouterParallel``'s
         per-EP-rank masking) so the a2a dispatch can route each (token, expert) to its owning rank;
       * ``torch_a2a_experts`` -- inject the EP ``process_group`` into the experts forward (4th arg)
         and skip the all-reduce (the a2a combine does the reduction).
 
-    These two styles are functionally the stock ``megamoe_router`` / ``megamoe_experts`` (which were
-    added for DeepGEMM Mega-MoE in transformers 5.10.4), reimplemented here -- ~5 lines each -- so the
-    a2a path OWNS its EP styles and does NOT depend on megamoe (i.e. it stays portable below 5.10.4).
+    These two styles are functionally transformers' ``megamoe_router`` / ``megamoe_experts`` (added
+    in 5.10.4 for DeepGEMM Mega-MoE), reimplemented here so the transport works below 5.10.4 too.
     The base classes (``RouterParallel``, ``TensorParallelLayer``) are stock wherever the EP infra
     exists (transformers >= 5.6, the framework floor enforced in ``load_and_prepare_ep``), so this
     works on any such version; ``grouped_gemm`` (expert weight sharding) is stock too.
@@ -324,7 +310,7 @@ def register_torch_a2a():
     ALL_EXPERTS_FUNCTIONS.register("torch_a2a", torch_a2a_experts_forward)
 
     class TorchA2ARouter(RouterParallel):
-        """torch_a2a router style: emit GLOBAL unmasked expert ids (== stock ``megamoe_router``).
+        """torch_a2a router style: emit global, unmasked expert ids (== stock ``megamoe_router``).
 
         The base ``RouterParallel._prepare_output_fn`` remaps to local ids + masks non-local; the a2a
         dispatch needs the global ids, so this just passes the router outputs through unchanged.
@@ -352,15 +338,11 @@ def register_torch_a2a():
         def _prepare_output_fn(self, mod, outputs, device_mesh):
             return outputs
 
-        # --- transformers >=5.16 API ---------------------------------------------------------
-        # install_forward() there calls transform_inputs_pre_forward/transform_output_post_forward
-        # and NEVER the _prepare_* pair above, whose base implementations are no-ops. Without these
-        # two methods the EP process_group is silently not injected and torch_a2a_experts_forward
-        # raises "requires the EP process_group". Additive: <5.16 ignores them.
+        # transformers >= 5.16 calls the methods below and never the _prepare_* pair above; without
+        # them the EP process_group is not injected. Older versions ignore them.
         def should_use_local_tensors(self, module):
-            # The a2a forward dispatches tokens itself and runs the LOCAL expert shard through
-            # _grouped_linear; without this the grouped matmul mixes DTensor params with plain
-            # activation tensors and aten._grouped_mm rejects the call.
+            # The a2a forward runs the local expert shard through _grouped_linear itself, and
+            # aten._grouped_mm rejects DTensor params next to plain activations.
             return True
 
         def transform_inputs_pre_forward(self, module, args, kwargs, mesh):
