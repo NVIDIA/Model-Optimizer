@@ -577,6 +577,137 @@ class LayerActivationCollector:
         return self.get_input_activations(next_layer, forward_loop)
 
 
+def _used_gpus() -> list[int]:
+    """GPUs this process holds memory on; probing any other would create a context on it."""
+    return [i for i in range(torch.cuda.device_count()) if torch.cuda.memory_reserved(i)]
+
+
+def _available_gpu_bytes(gpu: int) -> int:
+    """Memory a new allocation on *gpu* can get: what is free plus what PyTorch caches unused."""
+    free, _ = torch.cuda.mem_get_info(gpu)
+    return free + torch.cuda.memory_reserved(gpu) - torch.cuda.memory_allocated(gpu)
+
+
+def _cuda_bytes_per_gpu(obj: Any, out: dict[int, int] | None = None) -> dict[int, int]:
+    """Bytes of the CUDA tensors in a nested args/kwargs structure, per GPU."""
+    out = {} if out is None else out
+    if isinstance(obj, torch.Tensor):
+        if obj.is_cuda:
+            out[obj.device.index] = out.get(obj.device.index, 0) + obj.nbytes
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            _cuda_bytes_per_gpu(value, out)
+    elif isinstance(obj, (list, tuple)):
+        for value in obj:
+            _cuda_bytes_per_gpu(value, out)
+    return out
+
+
+def _capture_layer_inputs(
+    model: nn.Module, layer: nn.Module, batch_size: int, seq_len: int, device: torch.device
+):
+    """Run *model* on a dummy batch until *layer* and return the ``(args, kwargs)`` it receives."""
+    # Inline import: dataset_utils is not needed by the rest of this module.
+    from modelopt.torch.utils.dataset_utils import _disable_use_cache
+
+    input_ids = torch.zeros(batch_size, seq_len, dtype=torch.long, device=device)
+    # One left-pad position, like padded calibration rows, so the model builds the explicit
+    # attention mask that calibration batches get instead of a cheaper causal-only path.
+    attention_mask = torch.ones_like(input_ids)
+    attention_mask[:, 0] = 0
+    info = layer._layerwise_calib
+    info.mode = "capture"
+    try:
+        with _disable_use_cache(model):
+            model(input_ids, attention_mask=attention_mask)
+    finally:
+        info.mode = "original"
+    (inputs,) = info.collected_inputs
+    info.collected_inputs = []
+    return inputs
+
+
+def _forward_peak_per_gpu(layer: nn.Module, args: tuple, kwargs: dict) -> dict[int, int]:
+    """Peak memory one forward of *layer* adds on each GPU."""
+    base = {}
+    for gpu in _used_gpus():
+        torch.cuda.reset_peak_memory_stats(gpu)
+        base[gpu] = torch.cuda.memory_allocated(gpu)
+    layer(*args, **kwargs)
+    return {gpu: torch.cuda.max_memory_allocated(gpu) - base.get(gpu, 0) for gpu in _used_gpus()}
+
+
+def _layer_batch_fit(
+    model: nn.Module,
+    layer: nn.Module,
+    seq_len: int,
+    num_samples: int,
+    memory_fraction: float,
+    device: torch.device,
+) -> int | None:
+    """Largest batch whose forward through *layer* fits; ``None`` if no GPU memory grows with it."""
+    peaks = []
+    # The first forward only warms up: it also allocates one-off buffers like cuBLAS's workspace.
+    for batch_size in (1, 1, 2):
+        args, kwargs = _capture_layer_inputs(model, layer, batch_size, seq_len, device)
+        if batch_size == 1:
+            cached_per_sample = _cuda_bytes_per_gpu((args, kwargs))
+        peaks.append(_forward_peak_per_gpu(layer, args, kwargs))
+        del args, kwargs
+
+    _, one, two = peaks
+    fits = []
+    for gpu, peak in two.items():
+        per_sample = peak - one.get(gpu, 0)
+        if per_sample <= 0:
+            continue
+        # Layerwise calibration caches every sample's inputs for this layer and the next.
+        available = _available_gpu_bytes(gpu) - 2 * num_samples * cached_per_sample.get(gpu, 0)
+        fixed = one.get(gpu, 0) - per_sample
+        fits.append(int((memory_fraction * available - fixed) // per_sample))
+    return min(fits, default=None)
+
+
+@torch.no_grad()
+def get_max_layerwise_batch_size(
+    model: nn.Module,
+    seq_len: int,
+    max_batch_size: int,
+    num_samples: int,
+    memory_fraction: float = 0.5,
+    device: torch.device | None = None,
+) -> int:
+    """Largest calibration batch, up to *max_batch_size*, whose decoder-layer forwards fit.
+
+    Layerwise calibration runs one decoder layer at a time, so a full-model batch probe such as
+    :func:`get_max_batch_size <modelopt.torch.utils.dataset_utils.get_max_batch_size>` both
+    overstates the memory a batch needs and risks running out of it. Instead, the first layer
+    of each kind (by module classes: dense or MoE, full or linear attention) runs on one and
+    two samples of *seq_len* tokens, and the growth of its peak memory on each GPU is that GPU's
+    cost per sample. A batch fits when the layer's forward stays within *memory_fraction* of
+    the GPU's available memory, after the inputs layerwise calibration caches for all
+    *num_samples*; the rest is left for quantizers and Hessians. The dummy token ids go to
+    *device*, by default the model's. All ranks return the same, smallest batch.
+    """
+    batch_size = max_batch_size
+    layers = LayerActivationCollector.get_decoder_layers(model)
+    if layers and torch.cuda.is_available() and max_batch_size > 1:
+        kinds: dict[tuple[str, ...], nn.Module] = {}
+        for layer in layers:
+            kinds.setdefault(tuple(sorted({type(m).__name__ for m in layer.modules()})), layer)
+        device = device or get_module_device(model)
+        collector = LayerActivationCollector(model)
+        collector._patch_all_layers(layers)
+        try:
+            for layer in kinds.values():
+                fit = _layer_batch_fit(model, layer, seq_len, num_samples, memory_fraction, device)
+                if fit is not None:
+                    batch_size = min(batch_size, fit)
+        finally:
+            collector._unpatch_all_layers()
+    return max(1, min(dist.allgather(batch_size)))
+
+
 def _move_to_device(obj: Any, device: torch.device) -> Any:
     """Recursively move tensors to *device*. Non-tensors are returned as-is."""
     if isinstance(obj, torch.Tensor):
