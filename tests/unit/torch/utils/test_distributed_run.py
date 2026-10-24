@@ -205,6 +205,8 @@ def test_a_single_process_computes_alone(monkeypatch):
         )
     assert broadcast_from("x", lambda: 3) == 3
     assert all_reduce("smallest", lambda: 4, min) == 4
+    with pytest.raises(ValueError, match="rank=1"):
+        broadcast_from("x", lambda: 3, rank=1)
 
 
 def _broadcast_from_job(rank, size):
@@ -319,10 +321,19 @@ def test_a_distributed_launch_yields_this_ranks_state_on_its_cuda_device(monkeyp
     monkeypatch.setattr(dist, "rank", lambda group=None: 2)
     monkeypatch.setattr(dist, "size", lambda group=None: 4)
     monkeypatch.setattr(dist, "local_rank", lambda: 1)
-    with distributed_run(timeout=timedelta(hours=1), device="cpu") as state:
+    with distributed_run(timeout=timedelta(hours=1)) as state:
         assert state == DistributedState(rank=2, world_size=4, device=torch.device("cuda:1"))
         assert not state.is_main
     assert timeouts == [timedelta(hours=1)]
+
+
+def test_a_distributed_launch_refuses_another_device(monkeypatch):
+    """Every rank runs on its own CUDA device, so another device is refused, before any setup,
+    rather than ignored."""
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setattr(dist, "setup", lambda **kwargs: pytest.fail("set a group up"))
+    with pytest.raises(ValueError, match="device='cpu'"), distributed_run(device="cpu"):
+        pass
 
 
 class _ExitedError(Exception):
@@ -365,7 +376,7 @@ def test_the_run_ends_the_group_it_set_up(monkeypatch, launch, body_raises, ends
     escapes = _ExitedError if ends_by == "abort" else body_raises
     expected = pytest.raises(escapes) if escapes else nullcontext()
 
-    with expected, distributed_run(device="cpu"):
+    with expected, distributed_run(device="cuda" if launch else "cpu"):
         if not launch:
             live.append("the body's group")
         if body_raises:
@@ -391,6 +402,6 @@ def test_the_run_leaves_a_group_it_found_alone(monkeypatch, world_size, raises):
     monkeypatch.setattr(dist, "cleanup", lambda: pytest.fail("destroyed the caller's group"))
     monkeypatch.setattr(dist, "abort", lambda: pytest.fail("exited the caller's process"))
     expected = pytest.raises(ValueError, match="calibration failed") if raises else nullcontext()
-    with expected, distributed_run(device="cpu"):
+    with expected, distributed_run(device="cpu" if world_size is None else "cuda"):
         if raises:
             raise ValueError("calibration failed")

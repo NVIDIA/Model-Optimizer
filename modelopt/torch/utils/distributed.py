@@ -348,11 +348,12 @@ _PLAN_ATTR = "_modelopt_distribution_plan"
 
 
 def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> None:
-    """Record that ``model`` is distributed as ``plan``, on it and on every submodule.
+    """Record that ``model`` is distributed as ``plan``, on it and on every submodule it has now.
 
     Code handed a submodule, such as a VLM's language model, then reads the same plan as code handed
-    the whole model. ``load_pretrained`` records the plan it loads by; code that distributes a model
-    itself records it here before calibrating or exporting the model.
+    the whole model; a module added afterwards records none. ``load_pretrained`` records the plan it
+    loads by once the model is built; code that distributes a model itself records it here before
+    calibrating or exporting the model.
 
     A model is distributed once, and its plan recorded once: recording a plan on a model that, or
     any of whose submodules, already records one raises, the same plan included, and leaves the
@@ -401,10 +402,10 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
     different labels at the same point fail. Collective: every rank calls it at the same point,
     with the same ``rank``. Outside a distributed run ``fn`` runs alone.
     """
-    if not is_distributed_run():
-        return fn()
     if not 0 <= rank < size():
         raise ValueError(f"rank={rank} is not a rank of this {size()}-rank run.")
+    if not is_distributed_run():
+        return fn()
     sending = torch.distributed.get_rank() == rank
     value: Any = None
     error = None
@@ -485,12 +486,15 @@ class DistributedState:
 
 
 @contextmanager
-def distributed_run(timeout: timedelta | None = None, device: torch.device | str = "cuda"):
+def distributed_run(
+    timeout: timedelta | None = None, device: torch.device | str = "cuda"
+) -> Iterator[DistributedState]:
     """Own the run's process group for the block, and yield this process's state.
 
     On a distributed launch (``WORLD_SIZE>1``) this sets the process group up, binding this rank's
     CUDA device, with ``timeout``. It yields this rank's :class:`DistributedState`, on that CUDA
-    device. A single process sets nothing up and is rank 0 of a run of one, on ``device``.
+    device, and refuses any other ``device``. A single process sets nothing up and is rank 0 of a run
+    of one, on ``device``.
 
     On exit, even if the body raises, it destroys the group the run set up: the launch's, or one the
     body set up, such as the one-rank group a single process's FSDP2 load shards through. A group
@@ -500,6 +504,11 @@ def distributed_run(timeout: timedelta | None = None, device: torch.device | str
     rank never reaches.
     """
     launched = is_distributed_launch()
+    if launched and torch.device(device).type != "cuda":
+        raise ValueError(
+            f"distributed_run(device={device!r}): a distributed launch runs each rank on its own "
+            "CUDA device; run a single process for another device."
+        )
     group_was_there = is_initialized()
     if launched:
         setup(timeout=timeout)
