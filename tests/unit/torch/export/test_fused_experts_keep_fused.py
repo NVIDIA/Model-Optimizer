@@ -348,15 +348,25 @@ def _native_fp8(experts):
     )
 
 
+def _native_fp8_unquantized(experts):
+    _native_fp8(experts)
+    _unquantized(experts, ["down_proj"])
+
+
 @LAYOUTS
 @pytest.mark.parametrize(
     ("change", "match"),
-    [(_mixed, r"down_proj: weight quantizers \[1\] of 4"), (_native_fp8, "native FP8")],
-    ids=["mixed", "native-fp8"],
+    [
+        (_mixed, r"down_proj: weight quantizers \[1\] of 4"),
+        (_native_fp8, "native FP8"),
+        (_native_fp8_unquantized, "native FP8"),
+    ],
+    ids=["mixed", "native-fp8", "native-fp8-unquantized"],
 )
 def test_a_projection_the_fold_cannot_write_is_refused_untouched(experts_cls, change, match):
     """One fused tensor cannot mix quantized and unquantized experts, and native FP8 weights need the
-    scale_inv the fold drops. The refusal comes before the other projection folds."""
+    scale_inv the fold drops, also where a recipe leaves them unquantized. The refusal comes before
+    the other projection folds."""
     experts = _quantized_experts(experts_cls, mtq.FP8_DEFAULT_CFG)
     change(experts)
     before = {k: v.clone() for k, v in experts.state_dict().items()}
@@ -365,7 +375,7 @@ def test_a_projection_the_fold_cannot_write_is_refused_untouched(experts_cls, ch
         _export_fused_experts_keep_fused(experts, torch.bfloat16)
 
     _assert_byte_identical(experts.state_dict(), before)
-    assert experts.down_proj_weight_quantizers[0].is_enabled
+    assert getattr(experts, f"{experts._first_proj_attr}_weight_quantizers")[0].is_enabled
 
 
 # ------------------------------------------------------------------ split_fused_experts_state_dict

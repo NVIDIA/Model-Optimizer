@@ -184,14 +184,16 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
     for proj in (first, "down_proj"):
         weight_quantizers = getattr(module, f"{proj}_weight_quantizers")
         enabled = [q.is_enabled for q in weight_quantizers]
+        wdata = getattr(module, proj).data
+        if wdata.element_size() == 1:
+            # get_expert_weight dequantizes these with their scale_inv, which the fold drops below
+            # whether it folds the projection or leaves it as it is.
+            raise NotImplementedError(
+                f"{type(module).__name__}.{proj}: native FP8 expert weights cannot be exported as "
+                "stored, since the fold drops their scale_inv; dequantize them first "
+                "(unpack_weight())."
+            )
         if all(enabled):
-            wdata = getattr(module, proj).data
-            if wdata.element_size() == 1:
-                # get_expert_weight dequantizes these with their scale_inv, which the fold drops.
-                raise NotImplementedError(
-                    f"{type(module).__name__}.{proj}: native FP8 expert weights cannot be folded "
-                    "as stored; dequantize them first (unpack_weight())."
-                )
             if DTensor is not None and isinstance(wdata, DTensor):
                 _refuse_unfoldable_shards(module, proj, wdata, len(weight_quantizers))
             folded.append(proj)
@@ -746,9 +748,9 @@ def _split_local_fused_module(
 
     def _loc_scale(key):
         # Weight scales are dim-0 (per-expert) tensors. A DTensor scale shards with the weight ->
-        # to_local() aligns. But under EP the keep-fused fold emits the scale as a PLAIN buffer
-        # spanning the whole EP group (not dp-sharded like the weight param); slice it by the
-        # weight's within-group dp_offset so each scale pairs with its own dp-local expert.
+        # to_local() aligns. The keep-fused fold emits DTensor scales for a sharded weight, but a
+        # scale handed in as a PLAIN tensor over every expert of the group is accepted too: slice
+        # it by the weight's within-group dp_offset so each scale pairs with its own dp-local expert.
         v = sharded_sd.get(key)
         if v is None:
             return None

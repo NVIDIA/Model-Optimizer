@@ -41,11 +41,12 @@ def _has_fused_experts_quantizers(module: nn.Module) -> bool:
 def _fsdp2_weight_window(ctx: ExportContext, module: nn.Module):
     """``fsdp2_aware_weight_update`` on the FSDP2 unit that owns ``module``'s weights.
 
-    That is the model when the model itself is wrapped. Expert parallelism FSDP2-shards only the dense
-    layers and leaves the root unwrapped, and a window opened on an unwrapped root does nothing: the
-    weight stays a sharded DTensor, which packing mishandles (``DTensor << int`` is a silent no-op in
-    torch 2.11, so NVFP4 packed unrelated codes next to correct scales). So open it on the innermost
-    enclosing unit instead, found by walking up the module's name: the export calls this per module.
+    The window opens on the innermost unit enclosing the module, but only when the root it is handed
+    is wrapped itself: on an unwrapped root it does nothing. Expert parallelism FSDP2-shards only the
+    dense layers and leaves the root unwrapped, where the weight would stay a sharded DTensor, which
+    packing mishandles (``DTensor << int`` is a silent no-op in torch 2.11, so NVFP4 packed unrelated
+    codes next to correct scales). So there that unit is handed in as the root, found by walking up
+    the module's name: the export calls this per module.
     """
     from torch.distributed.fsdp import FSDPModule
 
