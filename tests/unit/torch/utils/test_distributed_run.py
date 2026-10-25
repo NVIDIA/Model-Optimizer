@@ -126,14 +126,14 @@ def test_a_model_with_no_plan_is_a_single_process():
 
 
 def _outcome(call):
-    """``(value, None)``, or ``(None, error)`` if ``call()`` raises.
+    """``(value, None)``, or ``(None, error)`` if ``call()`` raises, a ``SystemExit`` included.
 
     For pooled jobs, which cannot use ``pytest.raises``: its failure is a ``BaseException``, which
-    ends the worker instead of failing the job.
+    ends the worker instead of failing the job, as an uncaught ``SystemExit`` would.
     """
     try:
         return call(), None
-    except Exception as error:
+    except (Exception, SystemExit) as error:
         return None, error
 
 
@@ -226,6 +226,9 @@ def _broadcast_from_job(rank, size):
     def fail():
         raise ValueError("bad degrees")
 
+    def exit_2():
+        raise SystemExit(2)
+
     with bounded_collectives():
         for sender in range(size):
             ran.clear()
@@ -240,6 +243,14 @@ def _broadcast_from_job(rank, size):
         else:
             assert isinstance(error, RuntimeError), error
             assert "rank 0 failed to compute x" in str(error), error
+        _, error = _outcome(lambda: broadcast_from("x", exit_2))
+        assert isinstance(error, SystemExit) and error.code == 2, error
+        _, error = _outcome(lambda: broadcast_from("x", lambda: (n for n in range(1))))
+        if rank == 0:
+            assert isinstance(error, TypeError), error
+        else:
+            assert isinstance(error, RuntimeError), error
+            assert "rank 0 failed to compute x: TypeError" in str(error), error
         sent, error = _outcome(lambda: broadcast_from("plan" if rank == 0 else "other", lambda: 7))
         if rank == 0:
             assert (sent, error) == (7, None)
@@ -250,15 +261,17 @@ def _broadcast_from_job(rank, size):
 
 def test_broadcast_from_gives_every_rank_the_sending_ranks_value(cpu_dist_workers):
     """Over a real broadcast: any rank can send, and only it runs fn. A rank outside the run is
-    refused, the sending rank's failure stops every rank, and ranks out of step fail."""
+    refused, the sending rank's failure stops every rank and its exit exits every rank with its
+    code, so that distributed_run tears every rank down alike. A value that does not pickle fails as
+    fn raising does, rather than in the broadcast, and ranks out of step fail."""
     cpu_dist_workers.run(_broadcast_from_job)
 
 
 @pytest.mark.parametrize("error", [ValueError, SystemExit])
 def test_the_sending_rank_failing_still_reaches_the_broadcast(monkeypatch, error):
     """The sending rank must still send on failure, or every other rank hangs in the broadcast; a
-    SystemExit from an argparse-style check too. A stand-in broadcast catches that at once, where a
-    real one would wait out its timeout."""
+    SystemExit from an argparse-style check too, which goes as its code. A stand-in broadcast
+    catches that at once, where a real one would wait out its timeout."""
     sent = _as_rank(monkeypatch, 0)
 
     def fail():
@@ -266,13 +279,19 @@ def test_the_sending_rank_failing_still_reaches_the_broadcast(monkeypatch, error
 
     with pytest.raises(error, match="bad degrees"):
         broadcast_from("x", fail)
-    assert sent == [(("x", None, f"{error.__name__}: bad degrees"), 0)]
+    told = (True, "bad degrees") if error is SystemExit else (False, "ValueError: bad degrees")
+    assert sent == [(("x", None, told), 0)]
 
 
 def _all_reduce_job(rank, size):
     def fail_on_rank_1():
         if rank == 1:
             raise ValueError("no memory reading")
+        return 4
+
+    def exit_on_rank_1():
+        if rank == 1:
+            raise SystemExit(3)
         return 4
 
     with bounded_collectives():
@@ -283,6 +302,16 @@ def _all_reduce_job(rank, size):
         else:
             assert isinstance(error, RuntimeError), error
             assert "rank 1 failed to compute smallest" in str(error), error
+        _, error = _outcome(lambda: all_reduce("smallest", exit_on_rank_1, min))
+        assert isinstance(error, SystemExit) and error.code == 3, error
+        _, error = _outcome(
+            lambda: all_reduce("smallest", lambda: (n for n in range(1)) if rank == 1 else 4, min)
+        )
+        if rank == 1:
+            assert isinstance(error, TypeError), error
+        else:
+            assert isinstance(error, RuntimeError), error
+            assert "rank 1 failed to compute smallest: TypeError" in str(error), error
         _, error = _outcome(
             lambda: all_reduce("smallest" if rank == 0 else "other", lambda: 4, min)
         )
@@ -292,7 +321,8 @@ def _all_reduce_job(rank, size):
 
 def test_all_reduce_gives_every_rank_the_combined_value(cpu_dist_workers):
     """Over a real gather: every rank's value counts and every rank gets the same result. One rank's
-    failure stops every rank, and ranks out of step fail."""
+    failure stops every rank and its exit exits every rank with its code. A value that does not
+    pickle fails as fn raising does, rather than in the gather, and ranks out of step fail."""
     cpu_dist_workers.run(_all_reduce_job)
 
 
@@ -307,7 +337,12 @@ def test_a_rank_failing_to_compute_still_joins_the_gather(monkeypatch, error):
 
     with pytest.raises(error, match="no memory reading"):
         all_reduce("smallest", fail, min)
-    assert sent == [("smallest", None, f"{error.__name__}: no memory reading")]
+    told = (
+        (True, "no memory reading")
+        if error is SystemExit
+        else (False, "ValueError: no memory reading")
+    )
+    assert sent == [("smallest", None, told)]
 
 
 def _bounded_barrier_job(rank, size):

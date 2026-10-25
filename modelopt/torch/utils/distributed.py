@@ -360,13 +360,13 @@ def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> Non
     any of whose submodules, already records one raises, the same plan included, and leaves the
     model as it was. No code reloads or re-distributes a model it loaded.
     """
-    for module in model.modules():
+    for name, module in model.named_modules():
         recorded = getattr(module, _PLAN_ATTR, None)
         if recorded is not None:
+            where = f"{type(module).__name__} {name!r}" if name else type(module).__name__
             raise ValueError(
-                f"{type(module).__name__} is already recorded as distributed by {recorded!r}; a "
-                f"model is distributed and its plan recorded once, so {plan!r} cannot be recorded "
-                "over it."
+                f"{where} is already recorded as distributed by {recorded!r}; a model is "
+                f"distributed and its plan recorded once, so {plan!r} cannot be recorded over it."
             )
     for module in model.modules():
         setattr(module, _PLAN_ATTR, plan)
@@ -398,16 +398,43 @@ def distribution_plan(model: torch.nn.Module) -> DistributionPlan:
 _V = TypeVar("_V")
 
 
+def _sendable(error: BaseException | None) -> tuple[bool, Any] | None:
+    """``error`` as this rank sends it to the others, ``None`` for none; see :func:`_received`.
+
+    An error goes as its text: the other ranks only need to stop, and an exception is not
+    guaranteed to pickle. A SystemExit goes as its code, for every rank to exit with:
+    :func:`distributed_run` ends an exit with a barrier but an error with :func:`abort`, so a rank
+    exiting while its peers abort would wait in that barrier for ranks that are gone. A code other
+    than an int or ``None`` goes as its text, which the interpreter prints for it before exiting
+    with 1.
+    """
+    if error is None:
+        return None
+    if isinstance(error, SystemExit):
+        code = error.code
+        return True, code if code is None or isinstance(code, int) else str(code)
+    return False, f"{type(error).__name__}: {error}"
+
+
+def _received(sent: tuple[bool, Any], rank: int, label: str) -> BaseException:
+    """The exception to raise for what ``rank`` sent (:func:`_sendable`) on failing ``label``."""
+    exited, detail = sent
+    if exited:
+        return SystemExit(detail)
+    return RuntimeError(f"rank {rank} failed to compute {label}: {detail}")
+
+
 def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
     """Return ``fn()`` run on ``rank`` only, on every rank.
 
     For a value that depends on what each rank reads for itself -- the environment, its GPU, files
-    on its node -- so that ranks computing it for themselves could disagree. If ``fn`` raises, every
-    rank raises, instead of waiting in a broadcast ``rank`` never sends; its value must pickle,
-    which the broadcast does before it sends anything. A rank broadcasting another label than
-    ``rank`` at the same point fails; ``rank`` sees no other rank's label, and returns. Collective:
-    every rank calls it at the same point, with the same ``rank``. Outside a distributed run ``fn``
-    runs alone.
+    on its node -- so that ranks computing it for themselves could disagree. If ``fn`` raises, or
+    returns a value that does not pickle, as the broadcast needs, every rank raises instead of
+    waiting in a broadcast ``rank`` never sends: ``rank`` its own error, the others a SystemExit
+    with its code if that is what it was, so that every rank exits, else a RuntimeError. A rank
+    broadcasting another label than ``rank`` at the same point fails; ``rank`` sees no other rank's
+    label, and returns. Collective: every rank calls it at the same point, with the same ``rank``.
+    Outside a distributed run ``fn`` runs alone.
     """
     if not 0 <= rank < size():
         raise ValueError(f"rank={rank} is not a rank of this {size()}-rank run.")
@@ -419,20 +446,23 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
     if sending:
         try:
             value = fn()
+            # Pickle it here, as the broadcast will: a value that does not pickle then fails as this
+            # rank's error, which the broadcast sends, rather than in the broadcast, on this rank
+            # alone, leaving the others waiting.
+            torch.save(value, io.BytesIO())
         except BaseException as e:
             # Still send: the other ranks would otherwise wait in the broadcast for this one. A
             # SystemExit or KeyboardInterrupt too, which argparse-style checks raise.
-            error = e
+            value, error = None, e
     # One message from the sending rank: its label, so a rank broadcasting another learns the two
-    # are out of step, and its value or its error. The error goes as text: the other ranks only
-    # need to stop, and an exception is not guaranteed to pickle.
-    message = [(label, value, None if error is None else f"{type(error).__name__}: {error}")]
+    # are out of step, and its value or its error.
+    message = [(label, value, _sendable(error))]
     torch.distributed.broadcast_object_list(message, group_src=rank)
     sent_label, value, sent_error = message[0]
     if error is not None:
         raise error
     if sent_error is not None:
-        raise RuntimeError(f"rank {rank} failed to compute {label}: {sent_error}")
+        raise _received(sent_error, rank, label)
     if sent_label != label:
         raise RuntimeError(
             f"Ranks broadcast out of step: this rank broadcast {label!r} while rank {rank} sent "
@@ -446,28 +476,33 @@ def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _
 
     ``combine`` takes the ranks' values in rank order and returns the one every rank gets, e.g.
     ``min`` for a batch size each rank's memory bounds, where one rank's choice could run another
-    out of memory. If ``fn`` raises on any rank, every rank raises, instead of waiting in the gather
-    that rank never joins; its value must pickle, which the gather does before it gathers anything.
-    Ranks reducing different labels at the same point fail. Collective; outside a distributed run
-    ``fn`` runs alone.
+    out of memory. If ``fn`` raises on any rank, or returns a value that does not pickle, as the
+    gather needs, every rank raises instead of waiting in a gather that rank never joins: a failing
+    rank its own error, the others the first failing rank's, a SystemExit as a SystemExit with its
+    code, anything else as a RuntimeError. Ranks reducing different labels at the same point fail.
+    Collective; outside a distributed run ``fn`` runs alone.
     """
     if not is_distributed_run():
         return combine([fn()])
     value, error = None, None
     try:
         value = fn()
+        # Pickle it here, as the gather will: a value that does not pickle then fails as this
+        # rank's error, which the gather carries, rather than in the gather, on this rank alone,
+        # leaving the others waiting.
+        torch.save(value, io.BytesIO())
     except BaseException as e:
         # Still join the gather: the other ranks would otherwise wait in it for this one, a
         # SystemExit or KeyboardInterrupt included.
-        error = e
-    mine = (label, value, None if error is None else f"{type(error).__name__}: {error}")
+        value, error = None, e
+    mine = (label, value, _sendable(error))
     gathered: list[Any] = [None] * torch.distributed.get_world_size()
     torch.distributed.all_gather_object(gathered, mine)
     if error is not None:
         raise error
     for rank_, (_, _, rank_error) in enumerate(gathered):
         if rank_error is not None:
-            raise RuntimeError(f"rank {rank_} failed to compute {label}: {rank_error}")
+            raise _received(rank_error, rank_, label)
     labels = sorted({rank_label for rank_label, _, _ in gathered})
     if labels != [label]:
         raise RuntimeError(
