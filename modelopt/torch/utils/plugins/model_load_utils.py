@@ -225,17 +225,18 @@ def build_meta_causal_lm(
             from transformers import AutoModelForImageTextToText
 
             model_factory = AutoModelForImageTextToText
-    registered = getattr(getattr(model_factory, "_model_mapping", None), "_extra_content", None)
-    kept = dict(registered) if registered is not None else {}
+    # Where transformers records the class a remote-code build registers. Read without a fallback:
+    # if a release moves it, this fails here rather than leave one rank's model without generate.
+    registered = model_factory._model_mapping._extra_content
+    kept = dict(registered)
     try:
         with init_empty_weights(include_buffers=False):
             model = model_factory.from_config(
                 hf_config, dtype=dtype, trust_remote_code=trust_remote_code
             )
     finally:
-        if registered is not None:
-            registered.clear()
-            registered.update(kept)
+        registered.clear()
+        registered.update(kept)
     model.eval()
     return model
 
