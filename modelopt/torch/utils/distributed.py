@@ -477,10 +477,15 @@ def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _
     ``combine`` takes the ranks' values in rank order and returns the one every rank gets, e.g.
     ``min`` for a batch size each rank's memory bounds, where one rank's choice could run another
     out of memory. If ``fn`` raises on any rank, or returns a value that does not pickle, as the
-    gather needs, every rank raises instead of waiting in a gather that rank never joins: a failing
-    rank its own error, the others the first failing rank's, a SystemExit as a SystemExit with its
-    code, anything else as a RuntimeError. Ranks reducing different labels at the same point fail.
-    Collective; outside a distributed run ``fn`` runs alone.
+    gather needs, every rank raises instead of waiting in a gather that rank never joins, and every
+    rank alike: if any rank's error is not a SystemExit, a rank with such an error raises its own
+    and the others a RuntimeError naming the first one; else every rank exits, a rank that exited
+    with its own SystemExit and the others with the first one's code. Ranks reducing different
+    labels at the same point fail. Collective; outside a distributed run ``fn`` runs alone.
+
+    It runs ``fn`` itself so that a rank whose ``fn`` fails still joins the gather, which
+    :func:`allreduce`, handed values the ranks already hold, cannot do; :func:`broadcast_from`
+    differs from :func:`broadcast` and :func:`master_only` in the same way.
     """
     if not is_distributed_run():
         return combine([fn()])
@@ -498,11 +503,18 @@ def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _
     mine = (label, value, _sendable(error))
     gathered: list[Any] = [None] * torch.distributed.get_world_size()
     torch.distributed.all_gather_object(gathered, mine)
-    if error is not None:
-        raise error
-    for rank_, (_, _, rank_error) in enumerate(gathered):
-        if rank_error is not None:
-            raise _received(rank_error, rank_, label)
+    failures = [(rank_, sent) for rank_, (_, _, sent) in enumerate(gathered) if sent is not None]
+    if failures:
+        # Every rank raises by one rule, for distributed_run to end every rank alike. A rank whose
+        # error is not a SystemExit aborts, so if any rank's is not, every rank raises an error, an
+        # exiting rank too, rather than wait in the exit's barrier for the aborted one; else every
+        # rank exits. A failing rank raises its own exception when it is of that kind. Each sent is
+        # _sendable's (exited, detail).
+        errors = [(rank_, sent) for rank_, sent in failures if not sent[0]]
+        failed_rank, sent = (errors or failures)[0]
+        if error is not None and isinstance(error, SystemExit) == sent[0]:
+            raise error
+        raise _received(sent, failed_rank, label)
     labels = sorted({rank_label for rank_label, _, _ in gathered})
     if labels != [label]:
         raise RuntimeError(
@@ -575,19 +587,17 @@ def distributed_run(
         # the peers. A per-rank exception (only some ranks raise) leaves the rest inside a
         # calibration a2a collective, so this rank's cleanup barrier or destroy_process_group would
         # DEADLOCK with the original exception never surfaced. A run of several ranks that owns its
-        # group therefore aborts the rank: abort() prints the traceback and exits.
+        # group therefore aborts the rank: abort() prints the traceback and exits. Anywhere else the
+        # error goes on to the caller, traceback and all.
         owns_group = not group_was_there and is_initialized()
         # Every rank reaches a SystemExit, an intentional exit: it is not an error to report.
         if exc is not None and not isinstance(exc, SystemExit):
             print(
-                f"[distributed_run][rank {os.environ.get('RANK', '?')}] body raised "
-                f"{type(exc).__name__}: {exc}",
+                f"[distributed_run][rank {rank()}] body raised {type(exc).__name__}: {exc}",
                 flush=True,
             )
             if owns_group and size() > 1:
                 abort()
-            traceback.print_exc()
-            sys.stderr.flush()
         if owns_group:
             _destroy_group(exc)
 

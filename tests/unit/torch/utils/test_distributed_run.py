@@ -294,14 +294,18 @@ def _all_reduce_job(rank, size):
             raise SystemExit(3)
         return 4
 
+    def exit_on_rank_0_fail_on_rank_1():
+        raise SystemExit(3) if rank == 0 else ValueError("no memory reading")
+
     with bounded_collectives():
         assert all_reduce("smallest", lambda: [8, 2][rank], min) == 2
-        _, error = _outcome(lambda: all_reduce("smallest", fail_on_rank_1, min))
-        if rank == 1:
-            assert isinstance(error, ValueError), error
-        else:
-            assert isinstance(error, RuntimeError), error
-            assert "rank 1 failed to compute smallest" in str(error), error
+        for fail in (fail_on_rank_1, exit_on_rank_0_fail_on_rank_1):
+            _, error = _outcome(lambda: all_reduce("smallest", fail, min))
+            if rank == 1:
+                assert isinstance(error, ValueError), error
+            else:
+                assert isinstance(error, RuntimeError), error
+                assert "rank 1 failed to compute smallest: ValueError" in str(error), error
         _, error = _outcome(lambda: all_reduce("smallest", exit_on_rank_1, min))
         assert isinstance(error, SystemExit) and error.code == 3, error
         _, error = _outcome(
@@ -321,8 +325,10 @@ def _all_reduce_job(rank, size):
 
 def test_all_reduce_gives_every_rank_the_combined_value(cpu_dist_workers):
     """Over a real gather: every rank's value counts and every rank gets the same result. One rank's
-    failure stops every rank and its exit exits every rank with its code. A value that does not
-    pickle fails as fn raising does, rather than in the gather, and ranks out of step fail."""
+    failure stops every rank and its exit exits every rank with its code. A rank's error outranks
+    another's exit, so that no rank waits in the exit's barrier for one that aborted. A value that
+    does not pickle fails as fn raising does, rather than in the gather, and ranks out of step
+    fail."""
     cpu_dist_workers.run(_all_reduce_job)
 
 
@@ -464,8 +470,11 @@ def test_the_run_ends_the_group_it_set_up(
         run()
 
     assert ended == ends_by
-    # An intentional exit is not reported as an error.
-    assert ("body raised" in capsys.readouterr().out) == (body_raises is ValueError)
+    # An intentional exit is not reported as an error. An error is reported once, under this rank's
+    # place in the group; its traceback is abort()'s to print, or goes on with it to the caller.
+    out, err = capsys.readouterr()
+    assert ("[distributed_run][rank 0] body raised" in out) == (body_raises is ValueError)
+    assert "Traceback" not in err
 
 
 @pytest.mark.parametrize("raises", [False, True], ids=["returns", "raises"])
