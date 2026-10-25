@@ -520,6 +520,14 @@ def _load_sharded(route, ckpt_path, auto_class, model_type, kwargs, hub_options)
         raise NotImplementedError(
             f"The FSDP2 load cannot dequantize this {model_type} checkpoint; load it unsharded."
         )
+    if _auto_class(hf_config, trust_remote_code=trust_remote_code) is not AutoModelForCausalLM:
+        # It builds through AutoModelForCausalLM, which refuses most VLMs' configs and, for some,
+        # builds the language model alone, whose other towers the export would carry unquantized.
+        raise NotImplementedError(
+            f"The FSDP2 load builds a causal LM, which this {model_type} checkpoint is not. To load "
+            "it whole on every rank, pass its model class as auto_class, with MODELOPT_FSDP_SIZE=1 "
+            f"or distribution=DistributionPlan({dist.size()}, dense='replicate')."
+        )
     if not dist.is_initialized():
         # FSDP2 shards through a process group even on one rank; a plan for more ranks than one
         # was refused without a group. A run (distributed_run) destroys the group on exit.
@@ -1340,7 +1348,9 @@ def resolve_distribution_plan(
     every later step reads it back from there
     (:func:`~modelopt.torch.utils.distributed.distribution_plan`). Returns ``(plan, hf_config)``,
     ``hf_config`` being this rank's own copy of the config (rank 0 decides the plan from its copy),
-    for a sharded load to build from.
+    for a sharded load to build from: hand it to :func:`load_pretrained` only with a plan that
+    shards the model, as a whole-model load reads the checkpoint's config itself, and refuses
+    ``hf_config``.
 
     Rank 0 decides, from the model built on the meta device: from its parameters rather than
     estimates of them, and from its routed experts as an expert-parallel load finds them. Every rank

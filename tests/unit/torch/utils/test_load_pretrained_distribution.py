@@ -354,26 +354,45 @@ def test_a_sharded_load_refuses_what_it_cannot_honor(
 
 
 @pytest.mark.parametrize(
-    ("distribution", "quantized", "whole_model_kwargs", "error", "match"),
+    ("distribution", "checkpoint", "whole_model_kwargs", "error", "match"),
     [
         (
             DistributionPlan(4, dense="fsdp"),
-            False,
+            "causal-lm",
             False,
             ValueError,
             "is for 4 ranks, but this run has 2",
         ),
-        (DistributionPlan(2, dense="fsdp"), True, False, NotImplementedError, "cannot dequantize"),
-        ("fsdp2", False, False, TypeError, "expected a DistributionPlan or None"),
+        (
+            DistributionPlan(2, dense="fsdp"),
+            "quantized",
+            False,
+            NotImplementedError,
+            "cannot dequantize",
+        ),
+        (
+            DistributionPlan(2, dense="fsdp"),
+            "vlm",
+            False,
+            NotImplementedError,
+            "builds a causal LM, which this llava checkpoint is not",
+        ),
+        ("fsdp2", "causal-lm", False, TypeError, "expected a DistributionPlan or None"),
         (
             DistributionPlan(2),
-            False,
+            "causal-lm",
             True,
             TypeError,
             "hf_config applies to a sharded load only",
         ),
     ],
-    ids=["another-world", "quantized-checkpoint", "not-a-plan", "hf-config-on-a-whole-load"],
+    ids=[
+        "another-world",
+        "quantized-checkpoint",
+        "vlm-checkpoint",
+        "not-a-plan",
+        "hf-config-on-a-whole-load",
+    ],
 )
 def test_a_load_refuses_what_it_cannot_load(
     run_as,
@@ -383,17 +402,18 @@ def test_a_load_refuses_what_it_cannot_load(
     process_group,
     tmp_path,
     distribution,
-    quantized,
+    checkpoint,
     whole_model_kwargs,
     error,
     match,
 ):
     """Before anything loads: a plan for another world; a quantized checkpoint, which FSDP2 would
-    read as stored; anything but a plan; and the sharded loads' config, which from_pretrained would
-    take for a model argument and fail far from here."""
+    read as stored; a VLM, which FSDP2 would build through AutoModelForCausalLM, refused or as its
+    language model alone; anything but a plan; and the sharded loads' config, which from_pretrained
+    would take for a model argument and fail far from here."""
     run_as(2)
-    config = serve(LlamaConfig(**_TINY))
-    if quantized:
+    config = serve(transformers.LlavaConfig() if checkpoint == "vlm" else LlamaConfig(**_TINY))
+    if checkpoint == "quantized":
         config.quantization_config = {"quant_method": "fp8"}
     whole = {"auto_class": auto_class, "hf_config": config} if whole_model_kwargs else {}
 
