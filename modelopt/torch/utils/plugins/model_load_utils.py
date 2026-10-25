@@ -585,7 +585,8 @@ def _meta_dcp_load(
     """
     # Read what the checkpoint holds before changing the model, so a refusal leaves it as it was.
     reader = HuggingFaceStorageReader(str(local_dir))
-    ckpt_keys = set(reader.read_metadata().state_dict_metadata.keys())
+    ckpt_md = reader.read_metadata().state_dict_metadata
+    ckpt_keys = set(ckpt_md)
     if not ckpt_keys:
         raise RuntimeError(
             f"meta+DCP load: the checkpoint at {local_dir} has NO tensors -- the resolved snapshot carries no "
@@ -614,14 +615,15 @@ def _meta_dcp_load(
     # match would SILENTLY skip every renamed weight (they stay ``to_empty`` garbage -> a wrecked model that
     # only surfaces as a confusing downstream crash). Reproduce from_pretrained's result generically via
     # :func:`_map_ckpt_keys_to_model`: exact -> conversion-mapping regexes -> longest UNIQUE suffix.
-    model_keys = list(model.state_dict())  # (sharded or plain) params + persistent buffers
-    target_names = set(load_names) & set(model_keys)
+    # (sharded or plain) params + persistent buffers; a DTensor's shape is its global one.
+    model_shapes = {k: t.shape for k, t in model.state_dict().items()}
+    target_names = set(load_names) & set(model_shapes)
     # {ckpt_key: model_key}, mapped against the WHOLE model and then cut to what this load fills: a suffix
     # unique among the targets alone can still belong to a key outside them (an expert's, when only the
     # dense part loads here).
     key_map = {
         ck: mk
-        for ck, mk in _map_ckpt_keys_to_model(model, ckpt_keys, set(model_keys)).items()
+        for ck, mk in _map_ckpt_keys_to_model(model, ckpt_keys, set(model_shapes)).items()
         if mk in target_names
     }
     # The export carries the checkpoint tensors the model has no parameter for over raw, as the load
@@ -636,6 +638,19 @@ def _meta_dcp_load(
             f"but its load recorded them as having no param, for the export to carry over raw: "
             f"{carried[:3]}. The two would write them twice."
         )
+    # dcp.load refuses a checkpoint tensor whose shape is not its model tensor's only once to_empty has
+    # re-emptied the model; refuse it while the model is untouched.
+    mismatched = sorted(
+        f"{ck} {tuple(ckpt_md[ck].size)} -> {mk} {tuple(model_shapes[mk])}"
+        for ck, mk in key_map.items()
+        if ckpt_md[ck].size != model_shapes[mk]
+    )
+    if mismatched:
+        raise RuntimeError(
+            f"meta+DCP load: {len(mismatched)} checkpoint tensor(s) differ in shape from the model "
+            f"tensor they map onto, as when the model's config does not match the checkpoint: "
+            f"{mismatched[:3]}"
+        )
     # Build load_sd in the model's state_dict ORDER (identical on every rank) -- NOT key_map/set iteration
     # order, which is hash-randomized per process. dcp.load's collective load planner deadlocks if ranks
     # present the same keys in different orders, so a deterministic, rank-consistent order is required.
@@ -647,18 +662,22 @@ def _meta_dcp_load(
     # ~2 params/layer unloaded but they are ~95% of the weight, so a count-based guard misses it. A smaller
     # shortfall can be tied weights, which ``tie_weights`` fills after the load; whatever it does not fill
     # fails there. Every alias of a tied param counts, as in unplaced_source_keys: the checkpoint can
-    # store the one named_parameters() drops by default.
-    numel = {
-        n: p.numel() for n, p in model.named_parameters(remove_duplicate=False) if n in target_names
-    }
-    want_params = set(numel)
-    unloaded = want_params - mapped_names
+    # store the one named_parameters() drops by default. Only meta params weigh in: one already real
+    # keeps its value without a checkpoint tensor.
+    want_params: set[str] = set()
+    numel: dict[str, int] = {}
+    for n, p in model.named_parameters(remove_duplicate=False):
+        if n in target_names:
+            want_params.add(n)
+            if p.is_meta:
+                numel[n] = p.numel()
+    unloaded = numel.keys() - mapped_names
     total_nel = max(1, sum(numel.values()))
     unloaded_nel = sum(numel[n] for n in unloaded)
     if 2 * unloaded_nel > total_nel:
         raise RuntimeError(
-            f"meta+DCP load: {len(unloaded)}/{len(want_params)} params ({100 * unloaded_nel / total_nel:.0f}% "
-            f"of the target weight) matched no checkpoint key -- the checkpoint's key naming was not resolved "
+            f"meta+DCP load: {len(unloaded)}/{len(numel)} meta params ({100 * unloaded_nel / total_nel:.0f}% "
+            f"of their weight) matched no checkpoint key -- the checkpoint's key naming was not resolved "
             f"to this model's state_dict (exact + conversion-mapping + suffix match all missed), or it needs a "
             f"weight conversion DCP can't do (FUSED EXPERTS, split qkv, on-the-fly dequant). Unloaded e.g.: "
             f"{sorted(unloaded)[:5]}. Replicating the dense part (MODELOPT_FSDP_SIZE=1) loads it through "

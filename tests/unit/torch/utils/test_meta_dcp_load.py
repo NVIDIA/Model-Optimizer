@@ -280,10 +280,11 @@ class _Router(nn.Module):
 def test_target_params_that_already_had_values_need_no_checkpoint_tensor(tmp_path):
     """A target param that was real before the load -- beside a meta one, so restored after
     ``to_empty``, or in a module the load never re-empties -- keeps its value when the checkpoint
-    lacks it, instead of failing as unfilled."""
+    lacks it, instead of failing as unfilled or, however large (the expert outweighs the one meta
+    param), as weight the key mapping missed."""
     model = nn.Module()
     model.gate = _Router()
-    model.expert = nn.Linear(2, 2, bias=False)
+    model.expert = nn.Linear(64, 64, bias=False)
     expert = model.expert.weight.detach().clone()
     ckpt = {"gate.weight": torch.randn(4, 4)}
 
@@ -499,21 +500,29 @@ def _recorded_as_carried_over(model):
     model._modelopt_unplaced_source_keys = ["model.norm.weight"]
 
 
+def _with_another_vocab_size(model):
+    head = model.lm_head
+    model.lm_head = nn.Linear(head.in_features, 2 * head.out_features, bias=False, device="meta")
+
+
 @pytest.mark.parametrize(
     ("change", "match"),
     [
         (_root_sharded, "root module is fully_shard-ed"),
         (_with_a_meta_buffer, r"buffer\(s\) are on meta"),
         (_recorded_as_carried_over, "recorded them as having no param"),
+        (_with_another_vocab_size, r"lm_head.weight \(32, 32\) -> lm_head.weight \(64, 32\)"),
     ],
-    ids=["root-sharded", "meta-buffer", "carried-over-raw"],
+    ids=["root-sharded", "meta-buffer", "carried-over-raw", "other-shape"],
 )
 def test_a_load_it_cannot_do_rightly_is_refused_before_anything_changes(
     tmp_path, gloo_world_of_one, change, match
 ):
     """A root-sharded model, which the module-by-module materialization would corrupt; a buffer on
     meta, which a checkpoint of params cannot fill; a tensor the export carries over raw, which
-    filling would write twice. Each is refused with every param still on meta."""
+    filling would write twice; a checkpoint tensor of another shape than its param, as a head built
+    for another vocab_size has, which ``dcp.load`` refuses only once the model is re-emptied. Each
+    is refused with every param still on meta."""
     ckpt_dir = _save(tmp_path, get_tiny_llama().state_dict())
     model = _meta_twin(get_tiny_llama)
     change(model)
