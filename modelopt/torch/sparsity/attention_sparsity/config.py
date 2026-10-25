@@ -750,7 +750,8 @@ class SolAttnAttributeConfig(ModeloptBaseConfig):
         title="KV splits.",
         description=(
             "KV splits for the SM90 CuTe kernel. 'auto' uses 4 for SM90 sequences of at "
-            "least 65,536 tokens and 1 otherwise; other backends require 1."
+            "least 65,536 tokens and 1 otherwise. An explicit 2 or 4 that the selected "
+            "backend cannot run falls back to dense SDPA."
         ),
     )
 

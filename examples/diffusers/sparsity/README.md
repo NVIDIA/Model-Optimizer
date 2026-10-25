@@ -104,8 +104,9 @@ import modelopt.torch.sparsity.attention_sparsity as mtsa
 mtsa.sparsify(transformer, mtsa.SOL_ATTN_DEFAULT)
 ```
 
-Only non-causal, unmasked BF16 self-attention with head dimension 128 runs Sol-Attn;
-other calls (e.g. text cross-attention) fall back to dense SDPA.
+Only inference-time (no autograd), non-causal, unmasked BF16 self-attention with head
+dimension 128 runs Sol-Attn; other calls (e.g. text cross-attention) fall back to dense SDPA.
+A layer whose self-attention calls all fall back emits a one-time warning with the reason.
 
 ## Known Issues
 

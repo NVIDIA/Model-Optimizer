@@ -44,10 +44,10 @@ def _qkv(tokens=4096, heads=4, dtype=torch.bfloat16):
     return [torch.randn(1, heads, tokens, 128, device="cuda", dtype=dtype) for _ in range(3)]
 
 
-def _sol_cfg(tau):
+def _sol_cfg(tau, **kwargs):
     return {
         "sparse_cfg": {
-            "*attn*": {"method": "sol_attn", "tau": tau, "collect_stats": True},
+            "*attn*": {"method": "sol_attn", "tau": tau, "collect_stats": True, **kwargs},
             "default": {"enable": False},
         }
     }
@@ -71,8 +71,20 @@ def test_sparsified_matches_kernel_semantics():
     assert not torch.allclose(sparse, exact, atol=1e-2)
 
 
-def test_ineligible_call_falls_back_to_dense():
-    q, k, v = _qkv(dtype=torch.float16)
-    model = mtsa.sparsify(Block(), _sol_cfg(1.0))
-    torch.testing.assert_close(model(q, k, v), F.scaled_dot_product_attention(q, k, v))
+@pytest.mark.parametrize(
+    ("dtype", "requires_grad", "cfg"),
+    [
+        (torch.float16, False, {}),
+        (torch.bfloat16, True, {}),  # forward-only kernel: autograd keeps dense SDPA
+        (torch.bfloat16, False, {"kv_splits": 4}),  # 4096 tokens fit only one KV split
+    ],
+)
+def test_ineligible_call_falls_back_to_dense(dtype, requires_grad, cfg):
+    q, k, v = (x.requires_grad_(requires_grad) for x in _qkv(dtype=dtype))
+    model = mtsa.sparsify(Block(), _sol_cfg(1.0, **cfg))
+    out = model(q, k, v)
+    torch.testing.assert_close(out, F.scaled_dot_product_attention(q, k, v))
     assert model.attn1.get_stats()["total_calls"] == 0
+    if requires_grad:
+        out.float().sum().backward()
+        assert all(x.grad is not None for x in (q, k, v))

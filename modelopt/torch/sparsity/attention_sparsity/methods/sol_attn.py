@@ -23,7 +23,7 @@ SM89/SM90/SM100/SM120, Triton otherwise), imported lazily at runtime.
 Integration:
     After ``mtsa.sparsify(model, SOL_ATTN_DEFAULT)``, eligible
     ``F.scaled_dot_product_attention`` calls inside matched layers run Sol-Attn; other
-    calls (cross-attention, masks, unsupported dtype/head dim/device) stay dense.
+    calls (cross-attention, masks, autograd, unsupported dtype/head dim/device) stay dense.
 """
 
 import math
