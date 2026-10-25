@@ -1005,16 +1005,18 @@ def get_max_batch_size(
     """Get the maximum batch size that can be used for the model.
 
     ``forward_step(model, inputs)`` optionally probes a custom workload, including during
-    OOM retries. By default, probe a model forward (or generation for encoder-decoder models).
+    OOM retries (which a model distributed over several ranks skips, below). By default, probe a
+    model forward (or generation for encoder-decoder models).
 
     For a model whose recorded plan distributes it over several ranks
     (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`) it is collective: every rank
     calls it, and every rank gets the smallest batch size any rank's GPU allows
     (:func:`~modelopt.torch.utils.distributed.all_reduce`), so that all run the same number of
-    calibration steps. Each rank then measures its own GPU only and probes with a single forward:
-    retrying a smaller batch after an out-of-memory error would run a different number of forwards,
-    and of the collectives inside them, on each rank. A model with no plan recorded, such as a
-    Megatron model, is measured on every visible GPU, as in a single process.
+    calibration steps. Each rank then measures its own GPU only, from one forward of the
+    single-sample input, and does not probe the batch size it arrives at: retrying a smaller batch
+    after an out-of-memory error would run a different number of forwards, and of the collectives
+    inside them, on each rank. A model with no plan recorded, such as a Megatron model, is measured
+    on every visible GPU, as in a single process.
     """
     from .distributed import all_reduce, local_rank, recorded_distribution_plan
 

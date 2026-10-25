@@ -107,9 +107,11 @@ def _refuse_unsupported_distributed_calibration(
     Each rank of such a model calibrates on its own data, so an algorithm that keeps its statistics
     on the rank would leave the ranks' copies of a weight different. Under expert parallelism each
     rank's per-expert quantizers hold its own experts, and calibration syncs them over the groups
-    their module's ``ParallelState`` names, every rank unless set: without the experts'
-    expert-parallel group, any calibration would merge different experts' scales. Called before
-    anything changes.
+    their module's ``ParallelState`` names, every rank for a module converted without one: a module
+    holding routed experts must name the experts' expert-parallel group and, for data parallelism,
+    only the ranks holding the same experts, or any calibration would merge different experts'
+    scales. Called before anything changes; a routed expert's quantized module, whose state
+    calibration reads, is checked once quantization has converted it, before it calibrates.
     """
     plan = dist.recorded_distribution_plan(model)
     if plan is None or plan.world_size == 1:
@@ -123,21 +125,35 @@ def _refuse_unsupported_distributed_calibration(
             "different. Calibrate with max, MSE, GPTQ or SmoothQuant, with distributed_sync on, or "
             "in a single process."
         )
-    if (
-        algorithm is not None
-        and plan.is_expert_parallel
-        and not any(
-            (state := getattr(module, "_parallel_state", None)) is not None
-            and state.expert_model_parallel_group.is_initialized()
-            for module in model.modules()
-        )
-    ):
+    if algorithm is None or not plan.is_expert_parallel:
+        return
+    # Routed experts: the modules carrying an expert-parallel group, and the quantized modules under
+    # a container named ``experts``, as every expert-parallel plan in transformers names it.
+    holders = {}
+    for name, module in model.named_modules():
+        state = getattr(module, "_parallel_state", None)
+        if (state is not None and state.expert_model_parallel_group.is_initialized()) or (
+            isinstance(module, QuantModule) and "experts" in name.split(".")
+        ):
+            holders[name] = state
+    wrong = [
+        name
+        for name, state in holders.items()
+        if state is None
+        or not state.expert_model_parallel_group.is_initialized()
+        or max(state.data_parallel_group.world_size(), 1) != plan.edp
+    ]
+    if not holders or wrong:
         raise NotImplementedError(
-            f"Calibrating a model whose experts are sharded over {plan.ep_size} ranks needs their "
-            "expert-parallel group, which none of its modules carries: each rank's per-expert "
-            "quantizers would sync over every rank, merging different experts' scales. Give the "
-            "routed experts a ParallelState with their expert-parallel group, and the ranks "
-            "holding the same experts as their data-parallel group."
+            f"Calibrating a model whose experts are sharded over {plan.ep_size} ranks needs each "
+            "routed expert's ParallelState to name its expert-parallel group and, as its "
+            f"data-parallel group, the {plan.edp} rank(s) holding the same experts, or calibration "
+            "would sync their scales over the wrong ranks. "
+            + (
+                f"These modules do not: {wrong[:3]}."
+                if wrong
+                else "None of the model's modules carries an expert-parallel group."
+            )
         )
 
 
