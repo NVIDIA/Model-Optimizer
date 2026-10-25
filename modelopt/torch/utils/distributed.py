@@ -701,7 +701,9 @@ class _StridedIterableShard(IterableDataset):
     collectives from hanging when one rank runs short. A stream shorter than ``world_size`` has no
     complete group, so it is refused rather than leaving every rank with nothing to calibrate on. Each
     DataLoader worker process iterates its own copy of the stream, so the workers split the groups
-    between them rather than each yielding them all.
+    between them rather than each yielding them all: every worker still decodes the whole stream and
+    keeps ``1/num_workers`` of it, so ``num_workers > 0`` buys parallelism at ``num_workers`` times
+    the decode cost.
     ``vlm_dataset_utils._ShardedIterable`` cannot stand in: it pads every rank to a count its own loader
     knows, while this wraps any loader's stream, which may know none, and splits across its workers.
     """
@@ -888,7 +890,9 @@ def distributed_forward_loop(
 
     The forwards run without gradients and with KV/state caching disabled (``_disable_use_cache``), as
     the single-node ``_forward_loop`` runs them: a hybrid Mamba/attention model mutates its cache in
-    place. Each batch is a mapping of the forward's keyword arguments, as ``model(**batch)`` takes.
+    place. Each batch is a mapping of the forward's keyword arguments, as ``model(**batch)`` takes;
+    only its tensor values move to ``device``, so tensors nested in a value (a list of images, say)
+    must already be there.
     """
     # Local import to avoid any import cycle within modelopt.torch.utils.
     from modelopt.torch.utils.dataset_utils import _disable_use_cache
@@ -899,6 +903,8 @@ def distributed_forward_loop(
             f"{plan!r}: an expert-parallel model calibrates with the ep_mesh its routed experts "
             "are sharded over, and any other model without one."
         )
+    if ep_mesh is not None and ep_mesh.size() != plan.ep_size:
+        raise ValueError(f"{plan!r}: the ep_mesh spans {ep_mesh.size()} ranks, not {plan.ep_size}.")
 
     def calibrate(_inner_model):
         _reinstall_a2a_forwards(model, ep_mesh)

@@ -410,7 +410,6 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
             raise torch.cuda.OutOfMemoryError
 
     model = Mock(spec=torch.nn.Module)
-    model.modules.return_value = []  # no plan recorded and no FSDP2 module: a single process's
     # get_max_batch_size calls the module (model(...)) so FSDP2 hooks fire, not model.forward,
     # so route the mock's __call__ via side_effect.
     model.side_effect = fake_call
@@ -452,16 +451,19 @@ class _BatchSizeProbe(torch.nn.Module):
         self.batch_sizes.append(x.shape[0])
 
 
-def _smallest_batch_size_job(rank, world_size):
+def _batch_size_job(rank, world_size, planned):
     model = _BatchSizeProbe()
-    set_distribution_plan(model, DistributionPlan(world_size))
+    if planned:
+        set_distribution_plan(model, DistributionPlan(world_size))
     # A sample takes 100 bytes: rank 0's GPU has room for 4 of them, rank 1's for 10 (regulated to 8).
     free = [400, 1000][rank]
+    # What one measurement reads: the rank's own GPU, or every visible one.
+    gpus = 1 if planned else 4
     measured = []
 
     def mem_get_info(device):
         measured.append(device)
-        return (free if len(measured) == 1 else free - 100, 0)
+        return (free if len(measured) <= gpus else free - 100, 0)
 
     # A rank left waiting in the reduction gives up in seconds on this group.
     group = torch.distributed.new_group(timeout=timedelta(seconds=10))
@@ -484,15 +486,23 @@ def _smallest_batch_size_job(rank, world_size):
     finally:
         torch.distributed.destroy_process_group(group)
 
-    assert measured == [torch.device("cuda", rank)] * 2  # its own GPU (LOCAL_RANK) only
-    assert model.batch_sizes == [1]  # one probe: an OOM retry would run more forwards on some ranks
-    assert batch_size == 4  # rank 0's
+    if planned:
+        assert measured == [torch.device("cuda", rank)] * 2  # its own GPU (LOCAL_RANK) only
+        # One probe: an OOM retry would run more forwards on some ranks.
+        assert model.batch_sizes == [1]
+        assert batch_size == 4  # rank 0's
+    else:
+        assert measured == list(range(4)) * 2  # every visible GPU, as in a single process
+        assert batch_size == [4, 8][rank]  # its own
 
 
-def test_get_max_batch_size_takes_the_smallest_ranks_in_a_distributed_run(cpu_dist_workers):
+@pytest.mark.parametrize("planned", [True, False], ids=["planned", "no-plan"])
+def test_get_max_batch_size_in_a_distributed_run(cpu_dist_workers, planned):
     """Every rank must run the same number of calibration steps, so ranks agree on one batch size
-    for a model whose plan distributes it over them: the smallest any rank's GPU allows."""
-    cpu_dist_workers.run(_smallest_batch_size_job)
+    for a model whose plan distributes it over them: the smallest any rank's GPU allows. A model
+    with no plan recorded, such as a Megatron model, is measured by each rank as a single process
+    measures it, and is not refused."""
+    cpu_dist_workers.run(_batch_size_job, planned=planned)
 
 
 def test_get_dataset_samples_with_unsupported_dataset(make_toy_hf_dataset):
