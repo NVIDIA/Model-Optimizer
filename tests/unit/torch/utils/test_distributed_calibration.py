@@ -638,3 +638,20 @@ def test_expert_parallel_calibration_needs_the_experts_expert_parallel_group(
     group at all, with one on the router alone, and with a data-parallel group spanning ranks that
     hold other experts."""
     cpu_dist_workers.run(_expert_parallel_calibration_job, layout=layout)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": "max"},
+        mtq.INT8_DEFAULT_CFG,
+    ],
+    ids=["all-disabled", "quantized"],
+)
+def test_a_module_without_routed_experts_calibrates_under_an_expert_parallel_plan(config):
+    """hf_ptq quantizes a VLM's vision tower apart from its language model, every quantizer
+    disabled. It holds no routed experts, so it has no experts' scales to merge, quantized or not."""
+    model = nn.Sequential(nn.Linear(16, 16))
+    set_distribution_plan(model, _EXPERT_PARALLEL)
+
+    mtq.quantize(model, config, lambda m: m(torch.randn(2, 16)))

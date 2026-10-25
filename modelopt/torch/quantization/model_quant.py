@@ -137,6 +137,8 @@ def _refuse_unsupported_distributed_calibration(
             isinstance(module, QuantModule) and "experts" in name.split(".")
         ):
             holders[name] = state
+    if not holders and not any("experts" in name.split(".") for name, _ in model.named_modules()):
+        return  # no routed experts here, as in a VLM's vision tower: no experts' scales to merge
     wrong = [
         name
         for name, state in holders.items()
