@@ -395,3 +395,51 @@ class TestDFlashFlexAttentionGPU:
         ]
         assert grads, "no draft gradients were produced"
         assert all(torch.isfinite(g).all() for g in grads)
+
+
+class TestDFlashFusedLossGPU:
+    """On CUDA the fused loss runs its statistics through torch.compile; they must still match."""
+
+    DFLASH2_ARCH = {
+        "projector_type": "dflash2",
+        "conv_kernel_size": 2,
+        "conv_group_size": 4,
+        "selector_rank": 8,
+        "selector_top_k": 5,
+    }
+
+    @staticmethod
+    def _step(fused, overrides, arch):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config()
+        config.update(dflash_fused_loss=fused, **overrides)
+        config["dflash_architecture_config"].update(arch)
+        mtsp.convert(model, [("dflash", config)])
+        model = model.float().cuda().train()  # fp32, so the two paths differ only by rounding
+        torch.manual_seed(0)
+        input_ids = torch.randint(1, model.config.vocab_size, (2, SEQ_LEN), device="cuda")
+        torch.manual_seed(1)
+        out = model(input_ids=input_ids, attention_mask=torch.ones_like(input_ids))
+        out.loss.backward()
+        params = model.dflash_module.named_parameters()
+        return out, {name: p.grad for name, p in params if p.grad is not None}
+
+    @pytest.mark.parametrize(
+        ("overrides", "arch"),
+        [
+            ({}, {}),  # KD on the base's logits, D-PACE weighting
+            (
+                {"dflash_self_logit_distillation": False, "dflash_lk_loss_type": "lambda"},
+                DFLASH2_ARCH,
+            ),
+        ],
+        ids=["dflash-kd", "dflash2-selector"],
+    )
+    def test_matches_the_materialized_logits(self, overrides, arch):
+        eager, eager_grads = self._step(False, overrides, arch)
+        fused, fused_grads = self._step(True, overrides, arch)
+        torch.testing.assert_close(fused.loss, eager.loss)
+        assert fused.train_acc == eager.train_acc
+        assert fused_grads.keys() == eager_grads.keys()
+        for name, grad in eager_grads.items():
+            torch.testing.assert_close(fused_grads[name], grad, msg=name)

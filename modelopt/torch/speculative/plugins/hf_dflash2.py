@@ -55,6 +55,8 @@ class HFDFlash2Model(HFDFlashModel):
     to it when ``dflash_architecture_config.projector_type == "dflash2"``.
     """
 
+    _supports_fused_loss = True
+
     def _build_draft_module(self, dflash_config):
         """Build the DFlash2 draft module (DFlash backbone + convolutions + selector)."""
         return DFlash2Module(dflash_config)
@@ -108,13 +110,27 @@ class HFDFlash2Model(HFDFlashModel):
 
         return DFlash2Exporter(self)
 
+    def _fused_head_extras(self):
+        """The selector scores the backbone's top-k candidates."""
+        selector = self.dflash_module.candidate_selector
+        return set(), selector.top_k if self.dflash_selector_loss_alpha > 0 else 0
+
     def _selector_loss(
-        self, logits, target_ids, hidden, predecessor_ids, supervised_mask, loss_weights, weight_sum
+        self,
+        logits,
+        target_ids,
+        hidden,
+        predecessor_ids,
+        supervised_mask,
+        loss_weights,
+        weight_sum,
+        head_stats=None,
     ):
         """Cross-entropy over the selector's candidate set, and its top-1 accuracy.
 
         Args:
-            logits: Backbone logits per block position ``[B, N, block_size, V]``.
+            logits: Backbone logits per block position ``[B, N, block_size, V]``, or ``None``
+                under ``dflash_fused_loss``, whose pass took their top-k into ``head_stats``.
             target_ids: Gold token ids ``[B, N, block_size]``.
             hidden: Backbone hidden states ``[B, N, block_size, H]``.
             predecessor_ids: Teacher-forced predecessor ids ``[B, N, block_size]``.
@@ -131,7 +147,11 @@ class HFDFlash2Model(HFDFlashModel):
         selector = self.dflash_module.candidate_selector
         top_k = selector.top_k
 
-        unary_logits, candidate_ids = logits.topk(top_k, dim=-1)
+        if logits is None:
+            unary_logits = head_stats.top_logits.view(*target_ids.shape, top_k)
+            candidate_ids = head_stats.top_ids.view(*target_ids.shape, top_k)
+        else:
+            unary_logits, candidate_ids = logits.topk(top_k, dim=-1)
 
         # Train on the strict top-k, the candidate set serving actually builds. A gold
         # token the backbone did not propose is a backbone recall failure, not a
@@ -260,13 +280,14 @@ class HFDFlash2Model(HFDFlashModel):
         # The backbone's own mask and position weights: a block position's choice only
         # matters if every earlier one was accepted, which decay / D-PACE model.
         selector_loss, selector_accuracy, selector_coverage = self._selector_loss(
-            logits.reshape(bsz, n_blocks, block_size, -1),
+            None if logits is None else logits.reshape(bsz, n_blocks, block_size, -1),
             target_ids,
             draft_hidden.reshape(bsz, n_blocks, block_size, -1),
             predecessor_ids,
             terms.supervised_mask.view_as(target_ids),
             terms.weights.view_as(target_ids),
             terms.weight_sum,
+            head_stats=terms.head_stats,
         )
         self._selector_metrics = {
             "selector_accuracy": selector_accuracy,
