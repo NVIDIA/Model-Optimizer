@@ -46,6 +46,7 @@ Changelog
 
 **Backward Breaking Changes**
 
+- ``examples/hf_ptq/hf_ptq.py --use_fsdp2`` on more than one GPU now refuses calibration that keeps its statistics on each rank: AWQ, SVDQuant, local Hessian and imatrix, also as an AutoQuantize candidate. Each rank calibrates on its own share of the data, so these calibrated the ranks' shards of a weight differently; run them without ``--use_fsdp2``.
 - ``export_mcore_gpt_to_hf`` given a Hugging Face Hub model ID no longer writes the tokenizer, processor, generation config or remote-code files. Pass a local directory instead, e.g. from ``modelopt.torch.export.ensure_local_checkpoint``.
 - Drop support for Python 3.10, which has reached end-of-life. ModelOpt now requires Python 3.11 or later.
 - Bump minimum required PyTorch version to 2.10.

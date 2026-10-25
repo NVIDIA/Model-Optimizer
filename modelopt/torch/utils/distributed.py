@@ -695,15 +695,15 @@ class _StridedIterableShard(IterableDataset):
 
     ``DistributedSampler`` only works with map-style datasets. Streaming calibration datasets (e.g. the
     Nemotron image-text ``NemotronTarPlusJsonlIterable``) are iterable, so each rank instead builds its
-    own identical stream (deterministic seed) and takes slot ``rank`` from every complete group of
-    ``world_size`` consecutive samples. Any trailing incomplete group is dropped so every rank yields
-    exactly the same count -- preserving the equal-per-rank-batch invariant that keeps per-step EP
-    collectives from hanging when one rank runs short. A stream shorter than ``world_size`` has no
-    complete group, so it is refused rather than leaving every rank with nothing to calibrate on. Each
-    DataLoader worker process iterates its own copy of the stream, so the workers split the groups
-    between them rather than each yielding them all: every worker still decodes the whole stream and
-    keeps ``1/num_workers`` of it, so ``num_workers > 0`` buys parallelism at ``num_workers`` times
-    the decode cost.
+    own copy of the stream, the same on every rank and worker as :func:`shard_dataloader` requires,
+    and takes slot ``rank`` from every complete group of ``world_size`` consecutive samples. Any
+    trailing incomplete group is dropped so every rank yields exactly the same count -- preserving
+    the equal-per-rank-batch invariant that keeps per-step EP collectives from hanging when one rank
+    runs short. A stream shorter than ``world_size`` has no complete group, so it is refused rather
+    than leaving every rank with nothing to calibrate on. Each DataLoader worker process iterates
+    its own copy of the stream, so the workers split the groups between them rather than each
+    yielding them all: every worker still decodes the whole stream and keeps ``1/num_workers`` of
+    it, so ``num_workers > 0`` buys parallelism at ``num_workers`` times the decode cost.
     ``vlm_dataset_utils._ShardedIterable`` cannot stand in: it pads every rank to a count its own loader
     knows, while this wraps any loader's stream, which may know none, and splits across its workers.
     """
@@ -721,7 +721,8 @@ class _StridedIterableShard(IterableDataset):
             group = list(itertools.islice(it, self.world_size))
             if len(group) < self.world_size:
                 if index == 0:
-                    # Every rank and worker sees the same stream, so all of them refuse it together.
+                    # shard_dataloader requires the same stream on every rank and worker, so all of
+                    # them refuse it together.
                     raise ValueError(
                         f"The calibration stream has {len(group)} sample(s), fewer than the "
                         f"{self.world_size} ranks: no rank would get a sample to calibrate on."
@@ -740,14 +741,20 @@ def shard_dataloader(loader: DataLoader, rank: int, world_size: int) -> DataLoad
     replaces the loader's sampler, so a shuffling one becomes the rank's unshuffled share, and one that
     picks samples itself (a subset, or a batch sampler other than a plain ``BatchSampler``) is refused
     rather than silently widened. For streaming ``IterableDataset`` datasets (which have no ``len()``
-    and so can't use a sampler) each rank strides its own deterministic copy of the stream via
-    :class:`_StridedIterableShard`. Every DataLoader worker must see that whole stream: a dataset that
-    splits itself across workers by ``get_worker_info()`` would be split twice and lose samples, so
-    load one with ``num_workers=0``.
+    and so can't use a sampler) each rank strides its own copy of the stream via
+    :class:`_StridedIterableShard`. That stream must yield the same samples in the same order on
+    every rank and in every DataLoader worker, or the shards overlap and the ranks' step counts can
+    differ, which hangs the collectives: one that shuffles needs a fixed seed of its own, as torch
+    seeds each worker's RNG differently and the ranks' RNGs need not agree. Every DataLoader worker
+    must see that whole stream: a dataset that splits itself across workers by ``get_worker_info()``
+    would be split twice and lose samples, so load one with ``num_workers=0``.
 
     Forwards all non-sampler DataLoader settings from ``loader`` (batching, workers, pinning,
-    prefetch, init fn, generator, ...).
+    prefetch, init fn, generator, ...). With one rank there is nothing to shard: ``loader`` itself
+    comes back, its sampler and shuffling included.
     """
+    if world_size == 1:
+        return loader
     batching = loader.batch_sampler
     if not isinstance(loader.dataset, IterableDataset):
         # A plain BatchSampler, built from batch_size or passed in, batches what its sampler picks;

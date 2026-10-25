@@ -610,11 +610,13 @@ mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)
 
 ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for distributed model sharding and calibration, exposed via the `--use_fsdp2` flag on the standard `hf_ptq.py` entry point.
 
-> *Weight and KV-cache AutoQuantize with `--use_fsdp2` are experimental.*
+> *Weight and KV-cache AutoQuantize with `--use_fsdp2` are experimental, and refused when a candidate format is one of those refused below.*
 
 > *Nemotron-H checkpoints containing MTP weights are not supported with `--use_fsdp2` and are rejected before distributed model loading. Remove `--use_fsdp2` to load and calibrate the MTP modules; the distributed loader does not construct them.*
 
 > *AWQ calibration (`awq_lite`, `awq_full`), as the AWQ formats and recipes use, AutoQuantize candidates included, is not supported with `--use_fsdp2` on more than one rank and is rejected before distributed model loading: each rank would fold its own smoothing scale into its weight shard. Drop `--use_fsdp2` (the single-process `device_map` still spreads the model over all the GPUs), run on one rank, or use a non-AWQ format.*
+
+> *With `--use_fsdp2` on more than one GPU, calibration that keeps its statistics on each rank is refused when quantization starts: AWQ and SVDQuant (`--qformat int4_awq`, `w4a8_awq_beta`, `nvfp4_awq_lite`, `nvfp4_awq_clip`, `nvfp4_awq_full`, `nvfp4_svdquant`), local Hessian (`nvfp4_w4a4_weight_local_hessian`), imatrix (the `iq*` formats), the recipes that use them, and AutoQuantize recipes with such a candidate format. Each rank calibrates on its own share of the data, so the ranks would calibrate their shards of a weight differently. Run these without `--use_fsdp2`.*
 
 ### Usage
 

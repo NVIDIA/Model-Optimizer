@@ -105,13 +105,14 @@ def _refuse_unsupported_distributed_calibration(
     """Refuse a calibration that would come out wrong on a model distributed over several ranks.
 
     Each rank of such a model calibrates on its own data, so an algorithm that keeps its statistics
-    on the rank would leave the ranks' copies of a weight different. Under expert parallelism each
-    rank's per-expert quantizers hold its own experts, and calibration syncs them over the groups
-    their module's ``ParallelState`` names, every rank for a module converted without one: a module
-    holding routed experts must name the experts' expert-parallel group and, for data parallelism,
-    only the ranks holding the same experts, or any calibration would merge different experts'
-    scales. Called before anything changes; a routed expert's quantized module, whose state
-    calibration reads, is checked once quantization has converted it, before it calibrates.
+    on the rank would calibrate the ranks' copies, or shards, of a weight differently. Under expert
+    parallelism each rank's per-expert quantizers hold its own experts, and calibration syncs them
+    over the groups their module's ``ParallelState`` names, every rank for a module converted
+    without one: a module holding routed experts must name the experts' expert-parallel group and,
+    for data parallelism, only the ranks holding the same experts, or any calibration would merge
+    different experts' scales. Called before anything changes; a routed expert's quantized module,
+    whose state calibration reads, is checked once quantization has converted it, before it
+    calibrates.
     """
     plan = dist.recorded_distribution_plan(model)
     if plan is None or plan.world_size == 1:
@@ -121,9 +122,9 @@ def _refuse_unsupported_distributed_calibration(
         raise NotImplementedError(
             f"Calibrating with {', '.join(refused)} is not supported on a model distributed over "
             f"{plan.world_size} ranks. Each rank calibrates on its own data and this calibration "
-            "keeps what it gathers on the rank, so the ranks' copies of a weight would come out "
-            "different. Calibrate with max, MSE, GPTQ or SmoothQuant, with distributed_sync on, or "
-            "in a single process."
+            "keeps what it gathers on the rank, so the ranks would calibrate their copies, or their "
+            "shards, of a weight differently. Calibrate with max, MSE, GPTQ or SmoothQuant, with "
+            "distributed_sync on, or in a single process."
         )
     if algorithm is None or not plan.is_expert_parallel:
         return
