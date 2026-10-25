@@ -194,15 +194,23 @@ def test_load_fills_a_meta_model_keeps_its_buffers_and_reties_it(tmp_path):
     assert model.lm_head.weight is model.model.embed_tokens.weight
 
 
-def test_a_tie_keeps_the_values_of_the_alias_the_checkpoint_stored(tmp_path, monkeypatch):
+@pytest.mark.parametrize("shared", [False, True], ids=["aliases-apart", "one-shared-param"])
+def test_a_tie_keeps_the_values_of_the_alias_the_checkpoint_stored(
+    tmp_path, monkeypatch, recwarn, shared
+):
     """A tied checkpoint stores one alias; tying keeps the embedding's parameter. When the checkpoint
     stored only ``lm_head.weight``, the kept parameter must take its values rather than keep the memory
-    ``to_empty`` gave it, as ``from_pretrained`` leaves it. (A checkpoint storing the embedding is the
-    load-and-retie test above.)"""
+    ``to_empty`` gave it, as ``from_pretrained`` leaves it. That holds whether the meta model holds the
+    aliases apart, as ``init_empty_weights`` builds it, or as one parameter, as ``from_pretrained``'s
+    tying leaves it, which ``named_parameters()`` lists once; neither alias is reported as a buffer.
+    (A checkpoint storing the embedding is the load-and-retie test above.)"""
     src = get_tiny_llama(tie_word_embeddings=True)
     ckpt = {k: v for k, v in src.state_dict().items() if k != "model.embed_tokens.weight"}
     ckpt_dir = _save(tmp_path, ckpt)
     model = _meta_twin(get_tiny_llama, tie_word_embeddings=True)
+    if shared:
+        model.tie_weights()  # outside init_empty_weights: one Parameter under both names
+        assert model.lm_head.weight is model.model.embed_tokens.weight
     # Fresh storage holds NaN, so a parameter nothing wrote to shows.
     empty_like = torch.empty_like
     monkeypatch.setattr(
@@ -213,6 +221,7 @@ def test_a_tie_keeps_the_values_of_the_alias_the_checkpoint_stored(tmp_path, mon
 
     assert model.lm_head.weight is model.model.embed_tokens.weight
     assert torch.equal(model.lm_head.weight, ckpt["lm_head.weight"])
+    assert not [w for w in recwarn if "buffer" in str(w.message)]
 
 
 def test_flat_vlm_checkpoint_names_reach_the_nested_params(tmp_path):
