@@ -93,6 +93,7 @@ from . import (  # isort: skip
     qwen3_moe,
     qwen3_next,
     qwen3_vl_moe,
+    qwen4_exp,
     step3p5,
     step3p7,
 )

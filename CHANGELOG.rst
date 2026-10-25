@@ -19,6 +19,7 @@ Changelog
 - Add ``hessian_input_dtype`` to the GPTQ and ``local_hessian`` algorithm configs. ``bfloat16`` accumulates the float32 Hessian with a tensor-core GEMM on bfloat16 activations, several times faster and without a float32 copy of each batch; the default ``float32`` keeps the existing float32 GEMM.
 - Add ``examples/hf_ptq/convert_ggml_to_int8.py`` to expand a checkpoint exported with a GGML recipe (IQ formats, ``q8_0``) into an INT8 weight-only compressed-tensors checkpoint. Stock vLLM serves it with its integer kernels at about half the BF16 weight memory, reproducing the GGML weights up to rounding their scales to the model dtype.
 - Speed up NVFP4 QAT and QAD of Hugging Face fused MoE experts: all experts of a projection are now fake-quantized in one kernel launch instead of one per expert, about 2x faster per MoE layer on Qwen3-30B-A3B with FSDP2.
+- ``hf_ptq.py`` calibrates Qwen3.8 (``qwen4_exp``) without running its QSA indexer's per-query Python loop when every visible key fits the indexer's token budget, with bit-identical results. On Qwen3.8-Flash-Next this saves about two hours of layerwise calibration.
 
 *Speculative Decoding*
 
