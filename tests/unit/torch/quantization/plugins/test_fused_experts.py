@@ -395,6 +395,26 @@ class TestQuantFusedExperts:
         )
         self._cleanup_registry(expert_type)
 
+    def test_checkpoint_recompute_restores_linear(self):
+        """Non-reentrant checkpointing stops its recompute by raising inside the experts forward.
+
+        The ``F.linear`` interception must not stay installed after that, or every later
+        ``F.linear`` call in the process runs this module's hook.
+        """
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+        register_fused_experts_on_the_fly(model)
+        model.moe.experts = QuantModuleRegistry.convert(model.moe.experts)
+        linear = F.linear
+        try:
+            x = torch.randn(1, 8, HIDDEN_DIM, requires_grad=True)
+            torch.utils.checkpoint.checkpoint(model, x, use_reentrant=False).sum().backward()
+            assert F.linear is linear
+        finally:
+            F.linear = linear
+            self._cleanup_registry(expert_type)
+
     def test_expert_index_recovery(self):
         """Storage-offset based expert index recovery should be correct."""
         experts = _SyntheticFusedExperts()
