@@ -38,6 +38,7 @@ from ..block_config import (
     MambaConfig,
     maybe_cast_block_configs,
 )
+from ..pruning.pruning_utils import lm_head_dim
 from ..tools.checkpoint_utils_hf import init_model_from_config
 from ..utils.misc import (
     EmptyInitOnDevice,
@@ -357,9 +358,8 @@ def calculate_attention_memory(
     ):
         seq_len = min(seq_len, attention_chunk_size)
 
-    # Pruning hidden_size leaves head_dim unchanged, so read it from the config: n_embd // n_head
-    # is wrong for models that set head_dim explicitly, and for every candidate with a pruned n_embd.
-    head_dim = getattr(descriptor.get_language_model_config(model_config), "head_dim", None)
+    # Pruning hidden_size leaves the head dimension unchanged, so take it from the parent config.
+    head_dim = lm_head_dim(model_config, descriptor)
     kv_dim = calculate_kv_dim(attention_config.num_key_value_heads, n_head, n_embd, head_dim)
     total_num_tokens = seq_len * (batch_size + prefill_queue_size)
     kv_cache_size = total_num_tokens * kv_dim

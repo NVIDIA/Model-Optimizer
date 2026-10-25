@@ -41,15 +41,27 @@ def test_calculate_kv_dim(n_embd, n_head, num_key_value_heads, head_dim, expecte
     assert calculate_kv_dim(num_key_value_heads, n_head, n_embd, head_dim) == expected
 
 
+@pytest.mark.parametrize(
+    ("model_config", "head_dim"),
+    [
+        (SimpleNamespace(head_dim=128), 128),  # explicit head_dim (Mistral-Small-24B)
+        (
+            SimpleNamespace(hidden_size=5120, num_attention_heads=32),
+            160,
+        ),  # parent hidden_size // heads
+    ],
+)
 @pytest.mark.parametrize("n_embd", [5120, 3840])  # unpruned, and hidden_size pruned to 3840
-def test_attention_kv_cache_uses_config_head_dim(monkeypatch, n_embd):
-    # The KV cache depends on num_key_value_heads and head_dim only, so pruning hidden_size must not
-    # change it. The weight count is irrelevant here and would need a real model to compute.
+def test_attention_kv_cache_independent_of_pruned_hidden_size(
+    monkeypatch, model_config, head_dim, n_embd
+):
+    # Pruning hidden_size leaves the head dimension unchanged, so the KV cache must not depend on n_embd.
+    # The weight count is irrelevant here and would need a real model to compute.
     monkeypatch.setattr(calc, "calculate_subblock_params", lambda *args: 0)
-    batch_size, seq_len, num_key_value_heads, head_dim = 2, 16, 8, 128
+    batch_size, seq_len, num_key_value_heads = 2, 16, 8
     mem = calc.calculate_attention_memory(
         AttentionConfig(num_key_value_heads=num_key_value_heads),
-        model_config=SimpleNamespace(head_dim=head_dim),
+        model_config=model_config,
         descriptor=_Descriptor,
         batch_size=batch_size,
         prefill_seq_len=seq_len,
