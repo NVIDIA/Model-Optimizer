@@ -535,6 +535,33 @@ def test_a_model_that_cannot_be_built_on_meta_names_itself(run_as, serve, monkey
         resolve_distribution_plan(str(tmp_path))
 
 
+def test_a_meta_build_leaves_the_auto_class_as_it_found_it(monkeypatch):
+    """Building a remote-code model through an auto class registers its class there, as it is, and a
+    later load through that auto class builds the registered class, without the ``generate`` a first
+    load adds. Rank 0 alone builds one to decide a distribution: its load alone would lack it."""
+
+    class ProbeConfig(transformers.PretrainedConfig):
+        model_type = "meta_build_probe"
+
+    class ProbeModel(transformers.PreTrainedModel):
+        config_class = ProbeConfig
+
+    mapping = AutoModelForCausalLM._model_mapping
+    monkeypatch.setattr(mapping, "_extra_content", dict(mapping._extra_content))
+    from_config = AutoModelForCausalLM.from_config
+
+    def remote_from_config(config, **kwargs):
+        # What transformers' from_config does for a remote-code config before it builds.
+        AutoModelForCausalLM.register(ProbeConfig, ProbeModel, exist_ok=True)
+        return from_config(config, **kwargs)
+
+    monkeypatch.setattr(AutoModelForCausalLM, "from_config", remote_from_config)
+
+    model_load_utils.build_meta_causal_lm(None, False, None, LlamaConfig(**_TINY))
+
+    assert ProbeConfig not in mapping
+
+
 def test_the_hub_options_locate_the_checkpoint_the_load_reads(tmp_path):
     """``revision``, ``cache_dir``, ``local_files_only`` and ``subfolder`` find the checkpoint as
     ``load_pretrained`` takes them, so the plan and its config are those of what the load reads."""

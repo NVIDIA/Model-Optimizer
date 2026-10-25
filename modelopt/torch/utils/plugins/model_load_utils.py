@@ -198,7 +198,14 @@ def build_meta_causal_lm(
     hf_config=None,
     auto_class: Any = None,
 ):
-    """Build a meta-init causal LM (no real storage allocated), or ``auto_class``'s model."""
+    """Build a meta-init causal LM (no real storage allocated), or ``auto_class``'s model.
+
+    It leaves ``auto_class`` as it found it. Building a remote-code model through an auto class
+    registers its class there, as it is, and a later load through that auto class builds the
+    registered class, without the ``GenerationMixin`` a first load adds: a rank that built one more
+    meta model than its peers, as rank 0 deciding a distribution does, would load its model without
+    the ``generate`` theirs have.
+    """
     if hf_config is None:
         config_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
         if attn_implementation is not None:
@@ -218,10 +225,17 @@ def build_meta_causal_lm(
             from transformers import AutoModelForImageTextToText
 
             model_factory = AutoModelForImageTextToText
-    with init_empty_weights(include_buffers=False):
-        model = model_factory.from_config(
-            hf_config, dtype=dtype, trust_remote_code=trust_remote_code
-        )
+    registered = getattr(getattr(model_factory, "_model_mapping", None), "_extra_content", None)
+    kept = dict(registered) if registered is not None else {}
+    try:
+        with init_empty_weights(include_buffers=False):
+            model = model_factory.from_config(
+                hf_config, dtype=dtype, trust_remote_code=trust_remote_code
+            )
+    finally:
+        if registered is not None:
+            registered.clear()
+            registered.update(kept)
     model.eval()
     return model
 
