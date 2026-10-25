@@ -113,7 +113,6 @@ def test_wan22_skip_softmax_threshold(tiny_wan22_path, tmp_path):
 
 def test_wan22_sol_attn(tiny_wan22_path, tmp_path):
     """Sol-Attn on self-attention; tiny heads (dim != 128) exercise the dense fallback."""
-    pytest.importorskip("sol_attn")
     cmd = [
         "python",
         "wan22_sol_attn.py",
