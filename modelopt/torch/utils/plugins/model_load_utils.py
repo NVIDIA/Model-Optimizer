@@ -674,6 +674,12 @@ def load_pretrained(
             kwargs["hf_config"] = copy.deepcopy(config)
     if model_type is None:
         # The load uses the config passed for it, if any, so the loading hook follows that one.
+        if route == _FSDP2 and hf_config is None and config is None:
+            # The FSDP2 load builds from the checkpoint's config too: read it once, for both.
+            hf_config = AutoConfig.from_pretrained(
+                ckpt_path, trust_remote_code=trust_remote_code, **hub_options
+            )
+            kwargs["hf_config"] = hf_config
         model_type = getattr(hf_config or config, "model_type", None) or (
             AutoConfig.from_pretrained(
                 ckpt_path, trust_remote_code=trust_remote_code, **hub_options
@@ -1246,6 +1252,9 @@ def _decide_distribution(
         # to shard, a load with this one gives every rank the whole model: there is nothing to
         # measure, nor a model to build for it.
         return DistributionPlan(world_size)
+    # Building writes to the config it builds from, and only rank 0 decides: build from a copy, so
+    # the config returned with the plan, which a sharded load builds from, is alike on every rank.
+    hf_config = copy.deepcopy(hf_config)
     try:
         model = build_meta_causal_lm(
             ckpt_path,
@@ -1365,7 +1374,7 @@ def resolve_distribution_plan(
     without building it.
 
     ``config``, the config the load will use when the caller has one, is decided from instead of
-    the checkpoint's, which is then not read: each rank takes a copy, as deciding may add to it.
+    the checkpoint's, which is then not read: each rank takes a copy, as building writes to it.
     """
     # Each rank reads the checkpoint for itself. One that cannot must fail every rank here, rather
     # than leave the others waiting in a broadcast below for a rank that already raised.

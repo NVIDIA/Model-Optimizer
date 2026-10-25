@@ -43,7 +43,7 @@ Changelog
 *Misc*
 
 - The ``evaluation`` agent skill can stop looping ("doom loop") reasoning early: ask it to avoid doom loops and it adds vLLM's ``repetition_detection`` request field (vLLM 0.17.0 or later) to every task, ending a request once its output repeats. Use the same setting for baseline and candidate runs.
-- ``modelopt.torch.utils.plugins.model_load_utils.load_pretrained`` now also loads a model distributed. Under ``torchrun`` it FSDP2-shards the model or gives every rank a whole copy, by the plan the new ``resolve_distribution_plan`` decides from the model and the ``MODELOPT_FSDP_SIZE`` variable, or by a plan passed as its new ``distribution`` argument. The loaded model records the plan (``modelopt.torch.utils.distributed.distribution_plan``).
+- ``modelopt.torch.utils.plugins.model_load_utils.load_pretrained`` now also loads a model distributed. Under ``torchrun`` it FSDP2-shards the model or gives every rank a whole copy, by the plan the new ``resolve_distribution_plan`` decides from the model and the ``MODELOPT_FSDP_SIZE`` variable, or by a plan passed as its new ``distribution`` argument. The loaded model records the plan (``modelopt.torch.utils.distributed.distribution_plan``). Until the expert-parallel load lands, an MoE planned expert-parallel, as the default ``MODELOPT_EP_DEGREE=auto`` plans one whose config has a ``base_model_ep_plan``, is refused before it loads: set ``MODELOPT_EP_DEGREE=1`` (with ``MODELOPT_FSDP_SIZE=world`` to FSDP2-shard it) or pass a plan with ``ep_size=1``.
 
 **Backward Breaking Changes**
 

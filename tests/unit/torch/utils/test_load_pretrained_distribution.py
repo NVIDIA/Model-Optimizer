@@ -172,8 +172,8 @@ def test_a_replicated_plan_loads_the_whole_model_on_every_rank(
 def test_an_fsdp_plan_loads_through_the_parallel_fsdp2_loader(
     run_as, loaders, process_group, monkeypatch, tmp_path
 ):
-    """FSDP2 shards over the process group it reads its rank and GPU from, by a config read with
-    the Hub options the load was given (custom code an ``auto_map`` names in another repo)."""
+    """FSDP2 shards over the process group it reads its rank and GPU from, by a config read once,
+    with the Hub options the load was given (custom code an ``auto_map`` names in another repo)."""
     run_as(2, rank=1)
     served, reads = LlamaConfig(**_TINY), []
     monkeypatch.setattr(
@@ -189,7 +189,7 @@ def test_an_fsdp_plan_loads_through_the_parallel_fsdp2_loader(
     assert (call["device"], call["rank"], call["world_size"]) == (torch.device("cuda:1"), 1, 2)
     assert call["cpu_offload"] is True
     assert call["hf_config"] is served
-    assert reads and all(read.get("local_files_only") is True for read in reads)
+    assert [read.get("local_files_only") for read in reads] == [True]
     assert distribution_plan(model) == plan
     assert loaders == {}
 
@@ -217,8 +217,8 @@ def test_a_config_passed_for_the_load_is_the_one_it_decides_from(
     run_as, loaders, process_group, monkeypatch, tmp_path, handed
 ):
     """No config is read: the plan is decided from the one passed for the load, which the FSDP2
-    load then builds from, as it does with a plan handed in. Deciding adds to that config, so it
-    works on a copy of it."""
+    load then builds from, as it does with a plan handed in. Building writes to that config, so the
+    load works on a copy of it."""
     monkeypatch.setenv("MODELOPT_FSDP_SIZE", "world")
     run_as(2, rank=1)
     reads: list = []
