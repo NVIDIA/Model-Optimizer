@@ -46,6 +46,7 @@ from transformers import (
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
 
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import env
 from modelopt.torch.utils.distributed import (
@@ -557,7 +558,8 @@ def load_pretrained(
     """Load a Hugging Face model for ModelOpt to optimize and export, whole or distributed.
 
     ``distribution`` is the :class:`~modelopt.torch.utils.distributed.DistributionPlan` to spread
-    the model over the run's ranks by, :func:`resolve_distribution_plan`'s by default. By the plan:
+    the model over the run's ranks by. Every rank takes rank 0's, or, when rank 0 passes none,
+    :func:`resolve_distribution_plan`'s. By the plan:
 
     * ``dense="fsdp"``: a causal LM FSDP2-sharded over the whole process group, each rank reading its
       own layers (:func:`parallel_load_and_prepare_fsdp2`, whose ``cpu_offload``, ``mp_policy`` and
@@ -587,10 +589,11 @@ def load_pretrained(
     * A Hub model ID is made local first (:func:`ensure_local_checkpoint`, which takes the
       ``revision``, ``token``, ``cache_dir`` and ``local_files_only`` ``kwargs``): the export reads
       the source checkpoint from disk. Under ``torch.distributed`` every rank must call this. The
-      config and model loads still take all but ``revision``: an ``auto_map`` entry can name
-      custom code in another Hub repo, which Transformers fetches with them. A ``subfolder`` is
-      part of where the checkpoint is: the config, the loading hook and the record below read it,
-      as the load does.
+      config read and the whole-model load still take all but ``revision``: an ``auto_map`` entry
+      can name custom code in another Hub repo, which Transformers fetches with them. A sharded
+      load builds its model from the config with ``from_config``, which takes none, so such code
+      comes with the environment's Hub settings. A ``subfolder`` is part of where the checkpoint
+      is: the config, the loading hook and the record below read it, as the load does.
     * The model type's loading hook runs
       (:func:`~modelopt.torch.models.hf.prepare_model_for_loading`), e.g. to keep the MTP head a
       Nemotron-H checkpoint carries. ``model_type`` selects it; when omitted, the type of the
@@ -630,33 +633,38 @@ def load_pretrained(
     config = config if isinstance(config, PretrainedConfig) else None
     if config is not None and "hf_config" in kwargs:
         raise TypeError("config and hf_config both name the config to load with; pass one.")
-    if distribution is None and "hf_config" in kwargs:
-        # The load builds from hf_config as given, so the plan must be the one it came with, not
-        # one decided here from another config.
-        raise TypeError(
-            "hf_config is the config resolve_distribution_plan returned with a plan: pass that plan "
-            "as distribution=, or pass config= to have the plan decided from your config."
-        )
+
+    def handed() -> DistributionPlan | None:
+        if distribution is None:
+            return None
+        if not isinstance(distribution, DistributionPlan):
+            raise TypeError(f"distribution={distribution!r}: expected a DistributionPlan or None.")
+        _route(distribution)
+        return distribution
+
+    # Every rank takes rank 0's distribution, a plan or none, so every rank runs the same load and
+    # its collectives: a rank going by its own could wait in collectives the others never join, and
+    # ranks loading different plans would build mismatched meshes. Rank 0 checks it before it sends,
+    # so one it refuses raises on every rank instead of leaving them in the broadcast.
+    plan = dist.broadcast_from("distribution", handed)
     hf_config = kwargs.get("hf_config")
-    if distribution is None:
+    if plan is None:
+        if "hf_config" in kwargs:
+            # The load builds from hf_config as given, so the plan must be the one it came with,
+            # not one decided here from another config.
+            raise TypeError(
+                "hf_config is the config resolve_distribution_plan returned with a plan: pass that "
+                "plan as distribution=, or pass config= to have the plan decided from your config."
+            )
         plan, hf_config = resolve_distribution_plan(
-            ckpt_path, config=config, trust_remote_code=trust_remote_code, **hub_options
+            ckpt_path,
+            config=config,
+            auto_class=auto_class,
+            trust_remote_code=trust_remote_code,
+            **hub_options,
         )
         if _route(plan) is not None:
             kwargs.setdefault("hf_config", hf_config)
-    elif isinstance(distribution, DistributionPlan):
-        # Every rank loads the plan rank 0 was handed, as it would one it decided: ranks loading
-        # different plans would build mismatched meshes and hang. Rank 0 checks it before it sends,
-        # so a plan it refuses raises on every rank instead of leaving them in the broadcast.
-        handed = distribution
-
-        def checked() -> DistributionPlan:
-            _route(handed)
-            return handed
-
-        plan = dist.broadcast_from("plan", checked)
-    else:
-        raise TypeError(f"distribution={distribution!r}: expected a DistributionPlan or None.")
     route = _route(plan)
     if route is not None and config is not None:
         # The sharded load builds the model from hf_config: the plan's copy of this one, or a copy
@@ -1213,7 +1221,7 @@ def _ep_degree(ep_size) -> int | str:
 
 
 def _decide_distribution(
-    ckpt_path: str, hf_config, world_size: int, ep_size, dense, trust_remote_code: bool
+    ckpt_path: str, hf_config, world_size: int, ep_size, dense, trust_remote_code: bool, auto_class
 ) -> DistributionPlan:
     """The plan :func:`resolve_distribution_plan` returns, decided by this rank alone."""
     # What the caller set the EP degree with, for a refusal to name it.
@@ -1229,6 +1237,15 @@ def _decide_distribution(
         )
     ep_size = _ep_degree(ep_size)
     dense = _dense_from_env(world_size) if dense is None else dense
+    if (
+        auto_class not in (None, AutoModelForCausalLM)
+        and ep_size in ("auto", 1)
+        and dense in ("auto", "replicate")
+    ):
+        # The sharded loads build their own model class and refuse another, so with nothing asking
+        # to shard, a load with this one gives every rank the whole model: there is nothing to
+        # measure, nor a model to build for it.
+        return DistributionPlan(world_size)
     try:
         model = build_meta_causal_lm(
             ckpt_path,
@@ -1297,6 +1314,7 @@ def resolve_distribution_plan(
     ckpt_path: str,
     *,
     config: PretrainedConfig | None = None,
+    auto_class: Any = None,
     trust_remote_code: bool = False,
     ep_size: int | str | None = None,
     dense: str | None = None,
@@ -1341,6 +1359,11 @@ def resolve_distribution_plan(
     :func:`ensure_local_checkpoint`, and passes the local directory: the plan is then decided for
     the snapshot the load reads.
 
+    ``auto_class`` is the class the load builds the model with, :func:`load_pretrained`'s. The
+    sharded loads build their own and refuse any other than ``AutoModelForCausalLM``, so with
+    another, and no knob or argument asking to shard, every rank loads the whole model, planned
+    without building it.
+
     ``config``, the config the load will use when the caller has one, is decided from instead of
     the checkpoint's, which is then not read: each rank takes a copy, as deciding may add to it.
     """
@@ -1377,7 +1400,7 @@ def resolve_distribution_plan(
     plan = dist.broadcast_from(
         "plan",
         lambda: _decide_distribution(
-            ckpt_path, hf_config, world_size, ep_size, dense, trust_remote_code
+            ckpt_path, hf_config, world_size, ep_size, dense, trust_remote_code, auto_class
         ),
     )
     if plan != DistributionPlan():

@@ -250,6 +250,31 @@ def test_hf_config_is_refused_without_the_plan_it_came_with(
     assert loaders == {}
 
 
+@pytest.mark.parametrize("fsdp_size", [None, "world"], ids=["no-knob", "knob-shards"])
+def test_a_model_class_of_the_callers_own_loads_whole(
+    run_as, serve, loaders, auto_class, monkeypatch, tmp_path, fsdp_size
+):
+    """The sharded loads build their own model class and refuse another, so with nothing asking to
+    shard, a class of the caller's own loads whole on every rank, planned without building the
+    model on the meta device, which the decision's own pick of class may not build (an
+    encoder-decoder loaded through AutoModel). A knob asking to shard still decides, and the
+    sharded load refuses the class."""
+    run_as(2)
+    serve(LlamaConfig(**_TINY))
+    if fsdp_size is None:
+        monkeypatch.setattr(
+            model_load_utils, "build_meta_causal_lm", lambda *a, **k: pytest.fail("built a model")
+        )
+        model = load_pretrained(str(tmp_path), auto_class)
+        assert distribution_plan(model) == DistributionPlan(2)
+        assert len(auto_class.calls) == 1
+    else:
+        monkeypatch.setenv("MODELOPT_FSDP_SIZE", fsdp_size)
+        with pytest.raises(NotImplementedError, match="builds its model class itself"):
+            load_pretrained(str(tmp_path), auto_class)
+    assert loaders == {}
+
+
 def test_an_expert_parallel_plan_is_refused(run_as, serve, loaders, auto_class, tmp_path):
     """No load here shards the routed experts: an EP plan fails before anything loads."""
     run_as(2)
@@ -261,18 +286,35 @@ def test_an_expert_parallel_plan_is_refused(run_as, serve, loaders, auto_class, 
     assert auto_class.calls == []
 
 
-def _every_rank_loads_rank0s_plan_job(rank, size, ckpt):
-    handed = DistributionPlan(size) if rank == 0 else DistributionPlan(size, dense="fsdp")
+def _every_rank_loads_rank0s_plan_job(rank, size, ckpt, handed):
+    model, refused = None, None
     with bounded_collectives():
-        model = load_pretrained(ckpt, distribution=handed, device_map="cpu")
-    assert distribution_plan(model) == DistributionPlan(size), rank
+        try:  # not pytest.raises: its failure would end the pooled worker instead of the job
+            model = load_pretrained(ckpt, distribution=handed[rank], device_map="cpu")
+        except Exception as error:
+            refused = str(error)
+    if isinstance(handed[0], DistributionPlan):
+        assert refused is None and distribution_plan(model) == handed[0], (rank, refused)
+    else:
+        # Rank 0's refusal, on every rank, rather than a rank left waiting in the broadcast.
+        assert "expected a DistributionPlan or None" in str(refused), (rank, refused)
 
 
-def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path):
-    """Over a real broadcast. Ranks loading different plans would build mismatched meshes and hang:
-    rank 1, handed an FSDP2 plan of its own, loads the whole model by the plan rank 0 was handed."""
+@pytest.mark.parametrize(
+    "handed",
+    [
+        (DistributionPlan(2), DistributionPlan(2, dense="fsdp")),
+        (DistributionPlan(2), None),
+        ("fsdp2", DistributionPlan(2)),
+    ],
+    ids=["another-plan", "none", "not-a-plan"],
+)
+def test_every_rank_loads_the_plan_rank0_was_handed(cpu_dist_workers, tmp_path, handed):
+    """Over a real broadcast, whatever rank 1 was handed. Ranks loading different plans would build
+    mismatched meshes, and one handed none would decide a plan through collectives the others never
+    join: both would hang. A distribution rank 0 refuses fails every rank."""
     LlamaForCausalLM(LlamaConfig(**_TINY)).save_pretrained(tmp_path)
-    cpu_dist_workers.run(_every_rank_loads_rank0s_plan_job, ckpt=str(tmp_path))
+    cpu_dist_workers.run(_every_rank_loads_rank0s_plan_job, ckpt=str(tmp_path), handed=handed)
 
 
 @pytest.mark.parametrize(
