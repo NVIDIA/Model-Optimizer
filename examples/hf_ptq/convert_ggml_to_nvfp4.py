@@ -29,6 +29,7 @@ import json
 import os
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 import torch
 from convert_ggml_to_int8 import ggml_layer_formats, write_converted_checkpoint
@@ -61,18 +62,19 @@ def convert_ggml_export_to_nvfp4(
     simulated. The one difference: projections vLLM fuses share the largest of their power-of-two
     per-tensor scales, which moves only blocks near the bottom of E4M3's range. Activation scales,
     unquantized tensors and the other files are copied as they are; the GGML export is left
-    unchanged.
+    unchanged. Layers in another format, such as FP8 attention, keep their tensors and config, and
+    the checkpoint becomes ``MIXED_PRECISION``.
 
     Args:
-        ggml_dir: A Hugging Face export whose quantized layers are all GGML formats, as written
-            by hf_ptq.py with a GGML recipe.
+        ggml_dir: A Hugging Face export with GGML layers, as written by hf_ptq.py with a GGML
+            recipe or by the Megatron-Bridge export.
         output_dir: Where to write the NVFP4 checkpoint. Must be empty or not exist yet.
         max_shard_size: Target bytes per output safetensors shard; a larger tensor gets a shard
             of its own. Conversion holds one output shard in memory at a time.
     """
     ggml_dir = Path(ggml_dir)
     hf_quant_config = json.loads((ggml_dir / "hf_quant_config.json").read_text())
-    layer_formats = ggml_layer_formats(ggml_dir)
+    layer_formats = ggml_layer_formats(ggml_dir, other_algos=True)
     weight_map = indexed_weight_map(ggml_dir)
     with_input_scale = {layer for layer in layer_formats if f"{layer}.input_scale" in weight_map}
     if with_input_scale and with_input_scale != set(layer_formats):
@@ -97,10 +99,23 @@ def convert_ggml_export_to_nvfp4(
         }
 
     quantization = hf_quant_config["quantization"]
+    nvfp4 = {"quant_algo": "NVFP4" if with_input_scale else "W4A16_NVFP4", "group_size": 16}
+    other_layers = {
+        layer: layer_config
+        for layer, layer_config in quantization.get("quantized_layers", {}).items()
+        if layer not in layer_formats
+    }
+    if other_layers:
+        layers = {**other_layers, **{layer: dict(nvfp4) for layer in layer_formats}}
+        converted: dict[str, Any] = {
+            "quant_algo": "MIXED_PRECISION",
+            "quantized_layers": dict(sorted(layers.items())),
+        }
+    else:
+        converted = dict(nvfp4)
     hf_quant_config["quantization"] = {
-        "quant_algo": "NVFP4" if with_input_scale else "W4A16_NVFP4",
+        **converted,
         "kv_cache_quant_algo": None,
-        "group_size": 16,
         "exclude_modules": quantization.get("exclude_modules", []),
     }
     config = json.loads((ggml_dir / "config.json").read_text())

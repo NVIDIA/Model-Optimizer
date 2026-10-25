@@ -55,6 +55,7 @@ from modelopt.recipe import load_recipe
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
 from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
 from modelopt.torch.export.quant_format import GGML_FORMATS
+from modelopt.torch.export.quant_utils import process_layer_quant_config
 from modelopt.torch.export.quantized_weight_export import (
     build_hf_quantization_config,
     capture_kv_cache_export_state,
@@ -164,6 +165,30 @@ def test_megatron_name_remapping_exports_ggml_payload(qformat):
         "model.layers.0.mlp.down_proj.quantization": qformat,
         "model.layers.0.mlp.down_proj.awq_block_size": block_size,
     }
+
+
+def test_megatron_ggml_export_writes_the_nvfp4_input_scale():
+    """A W1A4/W2A4 layer exports its NVFP4 input_scale, and hf_quant_config marks it."""
+    linear = torch.nn.Linear(256, 2, bias=False, dtype=torch.bfloat16)
+    linear.weight_quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits="iq2_s", block_sizes={-1: 256}, backend="ggml")
+    )
+    linear.input_quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=(2, 1), block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)}
+        )
+    )
+    linear.input_quantizer.amax = torch.tensor(6.0 * 448)
+    exporter = _make_ggml_exporter()
+    exporter._layer_state_dicts = {1: exporter._state_dict}
+
+    exporter._name_remapping(linear, "model.layers.0.mlp.down_proj.")
+    exporter._mark_ggml_input_quantization()
+
+    assert exporter._state_dict["model.layers.0.mlp.down_proj.input_scale"] == 1.0
+    assert exporter.layer_config_dict["model.layers.0.mlp.down_proj.input_quantization"] == "nvfp4"
+    layer_config = process_layer_quant_config(exporter.layer_config_dict)
+    assert layer_config["input_quant_algo"] == "NVFP4"
 
 
 def _make_ggml_experts(qformat, layer_type, *, bias=False):

@@ -515,6 +515,23 @@ def _validate_ggml_input_quantizer(input_quantizer) -> None:
         )
 
 
+def get_ggml_input_scale(input_quantizer) -> torch.Tensor | None:
+    """The NVFP4 ``input_scale`` of a GGML layer, ``amax / (6 * 448)``; None if it has no input quant.
+
+    Refuses a quantizer calibration never gave an amax, before the caller mutates anything.
+    """
+    if input_quantizer is None or not input_quantizer.is_enabled:
+        return None
+    _validate_ggml_input_quantizer(input_quantizer)
+    input_scale = NVFP4QTensor.get_activation_scaling_factor(input_quantizer)
+    if input_scale is None:
+        raise ValueError(
+            "The NVFP4 input quantizer of a GGML layer has no calibrated amax, so it has no "
+            "input_scale to export."
+        )
+    return input_scale.squeeze()
+
+
 def get_ggml_input_quantization(module: nn.Module) -> str | None:
     """``QUANTIZATION_NVFP4`` if ``module``'s GGML weights take NVFP4 inputs, else None.
 

@@ -172,7 +172,7 @@ activations and tensor-core math are what deliver the throughput.
   with dynamic NVFP4 activations (W1A4/W2A4). An FP4 GEMM takes NVFP4 weights too, so fake quant
   transcodes each decoded IQ weight to NVFP4 and GPTQ compensates that error. The export adds NVFP4
   `input_scale`s beside the GGML blocks; `examples/hf_ptq/convert_ggml_to_nvfp4.py` turns it into
-  an NVFP4 W4A4 checkpoint for vLLM. Megatron export does not support them yet.
+  an NVFP4 W4A4 checkpoint for vLLM.
 - **`q8_0`** — GGML-compatible weight-only quantization on eligible linear layers,
   with BF16 activations; `lm_head`, MoE routers, `conv1d` and the vision branch stay
   in BF16. Q8_0 uses 8.5 bits per weight and requires no calibration data. Quantized

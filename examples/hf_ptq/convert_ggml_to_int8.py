@@ -91,8 +91,14 @@ def model_dtype(config: dict) -> str:
     )
 
 
-def ggml_layer_formats(ggml_dir: str | os.PathLike) -> dict[str, GGMLFormat]:
-    """The GGML format of every layer holding a packed payload, refusing anything else."""
+def ggml_layer_formats(
+    ggml_dir: str | os.PathLike, other_algos: bool = False
+) -> dict[str, GGMLFormat]:
+    """The GGML format of every layer holding a packed payload.
+
+    Any other quantized layer is refused, unless ``other_algos`` lets it through for the caller
+    to copy as it is.
+    """
     ggml_dir = Path(ggml_dir)
     quantization = json.loads((ggml_dir / "hf_quant_config.json").read_text())["quantization"]
     if quantization.get("kv_cache_quant_algo") is not None:
@@ -105,7 +111,7 @@ def ggml_layer_formats(ggml_dir: str | os.PathLike) -> dict[str, GGMLFormat]:
         else {quantization.get("quant_algo")}
     )
     unsupported = sorted(str(a) for a in algos if str(a).lower() not in GGML_FORMAT_REGISTRY)
-    if unsupported:
+    if unsupported and not other_algos:
         raise ValueError(f"Only GGML layers convert, but the export has {unsupported}.")
 
     layer_formats = {}
@@ -119,13 +125,16 @@ def ggml_layer_formats(ggml_dir: str | os.PathLike) -> dict[str, GGMLFormat]:
             }
         for name, shape in payloads.items():
             layer = name.removesuffix(".weight")
+            if mixed and layer not in layer_configs:
+                raise ValueError(f"{layer} holds a uint8 weight but is not in quantized_layers.")
+            algo = layer_configs[layer]["quant_algo"] if mixed else quantization["quant_algo"]
+            # Another format's uint8 weight, such as packed NVFP4; only reachable with other_algos.
+            if algo.lower() not in GGML_FORMAT_REGISTRY:
+                continue
             # A 2-D weight's payload is [rows, blocks, block bytes]; weight_shape and the
             # converters assume that layout.
             if len(shape) != 3:
                 raise ValueError(f"{layer} is not a 2-D weight; only 2-D weights convert.")
-            if mixed and layer not in layer_configs:
-                raise ValueError(f"{layer} holds a uint8 weight but is not in quantized_layers.")
-            algo = layer_configs[layer]["quant_algo"] if mixed else quantization["quant_algo"]
             layer_formats[layer] = GGML_FORMAT_REGISTRY[algo.lower()]
     if not layer_formats:
         raise ValueError(f"{ggml_dir} holds no GGML weights to convert.")

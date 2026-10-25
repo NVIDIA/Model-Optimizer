@@ -17,7 +17,7 @@ import json
 
 import pytest
 import torch
-from _test_utils.examples.ggml_export import quantize_tiny_llama
+from _test_utils.examples.ggml_export import IQ1_S, quantize_tiny_llama
 from _test_utils.examples.hf_ptq_example_utils import convert_ggml_to_nvfp4
 from _test_utils.examples.run_command import run_example_command
 from safetensors.torch import load_file, save_file
@@ -119,3 +119,37 @@ def test_an_export_with_some_activation_scales_is_refused(tmp_path):
         convert_ggml_to_nvfp4.convert_ggml_export_to_nvfp4(ggml_dir, tmp_path / "nvfp4")
 
     assert not (tmp_path / "nvfp4").exists()
+
+
+@pytest.mark.parametrize(
+    ("other_cfg", "other_algo"),
+    [
+        ({"num_bits": (4, 3), "axis": None}, "FP8"),
+        (
+            {**NVFP4_INPUT, "block_sizes": {**NVFP4_INPUT["block_sizes"], "type": "static"}},
+            "W4A16_NVFP4",
+        ),
+    ],
+)
+def test_layers_in_another_format_are_copied_into_a_mixed_checkpoint(
+    tmp_path, other_cfg, other_algo
+):
+    # Layer 1's MLP in another format, as attention stays FP8 and lm_head can stay NVFP4 (packed
+    # uint8 like GGML) in the published Qwen3.8-27B-NVFP4 layout.
+    model, _ = quantize_tiny_llama(tmp_path, (IQ1_S, other_cfg))
+    export_hf_checkpoint(model, export_dir=tmp_path / "ggml")
+    before = load_file(tmp_path / "ggml" / "model.safetensors")
+
+    convert_ggml_to_nvfp4.convert_ggml_export_to_nvfp4(tmp_path / "ggml", tmp_path / "nvfp4")
+
+    quantization = json.loads((tmp_path / "nvfp4" / "hf_quant_config.json").read_text())
+    quantization = quantization["quantization"]
+    assert quantization["quant_algo"] == "MIXED_PRECISION"
+    layers = quantization["quantized_layers"]
+    after = _load(tmp_path / "nvfp4")
+    for proj in PROJECTIONS:
+        assert layers[f"model.layers.0.mlp.{proj}"]["quant_algo"] == "W4A16_NVFP4"
+        assert layers[f"model.layers.1.mlp.{proj}"]["quant_algo"] == other_algo
+        assert after[f"model.layers.0.mlp.{proj}.weight_scale"].dtype == torch.float8_e4m3fn
+        other = [k for k in before if k.startswith(f"model.layers.1.mlp.{proj}.")]
+        assert other and all(torch.equal(after[k], before[k]) for k in other)
