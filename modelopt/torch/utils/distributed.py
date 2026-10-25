@@ -353,7 +353,8 @@ def set_distribution_plan(model: torch.nn.Module, plan: DistributionPlan) -> Non
     Code handed a submodule, such as a VLM's language model, then reads the same plan as code handed
     the whole model; a module added afterwards records none. ``load_pretrained`` records the plan it
     loads by once the model is built; code that distributes a model itself records it here before
-    calibrating or exporting the model.
+    calibrating or exporting the model. The plan says how the model is placed over the run; the
+    :class:`ParallelState` a quantized module holds names the process groups its collectives run on.
 
     A model is distributed once, and its plan recorded once: recording a plan on a model that, or
     any of whose submodules, already records one raises, the same plan included, and leaves the
@@ -402,9 +403,11 @@ def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
 
     For a value that depends on what each rank reads for itself -- the environment, its GPU, files
     on its node -- so that ranks computing it for themselves could disagree. If ``fn`` raises, every
-    rank raises, instead of waiting in a broadcast ``rank`` never sends. Ranks broadcasting
-    different labels at the same point fail. Collective: every rank calls it at the same point,
-    with the same ``rank``. Outside a distributed run ``fn`` runs alone.
+    rank raises, instead of waiting in a broadcast ``rank`` never sends; its value must pickle,
+    which the broadcast does before it sends anything. A rank broadcasting another label than
+    ``rank`` at the same point fails; ``rank`` sees no other rank's label, and returns. Collective:
+    every rank calls it at the same point, with the same ``rank``. Outside a distributed run ``fn``
+    runs alone.
     """
     if not 0 <= rank < size():
         raise ValueError(f"rank={rank} is not a rank of this {size()}-rank run.")
@@ -444,8 +447,9 @@ def all_reduce(label: str, fn: Callable[[], _V], combine: Callable[[list[_V]], _
     ``combine`` takes the ranks' values in rank order and returns the one every rank gets, e.g.
     ``min`` for a batch size each rank's memory bounds, where one rank's choice could run another
     out of memory. If ``fn`` raises on any rank, every rank raises, instead of waiting in the gather
-    that rank never joins. Ranks reducing different labels at the same point fail. Collective;
-    outside a distributed run ``fn`` runs alone.
+    that rank never joins; its value must pickle, which the gather does before it gathers anything.
+    Ranks reducing different labels at the same point fail. Collective; outside a distributed run
+    ``fn`` runs alone.
     """
     if not is_distributed_run():
         return combine([fn()])
@@ -518,19 +522,24 @@ def distributed_run(
     group_was_there = is_initialized()
     if launched and not group_was_there:
         setup(timeout=timeout)
+    # The body's own exception: sys.exc_info() would also report one a caller up the stack is
+    # handling, which would make a clean exit from a run entered in an except block abort the rank.
+    exc: BaseException | None = None
     try:
         yield (
             DistributedState(rank(), size(), torch.device(f"cuda:{local_rank()}"))
             if launched
             else DistributedState(0, 1, device)
         )
+    except BaseException as e:
+        exc = e
+        raise
     finally:
         # If the body is unwinding due to an exception, PRINT it here BEFORE anything that waits on
         # the peers. A per-rank exception (only some ranks raise) leaves the rest inside a
         # calibration a2a collective, so this rank's cleanup barrier or destroy_process_group would
         # DEADLOCK with the original exception never surfaced. A run of several ranks that owns its
         # group therefore aborts the rank: abort() prints the traceback and exits.
-        exc = sys.exc_info()[1]
         owns_group = not group_was_there and is_initialized()
         # Every rank reaches a SystemExit, an intentional exit: it is not an error to report.
         if exc is not None and not isinstance(exc, SystemExit):

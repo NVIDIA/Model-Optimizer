@@ -311,7 +311,7 @@ def test_a_rank_failing_to_compute_still_joins_the_gather(monkeypatch, error):
 
 
 def _bounded_barrier_job(rank, size):
-    groups = []
+    groups, own = [], object()
     with (
         mock.patch.object(
             torch.distributed, "barrier", lambda *a, group=None, **k: groups.append(group)
@@ -319,12 +319,14 @@ def _bounded_barrier_job(rank, size):
         bounded_collectives(),
     ):
         torch.distributed.barrier(group=None)  # as modelopt's barrier() calls it
-    assert groups and groups[0] is not None, groups
+        torch.distributed.barrier(group=own)
+    assert len(groups) == 2 and groups[0] not in (None, own) and groups[1] is own, groups
 
 
 def test_bounded_collectives_bound_a_barrier_called_with_group_none(cpu_dist_workers):
     """modelopt's ``barrier()`` names ``group=None`` explicitly; the bound holds for it too, or a
-    rank left waiting in it would wait out the default group's timeout."""
+    rank left waiting in it would wait out the default group's timeout. A collective on a group of
+    its own keeps that group."""
     cpu_dist_workers.run(_bounded_barrier_job)
 
 
@@ -369,6 +371,7 @@ class _ExitedError(Exception):
     """Raised by a stand-in for abort(), which exits the process instead of returning."""
 
 
+@pytest.mark.parametrize("in_except", [False, True], ids=["entered-plainly", "entered-in-except"])
 @pytest.mark.parametrize(
     ("launch", "body_raises", "ends_by"),
     [
@@ -380,11 +383,14 @@ class _ExitedError(Exception):
     ],
     ids=["launch", "launch-raises", "launch-exits", "single-process", "single-process-raises"],
 )
-def test_the_run_ends_the_group_it_set_up(monkeypatch, capsys, launch, body_raises, ends_by):
+def test_the_run_ends_the_group_it_set_up(
+    monkeypatch, capsys, launch, body_raises, ends_by, in_except
+):
     """The launch's group, or the one a single process's FSDP2 load sets up mid-run, is destroyed on
     the way out. A rank of several whose body raised exits through abort() instead, and torchrun tears
     the job down: the cleanup's barrier and destroy_process_group would wait on peers that may sit in
-    a collective this rank never reaches. Every rank reaches an intentional exit."""
+    a collective this rank never reaches. Every rank reaches an intentional exit. Only the body's own
+    exception counts, not one the caller is handling where it entered the run."""
     if launch:
         monkeypatch.setenv("WORLD_SIZE", "2")
     else:
@@ -405,11 +411,20 @@ def test_the_run_ends_the_group_it_set_up(monkeypatch, capsys, launch, body_rais
     escapes = _ExitedError if ends_by == "abort" else body_raises
     expected = pytest.raises(escapes) if escapes else nullcontext()
 
-    with expected, distributed_run(device="cuda" if launch else "cpu"):
-        if not launch:
-            live.append("the body's group")
-        if body_raises:
-            raise body_raises
+    def run():
+        with expected, distributed_run(device="cuda" if launch else "cpu"):
+            if not launch:
+                live.append("the body's group")
+            if body_raises:
+                raise body_raises
+
+    if in_except:
+        try:
+            raise KeyError("the caller's")
+        except KeyError:
+            run()
+    else:
+        run()
 
     assert ended == [ends_by]
     # An intentional exit is not reported as an error.

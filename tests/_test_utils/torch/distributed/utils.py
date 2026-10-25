@@ -155,9 +155,10 @@ def reseeding_worker_teardown(rank, world_size):
 
 
 def _on_group(collective, bound, /, *args, **kwargs):
-    """``collective`` on ``bound``, whatever group the caller named: modelopt's ``barrier()`` passes
-    ``group=None`` explicitly, which would override a ``partial``'s keyword."""
-    return collective(*args, **{**kwargs, "group": bound})
+    """``collective`` on ``bound`` unless the caller named a group of its own: modelopt's
+    ``barrier()`` passes ``group=None`` explicitly, which would override a ``partial``'s keyword."""
+    group = kwargs.get("group")
+    return collective(*args, **{**kwargs, "group": bound if group is None else group})
 
 
 @contextmanager
