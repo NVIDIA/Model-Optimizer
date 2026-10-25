@@ -61,7 +61,7 @@ def distributed_save_hf_checkpoint(
 ) -> bool:
     """No-gather distributed HF export.
 
-    Thin wrapper: hf_ptq exports under ``torch.inference_mode()``, so run the entire write with inference mode DISABLED
+    Thin wrapper: a caller may be in ``torch.inference_mode()``, so run the entire write with inference mode DISABLED
     via a nested ``inference_mode(False)`` context -- the ``.detach()`` in ``get_model_state_dict`` and the version-
     counted ops in the write path both reject inference tensors. The context form reliably restores normal mode for this
     scope (a decorator did not, under the caller's already-active inference_mode). ``no_grad`` too:
@@ -699,8 +699,11 @@ def _distributed_save_hf_checkpoint_impl(
       4. Every rank bin-packs its own owned set into even shards, numbered into a global range, and
          writes them directly with ``safetensors.save_file``. Rank 0 unions the weight index.
 
-    Peak memory per rank is its owned set, not the model. Placements the point-to-point transport
-    does not cover are rejected rather than routed through an untested slower path.
+    No rank holds the model. On top of its own shard of it, which the model keeps, a rank holds what
+    it writes -- its experts, split into per-expert copies, and the dense tensors it owns, assembled
+    as :func:`_materialize_owned` describes -- and, from a caller in inference mode, a copy of each
+    inference tensor in its shard. Placements the point-to-point transport does not cover are
+    rejected rather than routed through an untested slower path.
     """
     import torch.distributed as dist
     from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
@@ -751,15 +754,17 @@ def _distributed_save_hf_checkpoint_impl(
     write_experts = dp_idx == 0
     sharded_sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
 
-    # Re-materialize every value as a NORMAL tensor UP FRONT. hf_ptq exports under torch.inference_mode(),
-    # so these are inference tensors; the inference flag is STICKY -- clone/reshape/detach/slice all
+    # Re-materialize every inference tensor as a NORMAL one UP FRONT. A caller in inference mode hands
+    # over inference tensors; the inference flag is STICKY -- clone/reshape/detach/slice all
     # propagate it -- and the expert split, scale reduce and write below all do version-counted ops
     # that reject inference tensors. The only way to drop the flag is to copy the data into a freshly
     # ALLOCATED tensor (here, under the wrapper's inference_mode(False)). For a DTensor, copy the LOCAL
-    # shard and rewrap so mesh/placements survive. Bounded to this rank's shard.
+    # shard and rewrap so mesh/placements survive. Anything else is used as it is.
     def _to_normal(v):
         if isinstance(v, DTensor):
             _loc = v.to_local()
+            if not _loc.is_inference():
+                return v
             _new = torch.empty_like(_loc)
             _new.copy_(_loc)
             # Pass the ORIGINAL global shape/stride: from_local() otherwise re-infers them as
@@ -782,12 +787,10 @@ def _distributed_save_hf_checkpoint_impl(
             return _new
         return v
 
-    # Re-materialize IN PLACE, not as `{k: _to_normal(v) for ...}`. The comprehension keeps the ENTIRE
-    # original dict alive while building a full second copy -> a transient 2x of the whole state dict.
-    # That is fine at 30B (24GB -> 48GB) but OOMs at large MoE: at 235B the write-point state dict is
-    # ~157GB/rank (fused expert weights are sharded, but the per-expert NVFP4 scale tensors are
-    # replicated on every rank), and doubling it hits ~314GB > GPU. Overwriting each key frees the old
-    # value immediately, so peak stays ~1x. (Import of ep-dp's in-place/streaming write handling.)
+    # A copy adds to this rank's memory rather than replacing anything: the values are views of the
+    # model's own parameters and buffers, which keep their data. Copying every value would hold the
+    # rank's whole shard twice; copying only inference tensors costs a caller outside inference mode
+    # (hf_ptq exports under no_grad) nothing.
     for _k in list(sharded_sd.keys()):
         sharded_sd[_k] = _to_normal(sharded_sd[_k])
     prefixes = _fused_experts_prefixes(sharded_sd)
@@ -815,7 +818,7 @@ def _distributed_save_hf_checkpoint_impl(
     # Skipped on dp-replica ranks under DP x EP (their experts are written by dp group 0).
     local_sd: dict = {}
     if write_experts:
-        for pi, prefix in enumerate(prefixes):
+        for prefix in prefixes:
             local_sd.update(
                 _split_local_fused_module(
                     prefix, sharded_sd, ep_rank=ep_rank, total_experts=total_experts
@@ -824,7 +827,7 @@ def _distributed_save_hf_checkpoint_impl(
         local_sd = postprocess_state_dict(
             local_sd, maxbound, kv_cache_format, is_modelopt_qlora, tied_map=tied_map
         )
-        # In place (see above): avoid a transient 2x copy of the per-expert split.
+        # In place: the split's tensors are its own copies, so one made contiguous replaces the old.
         for _k in list(local_sd.keys()):
             local_sd[_k] = local_sd[_k].detach().contiguous()
     # At this point local_sd holds ONLY this rank's (already split, per-expert) experts -- capture the
