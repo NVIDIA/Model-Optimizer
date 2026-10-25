@@ -28,6 +28,7 @@ from collections import Counter
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import bounded_collectives
 from torch import nn
 from torch.utils.data import (
     BatchSampler,
@@ -41,6 +42,7 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as mto_dist
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
+    ParallelState,
     _reinstall_a2a_forwards,
     distributed_forward_loop,
     set_distribution_plan,
@@ -248,13 +250,17 @@ _LEGACY_TP_MODULE = "transformers.integrations.tensor_parallel"
 
 
 class _FakeMesh:
-    """The EP device mesh; the TP wrappers only need its process group."""
+    """The EP device mesh; the TP wrappers only need its process group, the loop its size."""
 
-    def __init__(self):
+    def __init__(self, ranks=2):
         self.group = object()
+        self.ranks = ranks
 
     def get_group(self):
         return self.group
+
+    def size(self):
+        return self.ranks
 
 
 class _WrapperStyle:
@@ -495,17 +501,22 @@ def test_forward_loop_replants_a2a_wrappers_dropped_after_it_was_built(monkeypat
 
 
 @pytest.mark.parametrize(
-    ("plan", "mesh"),
-    [(_EXPERT_PARALLEL, None), (DistributionPlan(world_size=2), _FakeMesh())],
-    ids=["expert-parallel-without-mesh", "mesh-for-a-replicated-model"],
+    ("plan", "mesh", "match"),
+    [
+        (_EXPERT_PARALLEL, None, "calibrates with the ep_mesh"),
+        (DistributionPlan(world_size=2), _FakeMesh(), "calibrates with the ep_mesh"),
+        (DistributionPlan(world_size=4, ep_size=2), _FakeMesh(ranks=4), "spans 4 ranks"),
+    ],
+    ids=["expert-parallel-without-mesh", "mesh-for-a-replicated-model", "mesh-of-the-whole-world"],
 )
-def test_the_ep_mesh_comes_with_an_expert_parallel_plan_only(plan, mesh):
+def test_the_ep_mesh_is_the_plans_expert_parallel_one(plan, mesh, match):
     """Without its mesh, the experts' forward would run with no EP group at the first step; a mesh
-    for a model whose plan shards no experts would be ignored."""
+    for a model whose plan shards no experts would be ignored; and a mesh over other ranks than an
+    expert-parallel group would hand the all-to-all the wrong group."""
     model = _Recorder()
     set_distribution_plan(model, plan)
 
-    with pytest.raises(ValueError, match="calibrates with the ep_mesh"):
+    with pytest.raises(ValueError, match=match):
         distributed_forward_loop(model, [{"input_ids": torch.zeros(1, 1)}], ep_mesh=mesh)
 
 
@@ -573,3 +584,37 @@ def test_rank_local_calibration_is_refused_before_it_changes_a_distributed_model
     after = model.state_dict()
     assert after.keys() == state.keys()
     assert all(torch.equal(after[name], tensor) for name, tensor in state.items())
+
+
+def _expert_parallel_calibration_job(rank, size, seeded):
+    model = nn.Sequential(nn.Linear(16, 16))
+    if seeded:
+        # A routed expert's state under expert parallelism: its expert-parallel group (here every
+        # rank), and no other rank holding the same experts for its data-parallel group.
+        model[0]._parallel_state = ParallelState(
+            data_parallel_group=-1, expert_model_parallel_group=None
+        )
+    set_distribution_plan(model, DistributionPlan(world_size=size, ep_size=size))
+    raised = None
+    with bounded_collectives():
+        # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
+        # the shared worker down instead of failing this test alone.
+        try:
+            mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))
+        except NotImplementedError as e:
+            raised = str(e)
+    if seeded:
+        assert raised is None, raised
+    else:
+        assert raised is not None and "expert-parallel group" in raised, raised
+        assert type(model[0]) is nn.Linear  # refused before converting anything
+
+
+@pytest.mark.parametrize("seeded", [False, True], ids=["without-the-group", "seeded"])
+def test_expert_parallel_calibration_needs_the_experts_expert_parallel_group(
+    cpu_dist_workers, seeded
+):
+    """Each rank's per-expert quantizers hold its own experts, and max syncs them over the groups
+    their module's ParallelState names, every rank unless set, which would merge different experts'
+    scales. Calibration is refused before anything changes until the experts carry their group."""
+    cpu_dist_workers.run(_expert_parallel_calibration_job, seeded=seeded)
