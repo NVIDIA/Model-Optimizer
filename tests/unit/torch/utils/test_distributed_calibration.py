@@ -178,11 +178,13 @@ def test_iterable_shards_split_their_groups_across_worker_processes(monkeypatch)
 )
 def test_a_loader_that_picks_its_own_samples_is_refused(picker):
     """The rank's DistributedSampler would replace what it picks, silently calibrating on the whole
-    dataset instead, however the loader batches the picks."""
+    dataset instead, however the loader batches the picks. A lone rank has nothing to shard and
+    keeps the loader as it is."""
     loader = DataLoader(list(range(8)), collate_fn=_collate, **picker)
 
     with pytest.raises(ValueError, match="picks which samples it reads"):
         shard_dataloader(loader, 0, 2)
+    assert shard_dataloader(loader, 0, 1) is loader
 
 
 @pytest.mark.parametrize(
