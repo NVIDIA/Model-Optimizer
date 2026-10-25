@@ -27,6 +27,7 @@ rank in process, and two spawned ranks where a non-zero expert offset matters.
 import contextlib
 import copy
 import math
+import re
 import warnings
 
 import pytest
@@ -353,6 +354,10 @@ def _native_fp8_unquantized(experts):
     _unquantized(experts, ["down_proj"])
 
 
+def _fewer_experts_counted(experts):
+    experts.num_experts = NUM_EXPERTS - 1
+
+
 @LAYOUTS
 @pytest.mark.parametrize(
     ("change", "match"),
@@ -360,13 +365,15 @@ def _native_fp8_unquantized(experts):
         (_mixed, r"down_proj: weight quantizers \[1\] of 4"),
         (_native_fp8, "native FP8"),
         (_native_fp8_unquantized, "native FP8"),
+        (_fewer_experts_counted, "num_experts is 3, but the unsharded weight holds 4 experts"),
     ],
-    ids=["mixed", "native-fp8", "native-fp8-unquantized"],
+    ids=["mixed", "native-fp8", "native-fp8-unquantized", "num-experts-short"],
 )
 def test_a_projection_the_fold_cannot_write_is_refused_untouched(experts_cls, change, match):
     """One fused tensor cannot mix quantized and unquantized experts, and native FP8 weights need the
-    scale_inv the fold drops, also where a recipe leaves them unquantized. The refusal comes before
-    the other projection folds."""
+    scale_inv the fold drops, also where a recipe leaves them unquantized. A ``num_experts`` short of
+    the weight's rows would fold only the first experts. The refusal comes before the other
+    projection folds."""
     experts = _quantized_experts(experts_cls, mtq.FP8_DEFAULT_CFG)
     change(experts)
     before = {k: v.clone() for k, v in experts.state_dict().items()}
@@ -567,8 +574,9 @@ def _two_rank_split_job(rank, world_size):
         _export_fused_experts_keep_fused(_shard_fused_weights(lone, mesh), torch.bfloat16)
 
     # Expert parallelism leaves a rank only its own experts' quantizers, in shard order, under a
-    # fused weight spanning every expert. Kept last: without that pairing rank 1 alone fails, and
-    # no collective follows for rank 0 to wait in.
+    # fused weight spanning every expert. Kept last, with the joint decision below: without that
+    # pairing rank 1 alone fails, and rank 0 then waits only in the collectives below, which the
+    # worker pool ends once a rank has failed.
     experts = _quantized_experts(_KeepFusedGatedExperts, mtq.NVFP4_DEFAULT_CFG)
     plain = _keep_fused_export(experts)
     n_local = NUM_EXPERTS // world_size
@@ -593,13 +601,49 @@ def _two_rank_split_job(rank, world_size):
         else:
             assert torch.equal(_raw_bytes(value), _raw_bytes(plain[key])), key
 
+    # Each rank sees only its own experts' quantizers there, so the ranks decide on a projection
+    # together: rank 1 disabling some or all of its experts' is refused on both ranks, rather than
+    # folded on rank 0 alone, and every expert disabled leaves the projection as it is on both.
+    for disabled in ([3], [2, 3], [0, 1, 2, 3]):
+        sharded = sharded_keeping_quantizers(mine)
+        for expert, quantizer in enumerate(sharded.down_proj_weight_quantizers, start=mine.start):
+            if expert in disabled:
+                quantizer.disable()
+        if len(disabled) < NUM_EXPERTS:
+            with pytest.raises(NotImplementedError, match=re.escape(f"quantizers {disabled} of 4")):
+                _export_fused_experts_keep_fused(sharded, torch.bfloat16)
+        else:
+            _export_fused_experts_keep_fused(sharded, torch.bfloat16)
+            assert hasattr(sharded, "gate_up_proj_weight_scale")
+            assert not hasattr(sharded, "down_proj_weight_scale")
+
 
 def test_two_ranks_fold_and_split_their_own_experts_under_global_indices(cpu_dist_workers):
     """Rank 1 holds experts 2-3: each must be folded with ITS quantizer and keep its index, and the
     fused tensors stay sharded on the expert axis at their global shape, an uneven shard included.
-    Its quantizers are every expert's (FSDP2) or, under expert parallelism, its own two. A layout
-    that leaves a rank no expert, or quantizers that are neither, is refused on every rank."""
+    Its quantizers are every expert's (FSDP2) or, under expert parallelism, its own two, and then
+    the ranks decide on each projection's quantization together. A layout that leaves a rank no
+    expert, or quantizers that are neither, is refused on every rank."""
     cpu_dist_workers.run(_two_rank_split_job)
+
+
+@pytest.mark.parametrize(
+    ("mesh_shape", "placements"),
+    [((1,), [Shard(2)]), ((1, 1), [Shard(0), Shard(0)])],
+    ids=["off-the-expert-axis", "over-two-mesh-dims"],
+)
+def test_a_fused_weight_sharded_other_than_by_expert_is_refused(
+    gloo_world_of_one, mesh_shape, placements
+):
+    """The fold shards the scales on the expert axis alone, and the ranks agree on their experts
+    over one mesh dim: the scales of another layout would claim one rank's slice as the whole."""
+    experts = _quantized_experts(_KeepFusedGatedExperts, mtq.FP8_DEFAULT_CFG)
+    mesh = init_device_mesh("cpu", mesh_shape)
+    weight = distribute_tensor(experts.down_proj.data, mesh, placements)
+    experts.down_proj = nn.Parameter(weight, requires_grad=False)
+
+    with pytest.raises(NotImplementedError, match="sharded over one mesh dim"):
+        _export_fused_experts_keep_fused(experts, torch.bfloat16)
 
 
 # ------------------------------------------------------------------ export handlers
