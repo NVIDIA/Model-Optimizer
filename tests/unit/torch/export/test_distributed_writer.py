@@ -48,6 +48,7 @@ from transformers import AutoModelForCausalLM, LlamaConfig, MixtralConfig, Qwen2
 from transformers.core_model_loading import Chunk, WeightConverter
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export import distributed_writer, quant_aware_conversion
 from modelopt.torch.export.distributed_writer import (
     _even_bins,
     _is_full_world_shard0,
@@ -805,10 +806,22 @@ def test_distributed_save_writes_the_hub_checkpoint_of_a_sharded_moe(
     A caller in inference mode hands the writer inference tensors, which its writes reject. Extra
     tensors already carry hub names, so the reverse conversion must not rename them: the first is
     named like an in-memory Mixtral expert weight, which the reverse would turn into
-    ``block_sparse_moe.experts.0.w1``.
+    ``block_sparse_moe.experts.0.w1``. Only an inference tensor is copied before the transfer: the
+    dense shards reach it as the model holds them, since a copy would only add to the rank's memory.
     """
     src = _save(_mixtral_config(tie_word_embeddings=case == "tied"), tmp_path / "src")
     model = _fsdp2_shard(_load(src), gloo_world_of_one)
+    shards = {p.to_local().untyped_storage().data_ptr() for p in model.parameters()}
+    moved = []  # per dense DTensor reaching the transfer: whether it is the model's own shard
+
+    def materialize_owned(local_sd, *args):
+        moved.extend(
+            v.to_local().untyped_storage().data_ptr() in shards
+            for v in local_sd.values()
+            if isinstance(v, DTensor)
+        )
+        return _materialize_owned(local_sd, *args)
+
     want = load_file(str(src / "model.safetensors"))
     extra = None
     if case == "extra-state-dict":
@@ -822,7 +835,10 @@ def test_distributed_save_writes_the_hub_checkpoint_of_a_sharded_moe(
     elif case == "inference-mode":
         want["model.norm.weight_scale"] = torch.tensor(0.5)
 
-    with torch.inference_mode(case == "inference-mode"):
+    with (
+        torch.inference_mode(case == "inference-mode"),
+        mock.patch.object(distributed_writer, "_materialize_owned", materialize_owned),
+    ):
         if case == "inference-mode":
             # Made in inference mode, like the scales an inference-mode pack registers.
             model.model.norm.register_buffer("weight_scale", torch.full((), 0.5))
@@ -830,6 +846,7 @@ def test_distributed_save_writes_the_hub_checkpoint_of_a_sharded_moe(
 
     assert len(list((tmp_path / "export").glob("*.safetensors"))) > 1
     _assert_byte_identical(_load_checkpoint(tmp_path / "export"), want)
+    assert moved and all(moved), moved
 
 
 @pytest.mark.parametrize("wrap_root", [True, False], ids=["root-wrapped", "layers-only"])
