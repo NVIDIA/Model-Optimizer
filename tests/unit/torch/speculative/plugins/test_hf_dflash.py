@@ -1727,3 +1727,70 @@ class TestTeacherLogits:
         ).loss.backward()
         assert len(seen) == 2, seen  # the draft's logits, then the KD teacher rows
         assert (bsz, SEQ_LEN, hidden) not in seen, seen
+
+
+class TestDFlashFusedLoss:
+    """``dflash_fused_loss`` trains exactly what the loss on materialized logits trains."""
+
+    @staticmethod
+    def _step(fused, offline, **overrides):
+        """One training step's output and draft gradients, from fixed weights, data and anchors."""
+        torch.manual_seed(0)
+        model = get_tiny_llama(num_hidden_layers=4)
+        if offline:
+            model.config.num_orig_hidden_layers = 4
+        config = get_dflash_config(offline=offline)
+        config.update(dflash_fused_loss=fused, **overrides)
+        mtsp.convert(model, [("dflash", config)])
+        model.float().train()  # fp32, so the two paths differ only by rounding
+        batch = _dflash_batch(model.config.vocab_size)
+        if offline:
+            hidden = model.config.hidden_size
+            batch["base_model_outputs"] = {
+                "aux_hidden_states": torch.randn(2, SEQ_LEN, len(model.target_layer_ids) * hidden),
+                "base_model_hidden_states": torch.randn(2, SEQ_LEN, hidden),
+            }
+        torch.manual_seed(1)
+        out = model(**batch)
+        out.loss.backward()
+        params = model.dflash_module.named_parameters()
+        return out, {name: p.grad for name, p in params if p.grad is not None}
+
+    @pytest.mark.parametrize(
+        ("offline", "overrides"),
+        [
+            (False, {}),  # KD on the base's logits, D-PACE weighting
+            (True, {"dflash_loss_objective": "decay", "dflash_loss_decay_factor": 4.0}),
+            (False, {"dflash_self_logit_distillation": False}),  # cross-entropy, D-PACE
+        ],
+        ids=["kd-online", "kd-offline-decay", "ce"],
+    )
+    def test_matches_the_materialized_logits(self, offline, overrides):
+        eager, eager_grads = self._step(False, offline, **overrides)
+        fused, fused_grads = self._step(True, offline, **overrides)
+        torch.testing.assert_close(fused.loss, eager.loss)
+        assert fused.train_acc == eager.train_acc
+        assert fused_grads.keys() == eager_grads.keys()
+        for name, grad in eager_grads.items():
+            torch.testing.assert_close(fused_grads[name], grad, msg=name)
+
+    @pytest.mark.parametrize(
+        ("overrides", "arch", "hook_lm_head"),
+        [
+            ({}, {"projector_type": "dspark", "markov_rank": 4}, False),
+            ({}, {"projector_type": "domino", "gru_hidden_dim": 8, "emb_dim": 8}, False),
+            ({"dflash_freeze_base_model": False}, {}, False),
+            ({}, {}, True),
+        ],
+        ids=["dspark", "domino", "trainable-lm-head", "hooked-lm-head"],
+    )
+    def test_unsupported_setups_are_rejected(self, overrides, arch, hook_lm_head):
+        """Each would make the fused pass skip a term or a gradient the eager loss has."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        if hook_lm_head:
+            model.lm_head.register_forward_hook(lambda module, args, output: output * 2)
+        config = get_dflash_config()
+        config.update(dflash_fused_loss=True, **overrides)
+        config["dflash_architecture_config"].update(arch)
+        with pytest.raises(ValueError, match="dflash_fused_loss"):
+            mtsp.convert(model, [("dflash", config)])

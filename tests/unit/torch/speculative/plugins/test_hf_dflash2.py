@@ -384,6 +384,34 @@ class TestDFlash2Forward:
         assert out["selector_metrics"]["selector_accuracy"].item() > 0.9
         assert out["selector_metrics"]["selector_coverage"].item() > 0.9
 
+    @pytest.mark.parametrize("lk_loss_type", ["ce", "lambda"])
+    def test_fused_loss_matches_the_materialized_logits(self, lk_loss_type):
+        """The selector's top-k and its gradient come out of the fused pass unchanged."""
+        results = []
+        for fused in (False, True):
+            torch.manual_seed(0)
+            model = get_tiny_llama(num_hidden_layers=4)
+            config = _get_dflash2_config()
+            config.update(dflash_fused_loss=fused, dflash_lk_loss_type=lk_loss_type)
+            mtsp.convert(model, [("dflash", config)])
+            model.float().train()  # fp32, so the two paths differ only by rounding
+            with torch.no_grad():  # a live selector, so its gradient reaches the backbone
+                torch.nn.init.normal_(model.dflash_module.candidate_selector.successor_codebook)
+            input_ids, attention_mask, labels = _make_batch(model.dflash_config.vocab_size)
+            torch.manual_seed(1)
+            out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            out.loss.backward()
+            params = model.dflash_module.named_parameters()
+            results.append((out, {name: p.grad for name, p in params if p.grad is not None}))
+        (eager, eager_grads), (fused, fused_grads) = results
+        torch.testing.assert_close(fused.loss, eager.loss)
+        assert fused.train_acc == eager.train_acc
+        for key, value in eager["selector_metrics"].items():
+            torch.testing.assert_close(fused["selector_metrics"][key], value, msg=key)
+        assert fused_grads.keys() == eager_grads.keys()
+        for name, grad in eager_grads.items():
+            torch.testing.assert_close(fused_grads[name], grad, msg=name)
+
 
 class TestCandidateSelectorAlignment:
     """Pin the offset convention shared by the training objective and the lattice walk."""

@@ -37,6 +37,7 @@ Changelog
 - Add support for the `SPEED-Bench v1.1 <https://huggingface.co/datasets/nvidia/SPEED-Bench>`_ dataset.
 - With ``training.dataloader_num_workers`` > 0, ``examples/speculative_decoding/main.py`` now yields each training batch as soon as a worker finishes it, so one slow sample, such as a slow hidden-state fetch in streaming training, no longer stalls every DDP rank. Sample order within the prefetch window is then no longer deterministic; set ``training.dataloader_in_order=true`` to restore it (context-parallel and ``full_determinism`` runs always keep it).
 - The ``general/speculative_decoding/dflash2`` recipe now enables ``dflash_use_torch_compile`` and ``dflash_use_flex_attention``, and turns ``tf32`` off, which compilation needs on PyTorch 2.9 and 2.10. To train eagerly as before, start the run with ``dflash.dflash_use_torch_compile=false dflash.dflash_use_flex_attention=false``; a run resumed from a checkpoint keeps the checkpoint's DFlash settings.
+- Add ``dflash_fused_loss`` to the DFlash config. DFlash, DFlash2 and LiLiCorr training then computes its loss in row chunks fused with the frozen ``lm_head`` projection instead of materializing the draft's full-vocabulary logits, which saves time and memory on large vocabularies.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
