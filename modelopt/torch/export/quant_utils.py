@@ -897,8 +897,11 @@ def to_quantized_weight(
             # Clear GPU cache to avoid pontential GPU OOM issues for large models.
             clear_cuda_cache()
             return (weight / weights_scaling_factor.unsqueeze(-1)).to(torch.float8_e4m3fn)
-        # Divide in float32 like fake quantization: a 0-d scale would not promote a bf16 weight.
-        return (weight.float() / weights_scaling_factor).to(torch.float8_e4m3fn)
+        # A 0-d scale would not promote a bf16 weight, so the division would round in bf16 instead of
+        # float32 like fake quantization. A 1-d scale promotes in-kernel, without a float32 copy.
+        if weights_scaling_factor.dim() == 0:
+            weights_scaling_factor = weights_scaling_factor.reshape(1)
+        return (weight / weights_scaling_factor).to(torch.float8_e4m3fn)
 
     if quantization in [QUANTIZATION_INT8_SQ, QUANTIZATION_INT8_WO]:
         return (weight / weights_scaling_factor[:, None]).round().clamp(-128, 127).to(torch.int8)
