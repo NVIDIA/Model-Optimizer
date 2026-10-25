@@ -617,6 +617,26 @@ class StaticBlockwiseFP4FakeQuantFunction(Function):
         return _fake_quant_backward_function(ctx, grad_outputs, num_args=len(ctx.needs_input_grad))
 
 
+class StackedNVFP4FakeQuantFunction(Function):
+    """Dynamic NVFP4 fake quantization of stacked tensors, one global amax per slice of dim 0.
+
+    Matches a separate :func:`dynamic_block_quant` call per slice (e.g. per expert of a fused
+    ``(E, N, K)`` weight) in a single kernel launch.
+    """
+
+    @staticmethod
+    def forward(ctx, inputs, amax, pass_through_bwd=True):
+        """Forward method; ``amax`` holds one value per slice of ``inputs`` along dim 0."""
+        clip_amax = amax.reshape(-1, *([1] * (inputs.dim() - 1)))
+        _save_for_backward_if_needed(ctx, pass_through_bwd, inputs, clip_amax)
+        return triton_kernel.fp4_fake_quant_block(inputs, amax)
+
+    @staticmethod
+    def backward(ctx, grad_outputs):
+        """Implements straight through estimation with clipping."""
+        return _fake_quant_backward_function(ctx, grad_outputs, num_args=3)
+
+
 def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
     """Shared function body between TensorQuantFunction and FakeTensorQuantFunction."""
     # Fine scale, per channel scale will be handled by broadcasting, which could be tricky. Pop a warning.
@@ -716,5 +736,6 @@ fake_tensor_quant = FakeTensorQuantFunction.apply
 scaled_e4m3 = ScaledE4M3Function.apply
 dynamic_block_quant = DynamicBlockQuantizationFunction.apply
 static_blockwise_fp4_fake_quant = StaticBlockwiseFP4FakeQuantFunction.apply
+stacked_nvfp4_fake_quant = StackedNVFP4FakeQuantFunction.apply
 fp4_cast_ste = FP4CastSTEFunction.apply
 int_cast_ste = IntCastSTEFunction.apply

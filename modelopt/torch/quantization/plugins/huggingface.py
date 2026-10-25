@@ -31,6 +31,7 @@ from torch.nn.functional import linear
 from transformers.integrations.finegrained_fp8 import FP8Experts, FP8Linear
 from transformers.models.t5.modeling_t5 import T5Attention
 
+import modelopt.torch.kernels.quantization.gemm as triton_kernel
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_FA_AVAILABLE
 from modelopt.torch.kernels.common.attention import (
     triton_attention_forward,
@@ -40,6 +41,7 @@ from modelopt.torch.kernels.quantization.gemm import IS_AVAILABLE as IS_TRITON_A
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils.distributed import ParallelState
 
+from .. import tensor_quant
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import register
 from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantizer
@@ -776,6 +778,53 @@ def _get_fused_expert_intermediate_dim(module):
     return module.gate_up_proj.shape[1] // 2
 
 
+def _stacked_nvfp4_amax(weight: torch.Tensor, quantizers: nn.ModuleList) -> torch.Tensor | None:
+    """The experts' weight amaxes as one ``(num_experts,)`` tensor, or ``None``.
+
+    Only when one stacked NVFP4 kernel reproduces every expert's own quantizer exactly: each is a
+    calibrated dynamic-NVFP4 fake quantizer with a per-tensor amax, all with the same backward, and
+    none is calibrating, adds a pre-quant scale, rotation or custom backend, or has hooks that
+    expect its own forward to run.
+    """
+    if (
+        tensor_quant.DISABLE_TRITON_KERNEL
+        or not IS_TRITON_AVAILABLE
+        or not hasattr(triton_kernel, "fp4_fake_quant_block")
+        or not weight.is_cuda
+        or isinstance(weight, torch.distributed.tensor.DTensor)
+        or weight.shape[0] != len(quantizers)
+    ):
+        return None
+    pass_through_bwd = quantizers[0]._pass_through_bwd
+    amaxes = []
+    for q in quantizers:
+        amax = getattr(q, "_amax", None)
+        if not (
+            type(q) is TensorQuantizer
+            and q.is_enabled
+            and q._if_quant
+            and q._fake_quant
+            and not q._if_calib
+            and q.is_nvfp4_dynamic
+            and q.block_sizes.get(-1) == 16
+            and q.backend is None
+            and q.pre_quant_scale is None
+            and not q.rotate_is_enabled
+            and not q.rotate_back_is_enabled
+            and not q._use_constant_amax
+            and q._pass_through_bwd == pass_through_bwd
+            and not (q._forward_hooks or q._forward_pre_hooks)
+            and amax is not None
+            and amax.numel() == 1
+            # A clipped backward compares weight and amax: in one dtype, type promotion cannot
+            # change the result.
+            and (pass_through_bwd or amax.dtype == weight.dtype)
+        ):
+            return None
+        amaxes.append(amax.reshape(1))
+    return torch.cat(amaxes).to(weight.device)
+
+
 class _QuantFusedExperts(_QuantFunctionalMixin):
     """Generic quantized wrapper for HuggingFace fused MoE expert modules.
 
@@ -859,6 +908,8 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
 
         self._register_temp_attribute("_down_proj_linear", False)
         self._register_temp_attribute("_current_expert_idx", 0)
+        # Per forward: each projection's experts, fake-quantized together (see _quantized_weight).
+        self._register_temp_attribute("_stacked_weights", {})
 
     @property
     def functionals_to_replace(self):
@@ -871,15 +922,18 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             if self._down_proj_linear:
                 idx = self._current_expert_idx
                 input = self.down_proj_input_quantizer(input)
-                weight = self.down_proj_weight_quantizers[idx](
-                    self.get_expert_weight("down_proj", idx, input.dtype)
+                weight = self._quantized_weight(
+                    "down_proj", self.down_proj_weight_quantizers, idx, input.dtype
                 )
             else:
                 idx = self._get_expert_idx_from_first_proj(weight)
                 self._current_expert_idx = idx
                 input = getattr(self, self._first_proj_input_quantizer_attr)(input)
-                weight = getattr(self, self._first_proj_weight_quantizers_attr)[idx](
-                    self.get_expert_weight(self._first_proj_attr, idx, input.dtype)
+                weight = self._quantized_weight(
+                    self._first_proj_attr,
+                    getattr(self, self._first_proj_weight_quantizers_attr),
+                    idx,
+                    input.dtype,
                 )
             self._down_proj_linear = not self._down_proj_linear
             return _orig_linear(input, weight, bias)
@@ -888,9 +942,44 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             (torch.nn.functional, "linear", _quantized_linear),
         ]
 
+    def _quantized_weight(self, name, quantizers, idx, dtype):
+        """Expert ``idx``'s ``name`` projection, fake-quantized by its own weight quantizer.
+
+        Calibrated NVFP4 experts are fake-quantized all at once, by one kernel launch on the
+        projection's first call of the forward, instead of one launch per expert.
+        """
+        if name not in self._stacked_weights:
+            weight = getattr(self, name)
+            # Without autograd the per-expert path is cheaper: it quantizes only the routed experts,
+            # one at a time. A subclass that rebuilds each expert's weight (FP8 dequant) keeps it too.
+            amax = (
+                _stacked_nvfp4_amax(weight, quantizers)
+                if torch.is_grad_enabled()
+                and type(self).get_expert_weight is _QuantFusedExperts.get_expert_weight
+                else None
+            )
+            # unbind's backward writes one gradient for all experts; weight[idx] per expert would
+            # write a full-size one each.
+            self._stacked_weights[name] = (
+                None
+                if amax is None
+                else tensor_quant.stacked_nvfp4_fake_quant(
+                    weight, amax, quantizers[0]._pass_through_bwd
+                ).unbind(0)
+            )
+        stacked = self._stacked_weights[name]
+        if stacked is None:
+            return quantizers[idx](self.get_expert_weight(name, idx, dtype))
+        return stacked[idx]
+
     def forward(self, *args, **kwargs):
         self._down_proj_linear = False
-        return super().forward(*args, **kwargs)
+        self._stacked_weights = {}
+        try:
+            return super().forward(*args, **kwargs)
+        finally:
+            # Autograd keeps what backward needs; holding more would pin every expert's copy.
+            self._stacked_weights = {}
 
     def get_expert_weight(self, name, idx, dtype=None):
         """Return one expert's projection in the calibration/export weight domain."""
