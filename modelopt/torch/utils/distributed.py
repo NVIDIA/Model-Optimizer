@@ -813,9 +813,11 @@ def _reinstall_a2a_forwards(model, ep_mesh) -> int:
     ``torch_a2a_experts_forward`` receives ``process_group=None`` and raises.
 
     Called at the top of the calibration loop: after conversion (so it wraps the QUANTIZED forward)
-    and before the first forward. Idempotent via a per-module flag, so repeated calibration passes
-    do not stack wrappers (which would inject the process_group argument twice). ``ep_mesh`` is the
-    mesh the routed experts are sharded over; without one there is nothing to re-plant.
+    and before the first forward. A module whose forward is still the wrapper planted here is
+    skipped, so repeated calibration passes do not stack wrappers; one whose forward was rebound
+    since (another conversion, or an export restoring an earlier forward) is planted again.
+    ``ep_mesh`` is the mesh the routed experts are sharded over; without one there is nothing to
+    re-plant.
     """
     if ep_mesh is None:
         return 0
@@ -843,15 +845,15 @@ def _reinstall_a2a_forwards(model, ep_mesh) -> int:
         return 0
     n = 0
     for name, mod in model.named_modules():
-        if getattr(mod, "_modelopt_a2a_forward_reinstalled", False):
-            continue
+        if mod.forward is getattr(mod, "_modelopt_a2a_forward", None):
+            continue  # the wrapper planted here is still in place
         style_name = _get_parameter_tp_plan(parameter_name=name, tp_plan=plan, is_weight=False)
         if (
             style_name in ("torch_a2a_experts", "torch_a2a_router")
             and style_name in ALL_PARALLEL_STYLES
         ):
             ALL_PARALLEL_STYLES[style_name].install_forward(mod, ep_mesh)
-            mod._modelopt_a2a_forward_reinstalled = True
+            mod._modelopt_a2a_forward = mod.forward
             n += 1
     if n and is_master():
         print(

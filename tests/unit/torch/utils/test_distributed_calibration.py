@@ -24,7 +24,7 @@ are faked here; everything runs in one CPU process.
 import re
 import sys
 import types
-from collections import Counter
+from collections import Counter, OrderedDict
 
 import pytest
 import torch
@@ -477,10 +477,11 @@ def test_forward_loop_frees_the_allocator_cache_around_the_forwards(monkeypatch,
 def test_forward_loop_replants_a2a_wrappers_dropped_after_it_was_built(monkeypatch):
     """hf_ptq's order -- build the loop, insert quantizers, calibrate -- hands the experts the EP group.
 
-    It holds on every pass (multi-pass algorithms call the loop again), with one wrapper per module.
-    Only the planned torch_a2a experts and routers are re-wrapped: other TP styles keep their forward,
-    and so do the quantizers under an experts module, since the plan is looked up per module
-    (``is_weight=False``) and children do not inherit their parent's style.
+    It holds on every pass (multi-pass algorithms call the loop again), with one wrapper per module,
+    and again once another conversion drops the wrappers anew. Only the planned torch_a2a experts
+    and routers are re-wrapped: other TP styles keep their forward, and so do the quantizers under an
+    experts module, since the plan is looked up per module (``is_weight=False``) and children do not
+    inherit their parent's style.
     """
     styles = _install_fake_tp(monkeypatch)
     model, mesh = _MoEModel(), _FakeMesh()
@@ -493,9 +494,12 @@ def test_forward_loop_replants_a2a_wrappers_dropped_after_it_was_built(monkeypat
 
     forward_loop(model)
     forward_loop(model)
+    for layer in model.layers:
+        _drop_tp_wrapper(layer.experts)
+    forward_loop(model)
 
-    assert [layer.experts.groups for layer in model.layers] == [[mesh.group] * 6] * 2
-    assert styles["torch_a2a_experts"].installed == [layer.experts for layer in model.layers]
+    assert [layer.experts.groups for layer in model.layers] == [[mesh.group] * 9] * 2
+    assert styles["torch_a2a_experts"].installed == [layer.experts for layer in model.layers] * 2
     assert styles["torch_a2a_router"].installed == [layer.gate for layer in model.layers]
     assert styles["colwise"].installed == []
 
@@ -586,13 +590,23 @@ def test_rank_local_calibration_is_refused_before_it_changes_a_distributed_model
     assert all(torch.equal(after[name], tensor) for name, tensor in state.items())
 
 
-def _expert_parallel_calibration_job(rank, size, seeded):
-    model = nn.Sequential(nn.Linear(16, 16))
-    if seeded:
-        # A routed expert's state under expert parallelism: its expert-parallel group (here every
-        # rank), and no other rank holding the same experts for its data-parallel group.
-        model[0]._parallel_state = ParallelState(
-            data_parallel_group=-1, expert_model_parallel_group=None
+# {module: (data_parallel_group, expert_model_parallel_group)} each layout seeds. With the experts
+# sharded over every rank, their expert-parallel group is every rank (None), and no other rank holds
+# the same experts (-1: no data-parallel group).
+_EXPERT_LAYOUTS = {
+    "seeded": {"experts": (-1, None)},
+    "without-the-group": {},
+    "on-the-router-only": {"gate": (-1, None)},
+    "data-parallel-over-every-rank": {"experts": (None, None)},
+}
+
+
+def _expert_parallel_calibration_job(rank, size, layout):
+    # A router and a routed expert, named as expert-parallel plans name the experts' container.
+    model = nn.Sequential(OrderedDict(gate=nn.Linear(16, 16), experts=nn.Linear(16, 16)))
+    for name, (dp, ep) in _EXPERT_LAYOUTS[layout].items():
+        model.get_submodule(name)._parallel_state = ParallelState(
+            data_parallel_group=dp, expert_model_parallel_group=ep
         )
     set_distribution_plan(model, DistributionPlan(world_size=size, ep_size=size))
     raised = None
@@ -603,18 +617,22 @@ def _expert_parallel_calibration_job(rank, size, seeded):
             mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))
         except NotImplementedError as e:
             raised = str(e)
-    if seeded:
+    if layout == "seeded":
         assert raised is None, raised
-    else:
-        assert raised is not None and "expert-parallel group" in raised, raised
-        assert type(model[0]) is nn.Linear  # refused before converting anything
+        return
+    assert raised is not None and "expert-parallel group" in raised, raised
+    # Refused before converting anything, but for unseeded experts beside a seeded router: those
+    # are told apart once quantization has converted them, and refused before they calibrate.
+    assert (type(model.experts) is nn.Linear) == (layout != "on-the-router-only")
 
 
-@pytest.mark.parametrize("seeded", [False, True], ids=["without-the-group", "seeded"])
+@pytest.mark.parametrize("layout", list(_EXPERT_LAYOUTS))
 def test_expert_parallel_calibration_needs_the_experts_expert_parallel_group(
-    cpu_dist_workers, seeded
+    cpu_dist_workers, layout
 ):
     """Each rank's per-expert quantizers hold its own experts, and max syncs them over the groups
     their module's ParallelState names, every rank unless set, which would merge different experts'
-    scales. Calibration is refused before anything changes until the experts carry their group."""
-    cpu_dist_workers.run(_expert_parallel_calibration_job, seeded=seeded)
+    scales. Calibration is refused until the experts carry their groups: with no expert-parallel
+    group at all, with one on the router alone, and with a data-parallel group spanning ranks that
+    hold other experts."""
+    cpu_dist_workers.run(_expert_parallel_calibration_job, layout=layout)
