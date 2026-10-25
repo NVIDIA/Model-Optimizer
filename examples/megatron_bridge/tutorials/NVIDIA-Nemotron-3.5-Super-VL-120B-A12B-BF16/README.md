@@ -14,7 +14,7 @@ The PTQ recipe is the same as the one used for the released [`nvidia/NVIDIA-Nemo
 
 ## Results
 
-All checkpoints were served with the same vLLM settings (see [Section 5](#5-evaluation-and-serving)), MMLU-ProX at `--max-model-len 32768` for all three; the quantized ones with an FP8 KV cache. BF16 is the mean of two runs.
+All checkpoints were served with the same vLLM settings (see [Section 5](#5-evaluation-and-serving)), MMLU-ProX at `--max-model-len 32768` for all three; the quantized ones with an FP8 KV cache.
 
 | Benchmark | BF16 (teacher) | W4A4 PTQ | W4A4 QAD (600 iters) |
 | --- | --- | --- | --- |
@@ -164,15 +164,23 @@ torchrun --nproc_per_node 4 /opt/Model-Optimizer/examples/megatron_bridge/export
 
 ### 5. Evaluation and Serving
 
-Serve with vLLM on one 4-GPU GB300 node, TP=4 with expert parallelism. Quantized checkpoints use these engine arguments; the BF16 baseline uses `--kv-cache-dtype auto`.
+Serve with vLLM on one 4-GPU GB300 node, TP=4 with expert parallelism. The results above used:
 
-| Setting | Value |
-| --- | --- |
-| `--kv-cache-dtype` | `fp8` |
-| `--max-model-len` | 262144 (32768 for MMLU-ProX) |
-| `--mamba-ssm-cache-dtype` | `float16` |
-| `--mamba-cache-dtype` | `float32` |
-| `--enable-mamba-cache-stochastic-rounding` | on |
-| `--mamba-cache-philox-rounds` | 5 |
-| Reasoning parser | `nemotron_v3` |
-| Chat template | the checkpoint's `chat_template.jinja` |
+```bash
+vllm serve /path/to/nemotron_3_5_super_vl_w4a4_hf \
+    --tensor-parallel-size 4 --enable-expert-parallel \
+    --trust-remote-code \
+    --max-model-len 262144 \
+    --kv-cache-dtype fp8 \
+    --mamba-ssm-cache-dtype float16 \
+    --mamba-cache-dtype float32 \
+    --enable-mamba-cache-stochastic-rounding \
+    --mamba-cache-philox-rounds 5 \
+    --reasoning-parser nemotron_v3 \
+    --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+    --chat-template /path/to/nemotron_3_5_super_vl_w4a4_hf/chat_template.jinja \
+    --enable-prefix-caching --enable-chunked-prefill \
+    --gpu-memory-utilization 0.8
+```
+
+MMLU-ProX was served with `--max-model-len 32768`. The BF16 baseline uses `--kv-cache-dtype auto`.
