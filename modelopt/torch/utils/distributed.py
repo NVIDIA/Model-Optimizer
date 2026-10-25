@@ -503,8 +503,10 @@ def distributed_run(
 
     On a distributed launch (``WORLD_SIZE>1``) this sets the process group up, binding this rank's
     CUDA device, with ``timeout``, unless the caller set one up already. It yields this rank's
-    :class:`DistributedState`, on that CUDA device, and refuses any other ``device``. A single
-    process sets nothing up and is rank 0 of a run of one, on ``device``.
+    :class:`DistributedState`, on that CUDA device, and refuses any other ``device``. Without a
+    launch it sets nothing up, and the state is on ``device``. The state's rank and size are always
+    the live group's, which the block's collectives run on: rank 0 of a run of one for a single
+    process, and this rank's place in a group the caller set up without the launch's environment.
 
     On exit, even if the body raises, it destroys the group the run set up: the launch's, or one the
     body set up, such as the one-rank group a single process's FSDP2 load shards through. A group
@@ -523,13 +525,12 @@ def distributed_run(
     if launched and not group_was_there:
         setup(timeout=timeout)
     # The body's own exception: sys.exc_info() would also report one a caller up the stack is
-    # handling, which would make a clean exit from a run entered in an except block abort the rank.
+    # handling, which would make a clean exit from a run entered in an except block abort the rank,
+    # or destroy its group without the barrier.
     exc: BaseException | None = None
     try:
-        yield (
-            DistributedState(rank(), size(), torch.device(f"cuda:{local_rank()}"))
-            if launched
-            else DistributedState(0, 1, device)
+        yield DistributedState(
+            rank(), size(), torch.device(f"cuda:{local_rank()}") if launched else device
         )
     except BaseException as e:
         exc = e
@@ -553,7 +554,7 @@ def distributed_run(
             traceback.print_exc()
             sys.stderr.flush()
         if owns_group:
-            cleanup()
+            _destroy_group(exc)
 
 
 def cleanup():
@@ -564,8 +565,16 @@ def cleanup():
     That is not sufficient on its own -- ``destroy_process_group`` below blocks for the same reason
     -- so error paths must call :func:`abort` before reaching this ``finally``.
     """
+    _destroy_group(sys.exc_info()[1])
+
+
+def _destroy_group(exc: BaseException | None) -> None:
+    """:func:`cleanup` for a rank unwinding from ``exc``, or from nothing if it is ``None``.
+
+    For a caller that knows what it unwinds from: :func:`cleanup` reads ``sys.exc_info()``, which
+    also reports an exception a caller up the stack is handling.
+    """
     if is_initialized():
-        exc = sys.exception()
         if exc is None or isinstance(exc, SystemExit):
             with suppress(Exception):
                 barrier()

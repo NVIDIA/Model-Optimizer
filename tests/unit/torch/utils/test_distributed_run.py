@@ -337,7 +337,7 @@ def test_a_single_process_is_rank_0_of_one_on_the_given_device(monkeypatch):
     """With no ranks to sync with, the run sets no group up and tears none down."""
     monkeypatch.delenv("WORLD_SIZE", raising=False)
     monkeypatch.setattr(dist, "setup", lambda **kwargs: pytest.fail("set a group up"))
-    monkeypatch.setattr(dist, "cleanup", lambda: pytest.fail("tore a group down"))
+    monkeypatch.setattr(dist, "_destroy_group", lambda exc: pytest.fail("tore a group down"))
     with distributed_run(device="cpu") as state:
         assert state == DistributedState(rank=0, world_size=1, device="cpu")
         assert state.is_main
@@ -347,7 +347,7 @@ def test_a_distributed_launch_yields_this_ranks_state_on_its_cuda_device(monkeyp
     monkeypatch.setenv("WORLD_SIZE", "4")
     timeouts = []
     monkeypatch.setattr(dist, "setup", lambda timeout=None: timeouts.append(timeout))
-    monkeypatch.setattr(dist, "cleanup", lambda: None)
+    monkeypatch.setattr(dist, "_destroy_group", lambda exc: None)
     monkeypatch.setattr(dist, "rank", lambda group=None: 2)
     monkeypatch.setattr(dist, "size", lambda group=None: 4)
     monkeypatch.setattr(dist, "local_rank", lambda: 1)
@@ -375,11 +375,11 @@ class _ExitedError(Exception):
 @pytest.mark.parametrize(
     ("launch", "body_raises", "ends_by"),
     [
-        (True, None, "cleanup"),
-        (True, ValueError, "abort"),
-        (True, SystemExit, "cleanup"),
-        (False, None, "cleanup"),
-        (False, ValueError, "cleanup"),
+        (True, None, ["barrier", "destroy"]),
+        (True, ValueError, ["abort"]),
+        (True, SystemExit, ["barrier", "destroy"]),
+        (False, None, ["barrier", "destroy"]),
+        (False, ValueError, ["destroy"]),
     ],
     ids=["launch", "launch-raises", "launch-exits", "single-process", "single-process-raises"],
 )
@@ -387,10 +387,11 @@ def test_the_run_ends_the_group_it_set_up(
     monkeypatch, capsys, launch, body_raises, ends_by, in_except
 ):
     """The launch's group, or the one a single process's FSDP2 load sets up mid-run, is destroyed on
-    the way out. A rank of several whose body raised exits through abort() instead, and torchrun tears
-    the job down: the cleanup's barrier and destroy_process_group would wait on peers that may sit in
-    a collective this rank never reaches. Every rank reaches an intentional exit. Only the body's own
-    exception counts, not one the caller is handling where it entered the run."""
+    the way out, after a barrier unless the body raised. A rank of several whose body raised exits
+    through abort() instead, and torchrun tears the job down: the barrier and destroy_process_group
+    would wait on peers that may sit in a collective this rank never reaches. Every rank reaches an
+    intentional exit. Only the body's own exception counts, not one the caller is handling where it
+    entered the run."""
     if launch:
         monkeypatch.setenv("WORLD_SIZE", "2")
     else:
@@ -401,14 +402,15 @@ def test_the_run_ends_the_group_it_set_up(
     monkeypatch.setattr(dist, "rank", lambda group=None: 0)
     monkeypatch.setattr(dist, "size", lambda group=None: 2 if launch else 1)
     monkeypatch.setattr(dist, "local_rank", lambda: 0)
-    monkeypatch.setattr(dist, "cleanup", lambda: ended.append("cleanup"))
+    monkeypatch.setattr(dist, "barrier", lambda group=None: ended.append("barrier"))
+    monkeypatch.setattr(torch.distributed, "destroy_process_group", lambda: ended.append("destroy"))
 
     def abort():
         ended.append("abort")
         raise _ExitedError
 
     monkeypatch.setattr(dist, "abort", abort)
-    escapes = _ExitedError if ends_by == "abort" else body_raises
+    escapes = _ExitedError if ends_by == ["abort"] else body_raises
     expected = pytest.raises(escapes) if escapes else nullcontext()
 
     def run():
@@ -426,7 +428,7 @@ def test_the_run_ends_the_group_it_set_up(
     else:
         run()
 
-    assert ended == [ends_by]
+    assert ended == ends_by
     # An intentional exit is not reported as an error.
     assert ("body raised" in capsys.readouterr().out) == (body_raises is ValueError)
 
@@ -435,19 +437,23 @@ def test_the_run_ends_the_group_it_set_up(
 @pytest.mark.parametrize("world_size", [None, "2"], ids=["single-process", "launch"])
 def test_the_run_leaves_a_group_it_found_alone(monkeypatch, world_size, raises):
     """Under a launch too, and when the body raises: a caller that set its group up before the run
-    keeps it, and gets the error."""
+    keeps it, and gets the error. The state is this rank's place in that group, also when the
+    caller set it up without the launch's environment."""
     if world_size is None:
         monkeypatch.delenv("WORLD_SIZE", raising=False)
     else:
         monkeypatch.setenv("WORLD_SIZE", world_size)
         monkeypatch.setattr(dist, "setup", lambda timeout=None: pytest.fail("set it up again"))
-        monkeypatch.setattr(dist, "rank", lambda group=None: 0)
-        monkeypatch.setattr(dist, "size", lambda group=None: 2)
         monkeypatch.setattr(dist, "local_rank", lambda: 0)
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
-    monkeypatch.setattr(dist, "cleanup", lambda: pytest.fail("destroyed the caller's group"))
+    monkeypatch.setattr(dist, "rank", lambda group=None: 1)
+    monkeypatch.setattr(dist, "size", lambda group=None: 2)
+    monkeypatch.setattr(
+        dist, "_destroy_group", lambda exc: pytest.fail("destroyed the caller's group")
+    )
     monkeypatch.setattr(dist, "abort", lambda: pytest.fail("exited the caller's process"))
     expected = pytest.raises(ValueError, match="calibration failed") if raises else nullcontext()
-    with expected, distributed_run(device="cpu" if world_size is None else "cuda"):
+    with expected, distributed_run(device="cpu" if world_size is None else "cuda") as state:
+        assert (state.rank, state.world_size) == (1, 2)
         if raises:
             raise ValueError("calibration failed")
