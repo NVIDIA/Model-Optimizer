@@ -446,11 +446,18 @@ def test_input_adapters_resolve_unsqueeze_axes_against_output_rank(axes, output_
 
 
 @pytest.mark.parametrize("batch", [1, 2, 3])
-def test_registered_normalization_preserves_native_channel_axis(batch):
+@pytest.mark.parametrize("activations", [(), ("Relu",), ("Relu", "Tanh")])
+def test_registered_normalization_preserves_native_channel_axis(batch, activations):
     """Keep direct rank-three normalization inputs on the channel-preserving route."""
     shape = [batch, 3, 4]
+    output = "normalized" if activations else "y"
+    nodes = [helper.make_node("InstanceNormalization", ["x", "scale", "bias"], [output])]
+    for index, operation in enumerate(activations):
+        following = "y" if index == len(activations) - 1 else f"activation_{index}"
+        nodes.append(helper.make_node(operation, [output], [following]))
+        output = following
     model = _make_model(
-        [helper.make_node("InstanceNormalization", ["x", "scale", "bias"], ["y"])],
+        nodes,
         [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
         [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)],
         [

@@ -20,7 +20,7 @@ from onnx import TensorProto, helper, numpy_helper
 
 from ..utils.graph_utils import GraphCache, add_initializer, batch_replace_nodes, pad4d
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
-from .dla_graph_cleanup import _subgraph_captures
+from .dla_graph_cleanup import _RANK_AGNOSTIC_OPS, _subgraph_captures
 from .dla_reorder_nodes import priority_topological_order
 
 __all__ = []
@@ -299,8 +299,40 @@ def _apply_fix_instancenorm_channels(model):
     graph = model.graph
     cache = GraphCache(graph)
     replacements = {}
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+
+    def output_squeezes(name):
+        """Follow layout-preserving unary paths to public output restoration adapters."""
+        pending, visited = [name], set()
+        while pending:
+            tensor = pending.pop()
+            if tensor in visited:
+                continue
+            visited.add(tensor)
+            for consumer, input_index in cache.get_consumers(tensor):
+                if (
+                    input_index != 0
+                    or consumer.domain not in {"", "ai.onnx"}
+                    or consumer.overload
+                    or (consumer.domain, consumer.op_type, consumer.overload) in local_functions
+                ):
+                    continue
+                if consumer.op_type == "Squeeze" and consumer.output[0] in cache.graph_output_names:
+                    yield consumer
+                elif (
+                    consumer.op_type in _RANK_AGNOSTIC_OPS
+                    and len(consumer.input) == 1
+                    and len(consumer.output) == 1
+                ):
+                    pending.append(consumer.output[0])
+
     for index, node in enumerate(graph.node):
-        if node.op_type == "InstanceNormalization":
+        if (
+            node.op_type == "InstanceNormalization"
+            and node.domain in {"", "ai.onnx"}
+            and not node.overload
+            and (node.domain, node.op_type, node.overload) not in local_functions
+        ):
             shape = cache.get_shape(node.input[0])
             if shape is not None and len(shape) == 3:
                 target = add_initializer(
@@ -319,12 +351,8 @@ def _apply_fix_instancenorm_channels(model):
                 )
                 node.input[0] = output
                 replacements[index] = ([node], [reshape, node])
-                for consumer, _ in cache.get_consumers(node.output[0]):
-                    if (
-                        consumer.op_type != "Squeeze"
-                        or consumer.output[0] not in cache.graph_output_names
-                        or len(consumer.input) < 2
-                    ):
+                for consumer in output_squeezes(node.output[0]):
+                    if len(consumer.input) < 2:
                         continue
                     axes = cache.get_init(consumer.input[1])
                     if axes is not None and numpy_helper.to_array(axes).reshape(-1).tolist() == [0]:
