@@ -44,6 +44,7 @@ Changelog
 
 **Bug Fixes**
 
+- Preserve accumulated histogram counts when computing an entropy calibration threshold with NumPy histograms.
 - ``mtq.quantize`` and ``mtq.calibrate`` now give every module back the training mode it had. They used to leave every module in the mode of the model passed in, so a module in eval mode inside a model in training mode came back in training mode.
 - Diffusers ``export_hf_checkpoint`` now honors ``save_modelopt_state=False`` (the default) when HuggingFace checkpointing is enabled. Pass ``save_modelopt_state=True`` to retain the ModelOpt state file.
 - The default PTQ recipes now leave multi-token-prediction (MTP) layers unquantized in Megatron vision-language models too (``language_model.mtp.*``), as they already did at the model root.
