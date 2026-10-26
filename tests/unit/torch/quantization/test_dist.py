@@ -113,6 +113,7 @@ def _cold_rank_device_helper(rank, size, case):
     )
     expected = "cpu" if rank == 0 or case == "the-collectives-device" else "meta"
     assert quantizer.amax.device.type == expected, f"rank {rank}: {quantizer.amax.device}"
+    assert quantizer.amax._base is None, "a view of the collective's buffer"
 
 
 @pytest.mark.parametrize(
@@ -122,8 +123,8 @@ def test_a_rank_that_never_calibrated_adopts_the_amax_where_it_keeps_its_state(
     cpu_dist_workers, case
 ):
     """A calibrated rank keeps its amax where it is. One that never calibrated the quantizer puts
-    the group's amax on a tensor the quantizer holds, else on the device its caller keeps the
-    module's quantizer state on, else on the collective's device."""
+    a copy of the group's amax on a tensor the quantizer holds, else on the device its caller keeps
+    the module's quantizer state on, else on the collective's device."""
     cpu_dist_workers.run(_cold_rank_device_helper, case=case)
 
 

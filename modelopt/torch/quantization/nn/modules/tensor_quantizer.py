@@ -1434,7 +1434,8 @@ class TensorQuantizer(nn.Module):
         A calibrated amax keeps its own dtype and device, exactly as an in-place reduce leaves it. A rank
         that never calibrated it adopts the group's amax where it keeps its quantizer state: on a tensor
         it holds itself, else on ``state_device``, which a caller passes as the device it keeps the
-        module's quantizer state on, else on the collective's device.
+        module's quantizer state on, else on the collective's device. A one-value amax travels in
+        float32, so a float64 one comes back rounded to float32 precision.
         """
         if not parallel_group.is_initialized():
             return
@@ -1489,7 +1490,7 @@ class TensorQuantizer(nn.Module):
                 t for t in (*self._buffers.values(), *self._parameters.values()) if t is not None
             ]
             target = held[0].device if held else (state_device or packed.device)
-            self._set_buffer("_amax", packed[0].to(device=target, dtype=dtype))
+            self._set_buffer("_amax", packed[0].to(device=target, dtype=dtype).clone())
 
     @contextlib.contextmanager
     def disable_pre_quant_scale(self):
