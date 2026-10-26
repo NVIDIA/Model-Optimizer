@@ -21,8 +21,14 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.nn import register_quant_backend, unregister_quant_backend
+from modelopt.torch.quantization.nn import (
+    SequentialQuantizer,
+    TensorQuantizer,
+    register_quant_backend,
+    unregister_quant_backend,
+)
 from modelopt.torch.quantization.utils import (
+    disable_weight_cache,
     enable_weight_cache,
     invalidate_weight_cache,
     weight_cache_scope,
@@ -112,9 +118,19 @@ def test_weight_cache_contract():
         pass
     with pytest.raises(ValueError, match="pass_through_bwd"):
         enable_weight_cache(_quantized_mlp(pass_through_bwd=False))
+    learned = _quantized_mlp()
+    learned[0].weight_quantizer.register_parameter("scale", nn.Parameter(torch.ones(1)))
+    with pytest.raises(ValueError, match="learned scales"):
+        enable_weight_cache(learned)
+    composed = _quantized_mlp()
+    composed[0].weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
+    with pytest.raises(ValueError, match="only TensorQuantizer"):
+        enable_weight_cache(composed)
 
     enable_weight_cache(model)
     with pytest.raises(RuntimeError, match="boom"), weight_cache_scope(model):
+        with pytest.raises(RuntimeError, match="inside weight_cache_scope"):
+            enable_weight_cache(model)
         model(torch.randn(4, 16))
         with pytest.raises(RuntimeError, match="nested"), weight_cache_scope(model):
             pass
@@ -123,3 +139,21 @@ def test_weight_cache_contract():
     with weight_cache_scope(model) as stats:
         model(torch.randn(4, 16))
     assert stats.misses == 2 and stats.hits == 0
+
+
+def test_enrollment_by_chunk():
+    chunks = [_quantized_mlp(), _quantized_mlp()]
+    # Like Megatron virtual pipeline chunks: each chunk owns its quantizers and can be scoped alone.
+    assert enable_weight_cache(chunks, select=lambda name, q: name.startswith("0.")) == 2
+    with weight_cache_scope(chunks[1]) as stats:
+        chunks[1](torch.randn(4, 16))
+    assert stats.misses == 1
+    with pytest.raises(ValueError, match="already enrolled"):
+        enable_weight_cache(nn.Sequential(chunks[1]))
+
+    disable_weight_cache(chunks[1])
+    with pytest.raises(ValueError, match="enable_weight_cache"), weight_cache_scope(chunks[1]):
+        pass
+    with weight_cache_scope(chunks[0]) as stats:
+        chunks[0](torch.randn(4, 16))
+    assert stats.misses == 1

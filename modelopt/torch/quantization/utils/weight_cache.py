@@ -37,7 +37,7 @@ __all__ = [
 ]
 
 # Kept outside the quantizers so that ModelOpt state, deepcopy and checkpoints never carry them.
-_ENROLLED: WeakKeyDictionary = WeakKeyDictionary()  # quantizer -> weakref to its enrollment root
+_ENROLLED: WeakKeyDictionary = WeakKeyDictionary()  # quantizer -> weakref to its model (chunk)
 _ACTIVE: WeakKeyDictionary = WeakKeyDictionary()  # quantizer -> _Session of its open scope
 _num_open_scopes = 0  # a plain int so the uncached path stays a cheap, compile-friendly check
 
@@ -56,7 +56,8 @@ class WeightCacheStats:
 @dataclass
 class _Entry:
     key: tuple
-    # Holds the input's storage so that its address cannot be reused by another tensor.
+    # Holds the input's storage so that its address cannot be reused by another tensor. For an input
+    # made afresh on each call (e.g. a padded weight), this keeps one more copy alive per entry.
     anchor: torch.Tensor
     value: torch.Tensor
     value_version: int
@@ -110,7 +111,7 @@ def enable_weight_cache(
 
     Args:
         model: The quantized model, or a list of its model chunks (e.g. Megatron virtual pipeline
-            stages), which then form one enrollment root.
+            stages). Each chunk owns the quantizers found in it, so a chunk can later be passed alone.
         select: Optional ``select(name, quantizer)`` filter over the weight quantizers, e.g. to
             cache only the routed experts of an MoE model.
 
@@ -121,12 +122,11 @@ def enable_weight_cache(
     from ..nn import QuantModule, TensorQuantizer
 
     models = _as_list(model)
-    root = models[0]
     previous = _enrolled(models)
     if any(q in _ACTIVE for q in previous):
         raise RuntimeError("Cannot change the weight cache enrollment inside weight_cache_scope.")
 
-    selected = []
+    selected = {}
     for m in models:
         names = {id(q): name for name, q in m.named_modules()}
         for module in m.modules():
@@ -147,18 +147,18 @@ def enable_weight_cache(
                 if any(p.requires_grad for p in quantizer.parameters()):
                     raise ValueError(f"{name}: the weight cache does not support learned scales.")
                 owner = _ENROLLED.get(quantizer)
-                if owner is not None and owner() is not None and owner() is not root:
+                if owner is not None and owner() is not None and owner() is not m:
                     raise ValueError(
                         f"{name} is already enrolled under another model; disable it there first."
                     )
-                selected.append(quantizer)
+                selected[quantizer] = m
     if not selected:
         raise ValueError("No enabled weight quantizers were selected for the weight cache.")
 
     for quantizer in previous:
         del _ENROLLED[quantizer]
-    for quantizer in selected:
-        _ENROLLED[quantizer] = ref(root)
+    for quantizer, m in selected.items():
+        _ENROLLED[quantizer] = ref(m)
     return len(selected)
 
 
