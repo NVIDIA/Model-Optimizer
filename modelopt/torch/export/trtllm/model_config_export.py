@@ -372,8 +372,10 @@ def _torch_to_tensorrt_llm_checkpoint(
                     continue
                 # TRT LLM forces the embedding table to be shared for the following models.
                 force_share_embedding_table = decoder_type in ["gemma", "gemma2", "gemma3"]
-                if force_share_embedding_table and torch.equal(
-                    module.weight, config.vocab_embedding.weight
+                if (
+                    force_share_embedding_table
+                    and config.vocab_embedding is not None
+                    and torch.equal(module.weight, config.vocab_embedding.weight)
                 ):
                     config.share_embedding_table = True
                 else:

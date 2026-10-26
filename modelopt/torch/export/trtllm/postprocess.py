@@ -97,6 +97,9 @@ def _split_model_config_for_tp(merged_config, split_factor):
             config.weight = weights[i]
 
     elif isinstance(merged_config, ExpertConfig):
+        assert merged_config.fc is not None and merged_config.proj is not None, (
+            "Expert config requires FC and output projections."
+        )
         assert merged_config.proj.linear_type != LINEAR_COLUMN  # row
         assert merged_config.fc.linear_type == LINEAR_COLUMN  # column
         # Avoid deepcopy and instantiate expert configs manually to avoid OOM
@@ -662,7 +665,7 @@ def pad_embedding_lm_head(model_config: ModelConfig, padding_factor: int = 64):
     pad_vocab_size = int((vocab_size + padding_factor - 1) / padding_factor) * padding_factor
     model_config.vocab_size = pad_vocab_size
 
-    if hasattr(model_config, "vocab_embedding"):
+    if model_config.vocab_embedding is not None:
         embedding_config = model_config.vocab_embedding
         original_weight = embedding_config.weight
         pad_size = (0, 0, 0, pad_vocab_size - original_weight.shape[0])
@@ -670,7 +673,7 @@ def pad_embedding_lm_head(model_config: ModelConfig, padding_factor: int = 64):
             original_weight, pad_size, mode="constant", value=0
         )
 
-    if hasattr(model_config, "lm_head"):
+    if model_config.lm_head is not None:
         lm_head_config = model_config.lm_head
         original_weight = lm_head_config.weight
         original_bias = lm_head_config.bias
@@ -793,6 +796,7 @@ def check_weight_shape_valid(config, inference_tensor_parallel=1, training_tenso
         return
 
     if isinstance(config, ExpertConfig):
+        assert config.fc is not None, "Expert FC projection is required."
         _, _, k = config.fc.weight.shape
         merged_k = k * training_tensor_parallel
         _check_merged_channel_is_valid(

@@ -173,8 +173,13 @@ def _from_dict(class_type, data):
     if data is None:
         return None
 
-    # class_type of quantization is str | None, which is catergrorized as Union
-    if class_type != str | None and get_origin(class_type) in [Union, UnionType]:
+    if get_origin(class_type) in (Union, UnionType):
+        concrete_types = [t for t in get_args(class_type) if t is not type(None)]
+        if len(concrete_types) == 1:
+            class_type = concrete_types[0]
+
+    # Select the concrete layout for polymorphic configuration fields.
+    if get_origin(class_type) in [Union, UnionType]:
         # Handle QKV
         if all(key in data for key in ["q", "k", "v"]):
             # splitted qkv case
@@ -250,6 +255,7 @@ def merge_qkv(model_config):
             attention = getattr(decoder_config, attention_key, None)
             if attention and isinstance(attention.qkv, QKVConfig):
                 splitted_qkv = attention.qkv
+                q, k, v = splitted_qkv._require_projections()
                 attention.qkv = LinearConfig()
                 attention.qkv.weight = splitted_qkv.weight
                 attention.qkv.bias = splitted_qkv.bias
@@ -259,12 +265,10 @@ def merge_qkv(model_config):
                 attention.qkv.prequant_scaling_factor = splitted_qkv.prequant_scaling_factor
                 attention.qkv.awq_block_size = splitted_qkv.awq_block_size
                 # Assert q,k,v have same quantization formats before merging
-                assert (
-                    splitted_qkv.q.quantization
-                    == splitted_qkv.k.quantization
-                    == splitted_qkv.v.quantization
-                ), "Quantization formats of q,k,v must be the same."
-                attention.qkv.quantization = splitted_qkv.q.quantization
+                assert q.quantization == k.quantization == v.quantization, (
+                    "Quantization formats of q,k,v must be the same."
+                )
+                attention.qkv.quantization = q.quantization
 
                 # Collect GPU memory from the deleted tensors
                 del splitted_qkv
@@ -386,7 +390,7 @@ def pack_linear_weights(model_config: ModelConfig):
 
         for head in model_config.medusa_heads:
             linear_layers.append(head.lm_head)
-            for layer in head.medusa_layers:
+            for layer in head.medusa_layers or []:
                 linear_layers.append(layer.linear)
 
         _linear_layer_to_quantized_weight(linear_layers)
