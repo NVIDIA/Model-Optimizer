@@ -21,7 +21,11 @@ import torch
 
 import modelopt.torch.opt as mto
 from modelopt.torch.export import export_speculative_decoding
-from modelopt.torch.speculative.utils import load_vlm_or_llm
+from modelopt.torch.speculative.utils import (
+    CONFIG_OVERRIDES_HELP,
+    load_vlm_or_llm,
+    parse_config_overrides,
+)
 
 
 def parse_args():
@@ -33,13 +37,24 @@ def parse_args():
     parser.add_argument(
         "--export_path", type=str, default="Destination directory for exported files."
     )
+    parser.add_argument(
+        "--config_overrides",
+        type=str,
+        default=None,
+        help=CONFIG_OVERRIDES_HELP,
+    )
     return parser.parse_args()
 
 
 mto.enable_huggingface_checkpointing()
 
 args = parse_args()
-model = load_vlm_or_llm(args.model_path, dtype="auto", trust_remote_code=args.trust_remote_code)
+model = load_vlm_or_llm(
+    args.model_path,
+    dtype="auto",
+    trust_remote_code=args.trust_remote_code,
+    config_overrides=parse_config_overrides(args.config_overrides),
+)
 model.eval()
 with torch.inference_mode():
     export_speculative_decoding(

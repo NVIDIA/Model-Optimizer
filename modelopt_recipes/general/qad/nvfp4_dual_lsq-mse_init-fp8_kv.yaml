@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 metadata:
-  recipe_type: ptq
   description: >-
     Learns separate pre-quantization and post-quantization NVFP4 weight scales with MSE
     initialization and FP8 scale sweep; uses dynamic NVFP4 activations and FP8 KV cache.

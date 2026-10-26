@@ -56,7 +56,7 @@ def _tasks(cfg):
         for key, val in pipeline.items():
             if key.startswith("task_") and isinstance(val, dict):
                 yield key, val
-    elif "script" in cfg:
+    elif "script" in cfg or "inline" in cfg:
         yield "task", cfg
 
 
@@ -76,15 +76,28 @@ def test_example_yaml_valid(path):
 
     for name, task in _tasks(cfg):
         script = task.get("script")
-        assert isinstance(script, str) and script.strip(), f"{path}:{name}: missing `script`"
+        inline = task.get("inline")
+        # A task runs either a `script:` wrapper or an `inline:` command — exactly one.
+        assert (isinstance(script, str) and script.strip()) or (
+            isinstance(inline, str) and inline.strip()
+        ), f"{path}:{name}: task needs a `script` or `inline`"
+        assert not (script and inline), f"{path}:{name}: set only one of `script`/`inline`"
+
+        # nemo-run's --yaml CLI layer rejects multi-line override values, so an
+        # inline command must stay single-line (use a folded scalar `>-`).
+        if inline:
+            assert "\n" not in inline.strip(), (
+                f"{path}:{name}: `inline` must be single-line (use folded `>-`, chain with `&&`)"
+            )
 
         # Scripts shipped with the launcher live under common/; verify the path is
         # real so a renamed/typo'd wrapper is caught at unit-test time.
-        first_token = script.split()[0]
-        if first_token.startswith("common/") and first_token not in _KNOWN_MISSING_SCRIPTS:
-            assert os.path.exists(os.path.join(_LAUNCHER_DIR, first_token)), (
-                f"{path}:{name}: script not found: {first_token}"
-            )
+        if script:
+            first_token = script.split()[0]
+            if first_token.startswith("common/") and first_token not in _KNOWN_MISSING_SCRIPTS:
+                assert os.path.exists(os.path.join(_LAUNCHER_DIR, first_token)), (
+                    f"{path}:{name}: script not found: {first_token}"
+                )
 
         slurm_config = task.get("slurm_config")
         if slurm_config is not None:

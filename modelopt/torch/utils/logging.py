@@ -34,6 +34,7 @@ from . import distributed as dist
 
 __all__ = [
     "DeprecatedError",
+    "TeeStream",
     "atomic_print",
     "capture_io",
     "no_stdout",
@@ -217,6 +218,41 @@ def silence_matched_warnings(pattern=None):
     finally:
         if compiled_pattern is not None:
             warnings.showwarning = original_showwarning
+
+
+class TeeStream:
+    """Mirror a text stream to *sink* while passing writes through to *stream*.
+
+    Scripts that report progress with bare ``print()`` have no log file; wrapping
+    ``sys.stdout``/``sys.stderr`` in this is what produces one. Attribute access falls
+    through to the wrapped stream so ``isatty()`` keeps progress bars behaving. Native
+    (C-level) writes go straight to the real file descriptor and are *not* captured.
+    """
+
+    def __init__(self, stream, sink):
+        """Wrap *stream*, mirroring everything written to it into the open file *sink*."""
+        self._stream = stream
+        self._sink = sink
+
+    def write(self, data: str) -> int:
+        """Write to both the original stream and the sink."""
+        self._stream.write(data)
+        if not self._sink.closed:
+            self._sink.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        """Flush both the original stream and the sink."""
+        self._stream.flush()
+        if not self._sink.closed:
+            self._sink.flush()
+
+    def __getattr__(self, name):
+        # Guard the wrapped attributes themselves: __getattr__ runs whenever they are absent
+        # (during unpickling, or on a copy), and delegating then would recurse forever.
+        if name in ("_stream", "_sink"):
+            raise AttributeError(name)
+        return getattr(self._stream, name)
 
 
 class DeprecatedError(NotImplementedError):

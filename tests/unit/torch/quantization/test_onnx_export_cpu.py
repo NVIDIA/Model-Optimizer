@@ -33,7 +33,19 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.tensor_quant as tensor_quant
 from modelopt.onnx import utils
 from modelopt.onnx.export import NVFP4QuantExporter
+from modelopt.onnx.export.nvfp4_exporter import _encode_nvfp4_block_scale
+from modelopt.onnx.quantization.qdq_utils import fp4qdq_to_2dq
+from modelopt.torch.quantization.qtensor import NVFP4QTensor
 from modelopt.torch.quantization.utils import is_quantized_linear
+
+
+def _export_to_onnx(model, sample_input, **kwargs):
+    buffer = io.BytesIO()
+    if "enable_onnx_checker" in inspect.signature(torch.onnx.export).parameters:
+        kwargs["enable_onnx_checker"] = False
+    torch.onnx.export(model, sample_input, buffer, dynamo=False, **kwargs)
+    buffer.seek(0)
+    return onnx.load_model_from_string(buffer.read())
 
 
 @pytest.mark.parametrize("model_cls", TEST_MODELS)
@@ -56,6 +68,41 @@ def test_onnx_export_cpu(model_cls, num_bits, per_channel_quantization, constant
     )
 
 
+def test_fp8_conv_export_preserves_custom_qdq_and_kernel_shape():
+    model = torch.nn.Conv2d(3, 4, 3, bias=False).eval()
+    sample_input = torch.randn(1, 3, 8, 8)
+    model = mtq.quantize(
+        model,
+        mtq.FP8_DEFAULT_CFG,
+        forward_loop=lambda quantized_model: quantized_model(sample_input),
+    )
+
+    exported_model = _export_to_onnx(model, sample_input, opset_version=20)
+    producers = {output: node for node in exported_model.graph.node for output in node.output}
+    conv = next(node for node in exported_model.graph.node if node.op_type == "Conv")
+
+    for conv_input in conv.input[:2]:
+        dequantize = producers[conv_input]
+        quantize = producers[dequantize.input[0]]
+        assert dequantize.op_type == "TRT_FP8DequantizeLinear"
+        assert quantize.op_type == "TRT_FP8QuantizeLinear"
+
+    value_info = {value.name: value for value in exported_model.graph.value_info}
+    weight_dequantize = producers[conv.input[1]]
+    weight_quantize = producers[weight_dequantize.input[0]]
+    for value_name in (*weight_quantize.output, *weight_dequantize.output):
+        shape = [
+            dimension.dim_value for dimension in value_info[value_name].type.tensor_type.shape.dim
+        ]
+        assert shape == [4, 3, 3, 3]
+
+    kernel_shape = next(
+        attribute for attribute in conv.attribute if attribute.name == "kernel_shape"
+    )
+    assert list(kernel_shape.ints) == [3, 3]
+    onnx.checker.check_model(exported_model)
+
+
 def test_nvfp4_exported_onnx_is_topologically_sorted(monkeypatch):
     def forward_loop(model):
         model(sample_input)
@@ -75,31 +122,116 @@ def test_nvfp4_exported_onnx_is_topologically_sorted(monkeypatch):
             module.input_quantizer.disable()
             module.weight_quantizer._onnx_quantizer_type = "static"
 
-    buffer = io.BytesIO()
-    if "enable_onnx_checker" in inspect.signature(torch.onnx.export).parameters:
-        kwargs = {"enable_onnx_checker": False}
-    else:
-        kwargs = {}
-
-    torch.onnx.export(
+    exported_model = _export_to_onnx(
         model,
         sample_input,
-        buffer,
         input_names=["input"],
         output_names=["output"],
         export_params=True,
         opset_version=21,
-        dynamo=False,
-        **kwargs,
     )
-
-    buffer.seek(0)
-    exported_model = onnx.load_model_from_string(buffer.read())
     assert any(node.op_type == "TRT_FP4QDQ" for node in exported_model.graph.node)
 
     converted_model = NVFP4QuantExporter.process_model(exported_model)
     assert not any(node.op_type == "TRT_FP4QDQ" for node in converted_model.graph.node)
     onnx.checker.check_model(converted_model)
+
+
+@pytest.mark.parametrize(
+    ("convert", "deprecated"),
+    [
+        pytest.param(NVFP4QuantExporter.process_model, False, id="exporter"),
+        pytest.param(fp4qdq_to_2dq, True, id="deprecated-shim"),
+    ],
+)
+@pytest.mark.parametrize(
+    "scale_case", ["fp8-rounding", "fp32-tensor-arithmetic", "fp32-block-arithmetic"]
+)
+def test_nvfp4_packed_weights_match_eager(scale_case, convert, deprecated):
+    block_size = 16
+    if scale_case == "fp8-rounding":
+        weight = np.zeros((4, block_size), dtype=np.float16)
+        weight[0, 0] = 6.0
+        weight[1, :2] = [0.231689453125, 0.0297393798828125]
+        expected_scale = np.array([[448.0], [18.0], [1.0], [1.0]], dtype=np.float32)
+    elif scale_case == "fp32-tensor-arithmetic":
+        weight = np.zeros((2, block_size), dtype=np.float16)
+        weight[0, 0] = 3.296875
+        weight[1, 0] = 2.099609375
+        weight[1, -2:] = [-1.501953125, 0.6181640625]
+        expected_scale = np.array([[448.0], [288.0]], dtype=np.float32)
+    else:
+        weight = np.zeros((2, block_size), dtype=np.float16)
+        weight[:, 0] = [2.24609375, 2.515625]
+        expected_scale = np.array([[384.0], [448.0]], dtype=np.float32)
+
+    weight_dq = helper.make_tensor_value_info("weight_dq", TensorProto.FLOAT, list(weight.shape))
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "TRT_FP4QDQ",
+                    ["weight"],
+                    ["weight_dq"],
+                    name="weight_qdq",
+                    block_size=block_size,
+                ),
+                helper.make_node(
+                    "MatMul",
+                    ["activation", "weight_dq"],
+                    ["output"],
+                    name="matmul",
+                ),
+            ],
+            "nvfp4_packed_weights",
+            [
+                helper.make_tensor_value_info(
+                    "activation", TensorProto.FLOAT16, [1, weight.shape[0]]
+                )
+            ],
+            [helper.make_tensor_value_info("output", TensorProto.FLOAT16, [1, weight.shape[1]])],
+            [numpy_helper.from_array(weight, "weight")],
+            value_info=[weight_dq],
+        ),
+        opset_imports=[helper.make_opsetid("", 23)],
+    )
+
+    if deprecated:
+        with pytest.warns(DeprecationWarning):
+            converted = convert(model)
+    else:
+        converted = convert(model)
+    eager_qtensor, eager_scale, _ = NVFP4QTensor.quantize(
+        torch.from_numpy(weight.astype(np.float32)), block_size
+    )
+
+    np.testing.assert_array_equal(eager_scale.float().cpu().numpy(), expected_scale)
+
+    fp8_scale = next(
+        initializer
+        for initializer in converted.graph.initializer
+        if initializer.name == "weight_f8_scale"
+    )
+    np.testing.assert_array_equal(
+        np.frombuffer(fp8_scale.raw_data, dtype=np.uint8),
+        eager_scale.view(torch.uint8).cpu().numpy().reshape(-1),
+    )
+
+    fp4_weight = next(
+        initializer
+        for initializer in converted.graph.initializer
+        if initializer.name == "weight_f4"
+    )
+    np.testing.assert_array_equal(
+        np.frombuffer(fp4_weight.raw_data, dtype=np.uint8),
+        eager_qtensor._quantized_data.cpu().numpy().reshape(-1),
+    )
+
+
+@pytest.mark.parametrize("scale", [np.nan, np.inf, -1.0])
+def test_nvfp4_rejects_invalid_block_scale(scale):
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        _encode_nvfp4_block_scale(np.array([scale], dtype=np.float32))
 
 
 def test_nvfp4_shared_activation_reuses_cast():

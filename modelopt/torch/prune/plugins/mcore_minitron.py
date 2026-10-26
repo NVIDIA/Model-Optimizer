@@ -28,7 +28,7 @@ import io
 import sys
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
 from itertools import product
 from typing import Any
@@ -47,6 +47,7 @@ from megatron.core.tensor_parallel import (
     gather_from_tensor_model_parallel_region,
     reduce_from_tensor_model_parallel_region,
 )
+from megatron.core.transformer.multi_latent_attention import MLASelfAttention
 from pydantic import create_model
 from rich.console import Console
 from rich.markup import escape as rich_escape
@@ -56,8 +57,6 @@ from tqdm import tqdm
 
 from modelopt.torch.nas.conversion import NASModeRegistry
 from modelopt.torch.nas.plugins.megatron import (
-    HAS_HYBRID,
-    HAS_MAMBA,
     SUPPORTED_MODELS,
     _DynamicAttention,
     _DynamicMambaLayer,
@@ -116,6 +115,14 @@ SUPPORTED_HPARAMS = {
 # to the surviving layers on depth pruning. Integer/None cadence values are ignored (need no update).
 _PER_LAYER_CONFIG_PATTERNS = ("linear_attention_freq", "moe_layer_freq")
 
+# Per-layer state newer MCore ``HybridStack`` keeps index-aligned with ``decoder.layers``.
+_HYBRID_STACK_LAYER_STATE = (
+    "layer_config_list",
+    "num_layers_per_pipeline_rank",
+    "_execution_layer_indices",
+    "_execution_layer_config_list",
+)
+
 __all__ = [
     "SUPPORTED_HPARAMS",
     "MCoreMinitronConfig",
@@ -129,10 +136,9 @@ __all__ = [
 def _get_hybrid_pattern_key(model: nn.Module) -> str | None:
     """Return the attribute name carrying the hybrid block pattern for hybrid models, else None.
 
-    Handles both ``MambaModel`` (which still uses ``hybrid_override_pattern``) and plain
-    ``HybridModel`` (the parent class introduced in modern Megatron-LM, which carries
-    ``hybrid_layer_pattern``). Detecting by attribute presence avoids fragile isinstance
-    checks against a class hierarchy that may shift across MCore versions.
+    Handles both the deprecated ``hybrid_override_pattern`` and ``hybrid_layer_pattern``.
+    Detecting by attribute presence avoids fragile isinstance checks against a class
+    hierarchy that may shift across MCore versions.
     """
     for attr in ("hybrid_override_pattern", "hybrid_layer_pattern"):
         if getattr(model, attr, None):
@@ -154,7 +160,7 @@ def _slice_per_layer_pattern(pattern: list | tuple | str, dropped_layers: set[in
 def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[int]) -> None:
     """Remove given layers (1-indexed) of the model (works with TP and/or PP).
 
-    If model is a wrapper around GPTModel or MambaModel, it will be unwrapped.
+    If model is a wrapper around GPTModel or HybridModel, it will be unwrapped.
     """
     layers_to_drop = sorted(layers_to_drop)
     assert layers_to_drop[0] >= 1, (
@@ -169,6 +175,11 @@ def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[i
     assert isinstance(model, supported_model_types), (
         f"Model should have one of {supported_model_types} submodule, got {model}"
     )
+    decoder = model.decoder
+    is_hybrid_stack = hasattr(decoder, "_execution_layer_indices")
+    assert not is_hybrid_stack or decoder._execution_layer_indices == list(
+        range(len(decoder.layers))
+    ), "Dropping grouped hybrid layers (e.g. shortcut MoE blocks) is not supported."
     print_rank_0(f"Dropping decoder layers {layers_to_drop} (1-indexed) from model.")
 
     # get the number of layers remaining in each pp rank
@@ -194,13 +205,19 @@ def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[i
 
     # reindex kept layers, exclude sharded state dict for dropped layers
     layer_number = sum(layers_remaining_per_pp[: get_pipeline_model_parallel_rank()]) + 1
-    kept_layers = []
-    for layer in model.decoder.layers:
-        if layer.layer_number not in layers_to_drop:
-            layer.layer_number = layer_number
-            layer_number += 1
-            kept_layers.append(layer)
-    model.decoder.layers = nn.ModuleList(kept_layers)
+    kept_indices = [
+        i for i, layer in enumerate(decoder.layers) if layer.layer_number not in layers_to_drop
+    ]
+    kept_layers = [decoder.layers[i] for i in kept_indices]
+    for layer in kept_layers:
+        layer.layer_number = layer_number
+        layer_number += 1
+    decoder.layers = nn.ModuleList(kept_layers)
+    if is_hybrid_stack:
+        decoder.layer_config_list = [decoder.layer_config_list[i] for i in kept_indices]
+        decoder.num_layers_per_pipeline_rank = len(kept_layers)
+        decoder._execution_layer_indices = list(range(len(kept_layers)))
+        decoder._execution_layer_config_list = list(decoder.layer_config_list)
 
     model.config.num_layers = new_num_layers
 
@@ -255,6 +272,11 @@ class MCoreMinitronSearcher(BaseSearcher):
     - `max_depth_pruning`: Maximum fraction per depth hyperparameter to prune (default: 0.20).
         Only top (1 - max_depth_pruning) choices will be considered.
     - `hparams_to_skip`: List of hparams to skip during the search (default: None).
+    - `candidate_filter`: Callable rejecting candidate configs the caller cannot use, e.g. ones
+        their checkpoint format cannot represent (default: None). Receives every supported hparam,
+        with non-searched ones filled in from the model config (unset ones are omitted, so a
+        filter using them raises `KeyError`). Like `score_func`, it is assumed
+        unchanged when resuming from a `checkpoint`, since rejected candidates are not cached.
     - `top_k`: Number of candidates to consider for score_func validation (default: 10).
     - `seq_length`: Sequence length for KV-cache memory estimate (default: 4096).
         Only used with the ``memory_mb`` constraint.
@@ -280,6 +302,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             "max_width_pruning": 0.40,
             "max_depth_pruning": 0.20,
             "hparams_to_skip": None,
+            "candidate_filter": None,
             "top_k": 10,
             # Memory footprint config (only used with memory_mb constraint)
             "seq_length": 4096,
@@ -294,6 +317,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             "layer_scores": {},
             "sorted_layers": None,
             "all_candidates_per_constraint": {},
+            "best": {},
         }
 
     def sanitize_search_config(self, config: SearchConfig | None) -> SearchConfig:
@@ -440,6 +464,11 @@ class MCoreMinitronSearcher(BaseSearcher):
             if isinstance(getattr(model.config, attr, None), (list, tuple))
         }
         saved_hybrid = getattr(model, hybrid_key) if hybrid_key else None
+        saved_stack_state = {
+            attr: getattr(model.decoder, attr)
+            for attr in _HYBRID_STACK_LAYER_STATE
+            if hasattr(model.decoder, attr)
+        }
         try:
             self._prune(export_config)
             yield
@@ -451,6 +480,8 @@ class MCoreMinitronSearcher(BaseSearcher):
             for offset, layer in enumerate(all_layers):
                 layer.layer_number = start_layer_number + offset
             model.decoder.layers = all_layers
+            for attr, value in saved_stack_state.items():
+                setattr(model.decoder, attr, value)
             sample(model, sample_func=max)
             for attr, pattern in saved_patterns.items():
                 setattr(model.config, attr, pattern)
@@ -478,24 +509,20 @@ class MCoreMinitronSearcher(BaseSearcher):
             layers_to_drop = self.sorted_layers[num_layers_hp.active :]
             drop_mcore_language_model_layers(self.model, layers_to_drop=layers_to_drop)
 
-        # Update model config with pruned architecture
-        # kv_channels can be None so we need to save from original hidden_size and num_attention_heads
-        if self.model.config.kv_channels is None:
-            self.model.config.kv_channels = (
-                self.model.config.hidden_size // self.model.config.num_attention_heads
-            )
-        # num_query_groups can be None so we need to save from original num_attention_heads
-        if self.model.config.num_query_groups is None:
-            self.model.config.num_query_groups = self.model.config.num_attention_heads
-        # moe_ffn_hidden_size can be None so we need to save from original ffn_hidden_size
-        if (
-            self.model.config.moe_ffn_hidden_size is None
-            and self.model.config.num_moe_experts is not None
-        ):
-            self.model.config.moe_ffn_hidden_size = self.model.config.ffn_hidden_size
-        # Now set hparam active choices
-        for hp_name, hp_value in export_config.items():
-            setattr(self.model.config, hp_name, hp_value)
+        # Update model config (and newer MCore hybrid's per-layer copies) with pruned architecture
+        for config in [self.model.config, *getattr(self.model.decoder, "layer_config_list", [])]:
+            # kv_channels can be None so we need to save from original hidden_size and num_attention_heads
+            if config.kv_channels is None:
+                config.kv_channels = config.hidden_size // config.num_attention_heads
+            # num_query_groups can be None so we need to save from original num_attention_heads
+            if config.num_query_groups is None:
+                config.num_query_groups = config.num_attention_heads
+            # moe_ffn_hidden_size can be None so we need to save from original ffn_hidden_size
+            if config.moe_ffn_hidden_size is None and config.num_moe_experts is not None:
+                config.moe_ffn_hidden_size = config.ffn_hidden_size
+            # Now set hparam active choices
+            for hp_name, hp_value in export_config.items():
+                setattr(config, hp_name, hp_value)
 
         # Reinitialize the MoE token dispatcher after pruning
         for m in self.model.modules():
@@ -520,6 +547,7 @@ class MCoreMinitronSearcher(BaseSearcher):
         max_width_pruning = self.config["max_width_pruning"]
         max_depth_pruning = self.config["max_depth_pruning"]
         hparams_to_skip = self.config["hparams_to_skip"]
+        candidate_filter = self.config["candidate_filter"]
         top_k = self.config["top_k"]
         constraints_str = ", ".join(f"{self._fmt_metric(v, k)} {k}" for k, v in max_metrics.items())
         print_rank_0(f"\nSearching for the best pruned architecture under {constraints_str}...")
@@ -548,12 +576,24 @@ class MCoreMinitronSearcher(BaseSearcher):
                 max_depth_pruning,
                 hparams_to_skip,
             )
+            # Only place to reject invalid hparam *combinations*; unsearched ones come from config.
+            base_config = {
+                hp: getattr(self.model.config, hp)
+                for hp in SUPPORTED_HPARAMS
+                if getattr(self.model.config, hp, None) is not None
+            }
             selected = []
+            num_filtered = 0
             for ss_config in tqdm(
                 search_space_configs,
                 desc="Finding all candidates fitting the constraints...",
                 disable=not dist.is_master(),
             ):
+                if candidate_filter is not None and not candidate_filter(
+                    {**base_config, **ss_config}
+                ):
+                    num_filtered += 1
+                    continue
                 candidate_metrics = self._compute_candidate_metrics(ss_config, max_num_layers)
                 if all(candidate_metrics[k] <= max_metrics[k] for k in active_metric_keys):
                     selected.append(
@@ -561,7 +601,11 @@ class MCoreMinitronSearcher(BaseSearcher):
                             ss_config, {k: candidate_metrics[k] for k in active_metric_keys}, None
                         )
                     )
-            assert len(selected) > 0, "No subnets found fitting the constraints!"
+            if num_filtered:
+                print_rank_0(f"Rejected {num_filtered} candidates via candidate_filter.")
+            assert len(selected) > 0, "No subnets found fitting the constraints!" + (
+                f" candidate_filter rejected all {num_filtered} candidates." if num_filtered else ""
+            )
             print_rank_0(f"Found {len(selected)} candidates fitting the constraints!")
             self.all_candidates_per_constraint[constraints_cache_key] = sorted(
                 selected, key=lambda x: x.metrics[primary_key], reverse=True
@@ -641,6 +685,7 @@ class MCoreMinitronSearcher(BaseSearcher):
 
         dist.barrier()
         best = max(top_k_candidates, key=lambda x: x.score)  # type: ignore[arg-type, return-value]
+        self.best = asdict(best)
         best_grid = Table.grid(padding=(0, 2))
         best_grid.add_column(style="bold green", no_wrap=True)
         best_grid.add_column()
@@ -781,14 +826,6 @@ class MCoreMinitronSearcher(BaseSearcher):
         return metrics
 
 
-_HYBRID_DIVISORS = {
-    "hidden_size_divisor": 256,
-    "ffn_hidden_size_divisor": 512,
-    "mamba_head_dim_divisor": 8,
-    "num_moe_experts_divisor": 8,
-    "num_layers_divisor": 2,
-}
-
 MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
     "MCoreMinitronConfig",
     **get_kwargs_for_create_model_with_rules(
@@ -800,8 +837,13 @@ MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
                 "num_moe_experts_divisor": 8,
                 "num_layers_divisor": 2,
             },
-            **({"megatron.core.models.mamba.MambaModel": _HYBRID_DIVISORS} if HAS_MAMBA else {}),
-            **({"megatron.core.models.hybrid.HybridModel": _HYBRID_DIVISORS} if HAS_HYBRID else {}),
+            "megatron.core.models.hybrid.HybridModel": {
+                "hidden_size_divisor": 256,
+                "ffn_hidden_size_divisor": 512,
+                "mamba_head_dim_divisor": 8,
+                "num_moe_experts_divisor": 8,
+                "num_layers_divisor": 2,
+            },
         },
         doc='Configuration for the ``"mcore_minitron"`` mode.',
     ),
@@ -843,7 +885,7 @@ def _inherit_base_model_rules(model: nn.Module, rules: dict) -> dict:
 
     Model subclasses (e.g. VLM language models like ``Qwen3VLGPTModel``) are registered under their
     own ``DMRegistry`` key but share the dynamic class (and thus the search-space rule schema) of
-    their base ``GPTModel``/``MambaModel``. ``MCoreMinitronConfig`` only defines rule fields for the
+    their base ``GPTModel``/``HybridModel``. ``MCoreMinitronConfig`` only defines rule fields for the
     base classes, so without this a subclass module would have no matching rule and get *frozen*
     during conversion (disabling width/depth pruning). Copy the base rule onto the subclass key.
     """
@@ -852,7 +894,7 @@ def _inherit_base_model_rules(model: nn.Module, rules: dict) -> dict:
         base_rule = rules.get(base_key)
         if base_rule is None:
             continue
-        # GPTModel/MambaModel are siblings (not subclasses of each other), so isinstance uniquely
+        # GPTModel/HybridModel are siblings (not subclasses of each other), so isinstance uniquely
         # assigns each module to its base; the subclass shares the base's dynamic class and hence its
         # rule schema. A subclass registered under its own key but absent from rules inherits it here.
         for mod in model.modules():
@@ -950,6 +992,25 @@ class MCoreMinitronModeDescriptor(ModeDescriptor):
         return restore_mcore_minitron
 
 
+def _fused_ln_linears_over_hidden_size(module: nn.Module):
+    """Yield fused-layernorm linears whose layernorm is over ``hidden_size``.
+
+    MLA's Q/KV up-projections are ``TELayerNormColumnParallelLinear`` too, but their layernorm is
+    over the latent rank and MCore unpacks their output as ``(out, bias)``. Setting
+    ``return_layernorm_output`` there makes it ``((out, ln_out), bias)`` and breaks the forward.
+    """
+    up_projs = {
+        id(sub)
+        for m in module.modules()
+        if isinstance(m, MLASelfAttention)
+        for attr in ("linear_q_up_proj", "linear_kv_up_proj")
+        if (sub := getattr(m, attr, None)) is not None
+    }
+    for m in module.modules():
+        if isinstance(m, TELayerNormColumnParallelLinear) and id(m) not in up_projs:
+            yield m
+
+
 class ImportanceEstimatorRegistry:
     """Register importance estimators and forward hooks for all supported modules in the model.
 
@@ -1032,9 +1093,8 @@ class ImportanceEstimatorRegistry:
         self._hooks.clear()
 
         # Unpatch return_layernorm_output on fused TELayerNormColumnParallelLinear modules
-        for m in self.model.modules():
-            if isinstance(m, TELayerNormColumnParallelLinear):
-                m.return_layernorm_output = False
+        for m in _fused_ln_linears_over_hidden_size(self.model):
+            m.return_layernorm_output = False
 
     def get_layer_scores(self) -> dict[int, torch.Tensor]:
         """Get the layer scores (1-indexed) from the model.
@@ -1164,9 +1224,8 @@ def _register_hidden_size_importance(
     # Layernorms are fused into TELayerNormColumnParallelLinear. We temporarily
     # patch return_layernorm_output=True so TE's fused kernel returns the layernorm output.
     # For MoE layers, pre_mlp_layernorm is a separate TENorm — use a regular forward hook.
-    for m in module.modules():
-        if isinstance(m, TELayerNormColumnParallelLinear):
-            m.return_layernorm_output = True
+    for m in _fused_ln_linears_over_hidden_size(module):
+        m.return_layernorm_output = True
 
     for layer in module.decoder.layers:
         if isinstance(layer, _DynamicTransformerLayer):

@@ -15,8 +15,10 @@
 """Export HuggingFace model to vLLM fakequant checkpoint."""
 
 import copy
+import json
 import logging
 import re
+import shutil
 import warnings
 from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
@@ -25,26 +27,52 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from safetensors import safe_open
+from safetensors.torch import save_file
 
 import modelopt.torch.opt as mto
+from modelopt.torch.models import hf_model_type, is_moe
 from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
-from modelopt.torch.quantization.nn import QuantModule, SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    AnyQuantizer,
+    GroupedQuantizer,
+    QuantModule,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
-from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
+from modelopt.torch.quantization.utils.core_utils import (
+    ModuleNames,
+    enable_weight_access_and_writeback,
+    module_name_maps,
+)
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import get_unwrapped_name, safe_save
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import copy_off_index_safetensors
 
-from ..layer_utils import get_experts_list, is_moe
+from ..layer_utils import get_experts_list
 from ..quant_utils import get_quantization_format
-from ..unified_export_hf import collect_shared_input_modules
+from ..unified_export_hf import (
+    _copy_non_model_files_from_source,
+    _source_checkpoint,
+    collect_shared_input_modules,
+    read_unplaced_weights,
+)
 
 __all__ = [
+    "QUANTIZER_RECIPE_FORMAT",
+    "QUANTIZER_RECIPE_VERSION",
     "export_hf_vllm_fq_checkpoint",
     "infer_quantizer_prefix_remap",
     "is_weight_quantizer_state_key",
     "merge_amax_tensors_for_group",
 ]
+
+# Header of a versioned exported quantizer recipe (``quant_recipe.yaml``); its ``quantizers`` map HF
+# quantizer names to properties-only ModelOpt quantizer states.
+QUANTIZER_RECIPE_FORMAT = "modelopt_quantizer_recipe"
+QUANTIZER_RECIPE_VERSION = 1
 
 # Matches ``…weight_quantizer``, ``…weight_quantizer.0``, ``…w13_weight_quantizer.0``,
 # and the plural fused-experts form ``…weight_quantizers.0`` (per-expert ModuleList).
@@ -125,9 +153,7 @@ def _check_all_weight_quantizers_disabled(model: nn.Module) -> None:
         if not isinstance(module, QuantModule):
             continue
         for attr_name, quantizer in module.named_children():
-            if attr_name.endswith("weight_quantizer") and isinstance(
-                quantizer, (TensorQuantizer, SequentialQuantizer)
-            ):
+            if attr_name.endswith("weight_quantizer") and isinstance(quantizer, AnyQuantizer):
                 if quantizer.is_enabled:
                     raise RuntimeError(
                         f"vLLM fakequant export: {attr_name!r} must be disabled before saving "
@@ -361,7 +387,7 @@ def merge_amax_tensors_for_group(tensors: list[torch.Tensor]) -> torch.Tensor:
 def _enable_writeback_for_group(
     group: list[nn.Module],
     root_model: nn.Module,
-    name_to_module: dict[str, nn.Module],
+    names: ModuleNames | None,
 ):
     """Nest ``enable_weight_access_and_writeback`` for every module in ``group`` (one ``with``).
 
@@ -370,7 +396,7 @@ def _enable_writeback_for_group(
     """
     with ExitStack() as stack:
         for m in group:
-            stack.enter_context(enable_weight_access_and_writeback(m, root_model, name_to_module))
+            stack.enter_context(enable_weight_access_and_writeback(m, root_model, names))
         yield
 
 
@@ -406,9 +432,9 @@ def _resmooth_experts_for_export(
     if qfmt is None or "awq" not in qfmt.lower():
         return {}, set()
 
-    name_to_module = dict(model.named_modules()) if inplace else None
+    names = module_name_maps(model) if inplace else None
 
-    model_type = type(model).__name__.lower()
+    model_type = hf_model_type(model)
     id_to_name: dict[int, str] = {id(m): n for n, m in model.named_modules()}
     out: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {}
     requant_weights: set[str] = set()
@@ -466,7 +492,7 @@ def _resmooth_experts_for_export(
     # different tokens to each expert, so forward hooks cannot detect them as
     # sharing the same input tensor.
     for _, module in model.named_modules():
-        if not is_moe(module):
+        if not is_moe(module, model_type):
             continue
         try:
             expert_groups = get_experts_list(module, model_type)
@@ -476,11 +502,11 @@ def _resmooth_experts_for_export(
             if not experts:
                 continue
             if inplace:
-                if name_to_module is None:
+                if names is None:
                     raise RuntimeError(
-                        "name_to_module is required when inplace=True in _resmooth_experts_for_export"
+                        "names is required when inplace=True in _resmooth_experts_for_export"
                     )
-                with _enable_writeback_for_group(experts, model, name_to_module):
+                with _enable_writeback_for_group(experts, model, names):
                     _process_group(experts)
             else:
                 _process_group(experts)
@@ -505,16 +531,101 @@ def _resmooth_experts_for_export(
         if len(modules) <= 1:
             continue
         if inplace:
-            if name_to_module is None:
+            if names is None:
                 raise RuntimeError(
-                    "name_to_module is required when inplace=True in _resmooth_experts_for_export"
+                    "names is required when inplace=True in _resmooth_experts_for_export"
                 )
-            with _enable_writeback_for_group(modules, model, name_to_module):
+            with _enable_writeback_for_group(modules, model, names):
                 _process_group(modules)
         else:
             _process_group(modules)
 
     return out, requant_weights
+
+
+def _carry_over_unplaced_weights(export_dir: Path, model: nn.Module) -> None:
+    """Write checkpoint weights the model never held as an extra safetensors shard.
+
+    ``save_pretrained`` only ever writes ``model.state_dict()`` (or a copy of it), so a
+    checkpoint weight with no parameter in the built model -- an MTP head, an auxiliary
+    tower -- is never in what it saves, regardless of whether ``state_dict=`` was passed
+    explicitly. :func:`read_unplaced_weights` reads those tensors back from the source
+    checkpoint; this writes them as their own shard and rebuilds the index from every
+    shard on disk (mirroring ``LayerwiseExporter._write_index``), which sidesteps the
+    single-file-vs-sharded distinction ``save_pretrained`` may have already chosen.
+
+    A no-op when there is nothing to carry (the common case: most models have no
+    unplaced weights at all).
+    """
+    extra = read_unplaced_weights(model)
+    if not extra:
+        return
+
+    shard_name = "model-carried-over.safetensors"
+    save_file(
+        {k: v.detach().contiguous().cpu() for k, v in extra.items()}, str(export_dir / shard_name)
+    )
+    print(
+        f"Carrying {len(extra)} checkpoint weight(s) the model has no parameter for into {shard_name}"
+    )
+
+    weight_map: dict[str, str] = {}
+    total_size = 0
+    for shard in sorted(export_dir.glob("*.safetensors")):
+        with safe_open(str(shard), framework="pt") as f:
+            for key in f.keys():  # noqa: SIM118 -- safe_open has no __iter__
+                weight_map[key] = shard.name
+        with open(shard, "rb") as fh:
+            header_len = int.from_bytes(fh.read(8), "little")
+        total_size += shard.stat().st_size - 8 - header_len
+
+    index = {"metadata": {"total_size": total_size}, "weight_map": weight_map}
+    (export_dir / "model.safetensors.index.json").write_text(json.dumps(index, indent=2))
+
+
+def _copy_source_config(model: nn.Module, export_dir: Path) -> None:
+    """Preserve source config bytes when model settings are unchanged."""
+    source = getattr(model.config, "_name_or_path", None)
+    try:
+        from transformers.utils import cached_file
+
+        source_config = (
+            cached_file(
+                source,
+                "config.json",
+                _raise_exceptions_for_gated_repo=False,
+                _raise_exceptions_for_missing_entries=False,
+                _raise_exceptions_for_connection_errors=False,
+            )
+            if source
+            else None
+        )
+        if not source_config:
+            raise FileNotFoundError(f"config.json for {source!r}")
+        source_config = Path(source_config)
+        original = type(model.config).from_dict(json.loads(source_config.read_text())).to_dict()
+        current = model.config.to_dict()
+    except Exception as e:
+        warnings.warn(
+            f"Could not compare source config: {e}; keeping the config generated by "
+            "save_pretrained.",
+            stacklevel=2,
+        )
+        return
+
+    # Loading a checkpoint changes its location metadata, not its model settings.
+    for config in (current, original):
+        config.pop("_name_or_path", None)
+    if current != original:
+        warnings.warn(
+            "Model config changed since loading; keeping the config generated by "
+            "save_pretrained to match the exported weights.",
+            stacklevel=2,
+        )
+        return
+
+    if source_config.resolve() != (export_dir / "config.json").resolve():
+        shutil.copyfile(source_config, export_dir / "config.json")
 
 
 def export_hf_vllm_fq_checkpoint(
@@ -625,7 +736,10 @@ def export_hf_vllm_fq_checkpoint(
                 for attr_name, quantizer in module.named_children():
                     if not (attr_name.endswith("weight_quantizer") and quantizer.is_enabled):
                         continue
-                    if isinstance(quantizer, SequentialQuantizer):
+                    if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
+                        # GroupedQuantizer (per-expert TEGroupedLinear) and SequentialQuantizer
+                        # both hold sub-quantizers; disable each so the widened
+                        # _check_all_weight_quantizers_disabled(AnyQuantizer) check passes.
                         quantizer.disable()
                         for sub in quantizer:
                             wqs_to_restore.append((sub, sub._rotate))
@@ -692,6 +806,17 @@ def export_hf_vllm_fq_checkpoint(
                 model._keys_to_ignore_on_save = prev_ignore
         else:
             model.save_pretrained(export_dir, state_dict=clean_sd, save_modelopt_state=False)
+
+        # Step 4: carry over checkpoint weights the model never held (an MTP head, an
+        # auxiliary tower). save_pretrained above wrote only model-backed state, same as
+        # export_hf_checkpoint's post_state_dict; this writes the rest as an extra shard,
+        # the one thing save_pretrained's state_dict= path cannot do for the
+        # inplace_mem_efficient branch (it deliberately omits state_dict= there -- see the
+        # comment above -- so there is no state_dict to merge extras into).
+        _carry_over_unplaced_weights(export_dir, model)
+        copy_off_index_safetensors(_source_checkpoint(model), export_dir)
+        _copy_non_model_files_from_source(model, export_dir)
+        _copy_source_config(model, export_dir)
 
     finally:
         if not inplace_mem_efficient:

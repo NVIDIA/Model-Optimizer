@@ -26,7 +26,7 @@ This section focuses on applying Model Optimizer's state-of-the-art complementar
 
 ## Pre-Requisites
 
-For Minitron pruning for Megatron-Bridge / Megatron-LM models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.06`) which has all the dependencies installed.
+For Minitron pruning for Megatron-Bridge / Megatron-LM models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.08`) which has all the dependencies installed.
 
 For FastNAS pruning for PyTorch Computer Vision models, no additional dependencies are required.
 
@@ -63,7 +63,6 @@ bridge, provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf
         "pipeline_dtype": torch.bfloat16,
         "seq_length": 4096,
     },
-    moe_grouped_gemm=False,
 )
 
 # Set up the forward loop to run on 1024 train samples

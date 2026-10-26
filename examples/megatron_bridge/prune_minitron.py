@@ -42,19 +42,12 @@ import argparse
 import json
 import os
 import re
+import sys
 
 import torch
 from megatron.bridge import AutoBridge
-from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
-
-try:  # nemo:26.08+
-    from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
-
-    # MambaModelProvider subclasses HybridModelProvider on nemo:26.08+, so the tuple covers both.
-    _HYBRID_PROVIDER_TYPES: tuple[type, ...] = (MambaModelProvider, HybridModelProvider)
-except ImportError:  # nemo:26.06 and earlier
-    _HYBRID_PROVIDER_TYPES = (MambaModelProvider,)
-
+from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
+from mlflow_utils import NON_PARAMS, add_mlflow_args, mlflow_run, resolve_mlflow_args
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -65,7 +58,8 @@ from transformers import (
 import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.export import copy_hf_ckpt_remote_code
+from modelopt.torch.export import copy_non_model_files, ensure_local_checkpoint
+from modelopt.torch.nas.plugins.megatron_model_stats import parse_main_layer_chars
 from modelopt.torch.utils import (
     get_supported_datasets,
     num2hrb,
@@ -73,7 +67,8 @@ from modelopt.torch.utils import (
     print_rank_0,
     warn_rank_0,
 )
-from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
+from modelopt.torch.utils.mlflow import Tool, masked_args
+from modelopt.torch.utils.plugins.mbridge import get_language_model, load_mbridge_model_from_hf
 from modelopt.torch.utils.plugins.megatron_calibration import (
     get_megatron_calibration_forward_loop,
     get_megatron_vlm_calibration_forward_loop,
@@ -94,12 +89,60 @@ DEFAULT_VLM_CALIB_DATASET = "nemotron_vlm_dataset_v2"
 _MTP_HF_CONFIG_FIELDS = ("num_nextn_predict_layers", "mtp_num_hidden_layers", "mtp_num_layers")
 
 
+def _prune_variant(args: argparse.Namespace) -> str:
+    """What this pruning run was asked for. The targets can be combined, so the first one set
+    names the experiment and the params carry the rest."""
+    for flag in ("prune_target_params", "prune_target_active_params", "prune_target_memory_mb"):
+        value = getattr(args, flag, None)
+        if value is not None:
+            return f"{flag.removeprefix('prune_target_')}-{value}"
+    return "export_config"
+
+
+PRUNE = Tool(
+    name="megatron_bridge_prune",
+    tracks=(
+        "Track this run on an MLflow server, uploading the command and the run log -- which "
+        "carries the pruning decisions and the score gate -- and writing .experiment.json "
+        "into the checkpoint it saves."
+    ),
+    variant_help="the pruning target, or export_config",
+    variant=_prune_variant,
+    model=lambda args: args.hf_model_name_or_path,
+    # Exactly one: the parser makes the two output flags a required exclusive group.
+    checkpoint=lambda args: args.output_megatron_path or args.output_hf_path,
+    # Known only after the search, so main() stashes it on args.
+    metrics=lambda args: (
+        {} if getattr(args, "prune_score", None) is None else {"prune_score": args.prune_score}
+    ),
+    non_params=NON_PARAMS,
+)
+
+
 def _hf_config_has_mtp(hf_cfg) -> bool:
     """Whether an HF config declares MTP heads (checked top-level and under ``text_config``)."""
     return any(
         cfg is not None and getattr(cfg, field, 0)
         for cfg in (getattr(hf_cfg, "text_config", None), hf_cfg)
         for field in _MTP_HF_CONFIG_FIELDS
+    )
+
+
+# HF names the shared expert size with or without the ``moe_`` prefix depending on the model
+# (e.g. Qwen3.5-MoE uses ``shared_expert_intermediate_size``).
+_SHARED_EXPERT_SIZE_FIELDS = (
+    "moe_shared_expert_intermediate_size",
+    "shared_expert_intermediate_size",
+)
+
+
+def _is_deepseek_style_moe(text_cfg) -> bool:
+    """Whether the shared expert is sized as ``n_shared_experts * moe_intermediate_size``.
+
+    Such configs can only represent a shared expert size that is a multiple of the routed one.
+    """
+    return getattr(text_cfg, "n_shared_experts", None) is not None and not any(
+        hasattr(text_cfg, field) for field in _SHARED_EXPERT_SIZE_FIELDS
     )
 
 
@@ -238,6 +281,12 @@ def get_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--score_lower_bound",
+        type=float,
+        default=None,
+        help="If set, fail the job when the NAS-based pruned model's score is below this bound.",
+    )
+    parser.add_argument(
         "--ss_channel_divisor",
         type=int,
         default=None,
@@ -282,6 +331,8 @@ def get_args() -> argparse.Namespace:
         ),
     )
 
+    add_mlflow_args(parser, PRUNE)
+
     args = parser.parse_args()
 
     # Validate pruning target arguments
@@ -296,6 +347,11 @@ def get_args() -> argparse.Namespace:
         parser.error(
             "At least one of --prune_export_config, --prune_target_params,"
             " --prune_target_active_params, or --prune_target_memory_mb is required."
+        )
+    if args.score_lower_bound is not None and args.prune_export_config:
+        parser.error(
+            "--score_lower_bound requires NAS-based scoring (--prune_score_func), "
+            "not --prune_export_config."
         )
 
     # Post-process arguments
@@ -323,7 +379,13 @@ def get_args() -> argparse.Namespace:
     if args.inference_batch_size is None:
         args.inference_batch_size = args.calib_batch_size
 
-    print_args(args)
+    resolve_mlflow_args(args, parser, PRUNE)
+
+    print_args(masked_args(args))
+
+    # Flipped by main() once a checkpoint is on disk; a run that only scores candidates
+    # writes none, and then there is nothing for a provenance pointer to claim.
+    args.checkpoint_exported = False
 
     return args
 
@@ -376,8 +438,15 @@ def main(args: argparse.Namespace):
         warn_rank_0(f"\nPruned model already exists at {args.output_hf_path}. Exiting...")
         return
 
+    # --hf_model_name_or_path stays as given. Later steps read the local copy of the whole
+    # checkpoint in local_checkpoint_path, since exporters read the source's files from local disk
+    # only; hub_model_id is the Hub ID, or None for a local path.
+    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
+        args.hf_model_name_or_path
+    )
+
     bridge, provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(
-        hf_model_name_or_path=args.hf_model_name_or_path,
+        hf_model_name_or_path=args.local_checkpoint_path,
         trust_remote_code=args.trust_remote_code,
         provider_overrides={
             "tensor_model_parallel_size": 1,  # Tensor parallelism is not supported
@@ -387,7 +456,9 @@ def main(args: argparse.Namespace):
             "num_layers_in_last_pipeline_stage": args.num_layers_in_last_pipeline_stage,
             "pipeline_dtype": torch.bfloat16,
             "seq_length": args.seq_length,
-            "mtp_num_layers": 0,  # MTP is not supported during calibration
+            # MTP is not supported during calibration; drop it
+            "mtp_num_layers": 0,
+            "mtp_hybrid_override_pattern": None,
         },
         init_model_parallel=True,
         moe_grouped_gemm=not args.no_moe_grouped_gemm,
@@ -406,8 +477,7 @@ def main(args: argparse.Namespace):
 
     # For VLMs (e.g. Qwen3-VL), only the language model is pruned; the vision tower is left intact.
     # hidden_size is shared with the vision->LM projector, so it is skipped
-    language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
-    is_vlm = language_model is not unwrapped_model
+    language_model, is_vlm = get_language_model(unwrapped_model)
     if is_vlm:
         warn_rank_0(
             "VLM detected: pruning model.language_model only; all non-language-model components "
@@ -447,7 +517,7 @@ def main(args: argparse.Namespace):
     # the full VLM forward over image-text pairs.
     if use_image_calib:
         processor = AutoProcessor.from_pretrained(
-            args.hf_model_name_or_path, trust_remote_code=args.trust_remote_code
+            args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
         )
         forward_loop = get_megatron_vlm_calibration_forward_loop(
             unwrapped_model,  # full VLM (vision encoder + projector + language model)
@@ -529,6 +599,17 @@ def main(args: argparse.Namespace):
         pruning_config["max_width_pruning"] = args.max_width_pruning
         pruning_config["max_depth_pruning"] = args.max_depth_pruning
         pruning_config["hparams_to_skip"] = args.hparams_to_skip
+        # DeepSeek-style MoE configs size the shared expert as n_shared_experts * moe_intermediate_size,
+        # so only candidates whose shared size is a multiple of the routed one can be saved to HF.
+        src_hf_cfg = bridge.hf_pretrained.config
+        if _is_deepseek_style_moe(getattr(src_hf_cfg, "text_config", src_hf_cfg)):
+            warn_rank_0(
+                "DeepSeek-style MoE config detected: restricting the search to candidates whose "
+                "moe_shared_expert_intermediate_size is a multiple of moe_ffn_hidden_size."
+            )
+            pruning_config["candidate_filter"] = lambda cfg: (
+                cfg["moe_shared_expert_intermediate_size"] % cfg["moe_ffn_hidden_size"] == 0
+            )
         pruning_config["top_k"] = args.top_k
         # memory_mb constraint requires batch_size and seq_length
         pruning_config["batch_size"] = args.inference_batch_size
@@ -544,12 +625,15 @@ def main(args: argparse.Namespace):
         dummy_input=None,
         config=pruning_config,
     )
+    # Stashed here rather than after the saves: a run that dies exporting still reports the
+    # number the GPU hours bought. Absent for --prune_export_config, which scores nothing.
+    args.prune_score = pruning_scores.get("best", {}).get("score")
     # Remove unnecessary modelopt_state since ckpt is homogeneous
     if mto.ModeloptStateManager.has_state_for_mode_type("prune", model=language_model):
         mto.ModeloptStateManager.remove_state(language_model)
     if is_vlm:
         _log_vlm_param_breakdown(unwrapped_model, language_model, "after pruning")
-    if isinstance(provider, _HYBRID_PROVIDER_TYPES):
+    if isinstance(provider, HybridModelProvider):
         hybrid_key = (
             "hybrid_override_pattern"
             if hasattr(unwrapped_model, "hybrid_override_pattern")
@@ -566,19 +650,22 @@ def main(args: argparse.Namespace):
         bridge.save_megatron_model(
             model,
             args.output_megatron_path,
-            hf_tokenizer_path=args.hf_model_name_or_path,
+            # Recorded in the checkpoint's config: the Hub ID stays valid on other hosts.
+            hf_tokenizer_path=args.hub_model_id or args.local_checkpoint_path,
             hf_tokenizer_kwargs=tokenizer_kwargs,
         )
+        args.checkpoint_exported = True
         print_rank_0(
             f"Saved pruned model to {args.output_megatron_path} in Megatron checkpoint format"
         )
     else:
         print_rank_0(f"Saving pruned model to {args.output_hf_path} in HF checkpoint format")
 
-        # [WAR] Save the pruned HF model by hand until Megatron-Bridge natively supports it.
-        # TODO: Replace this whole block with ``AutoBridge.from_auto_config(...).save_hf_weights(...)``
-        #     once the Megatron-Bridge fix ships (nemo:26.08).
-        bridge.hf_pretrained.save_artifacts(args.output_hf_path)
+        # Build the pruned HF config field-by-field from the pruned Megatron config, then stream weights.
+        # Rank 0 only: a late write from another rank would leave config.json stale.
+        if dist.is_master():
+            bridge.hf_pretrained.save_artifacts(args.output_hf_path)
+        dist.barrier()
         hf_cfg = AutoConfig.from_pretrained(
             args.output_hf_path, trust_remote_code=args.trust_remote_code
         )
@@ -597,12 +684,7 @@ def main(args: argparse.Namespace):
             text_cfg.mamba_head_dim = mcore_cfg.mamba_head_dim
         if hasattr(text_cfg, "moe_intermediate_size"):
             text_cfg.moe_intermediate_size = mcore_cfg.moe_ffn_hidden_size
-        # HF names this field with or without the ``moe_`` prefix depending on the model
-        # (e.g. Qwen3.5-MoE uses ``shared_expert_intermediate_size``).
-        for shared_expert_field in (
-            "moe_shared_expert_intermediate_size",
-            "shared_expert_intermediate_size",
-        ):
+        for shared_expert_field in _SHARED_EXPERT_SIZE_FIELDS:
             if hasattr(text_cfg, shared_expert_field):
                 setattr(
                     text_cfg, shared_expert_field, mcore_cfg.moe_shared_expert_intermediate_size
@@ -611,7 +693,16 @@ def main(args: argparse.Namespace):
             text_cfg.num_experts = mcore_cfg.num_moe_experts
         if hasattr(text_cfg, "n_routed_experts"):
             text_cfg.n_routed_experts = mcore_cfg.num_moe_experts
-        if hasattr(text_cfg, "n_shared_experts"):
+        # n_shared_experts is a fixed count; only DeepSeek-style configs record the pruned shared
+        # expert size through it. candidate_filter keeps the search divisible, so only a manual
+        # --prune_export_config can violate this.
+        if _is_deepseek_style_moe(text_cfg):
+            if mcore_cfg.moe_shared_expert_intermediate_size % mcore_cfg.moe_ffn_hidden_size:
+                raise ValueError(
+                    f"{mcore_cfg.moe_shared_expert_intermediate_size=} must be a multiple of "
+                    f"{mcore_cfg.moe_ffn_hidden_size=} for this config, which stores the shared "
+                    "expert size as n_shared_experts * moe_intermediate_size. "
+                )
             text_cfg.n_shared_experts = (
                 mcore_cfg.moe_shared_expert_intermediate_size // mcore_cfg.moe_ffn_hidden_size
             )
@@ -645,28 +736,59 @@ def main(args: argparse.Namespace):
                     "distillation cannot recover this vision-path change -- consider full VLM "
                     "training/distillation instead of LM-only to recover vision quality."
                 )
-        if isinstance(provider, _HYBRID_PROVIDER_TYPES) and hasattr(
-            hf_cfg, "hybrid_override_pattern"
+        # Only older remote-code configs need this; native configs carry the cadence in layer_types.
+        if (
+            isinstance(provider, HybridModelProvider)
+            and not hasattr(text_cfg, "layer_types")
+            and hasattr(text_cfg, "hybrid_override_pattern")
         ):
-            hf_cfg.hybrid_override_pattern = getattr(unwrapped_model, hybrid_key)
+            # MCore's pattern can carry an MTP suffix (``/...``) and PP boundaries (``|``) which we need to remove
+            text_cfg.hybrid_override_pattern = "".join(
+                parse_main_layer_chars(getattr(unwrapped_model, hybrid_key), mcore_cfg.num_layers)
+            )
         text_cfg.num_hidden_layers = mcore_cfg.num_layers
         # Mark MTP as disabled on the HF text config written after pruning
         for field in _MTP_HF_CONFIG_FIELDS:
             if hasattr(text_cfg, field):
                 setattr(text_cfg, field, 0)
 
-        # Save dummy pruned HF model to get the correct bridge for saving pruned weights
-        dummy_model_cls = AutoModelForImageTextToText if is_vlm else AutoModelForCausalLM
-        dummy_model_cls.from_config(
-            hf_cfg, trust_remote_code=args.trust_remote_code
-        ).save_pretrained(args.output_hf_path, trust_remote_code=args.trust_remote_code)
-        pruned_bridge = AutoBridge.from_hf_pretrained(
-            args.output_hf_path, trust_remote_code=args.trust_remote_code
-        )
-        pruned_bridge.save_hf_weights(model, args.output_hf_path)
+        # Config-only bridge (hf_keys=None) keeps the embedding task when transformers' saved key
+        # differs from the bridge mapping (NemotronH's backbone.embedding vs ...embeddings).
+        if isinstance(provider, HybridModelProvider) and not is_vlm:
+            pruned_bridge = AutoBridge.from_hf_config(hf_cfg)
+            # save_hf_pretrained reads trust_remote_code off the bridge to fetch source artifacts;
+            # from_hf_config can't infer it since AutoConfig consumes the kwarg.
+            pruned_bridge.trust_remote_code = args.trust_remote_code
+            pruned_bridge.save_hf_pretrained(
+                model, args.output_hf_path, source_path=args.local_checkpoint_path
+            )
+        else:
+            dummy_model_cls = AutoModelForImageTextToText if is_vlm else AutoModelForCausalLM
+            dummy_model_cls.from_config(
+                hf_cfg, trust_remote_code=args.trust_remote_code
+            ).save_pretrained(args.output_hf_path, trust_remote_code=args.trust_remote_code)
+            pruned_bridge = AutoBridge.from_hf_pretrained(
+                args.output_hf_path, trust_remote_code=args.trust_remote_code
+            )
+            pruned_bridge.save_hf_weights(model, args.output_hf_path)
 
-        copy_hf_ckpt_remote_code(args.hf_model_name_or_path, args.output_hf_path)
+        # Every rank gets here (save_hf_weights is collective); one writer is enough.
+        if dist.is_master():
+            copy_non_model_files(args.local_checkpoint_path, args.output_hf_path)
+        args.checkpoint_exported = True
         print_rank_0(f"Saved pruned model to {args.output_hf_path} in HF checkpoint format")
+
+    # Accuracy gate: exit non-zero if pruned model's score is below the bound
+    if args.score_lower_bound is not None:
+        best_score = pruning_scores["best"].get("score")
+        assert best_score is not None, "No scored best candidate in pruning_scores"
+        passed = best_score >= args.score_lower_bound
+        print_rank_0(
+            f"[score_gate] final pruned model {args.prune_score_func} score = {best_score:.4f} "
+            f"(lower_bound {args.score_lower_bound}) -> {'PASS' if passed else 'FAIL'}"
+        )
+        if not passed:
+            sys.exit(1)
 
     print_rank_0("Done!")
 
@@ -675,6 +797,11 @@ if __name__ == "__main__":
     dist.setup()
     args = get_args()
     try:
-        main(args)
+        # Entered inside the try: opening the run is fatal by design, and the peers of a rank
+        # that exits without dist.abort() stay blocked on the first collective.
+        with mlflow_run(args, PRUNE):
+            main(args)
+    except BaseException:
+        dist.abort()  # peers may be stuck in a collective this rank will never reach
     finally:
         dist.cleanup()

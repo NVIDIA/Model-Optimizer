@@ -36,8 +36,6 @@ def test_export_compressed_nvfp4_weight_trtllm_scale():
     ``weight_quantizer._scale`` instead of the modelopt 2-D E4M3 layout. The export must
     un-swizzle it; using it as-is would write a scale of raw byte values.
     """
-    pytest.importorskip("tensorrt_llm")
-
     in_features = 256
     calib = lambda x: x(torch.randn(1, 4, in_features).cuda().half())  # noqa: E731
 

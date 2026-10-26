@@ -23,6 +23,7 @@ import inspect
 
 import pytest
 import torch
+from _test_utils.torch.quantization.attention import make_quant_attention
 from transformers import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaAttention
 
@@ -34,26 +35,13 @@ except ImportError:
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_FA_AVAILABLE
 from modelopt.torch.quantization.plugins.huggingface import _QuantAttention
 
-pytest.importorskip("transformers")
-
-
-def _make_quant_attention(hidden_size=128, num_q_heads=4, num_kv_heads=2):
-    config = LlamaConfig(
-        hidden_size=hidden_size,
-        num_attention_heads=num_q_heads,
-        num_key_value_heads=num_kv_heads,
-    )
-    quant_attention = _QuantAttention.convert(LlamaAttention(config, layer_idx=0))
-    quant_attention.config._attn_implementation = "sdpa"
-    return quant_attention
-
 
 @pytest.mark.skipif(not TRITON_FA_AVAILABLE, reason="Triton attention kernel unavailable")
 def test_p_qdq_fa():
     """FP8/NVFP4 p_bmm_quantizer runs on the built-in Triton kernel (no kitchen)."""
     batch_size, num_q_heads, num_kv_heads, seqlen, head_dim = 2, 4, 2, 32, 64
 
-    quant_attention = _make_quant_attention(num_q_heads=num_q_heads, num_kv_heads=num_kv_heads)
+    quant_attention = make_quant_attention(num_q_heads=num_q_heads, num_kv_heads=num_kv_heads)
     for name in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
         getattr(quant_attention, name).disable()
 
@@ -113,7 +101,7 @@ def test_p_qdq_unsupported_cases_raise():
     """The Triton qdq dispatch rejects attention semantics the kernel cannot honor."""
     batch_size, num_q_heads, num_kv_heads, seqlen, head_dim = 2, 4, 2, 32, 64
 
-    quant_attention = _make_quant_attention(num_q_heads=num_q_heads, num_kv_heads=num_kv_heads)
+    quant_attention = make_quant_attention(num_q_heads=num_q_heads, num_kv_heads=num_kv_heads)
     for name in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
         getattr(quant_attention, name).disable()
     quant_attention.p_bmm_quantizer.num_bits = (4, 3)  # FP8 mode
@@ -172,7 +160,7 @@ def test_p_qdq_non_causal_falls_back_to_eager():
     instead of raising -- keeping the softmax-P quant in an export-traceable graph."""
     batch_size, num_q_heads, num_kv_heads, seqlen, head_dim = 2, 4, 2, 32, 64
 
-    quant_attention = _make_quant_attention(num_q_heads=num_q_heads, num_kv_heads=num_kv_heads)
+    quant_attention = make_quant_attention(num_q_heads=num_q_heads, num_kv_heads=num_kv_heads)
     for name in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
         getattr(quant_attention, name).disable()
 

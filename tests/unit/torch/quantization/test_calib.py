@@ -404,14 +404,17 @@ def test_postprocess_amax():
 
 def test_svdquant_lora_weights():
     model = _SimpleMLP(64, 64, 64, 64)
+    inputs = torch.randn(2, 64, 64)
 
     quant_config = mtq.INT8_SMOOTHQUANT_CFG.copy()
     quant_config["algorithm"] = "svdquant"
 
-    mtq.quantize(model, quant_config, partial(forward_loop, dataloader=[torch.randn(2, 64, 64)]))
+    mtq.quantize(model, quant_config, partial(forward_loop, dataloader=[inputs]))
 
+    original_weights = []
     for module in model.modules():
         if isinstance(module, torch.nn.Linear):
+            original_weights.append((module, module.weight.detach().clone()))
             assert module.weight_quantizer.svdquant_lora_a is not None
             assert module.weight_quantizer.svdquant_lora_b is not None
 
@@ -419,6 +422,22 @@ def test_svdquant_lora_weights():
                 module.weight_quantizer.svdquant_lora_b @ module.weight_quantizer.svdquant_lora_a
             )
             assert lora_residual.shape == module.weight.shape
+
+    output_before = model(inputs)
+    with mtq.temporarily_fold_weights(model):
+        output_folded = model(inputs)
+        for module, _ in original_weights:
+            assert module.weight_quantizer.svdquant_lora_a is not None
+            assert module.weight_quantizer.svdquant_lora_b is not None
+            assert not module.weight_quantizer.is_enabled
+    output_restored = model(inputs)
+
+    assert torch.allclose(output_folded, output_before)
+    assert torch.allclose(output_restored, output_before)
+    for module, original_weight in original_weights:
+        assert torch.equal(module.weight, original_weight)
+        assert module.weight_quantizer.svdquant_lora_a is not None
+        assert module.weight_quantizer.svdquant_lora_b is not None
 
 
 def test_layerwise_calibrate_support_gate():

@@ -128,6 +128,48 @@ class TestBuildDockerExecutor:
         volumes = executor.volumes
         assert any("/custom/modelopt:/opt/modelopt" in v for v in volumes)
 
+    def test_docker_user_defaults_to_host_uid(self, tmp_path):
+        executor = build_docker_executor(
+            hf_local="/tmp/hf",
+            slurm_config=MagicMock(
+                local=False,
+                container="test:latest",
+                modelopt_install_path="/opt/modelopt",
+                container_mounts=None,
+                srun_args=None,
+                array=None,
+                docker_user=None,
+            ),
+            experiment_id="exp_u1",
+            job_dir=str(tmp_path / "experiments"),
+            task_name="task_0",
+            packager=MagicMock(),
+            modelopt_src_path="/tmp/modelopt",
+            experiment_title="cicd",
+        )
+        assert executor.additional_kwargs["user"] == f"{os.getuid()}:{os.getgid()}"
+
+    def test_docker_user_override(self, tmp_path):
+        executor = build_docker_executor(
+            hf_local="/tmp/hf",
+            slurm_config=MagicMock(
+                local=False,
+                container="test:latest",
+                modelopt_install_path="/opt/modelopt",
+                container_mounts=None,
+                srun_args=None,
+                array=None,
+                docker_user="root",
+            ),
+            experiment_id="exp_u2",
+            job_dir=str(tmp_path / "experiments"),
+            task_name="task_0",
+            packager=MagicMock(),
+            modelopt_src_path="/tmp/modelopt",
+            experiment_title="cicd",
+        )
+        assert executor.additional_kwargs["user"] == "root"
+
     def test_experiment_title_mount(self, tmp_path):
         job_dir = str(tmp_path / "experiments")
         executor = build_docker_executor(

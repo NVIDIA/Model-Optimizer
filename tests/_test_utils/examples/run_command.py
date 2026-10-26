@@ -14,9 +14,13 @@
 # limitations under the License.
 """Utility functions for running example commands reused in multiple example tests."""
 
+import contextlib
 import os
+import signal
 import subprocess
+import threading
 import time
+import traceback
 import warnings
 from pathlib import Path
 
@@ -24,8 +28,9 @@ from _test_utils.torch.distributed.utils import get_free_port
 
 MODELOPT_ROOT = Path(__file__).parents[3]
 
-# Substrings that identify a *transient* HuggingFace Hub / dataset access failure
-_HF_TRANSIENT_MARKERS = (
+# Substrings that identify a *transient* failure a rerun clears: a HuggingFace Hub / dataset access
+# error, or a rendezvous port that another process bound between its selection and its use
+_TRANSIENT_MARKERS = (
     "HfHubHTTPError",
     "Too Many Requests",
     "500 Server Error",
@@ -47,6 +52,8 @@ _HF_TRANSIENT_MARKERS = (
     "Couldn't reach",  # datasets: "Couldn't reach <repo> on the Hub"
     "Temporary failure in name resolution",  # transient DNS
     "Name or service not known",  # transient DNS
+    "EADDRINUSE",  # torch.distributed's TCPStore: "name: EADDRINUSE, message: address already in use"
+    "Address already in use",  # the same from Python's OSError, gloo and NCCL
 )
 _HF_MAX_RETRIES = 1
 _HF_RETRY_DELAY_S = 10
@@ -61,13 +68,87 @@ def extend_cmd_parts(cmd_parts: list[str], **kwargs):
     return cmd_parts
 
 
+# Grace period for descendants to flush and close the inherited output pipe after the command exits,
+# then a short bound on the post-SIGKILL drain (the fds close as the kernel tears the group down).
+_ORPHAN_PIPE_TIMEOUT_S = 30
+_KILLED_PIPE_TIMEOUT_S = 5
+
+
 def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tuple[int, str]:
-    """Run a command, capturing combined stdout/stderr to catch transient HF errors."""
-    result = subprocess.run(
-        cmd_parts, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+    """Run a command, streaming and capturing combined stdout/stderr to catch transient HF errors.
+
+    Drained by a reader thread rather than ``subprocess.run``, which waits for EOF: a descendant
+    outliving the command keeps the pipe open, hanging the read and discarding every log line.
+    """
+    chunks: list[str] = []
+    process = subprocess.Popen(
+        cmd_parts,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
     )
-    print(result.stdout, end="")
-    return result.returncode, result.stdout
+    # start_new_session makes the child its own group leader, so the group id is its pid (read now:
+    # os.getpgid() stops resolving it once wait() reaps the child).
+    pgid = process.pid
+
+    def _kill_process_group():
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            if os.name == "posix":
+                os.killpg(pgid, signal.SIGKILL)
+            else:  # no process groups; the command itself is the best we can reach
+                process.kill()
+
+    def _drain():
+        with contextlib.suppress(ValueError):  # the stream is closed under us on the escape path
+            for line in process.stdout:  # type: ignore[union-attr]
+                print(line, end="")
+                chunks.append(line)
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    try:
+        if os.name == "posix":
+            # Wait *without* reaping: a reaped pid can be recycled, and pgid == the child's pid, so
+            # reaping before the kill below would risk signalling an unrelated group.
+            os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+        else:  # no process groups, so nothing to protect the pid for
+            process.wait()
+    except BaseException:
+        # Interrupted (most likely pytest-timeout) while the command runs: its own process group is
+        # not swept up with pytest's, so take the descendants down rather than leak them.
+        _kill_process_group()
+        with contextlib.suppress(Exception):
+            process.wait(timeout=_KILLED_PIPE_TIMEOUT_S)  # reap: WNOWAIT left it waitable
+        raise
+    reader.join(_ORPHAN_PIPE_TIMEOUT_S)
+
+    if reader.is_alive():
+        warnings.warn(
+            f"{cmd_parts[0]} left descendants holding its output pipe open; killing the process "
+            "group. Output may be truncated."
+        )
+        _kill_process_group()
+        reader.join(_KILLED_PIPE_TIMEOUT_S)
+
+    returncode = process.wait()
+
+    with contextlib.suppress(Exception):
+        process.stdout.close()  # type: ignore[union-attr]
+    return returncode, "".join(chunks)
+
+
+# Set by a suite's conftest to run a command without spawning a subprocess (see
+# ``_test_utils.examples.megatron_example_runner``). Unset means always use a subprocess.
+_in_process_runner = None
+
+
+def set_in_process_runner(runner) -> None:
+    """Register ``runner(cmd_parts, example_path) -> str``; it must not fall back to a subprocess."""
+    global _in_process_runner
+    _in_process_runner = runner
 
 
 def run_example_command(
@@ -78,22 +159,52 @@ def run_example_command(
     hf_max_retries: int = _HF_MAX_RETRIES,
     hf_retry_delay_s: int = _HF_RETRY_DELAY_S,
 ) -> str | None:
-    """Run an example command, retrying transient HuggingFace access errors."""
+    """Run an example command, retrying transient errors (see ``_TRANSIENT_MARKERS``) once."""
     print(f"[{example_path}] Running command: {cmd_parts}")
-    env = env or os.environ.copy()
+    in_process = _in_process_runner if env is None else None
+    if _in_process_runner is not None and env is not None:
+        # The in-process runner uses the ambient environment, so a caller-supplied env would be
+        # silently dropped. Fall back to a subprocess rather than run with the wrong environment.
+        warnings.warn(f"[{example_path}] env= given; running this step as a subprocess")
+    env = os.environ.copy() if env is None else env
     cwd = MODELOPT_ROOT / "examples" / example_path
 
     for attempt in range(hf_max_retries + 1):
         if setup_free_port:
+            # Subprocess steps only: an in-process runner picks its own free port, since env is a
+            # copy it never sees.
             env["MASTER_PORT"] = str(get_free_port())  # fresh port per attempt
-        returncode, output = _run_capturing(cmd_parts, cwd, env)
+        if in_process is not None:
+            # Inside the loop so in-process steps get the same transient-error retries; these
+            # tests do hit the Hub (e.g. calib_dataset_name="cnn_dailymail").
+            try:
+                result = in_process(cmd_parts, example_path)
+            except Exception as e:
+                # Re-raise unless it looks transient, so a real failure keeps its traceback
+                # instead of being flattened into CalledProcessError.
+                # format_exc() walks __cause__/__context__: most markers are exception type
+                # names that only ever appear in a formatted traceback, never in str(e) -- a Hub
+                # ConnectionError typically surfaces wrapped in a DatasetGenerationError. The
+                # runner also attaches what the step printed, for launcher-level failures.
+                captured = getattr(e, "captured_output", "")
+                text = f"{traceback.format_exc()}\n{captured}"
+                if attempt == hf_max_retries or not any(
+                    marker in text for marker in _TRANSIENT_MARKERS
+                ):
+                    raise
+                returncode, output = 1, text
+            else:
+                assert result is not None, "an in-process runner must return output, not fall back"
+                return result
+        else:
+            returncode, output = _run_capturing(cmd_parts, cwd, env)
         if returncode == 0:
             return output
-        transient = any(marker in output for marker in _HF_TRANSIENT_MARKERS)
+        transient = any(marker in output for marker in _TRANSIENT_MARKERS)
         if not transient or attempt == hf_max_retries:
-            raise subprocess.CalledProcessError(returncode, cmd_parts)
+            raise subprocess.CalledProcessError(returncode, cmd_parts, output=output)
         warnings.warn(
-            f"[{example_path}] transient HuggingFace access error; retrying in "
+            f"[{example_path}] transient error; retrying in "
             f"{hf_retry_delay_s}s (attempt {attempt + 1}/{hf_max_retries})"
         )
         time.sleep(hf_retry_delay_s)
@@ -109,4 +220,7 @@ def run_hf_ptq_command(*, model: str, quant: str | None = None, vlm: bool = Fals
         # VLM PTQ shares the hf_ptq entry point; --vlm runs the multimodal deploy smoke test.
         cmd_parts.append("--vlm")
     cmd_parts = extend_cmd_parts(cmd_parts, **kwargs)
-    run_example_command(cmd_parts, "hf_ptq")
+    # Run a single-GPU TRT-LLM deploy's executor in the script's process. By default it spawns an
+    # MPI worker that imports TRT-LLM again, adding ~20s to every deploy.
+    env = {**os.environ, "TLLM_WORKER_USE_SINGLE_PROCESS": "1"}
+    run_example_command(cmd_parts, "hf_ptq", env=env)

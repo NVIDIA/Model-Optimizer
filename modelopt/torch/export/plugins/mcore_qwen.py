@@ -27,6 +27,7 @@ from .mcore_custom import (
     NameRemapping,
     QKVMerging,
     QKVSlicing,
+    SelfAttentionScaling,
 )
 
 qwen3_causal_lm_import: dict[str, CustomModuleMapping] = {
@@ -64,6 +65,8 @@ qwen3_causal_lm_export: dict[str, CustomModuleMapping] = {
     "fused_input_layernorm": NameRemapping("model.layers.{}.input_layernorm.weight"),
     "linear_qkv": QKVSlicing("model.layers.{}.self_attn."),
     "linear_proj": NameRemapping("model.layers.{}.self_attn.o_proj."),
+    # KV cache quant export
+    "core_attention": SelfAttentionScaling("model.layers.{}.self_attn."),
     "q_layernorm": NameRemapping("model.layers.{}.self_attn.q_norm."),
     "k_layernorm": NameRemapping("model.layers.{}.self_attn.k_norm."),
     # MLP
@@ -102,6 +105,8 @@ qwen25_causal_lm_export: dict[str, CustomModuleMapping] = {
     "fused_input_layernorm": NameRemapping("model.layers.{}.input_layernorm.weight"),
     "linear_qkv": QKVSlicing("model.layers.{}.self_attn."),
     "linear_proj": NameRemapping("model.layers.{}.self_attn.o_proj."),
+    # KV cache quant export
+    "core_attention": SelfAttentionScaling("model.layers.{}.self_attn."),
     # MLP
     "pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm."),
     "fused_pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm.weight"),

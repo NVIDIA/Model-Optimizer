@@ -16,11 +16,18 @@
 import onnx_graphsurgeon as gs
 
 
-def assert_nodes_are_quantized(nodes):
+def assert_nodes_are_quantized(nodes, *, ignore_identity_inputs: bool = False):
+    """Assert every variable input of ``nodes`` is produced by a DequantizeLinear.
+
+    ``ignore_identity_inputs`` skips inputs fed by an ``Identity`` node, for graphs where the
+    quantizer legitimately leaves such a passthrough in place (e.g. concat elimination).
+    """
     for node in nodes:
         for inp_idx, inp in enumerate(node.inputs):
             if isinstance(inp, gs.Variable):
                 producer = node.i(inp_idx)
+                if ignore_identity_inputs and producer and producer.op == "Identity":
+                    continue
                 # Quantized path may include a Cast right after DQ
                 if producer and producer.op == "Cast":
                     producer = producer.i(0)

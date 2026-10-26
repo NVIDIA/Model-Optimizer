@@ -18,13 +18,15 @@
 import numpy as np
 import pytest
 import torch
+import yaml
 from _test_utils.torch.quantization.models import SimpleLinear
 from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTester
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
-from modelopt.torch.quantization import QuantModuleRegistry
+from modelopt.torch.quantization import QuantModuleRegistry, tensor_quant
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, RotateConfig
+from modelopt.torch.quantization.conversion import create_and_replace_svdquant_linear_on_the_fly
 from modelopt.torch.quantization.nn import (
     SequentialQuantizer,
     TensorQuantizer,
@@ -35,6 +37,70 @@ from modelopt.torch.quantization.nn import (
 
 class TestFakeTensorQuantCPU(FakeTensorQuantTester):
     device = "cpu"
+
+
+def test_custom_op_schemas_keep_legacy_positional_calls():
+    inputs = torch.randn(4, 32)
+    amax = torch.tensor(1.0)
+    fp8 = torch.ops.tensorrt.quantize_op(inputs, amax, 8, 4, False, False)
+    mxfp8 = torch.ops.tensorrt.dynamic_block_quantize_op.overload(inputs, 32, None, 8, 4, 9, 8)
+
+    assert (fp8.shape, fp8.dtype) == (inputs.shape, inputs.dtype)
+    assert (mxfp8.shape, mxfp8.dtype) == (inputs.shape, inputs.dtype)
+
+
+@pytest.mark.parametrize("num_bits", [8, 4])
+def test_cpu_integer_carrier_strict_capture_preserves_custom_op(num_bits):
+    class QuantizeCarrier(torch.nn.Module):
+        def forward(self, inputs, amax):
+            return torch.ops.tensorrt.quantize_op(inputs, amax, num_bits, 0, False, False, "Float")
+
+    inputs = torch.randn(4, 32)
+    amax = torch.tensor(1.0)
+    exported = torch.export.export(QuantizeCarrier(), (inputs, amax), strict=True)
+
+    assert any(
+        node.target == torch.ops.tensorrt.quantize_op.default for node in exported.graph.nodes
+    )
+    expected = tensor_quant.fake_tensor_quant(inputs, amax, None, num_bits, False, False)
+    torch.testing.assert_close(exported.module()(inputs, amax), expected)
+
+
+def test_cpu_fp8_quantizer_strict_capture_preserves_custom_op():
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3), narrow_range=False))
+    quantizer.amax = torch.tensor(1.0)
+    inputs = (torch.randn(4, 32),)
+
+    exported = torch.export.export(quantizer, inputs, strict=True)
+
+    assert any(
+        node.target == torch.ops.tensorrt.quantize_op.default for node in exported.graph.nodes
+    )
+    torch.testing.assert_close(exported.module()(*inputs), quantizer(*inputs))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize(
+    ("amax_shape", "num_bits", "block_size", "axis"),
+    [([], 8, None, None), ([2, 1], 8, None, 0), ([4, 1], 4, 2, 1)],
+    ids=["scalar", "per_axis", "block"],
+)
+def test_registered_cpu_quantize_matches_eager(amax_shape, num_bits, block_size, axis, dtype):
+    inputs = torch.linspace(-3, 3, 8, dtype=dtype).reshape(2, 4)
+    if block_size is not None:
+        inputs = inputs.reshape(-1, block_size)
+    amax = torch.full(amax_shape, 2.0, dtype=dtype)
+    if amax.numel() > 1:
+        amax[0] = 0
+    expected = tensor_quant.fake_tensor_quant(inputs, amax, None, num_bits, False, True)
+
+    legacy = torch.ops.tensorrt.quantize_op(inputs, amax, num_bits, 0, False, True)
+    with_metadata = torch.ops.tensorrt.quantize_op(
+        inputs, amax, num_bits, 0, False, True, "Float", block_size, axis
+    )
+
+    torch.testing.assert_close(legacy, expected, rtol=0, atol=0)
+    torch.testing.assert_close(with_metadata, expected, rtol=0, atol=0)
 
 
 class TestQuantizerAttributeConfig:
@@ -317,19 +383,171 @@ def test_fold_weight_disables_quantizer_without_extra_transform(
         unregister_quant_backend(backend_name)
 
 
-def test_fold_weight_keep_attrs_keeps_amax(monkeypatch):
+def test_fold_weight_keep_attrs_keeps_calibration_attrs_inactive(monkeypatch):
     calls = []
     backend_name = "test_fold_backend_keep"
     qlinear = _make_qlinear_with_backend(monkeypatch, calls, backend_name)
     try:
         qlinear.weight_quantizer.amax = torch.tensor(1.0)
+        qlinear.weight_quantizer.pre_quant_scale = torch.tensor([[0.5, 1.0, 1.5, 2.0]])
+        inputs = torch.randn(2, 4)
+        output_before = qlinear(inputs)
 
         qlinear.fold_weight(keep_attrs=True)
 
         assert hasattr(qlinear.weight_quantizer, "_amax")
+        assert hasattr(qlinear.weight_quantizer, "_pre_quant_scale")
+        assert qlinear.weight_quantizer.pre_quant_scale is None
         assert not qlinear.weight_quantizer.is_enabled
+        assert torch.allclose(qlinear(inputs), output_before)
     finally:
         unregister_quant_backend(backend_name)
+
+
+def test_fold_weight_folds_svdquant_lora():
+    model = torch.nn.Sequential(torch.nn.Linear(4, 3))
+    inputs = torch.randn(2, 4)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, config, lambda m: m(inputs))
+    create_and_replace_svdquant_linear_on_the_fly(model)
+    model[0].weight_quantizer.svdquant_lora_a = torch.randn(2, 4)
+    model[0].weight_quantizer.svdquant_lora_b = torch.randn(3, 2)
+    output_before = model(inputs)
+
+    mtq.fold_weight(model)
+
+    assert not hasattr(model[0].weight_quantizer, "_svdquant_lora_a")
+    assert torch.allclose(model(inputs), output_before, atol=1e-6)
+
+
+@torch.no_grad()
+def test_fold_weight_folds_sequential_weight_quantizer():
+    model = SimpleLinear()
+    inputs = model.get_input()
+    mtq.quantize(model, {**WINT4INT8_CFG, "algorithm": "max"}, lambda m: m(inputs))
+    expected = {
+        module: module.weight_quantizer(module.weight)
+        for module in model.modules()
+        if isinstance(getattr(module, "weight_quantizer", None), SequentialQuantizer)
+    }
+    assert expected
+
+    mtq.fold_weight(model)
+
+    for module, weight in expected.items():
+        assert torch.equal(module.weight, weight)
+        assert not any(q.is_enabled or hasattr(q, "_amax") for q in module.weight_quantizer)
+
+
+def test_temporarily_fold_weights_restores_after_exception(monkeypatch):
+    calls = []
+    backend_name = "test_temporary_fold_backend"
+    qlinear = _make_qlinear_with_backend(
+        monkeypatch,
+        calls,
+        backend_name,
+        rotate={"enable": True},
+    )
+    try:
+        quantizer = qlinear.weight_quantizer
+        quantizer.amax = torch.tensor(1.0)
+        quantizer.pre_quant_scale = torch.tensor([[0.5, 1.0, 1.5, 2.0]])
+        original_weight = qlinear.weight.detach().clone()
+        original_storage = qlinear.weight.data_ptr()
+        original_rotate = quantizer._rotate
+        original_pre_quant_scale = quantizer.pre_quant_scale.detach().clone()
+        original_input_dtype = quantizer._input_dtype
+        inputs = torch.randn(2, 4)
+        output_before = qlinear(inputs)
+
+        with (
+            pytest.raises(RuntimeError, match="test error"),
+            mtq.temporarily_fold_weights(qlinear, snapshot_device="cpu"),
+        ):
+            assert not torch.equal(qlinear.weight, original_weight)
+            assert qlinear.weight.data_ptr() == original_storage
+            assert not quantizer.is_enabled
+            assert not quantizer.rotate_is_enabled
+            assert hasattr(quantizer, "_pre_quant_scale")
+            assert quantizer.pre_quant_scale is None
+            assert torch.allclose(qlinear(inputs), output_before)
+            raise RuntimeError("test error")
+
+        assert torch.equal(qlinear.weight, original_weight)
+        assert qlinear.weight.data_ptr() == original_storage
+        assert quantizer.is_enabled
+        assert quantizer._rotate == original_rotate
+        assert torch.equal(quantizer.pre_quant_scale, original_pre_quant_scale)
+        assert quantizer._input_dtype == original_input_dtype
+        assert torch.allclose(qlinear(inputs), output_before)
+    finally:
+        unregister_quant_backend(backend_name)
+
+
+def test_temporarily_fold_weights_handles_disabled_transform_and_none_weight():
+    disabled = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    pre_quant_scale = torch.tensor([[0.5, 1.0, 1.5, 2.0]])
+    disabled.weight_quantizer.pre_quant_scale = pre_quant_scale
+    disabled.weight_quantizer.disable()
+    original_weight = disabled.weight.detach().clone()
+
+    tied_output = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    tied_output.weight = None
+
+    with mtq.temporarily_fold_weights(torch.nn.ModuleList([disabled, tied_output])):
+        assert torch.equal(disabled.weight, original_weight * pre_quant_scale)
+        assert not disabled.weight_quantizer.is_enabled
+        assert disabled.weight_quantizer.pre_quant_scale is None
+        assert tied_output.weight_quantizer.is_enabled
+
+    assert torch.equal(disabled.weight, original_weight)
+    assert not disabled.weight_quantizer.is_enabled
+    assert torch.equal(disabled.weight_quantizer.pre_quant_scale, pre_quant_scale)
+    assert tied_output.weight_quantizer.is_enabled
+
+
+def test_temporarily_fold_weights_restores_when_folding_fails(monkeypatch):
+    first_calls = []
+    second_calls = []
+    first_backend = "test_temporary_fold_first_backend"
+    second_backend = "test_temporary_fold_failing_backend"
+    first = _make_qlinear_with_backend(monkeypatch, first_calls, first_backend)
+    second = _make_qlinear_with_backend(monkeypatch, second_calls, second_backend)
+
+    def failing_backend(inputs, _quantizer):
+        raise RuntimeError("fold failed")
+
+    unregister_quant_backend(second_backend)
+    register_quant_backend(second_backend, failing_backend)
+    model = torch.nn.ModuleList([first, second])
+    original_weights = [module.weight.detach().clone() for module in model]
+    try:
+        with pytest.raises(RuntimeError, match="fold failed"), mtq.temporarily_fold_weights(model):
+            pass
+
+        for module, original_weight in zip(model, original_weights):
+            assert torch.equal(module.weight, original_weight)
+            assert module.weight_quantizer.is_enabled
+    finally:
+        unregister_quant_backend(first_backend)
+        unregister_quant_backend(second_backend)
+
+
+def test_temporarily_fold_weights_rejects_sequential_quantizer():
+    qlinear = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    qlinear.weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
+
+    with (
+        pytest.raises(NotImplementedError, match="does not support SequentialQuantizer"),
+        mtq.temporarily_fold_weights(qlinear),
+    ):
+        pass
 
 
 WINT4INT8_CFG = {
@@ -427,3 +645,48 @@ def test_set_quantizer_cxt_restores_on_exception():
         if isinstance(module, TensorQuantizer)
     }
     assert post_state == pre_state
+
+
+def test_preserve_quantizer_attributes_context_restores_type_and_properties():
+    model = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    model.weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
+    original_states = [
+        quantizer.get_modelopt_state(properties_only=True) for quantizer in model.weight_quantizer
+    ]
+
+    with mtq.preserve_quantizer_attributes_context(model):
+        mtq.set_quantizer_by_cfg(
+            model,
+            [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4}}],
+        )
+        assert isinstance(model.weight_quantizer, TensorQuantizer)
+
+    assert isinstance(model.weight_quantizer, SequentialQuantizer)
+    restored_states = [
+        quantizer.get_modelopt_state(properties_only=True) for quantizer in model.weight_quantizer
+    ]
+    assert restored_states == original_states
+
+
+@pytest.mark.parametrize(
+    "attribute_cfg",
+    [
+        {
+            "num_bits": (2, 1),
+            "axis": None,
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+        },
+        {"num_bits": (4, 3), "axis": None, "use_constant_amax": True},
+        {"num_bits": 8, "axis": 0, "unsigned": True, "narrow_range": True, "type": "dynamic"},
+        {"num_bits": "custom", "backend": "custom_backend", "backend_extra_args": {"offset": 0.25}},
+        {"enable": False},
+    ],
+)
+def test_attribute_config_from_modelopt_state_round_trips_yaml(attribute_cfg):
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(**attribute_cfg))
+    state = quantizer.get_modelopt_state(properties_only=True)
+    restored_cfg = TensorQuantizer.attribute_config_from_modelopt_state(
+        yaml.safe_load(yaml.safe_dump(state))
+    )
+    restored = TensorQuantizer(QuantizerAttributeConfig(**restored_cfg))
+    assert restored.get_modelopt_state(properties_only=True) == state

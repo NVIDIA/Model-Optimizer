@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import contextlib
 import itertools
 import time
 from typing import Any
@@ -68,9 +67,9 @@ class AutoDeployModel(Model):
 
     def stop(self):
         """Stop and cleanup the model."""
-        if hasattr(self, "model") and self.model is not None:
-            with contextlib.suppress(Exception):
-                del self.model
+        if getattr(self, "model", None) is not None:
+            self.model.shutdown()
+            del self.model
 
 
 def create_auto_deploy_model(model_path: str, max_concurrent_requests: int, kwargs: dict[str, Any]):
@@ -93,6 +92,8 @@ def create_auto_deploy_model(model_path: str, max_concurrent_requests: int, kwar
         )
     elif speculative_algorithm == "NONE":
         specdec = None
+    elif speculative_algorithm == "DSPARK":
+        raise NotImplementedError("DSPARK is only supported by --engine VLLM.")
 
     max_num_tokens = kwargs.get("max_num_tokens", 8192)
 

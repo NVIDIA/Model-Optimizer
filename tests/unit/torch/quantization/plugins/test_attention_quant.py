@@ -17,9 +17,8 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from _test_utils.torch.quantization.attention import make_quant_attention
 from _test_utils.torch.transformers_models import get_tiny_bert, get_tiny_llama, get_tiny_t5
-from transformers import LlamaConfig
-from transformers.models.llama.modeling_llama import LlamaAttention
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.plugins.huggingface import _QuantAttention
@@ -86,10 +85,10 @@ def test_kv_quant_hf(model_getter, attn_cls):
 
     original_is_compatible_attention = None
     if attn_cls is not None:
-        # Test case for transformers < 4.48
+        # Test case for attention modules without transformers' attention interface
         # This needs:
         # 1) replace the attention class with the test attention class
-        # 2) set _QuantAttention.is_compatible_attention output to False to fall back to the transformers < 4.48 support
+        # 2) set _QuantAttention.is_compatible_attention output to False to fall back to the AST-based support
         for name, module in model_test.named_modules():
             if name.endswith(attention_module):
                 if original_is_compatible_attention is None:
@@ -152,20 +151,9 @@ def test_kv_quant_bert():
     assert output.end_logits is not None
 
 
-def _make_quant_attention(hidden_size=128, num_q_heads=4, num_kv_heads=2):
-    config = LlamaConfig(
-        hidden_size=hidden_size,
-        num_attention_heads=num_q_heads,
-        num_key_value_heads=num_kv_heads,
-    )
-    quant_attention = _QuantAttention.convert(LlamaAttention(config, layer_idx=0))
-    quant_attention.config._attn_implementation = "sdpa"
-    return quant_attention
-
-
 def test_p_qdq_mode_detection():
     """p_bmm_quantizer config maps to the right Triton softmax qdq mode."""
-    quant_attention = _make_quant_attention()
+    quant_attention = make_quant_attention()
     sq = quant_attention.p_bmm_quantizer
 
     # Default int8 quantizer: not a supported Triton qdq format
@@ -197,3 +185,129 @@ def test_p_qdq_mode_detection():
     sq.block_sizes = None
     sq.disable()
     assert quant_attention._p_qdq_mode() is None
+
+
+@pytest.mark.parametrize("quantization_active", [True, False])
+def test_causal_p_qdq_dispatch_respects_quant_state(monkeypatch, quantization_active):
+    """Causal attention must dispatch according to the P quantizer runtime state."""
+    quant_attention = make_quant_attention()
+    for name in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
+        getattr(quant_attention, name).disable()
+
+    pq = quant_attention.p_bmm_quantizer
+    pq.num_bits = (4, 3)
+    pq.block_sizes = None
+    if quantization_active:
+        pq.enable_quant()
+    else:
+        pq.disable_quant()
+
+    calls = []
+    expected = object()
+    expected_attention_mask = object()
+
+    def triton_attention(*args, **kwargs):
+        calls.append("triton")
+        assert kwargs["attention_mask"] is expected_attention_mask
+        return expected
+
+    monkeypatch.setattr(
+        quant_attention,
+        "_triton_qdq_attention",
+        triton_attention,
+    )
+    monkeypatch.setattr(
+        quant_attention,
+        "_init_kitchen_attn_fn",
+        lambda: pytest.fail("P quantizer dispatch reached Kitchen initialization"),
+    )
+
+    def original_attention(_self, _query, _key, _value, attention_mask):
+        calls.append("original")
+        assert attention_mask is expected_attention_mask
+        return expected
+
+    states = torch.zeros(1, 4, 2, 32)
+    output = quant_attention._quantized_attention(
+        original_attention,
+        quant_attention,
+        states,
+        states,
+        states,
+        expected_attention_mask,
+    )
+
+    assert output is expected
+    assert calls == ["triton" if quantization_active else "original"]
+
+
+@pytest.mark.parametrize(
+    ("disable_method", "enable_method"),
+    [("disable", "enable"), ("disable_quant", "enable_quant")],
+)
+@pytest.mark.parametrize("preinitialized", [False, True])
+def test_kitchen_dispatch_respects_quantizer_runtime_state(
+    monkeypatch, disable_method, enable_method, preinitialized
+):
+    """Kitchen dispatch must stop while P quantization is inactive and resume afterward."""
+    quant_attention = make_quant_attention()
+    for name in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
+        getattr(quant_attention, name).disable()
+
+    pq = quant_attention.p_bmm_quantizer
+    pq.num_bits = (4, 3)
+    pq.block_sizes = {-1: 32, "type": "dynamic", "scale_bits": (8, 0)}
+
+    calls = []
+
+    def kitchen_attention(query, _key, _value):
+        calls.append("kitchen")
+        return query.flatten(2)
+
+    def init_kitchen():
+        calls.append("init")
+        quant_attention.use_kitchen = True
+        quant_attention.kitchen_attn_fn = kitchen_attention
+
+    monkeypatch.setattr(
+        "modelopt.torch.quantization.plugins.huggingface.kitchen",
+        object(),
+    )
+    monkeypatch.setattr(quant_attention, "_init_kitchen_attn_fn", init_kitchen)
+
+    if preinitialized:
+        quant_attention.use_kitchen = True
+        quant_attention.kitchen_attn_fn = kitchen_attention
+
+    expected = object()
+
+    def original_attention(_self, _query, _key, _value):
+        calls.append("original")
+        return expected
+
+    states = torch.zeros(1, 4, 2, 32)
+    getattr(pq, disable_method)()
+    output = quant_attention._quantized_attention(
+        original_attention,
+        quant_attention,
+        states,
+        states,
+        states,
+    )
+
+    assert output is expected
+    assert calls == ["original"]
+
+    calls.clear()
+    getattr(pq, enable_method)()
+    output = quant_attention._quantized_attention(
+        original_attention,
+        quant_attention,
+        states,
+        states,
+        states,
+    )
+
+    assert output[0].shape == (1, 2, 4, 32)
+    assert output[1] is None
+    assert calls == (["kitchen"] if preinitialized else ["init", "kitchen"])
