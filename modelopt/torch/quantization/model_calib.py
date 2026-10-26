@@ -408,9 +408,11 @@ def max_calibrate(
         return
 
     # Share expert input amax over the expert-parallel group, so experts that received no tokens take
-    # the layer's value. Input quantizers only, as expert weight shards differ per rank. Runs before the
-    # completeness check below, and only for modules that opt in (``_share_input_amax_across_ep``):
-    # Megatron's experts keep main's check-then-sync.
+    # the layer's value: a single value (per-tensor, or a dynamic block quantizer's global scale), as a
+    # per-channel or static per-block one that some ranks lack raises on every rank instead. Input
+    # quantizers only, as expert weight shards differ per rank. Runs before the completeness check
+    # below, and only for modules that opt in (``_share_input_amax_across_ep``): Megatron's experts
+    # keep main's check-then-sync.
     for name, module in model.named_modules():
         if (
             isinstance(module, QuantModule)

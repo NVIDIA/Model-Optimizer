@@ -1474,8 +1474,8 @@ class TensorQuantizer(nn.Module):
         if amax is not None:
             numel = amax.numel()
             # Tells apart shapes of one size, such as (8, 1) and (1, 8). A tuple of ints hashes alike
-            # in every process (a str would not), and the key stays exact in float32, as a numel of
-            # 2**24 or more does not.
+            # in every process (a str would not), and the key stays exact in float32, as a numel
+            # above 2**24 may not.
             shape_key = hash(tuple(amax.shape)) % (1 << 24)
             dtype_code = _AMAX_DTYPES.index(amax.dtype) + 1 if amax.dtype in _AMAX_DTYPES else 0
         # MAX turns each [x, -x] pair into x's largest and negated smallest value across the ranks.
@@ -1643,8 +1643,9 @@ def _collective_device(group) -> torch.device:
     Derived from the group's backends, which all ranks share, rather than from a local tensor: a rank
     that never calibrated a quantizer has no amax to ask, and ranks that disagree on the device type
     reach different backends and hang. Read from the group's configuration, not its name:
-    ``init_process_group()`` without a backend names the group ``undefined`` but configures it
-    ``cpu:gloo,cuda:nccl``. A gloo-only group has no CUDA backend at all.
+    ``init_process_group()`` without a backend names the group ``undefined`` but configures NCCL for
+    CUDA (``cuda:nccl``, next to ``cpu:gloo`` in some torch builds). A gloo-only group has no CUDA
+    backend at all.
     """
     if torch.cuda.is_available() and "nccl" in dist.get_backend_config(group):
         return torch.device("cuda", torch.cuda.current_device())
