@@ -81,6 +81,28 @@ def test_hessian_of_a_full_gpu_falls_back_to_the_cpu(need_2_gpus, monkeypatch, b
     assert helper.hessian.device == torch.device("cpu")
 
 
+def test_bf16_inputs_accumulate_the_float32_hessian():
+    """BF16 inputs give the float32 Hessian, on the inputs' GPU or the CPU, without a float32
+    copy of the inputs."""
+    torch.manual_seed(0)
+    batches = [torch.randn(4096, 1024, device="cuda", dtype=torch.bfloat16) for _ in range(3)]
+    inputs = torch.cat(batches).double()
+    expected = 2 * inputs.t() @ inputs / inputs.shape[0]
+
+    for device in ("cuda", "cpu"):
+        hessian, n_samples = torch.zeros(1024, 1024, device=device), 0
+        for batch in batches:
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+            base = torch.cuda.memory_allocated()
+            hessian, n_samples = update_hessian(batch, hessian, n_samples)
+            growth = torch.cuda.max_memory_allocated() - base
+        # Tensor cores round float32 sums their own way: ~1e-5 of the diagonal (2), not BF16's 1e-2.
+        torch.testing.assert_close(hessian.cuda().double(), expected, rtol=0, atol=1e-4)
+        if device == "cuda":
+            assert growth < batch.numel() * 4
+
+
 @pytest.mark.parametrize(
     ("measured_fraction", "stays"),
     [(None, False), (0.05, True), (0.25, False)],

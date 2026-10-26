@@ -38,6 +38,7 @@
 
 """GPTQ helper and Hessian utilities for calibration."""
 
+import functools
 from contextlib import contextmanager
 
 import torch
@@ -120,7 +121,7 @@ def update_hessian(input, hessian, n_samples):
     Note: input must be non-empty (batch_size > 0); a zero-sized input causes division by zero.
     """
     # Flatten to 2D (total_tokens, features) first, so batch_size counts tokens
-    input_flat = input.reshape(-1, input.shape[-1]).float()
+    input_flat = input.reshape(-1, input.shape[-1])
     batch_size = input_flat.shape[0]
 
     if batch_size == 0:  # in MOEs some experts receive no tokens
@@ -130,14 +131,49 @@ def update_hessian(input, hessian, n_samples):
     # once per expert per forward, and separate scale and add passes each rewrite all of H.
     scale = n_samples / (n_samples + batch_size)
     n_samples += batch_size
+    alpha = 2 / n_samples
+    if (
+        input_flat.is_cuda
+        and input_flat.dtype in (torch.bfloat16, torch.float16)
+        and _has_float32_out_gemm()
+    ):
+        # BF16 and FP16 products are exact in float32, so a tensor-core GEMM writing float32 differs
+        # from a float32 GEMM only in how it rounds the sums, by ~1e-5 of the Hessian's diagonal.
+        # It is 9-16x faster on GB300 and needs no float32 copy of the inputs.
+        if hessian.device == input_flat.device:
+            torch.addmm(
+                hessian,
+                input_flat.t(),
+                input_flat,
+                beta=scale,
+                alpha=alpha,
+                out_dtype=torch.float32,
+                out=hessian,
+            )
+        else:
+            gram = torch.mm(input_flat.t(), input_flat, out_dtype=torch.float32)
+            hessian.mul_(scale).add_(gram.to(hessian.device), alpha=alpha)
+        return hessian, n_samples
+
+    input_flat = input_flat.float()
     if hessian.device == input_flat.device:
-        hessian.addmm_(input_flat.t(), input_flat, beta=scale, alpha=2 / n_samples)
+        hessian.addmm_(input_flat.t(), input_flat, beta=scale, alpha=alpha)
     else:
-        hessian.mul_(scale).add_(
-            (input_flat.t() @ input_flat).to(hessian.device), alpha=2 / n_samples
-        )
+        hessian.mul_(scale).add_((input_flat.t() @ input_flat).to(hessian.device), alpha=alpha)
 
     return hessian, n_samples
+
+
+@functools.cache
+def _has_float32_out_gemm() -> bool:
+    """Whether this torch's CUDA GEMMs take BF16/FP16 inputs and write float32 (``out_dtype``)."""
+    try:
+        x = torch.zeros(1, 1, device="cuda", dtype=torch.bfloat16)
+        h = torch.mm(x, x, out_dtype=torch.float32)
+        torch.addmm(h, x, x, out_dtype=torch.float32, out=h)
+    except (TypeError, RuntimeError):
+        return False
+    return True
 
 
 def compute_hessian_inverse(hessian, weight, perc_damp):
