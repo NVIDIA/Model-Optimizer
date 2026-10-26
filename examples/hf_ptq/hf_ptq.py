@@ -966,31 +966,16 @@ def quantize_main(
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
 ):
-    # Detect if this is a Nemotron VL model using architecture-based detection. Cheap and
-    # needed on both the restore and calibration paths below.
-    is_nemotron_vl_model = is_nemotron_vl(full_model)
-
     if _restore_quantized_state_if_requested(args, full_model):
         # Restore mode retries a failed/interrupted export from a previously calibrated state,
         # so none of the calibration-only work below (batch-size probing, calibration
         # dataloader construction, the pre-quantize generation preview) is needed -- go
-        # straight to export. Passing None for the generation-preview args disables the
-        # before/after generation comparison inside post_quantize; export still runs.
-        post_quantize(
-            args,
-            full_model,
-            language_model,
-            model_type,
-            tokenizer,
-            processor,
-            None,
-            None,
-            None,
-            is_nemotron_vl_model,
-            None,
-            None,
-        )
+        # straight to export, with no before/after generation comparison.
+        export_quantized(args, full_model, language_model, model_type)
         return
+
+    # Detect if this is a Nemotron VL model using architecture-based detection.
+    is_nemotron_vl_model = is_nemotron_vl(full_model)
 
     # Load the recipe up front so we can detect layerwise calibration before batch-size probing.
     recipe = None

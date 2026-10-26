@@ -177,7 +177,6 @@ def test_restore_quantized_state_skips_calibration_and_exports(monkeypatch):
     args.verbose = False
 
     monkeypatch.setattr(hf_ptq.mto, "restore", lambda model, path: None)
-    monkeypatch.setattr(hf_ptq, "is_nemotron_vl", lambda model: False)
 
     def _fail(*_args, **_kwargs):
         pytest.fail("calibration-only setup must be skipped in restore mode")
