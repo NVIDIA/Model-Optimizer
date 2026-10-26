@@ -35,6 +35,7 @@ from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokeni
 from wrapt import register_post_import_hook
 
 import modelopt.torch.opt as mto
+from modelopt.torch.models import hf_model_type
 from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer, QATTrainer
 
 logger = logging.get_logger(__name__)
@@ -144,7 +145,7 @@ def patch_load_module(module):
                 )
             else:
                 model = load_class.from_pretrained(**init_kwargs)
-                if getattr(model.config, "model_type", None) == "qwen2_5_omni":
+                if hf_model_type(model) == "qwen2_5_omni":
                     model = model.thinker  # use part of Omni model
         else:
             raise ValueError(f"Model type {type(config)} is not supported.")

@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Alias recipe for nvidia/Qwen3-235B-A22B-Instruct-2507-NVFP4 (source Qwen/Qwen3-235B-A22B-Instruct-2507). Same recipe as `general/ptq/nvfp4_omlp_only-kv_fp8_cast`: NVFP4 on the attention
+# `o_proj` and the MLP/MoE layers, with an FP8 KV cache in cast mode. The Thinking
+# variant of the same release uses the same recipe.
+
+imports:
+  base: general/ptq/nvfp4_omlp_only-kv_fp8_cast
+
+$import: base
+metadata:
+  description: >-
+    Qwen/Qwen3-235B-A22B-Instruct-2507 quantized with the general o_proj+MLP NVFP4 scheme
+    and an FP8 KV cache in cast mode, as published in
+    nvidia/Qwen3-235B-A22B-Instruct-2507-NVFP4.

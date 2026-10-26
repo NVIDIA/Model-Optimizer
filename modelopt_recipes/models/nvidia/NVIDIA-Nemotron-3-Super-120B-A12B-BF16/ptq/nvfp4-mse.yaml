@@ -30,8 +30,8 @@
 # Calibration: weight MSE with FP8-scale sweep over the 128 e4m3 scale values
 # (NVFP4 weights use static block scales selected by MSE; FP8 per-tensor scales
 # are also chosen via MSE search instead of plain amax).
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 metadata:
-  recipe_type: ptq
   description: Super NVFP4 mixed precision — sparse MoE experts NVFP4 (W4A4, group_size 16); shared experts, mamba in/out_proj FP8 per-tensor; FP8 KV cache;
     everything else(lm_head/MTP/latent MOE) stay BF16. Weight-MSE calibration with FP8 scale sweep.
 quantize:

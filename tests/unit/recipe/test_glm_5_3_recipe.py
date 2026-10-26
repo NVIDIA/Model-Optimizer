@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Wildcard-precedence test for the GLM-5.3-Flash checkpoint-mirror PTQ recipe.
+"""Wildcard-precedence test for the GLM-5.3-Flash-BF16 checkpoint-mirror PTQ recipe.
 
 The recipe relies on wildcard scoping over ``base_disable_all`` rather than an
 explicit per-module map, so a few non-obvious matches decide correctness:
@@ -34,7 +34,7 @@ import torch.nn as nn
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
 
-_RECIPE = "models/zai-org/GLM-5.3-Flash/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast"
+_RECIPE = "models/zai-org/GLM-5.3-Flash-BF16/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast"
 _H = 32
 
 

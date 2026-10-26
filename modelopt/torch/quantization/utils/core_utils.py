@@ -247,18 +247,24 @@ def representative_weight_quantizer(module: nn.Module, weight_name: str = "weigh
 def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
     """Get the weight param attribute names in a converted module, non-recursive.
 
-    Covers three layouts:
+    Covers four layouts:
 
     - standard ``nn.Linear``: ``weight`` + ``weight_quantizer``.
     - custom per-weight quantizer (e.g. ``Llama4TextExperts`` with ``gate_up_proj`` +
       ``gate_up_proj_weight_quantizer``).
     - fused-experts ``nn.ModuleList`` quantizers (``_QuantFusedExperts`` with
       ``<first_proj>`` + ``<first_proj>_weight_quantizers`` plural list).
+    - TEGroupedLinear: ``weight0..N`` behind one ``GroupedQuantizer``, reported as ``weight``.
     """
+    from ..nn import GroupedQuantizer  # local: ..nn imports this utils package at module scope
+
     # standard: "weight" + "weight_quantizer" (singular) or "weight_quantizers" (plural)
     if getattr(module, "weight", None) is not None:
         if representative_weight_quantizer(module, "weight") is not None:
             yield "weight"
+    elif isinstance(getattr(module, "weight_quantizer", None), GroupedQuantizer):
+        # TEGroupedLinear: ``weight0..N`` share one GroupedQuantizer and there is no ``weight``.
+        yield "weight"
 
     # per-parameter custom attr names
     for name, _ in module.named_parameters(recurse=False):
@@ -629,7 +635,9 @@ def enable_weight_access_and_writeback(
     """
     if _get_enclosing_fsdp_module(module, root_model, names) is not None:
         context = fsdp2_weight_access_and_writeback_context(module, root_model, writeback, names)
-    elif is_quantized_parallel_linear(module) and hasattr(module, "_hf_tp_plan"):
+    elif is_quantized_parallel_linear(module) and hasattr(
+        module, "enable_weight_access_and_writeback"
+    ):
         # HF transformers TP sharded linear layer
         context = module.enable_weight_access_and_writeback()
     elif hasattr(module, "_hf_hook"):
@@ -660,7 +668,9 @@ def requires_weight_materialization(module, root_model, names: "ModuleNames | No
         return False
     if _get_enclosing_fsdp_module(module, root_model, names) is not None:
         return True
-    if is_quantized_parallel_linear(module) and hasattr(module, "_hf_tp_plan"):
+    if is_quantized_parallel_linear(module) and hasattr(
+        module, "enable_weight_access_and_writeback"
+    ):
         return True
     hook = getattr(module, "_hf_hook", None)
     if hook is None:
@@ -818,20 +828,37 @@ def patch_fsdp_mp_dtypes():
 
 @contextmanager
 def _disable_fsdp_unshard_reshard(layer):
-    """Disable FSDP2 unshard/reshard if *layer* is FSDP-wrapped."""
-    if isinstance(layer, FSDPModule):
-        _pg_cls = torch.distributed.fsdp._fully_shard._fsdp_param_group.FSDPParamGroup
-        orig_unshard = _pg_cls.unshard
-        orig_reshard = _pg_cls.reshard
-        _pg_cls.unshard = lambda self, async_op=False: None
-        _pg_cls.reshard = lambda self: None
-        try:
-            yield
-        finally:
-            _pg_cls.unshard = orig_unshard
-            _pg_cls.reshard = orig_reshard
-    else:
+    """Make the FSDP2 param groups inside *layer* skip unshard/reshard (already gathered).
+
+    Patched per group instance, not on ``FSDPParamGroup``: the rest of the model still runs forward
+    (e.g. while collecting the next layer's inputs) and must unshard as usual.
+    """
+    if not isinstance(layer, FSDPModule):  # nothing was gathered for its FSDP submodules
         yield
+        return
+    groups = {
+        id(group): group  # ``fully_shard([a, b])`` gives several modules one group
+        for module in layer.modules()
+        if isinstance(module, FSDPModule)
+        and (group := fully_shard.state(module)._fsdp_param_group) is not None
+    }.values()
+    # Contexts nest (``persistent_materialization(writeback=False)`` enters this twice), so restore
+    # whatever instance attributes were there before instead of deleting them.
+    saved = [
+        (group, {k: group.__dict__.get(k) for k in ("unshard", "reshard")}) for group in groups
+    ]
+    for group in groups:
+        group.unshard = lambda async_op=False: None
+        group.reshard = lambda: None
+    try:
+        yield
+    finally:
+        for group, prior in saved:
+            for name, value in prior.items():
+                if value is None:
+                    del group.__dict__[name]
+                else:
+                    setattr(group, name, value)
 
 
 def build_param_index(model):
@@ -975,6 +1002,9 @@ def fsdp2_aware_weight_update(
     Returns:
         None
     """
+    # Bound only once setup succeeds; the finally skips FSDP bookkeeping until then so an
+    # early error (e.g. an OOM from the unshard below) propagates and FSDP state stays intact.
+    fsdp_param_group = None
     try:
         if isinstance(root_model, FSDPModule):
             # Get FSDP root module, if none is returned, then the update is not made to a submodule of an FSDPModule
@@ -996,8 +1026,9 @@ def fsdp2_aware_weight_update(
                     root_module.unshard()
 
             # Get FSDPParam list
-            fsdp_param_group = fully_shard.state(root_module)._fsdp_param_group
-            fsdp_param_mapping = create_fsdp_param_mapping(fsdp_param_group.fsdp_params, root_model)
+            param_group = fully_shard.state(root_module)._fsdp_param_group
+            fsdp_param_mapping = create_fsdp_param_mapping(param_group.fsdp_params, root_model)
+            fsdp_param_group = param_group
 
             # Assert that all the modules in the module list are present in this fsdp_param_group
             if len(modules_to_update) > 1:
@@ -1017,7 +1048,7 @@ def fsdp2_aware_weight_update(
     finally:
         from modelopt.torch.quantization.qtensor.base_qtensor import QFSDPParam, QTensorWrapper
 
-        if isinstance(root_model, FSDPModule):
+        if fsdp_param_group is not None:
             # Update FSDPParam list
             for module in modules_to_update:
                 for param_name, param in module.named_parameters():

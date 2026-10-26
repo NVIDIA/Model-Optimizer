@@ -14,12 +14,12 @@
 # limitations under the License.
 
 # PTQ recipe wrapping the shipped NVFP4 W4A4 local-Hessian preset.
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 
 imports:
   preset: configs/ptq/presets/model/nvfp4_w4a4_weight_local_hessian
 
 metadata:
-  recipe_type: ptq
   description: >-
     Applies NVFP4 W4A4 with static weight scales, dynamic inputs, KV quantizers disabled, and
     local-Hessian weight calibration with an FP8-scale sweep.

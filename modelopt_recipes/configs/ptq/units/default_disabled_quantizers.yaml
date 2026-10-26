@@ -16,6 +16,11 @@
 # QuantizerCfgList snippet for standard module patterns that should remain unquantized.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+  # Linear-attention numerical emulation is opt-in, independently of projection quantization.
+  - quantizer_name: '*gdn_state_quantizer'
+    enable: false
+  - quantizer_name: '*gdn_w_quantizer'
+    enable: false
   - quantizer_name: '*block_sparse_moe.gate*'
     enable: false
   - quantizer_name: '*linear_attn.conv1d*'
@@ -41,7 +46,7 @@
     enable: false
   - quantizer_name: '*router*'
     enable: false
-  - quantizer_name: 'mtp.*'
+  - quantizer_name: '*mtp.*'
     enable: false
   - quantizer_name: 'output.*'
     enable: false
@@ -75,9 +80,17 @@
   - parent_class: 'nn.BatchNorm3d'
     quantizer_name: '*'
     enable: false
+  - parent_class: 'nn.SyncBatchNorm'
+    quantizer_name: '*'
+    enable: false
   - parent_class: 'nn.LeakyReLU'
     quantizer_name: '*'
     enable: false
   - parent_class: 'nn.Embedding'
+    quantizer_name: '*'
+    enable: false
+  # nn.LayerNorm quantizers are opt-in (e.g. the FP8 MHA LayerNorm output); a recipe
+  # that wants them must enable them after importing this unit.
+  - parent_class: 'nn.LayerNorm'
     quantizer_name: '*'
     enable: false

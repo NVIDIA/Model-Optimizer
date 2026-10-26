@@ -21,7 +21,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 
 import modelopt.torch.opt as mto
@@ -627,6 +626,29 @@ def test_auto_quantize_rejects_empty_module_formats(formats):
         )
 
 
+def test_gradient_search_config_none_score_func_does_not_warn():
+    """An explicitly empty score_func must not emit the ignored-value warning."""
+    searcher = AutoQuantizeGradientSearcher()
+
+    def forward_backward_step(model, data):
+        pass
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        config = searcher.sanitize_search_config(
+            {
+                "score_func": None,
+                "data_loader": [object()],
+                "forward_step": lambda model, data: None,
+                "forward_backward_step": forward_backward_step,
+            }
+        )
+
+    assert not any("`score_func` is ignored" in str(warning.message) for warning in caught)
+    assert "score_func" not in config
+    assert config["forward_backward_step"] is forward_backward_step
+
+
 def test_auto_quantize_fixed_module_isolated_from_unrelated_calibration(monkeypatch):
     model = TransformerBlock()
     calibration_states = []
@@ -770,23 +792,28 @@ INT8_CUSTOM_QUANT_TEST_CFG = {
 }
 
 
+_BLOCKWISE_INT8 = [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG]
+_AWQ_SMOOTHQUANT = [mtq.INT4_AWQ_CFG, mtq.INT8_SMOOTHQUANT_CFG]
+_AWQ_CUSTOM = [mtq.INT4_AWQ_CFG, INT8_CUSTOM_QUANT_TEST_CFG]
+_SMOOTHQUANT_ONLY = [mtq.INT8_SMOOTHQUANT_CFG]
+_NONE_SMOOTHQUANT = [None, mtq.INT8_SMOOTHQUANT_CFG]
+
+
+# A covering set rather than the full model x formats x method product: every model, format
+# list and method appears at least once, and the methods only differ in how candidates are scored.
 @pytest.mark.parametrize(
-    "model_cls",
-    [SimpleConv, SimpleConvLinear, SimpleLinear, TransformerBlock],
-)
-@pytest.mark.parametrize(
-    ("search_formats", "min_bits", "search_bits"),
+    ("model_cls", "search_formats", "min_bits", "search_bits", "method"),
     [
-        ([mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG], 4.0, 6.0),
-        ([mtq.INT4_AWQ_CFG, mtq.INT8_SMOOTHQUANT_CFG], 4.0, 6.0),
-        ([mtq.INT4_AWQ_CFG, INT8_CUSTOM_QUANT_TEST_CFG], 4.0, 6.0),
-        ([mtq.INT8_SMOOTHQUANT_CFG], 8.0, 11.0),
-        ([None, mtq.INT8_SMOOTHQUANT_CFG], 8.0, 11.0),
+        (SimpleConv, _BLOCKWISE_INT8, 4.0, 6.0, "gradient"),
+        (SimpleConvLinear, _AWQ_SMOOTHQUANT, 4.0, 6.0, "gradient"),
+        (TransformerBlock, _NONE_SMOOTHQUANT, 8.0, 11.0, "gradient"),
+        (SimpleLinear, _AWQ_CUSTOM, 4.0, 6.0, "kl_div"),
+        (TransformerBlock, _SMOOTHQUANT_ONLY, 8.0, 11.0, "kl_div"),
+        (SimpleConvLinear, _BLOCKWISE_INT8, 4.0, 6.0, "kl_div"),
+        (SimpleConv, _AWQ_SMOOTHQUANT, 4.0, 6.0, "aumann_shapley"),
+        (SimpleLinear, _NONE_SMOOTHQUANT, 8.0, 11.0, "aumann_shapley"),
+        (TransformerBlock, _AWQ_CUSTOM, 4.0, 6.0, "aumann_shapley"),
     ],
-)
-@pytest.mark.parametrize(
-    "method",
-    ["gradient", "kl_div"],
 )
 def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method):
     model = model_cls()
@@ -921,6 +948,8 @@ def test_pqs_folding(config):
 
 def _test_data_parallel_auto_quantize(rank, size):
     model = SimpleLinear()
+    # Each rank its own batches: only the data-parallel score sync makes their scores agree.
+    torch.manual_seed(rank)
 
     model, search_history = mtq.auto_quantize(
         model,
@@ -950,9 +979,8 @@ def _test_data_parallel_auto_quantize(rank, size):
     assert search_history["best"]["is_satisfied"]
 
 
-def test_data_parallel_auto_quantize(skip_on_windows):
-    # 2 ranks fully exercise the cross-rank sync the test asserts; more just adds spawn overhead.
-    spawn_multiprocess_job(2, _test_data_parallel_auto_quantize, backend="gloo")
+def test_data_parallel_auto_quantize(cpu_dist_workers):
+    cpu_dist_workers.run(_test_data_parallel_auto_quantize)
 
 
 def _test_data_parallel_moe_score_module(rank, size):
@@ -1013,8 +1041,8 @@ def _test_data_parallel_moe_score_module(rank, size):
     assert scores == rank_zero_scores
 
 
-def test_data_parallel_moe_score_module(skip_on_windows):
-    spawn_multiprocess_job(2, _test_data_parallel_moe_score_module, backend="gloo")
+def test_data_parallel_moe_score_module(cpu_dist_workers):
+    cpu_dist_workers.run(_test_data_parallel_moe_score_module)
 
 
 def test_score_hparam_registration_preserves_order():
@@ -1438,7 +1466,7 @@ def test_estimate_quant_compression_per_entry_effective_bits():
         )
 
 
-@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+@pytest.mark.parametrize("method", ["gradient", "kl_div", "aumann_shapley"])
 def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     """Test that checkpoint can be used to resume an interrupted search."""
     model = SimpleLinear()

@@ -20,19 +20,12 @@ import copy
 import pytest
 import torch
 import torch.nn as nn
-from packaging.version import Version
 
 pytest.importorskip("transformers")
 
-if Version(torch.__version__) < Version("2.9"):
-    pytest.skip("torch 2.8 grouped_mm is CUDA-only", allow_module_level=True)
-
-from _test_utils.torch.transformers_models import get_tiny_qwen3_moe
-
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.nn import QuantModuleRegistry
+from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
-    TRANSFORMERS_VERSION_GE_5_0,
     _is_sparse_sequaential_moe_block,
     register_sparse_moe_on_the_fly,
 )
@@ -42,7 +35,7 @@ from modelopt.torch.quantization.plugins.huggingface import (
 # Helpers: lightweight mock modules for _is_sparse_sequaential_moe_block
 # ---------------------------------------------------------------------------
 class _FakeGateWithRouter(nn.Module):
-    """Mimics a v5.x TopKRouter gate with top_k and num_experts."""
+    """Mimics a router gate with top_k and num_experts that returns logits."""
 
     def __init__(self, top_k=2, num_experts=4):
         super().__init__()
@@ -97,6 +90,37 @@ class _MoEBlockFallback(nn.Module):
             mask = (selected == i).any(dim=-1)
             if mask.any():
                 out[mask] += self.experts[i](hidden_states[mask])
+        return out
+
+
+class _RoutedExpertsGate(nn.Module):
+    """A router gate that names its expert count ``n_routed_experts`` and returns logits."""
+
+    def __init__(self, top_k=2, num_experts=4):
+        super().__init__()
+        self.top_k = top_k
+        self.n_routed_experts = num_experts
+        self.linear = nn.Linear(8, num_experts)
+
+    def forward(self, x):
+        return self.linear(x)
+
+
+class _MoEBlockRoutedExpertsGate(nn.Module):
+    """Matches the primary detection path through gate.top_k + gate.n_routed_experts."""
+
+    def __init__(self, num_experts=4, top_k=2):
+        super().__init__()
+        self.gate = _RoutedExpertsGate(top_k=top_k, num_experts=num_experts)
+        self.experts = nn.ModuleList([nn.Linear(8, 8) for _ in range(num_experts)])
+
+    def forward(self, hidden_states):
+        _, selected = torch.topk(self.gate(hidden_states), self.gate.top_k, dim=-1)
+        out = torch.zeros_like(hidden_states)
+        for i, expert in enumerate(self.experts):
+            mask = (selected == i).any(dim=-1)
+            if mask.any():
+                out[mask] += expert(hidden_states[mask])
         return out
 
 
@@ -175,164 +199,120 @@ class TestIsSparseBlock:
 # ---------------------------------------------------------------------------
 # Tests for _QuantSparseSequentialMoe
 # ---------------------------------------------------------------------------
-@pytest.mark.skipif(TRANSFORMERS_VERSION_GE_5_0, reason="Transformers v5 has stacked MoE")
 class TestQuantSparseSequentialMoe:
-    """Tests for _QuantSparseSequentialMoe using a real tiny Qwen3Moe model."""
+    """Tests for _QuantSparseSequentialMoe on a sequential (per-expert ``nn.Linear``) MoE block."""
 
     @staticmethod
-    def _get_moe_block(model):
-        """Return the first MoE block from the model."""
-        for module in model.modules():
-            if _is_sparse_sequaential_moe_block(module):
-                return module
-        raise RuntimeError("No MoE block found in model")
+    def _convert(block):
+        if QuantModuleRegistry.get(type(block)) is None:
+            register_sparse_moe_on_the_fly(block)
+        return QuantModuleRegistry.convert(block)
 
     def test_register_sparse_moe_on_the_fly(self):
-        model = get_tiny_qwen3_moe()
-        moe_block = self._get_moe_block(model)
-        moe_type = type(moe_block)
-
-        if QuantModuleRegistry.get(moe_type) is not None:
-            pytest.skip("MoE type already registered (upstream change)")
-
-        register_sparse_moe_on_the_fly(model)
-        assert QuantModuleRegistry.get(moe_type) is not None
+        block = _MoEBlockWithGateRouter()
+        register_sparse_moe_on_the_fly(block)
+        assert QuantModuleRegistry.get(type(block)) is not None
 
     def test_setup_config_knobs_default(self):
         """_setup should only initialize config knobs, no buffer or hook."""
-        model = get_tiny_qwen3_moe()
-        moe_block = self._get_moe_block(model)
-        if QuantModuleRegistry.get(type(moe_block)) is None:
-            register_sparse_moe_on_the_fly(model)
-
-        converted = QuantModuleRegistry.convert(moe_block)
+        converted = self._convert(_MoEBlockWithGateRouter())
         assert converted._moe_calib_experts_ratio is None
         assert not hasattr(converted, "expert_token_count")
 
     def test_forward_default_config_passthrough(self):
         """With default config (both features off), forward should be a direct pass-through."""
-        model = get_tiny_qwen3_moe()
-        moe_block = self._get_moe_block(model)
-        if QuantModuleRegistry.get(type(moe_block)) is None:
-            register_sparse_moe_on_the_fly(model)
+        block = _MoEBlockWithGateRouter()
+        ref_block = copy.deepcopy(block)
+        converted = self._convert(block)
 
-        ref_block = self._get_moe_block(get_tiny_qwen3_moe())
-        ref_block.load_state_dict(moe_block.state_dict())
-        converted = QuantModuleRegistry.convert(moe_block)
-
-        x = torch.randn(1, 4, 32, dtype=ref_block.gate.weight.dtype)
+        x = torch.randn(4, 8)
         with torch.no_grad():
-            out_ref = ref_block(x)
-            out_test = converted(x)
-
-        if isinstance(out_ref, tuple):
-            out_ref = out_ref[0]
-        if isinstance(out_test, tuple):
-            out_test = out_test[0]
-        assert torch.allclose(out_ref, out_test, atol=1e-5)
+            assert torch.allclose(ref_block(x), converted(x), atol=1e-5)
         assert not hasattr(converted, "expert_token_count")
 
     def test_forward_calib_restores_top_k(self):
         """After calibration forward with moe_calib_experts_ratio, top_k should be restored."""
-        model = get_tiny_qwen3_moe()
-        moe_block = self._get_moe_block(model)
-        if QuantModuleRegistry.get(type(moe_block)) is None:
-            register_sparse_moe_on_the_fly(model)
-
-        if TRANSFORMERS_VERSION_GE_5_0:
-            original_top_k = moe_block.gate.top_k
-        else:
-            original_top_k = moe_block.top_k
-
-        converted = QuantModuleRegistry.convert(moe_block)
+        converted = self._convert(_MoEBlockWithGateRouter(top_k=2))
         converted._moe_calib_experts_ratio = 1.0
+        converted.experts[0]._if_calib = True  # simulate calibration mode
 
-        # Simulate calibration mode
-        for m in converted.experts.modules():
-            if hasattr(m, "_if_calib"):
-                m._if_calib = True
-                break
-
-        x = torch.randn(1, 4, 32, dtype=converted.gate.weight.dtype)
         with torch.no_grad():
-            converted(x)
-
-        if TRANSFORMERS_VERSION_GE_5_0:
-            assert converted.gate.top_k == original_top_k
-        else:
-            assert converted.top_k == original_top_k
+            converted(torch.randn(4, 8))
+        assert converted.gate.top_k == 2
 
     def test_token_counting_lazy_init(self):
         """When moe_calib_experts_ratio > 0, token counting infra is lazy-inited."""
-        model = get_tiny_qwen3_moe()
-        moe_block = self._get_moe_block(model)
-        if QuantModuleRegistry.get(type(moe_block)) is None:
-            register_sparse_moe_on_the_fly(model)
-
-        converted = QuantModuleRegistry.convert(moe_block)
+        converted = self._convert(_MoEBlockWithGateRouter(num_experts=4, top_k=2))
         converted._moe_calib_experts_ratio = 0.5
-
         assert not hasattr(converted, "expert_token_count")
 
-        # Simulate calibration mode so lazy-init triggers during forward
-        # Set _if_calib on an expert sub-module (not set by default since only the MoE
-        # block was converted, not the full model).
-        next(converted.experts.modules())._if_calib = True
-
-        x = torch.randn(1, 4, 32, dtype=converted.gate.weight.dtype)
+        converted.experts[0]._if_calib = True  # lazy-init triggers during a calibration forward
         with torch.no_grad():
-            converted(x)
+            converted(torch.randn(4, 8))
+        assert converted.expert_token_count.numel() == 4
 
-        # Buffer and hook should now exist
-        assert hasattr(converted, "expert_token_count")
-        assert converted.expert_token_count.numel() > 0
-
-        # Manually enable counting and call gate to verify hook works
+        # Manually enable counting and call gate to verify the hook counts top_k per token
         converted._count_expert_tokens = True
-        if TRANSFORMERS_VERSION_GE_5_0:
-            hidden_size = converted.gate.weight.shape[1]
-            top_k = converted.gate.top_k
-        else:
-            hidden_size = converted.gate.in_features
-            top_k = converted.top_k if hasattr(converted, "top_k") else converted.gate.top_k
-
         converted.expert_token_count.zero_()
-        tokens = torch.randn(8, hidden_size, dtype=converted.gate.weight.dtype)
         with torch.no_grad():
-            converted.gate(tokens)
-        assert converted.expert_token_count.sum().item() == 8 * top_k
+            converted.gate(torch.randn(8, 8))
+        assert converted.expert_token_count.sum().item() == 8 * 2
+
+    @pytest.mark.parametrize(
+        ("block_cls", "top_k_owner"),
+        [
+            (_MoEBlockWithGateRouter, "gate"),
+            (_MoEBlockFallback, "block"),  # top_k + num_experts on the block, nn.Linear gate
+            (_MoEBlockRoutedExpertsGate, "gate"),  # gate.n_routed_experts instead of num_experts
+        ],
+    )
+    def test_calib_forward_supports_detected_layouts(self, block_cls, top_k_owner):
+        """Every layout detection accepts must also calibrate with token forcing."""
+        converted = self._convert(block_cls(num_experts=4, top_k=1))
+        owner = converted.gate if top_k_owner == "gate" else converted
+        converted._moe_calib_experts_ratio = 0.75
+        converted.experts[0]._if_calib = True
+
+        with torch.no_grad():
+            converted(torch.randn(16, 8))
+        assert owner.top_k == 1  # restored after the forced pass
+        # The forced pass routed each token to round(4 * 0.75) = 3 experts.
+        assert converted.expert_token_count.sum().item() == 16 * 3
 
 
-@pytest.mark.skipif(TRANSFORMERS_VERSION_GE_5_0, reason="Transformers v5 has stacked MoE")
-def test_qwen3_sequential_moe_quantize_with_token_forcing_and_counting():
-    """End-to-end: mtq.quantize a Qwen3MoE with INT8 + moe_calib_experts_ratio + token counting."""
-    model = get_tiny_qwen3_moe()
+class _TinySequentialMoEModel(nn.Module):
+    def __init__(self, block):
+        super().__init__()
+        self.block = block
 
-    # Verify detection
-    moe_found = any(_is_sparse_sequaential_moe_block(m) for m in model.modules())
-    assert moe_found, "Qwen3MoE should be detected as a sparse MoE block"
+    def forward(self, x):
+        return self.block(x)
 
+
+@pytest.mark.parametrize("block_cls", [_MoEBlockWithGateRouter, _MoEBlockFallback])
+def test_quantize_sequential_moe_with_token_forcing(block_cls):
+    """End-to-end: mtq.quantize calibrates every expert of a sequential MoE via token forcing."""
+    torch.manual_seed(0)
+    model = _TinySequentialMoEModel(block_cls(num_experts=4, top_k=1))
+    calib_data = [torch.randn(32, 8) for _ in range(2)]
     quant_cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
-    quant_cfg["algorithm"] = {
-        "method": "max",
-        "moe_calib_experts_ratio": 0.5,
-    }
+    quant_cfg["algorithm"] = {"method": "max", "moe_calib_experts_ratio": 0.75}
 
-    def calib_fn(model):
-        x = model.dummy_inputs["input_ids"]
-        for _ in range(2):
-            model(x)
+    def forward_loop(m):
+        for x in calib_data:
+            m(x)
 
-    mtq.quantize(model, quant_cfg, calib_fn)
+    mtq.quantize(model, quant_cfg, forward_loop)
 
-    # Verify token counting worked
-    for name, module in model.named_modules():
-        if hasattr(module, "expert_token_count") and module.expert_token_count.numel() > 0:
-            assert (module.expert_token_count > 0).all(), (
-                f"Not all experts received tokens in {name}: {module.expert_token_count}"
-            )
-
-    # Verify model still runs
+    block = model.block
+    assert block._moe_calib_experts_ratio == 0.75
+    # Each calibration batch routed every token to round(4 * 0.75) = 3 experts.
+    assert block.expert_token_count.sum().item() == 2 * 32 * 3
+    assert (block.expert_token_count > 0).all()
+    for name, module in block.experts.named_modules():
+        if isinstance(module, TensorQuantizer) and module.is_enabled:
+            assert module.amax is not None, f"expert quantizer {name} was not calibrated"
+    owner = block.gate if hasattr(block.gate, "top_k") else block
+    assert owner.top_k == 1  # routing restored after calibration
     with torch.no_grad():
-        out = model(model.dummy_inputs["input_ids"])
-    assert out.logits is not None
+        assert torch.isfinite(model(torch.randn(4, 8))).all()

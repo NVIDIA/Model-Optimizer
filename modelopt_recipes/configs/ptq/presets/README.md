@@ -6,13 +6,8 @@ from `modelopt.torch.quantization.config` (e.g., `FP8_DEFAULT_CFG`,
 `FP8_KV_CFG`).
 
 Presets compose from the reusable snippets in `configs/numerics/` and
-`configs/ptq/units/` via the `$import` system, and are split into two
+`configs/ptq/units/` via the `$import` system, and are split into three
 kinds:
-
-Preset files are also reusable snippets when imported by recipes or other
-configs, so each preset must declare a `# modelopt-schema: ...` preamble.
-Current preset files use `QuantizeConfig` so they are validated after their
-own imports have been resolved.
 
 - **`model/`** — *full* quantization presets. Each file is a complete,
   self-contained config (it sets `algorithm` and a full `quant_cfg` with
@@ -29,6 +24,11 @@ own imports have been resolved.
   files are complete configs used by the Diffusers examples, including
   attention and softmax quantizer choices that differ from the generic
   `model/` presets.
+
+Preset files are also reusable snippets when imported by recipes or other
+configs, so each preset must declare a `# modelopt-schema: ...` preamble.
+Current preset files use `QuantizeConfig` so they are validated after their
+own imports have been resolved.
 
 **Note:** The main purpose of these presets is to support the existing
 `hf_ptq.py` script's `--qformat` / `--kv_cache_qformat` flags and other

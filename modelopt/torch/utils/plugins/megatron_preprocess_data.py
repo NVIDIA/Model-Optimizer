@@ -90,6 +90,7 @@ import json
 import multiprocessing
 import time
 import warnings
+from multiprocessing.context import BaseContext
 from pathlib import Path
 
 from datasets import get_dataset_config_names, get_dataset_split_names, load_dataset
@@ -115,6 +116,35 @@ def _is_main_or_first_worker() -> bool:
     """
     identity = multiprocessing.current_process()._identity
     return not identity or identity[0] == 1
+
+
+_PRELOAD_MODULE = "modelopt.torch.utils.plugins.megatron_preprocess_data"
+
+
+def _worker_context() -> BaseContext:
+    """Return the multiprocessing context for the tokenization worker pool.
+
+    ``fork`` can segfault the children once CUDA is initialized in this process, so workers are
+    forked from a separate ``forkserver`` process instead. It preloads this module, so the heavy
+    ``torch`` / ``megatron`` import is paid once rather than per worker as with ``spawn``.
+    Windows has no ``forkserver`` and uses ``spawn``.
+    """
+    if "forkserver" not in multiprocessing.get_all_start_methods():
+        return multiprocessing.get_context("spawn")
+    ctx = multiprocessing.get_context("forkserver")
+    ctx.set_forkserver_preload([_PRELOAD_MODULE])
+    return ctx
+
+
+def _prestart_forkserver() -> None:
+    """Start the forkserver without waiting for it, so its preload overlaps with other work.
+
+    The later ``Pool()`` then blocks only for what remains of it. No-op where ``spawn`` is used.
+    """
+    if _worker_context().get_start_method() == "forkserver":
+        from multiprocessing import forkserver  # POSIX-only module
+
+        forkserver.ensure_running()
 
 
 class _Encoder:
@@ -280,12 +310,10 @@ class _Partition:
             yield from encoded_batch
 
     def _encode_docs(self, encoder: "_Encoder", lines, may_stop_early: bool = False):
-        """Tokenize ``lines``, forking worker processes only when ``workers > 1``.
+        """Tokenize ``lines``, using worker processes only when ``workers > 1``.
 
-        ``multiprocessing.Pool`` always ``fork()``s, even for a single worker. Forking a
-        process that has already initialized a CUDA context / many native threads (e.g. when
-        this is called in-process after GPU work) is unsafe and can segfault the children.
-        The single-worker path avoids the fork entirely by tokenizing inline in this process.
+        Workers start through ``_worker_context``; ``_Encoder`` holds only picklable fields, as each
+        worker loads its tokenizer in ``initializer``. The single-worker path tokenizes inline.
 
         When ``may_stop_early`` is true, wait for finite batches so no worker results are pending
         if the caller stops consuming documents after reaching its token limit.
@@ -295,7 +323,7 @@ class _Partition:
         if self.workers == 1:
             encoder.initializer()
             return None, map(encoder.encode, lines)
-        pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
+        pool = _worker_context().Pool(self.workers, initializer=encoder.initializer)
         if may_stop_early:
             batch_size = self.workers * 4  # Balance throughput against unused final-batch work.
             encoded_docs = self._encode_in_batches(pool, encoder, lines, batch_size)
@@ -556,7 +584,8 @@ def megatron_preprocess_data(
         json_keys: Key or list of keys to extract from json. Defaults to ["text"].
         append_eod: Append an <eod> token to the end of a document. Defaults to False.
         max_sequence_length: Maximum tokenized sequence length. Defaults to None.
-        workers: Number of worker processes to launch. Defaults to 1.
+        workers: Number of worker processes to launch. Defaults to 1. With more than one, call from
+            under an ``if __name__ == "__main__":`` guard, since workers re-import the main script.
         log_interval: Interval between progress updates. Defaults to 100000.
         reasoning_content: How to handle the ``reasoning_content`` field present in many
             Nemotron Post-Training v3 datasets. One of:
@@ -590,6 +619,10 @@ def megatron_preprocess_data(
             "every run with no disk cache, which is slower than the cached non-streaming path.",
             stacklevel=2,
         )
+
+    if workers > 1:
+        # Start the worker server now so its import overlaps the tokenizer and dataset loading below.
+        _prestart_forkserver()
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     vocab_size = AutoTokenizer.from_pretrained(tokenizer_name_or_path).vocab_size

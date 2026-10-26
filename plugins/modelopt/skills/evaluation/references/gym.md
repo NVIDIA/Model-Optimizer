@@ -46,9 +46,10 @@ When a newer `nemo-evaluator-launcher` release is available:
 4. Dry-run a known gym config and confirm the literal `NEL_INVOCATION_ID`
    assignment still precedes its runtime re-export in every generated `run.sub`.
 5. Launch with the candidate version and monitor the first 20–30 minutes for gym
-   bootstrap and rollout flow. The launcher-level `limit_samples` does **not** reach
-   the gym, so a cheap canary needs the gym's own `++limit=N` in
-   `collect_rollout_params` (and the data-prep pass still runs in full).
+   bootstrap and rollout flow. The launcher-level `limit_samples` reaches the gym
+   only if the template gates it into `++limit` — `example_mrcr.yaml` does (see
+   `recipes/tasks/gym/mrcr.md` Canary); otherwise add `++limit=N` to
+   `collect_rollout_params`. The data-prep pass still runs in full.
 
 Only then update the validated version used for scored runs. Do not mix launcher
 versions within a baseline-versus-candidate comparison.
