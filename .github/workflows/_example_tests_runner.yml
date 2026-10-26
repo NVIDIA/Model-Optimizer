@@ -65,13 +65,14 @@ jobs:
       - name: Install git for vLLM image
         if: startsWith(inputs.docker_image, 'vllm/') || startsWith(inputs.docker_image, 'docker.io/vllm/')
         run: apt-get update && apt-get install -y git
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: nv-gha-runners/setup-proxy-cache@eadc57871cde0c92a223d0f486ab669a2360f978 # main
-      - uses: ./.github/actions/cache-extensions
-        id: ext-cache
+      - name: Restore JIT caches
+        id: jit-caches
+        uses: ./.github/actions/restore-jit-caches
         with:
           # Per job (its examples): jobs sharing an image build different extensions, and the first to save wins the key.
-          cache-key: rtxpro6000-example-${{ steps.examples.outputs.key }}-${{ inputs.docker_image }}
+          env-key: rtxpro6000-example-${{ steps.examples.outputs.key }}-${{ inputs.docker_image }}
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu:/usr/local/tensorrt/targets/x86_64-linux-gnu/lib" >> $GITHUB_ENV
@@ -124,12 +125,15 @@ jobs:
           example: ${{ steps.examples.outputs.e2 }}
           allow-failure-examples: ${{ inputs.allow_failure_examples }}
           codecov-token: ${{ secrets.CODECOV_TOKEN }}
-      - name: Save extensions
+      - name: Save JIT caches
         # Not tied to the tests passing, see the action description
-        if: always() && steps.ext-cache.outputs.cache-hit != 'true'
-        uses: ./.github/actions/save-extensions
+        if: always()
+        uses: ./.github/actions/save-jit-caches
         with:
-          cache-key: ${{ steps.ext-cache.outputs.cache-key }}
+          torch-ext-key: ${{ steps.jit-caches.outputs.torch-ext-key }}
+          torch-ext-hit: ${{ steps.jit-caches.outputs.torch-ext-hit }}
+          triton-key: ${{ steps.jit-caches.outputs.triton-key }}
+          triton-hit: ${{ steps.jit-caches.outputs.triton-hit }}
       - name: Fail the job for an example that failed
         if: steps.example0.outputs.failed == 'true' || steps.example1.outputs.failed == 'true' || steps.example2.outputs.failed == 'true'
         run: exit 1
