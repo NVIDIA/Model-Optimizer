@@ -233,10 +233,11 @@ def test_rank_promotion_preserves_axis_semantics(operation, axis):
     )
 
     def promote(candidate):
+        """Declare deferred boundary ranks before applying the operation-specific stage."""
         if operation == "Gather":
             candidate = _apply_gather(candidate)
         candidate = _apply_non4d_model_inputs(candidate)
-        candidate = _apply_non4d_model_outputs(candidate)
+        candidate = _apply_non4d_model_outputs(candidate, defer_rank_conversion=True)
         if operation == "ArgMax":
             candidate = _apply_argmax(candidate)
         elif operation == "LpNormalization":
