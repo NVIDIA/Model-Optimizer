@@ -43,6 +43,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix LTX-2 distillation full-mode checkpoints to use the safetensors format expected by their file extension and loaders.
 - Diffusers ``export_hf_checkpoint`` now honors ``save_modelopt_state=False`` (the default) when HuggingFace checkpointing is enabled. Pass ``save_modelopt_state=True`` to retain the ModelOpt state file.
 - The default PTQ recipes now leave multi-token-prediction (MTP) layers unquantized in Megatron vision-language models too (``language_model.mtp.*``), as they already did at the model root.
 - Fix GPT-OSS draft training with pre-normalization teacher hidden states by enabling the target model's final normalization.
