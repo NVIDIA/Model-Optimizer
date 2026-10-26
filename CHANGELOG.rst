@@ -229,6 +229,8 @@ Changelog
 - Fix streaming speculative-decoding training capturing another request's hidden states when the vLLM serve ran requests concurrently, and failing on vLLM 0.29 and later. Retrain drafters trained in streaming mode against a serve that ran requests concurrently.
 - Fix DFlash-family drafters (DFlash, DFlash2, DSpark, Domino, LiLiCorr) trained from scratch with ``examples/speculative_decoding/main.py`` having their RoPE frequencies rounded to BF16, so they trained under different rotary phases than vLLM serves them with.
 - Fix DFlash2's candidate-selector loss weighing every block position equally and dividing by its own count of positions, unlike the backbone loss and the SGLang/SpecForge DFlash2 reference. Logged DFlash2 losses change.
+- Fix AutoCast turning FP64 initializers and ``Constant`` values that exceed the FP32 range into infinities. They are now clamped to the largest FP32 value and the affected tensor is named in a warning.
+- Fix AutoCast flipping the sign of an initializer value too small for the target precision; such values now keep their sign.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
