@@ -504,19 +504,20 @@ class GPTQHelper:
 
         if self.fused and self._fused_supported(quantizer, self.weight):
             block_sizes = quantizer.block_sizes
+            # The kernel looks up each column's scale by absolute index, so GPTQ blocks need not
+            # align with quantizer groups.
             quant_block_size = block_sizes.get(-1) or block_sizes.get(1)
-            if quant_block_size is not None and block_size % quant_block_size != 0:
-                raise ValueError(
-                    f"GPTQ block_size ({block_size}) must be divisible by the quantizer"
-                    f" group_size ({quant_block_size})"
-                )
             out_features, num_cols = self.weight.shape
             # A width the group size does not divide carries a scale for its padded last group.
             n_blocks = -(-num_cols // quant_block_size)
-            block_amax = quantizer.amax.reshape(out_features, n_blocks).float()
-            global_scale = quantizer.global_amax.float().item() / (6.0 * 448.0)
+            # The quantizer's own FP8 scales, so the fused update rounds onto the same grid.
+            block_scale = triton_kernel.compute_fp4_scales(quantizer.amax, quantizer.global_amax)
             gptq_blockwise_update_fused_scalar(
-                self.weight, block_amax, global_scale, self.h_inv, block_size, quant_block_size
+                self.weight,
+                block_scale.reshape(out_features, n_blocks),
+                self.h_inv,
+                block_size,
+                quant_block_size,
             )
         else:
             gptq_blockwise_update(self.weight, self.h_inv, block_size, quantizer)
@@ -578,20 +579,19 @@ def gptq_blockwise_update(weight, h_inv, block_size, quantize_fn):
         weight[:, block_end:].addmm_(errs, h_inv[block_start:block_end, block_end:], alpha=-1)
 
 
-def gptq_blockwise_update_fused_scalar(
-    weight, block_amax, global_scale, h_inv, block_size, quant_block_size
-):
+def gptq_blockwise_update_fused_scalar(weight, block_scale, h_inv, block_size, quant_block_size):
     """Fused GPTQ blockwise update for NVFP4 scalar quantization.
 
-    Uses a fused Triton kernel that combines scale computation, quantization,
-    and per-column error propagation into one launch per GPTQ block, avoiding
-    the Python-level per-column loop in :func:`gptq_blockwise_update`.
+    Uses a fused Triton kernel that combines quantization and per-column error propagation
+    into one launch per GPTQ block, avoiding the Python-level per-column loop in
+    :func:`gptq_blockwise_update`.
 
     Args:
         weight: Weight tensor ``[out_features, in_features]``, modified **in-place**
             with fake-quantized values.
-        block_amax: Per-block amax values ``[out_features, n_amax_blocks]``.
-        global_scale: Pre-computed ``global_amax / (6.0 * 448.0)`` (scalar).
+        block_scale: FP8-quantized per-block scales ``[out_features, n_scale_blocks]``, as
+            :func:`compute_fp4_scales <modelopt.torch.kernels.quantization.gemm.compute_fp4_scales>`
+            returns them.
         h_inv: Upper-triangular Cholesky factor of the damped inverse Hessian
             ``[in_features, in_features]``.
         block_size: Number of columns to process per GPTQ block.
@@ -604,8 +604,7 @@ def gptq_blockwise_update_fused_scalar(
         be = min(bs + block_size, num_cols)
         qw, err = gptq_fused_block_scalar(
             weight[:, bs:be].clone().contiguous(),
-            block_amax,
-            global_scale,
+            block_scale,
             h_inv[bs:be, bs:be].contiguous(),
             quant_block_size,
             bs,
