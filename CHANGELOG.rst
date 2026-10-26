@@ -43,6 +43,7 @@ Changelog
 
 **Bug Fixes**
 
+- Diffusers ``export_hf_checkpoint`` now honors ``save_modelopt_state=False`` (the default) when HuggingFace checkpointing is enabled. Pass ``save_modelopt_state=True`` to retain the ModelOpt state file.
 - The default PTQ recipes now leave multi-token-prediction (MTP) layers unquantized in Megatron vision-language models too (``language_model.mtp.*``), as they already did at the model root.
 - Fix GPT-OSS draft training with pre-normalization teacher hidden states by enabling the target model's final normalization.
 - Fix vanilla DSpark exports to use the Qwen3 DSpark architecture, head names and configuration expected by vLLM. Re-export existing training checkpoints to use this format.
