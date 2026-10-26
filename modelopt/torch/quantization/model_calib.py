@@ -428,9 +428,7 @@ def max_calibrate(
             ep_group = module.parallel_state.expert_model_parallel_group
             device = _quantizer_state_device(module)
             for child_name, child in module.named_children():
-                if isinstance(child, (TensorQuantizer, SequentialQuantizer)) and (
-                    "input_quantizer" in child_name
-                ):
+                if isinstance(child, AnyQuantizer) and "input_quantizer" in child_name:
                     for leaf in _iter_leaf_quantizers(child):
                         # Only enabled quantizers, and every rank must agree on which: a quantizer one
                         # rank skips and another syncs pairs mismatched tensors in every later
