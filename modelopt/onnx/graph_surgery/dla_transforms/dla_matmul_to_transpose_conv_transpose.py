@@ -15,11 +15,10 @@
 
 """Replace MatMul/Gemm nodes with an Unsqueeze-Transpose-Conv-Transpose-Squeeze subgraph.
 
-For nodes that pass eligibility (see below), the full Conv conversion is applied.
-For **ineligible** nodes, a lightweight 4-D promotion fallback is used instead:
-dynamic inputs are Unsqueezed to 4-D, static initializers are padded with leading
-1-dims in-place, and a Squeeze is inserted after the node to restore the original
-output rank.  This ensures all MatMul/Gemm tensors are 4-D after this transform.
+Eligible nodes use Conv with rank adapters at the current stage boundary.
+Ineligible Gemm nodes remain unchanged. Ineligible MatMul matrix operands use
+four-dimensional promotion when requested; vector promotion is unsupported and
+can only be deferred to a later stage. Rank adapters require ONNX opset 13+.
 
 Eligibility (checked via :func:`check_to_apply_transpose`):
 - The **second input** (weight) must be a constant initializer or a Const→DequantizeLinear chain.
@@ -42,7 +41,7 @@ Output Transpose always uses perm ``[0,3,2,1]``: ``[1,K,M,B] → [1,B,M,K]``.
 """
 
 import numpy as np
-from onnx import helper, numpy_helper
+from onnx import TensorProto, helper, numpy_helper
 
 from ...logging_config import logger
 from ..utils.graph_utils import (
@@ -50,15 +49,46 @@ from ..utils.graph_utils import (
     add_unique_initializers,
     batch_replace_nodes,
     check_to_apply_transpose,
+    get_node_attr_i,
     is_const_dq_input,
     pad4d,
+    set_node_attr_i,
 )
+from .dla_5d_reshape_to_4d import _known_non_scalar_control
+from .dla_constants_to_initializers import _add_legacy_initializer_inputs
+from .dla_graph_cleanup import _subgraph_captures
 
 
 def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=False):
-    """Convert MatMul/Gemm; optionally let the pipeline promote tensor ranks later."""
+    """Convert eligible matrices and optionally defer fallback rank promotion."""
     graph = model.graph
     cache = GraphCache(graph)
+    captured = _subgraph_captures(graph)
+    local_functions = {
+        (function.domain, function.name, function.overload) for function in model.functions
+    }
+    opsets = {entry.domain: entry.version for entry in model.opset_import}
+
+    def tensor_rank(name):
+        """Read rank metadata without requiring concrete dimension values."""
+        info = cache.vi_map.get(name)
+        if (
+            info is not None
+            and info.type.HasField("tensor_type")
+            and info.type.tensor_type.HasField("shape")
+        ):
+            return len(info.type.tensor_type.shape.dim)
+        shape = cache.get_shape(name)
+        return len(shape) if shape is not None else None
+
+    candidates = [
+        node
+        for node in graph.node
+        if node.op_type in {"MatMul", "Gemm"}
+        and node.domain in {"", "ai.onnx"}
+        and not node.overload
+        and (node.domain, node.op_type, node.overload) not in local_functions
+    ]
     unique_initializer: set = set()
 
     # shape map snapshot required by check_to_apply_transpose
@@ -71,9 +101,13 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
     node_idx = {id(n): i for i, n in enumerate(graph.node)}
     replacements_batch: dict[int, tuple[list, list]] = {}
     fallback_batch: dict[int, tuple[list, list]] = {}
-    for candidate in graph.node:
-        if candidate.op_type not in {"MatMul", "Gemm"}:
-            continue
+    for candidate in candidates:
+        if (
+            candidate.op_type == "MatMul"
+            and not defer_rank_conversion
+            and any(tensor_rank(name) == 1 for name in candidate.input[:2])
+        ):
+            raise ValueError(f"{candidate.name!r}: vector MatMul rank promotion is unsupported")
         if candidate.op_type == "Gemm":
             if any(
                 attribute.name in {"alpha", "beta"} and attribute.f != 1.0
@@ -87,141 +121,143 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
                 if bias_shape is None or len(bias_shape) != 1:
                     raise ValueError(f"Bias for {candidate.name!r} must have a known 1-D shape")
 
-    def update_initializers(
-        graph, name, current_node, nodes_to_add, trans_b=False, is_const_dq_init=False
-    ):
-        """Reshape weight initializer to a 4-D Conv kernel.
-
-        If the initializer is shared by other consumers besides the current
-        rewrite, a clone (new initializer + cloned DQ if applicable) is
-        created so other consumers keep the original layout; this MatMul/Gemm
-        gets rewired to the clone. When the initializer has a single consumer
-        it's rewritten in place as before.
-
-        Maps:
-          2D [C,K] → [K,C,1,1]  (or [C,K,1,1] when transB)
-          3D [C,K,M] → [M,K,C,1]  (or [C,K,M,1] when transB)
-          4D [N,C,K,M] → [M,K,C,N] perm (or [C,K,M,N] when transB)
-        """
-        for initializer in graph.initializer:
-            if initializer.name != name:
-                continue
-            axis = None
-            dq_node = None
-            shape = None
-            if is_const_dq_init:
-                dq_node = next(
-                    (
-                        n
-                        for n in graph.node
-                        if n.op_type == "DequantizeLinear" and n.output[0] == current_node.input[1]
-                    ),
-                    None,
-                )
-                if dq_node is not None:
-                    axis = next((attr.i for attr in dq_node.attribute if attr.name == "axis"), None)
-
-            # 2D [C,K]
-            if len(initializer.dims) == 2:
-                c, k = initializer.dims[0], initializer.dims[1]
-                init_arr = numpy_helper.to_array(initializer)
-                if not trans_b:
-                    init_arr = init_arr.T
-                    shape = (k, c, 1, 1)
-                    if axis is not None:
-                        axis = 1 - axis
-                else:
-                    shape = (c, k, 1, 1)
-
-            # 3D [C,K,M]
-            elif len(initializer.dims) == 3:
-                c, k, m = initializer.dims[0], initializer.dims[1], initializer.dims[2]
-                init_arr = numpy_helper.to_array(initializer)
-                if not trans_b:
-                    init_arr = init_arr.T
-                    shape = (m, k, c, 1)
-                    if axis is not None:
-                        axis = 2 - axis
-                else:
-                    shape = (c, k, m, 1)
-
-            # 4D [N,C,K,M]
-            elif len(initializer.dims) == 4:
-                n, c, k, m = (
-                    initializer.dims[0],
-                    initializer.dims[1],
-                    initializer.dims[2],
-                    initializer.dims[3],
-                )
-                init_arr = numpy_helper.to_array(initializer)
-                if not trans_b:
-                    init_arr = np.transpose(init_arr, (3, 2, 1, 0))
-                    shape = (m, k, c, n)
-                    if axis is not None:
-                        axis = 3 - axis
-                else:
-                    init_arr = np.transpose(init_arr, (1, 2, 3, 0))
-                    shape = (c, k, m, n)
-
-            reshaped_arr = np.reshape(init_arr, shape)
-            if len(cache.get_consumers(name)) > 1 or (
+    def update_initializers(name, current_node, nodes_to_add, trans_b=False, dq_node=None):
+        """Allocate the Conv layout while retaining every shared, public or captured weight view."""
+        initializer = cache.get_init(name)
+        if initializer is None:
+            raise ValueError(f"Missing weight initializer {name!r}")
+        dims = list(initializer.dims)
+        rank = len(dims)
+        perm = None if trans_b else list(reversed(range(rank)))
+        if trans_b and rank == 4:
+            perm = [1, 2, 3, 0]
+        shape = [dims[index] for index in perm] if perm is not None else dims
+        shape = [*shape, *([1] * (4 - rank))]
+        axis = None
+        if dq_node is not None:
+            axis = next(
+                (attribute.i for attribute in dq_node.attribute if attribute.name == "axis"), None
+            )
+            if axis is None and any(
+                _known_non_scalar_control(cache, control)
+                or (cache.get_init(control) is None and cache.get_shape(control) is None)
+                for control in dq_node.input[1:]
+                if control
+            ):
+                axis = 1
+            if axis is not None:
+                axis %= rank
+                if perm is not None:
+                    axis = perm.index(axis)
+        shared = (
+            len(cache.get_consumers(name)) > 1
+            or name in cache.graph_output_names | captured
+            or (
                 dq_node is not None
                 and (
                     len(cache.get_consumers(dq_node.output[0])) > 1
-                    or dq_node.output[0] in cache.graph_output_names
+                    or dq_node.output[0] in cache.graph_output_names | captured
                 )
-            ):
-                clone_idx = len(replacements_batch)
-                new_init_name = cache.unique_name(f"{name}_conv4d_{clone_idx}")
-                new_init_proto = numpy_helper.from_array(reshaped_arr, new_init_name)
-                add_unique_initializers(graph, unique_initializer, [new_init_proto])
-                if dq_node is not None:
-                    new_dq_out = f"{dq_node.output[0]}_conv4d_{clone_idx}"
-                    dq_clone = helper.make_node(
-                        "DequantizeLinear",
-                        inputs=[new_init_name, *list(dq_node.input[1:])],
-                        outputs=[new_dq_out],
-                        name=f"{dq_node.name or name}_conv4d_{clone_idx}",
-                    )
-                    dq_clone.attribute.extend(dq_node.attribute)
-                    if axis is not None:
-                        for attr in dq_clone.attribute:
-                            if attr.name == "axis":
-                                attr.i = axis
-                    nodes_to_add.append(dq_clone)
-                    current_node.input[1] = new_dq_out
-                else:
-                    current_node.input[1] = new_init_name
-                return
-
+            )
+        )
+        clone_idx = len(replacements_batch)
+        target_name = cache.unique_name(f"{name}_conv4d_{clone_idx}") if shared else name
+        if perm is None:
+            target = graph.initializer.add() if shared else initializer
+            if shared:
+                target.CopyFrom(initializer)
+                target.name = target_name
+            del target.dims[:]
+            target.dims.extend(shape)
+        else:
+            array = np.transpose(numpy_helper.to_array(initializer), perm).reshape(shape)
+            converted = numpy_helper.from_array(array, target_name)
+            if shared:
+                add_unique_initializers(graph, unique_initializer, [converted])
+            else:
+                initializer.CopyFrom(converted)
+        if shared:
             if dq_node is not None:
-                for attr in dq_node.attribute:
-                    if attr.name == "axis":
-                        attr.i = axis
-                        dq_node.name = f"{dq_node.name}_axis_updated"
+                dq_clone = type(dq_node)()
+                dq_clone.CopyFrom(dq_node)
+                dq_clone.name = cache.unique_name(f"{dq_node.name or name}_conv4d_{clone_idx}")
+                dq_clone.input[0] = target_name
+                dq_clone.output[0] = cache.unique_name(f"{dq_node.output[0]}_conv4d_{clone_idx}")
+                if axis is not None:
+                    set_node_attr_i(dq_clone, "axis", axis)
+                nodes_to_add.append(dq_clone)
+                current_node.input[1] = dq_clone.output[0]
+            else:
+                current_node.input[1] = target_name
+        elif dq_node is not None and axis is not None:
+            set_node_attr_i(dq_node, "axis", axis)
+            dq_node.name = cache.unique_name(f"{dq_node.name}_axis_updated")
 
-            reshaped_arr = np.reshape(init_arr, shape)
-            initializer.CopyFrom(numpy_helper.from_array(reshaped_arr, initializer.name))
-
-    # ── Separate eligible and ineligible nodes in one pass ───────────────────
     eligible_nodes = []
     ineligible_nodes = []
-    for node in graph.node:
-        if node.op_type not in ("MatMul", "Gemm"):
-            continue
-        if check_to_apply_transpose(node, model, tensor_name_dim_map):
-            eligible_nodes.append(node)
+    for node in candidates:
+        producer = cache.get_producer(node.input[1])
+        dq_node = (
+            producer if producer is not None and producer.op_type == "DequantizeLinear" else None
+        )
+        known_dq = dq_node is None or (
+            not dq_node.overload
+            and (dq_node.domain, dq_node.op_type, dq_node.overload) not in local_functions
+            and (
+                dq_node.domain in {"", "ai.onnx"}
+                or (dq_node.domain == "com.microsoft" and opsets.get(dq_node.domain) == 1)
+            )
+            and not get_node_attr_i(dq_node, "block_size", 0)
+        )
+        weight_name = dq_node.input[0] if dq_node is not None else node.input[1]
+        weight = cache.get_init(weight_name)
+        dtype = cache.get_dtype(node.input[0])
+        activation_shape = cache.get_shape(node.input[0])
+        if (
+            not known_dq
+            or weight is None
+            or weight_name in cache.graph_input_names
+            or any(tensor_rank(name) == 1 for name in node.input[:2])
+            or (
+                dtype is not None
+                and dtype not in {TensorProto.FLOAT, TensorProto.FLOAT16, TensorProto.DOUBLE}
+            )
+            or any(dim == 0 for dim in weight.dims)
+            or (activation_shape is not None and 0 in activation_shape)
+        ):
+            ineligible_nodes.append(node)
+        elif check_to_apply_transpose(node, model, tensor_name_dim_map):
+            output_rank = tensor_rank(node.output[0])
+            if output_rank is None:
+                output_rank = (
+                    max(len(tensor_name_dim_map[node.input[0]]), len(weight.dims))
+                    if node.op_type == "MatMul"
+                    else 2
+                )
+            eligible_nodes.append((node, weight_name, dq_node, output_rank))
         else:
             ineligible_nodes.append(node)
+    active_fallback = [
+        node
+        for node in ineligible_nodes
+        if node.op_type == "MatMul"
+        and not any(tensor_rank(name) == 1 for name in node.input[:2])
+        and (not defer_rank_conversion or node.input[1] in cache.graph_input_names)
+    ]
+    needs_adapters = any(
+        len(tensor_name_dim_map[node.input[0]]) < 4 or rank < 4
+        for node, _, _, rank in eligible_nodes
+    ) or any(
+        any(
+            tensor_rank(name) is not None and tensor_rank(name) < 4
+            for name in [*node.input[:2], node.output[0]]
+        )
+        for node in active_fallback
+    )
+    if needs_adapters and opsets.get("", opsets.get("ai.onnx", 1)) < 13:
+        raise ValueError("DLA matrix rank adapters require ONNX opset 13 or newer")
 
-    # ── Fallback: promote inputs/output of ineligible MatMul/Gemm to 4D ─────
-    # For each ineligible node:
-    #   * Dynamic inputs → Unsqueeze to 4D.
-    #   * Static initializer inputs (including DQ-wrapped) → expand dims in-place.
-    #   * Output → Squeeze back to original rank when the original was not 4D.
-    for node in ineligible_nodes:
-        if defer_rank_conversion and node.input[1] not in cache.graph_input_names:
-            continue
+    for node in active_fallback:
         cnt_fb = len(fallback_batch)
         pfx = node.name or f"mm_fallback_{cnt_fb}"
         initializer_names = cache.init_names
@@ -234,13 +270,14 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
                 continue
             if not inp:
                 continue
-            in_shape = cache.get_shape(inp)
-            if in_shape is None or len(in_shape) >= 4:
+            rank = tensor_rank(inp)
+            if rank is None or rank >= 4:
                 continue
-            rank = len(in_shape)
             # Check whether this is a static initializer (possibly DQ-wrapped)
             dq_src = is_const_dq_input(initializer_names, inp, graph)
-            init_name = dq_src or (inp if inp in initializer_names else None)
+            init_name = dq_src or (
+                inp if inp in initializer_names and inp not in cache.graph_input_names else None
+            )
             if init_name is not None:
                 if dq_src is not None:
                     # Preserve the quantization layout when a static DQ weight needs promotion.
@@ -261,19 +298,17 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
                 # Static weight: expand initializer dims in-place with 1-padding
                 for init in graph.initializer:
                     if init.name == init_name:
-                        arr = numpy_helper.to_array(init)
-                        if arr.ndim < 4:
-                            new_shape = pad4d(list(arr.shape))
+                        if len(init.dims) < 4:
+                            new_shape = pad4d(list(init.dims))
                             if (
                                 len(cache.get_consumers(init.name)) > 1
-                                or init.name in cache.graph_output_names
+                                or init.name in cache.graph_output_names | captured
                             ):
-                                clone = type(init)()
+                                clone = graph.initializer.add()
                                 clone.CopyFrom(init)
                                 clone.name = cache.unique_name(init.name + "_4d")
                                 del clone.dims[:]
                                 clone.dims.extend(new_shape)
-                                graph.initializer.append(clone)
                                 node.input[inp_idx] = clone.name
                             else:
                                 del init.dims[:]
@@ -284,30 +319,30 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
                 axes = list(range(4 - rank))
                 axes_init = numpy_helper.from_array(
                     np.array(axes, dtype=np.int64),
-                    name=f"{pfx}_in{inp_idx}_unsq_axes_{cnt_fb}",
+                    name=cache.unique_name(f"{pfx}_in{inp_idx}_unsq_axes_{cnt_fb}"),
                 )
                 add_unique_initializers(graph, unique_initializer, [axes_init])
-                inp_4d = f"{pfx}_in{inp_idx}_4d_{cnt_fb}"
+                inp_4d = cache.unique_name(f"{pfx}_in{inp_idx}_4d_{cnt_fb}")
                 pre.append(
                     helper.make_node(
                         "Unsqueeze",
                         inputs=[inp, axes_init.name],
                         outputs=[inp_4d],
-                        name=f"{pfx}_in{inp_idx}_unsq_{cnt_fb}",
+                        name=cache.unique_name(f"{pfx}_in{inp_idx}_unsq_{cnt_fb}"),
                     )
                 )
                 node.input[inp_idx] = inp_4d
 
         # Output: Squeeze back to original rank
         out_name = node.output[0] if node.output else None
-        if out_name and not defer_rank_conversion:
-            out_shape = cache.get_shape(out_name)
-            if out_shape is not None and len(out_shape) < 4:
-                temp_out = f"{pfx}_out_4d_{cnt_fb}"
-                sq_axes = list(range(4 - len(out_shape)))
+        if out_name:
+            out_rank = tensor_rank(out_name)
+            if out_rank is not None and out_rank < 4:
+                temp_out = cache.unique_name(f"{pfx}_out_4d_{cnt_fb}")
+                sq_axes = list(range(4 - out_rank))
                 sq_axes_init = numpy_helper.from_array(
                     np.array(sq_axes, dtype=np.int64),
-                    name=f"{pfx}_out_sq_axes_{cnt_fb}",
+                    name=cache.unique_name(f"{pfx}_out_sq_axes_{cnt_fb}"),
                 )
                 add_unique_initializers(graph, unique_initializer, [sq_axes_init])
                 post.append(
@@ -315,7 +350,7 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
                         "Squeeze",
                         inputs=[temp_out, sq_axes_init.name],
                         outputs=[out_name],
-                        name=f"{pfx}_out_sq_{cnt_fb}",
+                        name=cache.unique_name(f"{pfx}_out_sq_{cnt_fb}"),
                     )
                 )
                 node.output[0] = temp_out
@@ -323,11 +358,10 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
         if pre or post:
             fallback_batch[node_idx[id(node)]] = ([node], [*pre, node, *post])
 
-    for node in eligible_nodes:
+    for node, weight_name, weight_dq, output_rank in eligible_nodes:
         cnt = len(replacements_batch)
         pfx = node.name or f"matmul_{cnt}"
         nodes_to_add = []
-        initializer_names = cache.init_names
 
         # ── Gemm transA / transB attributes ──────────────────────────────────
         trans_a = False
@@ -344,26 +378,24 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
         if input_shape is None:
             raise ValueError(f"Shape unknown for activation tensor {node.input[0]!r}")
         orig_rank = len(input_shape)
-        output_shape = cache.get_shape(node.output[0])
-        output_rank = len(output_shape) if output_shape is not None else orig_rank
 
         # ── Step 1: Unsqueeze activation to 4D ───────────────────────────────
         # 2D [M,N]   → axes [0,1] → [1,1,M,N]
         # 3D [B,M,N] → axes [0]   → [1,B,M,N]
         activation_4d = node.input[0]
-        if orig_rank < 4 and not defer_rank_conversion:
+        if orig_rank < 4:
             axes = [0, 1] if orig_rank == 2 else [0]
             axes_init = numpy_helper.from_array(
-                np.array(axes, dtype=np.int64), name=f"{pfx}_unsq_axes_{cnt}"
+                np.array(axes, dtype=np.int64), name=cache.unique_name(f"{pfx}_unsq_axes_{cnt}")
             )
             add_unique_initializers(graph, unique_initializer, [axes_init])
-            activation_4d = f"{pfx}_unsqueeze4d_{cnt}"
+            activation_4d = cache.unique_name(f"{pfx}_unsqueeze4d_{cnt}")
             nodes_to_add.append(
                 helper.make_node(
                     "Unsqueeze",
                     inputs=[node.input[0], axes_init.name],
                     outputs=[activation_4d],
-                    name=f"{pfx}_unsqueeze4d_node_{cnt}",
+                    name=cache.unique_name(f"{pfx}_unsqueeze4d_node_{cnt}"),
                 )
             )
 
@@ -371,47 +403,21 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
         # transA=False: [1,B,M,N] → perm[0,3,2,1] → [1,N,M,B]  (C_in=N, H=M, W=B)
         # transA=True : [1,B,N,M] → perm[0,2,3,1] → [1,N,M,B]  (same result)
         perm_a = [0, 2, 3, 1] if trans_a else [0, 3, 2, 1]
-        transposed_a = f"{pfx}_tr_before0_{cnt}"
+        transposed_a = cache.unique_name(f"{pfx}_tr_before0_{cnt}")
         nodes_to_add.append(
             helper.make_node(
                 "Transpose",
                 inputs=[activation_4d],
                 outputs=[transposed_a],
-                name=f"{pfx}_transpose_before0_{cnt}",
+                name=cache.unique_name(f"{pfx}_transpose_before0_{cnt}"),
                 perm=perm_a,
             )
         )
 
         # ── Step 3: Prepare weight ────────────────────────────────────────────
-        dq_init_name = is_const_dq_input(initializer_names, node.input[1], graph)
-        is_const_dq = dq_init_name is not None
-        init_name = (
-            dq_init_name
-            if is_const_dq
-            else (node.input[1] if node.input[1] in initializer_names else None)
-        )
+        update_initializers(weight_name, node, nodes_to_add, trans_b, weight_dq)
+        conv_input1 = node.input[1]
 
-        if init_name is not None:
-            # Static weight: reshape initializer to 4-D conv kernel format
-            update_initializers(graph, init_name, node, nodes_to_add, trans_b, is_const_dq)
-            conv_input1 = node.input[1]  # tensor name unchanged; dims updated
-        else:
-            # Dynamic weight: add a Transpose node before Conv
-            # (check_to_apply_transpose normally prevents reaching here)
-            perm_b = [2, 3, 0, 1] if trans_b else [3, 2, 0, 1]
-            transposed_b = f"{pfx}_tr_before1_{cnt}"
-            nodes_to_add.append(
-                helper.make_node(
-                    "Transpose",
-                    inputs=[node.input[1]],
-                    outputs=[transposed_b],
-                    name=f"{pfx}_transpose_before1_{cnt}",
-                    perm=perm_b,
-                )
-            )
-            conv_input1 = transposed_b
-
-        # ── Step 4: Build Conv inputs (include optional Gemm bias) ───────────
         conv_inputs = [transposed_a, conv_input1]
         if len(node.input) >= 3 and node.input[2]:
             bias_shape = cache.get_shape(node.input[2])
@@ -422,13 +428,13 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
             conv_inputs.append(node.input[2])
 
         # ── Step 5: Conv ──────────────────────────────────────────────────────
-        conv_out = f"{pfx}_conv_out_{cnt}"
+        conv_out = cache.unique_name(f"{pfx}_conv_out_{cnt}")
         nodes_to_add.append(
             helper.make_node(
                 "Conv",
                 inputs=conv_inputs,
                 outputs=[conv_out],
-                name=f"{pfx}_conv_{cnt}",
+                name=cache.unique_name(f"{pfx}_conv_{cnt}"),
             )
         )
 
@@ -436,16 +442,14 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
         # [1,K,M,B] → perm[0,3,2,1] → [1,B,M,K]
         # Write to a temp name when Squeeze follows; otherwise directly to node.output[0].
         tr_after_out = (
-            f"{pfx}_tr_after_out_{cnt}"
-            if output_rank < 4 and not defer_rank_conversion
-            else node.output[0]
+            cache.unique_name(f"{pfx}_tr_after_out_{cnt}") if output_rank < 4 else node.output[0]
         )
         nodes_to_add.append(
             helper.make_node(
                 "Transpose",
                 inputs=[conv_out],
                 outputs=[tr_after_out],
-                name=f"{pfx}_transpose_after_{cnt}",
+                name=cache.unique_name(f"{pfx}_transpose_after_{cnt}"),
                 perm=[0, 3, 2, 1],
             )
         )
@@ -453,10 +457,10 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
         # ── Step 7: Squeeze back to original rank ─────────────────────────────
         # 2D case: [1,1,M,K] → squeeze [0,1] → [M,K]
         # 3D case: [1,B,M,K] → squeeze [0]   → [B,M,K]
-        if output_rank < 4 and not defer_rank_conversion:
+        if output_rank < 4:
             sq_axes = list(range(4 - output_rank))
             sq_axes_init = numpy_helper.from_array(
-                np.array(sq_axes, dtype=np.int64), name=f"{pfx}_sq_axes_{cnt}"
+                np.array(sq_axes, dtype=np.int64), name=cache.unique_name(f"{pfx}_sq_axes_{cnt}")
             )
             add_unique_initializers(graph, unique_initializer, [sq_axes_init])
             nodes_to_add.append(
@@ -464,7 +468,7 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
                     "Squeeze",
                     inputs=[tr_after_out, sq_axes_init.name],
                     outputs=list(node.output),
-                    name=f"{pfx}_squeeze_after_{cnt}",
+                    name=cache.unique_name(f"{pfx}_squeeze_after_{cnt}"),
                 )
             )
 
@@ -473,10 +477,11 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
     # ── Apply all replacements ────────────────────────────────────────────────
     all_batch = {**replacements_batch, **fallback_batch}
     batch_replace_nodes(graph, all_batch)
+    _add_legacy_initializer_inputs(model)
 
     logger.debug(
         "Replaced %d MatMul/Gemm nodes with Transpose-Conv-Transpose nodes; "
-        "promoted %d ineligible MatMul/Gemm nodes to 4D.",
+        "promoted %d ineligible MatMul nodes to 4D.",
         len(replacements_batch),
         len(fallback_batch),
     )

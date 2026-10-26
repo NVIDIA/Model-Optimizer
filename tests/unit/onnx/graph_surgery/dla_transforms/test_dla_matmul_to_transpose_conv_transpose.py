@@ -35,28 +35,25 @@ Does NOT convert:
   Dynamic weight  A[M,N] x W_graph_input[N,K]    → MatMul left unchanged
   NCHW non-unary  A[2,3,M,N] x W_init[2,3,N,K]  → MatMul left unchanged (4D weight, N/C > 1)
 
-Each test saves a base + transformed ONNX pair under
-``scratch_space/matmul_conv_test_models/`` for offline inspection.
 """
 
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 
 import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms.dla_matmul_to_transpose_conv_transpose import (
     _apply_matmul_to_transpose_conv_transpose as _apply_matmul_to_conv,
 )
+from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_compatible
 
-pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
+ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-_SAVED_MODELS_DIR = _REPO_ROOT / "scratch_space" / "matmul_conv_test_models"
 _OPSET_VERSION = 17
 _MAX_IR_VERSION_FOR_ORT = 9
 
@@ -68,26 +65,29 @@ M, N, K, B = 8, 16, 12, 3
 
 
 def _init(name: str, arr: np.ndarray) -> onnx.TensorProto:
+    """Create a named tensor initializer."""
     return numpy_helper.from_array(arr, name=name)
 
 
 def _vi(name: str, elem_type: int, shape: list) -> onnx.ValueInfoProto:
+    """Create typed shape metadata."""
     return helper.make_tensor_value_info(name, elem_type, shape)
 
 
 def _clamp_ir_version(model: onnx.ModelProto) -> None:
+    """Use an IR version supported by the test runtime."""
     model.ir_version = min(model.ir_version, _MAX_IR_VERSION_FOR_ORT)
 
 
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
-    import onnxruntime as ort  # type: ignore[import-not-found]
-
+    """Execute all graph outputs with the optional CPU runtime."""
     _clamp_ir_version(model)
     sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
     return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Measure the directional agreement of numerical outputs."""
     a64 = np.asarray(a, dtype=np.float64).ravel()
     b64 = np.asarray(b, dtype=np.float64).ravel()
     na, nb = float(np.linalg.norm(a64)), float(np.linalg.norm(b64))
@@ -99,6 +99,7 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _assert_outputs_match(ref: dict, got: dict) -> None:
+    """Check output names, shapes and numerical agreement."""
     assert ref.keys() == got.keys()
     for name in ref:
         a, b = ref[name], got[name]
@@ -108,22 +109,13 @@ def _assert_outputs_match(ref: dict, got: dict) -> None:
         np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-4, err_msg=f"{name}: value mismatch")
 
 
-def _save_test_pair(base: onnx.ModelProto, transformed: onnx.ModelProto, tag: str) -> None:
-    _SAVED_MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    onnx.save(base, str(_SAVED_MODELS_DIR / f"matmul_base_{tag}.onnx"))
-    import contextlib
-
-    with contextlib.suppress(Exception):
-        transformed = onnx.shape_inference.infer_shapes(copy.deepcopy(transformed))
-    onnx.save(transformed, str(_SAVED_MODELS_DIR / f"matmul_transformed_{tag}.onnx"))
-
-
 def _make_model(nodes, graph_name, inputs, outputs, initializers=None):
     """Build, shape-infer, and checker-validate a simple ONNX model."""
     graph = helper.make_graph(nodes, graph_name, inputs, outputs, initializer=initializers or [])
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
     _clamp_ir_version(model)
     try:
+        # Optional runtime tools may be absent without preventing test collection.
         from onnxruntime.tools.symbolic_shape_infer import (
             SymbolicShapeInference,  # type: ignore[import-untyped]
         )
@@ -284,6 +276,7 @@ def _make_matmul_nchw_non_unary():
 
 
 def _apply_and_run(model, feeds):
+    """Execute the original and converted graph for comparison."""
     ref = _run_ort(model, feeds)
     transformed = copy.deepcopy(model)
     transformed = _apply_matmul_to_conv(transformed)
@@ -307,7 +300,6 @@ def test_matmul_2d_activation_converts():
     assert any(n.op_type == "Unsqueeze" for n in tr.graph.node), "Unsqueeze expected for 2D input"
     assert any(n.op_type == "Squeeze" for n in tr.graph.node), "Squeeze expected for 2D input"
 
-    _save_test_pair(model, tr, "2d")
     _assert_outputs_match(ref, got)
 
 
@@ -321,7 +313,6 @@ def test_matmul_3d_activation_converts():
     assert any(n.op_type == "Unsqueeze" for n in tr.graph.node), "Unsqueeze expected for 3D input"
     assert any(n.op_type == "Squeeze" for n in tr.graph.node), "Squeeze expected for 3D input"
 
-    _save_test_pair(model, tr, "3d")
     _assert_outputs_match(ref, got)
 
 
@@ -339,7 +330,6 @@ def test_matmul_4d_activation_converts():
         "No Squeeze expected for 4D input"
     )
 
-    _save_test_pair(model, tr, "4d")
     _assert_outputs_match(ref, got)
 
 
@@ -350,7 +340,6 @@ def test_gemm_transb_converts():
 
     assert not any(n.op_type in ("MatMul", "Gemm") for n in tr.graph.node)
 
-    _save_test_pair(model, tr, "gemm_transb")
     _assert_outputs_match(ref, got)
 
 
@@ -361,7 +350,6 @@ def test_gemm_transa_converts():
 
     assert not any(n.op_type in ("MatMul", "Gemm") for n in tr.graph.node)
 
-    _save_test_pair(model, tr, "gemm_transa")
     _assert_outputs_match(ref, got)
 
 
@@ -375,7 +363,6 @@ def test_gemm_with_bias_converts():
     assert len(conv_nodes) == 1
     assert len(conv_nodes[0].input) == 3, "Conv should carry bias as third input"
 
-    _save_test_pair(model, tr, "gemm_bias")
     _assert_outputs_match(ref, got)
 
 
@@ -395,7 +382,6 @@ def test_matmul_dq_weight_converts():
         f"W_q dims: {list(w_q_init.dims)}, expected [{K},{N},1,1]"
     )
 
-    _save_test_pair(model, tr, "dq_weight")
     _assert_outputs_match(ref, got)
 
 
@@ -419,7 +405,6 @@ def test_matmul_dynamic_weight_not_converted():
         "Squeeze expected to restore original output rank"
     )
 
-    _save_test_pair(model, tr, "dynamic_weight")
     _assert_outputs_match(ref, got)
 
 
@@ -438,5 +423,393 @@ def test_matmul_nchw_non_unary_not_converted():
         "No Unsqueeze/Squeeze expected when all tensors are already 4D"
     )
 
-    _save_test_pair(model, tr, "nchw_non_unary")
     _assert_outputs_match(ref, got)
+
+
+@pytest.mark.parametrize("trans_a", [False, True])
+@pytest.mark.parametrize("trans_b", [False, True])
+@pytest.mark.parametrize("defer", [False, True])
+def test_dynamic_gemm_preserves_two_dimensional_contract(trans_a, trans_b, defer):
+    """Leave dynamic Gemm operands and transpose semantics valid in both modes."""
+    a_shape = [N, M] if trans_a else [M, N]
+    b_shape = [K, N] if trans_b else [N, K]
+    model = _make_model(
+        [
+            helper.make_node(
+                "Gemm", ["A", "W"], ["Y"], name="gemm", transA=int(trans_a), transB=int(trans_b)
+            )
+        ],
+        "dynamic_gemm",
+        [_vi("A", TensorProto.FLOAT, a_shape), _vi("W", TensorProto.FLOAT, b_shape)],
+        [_vi("Y", TensorProto.FLOAT, [M, K])],
+    )
+    feeds = {
+        "A": _RNG.standard_normal(a_shape).astype(np.float32),
+        "W": _RNG.standard_normal(b_shape).astype(np.float32),
+    }
+    expected = _run_ort(model, feeds)
+    before = model.SerializeToString()
+    _apply_matmul_to_conv(model, defer_rank_conversion=defer)
+    onnx.checker.check_model(model, full_check=True)
+    assert model.SerializeToString() == before
+    _assert_outputs_match(expected, _run_ort(model, feeds))
+
+
+@pytest.mark.parametrize("rank", [2, 3])
+def test_eligible_deferred_conversion_keeps_rank_adapters(rank):
+    """Keep eligible Conv rewrites valid before any later rank-promotion stage."""
+    model, feeds = (_make_matmul_2d if rank == 2 else _make_matmul_3d)()
+    expected = _run_ort(model, feeds)
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model), defer_rank_conversion=True)
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+def test_internal_pipeline_executes_eligible_two_dimensional_matmul():
+    """Run the registered deferred conversion through the actual internal sequence."""
+    model, feeds = _make_matmul_2d()
+    expected = _run_ort(model, feeds)
+    transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("axis", [None, -1, 1])
+@pytest.mark.parametrize("shared", [False, True])
+def test_per_axis_dq_weight_layout_is_preserved(axis, shared):
+    """Remap implicit and negative quantization axes while preserving shared DQ outputs."""
+    model, feeds = _make_matmul_dq_weight()
+    for tensor in model.graph.initializer:
+        if tensor.name == "W_scale":
+            tensor.CopyFrom(_init("W_scale", np.linspace(0.01, 0.02, K, dtype=np.float32)))
+        elif tensor.name == "W_zp":
+            tensor.CopyFrom(_init("W_zp", np.zeros(K, np.int8)))
+    if axis is not None:
+        model.graph.node[0].attribute.append(helper.make_attribute("axis", axis))
+    if shared:
+        model.graph.output.append(_vi("W_dq", TensorProto.FLOAT, [N, K]))
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+def test_public_weight_initializer_keeps_original_layout(quantized):
+    """Retain public weight tensors while allocating a Conv kernel for this consumer."""
+    model, feeds = (_make_matmul_dq_weight if quantized else _make_matmul_2d)()
+    name = "W_q" if quantized else "W"
+    model.graph.output.append(
+        _vi(name, TensorProto.INT8 if quantized else TensorProto.FLOAT, [N, K])
+    )
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+@pytest.mark.parametrize("defer", [False, True])
+def test_overridable_weight_initializer_uses_runtime_feed(quantized, defer):
+    """Preserve runtime weight overrides instead of converting their initializer defaults."""
+    model, feeds = (_make_matmul_dq_weight if quantized else _make_matmul_2d)()
+    name = "W_q" if quantized else "W"
+    tensor = next(tensor for tensor in model.graph.initializer if tensor.name == name)
+    model.graph.input.append(_vi(name, tensor.data_type, list(tensor.dims)))
+    feeds[name] = -numpy_helper.to_array(tensor)
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model), defer_rank_conversion=defer)
+    onnx.checker.check_model(transformed, full_check=True)
+    assert not any(node.op_type == "Conv" for node in transformed.graph.node)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("op_type", ["MatMul", "Gemm"])
+def test_custom_matrix_function_is_not_lowered_as_builtin(op_type):
+    """Preserve custom matrix functions whose result differs from the standard operation."""
+    function = helper.make_function(
+        "custom",
+        op_type,
+        ["A", "W"],
+        ["Y"],
+        [
+            helper.make_node("MatMul", ["A", "W"], ["product"]),
+            helper.make_node("Neg", ["product"], ["Y"]),
+        ],
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node(op_type, ["A", "W"], ["Y"], name="custom_matrix", domain="custom")],
+            "custom_matrix",
+            [_vi("A", TensorProto.FLOAT, [M, N])],
+            [_vi("Y", TensorProto.FLOAT, [M, K])],
+            initializer=[_init("W", _RNG.standard_normal([N, K]).astype(np.float32))],
+        ),
+        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("custom", 1)],
+        functions=[function],
+    )
+    _clamp_ir_version(model)
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"A": _RNG.standard_normal([M, N]).astype(np.float32)}
+    expected = _run_ort(model, feeds)
+    before = model.SerializeToString()
+    _apply_matmul_to_conv(model)
+    assert model.SerializeToString() == before
+    _assert_outputs_match(expected, _run_ort(model, feeds))
+
+
+@pytest.mark.parametrize("collision", ["activation", "cloned-dq"])
+def test_generated_matrix_names_preserve_unrelated_outputs(collision):
+    """Allocate fresh generated names across activation and cloned DQ branches."""
+    model, feeds = (_make_matmul_dq_weight if collision == "cloned-dq" else _make_matmul_2d)()
+    if collision == "cloned-dq":
+        model.graph.output.append(_vi("W_dq", TensorProto.FLOAT, [N, K]))
+    name = "W_dq_conv4d_0" if collision == "cloned-dq" else "mm_tr_before0_0"
+    model.graph.node.insert(0, helper.make_node("Identity", ["A"], [name], name="existing_alias"))
+    model.graph.output.append(_vi(name, TensorProto.FLOAT, [M, N]))
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+def test_integer_matmul_remains_a_valid_matmul():
+    """Keep integer matrix multiplication on its supported operator and preserve exact values."""
+    data = np.arange(6, dtype=np.int64).reshape(2, 3)
+    weight = np.arange(12, dtype=np.int64).reshape(3, 4)
+    model = _make_model(
+        [helper.make_node("MatMul", ["A", "W"], ["Y"], name="integer_mm")],
+        "integer_mm",
+        [_vi("A", TensorProto.INT64, [2, 3])],
+        [_vi("Y", TensorProto.INT64, [2, 4])],
+        [_init("W", weight)],
+    )
+    expected = ReferenceEvaluator(model).run(None, {"A": data})[0]
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    assert any(node.op_type == "MatMul" for node in transformed.graph.node)
+    np.testing.assert_array_equal(
+        ReferenceEvaluator(transformed).run(None, {"A": data})[0], expected
+    )
+
+
+def test_deferred_dynamic_matmul_restores_output_rank():
+    """Keep deferred graph-input weight promotion valid at the current stage boundary."""
+    model, feeds = _make_matmul_dynamic_weight()
+    expected = _run_ort(model, feeds)
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model), defer_rank_conversion=True)
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("symbolic", [False, True])
+def test_batched_weight_fallback_preserves_values_without_decoding(symbolic):
+    """Promote batched matrix layouts using ranks even when dimension values are symbolic."""
+    weight = _RNG.standard_normal([2, N, K]).astype(np.float32)
+    model = _make_model(
+        [helper.make_node("MatMul", ["A", "W"], ["Y"], name="batched")],
+        "batched_fallback",
+        [_vi("A", TensorProto.FLOAT, [2, M, N])],
+        [_vi("Y", TensorProto.FLOAT, [2, M, K])],
+        [_init("W", weight)],
+    )
+    if symbolic:
+        model.graph.input[0].CopyFrom(_vi("A", TensorProto.FLOAT, [2, "rows", N]))
+        model.graph.output[0].CopyFrom(_vi("Y", TensorProto.FLOAT, [2, "rows", K]))
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"A": _RNG.standard_normal([2, M, N]).astype(np.float32)}
+    expected = _run_ort(model, feeds)
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    assert any(node.op_type == "MatMul" for node in transformed.graph.node)
+    assert (
+        next(tensor for tensor in transformed.graph.initializer if tensor.name == "W").raw_data
+        == next(tensor for tensor in model.graph.initializer if tensor.name == "W").raw_data
+    )
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("weight_rank", [3, 4])
+def test_batched_weight_output_rank_survives_symbolic_metadata(weight_rank):
+    """Restore the declared batch rank independently of concrete output dimension values."""
+    weight = _RNG.standard_normal([*([1] * (weight_rank - 2)), N, K]).astype(np.float32)
+    model = _make_model(
+        [helper.make_node("MatMul", ["A", "W"], ["Y"], name="batched")],
+        "batched_output",
+        [_vi("A", TensorProto.FLOAT, [M, N])],
+        [_vi("Y", TensorProto.FLOAT, [*([1] * (weight_rank - 2)), M, K])],
+        [_init("W", weight)],
+    )
+    model.graph.output[0].CopyFrom(
+        _vi("Y", TensorProto.FLOAT, [f"dim_{index}" for index in range(weight_rank)])
+    )
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"A": _RNG.standard_normal([M, N]).astype(np.float32)}
+    expected = _run_ort(model, feeds)
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+def test_captured_weight_layout_is_preserved(quantized):
+    """Clone converted weights when nested control flow still reads their original layout."""
+    model, feeds = (_make_matmul_dq_weight if quantized else _make_matmul_2d)()
+    name = "W_dq" if quantized else "W"
+    branch = helper.make_graph(
+        [helper.make_node("Identity", [name], ["branch_out"])],
+        "branch",
+        [],
+        [_vi("branch_out", TensorProto.FLOAT, [N, K])],
+    )
+    model.graph.input.append(_vi("condition", TensorProto.BOOL, []))
+    model.graph.node.append(
+        helper.make_node(
+            "If",
+            ["condition"],
+            ["captured_weight"],
+            name="capture",
+            then_branch=branch,
+            else_branch=copy.deepcopy(branch),
+        )
+    )
+    model.graph.output.append(_vi("captured_weight", TensorProto.FLOAT, [N, K]))
+    feeds["condition"] = np.asarray(True)
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    actual = _run_ort(transformed, feeds)
+    np.testing.assert_array_equal(actual["captured_weight"], expected["captured_weight"])
+    _assert_outputs_match(expected, actual)
+
+
+def test_blocked_weight_dequantization_retains_its_layout():
+    """Keep blocked scale/data coordinates intact while promoting only the DQ result."""
+    model, feeds = _make_matmul_dq_weight()
+    model.opset_import[0].version = 21
+    model.graph.node[0].attribute.extend(
+        [helper.make_attribute("axis", 1), helper.make_attribute("block_size", 4)]
+    )
+    for tensor in model.graph.initializer:
+        if tensor.name == "W_scale":
+            tensor.CopyFrom(_init("W_scale", np.full([N, K // 4], 0.05, np.float32)))
+        elif tensor.name == "W_zp":
+            tensor.CopyFrom(_init("W_zp", np.zeros([N, K // 4], np.int8)))
+    onnx.checker.check_model(model, full_check=True)
+    expected = ReferenceEvaluator(model).run(None, feeds)
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    assert any(node.op_type == "MatMul" for node in transformed.graph.node)
+    for actual, reference in zip(ReferenceEvaluator(transformed).run(None, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
+@pytest.mark.parametrize("domain", ["custom", "com.microsoft"])
+def test_opaque_weight_function_is_not_reinterpreted_as_dq(domain):
+    """Preserve model-local weight functions with nonpointwise semantics."""
+    model, feeds = _make_matmul_dq_weight()
+    function = helper.make_function(
+        domain,
+        "DequantizeLinear",
+        ["data", "scale", "zero"],
+        ["output"],
+        [
+            helper.make_node("Cast", ["data"], ["cast"], to=TensorProto.FLOAT),
+            helper.make_node("Softmax", ["cast"], ["output"], axis=1),
+        ],
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.functions.append(function)
+    model.opset_import.append(helper.make_opsetid(domain, 1))
+    model.graph.node[0].domain = domain
+    onnx.checker.check_model(model, full_check=True)
+    expected = ReferenceEvaluator(model).run(None, feeds)
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    assert any(node.op_type == "MatMul" for node in transformed.graph.node)
+    for actual, reference in zip(ReferenceEvaluator(transformed).run(None, feeds), expected):
+        np.testing.assert_allclose(actual, reference, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize(("vector_a", "vector_b"), [(True, False), (False, True), (True, True)])
+@pytest.mark.parametrize("defer", [False, True])
+def test_vector_matmul_is_refused_or_left_for_later_conversion(vector_a, vector_b, defer):
+    """Avoid applying matrix-only rank promotion to vector multiplication semantics."""
+    a_shape = [N] if vector_a else [M, N]
+    w_shape = [N] if vector_b else [N, K]
+    output_shape = [] if vector_a and vector_b else [K] if vector_a else [M]
+    model = _make_model(
+        [helper.make_node("MatMul", ["A", "W"], ["Y"], name="vector")],
+        "vector",
+        [_vi("A", TensorProto.FLOAT, a_shape)],
+        [_vi("Y", TensorProto.FLOAT, output_shape)],
+        [_init("W", _RNG.standard_normal(w_shape).astype(np.float32))],
+    )
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"A": _RNG.standard_normal(a_shape).astype(np.float32)}
+    expected = _run_ort(model, feeds)
+    before = model.SerializeToString()
+    if defer:
+        _apply_matmul_to_conv(model, defer_rank_conversion=True)
+        assert model.SerializeToString() == before
+        _assert_outputs_match(expected, _run_ort(model, feeds))
+    else:
+        with pytest.raises(ValueError, match=r"[Uu]nsupported|[Vv]ector"):
+            _apply_matmul_to_conv(model)
+        assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("empty", ["rows", "outputs"])
+def test_empty_matrix_dimensions_remain_valid(empty):
+    """Keep empty matrix results on MatMul instead of creating an unsupported Conv kernel."""
+    rows = 0 if empty == "rows" else M
+    outputs = 0 if empty == "outputs" else K
+    weight = _RNG.standard_normal([N, outputs]).astype(np.float32)
+    model = _make_model(
+        [helper.make_node("MatMul", ["A", "W"], ["Y"], name="empty")],
+        "empty",
+        [_vi("A", TensorProto.FLOAT, [rows, N])],
+        [_vi("Y", TensorProto.FLOAT, [rows, outputs])],
+        [_init("W", weight)],
+    )
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"A": _RNG.standard_normal([rows, N]).astype(np.float32)}
+    expected = _run_ort(model, feeds)
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    assert any(node.op_type == "MatMul" for node in transformed.graph.node)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+def test_legacy_rank_adapter_schema_refuses_before_mutation():
+    """Refuse old Unsqueeze/Squeeze schemas before adding input-form rank adapters."""
+    model, feeds = _make_matmul_2d()
+    model.opset_import[0].version = 11
+    onnx.checker.check_model(model, full_check=True)
+    _run_ort(model, feeds)
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="opset"):
+        _apply_matmul_to_conv(model)
+    assert model.SerializeToString() == before
+
+
+def test_legacy_ir_registers_new_initializer_inputs():
+    """Keep IR3 valid when rank adapters introduce new constant axes tensors."""
+    model, feeds = _make_matmul_2d()
+    model.ir_version = 3
+    for tensor in model.graph.initializer:
+        model.graph.input.append(_vi(tensor.name, tensor.data_type, list(tensor.dims)))
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    assert {tensor.name for tensor in transformed.graph.initializer} <= {
+        value.name for value in transformed.graph.input
+    }
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
