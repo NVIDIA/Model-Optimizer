@@ -19,6 +19,8 @@ import pytest
 import torch
 import torch.nn as nn
 from _test_utils.torch.misc import set_seed
+
+pytest.importorskip("torch_geometric")
 from torch_geometric.nn import GATConv, GCNConv, SAGEConv, TransformerConv
 
 import modelopt.torch.quantization as mtq

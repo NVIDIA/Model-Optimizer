@@ -1,18 +1,20 @@
-# GPQA Diamond eval for Qwen3.6-35B-A3B. See README section 5 for the task/metric table.
+# AA-Omniscience (public set) eval for Qwen3.6-35B-A3B: knowledge recall and calibration. See the tutorial
+# README, "Knowledge recall and calibration".
 #
 # Set `execution.hostname`, `execution.account` and `deployment.checkpoint_path` (BF16, W4A4 PTQ or QAD)
 # before running. Serves BF16 and NVFP4 unchanged: vLLM reads the FP8 KV-cache setting from the
 # checkpoint's own `quantization_config`. NVFP4 needs a Blackwell GPU.
 #
-# Sampling per the nvidia/Qwen3.6-35B-A3B-NVFP4 card: T=1.0, top_p=0.95, max_new_tokens=131072.
-# num_repeats: 16 in a SINGLE run -- that is what `pass@1[avg-of-16]` means, so GPQA is the one
-# benchmark reported without a +/- figure. Longest task at ~2.5 h.
-#
-# Results use 1 independent run(s): launch this config 1 times and pool the per-run pass@1.
+# Sampling as for the other benchmarks: T=1.0, top_p=0.95, max_new_tokens=131072.
+# 600 questions x num_repeats 10 in a SINGLE run; report `pass@1[avg-of-10]` (judge_correct,
+# judge_omni_index = correct - incorrect, judge_omni_hallucination = incorrect / not correct), not
+# plain `pass@1`. ~1.5-2 h on one node; the slowest QAD checkpoint needed a second 4 h job.
+# JUDGE-SCORED (we used Gemini 3 Flash): needs NS_JUDGE_URL / OMNI_JUDGE_MODEL_ID / INFERENCE_API_KEY.
+# Keep the judge fixed across compared models.
 #
 #   pip install "nemo-evaluator-launcher[all]==0.2.6"
 #   export HF_TOKEN=<token>; export SLURM_JOB_DIR=<dir>; export HF_HOME=<cache>
-#   nemo-evaluator-launcher run --config eval_configs/gpqa.yaml
+#   nemo-evaluator-launcher run --config evaluation/omniscience.yaml
 defaults:
   - execution: slurm/default
   - deployment: vllm
@@ -64,6 +66,8 @@ evaluation:
   env_vars:
     HF_TOKEN: host:HF_TOKEN
     DUMMY_API_KEY: lit:dummy
+    # The judge is a separate endpoint and needs its own key.
+    INFERENCE_API_KEY: host:INFERENCE_API_KEY
   nemo_evaluator_config:
     config:
       params:
@@ -88,9 +92,19 @@ evaluation:
             chat_template_kwargs:
               enable_thinking: true
   tasks:
-    - name: ns_gpqa
+    - name: ns_omniscience
+      env_vars:
+        INFERENCE_API_KEY: host:INFERENCE_API_KEY
       nemo_evaluator_config:
         config:
           params:
             extra:
-              num_repeats: 16
+              num_repeats: 10
+              # vLLM's reasoning parser already strips the thinking; NeMo-Skills' own parse would find no
+              # </think> in the answer and grade it as empty.
+              args: "++parse_reasoning=False"
+              # Always judge-scored, so unlike AA-LCR it needs no `judge_support: true`.
+              judge:
+                url: ${oc.env:NS_JUDGE_URL}
+                model_id: ${oc.env:OMNI_JUDGE_MODEL_ID}
+                api_key: INFERENCE_API_KEY
