@@ -200,6 +200,7 @@ Changelog
 - Nested ``only_student_forward()`` and ``only_teacher_forward()`` contexts now preserve the enclosing execution mode, including when an inner context is disabled or raises an exception.
 - Fix an illegal memory access in static NVFP4 fake quantization for tensors with more than 2^31 elements, such as stacked MoE expert weights. The kernel is also about 14x faster.
 - Preserve accumulated histogram counts when computing an entropy calibration threshold with NumPy histograms.
+- Fix KV-cache quantization through ``register_attention_for_kv_quant``, the fallback for Hugging Face attention classes that do not use the attention interface, attaching the ``q``, ``k`` and ``v`` bmm quantizers to the wrong tensors for most attention layouts. Recalibrate and re-export models quantized through this fallback. Attention classes that compute their scores with ``torch.baddbmm`` (e.g. ``BloomAttention``, ``GPTNeoXJapaneseAttention``) are no longer patched, since their operands were always wired wrong (or raised ``IndexError``), and now get the existing warning to register a custom quantized attention class.
 
 0.47.0 (2026-09-23)
 ^^^^^^^^^^^^^^^^^^^
