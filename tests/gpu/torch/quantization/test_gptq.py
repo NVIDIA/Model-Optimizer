@@ -526,6 +526,28 @@ def test_fused_vs_unfused_nvfp4(quant_block_size, gptq_block_size):
     torch.testing.assert_close(weight_fused, weight_unfused, atol=1e-4, rtol=1e-4)
 
 
+@requires_triton
+@pytest.mark.parametrize(
+    ("in_features", "block_size"),
+    [
+        (96, 48),  # non-power-of-two GPTQ block
+        (208, 128),  # non-power-of-two final block
+        (70, 128),  # width the NVFP4 group size does not divide
+    ],
+)
+def test_gptq_fused_matches_unfused_on_irregular_shapes(in_features, block_size):
+    torch.manual_seed(0)
+    model = torch.nn.Linear(in_features, 32, bias=False, device="cuda")
+    inp = torch.randn(4, 16, in_features, device="cuda")
+    weights = []
+    for fused in (True, False):
+        quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
+        quant_cfg["algorithm"] = {"method": "gptq", "block_size": block_size, "fused": fused}
+        qmodel = mtq.quantize(copy.deepcopy(model), quant_cfg, forward_loop=lambda m: m(inp))
+        weights.append(qmodel.weight.data)
+    torch.testing.assert_close(weights[0], weights[1], atol=1e-4, rtol=1e-4)
+
+
 _NVFP4_BENCH_CONFIGS = [
     (16, 128, 256, 512),
     (16, 128, 256, 2048),

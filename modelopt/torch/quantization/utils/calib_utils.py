@@ -511,7 +511,8 @@ class GPTQHelper:
                     f" group_size ({quant_block_size})"
                 )
             out_features, num_cols = self.weight.shape
-            n_blocks = num_cols // quant_block_size
+            # A width the group size does not divide carries a scale for its padded last group.
+            n_blocks = -(-num_cols // quant_block_size)
             block_amax = quantizer.amax.reshape(out_features, n_blocks).float()
             global_scale = quantizer.global_amax.float().item() / (6.0 * 448.0)
             gptq_blockwise_update_fused_scalar(
