@@ -26,6 +26,7 @@ import torch
 from accelerate.hooks import remove_hook_from_module
 from autoquant_utils import (
     _FSDP2_KV_AUTOQUANT_ERROR,
+    _get_autoquant_memory_probe,
     _quantize_config_explicitly_enables_kv,
     _recipe_is_auto_quantize,
     _recipe_is_kv_auto_quantize,
@@ -84,7 +85,7 @@ from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
 from modelopt.torch.models import hf_model_type
-from modelopt.torch.models.hf import prepare_model_for_calibration, prepare_model_for_loading
+from modelopt.torch.models.hf import prepare_model_for_calibration
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
@@ -105,11 +106,22 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     ensure_local_checkpoint,
 )
-from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
+from modelopt.torch.utils.plugins.model_load_utils import (
+    load_pretrained,
+    parallel_load_and_prepare_fsdp2,
+)
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
+# Tokens per calibration batch when layerwise calibration picks the batch size (16 x 512).
+LAYERWISE_CALIB_TOKENS = 8192
+
+
+def _layerwise_calib_batch_size(calib_seq: int, num_samples: int) -> int:
+    """Default layerwise batch size: LAYERWISE_CALIB_TOKENS tokens, but 1 to all of the samples."""
+    return max(1, min(LAYERWISE_CALIB_TOKENS // calib_seq, num_samples))
+
 
 mto.enable_huggingface_checkpointing()
 
@@ -358,13 +370,12 @@ def load_model(args: argparse.Namespace):
             model_kwargs = {"trust_remote_code": args.trust_remote_code}
             if args.attn_implementation is not None:
                 model_kwargs["attn_implementation"] = args.attn_implementation
-            with prepare_model_for_loading(
-                hf_config.model_type, args.local_checkpoint_path, args.trust_remote_code
-            ):
-                full_model = AutoModelForCausalLM.from_pretrained(
-                    args.local_checkpoint_path,
-                    **model_kwargs,
-                )
+            full_model = load_pretrained(
+                args.local_checkpoint_path,
+                AutoModelForCausalLM,
+                model_type=hf_config.model_type,
+                **model_kwargs,
+            )
         calibration_only = True
 
     # Include auxiliary modules whose activation quantizers require calibration data.
@@ -986,10 +997,15 @@ def quantize_main(
             )
             args.batch_size = 1
         # Layerwise calibration processes one layer at a time; auto batch-size probing runs a
-        # full-model forward which defeats the point and can OOM on very large models.
+        # full-model forward which defeats the point and can OOM on very large models. A batch
+        # then only holds one layer's activations, so size it by tokens: batch 1 makes an MoE
+        # layer run its per-expert loop once per sample.
         elif is_layerwise:
-            print("Layerwise calibration enabled. Using default batch_size=1 for calibration.")
-            args.batch_size = 1
+            args.batch_size = _layerwise_calib_batch_size(args.calib_seq, sum(args.calib_size))
+            print(
+                f"Layerwise calibration enabled. Using default batch_size={args.batch_size} "
+                f"({LAYERWISE_CALIB_TOKENS} tokens per batch) for calibration."
+            )
         else:
             # Calibration/sparsification will actually take much more memory than regular inference
             # due to intermediate tensors for fake quantization. Setting sample_memory_usage_ratio
@@ -1020,7 +1036,11 @@ def quantize_main(
                 max_sample_length=args.calib_seq,
                 sample_memory_usage_ratio=sample_memory_usage_ratio if not run_auto_quant else 1.0,
                 sample_input_single_batch=sample_input_single_batch,
-                enable_grad=run_auto_quant,
+                enable_grad=(
+                    aq_config is not None
+                    and aq_config.auto_quantize_method in ("gradient", "aumann_shapley")
+                ),
+                forward_step=(_get_autoquant_memory_probe(recipe) if run_auto_quant else None),
             )
             args.batch_size = min(args.batch_size, sum(args.calib_size))
 
@@ -1412,6 +1432,9 @@ def parse_args() -> argparse.Namespace:
 
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
+
+    if args.calib_seq <= 0:
+        parser.error("--calib_seq must be positive.")
 
     if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
         parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")

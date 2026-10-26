@@ -394,10 +394,15 @@ def save_safetensors_by_layer_index(
         }
         for layer_index in range(total_layers):
             meta_filename = name_template.format(layer_index + 1, total_layers) + ".json"
-            with open(save_directory + "/" + meta_filename) as f:
-                shard = json.load(f)
-            safetensor_index["metadata"]["total_size"] += shard["metadata"]["total_size"]
-            safetensor_index["weight_map"].update(shard["weight_map"])
+            # Plus the expert shards that EP ranks other than 0 write beside the layer's own.
+            ep_shards = sorted(
+                Path(save_directory).glob(meta_filename[: -len(".json")] + "-ep*.json")
+            )
+            for shard_file in [Path(save_directory) / meta_filename, *ep_shards]:
+                with open(shard_file) as f:
+                    shard = json.load(f)
+                safetensor_index["metadata"]["total_size"] += shard["metadata"]["total_size"]
+                safetensor_index["weight_map"].update(shard["weight_map"])
 
         with open(save_directory + "/model.safetensors.index.json", "w") as f:
             json.dump(safetensor_index, f, indent=4)

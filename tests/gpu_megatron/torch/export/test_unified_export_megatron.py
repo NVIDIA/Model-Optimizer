@@ -354,12 +354,13 @@ def test_megatron_ggml_export_rejects_tensor_parallelism(qformat):
         exporter.save_pretrained("unused", "unused")
 
 
-def test_megatron_export_rejects_sequential_experts_at_ep():
-    """SequentialMLP experts are numbered by local position, so EP>1 export must refuse them."""
+def test_megatron_export_rejects_packed_local_experts_at_ep():
+    """Packed local-expert rules write a rank's experts as one tensor, so EP>1 export must refuse."""
     experts = torch.nn.Module()
     experts.local_experts = torch.nn.ModuleList()
     exporter = object.__new__(GPTModelExporter)
     exporter.model = torch.nn.Sequential(experts)
+    exporter.rules = {"use_packed_local_experts": True}
 
     with (
         patch.object(exporter, "_is_sidecar_writer_rank", return_value=False),
@@ -369,9 +370,58 @@ def test_megatron_export_rejects_sequential_experts_at_ep():
         patch.object(uem, "get_pipeline_model_parallel_rank", return_value=0),
         patch.object(uem, "get_pipeline_model_parallel_world_size", return_value=1),
         patch.object(uem, "get_tensor_model_parallel_rank", return_value=0),
-        pytest.raises(NotImplementedError, match="grouped-GEMM experts"),
+        pytest.raises(NotImplementedError, match="packed local experts"),
     ):
         exporter.save_pretrained("unused", "unused")
+
+
+def _test_sequential_experts_export_at_ep(model_dir, tmp_path, rank, size):
+    config = transformers.AutoConfig.from_pretrained(model_dir)
+    model = get_mcore_gpt_model(
+        expert_model_parallel_size=size,
+        initialize_megatron=True,
+        num_layers=config.num_hidden_layers,
+        hidden_size=config.hidden_size,
+        num_attention_heads=config.num_attention_heads,
+        num_query_groups=config.num_key_value_heads,
+        ffn_hidden_size=config.intermediate_size,
+        max_sequence_length=config.max_position_embeddings,
+        vocab_size=config.vocab_size,
+        normalization="RMSNorm",
+        kv_channels=config.hidden_size // config.num_attention_heads,
+        qk_layernorm=True,
+        num_moe_experts=config.num_experts,
+        moe_ffn_hidden_size=config.moe_intermediate_size,
+        moe_grouped_gemm=False,
+    ).cuda()
+    export_dir = tmp_path / "export"
+    stale = export_dir / "model-00001-of-00002-ep007.json"  # left by an export at a larger EP
+    if rank == 0:
+        export_dir.mkdir()
+        stale.write_text('{"metadata": {"total_size": 0}, "weight_map": {}}')
+    export_mcore_gpt_to_hf(model, model_dir, dtype=torch.bfloat16, export_dir=str(export_dir))
+    assert not stale.exists()
+
+    # Each rank's experts must land under their global ids, from whichever shard holds them.
+    weight_map = json.loads((export_dir / "model.safetensors.index.json").read_text())["weight_map"]
+    for layer_id, layer in enumerate(model.decoder.layers):
+        for expert_id, expert in zip(
+            layer.mlp.local_expert_indices, layer.mlp.experts.local_experts
+        ):
+            name = f"model.layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight"
+            with safe_open(str(export_dir / weight_map[name]), framework="pt") as f:
+                exported = f.get_tensor(name)
+            assert torch.equal(exported, expert.linear_fc2.weight.detach().bfloat16().cpu()), name
+    if rank == 0:
+        assert_exported_checkpoint_matches(
+            export_dir, model_dir, check_values=False, allow_unexpected=("mlp.gate.expert_bias",)
+        )
+
+
+def test_sequential_experts_export_at_ep(dist_workers_size_2, tmp_path):
+    """SequentialMLP experts exported at EP=2 keep every expert under its global id."""
+    model_dir = create_tiny_qwen3_moe_dir(tmp_path)
+    dist_workers_size_2.run(partial(_test_sequential_experts_export_at_ep, model_dir, tmp_path))
 
 
 def _test_mla_export_keeps_hf_head_dim(model_dir, rank, size):

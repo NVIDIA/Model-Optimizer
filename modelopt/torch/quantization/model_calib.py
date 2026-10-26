@@ -339,8 +339,9 @@ def max_calibrate(
         skip_forward_without_activation_calib: If True, skip the (potentially expensive)
             ``forward_loop`` when no enabled quantizer needs data-driven activation statistics
             (see :func:`_needs_activation_forward_for_max_calib`). Weight calibration still runs.
-            Only opt-in for the top-level ``max`` path; algorithms that always need activations
-            (MSE, local Hessian, SmoothQuant, SVDQuant, GPTQ) call this with the default False.
+            Opted into by the top-level ``max`` path and by GPTQ and imatrix, which run their own
+            forward; algorithms that always need activations (MSE, local Hessian, SmoothQuant,
+            SVDQuant) call this with the default False.
 
     See :class:`MaxCalibConfig <modelopt.torch.quantization.config.MaxCalibConfig>` for
     details on the remaining arguments.
@@ -941,6 +942,45 @@ def _is_quant_fused_experts(module: nn.Module) -> bool:
     )
 
 
+def _fused_expert_projections(module: nn.Module):
+    """Yield ``(weight_name, weight, weight_quantizers, input_quantizer)`` per fused-experts projection.
+
+    ``weight`` is the 3-D ``(num_experts, out, in)`` parameter, ``weight_quantizers`` holds one
+    quantizer per expert, and ``input_quantizer`` is shared by the experts and runs once per expert
+    forward with ``module._current_expert_idx`` already set to that expert.
+    """
+    first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
+    for weight_name, quantizers_name, input_q_name in (
+        (
+            first_proj_attr,
+            f"{first_proj_attr}_weight_quantizers",
+            f"{first_proj_attr}_input_quantizer",
+        ),
+        ("down_proj", "down_proj_weight_quantizers", "down_proj_input_quantizer"),
+    ):
+        weight = getattr(module, weight_name, None)
+        quantizers = getattr(module, quantizers_name, None)
+        input_quantizer = getattr(module, input_q_name, None)
+        if weight is not None and quantizers is not None and input_quantizer is not None:
+            yield weight_name, weight, quantizers, input_quantizer
+
+
+def _refuse_packed_fused_expert_weights(name, module, method, updates):
+    """Refuse fused experts that store a projection ``method`` updates in 8 bits.
+
+    Such experts (native FP8 experts) hand calibration dequantized copies of their weights, so an
+    in-place update would land in a temporary and be lost. ``updates(quantizer)`` says whether
+    ``method`` writes the weight that quantizer belongs to.
+    """
+    for weight_name, weight, quantizers, _ in _fused_expert_projections(module):
+        if weight.element_size() == 1 and any(updates(q) for q in quantizers):
+            raise ValueError(
+                f"{method} updates {name}.{weight_name} in place, but it is stored in 8 bits "
+                "(native FP8 experts), so the update would be lost. Call unpack_weight() on the "
+                "module before calibrating."
+            )
+
+
 class _WeightInputHook:
     """Identify active input collectors so auxiliary modules can request a calibration forward."""
 
@@ -991,20 +1031,9 @@ def _register_weight_input_hooks(model, names, capture, on_weight=None):
             handles.append(module.register_forward_pre_hook(_WeightInputHook(_dense_hook)))
         elif _is_quant_fused_experts(module):
             with enable_weight_access_and_writeback(module, model, names):
-                first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
-                for weight_name, quantizers_name, input_q_name in (
-                    (
-                        first_proj_attr,
-                        f"{first_proj_attr}_weight_quantizers",
-                        f"{first_proj_attr}_input_quantizer",
-                    ),
-                    ("down_proj", "down_proj_weight_quantizers", "down_proj_input_quantizer"),
+                for weight_name, weight, quantizers, input_quantizer in _fused_expert_projections(
+                    module
                 ):
-                    weight = getattr(module, weight_name, None)
-                    quantizers = getattr(module, quantizers_name, None)
-                    input_quantizer = getattr(module, input_q_name, None)
-                    if weight is None or quantizers is None or input_quantizer is None:
-                        continue
                     if on_weight is not None:
                         on_weight(f"{name}.{weight_name}", weight[0], quantizers[0])
                     # Snapshot which experts are enabled now, before the caching forward silences
@@ -2292,16 +2321,23 @@ def gptq(
     * **Non-layerwise** (``layerwise.enable=False``): called once on the full
       model. All layers are quantized in parallel from the original activations.
 
-    We recommend enabling layerwise calibration
-    (``"layerwise": {"enable": True}``) and using a calibration batch size of 1.
+    We recommend enabling layerwise calibration (``"layerwise": {"enable": True}``). The
+    calibration batch size only trades memory for speed: each forward of an HF fused-MoE layer
+    loops over its experts, so batch 1 pays that loop once per sample.
 
     Per-module steps:
 
-    1. ``max_calibrate`` to set amax values from the current activations.
+    1. ``max_calibrate`` to set weight amax, running a forward only when an enabled activation
+       quantizer needs data-driven amax.
     2. Promote eligible quantizers to ``StaticBlockScaleQuantizer`` (two-level scaling).
-    3. Collect per-linear-layer Hessian matrices via forward hooks.
+    3. Collect Hessian matrices via forward hooks: one per quantized linear layer, and one per
+       expert and projection of HF fused-MoE experts, over the tokens routed to that expert.
     4. Blockwise weight updates using the inverse Hessian to compensate for
-       rounding error (the core GPTQ column-wise update).
+       rounding error (the core GPTQ column-wise update). An expert no calibration token
+       reached has a zero Hessian and gets the plain search, as a dense layer would.
+
+    Each expert Hessian is ``in_features x in_features`` float32, so a large MoE needs
+    layerwise calibration to hold only one layer's expert Hessians at a time.
 
     Args:
         model: The module to quantize — either the full model or a single decoder
@@ -2315,50 +2351,136 @@ def gptq(
     """
     total_start = time.time()
 
+    fused_experts = [(n, m) for n, m in model.named_modules() if _is_quant_fused_experts(m)]
+    for name, module in fused_experts:
+        _refuse_packed_fused_expert_weights(name, module, "GPTQ", lambda q: q.is_enabled)
+
     # TODO: Add support for other scale setting strateiges like weight-mse or local-hessian
-    max_calibrate(model, forward_loop=forward_loop)
+    # The Hessian pass below is GPTQ's own forward; max only runs one if activations need amax.
+    max_calibrate(model, forward_loop=forward_loop, skip_forward_without_activation_calib=True)
 
     quantized_layers = [
         (n, m)
         for n, m in model.named_modules()
         if is_quantized_linear(m) and m.weight_quantizer.is_enabled
     ]
-    if not quantized_layers:
-        print_rank_0("No quantized linear layers found, skipping GPTQ")
+    if not quantized_layers and not fused_experts:
+        print_rank_0("No quantized linear layers or fused experts found, skipping GPTQ")
         return
 
-    def _make_gptq_handle(name, m):
-        backend = getattr(m.weight_quantizer, "backend", None)
+    # Every expert Hessian lives from now until its update; a whole large MoE's does not fit.
+    expert_hessian_bytes = 0
+    expert_devices = set()
+    for _, module in fused_experts:
+        for _, weight, quantizers, _ in _fused_expert_projections(module):
+            expert_hessian_bytes += (
+                4 * weight.shape[-1] ** 2 * sum(q.is_enabled for q in quantizers)
+            )
+            expert_devices.add(weight.device)
+    gpus = [d for d in expert_devices if d.type == "cuda"]
+    if gpus and expert_hessian_bytes > sum(torch.cuda.mem_get_info(d)[0] for d in gpus):
+        warn_rank_0(
+            f"GPTQ: the fused-MoE expert Hessians need {expert_hessian_bytes / 2**30:.1f} GiB, more "
+            "than the GPUs holding the experts have free, so they spill to host memory and can "
+            "exhaust it. Enable layerwise calibration to hold one layer's Hessians at a time."
+        )
+
+    def _make_gptq_handle(name, m, weight_quantizer=None, weight=None, log_mse=True):
+        quantizer = m.weight_quantizer if weight_quantizer is None else weight_quantizer
+        backend = getattr(quantizer, "backend", None)
         if backend is None:
             cls = GPTQHelper
         else:
             cls = _GPTQ_HELPER_REGISTRY.get(backend, GPTQHelper)
         return cls(
-            m, name, offload_to_cpu=True, fused=fused, importance_weighted=importance_weighted
+            m,
+            name,
+            offload_to_cpu=True,
+            fused=fused,
+            importance_weighted=importance_weighted,
+            weight_quantizer=weight_quantizer,
+            weight=weight,
+            log_mse=log_mse,
         )
 
     gptq_handles = {name: _make_gptq_handle(name, m) for name, m in quantized_layers}
     for handle in gptq_handles.values():
         handle.setup()
 
-    print_rank_0(f"Computing Hessians for {len(gptq_handles)} linear layers...")
+    # HF fused-MoE experts: one helper per expert and projection, fed only the tokens routed to that
+    # expert. The projection's shared input quantizer runs once per expert forward, so its output is
+    # exactly what the expert's F.linear consumes, the input-quantized input dense GPTQ also uses.
+    names = module_name_maps(model)
+    expert_handles: dict[int, GPTQHelper] = {}  # id(expert weight quantizer) -> helper
+    hooks = []
 
-    with set_quantizer_by_cfg_context(
-        model, [{"quantizer_name": "*weight_quantizer", "enable": False}]
-    ):
-        forward_loop(model)
+    def _make_expert_hook(experts, per_expert):
+        def _expert_hook(_input_quantizer, _args, output):
+            handle = per_expert.get(experts._current_expert_idx)
+            if handle is not None:
+                handle.accumulate(output)
+
+        return _expert_hook
+
+    for name, module in fused_experts:
+        with enable_weight_access_and_writeback(module, model, names):
+            for weight_name, weight, quantizers, input_quantizer in _fused_expert_projections(
+                module
+            ):
+                # An expert's logged error would cost two full matmuls; gptq() logs a summary.
+                per_expert = {
+                    idx: _make_gptq_handle(
+                        f"{name}.{weight_name}.{idx}", module, q, weight[idx], log_mse=False
+                    )
+                    for idx, q in enumerate(quantizers)
+                    if q.is_enabled
+                }
+                if per_expert:
+                    expert_handles.update((id(quantizers[i]), h) for i, h in per_expert.items())
+                    hooks.append(
+                        input_quantizer.register_forward_hook(_make_expert_hook(module, per_expert))
+                    )
+
+    print_rank_0(
+        f"Computing Hessians for {len(gptq_handles)} linear layers and "
+        f"{len(expert_handles)} fused-expert weights ({expert_hessian_bytes / 2**30:.1f} GiB)..."
+    )
+
+    try:
+        with set_quantizer_by_cfg_context(
+            model, [{"quantizer_name": "*weight_quantizer", "enable": False}]
+        ):
+            forward_loop(model)
+    finally:
+        for hook in hooks:
+            hook.remove()
 
     for handle in gptq_handles.values():
         handle.cleanup()
+    for handle in [*gptq_handles.values(), *expert_handles.values()]:
         handle.sync_hessian_across_dp()
 
     print_rank_0("Updating weights using GPTQ algorithm...")
-    names = module_name_maps(model)
     for handle in gptq_handles.values():
         with enable_weight_access_and_writeback(handle.module, model, names):
             handle.update_weights(block_size, perc_damp)
         handle.free()
-    del gptq_handles
+    for name, module in fused_experts:
+        updated = unreached = 0
+        with enable_weight_access_and_writeback(module, model, names):
+            for weight, quantizer in module.iter_weights_for_calibration():
+                handle = expert_handles.pop(id(quantizer), None)
+                if handle is not None:
+                    unreached += handle.n_samples == 0
+                    handle.update_weights(block_size, perc_damp, weight)
+                    handle.free()
+                    updated += 1
+        if updated:
+            print_rank_0(
+                f"[{name}] GPTQ updated {updated} expert weights, {unreached} of them never "
+                "reached by calibration"
+            )
+    del gptq_handles, expert_handles
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -2379,9 +2501,9 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
     encoder (see :func:`~modelopt.torch.quantization.utils.calib_utils.register_imatrix_encoder`)
     and accepts the quantizer. Each such weight is then encoded once, its search weighted by that
     statistic, and replaced by its fake-quantized value. Dense quantized linears and HF fused-MoE
-    experts (one statistic per expert, over the tokens routed to it) are both covered, so this
-    reaches the experts GPTQ skips. Encoders skip a quantizer that already holds final codes, so
-    ``[gptq, imatrix]`` runs GPTQ where it applies and imatrix on the rest.
+    experts (one statistic per expert, over the tokens routed to it) are both covered. Encoders
+    skip a quantizer that already holds final codes, so ``[gptq, imatrix]`` runs GPTQ where it
+    applies and imatrix on any weight it leaves.
     """
     if forward_loop is None:
         warn_rank_0("imatrix: no forward_loop given; skipping imatrix calibration")
@@ -2407,6 +2529,8 @@ def imatrix_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None)
     # Refuse a weight the encoder cannot take before any forward or calibration state changes;
     # otherwise it would fail only after calibration, with the earlier weights already encoded.
     for name, module in target_modules:
+        if _is_quant_fused_experts(module):
+            _refuse_packed_fused_expert_weights(name, module, "imatrix", lambda q: id(q) in targets)
         for weight, quantizer in module.iter_weights_for_calibration():
             if id(quantizer) in targets:
                 try:

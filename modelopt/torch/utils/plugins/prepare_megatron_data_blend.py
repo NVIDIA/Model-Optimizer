@@ -20,6 +20,7 @@ import gzip
 import hashlib
 import json
 import math
+import multiprocessing as mp
 import os
 import random
 import re
@@ -178,7 +179,10 @@ def _prepare_sources(
 
 
 def _to_chat(
-    row: dict[str, Any], content_field: str, reasoning_content: ReasoningContentMode = "native"
+    row: dict[str, Any],
+    content_field: str,
+    reasoning_content: ReasoningContentMode = "native",
+    loss_mode: str = "assistant",
 ) -> dict[str, Any] | None:
     """Convert a source row to ``{"messages": [...]}``, or ``None`` if it has nothing to train on.
 
@@ -189,7 +193,7 @@ def _to_chat(
     """
     if content_field == "messages":
         messages = row.get("messages")
-        if not messages:
+        if not messages or not isinstance(messages, list):
             return None
         messages = prepare_messages_for_chat_template(messages, reasoning_content=reasoning_content)
         chat: dict[str, Any] = {"messages": messages}
@@ -199,8 +203,8 @@ def _to_chat(
             if row.get(key):
                 chat[key] = row[key]
     else:
-        text = row.get("text") or ""
-        if not text:
+        text = row.get("text")
+        if not text or not isinstance(text, str):
             return None
         if "<extra_id_" not in text:
             return {"messages": [{"role": "assistant", "content": text}]}
@@ -224,8 +228,10 @@ def _to_chat(
             if content.strip()
         ]
         chat = {"messages": turns}
-    # Nothing in a row without an assistant turn is trained under assistant-only loss.
-    if not any(turn.get("role") == "assistant" for turn in chat["messages"]):
+    # Only loss_mode full trains a row without an assistant turn.
+    if loss_mode != "full" and not any(
+        turn.get("role") == "assistant" for turn in chat["messages"]
+    ):
         return None
     return chat
 
@@ -260,6 +266,7 @@ def _take_chat_rows(
     shuffle: bool,
     seed: int,
     reasoning_content: ReasoningContentMode,
+    loss_mode: str,
 ) -> list[dict[str, Any]]:
     """Return the first ``want`` usable chat rows of a source.
 
@@ -272,14 +279,27 @@ def _take_chat_rows(
     from megatron.bridge.data.conversation_processing import is_text_only_chat_example
 
     name = f"{source['hf_dataset']} {source.get('split') or source.get('files')}"
+    content_field = source["content_field"]  # a config error, not a bad row: fail here
     rows: list[dict[str, Any]] = []
-    rejected = 0
+    rejected = unconvertible = 0
     max_rejected = 10 * want + 100
     try:
         for row in _iter_rows(source, output_dir, shuffle, seed):
-            chat = _to_chat(row, source["content_field"], reasoning_content)
-            # Judge the source row's top-level media keys too, which the conversion does not keep.
-            if chat is None or not is_text_only_chat_example({**row, **chat}):
+            try:
+                chat = _to_chat(row, content_field, reasoning_content, loss_mode)
+                # Judge the source row's top-level media keys too, which the conversion drops.
+                if chat is not None and not is_text_only_chat_example({**row, **chat}):
+                    chat = None
+            except (AttributeError, KeyError, TypeError, ValueError) as e:
+                # As in the tokenizing reader: one malformed record must not lose the source.
+                # Warn on the first few only; the summary line carries the count.
+                if unconvertible < 5:
+                    print(
+                        f"[WARN] {name}: skipping a row that cannot be converted: {e!r}", flush=True
+                    )
+                unconvertible += 1
+                chat = None
+            if chat is None:
                 rejected += 1
                 if rejected > max_rejected:
                     break
@@ -292,8 +312,11 @@ def _take_chat_rows(
     if len(rows) < want:
         gave_up = rejected > max_rejected
         reason = f"gave up after {rejected} rejected rows" if gave_up else "source exhausted"
+        if unconvertible:
+            reason += f"; {unconvertible} rows could not be converted"
         raise RuntimeError(f"{name}: only {len(rows)}/{want} usable rows ({reason})")
-    print(f"{name}: {len(rows)} rows ({rejected} rejected)", flush=True)
+    detail = f", {unconvertible} unconvertible" if unconvertible else ""
+    print(f"{name}: {len(rows)} rows ({rejected} rejected{detail})", flush=True)
     return rows
 
 
@@ -326,6 +349,69 @@ def _part_path(parts_dir: Path, source: dict[str, Any], settings: dict[str, Any]
     return parts_dir / f"{source['hf_dataset'].replace('/', '--')}_{label}_{digest}.jsonl"
 
 
+_SFT_TOKENIZER: dict[str, Any] = {}
+
+
+def _init_sft_tokenizer(tokenizer: str, max_length: int, loss_mode: str) -> None:
+    from megatron.bridge.data.collators.sft import extract_skipped_token_ids
+    from megatron.bridge.data.conversation_processing import infer_assistant_mask_boundary_config
+    from transformers import AutoTokenizer
+
+    # distill.py --sft_hf_dataset tokenizes with the student's HF tokenizer, as loaded here.
+    processor = AutoTokenizer.from_pretrained(tokenizer)
+    _SFT_TOKENIZER.update(
+        processor=processor,
+        boundary_config=infer_assistant_mask_boundary_config(processor),
+        skipped_tokens=extract_skipped_token_ids(processor),
+        max_length=max_length,
+        loss_mode=loss_mode,
+    )
+
+
+def _sft_length(row: dict[str, Any]) -> int:
+    """Return the row's token count as Megatron-Bridge trains it, or 0 if nothing would be trained."""
+    from megatron.bridge.data.conversation_processing import tokenize_chat_example
+
+    try:
+        tokenized = tokenize_chat_example(row, warn_on_all_masked=False, **_SFT_TOKENIZER)
+    except ValueError as e:
+        # No assistant span matched: Bridge raises from a dataloader worker. Other errors are setup
+        # errors (e.g. a tokenizer without a chat template) that would drop every row.
+        if "did not match any loss-contributing spans" not in str(e):
+            raise
+        return 0
+    return tokenized.input_ids.numel() if tokenized.assistant_mask.any() else 0
+
+
+def _sft_lengths(rows: list[dict[str, Any]], config: dict[str, Any]) -> list[int]:
+    """Tokenize ``rows`` with Megatron-Bridge's chat SFT path in ``num_workers`` processes."""
+    init_args = (config["tokenizer"], config["max_length"], config.get("loss_mode", "assistant"))
+    num_workers = int(config.get("num_workers", len(os.sched_getaffinity(0))))
+    if num_workers <= 1:
+        _init_sft_tokenizer(*init_args)
+        return [_sft_length(row) for row in rows]
+    with mp.Pool(num_workers, initializer=_init_sft_tokenizer, initargs=init_args) as pool:
+        return pool.map(_sft_length, rows, chunksize=64)
+
+
+def _pair_rows(rows: list[dict[str, Any]], lengths: list[int], cap: int, seed: int) -> list:
+    """Order rows as pairs of at most ``cap`` tokens, so ``--mbs 2`` packs each pair together.
+
+    Pairs the longest remaining row with the shortest; a row that fits with no other is dropped.
+    The pairs are shuffled with ``seed``.
+    """
+    order = sorted(range(len(rows)), key=lengths.__getitem__)
+    pairs, i, j = [], 0, len(order) - 1
+    while i < j:
+        if lengths[order[i]] + lengths[order[j]] <= cap:
+            pairs.append((order[i], order[j]))
+            i += 1
+        j -= 1
+    random.Random(seed).shuffle(pairs)
+    print(f"Paired {2 * len(pairs)} of {len(rows)} rows into packs of <= {cap} tokens", flush=True)
+    return [rows[k] for pair in pairs for k in pair]
+
+
 def _chat_budgets(config: dict[str, Any]) -> list[int]:
     """Return each source's row budget; validate the inputs."""
     weights = [float(source["weight"]) for source in config["sources"]]
@@ -354,6 +440,12 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
     The rows are mixed with ``seed`` and ``min(1000, n // 20)`` of them are held out for validation.
     Each source is cached under ``<output_dir>/parts``, keyed by the settings that select its rows,
     so an interrupted run resumes.
+
+    With ``tokenizer`` and ``max_length`` (``distill.py --seq_length``), rows are tokenized as
+    Megatron-Bridge trains them (``loss_mode``, default ``assistant``, as ``--sft_loss_mode``), in
+    ``num_workers`` processes, and rows with no trained token are dropped. ``pack_max_tokens``
+    then orders each split as pairs of at most that many tokens for ``--sft_in_batch_packing
+    --mbs 2``.
     """
     config = load_config(config_path)
     if config.get("output_format") != "chat_jsonl":
@@ -361,9 +453,20 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
             "prepare_chat_data_blend writes output_format: chat_jsonl, "
             f"got {config.get('output_format')!r}."
         )
-    ignored = {"tokenizer", "target_tokens"} & config.keys()
-    if ignored:
-        raise ValueError(f"output_format: chat_jsonl does not use {sorted(ignored)}.")
+    if "target_tokens" in config:
+        raise ValueError("output_format: chat_jsonl does not use ['target_tokens'].")
+    if ("tokenizer" in config) != ("max_length" in config):
+        raise ValueError("chat_jsonl tokenizes rows only with both tokenizer and max_length.")
+    if "pack_max_tokens" in config and "max_length" not in config:
+        raise ValueError("pack_max_tokens needs tokenizer and max_length to count tokens.")
+    for key in ("max_length", "pack_max_tokens", "num_workers"):
+        value = config.get(key, 1)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{key} must be a positive integer, got {value!r}.")
+    if config.get("loss_mode", "assistant") not in ("assistant", "last_turn", "full"):
+        raise ValueError(
+            f"loss_mode must be assistant, last_turn or full: {config['loss_mode']!r}."
+        )
     if any("max_samples" in source for source in config["sources"]):
         raise ValueError("output_format: chat_jsonl does not use max_samples; set target_samples.")
     fields = {source["content_field"] for source in config["sources"]} - {"messages", "text"}
@@ -387,6 +490,9 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
     settings = {"shuffle": shuffle, "reasoning_content": reasoning_content}
     if shuffle:
         settings["seed"] = seed
+    loss_mode = config.get("loss_mode", "assistant")
+    if loss_mode == "full":  # keeps rows without an assistant turn
+        settings["loss_mode"] = loss_mode
 
     rows: list[dict[str, Any]] = []
     for source, want in zip(config["sources"], budgets):
@@ -396,13 +502,24 @@ def prepare_chat_data_blend(config_path: Path) -> dict[str, int]:
         part = _part_path(parts_dir, source, settings)
         got = _read_jsonl(part)
         if got is None or len(got) < want:
-            got = _take_chat_rows(source, output_dir, want, shuffle, seed, reasoning_content)
+            got = _take_chat_rows(
+                source, output_dir, want, shuffle, seed, reasoning_content, loss_mode
+            )
             _write_jsonl(part, got)
         rows.extend(got[:want])
 
     random.Random(seed).shuffle(rows)
+    if "max_length" in config:
+        lengths = _sft_lengths(rows, config)
+        kept = [k for k, n in enumerate(lengths) if n]
+        print(f"Dropped {len(rows) - len(kept)} rows with no trained token", flush=True)
+        rows, lengths = [rows[k] for k in kept], [lengths[k] for k in kept]
     num_validation = min(1000, len(rows) // 20)
     splits = {"validation": rows[:num_validation], "train": rows[num_validation:]}
+    if "pack_max_tokens" in config:
+        cap = config["pack_max_tokens"]
+        splits["validation"] = _pair_rows(splits["validation"], lengths[:num_validation], cap, seed)
+        splits["train"] = _pair_rows(splits["train"], lengths[num_validation:], cap, seed)
     if not splits["train"] or not splits["validation"]:
         raise RuntimeError(f"Too few rows ({len(rows)}) for a train/validation split.")
     for name, split_rows in splits.items():
@@ -420,7 +537,16 @@ def prepare_megatron_data_blend(config_path: Path) -> list[tuple[float, str]]:
             f"Unknown output_format {output_format!r} for a tokenized blend; use megatron, or "
             "chat_jsonl with prepare_chat_data_blend."
         )
-    chat_keys = {"target_samples", "shuffle", "seed", "reasoning_content"} & config.keys()
+    chat_keys = {
+        "target_samples",
+        "shuffle",
+        "seed",
+        "reasoning_content",
+        "max_length",
+        "loss_mode",
+        "pack_max_tokens",
+        "num_workers",
+    } & config.keys()
     if chat_keys:
         raise ValueError(f"Tokenized blends do not use {sorted(chat_keys)}.")
     output_dir = Path(config["output_dir"])

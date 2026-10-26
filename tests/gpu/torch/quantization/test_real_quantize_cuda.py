@@ -197,10 +197,12 @@ def test_compress_config(model_cls, quant_config, compress_config):
 
 
 @pytest.mark.parametrize("quant_config", [mtq.FP8_DEFAULT_CFG])
-def test_real_quantize_linear(quant_config, tmp_path):
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path)
+@pytest.mark.parametrize("tie_word_embeddings", [False, True])
+def test_real_quantize_linear(quant_config, tie_word_embeddings, tmp_path):
+    tiny_llama_dir = create_tiny_llama_dir(tmp_path, tie_word_embeddings=tie_word_embeddings)
     with init_quantized_weights(quant_config):
         model = AutoModelForCausalLM.from_pretrained(tiny_llama_dir)
+    assert (model.lm_head.weight is model.model.embed_tokens.weight) == tie_word_embeddings
 
     for _, module in model.named_modules():
         if (

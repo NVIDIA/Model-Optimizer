@@ -15,6 +15,7 @@
 
 import contextlib
 import faulthandler
+import gc
 import os
 import queue
 import signal
@@ -96,6 +97,36 @@ def get_live_pool(pools, key, make_pool):
     return pool
 
 
+_BASELINE_TORCH_FLAGS = {}
+
+
+def _capture_baseline_torch_flags():
+    """Remember the torch settings a freshly spawned worker starts with."""
+    _BASELINE_TORCH_FLAGS.update(
+        cudnn_deterministic=torch.backends.cudnn.deterministic,
+        cudnn_benchmark=torch.backends.cudnn.benchmark,
+        cudnn_tf32=torch.backends.cudnn.allow_tf32,
+        matmul_tf32=torch.backends.cuda.matmul.allow_tf32,
+        deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
+    )
+
+
+def reset_worker_state(rank, world_size):
+    """Return a persistent worker to the state it had right after spawning.
+
+    ``set_seed`` and similar helpers change process-global torch settings; run this job at the
+    boundary between test modules that share workers.
+    """
+    torch.backends.cudnn.deterministic = _BASELINE_TORCH_FLAGS["cudnn_deterministic"]
+    torch.backends.cudnn.benchmark = _BASELINE_TORCH_FLAGS["cudnn_benchmark"]
+    torch.backends.cudnn.allow_tf32 = _BASELINE_TORCH_FLAGS["cudnn_tf32"]
+    torch.backends.cuda.matmul.allow_tf32 = _BASELINE_TORCH_FLAGS["matmul_tf32"]
+    torch.use_deterministic_algorithms(_BASELINE_TORCH_FLAGS["deterministic_algorithms"])
+    torch.manual_seed(1234)
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
 def default_worker_teardown(rank, world_size):
     """Minimal cleanup between tests in persistent workers."""
     try:
@@ -107,6 +138,16 @@ def default_worker_teardown(rank, world_size):
     except Exception as e:
         print(f"Error resetting AcceleratorState: {e}")
     torch.cuda.empty_cache()
+
+
+def reseeding_worker_teardown(rank, world_size):
+    """``default_worker_teardown``, then the seed a freshly spawned rank starts from.
+
+    A job that draws a different amount of randomness on each rank would otherwise leave the next
+    job's ranks out of step, where spawned ranks would start it in step.
+    """
+    default_worker_teardown(rank, world_size)
+    torch.manual_seed(1234)
 
 
 class DistributedWorkerPool:
@@ -131,7 +172,9 @@ class DistributedWorkerPool:
         pool.shutdown()
     """
 
-    def __init__(self, world_size, backend="nccl", teardown_fn=default_worker_teardown):
+    def __init__(
+        self, world_size, backend="nccl", teardown_fn=default_worker_teardown, ready_timeout=300
+    ):
         assert world_size > 0, "World size must be greater than 0"
         self.world_size = world_size
         # Set once a job was interrupted: the workers are then killed, see ``run``.
@@ -160,9 +203,38 @@ class DistributedWorkerPool:
             p.start()
             self._processes.append(p)
 
-        for _ in range(world_size):
-            msg = self._result_queue.get(timeout=120)
-            assert msg == "ready", f"Worker failed to initialize: {msg}"
+        # ready_timeout is 300 s: cold imports of the Megatron/TE/modelopt stack take 75-100 s
+        # under coverage in CI
+        try:
+            for _ in range(world_size):
+                msg = self._get(ready_timeout)
+                assert msg == "ready", f"Worker failed to initialize: {msg}"
+        except BaseException:
+            self._abort()  # do not leave workers behind when the start fails
+            raise
+
+    def _get(self, timeout):
+        """Return the next message from the workers; fail within a second if a worker died.
+
+        A worker that exits (an illegal memory access aborts the process, an OOM kill) would
+        otherwise only be noticed when ``timeout`` runs out.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                return self._result_queue.get(
+                    timeout=max(0.01, min(1.0, deadline - time.monotonic()))
+                )
+            except queue.Empty:  # noqa: PERF203
+                dead = [
+                    (rank, p.exitcode) for rank, p in enumerate(self._processes) if not p.is_alive()
+                ]
+                if dead:
+                    raise RuntimeError(
+                        f"Worker process(es) died (rank, exit code): {dead}"
+                    ) from None
+                if time.monotonic() >= deadline:
+                    raise
 
     @staticmethod
     def _worker_loop(rank, world_size, backend, port, cmd_queue, result_queue, teardown_fn):
@@ -178,6 +250,7 @@ class DistributedWorkerPool:
         if backend == "nccl" and torch.cuda.is_available():
             torch.cuda.set_device(rank)
         torch.manual_seed(1234)
+        _capture_baseline_torch_flags()
         result_queue.put("ready")
 
         while True:
@@ -187,21 +260,27 @@ class DistributedWorkerPool:
             fn, args, kwargs = cmd
             status = "ok"
             tb = None
+            reported = False
             try:
                 fn(rank, world_size, *args, **kwargs)
             except Exception:
                 status = "error"
                 tb = traceback.format_exc()
+                # Report before teardown: it may block on a collective whose peer is still stuck in
+                # ``fn``, and the parent's failure grace period starts when it hears of a failure.
+                result_queue.put((status, rank, tb))
+                reported = True
             finally:
                 if teardown_fn is not None:
                     try:
                         teardown_fn(rank, world_size)
                     except Exception as e:
-                        print(f"Error tearing down worker: {e}")
-                        status = "error"
-                        teardown_tb = traceback.format_exc()
-                        tb = (tb + "\n" if tb else "") + f"[teardown] {teardown_tb}"
-            result_queue.put((status, rank, tb))
+                        print(f"Error tearing down worker: {e}\n{traceback.format_exc()}")
+                        if not reported:  # else the job failure is already sent; the teardown error is printed above
+                            status = "error"
+                            tb = f"[teardown] {traceback.format_exc()}"
+            if not reported:
+                result_queue.put((status, rank, tb))
 
         dist.destroy_process_group()
 
@@ -211,11 +290,11 @@ class DistributedWorkerPool:
         ``fn`` is called as ``fn(rank, world_size, *args, **kwargs)`` and must be picklable
         (top-level function or ``functools.partial`` of one).
 
-        If the wait is interrupted (e.g. by ``pytest-timeout``), or a rank fails and its peers do
-        not finish within ``failure_grace`` (they are typically blocked in a collective waiting for
-        it), the workers are still inside the job and every later ``run`` would hang until its own
-        timeout. The workers are killed instead and the pool is marked ``broken``; callers that
-        want to continue need a new pool.
+        If the job fails or the wait is interrupted (e.g. by ``pytest-timeout``), the workers may
+        still be inside the job or its teardown, typically blocked in a collective, and every later
+        ``run`` would hang until its own timeout. The workers are killed instead and the pool is
+        marked ``broken``; callers that want to continue need a new pool (``get_live_pool``). After
+        a rank fails, its peers get ``failure_grace`` seconds to report before the kill.
         """
         if self.broken:
             raise RuntimeError("Worker pool was killed after an earlier job hung; create a new one")
@@ -226,7 +305,12 @@ class DistributedWorkerPool:
                 q.put((fn, args, kwargs))
             for _ in range(self.world_size):
                 timeout = self.job_timeout if deadline is None else deadline - time.monotonic()
-                status, rank, tb = self._result_queue.get(timeout=max(timeout, 0))
+                try:
+                    status, rank, tb = self._get(max(timeout, 0))
+                except RuntimeError as e:  # a worker died: keep what the other ranks reported
+                    if errors:
+                        raise RuntimeError(f"{e}\n" + "\n".join(errors)) from None
+                    raise
                 if status == "error":
                     errors.append(f"--- Rank {rank} ---\n{tb}")
                     deadline = deadline or time.monotonic() + self.failure_grace
@@ -240,12 +324,16 @@ class DistributedWorkerPool:
             raise
 
         if errors:
+            if not self.broken:
+                # Every rank replied, but a failed rank reports before its teardown, which can still
+                # be blocked; never hand these workers to another job.
+                self._abort(dump_stacks=False)
             raise RuntimeError("Worker(s) failed:\n" + "\n".join(errors))
 
-    def _abort(self):
-        """Print every worker's stack (to stderr, for the CI log), then kill the workers."""
+    def _abort(self, dump_stacks=True):
+        """Kill the workers, first printing their stacks (to stderr, for the CI log) if asked."""
         self.broken = True
-        if hasattr(signal, "SIGUSR1"):
+        if dump_stacks and hasattr(signal, "SIGUSR1"):
             for p in self._processes:
                 with contextlib.suppress(OSError):
                     os.kill(p.pid, signal.SIGUSR1)
