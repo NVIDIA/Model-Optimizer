@@ -26,7 +26,8 @@ if str(_HF_PTQ_DIR) not in sys.path:
     sys.path.insert(0, str(_HF_PTQ_DIR))
 
 import convert_ggml_to_int8
+import convert_ggml_to_nvfp4
 import example_utils
 import nemotron_vl_calib
 
-__all__ = ["convert_ggml_to_int8", "example_utils", "nemotron_vl_calib"]
+__all__ = ["convert_ggml_to_int8", "convert_ggml_to_nvfp4", "example_utils", "nemotron_vl_calib"]

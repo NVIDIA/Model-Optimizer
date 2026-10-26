@@ -1250,6 +1250,13 @@ class GPTModelExporter:
         # separately exported scaling tensors. Keep the weight on-device until it can be packed
         # along its contraction axis, so the CUDA packer can be used.
         if is_iq:
+            input_quantizer = getattr(module, "input_quantizer", None)
+            if input_quantizer is not None and input_quantizer.is_enabled:
+                # Every rank holds the same layers (GGML export requires TP=PP=1), so all raise.
+                raise NotImplementedError(
+                    "Megatron GGML export does not write activation scales yet; export GGML "
+                    "layers with NVFP4 inputs from the Hugging Face model instead."
+                )
             return name_to_value, qformat, block_size
         # Getting the weight scales
         weight_scale = get_weight_scaling_factor(module)

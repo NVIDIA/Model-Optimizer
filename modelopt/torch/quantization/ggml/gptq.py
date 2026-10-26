@@ -20,7 +20,8 @@ from collections.abc import Callable
 import torch
 
 from ..utils.calib_utils import GPTQHelper, register_gptq_helper
-from .common import floored_second_moments, pin_packed_weight
+from .common import floored_second_moments, pin_packed_weight, validate_transcode
+from .nvfp4 import nvfp4_transcode
 from .registry import GGML_FORMAT_REGISTRY
 
 __all__ = ["GGMLGPTQHelper", "gptq_group_update"]
@@ -76,12 +77,23 @@ class GGMLGPTQHelper(GPTQHelper):
     dominate the search; its root keeps the column ranking at half the log-range.
     The payload GPTQ chose is pinned to the weight quantizer, so later forwards and export use
     those exact codes rather than encoding the GPTQ'd weight again, which would not return them.
+
+    With an NVFP4 ``transcode``, GPTQ compensates the error of the transcoded weight, the one an
+    FP4 GEMM computes with, while the model keeps the GGML decoding that the pinned payload matches.
     """
 
     def update_weights(self, block_size, perc_damp, weight=None):
         """Run the GPTQ update, then pin the chosen payload to the weight quantizer."""
         super().update_weights(block_size, perc_damp, weight)
         quantizer = self.weight_quantizer
+        if (quantizer.backend_extra_args or {}).get("transcode") is not None:
+            # GPTQ wrote the transcoded weight; fake quant transcodes the decoding on each forward.
+            weight = self.module.weight if weight is None else weight
+            ggml_format = GGML_FORMAT_REGISTRY[quantizer.num_bits]
+            decoded = ggml_format.dequantize(
+                self._packed, torch.tensor(weight.shape), dtype=weight.dtype
+            )
+            weight.data.copy_(decoded.reshape(weight.shape))
         pin_packed_weight(quantizer, quantizer.num_bits, self._packed)
         self._packed = None
 
@@ -91,6 +103,8 @@ class GGMLGPTQHelper(GPTQHelper):
         extra_args = quantizer.backend_extra_args or {}
         block_chunk_size = extra_args.get("block_chunk_size", ggml_format.block_chunk_size)
         decode_chunk_size = extra_args.get("decode_chunk_size", ggml_format.decode_chunk_size)
+        transcode = extra_args.get("transcode")
+        validate_transcode(transcode)
         payloads = []
         assert self.weight is not None, "_blockwise_update called before update_weights()"
         importance = None
@@ -104,9 +118,11 @@ class GGMLGPTQHelper(GPTQHelper):
                 group.contiguous(), block_chunk_size=block_chunk_size, **kwargs
             )
             payloads.append(packed)
-            return ggml_format.dequantize(
+            decoded = ggml_format.dequantize(
                 packed, shape, dtype=group.dtype, block_chunk_size=decode_chunk_size
             )
+            # Short of E4M3's range ends, transcoding a column group matches transcoding the weight.
+            return decoded if transcode is None else nvfp4_transcode(decoded, dtype=group.dtype)
 
         gptq_group_update(
             self.weight, self.h_inv, block_size, ggml_format.block_size, quantize_group

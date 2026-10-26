@@ -470,6 +470,44 @@ def uses_iq_quantization(module) -> bool:
     return any(uses_iq_quantization(child) for _, child in module.named_children())
 
 
+def _validate_ggml_input_quantizer(input_quantizer) -> None:
+    """Refuse a GGML layer's enabled input quantizer unless it is dynamic NVFP4 (W1A4/W2A4)."""
+    if isinstance(input_quantizer, SequentialQuantizer) or not (
+        input_quantizer.is_nvfp4_dynamic and input_quantizer.block_sizes.get(-1) == 16
+    ):
+        raise NotImplementedError(
+            "GGML export writes NVFP4 activation scales only, but a GGML layer has the input "
+            f"quantizer {input_quantizer}; its activation quantization would be lost."
+        )
+
+
+def get_ggml_input_quantization(module: nn.Module) -> str | None:
+    """``QUANTIZATION_NVFP4`` if ``module``'s GGML weights take NVFP4 inputs, else None.
+
+    One hf_quant_config entry describes a whole module, such as fused MoE experts, so a module whose
+    GGML weights quantize their inputs only in part is refused.
+    """
+    quantizes_input = set()
+    for weight_name in weight_attr_names(module):
+        weight_quantizer = representative_weight_quantizer(module, weight_name)
+        if not (
+            weight_quantizer is not None
+            and weight_quantizer.is_enabled
+            and getattr(weight_quantizer, "num_bits", None) in GGML_FORMATS
+        ):
+            continue
+        input_quantizer = getattr(module, quantizer_attr_names(weight_name).input_quantizer, None)
+        enabled = input_quantizer is not None and input_quantizer.is_enabled
+        if enabled:
+            _validate_ggml_input_quantizer(input_quantizer)
+        quantizes_input.add(enabled)
+    if len(quantizes_input) > 1:
+        raise NotImplementedError(
+            f"{type(module).__name__} quantizes the inputs of only some of its GGML weights."
+        )
+    return QUANTIZATION_NVFP4 if True in quantizes_input else None
+
+
 def _get_quantization_from_quantizers(
     layer: nn.Module,
     weight_quantizer: TensorQuantizer | SequentialQuantizer | None,
@@ -494,15 +532,10 @@ def _get_quantization_from_quantizers(
     if weight_quantizer.num_bits in GGML_FORMATS:
         if weight_quantizer.backend != "ggml":
             raise ValueError("GGML formats require the built-in 'ggml' quantization backend")
-        # Both exporters return before collecting input_scale and before the pre_quant_scale
-        # handling below, so an enabled activation quantizer would be dropped without a trace
-        # and the checkpoint would load as weight-only. Refuse instead.
+        # GGML export writes the NVFP4 input_scale of W1A4/W2A4 layers and nothing else of the
+        # input quantizer, so any other activation quantization would load as weight-only.
         if input_quantizer is not None and input_quantizer.is_enabled:
-            raise NotImplementedError(
-                "GGML export is weight-only, but this layer has an enabled input "
-                "quantizer. The GGML block payload carries no activation scale, so the "
-                "activation quantization would be silently lost."
-            )
+            _validate_ggml_input_quantizer(input_quantizer)
         if input_quantizer is not None and hasattr(input_quantizer, "_pre_quant_scale"):
             raise NotImplementedError("GGML export does not support an AWQ-style pre_quant_scale.")
         return weight_quantizer.num_bits
@@ -683,7 +716,7 @@ def process_layer_quant_config(layer_config_dict):
     exclude_modules = []
 
     for k, v in layer_config_dict.items():
-        if "awq_block_size" in k:
+        if "awq_block_size" in k or k.endswith(".input_quantization"):
             continue
 
         # Get layer name for constructing quantized_layers dictionary under per_layer_config
@@ -781,6 +814,9 @@ def process_layer_quant_config(layer_config_dict):
                 "block_payload_bytes": payload_bytes,
                 "packing": "ggml",
             }
+            if layer_config_dict.get(prefix + ".input_quantization") == QUANTIZATION_NVFP4:
+                # W1A4/W2A4: the layer also carries an NVFP4 input_scale.
+                layer_config["input_quant_algo"] = "NVFP4"
         else:
             layer_config = {"quant_algo": v}
 
@@ -1877,6 +1913,10 @@ def get_quant_config(
             # Construct per layer config dictionary
             layer_config_dict[name + ".quantization"] = quantization_format
             layer_config_dict[name + ".awq_block_size"] = block_size
+            if quantization_format in GGML_FORMATS:
+                input_quantization = get_ggml_input_quantization(module)
+                if input_quantization is not None:
+                    layer_config_dict[name + ".input_quantization"] = input_quantization
 
         # Find kv cache quant format
         is_language_model_module = (

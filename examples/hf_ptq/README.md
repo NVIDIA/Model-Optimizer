@@ -729,6 +729,16 @@ Each weight keeps its GGML integer level, and the step of its 16- or 32-weight s
 
 vLLM serves group-32 layers (IQ1_S, IQ2_XXS, Q8_0) with Marlin and group-16 layers (IQ1_M, IQ2_XS, IQ2_S) with Humming. On Blackwell GPUs, Marlin is much slower at large batch sizes, so set `VLLM_DISABLED_KERNELS=MarlinLinearKernel` to use Humming for group 32 as well.
 
+To evaluate a GGML model as an FP4 GEMM computes it, transcode it to NVFP4 with [convert_ggml_to_nvfp4.py](./convert_ggml_to_nvfp4.py). An export of a W1A4/W2A4 recipe (`general/ptq/<format>_w1a4` or `_w2a4`), which holds NVFP4 activation scales, becomes an NVFP4 W4A4 checkpoint; any other GGML export becomes NVFP4 weight-only (`W4A16_NVFP4`):
+
+```bash
+python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --recipe general/ptq/iq1_s_w1a4 --export_path <ggml_ckpt_path>
+python convert_ggml_to_nvfp4.py <ggml_ckpt_path> <nvfp4_ckpt_path>
+vllm serve <nvfp4_ckpt_path>
+```
+
+Each 16-weight block of a decoded GGML weight takes the E4M3 scale that minimises its error, as the W1A4/W2A4 recipes' fake quant does during calibration, so the NVFP4 checkpoint computes the weights the recipe calibrated. NVFP4 adds about 4% weight error to IQ1 and 7% to IQ2 on top of the GGML formats' own.
+
 #### SGLang
 
 ```python

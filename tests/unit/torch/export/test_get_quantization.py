@@ -203,8 +203,14 @@ def test_grouped_q8_0_quantizer_is_detected_for_export():
     assert get_quantization_format(module) == QUANTIZATION_Q8_0
 
 
-def test_iq_export_rejects_enabled_input_quantizer():
-    """IQ payloads carry no activation scale, so W-IQ + A-FP8 must not export as weight-only."""
+_NVFP4_INPUT_CFG = {
+    "num_bits": (2, 1),
+    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+}
+
+
+def test_iq_export_rejects_a_non_nvfp4_input_quantizer():
+    """GGML export writes only NVFP4 input scales, so W-IQ + A-FP8 must not export as weight-only."""
     model = _quantize_sequential(
         [
             {"quantizer_name": "*weight_quantizer", "cfg": _IQ_WEIGHT_CFG},
@@ -212,8 +218,24 @@ def test_iq_export_rejects_enabled_input_quantizer():
         ]
     )
 
-    with pytest.raises(NotImplementedError, match="weight-only"):
+    with pytest.raises(NotImplementedError, match="NVFP4 activation scales only"):
         get_quantization_format(model)
+
+
+def test_iq_with_nvfp4_inputs_is_marked_in_the_quant_config():
+    model = _quantize_sequential(
+        [
+            {"quantizer_name": "*weight_quantizer", "cfg": _IQ_WEIGHT_CFG},
+            {"quantizer_name": "0.input_quantizer", "cfg": _NVFP4_INPUT_CFG},
+        ]
+    )
+
+    quantization = get_quant_config(model)["quantization"]
+    assert quantization["quant_algo"] == "MIXED_PRECISION"
+    assert quantization["quantized_layers"]["0"]["input_quant_algo"] == "NVFP4"
+    assert "input_quant_algo" not in quantization["quantized_layers"]["1"]
+    groups = convert_hf_quant_config_format(get_quant_config(model))["config_groups"].values()
+    assert sorted("input_activations" in group for group in groups) == [False, True]
 
 
 def test_iq_hf_config_rejects_mismatched_group_size():

@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import torch
@@ -59,54 +60,43 @@ def convert_ggml_export_to_int8(
         max_shard_size: Target bytes per output safetensors shard; a larger tensor gets a shard
             of its own. Conversion holds one output shard in memory at a time.
     """
-    ggml_dir, output_dir = Path(ggml_dir), Path(output_dir)
-    config = json.loads((ggml_dir / "config.json").read_text())
-    quantization = json.loads((ggml_dir / "hf_quant_config.json").read_text())["quantization"]
+    config = json.loads((Path(ggml_dir) / "config.json").read_text())
+    scale_dtype = getattr(torch, model_dtype(config))
+    layer_formats = ggml_layer_formats(ggml_dir)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def convert(name: str, tensor: torch.Tensor) -> dict[str, torch.Tensor]:
+        layer = name.removesuffix(".weight")
+        ggml_format = layer_formats.get(layer) if name.endswith(".weight") else None
+        if ggml_format is None:
+            return {name: tensor}
+        return _int8_tensors(layer, tensor, ggml_format, scale_dtype, device)
+
+    config["quantization_config"] = _compressed_tensors_config(layer_formats)
+    # No hf_quant_config.json: it describes the GGML payloads this replaces.
+    write_converted_checkpoint(
+        ggml_dir, output_dir, convert, {"config.json": config}, max_shard_size
+    )
+
+
+def model_dtype(config: dict) -> str:
+    """The model dtype a Hugging Face ``config.json`` declares."""
     # Multimodal configs such as GLM-5.3-Flash's keep the dtype in text_config only.
     text_config = config.get("text_config", {})
-    dtype = (
+    return (
         config.get("dtype")
         or config.get("torch_dtype")
         or text_config.get("dtype")
         or text_config["torch_dtype"]
     )
-    scale_dtype = getattr(torch, dtype)
-    weight_map = indexed_weight_map(ggml_dir)
-    layer_formats = _ggml_layer_formats(ggml_dir, weight_map, quantization)
-    if output_dir.exists() and any(output_dir.iterdir()):
-        raise ValueError(f"{output_dir} is not empty.")
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    try:
-        shards = sorted(set(weight_map.values()))
-        new_weight_map = _write_int8_shards(
-            ggml_dir, shards, output_dir, layer_formats, scale_dtype, max_shard_size
-        )
-        total_size = sum((output_dir / s).stat().st_size for s in set(new_weight_map.values()))
-        index = {"metadata": {"total_size": total_size}, "weight_map": new_weight_map}
-        (output_dir / _INDEX).write_text(json.dumps(index, indent=2))
-        config["quantization_config"] = _compressed_tensors_config(layer_formats)
-        (output_dir / "config.json").write_text(json.dumps(config, indent=4))
-        # Both skip files already written, and copy_non_model_files skips hf_quant_config.json,
-        # which describes the GGML payloads this replaced.
-        copy_off_index_safetensors(ggml_dir, output_dir)
-        copy_non_model_files(ggml_dir, output_dir)
-    except BaseException:
-        # Empty the directory again, so a rerun is not refused over a partial checkpoint.
-        for path in output_dir.iterdir():
-            if path.is_dir():
-                shutil.rmtree(path)
-            else:
-                path.unlink()
-        raise
 
 
-def _ggml_layer_formats(
-    ggml_dir: Path, weight_map: dict[str, str], quantization: dict
-) -> dict[str, GGMLFormat]:
+def ggml_layer_formats(ggml_dir: str | os.PathLike) -> dict[str, GGMLFormat]:
     """The GGML format of every layer holding a packed payload, refusing anything else."""
+    ggml_dir = Path(ggml_dir)
+    quantization = json.loads((ggml_dir / "hf_quant_config.json").read_text())["quantization"]
     if quantization.get("kv_cache_quant_algo") is not None:
-        raise ValueError("INT8 conversion of a GGML export does not carry KV cache quantization.")
+        raise ValueError("Converting a GGML export does not carry KV cache quantization.")
     mixed = quantization.get("quant_algo") == "MIXED_PRECISION"
     layer_configs = quantization.get("quantized_layers", {}) if mixed else {}
     algos = (
@@ -116,10 +106,10 @@ def _ggml_layer_formats(
     )
     unsupported = sorted(str(a) for a in algos if str(a).lower() not in GGML_FORMAT_REGISTRY)
     if unsupported:
-        raise ValueError(f"Only GGML layers convert to INT8, but the export has {unsupported}.")
+        raise ValueError(f"Only GGML layers convert, but the export has {unsupported}.")
 
     layer_formats = {}
-    for shard in sorted(set(weight_map.values())):
+    for shard in sorted(set(indexed_weight_map(ggml_dir).values())):
         with safe_open(ggml_dir / shard, framework="pt") as f:
             # GGML payloads are the only uint8 weights an export writes.
             payloads = {
@@ -129,10 +119,10 @@ def _ggml_layer_formats(
             }
         for name, shape in payloads.items():
             layer = name.removesuffix(".weight")
-            # A 2-D weight's payload is [rows, blocks, block bytes]; weight_shape and the int32
-            # packing assume that layout.
+            # A 2-D weight's payload is [rows, blocks, block bytes]; weight_shape and the
+            # converters assume that layout.
             if len(shape) != 3:
-                raise ValueError(f"{layer} is not a 2-D weight; only 2-D weights convert to INT8.")
+                raise ValueError(f"{layer} is not a 2-D weight; only 2-D weights convert.")
             if mixed and layer not in layer_configs:
                 raise ValueError(f"{layer} holds a uint8 weight but is not in quantized_layers.")
             algo = layer_configs[layer]["quant_algo"] if mixed else quantization["quant_algo"]
@@ -142,16 +132,52 @@ def _ggml_layer_formats(
     return layer_formats
 
 
-def _write_int8_shards(
+def write_converted_checkpoint(
+    ggml_dir: str | os.PathLike,
+    output_dir: str | os.PathLike,
+    convert: Callable[[str, torch.Tensor], dict[str, torch.Tensor]],
+    config_files: dict[str, dict],
+    max_shard_size: int,
+) -> None:
+    """Write ``ggml_dir`` into ``output_dir`` with every indexed tensor passed through ``convert``.
+
+    ``convert`` maps a tensor's name and value to the tensors replacing it. ``config_files`` are
+    written as JSON and every other file is copied as it is. ``output_dir`` must be empty or not
+    exist yet; a failure empties it again, so a rerun is not refused over a partial checkpoint.
+    """
+    ggml_dir, output_dir = Path(ggml_dir), Path(output_dir)
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise ValueError(f"{output_dir} is not empty.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        shards = sorted(set(indexed_weight_map(ggml_dir).values()))
+        new_weight_map = _write_shards(ggml_dir, shards, output_dir, convert, max_shard_size)
+        total_size = sum((output_dir / s).stat().st_size for s in set(new_weight_map.values()))
+        index = {"metadata": {"total_size": total_size}, "weight_map": new_weight_map}
+        (output_dir / _INDEX).write_text(json.dumps(index, indent=2))
+        for name, content in config_files.items():
+            (output_dir / name).write_text(json.dumps(content, indent=4))
+        # Both skip files already written, and copy_non_model_files skips hf_quant_config.json.
+        copy_off_index_safetensors(ggml_dir, output_dir)
+        copy_non_model_files(ggml_dir, output_dir)
+    except BaseException:
+        for path in output_dir.iterdir():
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        raise
+
+
+def _write_shards(
     ggml_dir: Path,
     shards: list[str],
     output_dir: Path,
-    layer_formats: dict[str, GGMLFormat],
-    scale_dtype: torch.dtype,
+    convert: Callable[[str, torch.Tensor], dict[str, torch.Tensor]],
     max_shard_size: int,
 ) -> dict[str, str]:
     """Rewrite every shard's tensors into size-bounded output shards; return the weight map."""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     pending: dict[str, torch.Tensor] = {}
     written: list[list[str]] = []
 
@@ -163,14 +189,7 @@ def _write_int8_shards(
     for shard in shards:
         with safe_open(ggml_dir / shard, framework="pt") as f:
             for name in f.keys():  # noqa: SIM118 -- a safe_open handle is not a dict
-                layer = name.removesuffix(".weight")
-                ggml_format = layer_formats.get(layer) if name.endswith(".weight") else None
-                if ggml_format is None:
-                    tensors = {name: f.get_tensor(name)}
-                else:
-                    tensors = _int8_tensors(
-                        layer, f.get_tensor(name), ggml_format, scale_dtype, device
-                    )
+                tensors = convert(name, f.get_tensor(name))
                 if pending and _nbytes(pending) + _nbytes(tensors) > max_shard_size:
                     flush()
                 pending.update(tensors)

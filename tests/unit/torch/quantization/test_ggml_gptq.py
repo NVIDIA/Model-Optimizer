@@ -30,6 +30,7 @@ from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import _row_keys, pinned_packed_weight
 from modelopt.torch.quantization.ggml.gptq import gptq_group_update
+from modelopt.torch.quantization.ggml.nvfp4 import nvfp4_transcode
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 from modelopt.torch.quantization.utils.calib_utils import (
     compute_hessian_inverse,
@@ -94,7 +95,7 @@ IQ2_XXS = GGML_FORMAT_REGISTRY["iq2_xxs"]
 GPTQ = {"method": "gptq", "block_size": 256, "perc_damp": 0.3}
 
 
-def _iq_config(algorithm, num_bits="iq1_s"):
+def _iq_config(algorithm, num_bits="iq1_s", **backend_extra_args):
     return {
         "quant_cfg": [
             {"quantizer_name": "*", "enable": False},
@@ -104,6 +105,7 @@ def _iq_config(algorithm, num_bits="iq1_s"):
                     "num_bits": num_bits,
                     "block_sizes": {-1: GGML_FORMAT_REGISTRY[num_bits].block_size},
                     "backend": "ggml",
+                    "backend_extra_args": backend_extra_args,
                 },
                 "enable": True,
             },
@@ -151,6 +153,43 @@ def test_gptq_on_a_ggml_format_pins_the_payload_it_chose():
         return ((weight - original.weight) @ inputs.T).square().sum()
 
     assert weighted_error(model.weight) < weighted_error(plain.weight_quantizer(plain.weight))
+
+
+def test_gptq_with_an_nvfp4_transcode_compensates_the_transcoded_weight():
+    # IQ2's grid is far from E2M1's, so the transcode error GPTQ can compensate is large; it
+    # needs several column groups to show.
+    generator = torch.Generator().manual_seed(0)
+    original = torch.nn.Linear(2048, 32, bias=False)
+    with torch.no_grad():
+        original.weight.copy_(torch.randn(32, 2048, generator=generator) * 0.02)
+    inputs = (
+        torch.randn(256, 2048, generator=generator) * torch.randn(2048, generator=generator).exp()
+    )
+    models = {}
+    for transcode in (None, "nvfp4"):
+        models[transcode] = copy.deepcopy(original)
+        extra_args = {} if transcode is None else {"transcode": transcode}
+        mtq.quantize(
+            models[transcode],
+            _iq_config(GPTQ, "iq2_xs", **extra_args),
+            forward_loop=lambda m: m(inputs),
+        )
+    model = models["nvfp4"]
+
+    # The model keeps the decoding of the payload GPTQ pinned; fake quant transcodes it.
+    pinned = pinned_packed_weight(model.weight_quantizer, "iq2_xs")
+    decoded = GGML_FORMAT_REGISTRY["iq2_xs"].dequantize(
+        pinned, torch.tensor(model.weight.shape), dtype=torch.float32
+    )
+    assert torch.equal(model.weight.detach(), decoded)
+    torch.testing.assert_close(model.weight_quantizer(model.weight), nvfp4_transcode(decoded))
+
+    def transcoded_error(model):
+        transcoded = nvfp4_transcode(model.weight.detach())
+        return ((transcoded - original.weight) @ inputs.T).square().sum()
+
+    # About 5% lower over seeds and formats (IQ1's transcode error is smaller, and so its gain).
+    assert transcoded_error(model) < 0.98 * transcoded_error(models[None])
 
 
 @pytest.mark.parametrize(
