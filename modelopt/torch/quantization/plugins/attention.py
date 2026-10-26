@@ -52,7 +52,8 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
     model_module = inspect.getmodule(attention_cls)
     head = ast.parse(source_code)
 
-    bmm_ops = ("matmul", "bmm", "baddbmm")
+    # No baddbmm: its matrix operands are args[1] and args[2], and patch() wires args[0] and args[1]
+    bmm_ops = ("matmul", "bmm")
     sdpa_ops = ("scaled_dot_product_attention",)
 
     def is_bmm(node):

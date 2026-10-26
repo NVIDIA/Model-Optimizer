@@ -88,6 +88,18 @@ class NestedBinMatmulAttention(nn.Module):
         return torch.softmax(q @ k.transpose(-2, -1), dim=-1) @ v
 
 
+class BAddBMMAttention(nn.Module):
+    def forward(self, q, k, v, bias):
+        scores = torch.baddbmm(bias, q, k.transpose(-2, -1))
+        return torch.bmm(torch.softmax(scores, dim=-1), v)
+
+
+class BAddBMMKeywordAttention(nn.Module):
+    def forward(self, q, k, v, bias):
+        scores = torch.baddbmm(input=bias, batch1=q, batch2=k.transpose(-2, -1))
+        return torch.bmm(torch.softmax(scores, dim=-1), v)
+
+
 kv_cache_config = {
     "quant_cfg": [
         {"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": 4}, "enable": True},
@@ -174,6 +186,12 @@ def test_kv_quant_operand_wiring(attn_cls):
             assert quantizer.amax == operand.abs().max(), f"{name}_bmm_quantizer saw another tensor"
     finally:
         mtq.unregister(attn_cls)
+
+
+@pytest.mark.parametrize("attn_cls", [BAddBMMAttention, BAddBMMKeywordAttention])
+def test_kv_quant_rejects_baddbmm(attn_cls):
+    """baddbmm takes the additive input first, so its operands cannot be wired by position."""
+    assert not mtq.plugins.register_attention_for_kv_quant(attn_cls)
 
 
 def test_kv_quant_bert():
