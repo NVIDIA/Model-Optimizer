@@ -57,6 +57,7 @@ class _PackedWeightCache:
 
     base_ref: weakref.ReferenceType
     input_key: _CacheKey
+    input_fingerprint: torch.Tensor
     format_name: str
     block_chunk_size: int
     packed_weights: torch.Tensor
@@ -89,6 +90,26 @@ def _input_cache_key(inputs: torch.Tensor) -> _CacheKey | None:
     )
 
 
+def _input_fingerprint(inputs: torch.Tensor) -> torch.Tensor:
+    """Return a position-sensitive device-resident fingerprint of every input element."""
+    bits = inputs.contiguous().view(_SIGNED_INT_OF_SIZE[inputs.element_size()]).reshape(-1)
+    summary = torch.zeros(4, dtype=torch.int64, device=bits.device)
+    for start in range(0, bits.numel(), _ROW_KEY_CHUNK):
+        chunk = bits[start : start + _ROW_KEY_CHUNK].to(torch.int64)
+        positions = torch.arange(
+            start + 1, start + chunk.numel() + 1, dtype=torch.int64, device=bits.device
+        )
+        summary += torch.stack(
+            (
+                chunk.sum(),
+                (chunk * chunk).sum(),
+                (chunk * positions).sum(),
+                (chunk * chunk * positions).sum(),
+            )
+        )
+    return summary
+
+
 def _is_contiguous(shape: tuple[int, ...], stride: tuple[int, ...]) -> bool:
     expected = 1
     for size, step in zip(reversed(shape), reversed(stride)):
@@ -109,16 +130,44 @@ def _same_elements(key: _CacheKey, other: _CacheKey) -> bool:
     )
 
 
+def _same_input_layout(key: _CacheKey, other: _CacheKey) -> bool:
+    return (
+        key.data_ptr,
+        key.dtype,
+        key.device,
+        key.shape,
+        key.stride,
+    ) == (
+        other.data_ptr,
+        other.dtype,
+        other.device,
+        other.shape,
+        other.stride,
+    )
+
+
+def _same_contiguous_layout(key: _CacheKey, other: _CacheKey) -> bool:
+    return (
+        key.dtype == other.dtype
+        and key.device == other.device
+        and math.prod(key.shape) == math.prod(other.shape)
+        and _is_contiguous(key.shape, key.stride)
+        and _is_contiguous(other.shape, other.stride)
+    )
+
+
 def _matching_cache(
     quantizer, inputs: torch.Tensor, format_name: str, *, any_contiguous_view: bool = False
 ) -> _PackedWeightCache | None:
     """The quantizer's cached payload if it was packed from ``inputs``, else None.
 
     It matches only while the weight is unchanged since it was packed: the key carries the
-    tensor's version counter, so an in-place update misses. With ``any_contiguous_view`` it also
-    matches another contiguous view of the same values: TensorQuantizer hands fake quant the
-    weight reshaped into 256-value blocks, so export, which holds the weight itself, sees a
-    different shape over the same elements in the same order, and so the same GGML blocks.
+    tensor's version counter, so an in-place update misses. For trainable weights, it additionally
+    compares a device-resident content fingerprint because optimizers may update them without
+    incrementing that counter. With ``any_contiguous_view`` it also matches another
+    contiguous view of the same values: TensorQuantizer hands fake quant the weight reshaped into
+    256-value blocks, so export, which holds the weight itself, sees a different shape over the
+    same elements in the same order, and so the same GGML blocks.
     """
     cache = getattr(quantizer, "_quantizer_cache", None)
     input_key = _input_cache_key(inputs)
@@ -129,9 +178,20 @@ def _matching_cache(
         and cache.format_name == format_name
     ):
         return None
-    if cache.input_key == input_key or (
-        any_contiguous_view and _same_elements(cache.input_key, input_key)
-    ):
+    # ``inputs`` is often a view created in the forward; under no_grad its requires_grad is False
+    # even for a trainable parameter, so read it from the parameter itself.
+    same_layout = _same_input_layout(cache.input_key, input_key) or (
+        any_contiguous_view and _same_contiguous_layout(cache.input_key, input_key)
+    )
+    if not same_layout:
+        return None
+    same_version = cache.input_key.version == input_key.version
+    if not same_version:
+        return None
+    trainable_weight = _cache_base(inputs).requires_grad
+    if not trainable_weight or torch.is_inference_mode_enabled():
+        return cache
+    if torch.equal(cache.input_fingerprint, _input_fingerprint(inputs)):
         return cache
     return None
 
@@ -209,6 +269,7 @@ def fake_quantize_with_cache(
             quantizer._quantizer_cache = _PackedWeightCache(
                 base_ref=weakref.ref(_cache_base(inputs)),
                 input_key=input_key,
+                input_fingerprint=_input_fingerprint(inputs),
                 format_name=format_name,
                 block_chunk_size=block_chunk_size,
                 packed_weights=packed_weights,
