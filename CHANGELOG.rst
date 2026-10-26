@@ -31,6 +31,7 @@ Changelog
 - GGML GPTQ checkpoints from ``examples/megatron_bridge`` keep their calibrated codes when the Megatron checkpoint is reloaded for QAD or export, and layerwise calibration now runs on Megatron vision-language models.
 - The Megatron unified HF export (``export_mcore_gpt_to_hf``) now copies the source checkpoint's non-model files (tokenizer, processor, remote code, chat templates, ...) into the export unchanged, from local disk only. The ``examples/megatron_bridge`` scripts make a Hugging Face Hub model local first with ``modelopt.torch.export.ensure_local_checkpoint``.
 - Add an end-to-end W4A4 NVFP4 PTQ and QAD tutorial for NVIDIA Nemotron 3.5 Super VL, covering chat-data blend preparation, assistant-only distillation, Hugging Face export and vLLM serving. See `examples/megatron_bridge/tutorials/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/>`_ for details.
+- Add ``--lsq_scale_lr`` and ``--lsq_scale_only`` to ``examples/megatron_bridge/distill.py`` for LSQ scale learning: train the learnable NVFP4 weight scales at their own learning rate alongside the weights, or train only the scales, without gradients or optimizer state for the weights. Requires Megatron-Bridge with ``megatron.bridge.training.post_training.lsq``.
 
 *Misc*
 

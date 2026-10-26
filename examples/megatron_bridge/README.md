@@ -387,6 +387,10 @@ sequence length, and GPU memory: measure per-stage time and memory over a few it
 
 The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) (point `--megatron_path` at `/output/qwen3_8b_nvfp4_qad/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
 
+#### Scale Learning (LSQ)
+
+QAD can also train the NVFP4 per-block weight scales of a student quantized with a learnable-scale recipe such as `general/qad/nvfp4_lsq-mse_init-fp8_kv` (static-block NVFP4 needs `--tp_size 1` in both `quantize.py` and `distill.py`). Add `--lsq_scale_lr` to the QAD command above to train the scales at their own learning rate alongside the weights, or `--lsq_scale_only` to train only the scales: the weights are frozen and take no gradient or optimizer state, so `--lr` and `--min_lr` apply to the scales (e.g. `--lsq_scale_only --lr 3e-5 --min_lr 0`).
+
 #### Evaluating a QAD checkpoint in vLLM with fake quantization
 
 To evaluate a format vLLM has no kernels for (e.g. NVFP4 on Hopper, GGML IQ2, or a custom research format), export with `--vllm_fakequant_export`. The weight quantizers are folded into BF16 weights and Megatron-Bridge saves the model at any TP / EP / PP, VLMs included. The enabled activation and KV-cache quantizers go to `quantizer_state.pth` (ranges) and `quant_recipe.yaml` (settings), both under HF names:

@@ -39,6 +39,7 @@ from megatron.bridge.training.config import (
     GPTDatasetConfig,
     LoggerConfig,
     MockGPTDatasetConfig,
+    OptimizerConfigOverrideProvider,
     RNGConfig,
     TokenizerConfig,
     TrainingConfig,
@@ -339,6 +340,19 @@ def get_args():
     parser.add_argument("--min_lr", type=float, default=1e-5, help="Minimum learning rate")
     parser.add_argument("--lr_warmup_iters", type=int, default=50, help="Number of LR warmup steps")
     parser.add_argument(
+        "--lsq_scale_lr",
+        type=float,
+        default=None,
+        help="Peak learning rate of the learnable NVFP4 weight scales of an LSQ-quantized student, in "
+        "their own parameter group (no weight decay) on the --lr schedule. Default: --lr.",
+    )
+    parser.add_argument(
+        "--lsq_scale_only",
+        action="store_true",
+        help="Train only the LSQ weight scales of the student; its other parameters are frozen and "
+        "take no gradient or optimizer state.",
+    )
+    parser.add_argument(
         "--recompute_granularity",
         type=str,
         default=None,
@@ -510,6 +524,8 @@ def get_args():
         )
     if args.sft_dataset_root and not args.sft:
         raise ValueError("--sft_dataset_root requires --sft; without it the SFT path is not used.")
+    if args.lsq_scale_only and args.student_megatron_path is None:
+        raise ValueError("--lsq_scale_only requires an LSQ-quantized --student_megatron_path.")
     if args.sft and args.sft_dataset_root:
         # Fail on a mistyped root here rather than after both checkpoints have loaded onto GPUs.
         required = ["training.jsonl"] + (["validation.jsonl"] if args.eval_iters > 0 else [])
@@ -590,6 +606,18 @@ def _add_document_boundaries() -> None:
         return sample
 
     GPTDataset.__getitem__ = getitem_with_boundaries
+
+
+def _optimizer_config_override_provider(args) -> OptimizerConfigOverrideProvider:
+    """Optimizer parameter-group overrides; adds the LSQ scale group when --lsq_scale_lr is set."""
+    if args.lsq_scale_lr is None:
+        return OptimizerConfigOverrideProvider()
+    # Deferred: only recent Megatron-Bridge versions have it.
+    from megatron.bridge.training.post_training.lsq import LSQOptimizerConfigOverrideProvider
+
+    return LSQOptimizerConfigOverrideProvider(
+        scale_lr=args.lsq_scale_lr, scale_min_lr=None, scale_wd_mult=0.0
+    )
 
 
 def main(args: argparse.Namespace, owns_the_run: bool = True):
@@ -756,6 +784,12 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
 
         distill_provider.register_pre_wrap_hook(_per_stage_recompute_hook)
 
+    if args.lsq_scale_only:
+        from megatron.bridge.training.post_training.lsq import freeze_all_but_lsq_scales
+
+        # Appended, so it runs after the KD conversion; the teacher is already frozen.
+        distill_provider.register_pre_wrap_hook(freeze_all_but_lsq_scales)
+
     # Build optimizer and scheduler
     optimizer_config, scheduler_config = distributed_fused_adam_with_cosine_annealing(
         lr_warmup_iters=args.lr_warmup_iters,
@@ -848,6 +882,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         ),
         optimizer=optimizer_config,
         scheduler=scheduler_config,
+        optimizer_config_override_provider=_optimizer_config_override_provider(args),
         ddp=DistributedDataParallelConfig(
             check_for_nan_in_grad=True,
             grad_reduce_in_fp32=True,
