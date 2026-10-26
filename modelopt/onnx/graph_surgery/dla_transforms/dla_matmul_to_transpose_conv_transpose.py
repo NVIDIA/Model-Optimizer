@@ -476,6 +476,27 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
 
     # ── Apply all replacements ────────────────────────────────────────────────
     all_batch = {**replacements_batch, **fallback_batch}
+    # Later rank passes consume the original shape snapshot without another inference step.
+    for _, replacements in all_batch.values():
+        for adapter in replacements:
+            if adapter.op_type not in {"Unsqueeze", "Squeeze"}:
+                continue
+            original, padded = (
+                (adapter.input[0], adapter.output[0])
+                if adapter.op_type == "Unsqueeze"
+                else (adapter.output[0], adapter.input[0])
+            )
+            info = cache.vi_map.get(original)
+            if info is not None and info.type.tensor_type.HasField("shape"):
+                promoted = graph.value_info.add()
+                promoted.CopyFrom(info)
+                promoted.name = padded
+                dims = promoted.type.tensor_type.shape.dim
+                original_dims = list(dims)
+                del dims[:]
+                for _ in range(4 - len(original_dims)):
+                    dims.add().dim_value = 1
+                dims.extend(original_dims)
     batch_replace_nodes(graph, all_batch)
     _add_legacy_initializer_inputs(model)
 

@@ -51,6 +51,7 @@ from modelopt.onnx.graph_surgery.dla_transforms.dla_matmul_to_transpose_conv_tra
     _apply_matmul_to_transpose_conv_transpose as _apply_matmul_to_conv,
 )
 from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_compatible
+from modelopt.onnx.graph_surgery.utils.graph_utils import GraphCache
 
 ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 
@@ -461,6 +462,15 @@ def test_eligible_deferred_conversion_keeps_rank_adapters(rank):
     model, feeds = (_make_matmul_2d if rank == 2 else _make_matmul_3d)()
     expected = _run_ort(model, feeds)
     transformed = _apply_matmul_to_conv(copy.deepcopy(model), defer_rank_conversion=True)
+    cache = GraphCache(transformed.graph)
+    for adapter in transformed.graph.node:
+        if adapter.op_type == "Unsqueeze":
+            shape = cache.get_shape(adapter.output[0])
+        elif adapter.op_type == "Squeeze":
+            shape = cache.get_shape(adapter.input[0])
+        else:
+            continue
+        assert shape is not None and len(shape) == 4
     onnx.checker.check_model(transformed, full_check=True)
     _assert_outputs_match(expected, _run_ort(transformed, feeds))
 
