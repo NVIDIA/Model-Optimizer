@@ -1607,10 +1607,11 @@ def _all_reduce_amax(tensor: torch.Tensor, group) -> None:
         dist.all_reduce(tensor, op=dist.ReduceOp.MAX, group=group)
     except RuntimeError as e:
         raise RuntimeError(
-            f"Failed to synchronize amax across the calibration group: {e}. This is commonly a CUDA "
-            "OOM when NCCL lazily allocates communication buffers under calibration memory pressure; "
-            "free cached activations (gc.collect()/torch.cuda.empty_cache()) before the sync or reduce "
-            "the calibration sequence length / batch size."
+            f"Failed to synchronize amax across the calibration group: {e}. Common causes: a CUDA OOM "
+            "when NCCL lazily allocates communication buffers under calibration memory pressure (free "
+            "cached activations with gc.collect()/torch.cuda.empty_cache() before the sync, or reduce "
+            "the calibration sequence length / batch size), or an amax on a device the group's "
+            "backend does not serve."
         ) from e
 
 
