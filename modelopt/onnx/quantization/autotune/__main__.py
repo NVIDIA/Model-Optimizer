@@ -93,7 +93,7 @@ def run_autotune() -> int:
     """
     args = get_parser().parse_args()
     apply_mode_presets(args)
-    args.timing_cache = args.timing_cache or default_timing_cache_file()
+    args.timing_cache = args.timing_cache or default_timing_cache_file(args.use_trtexec)
     model_path = validate_file_path(args.onnx_path, "Model file")
     validate_file_path(args.qdq_baseline, "QDQ baseline model")
     output_dir = Path(args.output_dir)
@@ -280,7 +280,7 @@ Examples:
         "--timing_cache",
         type=str,
         default=None,
-        help="TensorRT timing cache file (default: ~/.cache/modelopt/trtexec_timing.cache)",
+        help="TensorRT timing cache file (default: a file per GPU and TensorRT version in ~/.cache/modelopt)",
     )
     trt_group.add_argument(
         "--warmup_runs",
