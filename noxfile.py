@@ -143,14 +143,19 @@ _GENCODE = re.compile(
 
 def _only_runner_archs(setup_py):
     """Drop the ``-gencode`` entries for the architectures not in TORCH_CUDA_ARCH_LIST, which CI sets to its GPU."""
-    archs = os.environ.get("TORCH_CUDA_ARCH_LIST")
-    if not archs:
+    archs = [
+        arch for arch in re.split(r"[;\s]+", os.environ.get("TORCH_CUDA_ARCH_LIST", "")) if arch
+    ]
+    # A named list (``Hopper``) cannot be matched to the -gencode entries: build every architecture, as without the variable
+    if not archs or not all(re.fullmatch(r"\d+\.\d+[a-z]?(\+PTX)?", arch) for arch in archs):
         return setup_py
-    keep = {re.sub(r"\D", "", arch) for arch in re.split(r"[;\s]+", archs)}
+    keep = {re.sub(r"\D", "", arch) for arch in archs}
     # ``pass`` keeps an ``if`` block valid when all of its entries are dropped
     patched = _GENCODE.sub(lambda m: m[0] if m["arch"] in keep else f"{m['indent']}pass", setup_py)
     if not _GENCODE.search(patched):
-        raise ValueError(f"No -gencode entry of setup.py matches TORCH_CUDA_ARCH_LIST={archs!r}")
+        raise ValueError(
+            f"No -gencode entry of setup.py matches TORCH_CUDA_ARCH_LIST={';'.join(archs)!r}"
+        )
     return patched
 
 
