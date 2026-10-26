@@ -58,9 +58,40 @@ TORCH_CUDA_AVAILABLE = torch.cuda.is_available()
 _SSH_OPTIONS = ("-oBatchMode=yes", "-oStrictHostKeyChecking=yes")
 
 
-def default_timing_cache_file() -> str:
-    """Return the default timing-cache path, in ModelOpt's private per-user cache directory."""
-    return str(get_cache_dir() / "trtexec_timing.cache")
+def _trtexec_version() -> str | None:
+    """Return the TensorRT version in the banner of ``trtexec`` (e.g. ``10.13.0``), if it runs."""
+    try:
+        banner = _run_trtexec_command(timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"\[TensorRT v(\d{2})(\d{2})(\d{2})\]", banner.stdout + banner.stderr)
+    return ".".join(str(int(part)) for part in match.groups()) if match else None
+
+
+def _timing_cache_tag(tensorrt_version: str | None) -> str:
+    """Name the GPU and the TensorRT version a timing cache is built for."""
+    parts = []
+    if TORCH_CUDA_AVAILABLE:
+        major, minor = torch.cuda.get_device_capability()
+        parts += [torch.cuda.get_device_name(), f"sm{major}{minor}"]
+    if tensorrt_version:
+        parts.append(f"trt{tensorrt_version}")
+    return re.sub(r"[^a-z0-9._-]+", "_", "_".join(parts).lower()).strip("_") or "default"
+
+
+def default_timing_cache_file(use_trtexec: bool = False) -> str:
+    """Return the default timing-cache path in ModelOpt's per-user cache directory.
+
+    The file name carries the GPU and the TensorRT version of the builder that applies the cache:
+    ``trtexec`` with ``use_trtexec``, the Python API otherwise. The two can differ in version, even
+    within one container image. Both apply a cache with ``ignoreMismatch`` set, so one built for
+    another device or TensorRT version would be used as is and could skew the measured latencies.
+    """
+    if use_trtexec:
+        tensorrt_version = _trtexec_version()
+    else:
+        tensorrt_version = trt.__version__ if TRT_AVAILABLE else None
+    return str(get_cache_dir() / f"trtexec_timing_{_timing_cache_tag(tensorrt_version)}.cache")
 
 
 def _validate_shape_range(min_shape: list, opt_shape: list, max_shape: list) -> None:
@@ -203,6 +234,8 @@ class Benchmark(ABC):
         run(): Execute the benchmark and return latency in milliseconds.
     """
 
+    _uses_trtexec = False  # whether trtexec, not the Python API, applies the timing cache
+
     def __init__(
         self,
         timing_cache_file: str | None = None,
@@ -214,7 +247,7 @@ class Benchmark(ABC):
 
         Args:
             timing_cache_file: Path to timing cache file to accelerate engine builds.
-                             If None, uses 'trtexec_timing.cache' in ModelOpt's cache
+                             If None, uses a file per GPU and TensorRT version in ModelOpt's cache
                              directory ('$XDG_CACHE_HOME/modelopt', '~/.cache/modelopt' if unset).
             warmup_runs: Number of warmup iterations before timing measurements.
             timing_runs: Number of iterations for latency measurement. Results
@@ -223,7 +256,7 @@ class Benchmark(ABC):
                              These plugins will be loaded during engine building.
                              If None, no custom plugins are loaded.
         """
-        self.timing_cache_file = timing_cache_file or default_timing_cache_file()
+        self.timing_cache_file = timing_cache_file or default_timing_cache_file(self._uses_trtexec)
         self.warmup_runs = warmup_runs
         self.timing_runs = timing_runs
         self.plugin_libraries = plugin_libraries or []
@@ -274,6 +307,8 @@ class TrtExecBenchmark(Benchmark):
     inference latency. It is the most straightforward method and closely
     mirrors standard TensorRT workflows.
     """
+
+    _uses_trtexec = True
 
     def __init__(
         self,
@@ -570,7 +605,7 @@ class TensorRTPyBenchmark(Benchmark):
 
         Args:
             timing_cache_file: Path to TensorRT timing cache file. If None,
-                              defaults to 'trtexec_timing.cache' in ModelOpt's cache
+                              defaults to a file per GPU and TensorRT version in ModelOpt's cache
                               directory (see :class:`Benchmark`).
             warmup_runs: Number of warmup iterations before timing measurements.
             timing_runs: Number of iterations for latency measurement.

@@ -97,7 +97,8 @@ def init_benchmark_instance(
                           These plugins will be loaded by trtexec or TensorRT Python API during engine building.
                           If None, no custom plugins are loaded.
         timing_cache_file: Path to TensorRT timing cache file for faster engine builds.
-                          If None, uses default "trtexec_timing.cache" (default: None)
+                          If None, uses a file per GPU and TensorRT version in ModelOpt's cache
+                          directory (default: None)
         warmup_runs: Number of warmup inference iterations before measurement.
                     Allows GPU to reach stable performance state (default: 5)
         timing_runs: Number of timed inference iterations for latency measurement.
