@@ -260,8 +260,13 @@ _TP_UNSYNCED_BLOCK_SIZES = {
     "per-token-block-sizes": {-1: None, "type": "dynamic"},
     "every-dim-block-sizes": {-1: None, -2: None},
 }
-# Per-token block sizes made per-tensor after the forward: through the config, or the setter.
-_MADE_PER_TENSOR = ("reconfigured-to-per-tensor", "assigned-per-tensor")
+# Per-token block sizes reconfigured after the forward into a layout the column-parallel sync takes:
+# per-tensor through the config or the setter, or the per-channel axis -1.
+_RECONFIGURED = (
+    "reconfigured-to-per-tensor",
+    "assigned-per-tensor",
+    "axis-configured-after-the-forward",
+)
 
 
 def _tensor_parallel_sync_helper(rank, size, case):
@@ -276,7 +281,7 @@ def _tensor_parallel_sync_helper(rank, size, case):
         linear._is_column_parallel = True
         if case in _TP_UNSYNCED_BLOCK_SIZES:
             linear.input_quantizer.block_sizes = _TP_UNSYNCED_BLOCK_SIZES[case]
-        elif case in (*_MADE_PER_TENSOR, "axis-configured-after-the-forward"):
+        elif case in (*_RECONFIGURED, "axis-none-configured-after-the-forward"):
             linear.input_quantizer.block_sizes = _TP_UNSYNCED_BLOCK_SIZES["per-token-block-sizes"]
         synced = [linear.input_quantizer]
     # A rank left waiting for a peer that skips the sync gives up in seconds on this group.
@@ -287,13 +292,15 @@ def _tensor_parallel_sync_helper(rank, size, case):
         if rank == 0:
             for quantizer in synced:
                 # One token, so that a per-token amax is a single value.
-                quantizer(torch.ones(1 if case in _MADE_PER_TENSOR else 2, 16))
+                quantizer(torch.ones(1 if case in _RECONFIGURED else 2, 16))
         # On every rank, after rank 0's forward turned the per-token block sizes into axis (0,).
         if case == "reconfigured-to-per-tensor":
             linear.input_quantizer.set_from_attribute_config({"block_sizes": None})
         elif case == "assigned-per-tensor":
             linear.input_quantizer.block_sizes = None
-        elif case == "axis-configured-after-the-forward":  # keeps the per-token block sizes
+        elif case == "axis-configured-after-the-forward":  # replaces the per-token block sizes
+            linear.input_quantizer.set_from_attribute_config({"axis": -1})
+        elif case == "axis-none-configured-after-the-forward":  # keeps them
             linear.input_quantizer.set_from_attribute_config({"axis": None})
 
     try:
@@ -301,21 +308,24 @@ def _tensor_parallel_sync_helper(rank, size, case):
     finally:
         dist.destroy_process_group(tp_group)
     for quantizer in synced:
-        if case in _TP_UNSYNCED_BLOCK_SIZES or case == "axis-configured-after-the-forward":
+        if case in _TP_UNSYNCED_BLOCK_SIZES or case == "axis-none-configured-after-the-forward":
             assert (getattr(quantizer, "_amax", None) is not None) == (rank == 0)
         else:
             assert quantizer.amax is not None
             assert quantizer.amax.item() == 1.0
 
 
-@pytest.mark.parametrize("case", ["column-parallel", "kv-cache", *_MADE_PER_TENSOR])
+@pytest.mark.parametrize("case", ["column-parallel", "kv-cache", *_RECONFIGURED])
 def test_a_rank_without_amax_still_joins_the_tensor_parallel_sync(cpu_dist_workers, case):
     """Rather than leave the rank that has one waiting in the sync for it. Also once a quantizer
-    whose forward turned block sizes into an axis is configured, or assigned, per-tensor."""
+    whose forward turned block sizes into an axis is configured, or assigned, per-tensor, or is
+    configured with an axis the sync takes."""
     cpu_dist_workers.run(_tensor_parallel_sync_helper, case=case)
 
 
-@pytest.mark.parametrize("case", [*_TP_UNSYNCED_BLOCK_SIZES, "axis-configured-after-the-forward"])
+@pytest.mark.parametrize(
+    "case", [*_TP_UNSYNCED_BLOCK_SIZES, "axis-none-configured-after-the-forward"]
+)
 def test_a_rank_without_amax_skips_the_tensor_parallel_sync_its_peers_skip(cpu_dist_workers, case):
     """Block quantizers are not synced across tensor parallelism, as judged alike by a rank whose
     forward turned the block sizes into an axis and by one that never ran it, also after a config

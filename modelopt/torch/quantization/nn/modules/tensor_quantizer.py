@@ -244,6 +244,11 @@ class TensorQuantizer(nn.Module):
         def _axis_setter(val):
             if getattr(self, "_calibrator", None) is not None:
                 self._calibrator._axis = val
+            if val is not None:
+                # axis and block_sizes are mutually exclusive; clear block_sizes when axis is set,
+                # including any the forward consumed, so every rank ends in this layout
+                setattr(self, "_block_sizes", None)
+                setattr(self, "_consumed_block_sizes", None)
             return val
 
         def _block_sizes_setter(val):
