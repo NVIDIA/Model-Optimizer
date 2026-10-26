@@ -357,6 +357,16 @@ def _prompt_with_vision_token(prompt: str, media_type: str, token_format: str) -
     return f"{QWEN_IMAGE_TOKEN}\n{prompt}"
 
 
+def _is_context_overflow(body: str) -> bool:
+    """Whether a non-200 body reports the request exceeding the model's context window.
+
+    Matched on the message rather than the status code: a 400 covers many unrelated
+    problems, and retrying those with a smaller budget would just burn requests.
+    """
+    lowered = body.lower()
+    return "maximum context length" in lowered or "longer than the maximum" in lowered
+
+
 def _openai_generate_one(
     request: dict[str, Any],
     url: str,
@@ -368,6 +378,8 @@ def _openai_generate_one(
     media_root: str | None,
     input_root: str | None,
     media_inline: bool = False,
+    enable_thinking: bool = False,
+    min_max_tokens: int = 256,
 ) -> tuple[str, str | None]:
     try:
         import requests
@@ -412,20 +424,38 @@ def _openai_generate_one(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if enable_thinking:
+        # Reasoning models gate their <think> prefill on a chat-template variable, and the
+        # usual guard is ``enable_thinking is defined and enable_thinking`` -- so leaving it
+        # unset is indistinguishable from setting it false, and the target answers without
+        # reasoning. Nothing in the response says which mode produced it.
+        payload["chat_template_kwargs"] = {"enable_thinking": True}
 
+    budget = max_tokens
     try:
-        response = requests.post(url, json=payload, timeout=timeout)
-        if response.status_code != 200:
-            return "", f"HTTP {response.status_code}: {response.text[:1000]}"
-        data = response.json()
-        choices = data.get("choices") or []
-        if not choices:
-            return "", f"No choices in OpenAI response: {data}"
-        message = choices[0].get("message") or {}
-        answer = _coerce_text(message.get("content"))
-        if not answer:
-            return "", f"Could not extract assistant content from OpenAI response: {data}"
-        return answer, None
+        while True:
+            payload["max_tokens"] = budget
+            response = requests.post(url, json=payload, timeout=timeout)
+            if response.status_code != 200:
+                body = response.text[:1000]
+                # The server REJECTS an over-budget request, it does not truncate: prompt
+                # tokens plus max_tokens must fit the context window or it is a 400.
+                # Returning the error here would drop the sample, and the samples that
+                # overflow are the longest-context ones -- long videos -- which is exactly
+                # the data a multimodal draft model needs to have seen. Shrink and retry.
+                if _is_context_overflow(body) and budget > min_max_tokens:
+                    budget = max(min_max_tokens, budget // 2)
+                    continue
+                return "", f"HTTP {response.status_code}: {body}"
+            data = response.json()
+            choices = data.get("choices") or []
+            if not choices:
+                return "", f"No choices in OpenAI response: {data}"
+            message = choices[0].get("message") or {}
+            answer = _coerce_text(message.get("content"))
+            if not answer:
+                return "", f"Could not extract assistant content from OpenAI response: {data}"
+            return answer, None
     except Exception:
         return "", traceback.format_exc()
 
@@ -506,6 +536,20 @@ def main() -> None:
         action="store_true",
         help="Send media as base64 data: URIs instead of paths/URLs. Self-contained, but "
         "inflates every request body -- prefer --media_url_base for video.",
+    )
+    parser.add_argument(
+        "--enable_thinking",
+        action="store_true",
+        help="Ask the chat template to prefill the reasoning block, for targets that gate "
+        "it on an enable_thinking template variable. Reasoning traces are far longer than "
+        "direct answers, so raise --max_tokens accordingly.",
+    )
+    parser.add_argument(
+        "--min_max_tokens",
+        type=int,
+        default=256,
+        help="Floor when shrinking the output budget to fit the context window. Below this "
+        "a completion is too stunted to be worth keeping.",
     )
     parser.add_argument(
         "--api_mode",
@@ -602,6 +646,8 @@ def main() -> None:
                         args.media_root,
                         args.input_root,
                         args.media_inline,
+                        args.enable_thinking,
+                        args.min_max_tokens,
                     ): meta
                     for request_args, meta in zip(batch_args, batch_meta)
                 }
