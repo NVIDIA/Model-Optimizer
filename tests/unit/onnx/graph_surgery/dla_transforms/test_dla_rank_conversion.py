@@ -36,6 +36,7 @@ from modelopt.onnx.graph_surgery.dla_transforms.dla_rank_conversion import (
 
 @pytest.mark.parametrize("operation", ["Transpose", "Reshape", "Tile", "Expand"])
 def test_rank_conversion_preserves_operator_values(operation):
+    """Execute native operators across explicitly deferred boundary and rank stages."""
     shape = [1, 3] if operation == "Expand" else [2, 3]
     inputs, initializers, attributes = ["x"], [], {}
     if operation == "Transpose":
@@ -65,7 +66,8 @@ def test_rank_conversion_preserves_operator_values(operation):
     model.ir_version = 9
     transformed = copy.deepcopy(model)
     for apply in (_apply_non4d_model_inputs, _apply_non4d_model_outputs, transform):
-        transformed = apply(transformed)
+        options = {"defer_rank_conversion": True} if apply is _apply_non4d_model_outputs else {}
+        transformed = apply(transformed, **options)
     options = ort.SessionOptions()
     options.intra_op_num_threads = 1
     data = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
