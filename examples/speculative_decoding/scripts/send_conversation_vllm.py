@@ -192,14 +192,16 @@ async def main(args: argparse.Namespace) -> None:
 
             # Use /tmp/meta.json to communicate with the local serving engine.
             # See usage guide for more details
-            with temp_meta_file.open("w") as f:
-                json.dump(
+            await asyncio.to_thread(
+                temp_meta_file.write_text,
+                json.dumps(
                     {
                         "conversation_id": conversation_id,
                         "output_file": str(hidden_states_file),
-                    },
-                    f,
-                )
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             input_ids = get_conversation_input_ids(tokenizer, conversations)
             num_input_tokens = len(input_ids)

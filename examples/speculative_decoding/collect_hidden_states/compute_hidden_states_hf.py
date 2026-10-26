@@ -102,6 +102,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _save_hidden_states(output_file, state):
+    tmp_file = output_file.with_suffix(".pt.tmp")
+    try:
+        torch.save(state, tmp_file)
+        os.replace(tmp_file, output_file)
+    except BaseException:
+        tmp_file.unlink(missing_ok=True)
+        raise
+
+
 def main(args: argparse.Namespace) -> None:
     # Load conversations
     dataset = load_conversations(args.input_data, args.dp_rank, args.dp_world_size)
@@ -181,27 +191,17 @@ def main(args: argparse.Namespace) -> None:
         # so a partial file from an interrupted run would be skipped forever and then fail in
         # torch.load at training time. os.replace is atomic within the same directory.
         output_file = output_dir / f"{conversation_id}.pt"
-        tmp_file = output_file.with_suffix(".pt.tmp")
-        try:
-            with open(tmp_file, "wb") as f:
-                torch.save(
-                    {
-                        "input_ids": input_ids.squeeze(0).cpu(),
-                        "hidden_states": output_hidden_states,
-                        **(
-                            {}
-                            if args.no_aux_hidden_states
-                            else {"aux_hidden_states": aux_hidden_states}
-                        ),
-                        "loss_mask": loss_mask,
-                        "conversation_id": conversation_id,
-                    },
-                    f,
-                )
-            os.replace(tmp_file, output_file)
-        except BaseException:
-            tmp_file.unlink(missing_ok=True)
-            raise
+        await asyncio.to_thread(
+            _save_hidden_states,
+            output_file,
+            {
+                "input_ids": input_ids.squeeze(0).cpu(),
+                "hidden_states": output_hidden_states,
+                **({} if args.no_aux_hidden_states else {"aux_hidden_states": aux_hidden_states}),
+                "loss_mask": loss_mask,
+                "conversation_id": conversation_id,
+            },
+        )
 
         num_success += 1
         pbar.update(1)

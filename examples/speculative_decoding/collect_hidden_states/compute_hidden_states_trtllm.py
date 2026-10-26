@@ -212,7 +212,7 @@ def main(args: argparse.Namespace) -> None:
     num_success = 0
     pbar = tqdm(total=len(dataset), desc=f"DP#{args.dp_rank} Processing conversations")
 
-    async def _post_process_trtllm_dumped(trtllm_dumped_file: str, conversation_id: int):
+    def _post_process_trtllm_dumped(trtllm_dumped_file: str, conversation_id: int):
         """
         Post-process the TRTLLM dumped file to same format as HF dumped:
         1. Remove id field, replace it with conversation_id
@@ -248,7 +248,9 @@ def main(args: argparse.Namespace) -> None:
         # TRTLLM API name files starts from 1
         # ref:https://github.com/NVIDIA/TensorRT-LLM/pull/7012
         trtllm_dumped_file = args.output_dir / f"{spec_config['file_prefix']}_{idx + 1}.pt"
-        dump_success = await _post_process_trtllm_dumped(trtllm_dumped_file, conversation_id)
+        dump_success = await asyncio.to_thread(
+            _post_process_trtllm_dumped, trtllm_dumped_file, conversation_id
+        )
         num_success += int(dump_success)
         pbar.update(1)
 

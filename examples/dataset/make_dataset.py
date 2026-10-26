@@ -181,8 +181,7 @@ async def _load_mtbench_conversations(
         err_msg = f"MTBench questions file {mtbench_questions_file} does not exist."
         raise FileNotFoundError(err_msg)
 
-    with mtbench_questions_file.open("r", encoding="utf-8") as f:
-        mtbench_raw = [json.loads(line) for line in f]
+    mtbench_raw = await asyncio.to_thread(_read_jsonl, mtbench_questions_file)
 
     random.shuffle(mtbench_raw)
     yield len(mtbench_raw)
@@ -245,8 +244,7 @@ async def _load_sharegpt_conversations(
         err_msg = f"ShareGPT file {sharegpt_file} does not exist."
         raise FileNotFoundError(err_msg)
 
-    with sharegpt_file.open("r", encoding="utf-8") as f:
-        sharegpt_raw = json.load(f)
+    sharegpt_raw = await asyncio.to_thread(_read_json, sharegpt_file)
 
     random.shuffle(sharegpt_raw)
     yield len(sharegpt_raw)
@@ -437,6 +435,30 @@ async def load_conversations_for_split(
     return unique_samples
 
 
+def _read_jsonl(path):
+    with path.open("r", encoding="utf-8") as f:
+        return [json.loads(line) for line in f]
+
+
+def _read_json(path):
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_conversations(output_path, all_conversations):
+    with output_path.open("w", encoding="utf-8") as f:
+        for entry in all_conversations:
+            assert "conversations" in entry, (
+                "Each conversation entry must have a 'conversations' field."
+            )
+            if "conversation_id" not in entry:
+                entry["conversation_id"] = id_for_conversation(entry["conversations"])
+            # Output in OpenAI messages format (rename conversations → messages)
+            output_entry = {k: v for k, v in entry.items() if k != "conversations"}
+            output_entry["messages"] = entry["conversations"]
+            f.write(json.dumps(output_entry, ensure_ascii=False) + "\n")
+
+
 async def main(args: argparse.Namespace) -> None:
     config = DataMixingConfig.load(args.config_file)
 
@@ -493,17 +515,7 @@ async def main(args: argparse.Namespace) -> None:
         logger.info(f"Writing {len(all_conversations)} conversations to {output.filename}")
         output_path = Path(output.filename)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with output_path.open("w", encoding="utf-8") as f:
-            for entry in all_conversations:
-                assert "conversations" in entry, (
-                    "Each conversation entry must have a 'conversations' field."
-                )
-                if "conversation_id" not in entry:
-                    entry["conversation_id"] = id_for_conversation(entry["conversations"])
-                # Output in OpenAI messages format (rename conversations → messages)
-                output_entry = {k: v for k, v in entry.items() if k != "conversations"}
-                output_entry["messages"] = entry["conversations"]
-                f.write(json.dumps(output_entry, ensure_ascii=False) + "\n")
+        await asyncio.to_thread(_write_conversations, output_path, all_conversations)
 
 
 if __name__ == "__main__":
