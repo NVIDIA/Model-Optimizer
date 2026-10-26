@@ -1468,7 +1468,9 @@ class TensorQuantizer(nn.Module):
         numel, shape_key, dtype_code = 0, 0, 0  # a rank without an amax holds no elements
         if amax is not None:
             numel = amax.numel()
-            # Exact in float32, and tells apart shapes of one size, such as (8, 1) and (1, 8).
+            # Tells apart shapes of one size, such as (8, 1) and (1, 8). A tuple of ints hashes alike
+            # in every process (a str would not), and the key stays exact in float32, as a numel of
+            # 2**24 or more does not.
             shape_key = hash(tuple(amax.shape)) % (1 << 24)
             dtype_code = _AMAX_DTYPES.index(amax.dtype) + 1 if amax.dtype in _AMAX_DTYPES else 0
         # MAX turns each [x, -x] pair into x's largest and negated smallest value across the ranks.
