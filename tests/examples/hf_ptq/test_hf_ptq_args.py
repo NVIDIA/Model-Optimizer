@@ -386,32 +386,53 @@ def test_composed_kv_autoquant_rejects_enabled_actual_kv_quantizers(monkeypatch)
 @pytest.mark.parametrize(
     "recipe",
     [
-        "kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
-        "nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+        "general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+        "general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
     ],
+    ids=["kv", "weight_then_kv"],
 )
-def test_fsdp2_kv_autoquant_reaches_distributed_model_load(monkeypatch, tmp_path, recipe):
-    get_tiny_qwen3(num_hidden_layers=1).save_pretrained(tmp_path)
-    monkeypatch.setenv("RANK", "0")
+def test_fsdp2_kv_autoquant_uses_parallel_model_loader(monkeypatch, tmp_path, recipe):
+    model = get_tiny_qwen3(num_hidden_layers=1)
+    model.save_pretrained(tmp_path)
+    monkeypatch.setenv("RANK", "1")
     hf_ptq, args = _parse_hf_ptq_args(
         monkeypatch,
         "--pyt_ckpt_path",
         str(tmp_path),
-        "--use_fsdp2",
         "--recipe",
-        "general/auto_quantize/" + recipe,
+        recipe,
+        "--use_fsdp2",
+        "--attn_implementation",
+        "eager",
     )
-    args.dist_state = SimpleNamespace(device="cpu", rank=0, world_size=1)
+    args.dist_state = SimpleNamespace(device=torch.device("cpu"), rank=1, world_size=2)
     args.hub_model_id, args.local_checkpoint_path = None, str(tmp_path)
+    calls = []
 
-    def distributed_load(checkpoint, *_args, **_kwargs):
-        assert checkpoint == str(tmp_path)
-        raise RuntimeError("distributed loader reached")
+    def parallel_loader(checkpoint, device, rank, world_size, **kwargs):
+        calls.append((checkpoint, device, rank, world_size, kwargs))
+        return model
 
-    monkeypatch.setattr(hf_ptq, "parallel_load_and_prepare_fsdp2", distributed_load)
+    monkeypatch.setattr(hf_ptq, "parallel_load_and_prepare_fsdp2", parallel_loader)
+    monkeypatch.setattr(
+        hf_ptq,
+        "get_tokenizer",
+        lambda *_args, **_kwargs: SimpleNamespace(padding_side="right", pad_token=None),
+    )
 
-    with pytest.raises(RuntimeError, match="distributed loader reached"):
-        hf_ptq.load_model(args)
+    loaded = hf_ptq.load_model(args)
+
+    assert len(calls) == 1
+    assert calls[0][:4] == (str(tmp_path), args.dist_state.device, 1, 2)
+    loader_kwargs = calls[0][4]
+    assert loader_kwargs["trust_remote_code"] is False
+    assert loader_kwargs["cpu_offload"] is False
+    assert loader_kwargs["attn_implementation"] == "eager"
+    assert loader_kwargs["hf_config"].model_type == model.config.model_type
+    assert loaded[0] is model
+    assert loaded[1] is model
+    assert loaded[3] is False
+    assert loaded[6] == args.dist_state.device
 
 
 @pytest.mark.parametrize("has_mtp", [False, True])
