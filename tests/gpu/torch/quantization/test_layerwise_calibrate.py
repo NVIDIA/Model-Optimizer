@@ -15,6 +15,7 @@
 
 """Integration tests for layerwise_calibrate and LayerActivationCollector."""
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -357,18 +358,23 @@ class _WideDecoderBlock(_DecoderBlock):
         )
 
 
-def test_layerwise_batch_probe_fits_the_heaviest_kind_of_layer(monkeypatch):
-    """The batch probe runs every kind of decoder layer, not just the first one."""
+@pytest.mark.parametrize("same_class", [False, True], ids=["new_class", "same_class"])
+def test_layerwise_batch_probe_fits_the_heaviest_kind_of_layer(monkeypatch, same_class):
+    """The batch probe runs every kind of decoder layer, not just the first one, including layers
+    of one class that differ in width, like Nemotron-NAS's."""
     _register_test_discoverer(monkeypatch)
     budget = 256 * 2**20
-    monkeypatch.setattr(layerwise_calib, "_available_gpu_bytes", lambda gpu: budget)
+    monkeypatch.setattr(layerwise_calib, "get_available_gpu_memory", lambda gpu: budget)
     model = _SimpleTransformerModel(n_layers=3, dim=256).cuda()
 
     def probe():
         return get_max_layerwise_batch_size(model, seq_len=512, max_batch_size=4096, num_samples=1)
 
     light = probe()
-    model.layers[2] = _WideDecoderBlock(256).cuda()
+    if same_class:
+        model.layers[2].ffn = _WideDecoderBlock(256).ffn.cuda()
+    else:
+        model.layers[2] = _WideDecoderBlock(256).cuda()
     heavy = probe()
     assert 1 < heavy < light < 4096
     assert not any(hasattr(layer, "_layerwise_calib") for layer in model.layers)
@@ -380,3 +386,31 @@ def test_layerwise_batch_probe_fits_the_heaviest_kind_of_layer(monkeypatch):
     with torch.no_grad():
         model.layers[2](x)
     assert torch.cuda.max_memory_allocated() - base <= budget / 2
+
+
+class _OutOfMemoryOnTwoSamples(nn.Module):
+    """Runs *module*, but runs out of GPU memory on a batch of more than one sample."""
+
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, x, **kwargs):
+        if x.shape[0] > 1:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory.")
+        return self.module(x, **kwargs)
+
+
+@pytest.mark.parametrize("where", ["layer_forward", "input_capture"])
+def test_layerwise_batch_probe_falls_back_to_one_sample(monkeypatch, where):
+    """A decoder layer that fits one sample but not two, or whose inputs for two samples cannot
+    be captured, gets a batch of one instead of stopping the run."""
+    _register_test_discoverer(monkeypatch)
+    model = _SimpleTransformerModel(n_layers=2, dim=64).cuda()
+    if where == "layer_forward":
+        model.layers[1] = _OutOfMemoryOnTwoSamples(model.layers[1])
+    else:
+        model.embed = _OutOfMemoryOnTwoSamples(model.embed)
+
+    assert get_max_layerwise_batch_size(model, seq_len=8, max_batch_size=64, num_samples=1) == 1
+    assert not any(hasattr(layer, "_layerwise_calib") for layer in model.layers)

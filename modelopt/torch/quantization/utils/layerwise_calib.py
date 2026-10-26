@@ -35,7 +35,13 @@ import torch
 import torch.nn as nn
 
 from modelopt.torch.utils import distributed as dist
-from modelopt.torch.utils import print_rank_0, warn_rank_0
+from modelopt.torch.utils import (
+    get_available_gpu_memory,
+    get_process_gpus,
+    print_rank_0,
+    warn_rank_0,
+)
+from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.network import (
     bind_forward_method,
     get_module_device,
@@ -366,10 +372,9 @@ class LayerActivationCollector:
                     # mode replays the batch it cached at full size, one cached batch per call: a
                     # retry cannot shrink it and would replay the next batch's inputs instead.
                     raise RuntimeError(
-                        "Layerwise calibration ran out of GPU memory while a decoder layer replayed "
-                        "a cached calibration batch. Splitting the batch now cannot help, since the "
-                        "layer replays it at the size it was cached with; rerun with a smaller "
-                        "calibration batch size."
+                        "Layerwise calibration ran out of GPU memory. Splitting the batch now "
+                        "cannot help, since each decoder layer replays its cached inputs at the "
+                        "size they were cached with; rerun with a smaller calibration batch size."
                     ) from e
                 except RuntimeError as e:
                     if "meta" not in str(e).lower():
@@ -587,17 +592,6 @@ class LayerActivationCollector:
         return self.get_input_activations(next_layer, forward_loop)
 
 
-def _used_gpus() -> list[int]:
-    """GPUs this process holds memory on; probing any other would create a context on it."""
-    return [i for i in range(torch.cuda.device_count()) if torch.cuda.memory_reserved(i)]
-
-
-def _available_gpu_bytes(gpu: int) -> int:
-    """Memory a new allocation on *gpu* can get: what is free plus what PyTorch caches unused."""
-    free, _ = torch.cuda.mem_get_info(gpu)
-    return free + torch.cuda.memory_reserved(gpu) - torch.cuda.memory_allocated(gpu)
-
-
 def _cuda_bytes_per_gpu(obj: Any, out: dict[int, int] | None = None) -> dict[int, int]:
     """Bytes of the CUDA tensors in a nested args/kwargs structure, per GPU."""
     out = {} if out is None else out
@@ -617,9 +611,6 @@ def _capture_layer_inputs(
     model: nn.Module, layer: nn.Module, batch_size: int, seq_len: int, device: torch.device
 ):
     """Run *model* on a dummy batch until *layer* and return the ``(args, kwargs)`` it receives."""
-    # Inline import: dataset_utils is not needed by the rest of this module.
-    from modelopt.torch.utils.dataset_utils import _disable_use_cache
-
     input_ids = torch.zeros(batch_size, seq_len, dtype=torch.long, device=device)
     # One left-pad position, like padded calibration rows, so the model builds the explicit
     # attention mask that calibration batches get instead of a cheaper causal-only path.
@@ -640,11 +631,13 @@ def _capture_layer_inputs(
 def _forward_peak_per_gpu(layer: nn.Module, args: tuple, kwargs: dict) -> dict[int, int]:
     """Peak memory one forward of *layer* adds on each GPU."""
     base = {}
-    for gpu in _used_gpus():
+    for gpu in get_process_gpus():
         torch.cuda.reset_peak_memory_stats(gpu)
         base[gpu] = torch.cuda.memory_allocated(gpu)
     layer(*args, **kwargs)
-    return {gpu: torch.cuda.max_memory_allocated(gpu) - base.get(gpu, 0) for gpu in _used_gpus()}
+    return {
+        gpu: torch.cuda.max_memory_allocated(gpu) - base.get(gpu, 0) for gpu in get_process_gpus()
+    }
 
 
 def _layer_batch_fit(
@@ -656,23 +649,34 @@ def _layer_batch_fit(
     device: torch.device,
 ) -> int | None:
     """Largest batch whose forward through *layer* fits; ``None`` if no GPU memory grows with it."""
-    peaks = []
     # The first forward only warms up: it also allocates one-off buffers like cuBLAS's workspace.
-    for batch_size in (1, 1, 2):
-        args, kwargs = _capture_layer_inputs(model, layer, batch_size, seq_len, device)
-        if batch_size == 1:
-            cached_per_sample = _cuda_bytes_per_gpu((args, kwargs))
-        peaks.append(_forward_peak_per_gpu(layer, args, kwargs))
+    for _ in range(2):
+        args, kwargs = _capture_layer_inputs(model, layer, 1, seq_len, device)
+        cached_per_sample = _cuda_bytes_per_gpu((args, kwargs))
+        one = _forward_peak_per_gpu(layer, args, kwargs)
         del args, kwargs
+    try:
+        args, kwargs = _capture_layer_inputs(model, layer, 2, seq_len, device)
+        two = _forward_peak_per_gpu(layer, args, kwargs)
+    except RuntimeError as e:
+        # Capturing inputs reports running out of memory as a RuntimeError raised from it.
+        if not any(isinstance(x, torch.cuda.OutOfMemoryError) for x in (e, e.__cause__)):
+            raise
+        two = None
+    finally:
+        args = kwargs = None
+    if two is None:
+        # One sample fits but two do not: release what the failed forward left cached.
+        torch.cuda.empty_cache()
+        return 1
 
-    _, one, two = peaks
     fits = []
     for gpu, peak in two.items():
         per_sample = peak - one.get(gpu, 0)
         if per_sample <= 0:
             continue
         # Layerwise calibration caches every sample's inputs for this layer and the next.
-        available = _available_gpu_bytes(gpu) - 2 * num_samples * cached_per_sample.get(gpu, 0)
+        available = get_available_gpu_memory(gpu) - 2 * num_samples * cached_per_sample.get(gpu, 0)
         fixed = one.get(gpu, 0) - per_sample
         fits.append(int((memory_fraction * available - fixed) // per_sample))
     return min(fits, default=None)
@@ -692,19 +696,22 @@ def get_max_layerwise_batch_size(
     Layerwise calibration runs one decoder layer at a time, so a full-model batch probe such as
     :func:`get_max_batch_size <modelopt.torch.utils.dataset_utils.get_max_batch_size>` both
     overstates the memory a batch needs and risks running out of it. Instead, the first layer
-    of each kind (by module classes: dense or MoE, full or linear attention) runs on one and
-    two samples of *seq_len* tokens, and the growth of its peak memory on each GPU is that GPU's
-    cost per sample. A batch fits when the layer's forward stays within *memory_fraction* of
-    the GPU's available memory, after the inputs layerwise calibration caches for all
-    *num_samples*; the rest is left for quantizers and Hessians. The dummy token ids go to
-    *device*, by default the model's. All ranks return the same, smallest batch.
+    of each kind (by module classes and parameter shapes: dense or MoE, full or linear attention,
+    and per-layer widths such as Nemotron-NAS's) runs on one and two samples of *seq_len* tokens,
+    and the growth of its peak memory on each GPU is that GPU's cost per sample. A batch fits
+    when the layer's forward stays within *memory_fraction* of the GPU's available memory, after
+    the inputs layerwise calibration caches for all *num_samples*; the rest is left for
+    quantizers and Hessians. A layer that fits one sample but not two gives a batch of one. The
+    dummy token ids go to *device*, by default the model's. All ranks return the same, smallest
+    batch.
     """
     batch_size = max_batch_size
     layers = LayerActivationCollector.get_decoder_layers(model)
     if layers and torch.cuda.is_available() and max_batch_size > 1:
-        kinds: dict[tuple[str, ...], nn.Module] = {}
+        kinds: dict[tuple, nn.Module] = {}
         for layer in layers:
-            kinds.setdefault(tuple(sorted({type(m).__name__ for m in layer.modules()})), layer)
+            classes = tuple(sorted({type(m).__name__ for m in layer.modules()}))
+            kinds.setdefault((classes, tuple(tuple(p.shape) for p in layer.parameters())), layer)
         device = device or get_module_device(model)
         collector = LayerActivationCollector(model)
         collector._patch_all_layers(layers)

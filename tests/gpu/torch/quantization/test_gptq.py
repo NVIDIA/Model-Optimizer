@@ -41,7 +41,7 @@ torch.manual_seed(RAND_SEED)
 
 def _report_available(monkeypatch, available):
     """Make each GPU report ``available[gpu]`` bytes for a new allocation, with no forward measured."""
-    monkeypatch.setattr(calib_utils, "_available_bytes", lambda gpu: available[gpu])
+    monkeypatch.setattr(calib_utils, "get_available_gpu_memory", lambda gpu: available[gpu])
     monkeypatch.setattr(calib_utils, "_calib_forward_peak", {})
 
 
@@ -91,7 +91,7 @@ def test_a_measured_calibration_forward_sets_the_hessian_reserve(
     """At 30% available, a GPU keeps a Hessian only once a measured forward leaves it room."""
     total = torch.cuda.get_device_properties(0).total_memory
     _report_available(monkeypatch, {0: total * 3 // 10})
-    monkeypatch.setattr(calib_utils, "_process_gpus", lambda: [0])
+    monkeypatch.setattr(calib_utils, "get_process_gpus", lambda: [0])
     if measured_fraction is not None:
         calib_utils._calib_forward_peak[0] = int(measured_fraction * total)
     linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
@@ -100,7 +100,8 @@ def test_a_measured_calibration_forward_sets_the_hessian_reserve(
 
 
 def test_gptq_records_its_calibration_forward_memory(monkeypatch):
-    """The next layer's Hessian reserve covers what this layer's calibration forward added."""
+    """The next layer's Hessian reserve covers what this layer's calibration forward added, and
+    not an earlier peak such as the previous layer's Hessians."""
     monkeypatch.setattr(calib_utils, "_calib_forward_peak", {})
     model = torch.nn.Linear(256, 256, device="cuda")
     inputs = torch.randn(2, 16, 256, device="cuda")
@@ -112,8 +113,10 @@ def test_gptq_records_its_calibration_forward_memory(monkeypatch):
         m(inputs)
         del scratch
 
+    earlier = 16 * transient
+    torch.empty(earlier, dtype=torch.uint8, device="cuda")  # freed at once; only the peak stays
     gptq(model, forward_loop=forward_loop, perc_damp=0.1, block_size=16)
-    assert calib_utils._calib_forward_peak[torch.cuda.current_device()] >= transient
+    assert transient <= calib_utils._calib_forward_peak[torch.cuda.current_device()] < earlier // 2
 
 
 @pytest.mark.parametrize(

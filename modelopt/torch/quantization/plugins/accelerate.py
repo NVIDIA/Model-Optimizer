@@ -28,6 +28,8 @@ from accelerate.utils.offload import PrefixedDataset
 
 import modelopt.torch.quantization as mtq
 
+from ..nn import TensorQuantizer
+
 __all__ = ["init_quantized_weights"]
 
 
@@ -81,8 +83,6 @@ def _writeback_params_to_weights_map(module, align_hook):
 
 def _own_quantizers(module):
     """Quantizers whose state belongs with ``module``'s weights, not with a hooked descendant's."""
-    from ..nn import TensorQuantizer
-
     for child in module.children():
         if isinstance(child, TensorQuantizer):
             yield child
@@ -111,9 +111,10 @@ def _carry_quantizers_with_offload(hook):
     Accelerate only manages the tensors a module had when it was dispatched, so calibration state
     such as NVFP4's per-block ``_amax``, and its calibrator's copy, stayed on the execution device
     for every offloaded layer and added up over the model. The CPU tensors stay the master copy:
-    a forward gets GPU copies, and after it the CPU tensors come back, once any tensor the forward
-    modified or replaced is copied back. The packed-weight cache is keyed to the weight just
-    released, so it is dropped.
+    a forward gets GPU copies, and after it the CPU tensors come back. A quantizer's own tensors
+    are always copied back, since its setters write through ``.data``, which leaves ``_version``
+    unchanged; a calibrator's tensor is copied back only if the forward replaced or modified it.
+    The packed-weight cache is keyed to the weight just released, so it is dropped.
     """
     if getattr(hook, "_modelopt_carries_quantizers", False):
         return
@@ -138,10 +139,17 @@ def _carry_quantizers_with_offload(hook):
                 if tensor.device.type in ("cpu", "meta"):
                     continue
                 entry = onloaded.pop(key, None)
-                if entry is not None and entry[0] is tensor and entry[2] == tensor._version:
-                    tensor.data = entry[1]
-                else:
+                if entry is None or entry[0] is not tensor:
                     tensor.data = tensor.data.cpu()
+                    continue
+                master = entry[1]
+                if key[1] != "_calibrator" or entry[2] != tensor._version:
+                    if master.shape != tensor.shape or master.dtype != tensor.dtype:
+                        tensor.data = tensor.data.cpu()
+                        continue
+                    # Into the existing master: a new CPU tensor costs 8x as much in page faults.
+                    master.copy_(tensor.data)
+                tensor.data = master
             for quantizer in _own_quantizers(module):
                 quantizer._quantizer_cache = None
         return output

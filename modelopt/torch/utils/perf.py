@@ -27,7 +27,9 @@ __all__ = [
     "AccumulatingTimer",
     "Timer",
     "clear_cuda_cache",
+    "get_available_gpu_memory",
     "get_cuda_memory_stats",
+    "get_process_gpus",
     "get_used_gpu_mem_fraction",
     "maybe_clear_cuda_cache",
     "report_memory",
@@ -89,6 +91,17 @@ def get_used_gpu_mem_fraction(device="cuda:0"):
 
     free_memory, total_memory = torch.cuda.mem_get_info(device)
     return (total_memory - free_memory) / total_memory
+
+
+def get_process_gpus() -> list[int]:
+    """GPUs this process already holds memory on; querying any other would create a context on it."""
+    return [i for i in range(torch.cuda.device_count()) if torch.cuda.memory_reserved(i)]
+
+
+def get_available_gpu_memory(gpu: int) -> int:
+    """Bytes a new allocation on ``gpu`` can get: the driver's free memory and our cached blocks."""
+    free, _ = torch.cuda.mem_get_info(gpu)
+    return free + torch.cuda.memory_reserved(gpu) - torch.cuda.memory_allocated(gpu)
 
 
 def report_memory(name="", rank=0, device=None):

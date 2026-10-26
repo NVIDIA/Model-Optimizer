@@ -141,6 +141,23 @@ def test_cpu_offloaded_tinyllama(tmp_path):
     assert torch.allclose(output_ref.logits, output_test.logits)
 
 
+def test_offloaded_quantizer_keeps_what_its_setter_wrote(tmp_path):
+    """A setter writes through ``.data``, which leaves ``_version`` alone; the offload must keep it."""
+    model, _, _, inputs = make_cpu_offloaded_model(tmp_path)
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda model: model(inputs))
+    linear = model.model.layers[0].self_attn.q_proj
+    quantizer = linear.weight_quantizer
+    with enable_weight_access_and_writeback(linear, model):
+        pass
+    assert quantizer._amax.device.type == "cpu"
+
+    amax = quantizer._amax * 2
+    with enable_weight_access_and_writeback(linear, model):
+        quantizer.amax = amax
+    assert quantizer._amax.device.type == "cpu"
+    assert torch.equal(quantizer._amax, amax)
+
+
 @pytest.mark.parametrize("use_checkpoint", [False, True], ids=["no_ckpt", "ckpt"])
 def test_layerwise_calibrate_cpu_offloaded(tmp_path, use_checkpoint):
     """Layerwise calibration on CPU-offloaded model matches GPU-only reference."""

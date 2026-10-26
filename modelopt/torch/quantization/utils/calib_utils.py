@@ -43,7 +43,7 @@ from contextlib import contextmanager
 import torch
 import torch.distributed as dist
 
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import get_available_gpu_memory, get_process_gpus, print_rank_0
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
 # A GPU takes a new Hessian only if enough memory stays available after it for the calibration
@@ -57,17 +57,6 @@ _HESSIAN_MIN_RESERVE = 0.1
 _calib_forward_peak: dict[int, int] = {}
 
 
-def _process_gpus() -> list[int]:
-    """GPUs this process already holds memory on."""
-    return [i for i in range(torch.cuda.device_count()) if torch.cuda.memory_reserved(i)]
-
-
-def _available_bytes(gpu: int) -> int:
-    """Memory an allocation on ``gpu`` can get: the driver's free memory and our cached blocks."""
-    free, _ = torch.cuda.mem_get_info(gpu)
-    return free + torch.cuda.memory_reserved(gpu) - torch.cuda.memory_allocated(gpu)
-
-
 def _gpu_has_room(gpu: int, nbytes: int) -> bool:
     """Whether ``nbytes`` more on ``gpu`` leaves the calibration forward the memory it needs."""
     total = torch.cuda.get_device_properties(gpu).total_memory
@@ -76,7 +65,7 @@ def _gpu_has_room(gpu: int, nbytes: int) -> bool:
         reserve = _HESSIAN_UNMEASURED_RESERVE * total
     else:
         reserve = max(_HESSIAN_MIN_RESERVE * total, _HESSIAN_RESERVE_MARGIN * peak)
-    return _available_bytes(gpu) - nbytes >= reserve
+    return get_available_gpu_memory(gpu) - nbytes >= reserve
 
 
 def reset_calib_forward_memory():
@@ -88,12 +77,15 @@ def reset_calib_forward_memory():
 def track_calib_forward_memory():
     """Record the memory the enclosed calibration forward adds on each GPU, for Hessian placement.
 
-    The peak is read without resetting PyTorch's peak counter, which callers may be measuring
-    with, so an earlier, higher peak can only overstate the need: the placement errs toward the
-    CPU, never toward running the next forward out of memory.
+    PyTorch's peak counters are reset first: otherwise an earlier peak, such as the previous
+    layer's Hessians and GPTQ updates, would count as forward memory and send Hessians to the CPU
+    for nothing.
     """
-    gpus = _process_gpus() if torch.cuda.is_available() else []
-    allocated = {gpu: torch.cuda.memory_allocated(gpu) for gpu in gpus}
+    gpus = get_process_gpus() if torch.cuda.is_available() else []
+    allocated = {}
+    for gpu in gpus:
+        torch.cuda.reset_peak_memory_stats(gpu)
+        allocated[gpu] = torch.cuda.memory_allocated(gpu)
     yield
     for gpu in gpus:
         added = torch.cuda.max_memory_allocated(gpu) - allocated[gpu]
@@ -109,7 +101,7 @@ def _hessian_offload_device(nbytes: int) -> torch.device:
     and only outside distributed runs, so no other job's or rank's GPU is touched.
     """
     if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
-        for gpu in sorted(_process_gpus(), key=_available_bytes, reverse=True):
+        for gpu in sorted(get_process_gpus(), key=get_available_gpu_memory, reverse=True):
             if _gpu_has_room(gpu, nbytes):
                 return torch.device("cuda", gpu)
     return torch.device("cpu")
