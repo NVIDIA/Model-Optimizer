@@ -95,7 +95,10 @@ DLA_TRANSFORMS = (
     ),
     ("Non4dModelInputs", _apply_non4d_model_inputs),
     ("Non4dModelOutputs", _apply_non4d_model_outputs),
-    ("RemoveIntermediarySqueezeAndUnsqueeze", _apply_remove_intermediary_squeeze_unsqueeze),
+    (
+        "RemoveIntermediarySqueezeAndUnsqueeze",
+        partial(_apply_remove_intermediary_squeeze_unsqueeze, rank_converted=True),
+    ),
     ("FixInstanceNormChannelMismatch", _apply_fix_instancenorm_channels),
     ("ShapeInference", infer_shapes),
     ("RemoveUnusedInitializers", _remove_unused_initializers),
