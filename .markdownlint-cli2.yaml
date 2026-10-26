@@ -13,6 +13,8 @@ config:
 
 # Vendored upstream skills — kept byte-identical to upstream via
 # .agents/scripts/sync-upstream-skills.sh; do not reformat.
+# The review prompt is likewise copied verbatim; see .github/workflows/claude_review.yml.
 ignores:
   - "plugins/modelopt/skills/launching-evals/**"
   - "plugins/modelopt/skills/accessing-mlflow/**"
+  - ".github/claude_review/review.md"
