@@ -535,7 +535,16 @@ def test_fused_vs_unfused_nvfp4(quant_block_size, gptq_block_size):
         (70, 128),  # width the NVFP4 group size does not divide
     ],
 )
-def test_gptq_fused_matches_unfused_on_irregular_shapes(in_features, block_size):
+def test_gptq_fused_matches_unfused_on_irregular_shapes(in_features, block_size, monkeypatch):
+    if torch.cuda.get_device_capability() < (8, 9):
+        pytest.skip("fused GPTQ needs SM89+")
+    fused_calls = []
+    fused_update = calib_utils.gptq_blockwise_update_fused_scalar
+    monkeypatch.setattr(
+        calib_utils,
+        "gptq_blockwise_update_fused_scalar",
+        lambda *args: fused_calls.append(1) or fused_update(*args),
+    )
     torch.manual_seed(0)
     model = torch.nn.Linear(in_features, 32, bias=False, device="cuda")
     inp = torch.randn(4, 16, in_features, device="cuda")
@@ -545,6 +554,7 @@ def test_gptq_fused_matches_unfused_on_irregular_shapes(in_features, block_size)
         quant_cfg["algorithm"] = {"method": "gptq", "block_size": block_size, "fused": fused}
         qmodel = mtq.quantize(copy.deepcopy(model), quant_cfg, forward_loop=lambda m: m(inp))
         weights.append(qmodel.weight.data)
+    assert len(fused_calls) == 1, "fused=True did not take the fused update"
     torch.testing.assert_close(weights[0], weights[1], atol=1e-4, rtol=1e-4)
 
 
