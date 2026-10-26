@@ -527,11 +527,6 @@ def _restore_quantized_state_if_requested(args: argparse.Namespace, full_model: 
     """
     if args.restore_quantized_state is None:
         return False
-    if args.save_quantized_state is not None:
-        raise ValueError(
-            "--save_quantized_state and --restore_quantized_state are mutually exclusive: "
-            "restoring a saved state skips calibration, so there is nothing new to save."
-        )
     print(
         f"Restoring quantized state from {args.restore_quantized_state}; skipping calibration."
     )
@@ -1395,10 +1390,10 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Path to save the calibrated/quantized model's ModelOpt state after calibration "
-            "completes, before export. Lets a failed or interrupted export be retried via "
-            "--restore_quantized_state without repeating calibration. Plain (non-AutoQuantize) "
-            "recipe/qformat path only."
+            "Path to save the calibrated model (full weights plus ModelOpt state, so expect a "
+            "file as large as the model) after calibration completes, before export. Lets a "
+            "failed or interrupted export be retried via --restore_quantized_state without "
+            "repeating calibration. Plain (non-AutoQuantize) recipe/qformat path only."
         ),
     )
     parser.add_argument(
@@ -1410,44 +1405,6 @@ def parse_args() -> argparse.Namespace:
             "calibration is skipped entirely and the saved state is restored onto the model "
             "before proceeding straight to export."
         ),
-    )
-    # Deprecated AutoQuantize CLI flags: no longer wired to anything -- AutoQuantize is now
-    # configured exclusively via an AutoQuantize --recipe. Kept only so old invocations fail
-    # loudly at parse_args() instead of silently running plain PTQ. The old CLI still lives on
-    # the 0.45 branch for anyone who needs it.
-    parser.add_argument(
-        "--auto_quantize_bits",
-        type=float,
-        default=None,
-        help="[Removed: use an AutoQuantize --recipe instead] Effective-bits target. Setting "
-        "this now fails parsing rather than silently running plain PTQ.",
-    )
-    parser.add_argument(
-        "--auto_quantize_method",
-        type=str,
-        default="gradient",
-        choices=["gradient", "kl_div"],
-        help="[Deprecated: use an AutoQuantize --recipe] Sensitivity scoring method.",
-    )
-    parser.add_argument(
-        "--auto_quantize_score_size",
-        type=int,
-        default=128,
-        help="[Deprecated: use an AutoQuantize --recipe] Number of samples for sensitivity scoring.",
-    )
-    parser.add_argument(
-        "--auto_quantize_cost_model",
-        type=str,
-        default="weight",
-        choices=["weight", "active_moe"],
-        help="[Deprecated: use an AutoQuantize --recipe] Cost model for the effective-bits search.",
-    )
-    parser.add_argument(
-        "--auto_quantize_active_moe_expert_ratio",
-        type=float,
-        default=None,
-        help="[Deprecated: use an AutoQuantize --recipe] Routed-expert active ratio for the "
-        "'active_moe' cost model.",
     )
     parser.add_argument(
         "--kv_auto_quantize_checkpoint",
@@ -1550,12 +1507,6 @@ def parse_args() -> argparse.Namespace:
         parser.error(
             "--low_memory_mode does not support --recipe; the low-memory loader initializes "
             "quantizers from --qformat/--kv_cache_qformat."
-        )
-    if args.auto_quantize_bits is not None:
-        parser.error(
-            "--auto_quantize_bits no longer enables AutoQuantize; it is not read anywhere in "
-            "the quantization path and a command relying on it would now silently run plain "
-            "PTQ instead. Use an AutoQuantize --recipe instead."
         )
     if args.save_quantized_state is not None and args.restore_quantized_state is not None:
         parser.error(
