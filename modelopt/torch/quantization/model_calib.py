@@ -407,17 +407,10 @@ def max_calibrate(
         _finalize_with_shared_state(model, weight_patterns)
         return
 
-    # Share the input (activation) amax across EP-sharded routed experts. In a sparse a2a/EP calibration
-    # each expert sees ONLY the tokens routed to it, so an expert (or a whole rank's experts) that received
-    # none has an uncalibrated input_quantizer -- while its weight_quantizer is always calibrated from the
-    # weight directly (above). Experts in a layer conceptually share one input amax, so MAX the
-    # input_quantizer amax over the expert-model-parallel group: cold experts pick up the shared value
-    # (sync_amax_across_distributed_group fills a None rank with the group MAX; if NO rank saw tokens the
-    # amax is dropped group-wide). Expert WEIGHT amax is intentionally NOT shared over EP (per-rank shards
-    # differ). This mirrors main's _should_sync_amax_across_ep / sync_moe_expert_amax input-amax sharing,
-    # which the a2a fused-experts path would otherwise miss -> some experts left with no scale. Must run
-    # BEFORE the completeness check so shared-in experts count as calibrated. Only modules that opt in
-    # (``_share_input_amax_across_ep``): Megatron's experts keep main's check-then-sync behavior.
+    # Share expert input amax over the expert-parallel group, so experts that received no tokens take
+    # the layer's value. Input quantizers only, as expert weight shards differ per rank. Runs before the
+    # completeness check below, and only for modules that opt in (``_share_input_amax_across_ep``):
+    # Megatron's experts keep main's check-then-sync.
     for name, module in model.named_modules():
         if (
             isinstance(module, QuantModule)
@@ -453,20 +446,11 @@ def max_calibrate(
                     _q, parallel_state, parent_name, child_name, device
                 )
             return
-        # Skip DISABLED quantizers: their amax is never used for quantization, so there is nothing to sync.
-        # This matters for a VLM whose non-language modules (vision tower / mm-projector) are disabled via a
-        # ``{"quantizer_name": "*", "enable": False}`` config with ``forward_loop=None``
-        # (extract_and_prepare_language_model_from_vl): those quantizers are uncalibrated, and a disabled
-        # NON-per-tensor one would hit the "amax shape not locally known" error below. Unlike the _amax-None
-        # case in the NOTE, disabling is a config property applied identically on every rank, so skipping is
-        # symmetric across the group -> it cannot desync the collective.
+        # A disabled quantizer has nothing to sync, and the config disables it on every rank alike.
         if not quantizer.is_enabled:
             return
-        # NOTE: do NOT early-return when this rank's `_amax` is None. Under data-parallel calibration a
-        # module may be activated on some ranks but not others, so `_amax` is present on only a subset of
-        # the group; every rank must still join the collective or the participant set mismatches -> NCCL
-        # deadlock. sync_amax_across_distributed_group handles this symmetrically (a rank without a local
-        # amax contributes a zero of the locally-known amax shape; the MAX picks up the real value).
+        # Do NOT return early on a local None amax: under data-parallel calibration only some ranks may
+        # hold one, and a rank that skips a collective its peers join leaves them waiting in it.
         quantizer.sync_amax_across_distributed_group(parallel_state.data_parallel_group, device)
         if _should_sync_amax_across_ep(parent_name, child_name, sync_expert_weight_amax):
             quantizer.sync_amax_across_distributed_group(
