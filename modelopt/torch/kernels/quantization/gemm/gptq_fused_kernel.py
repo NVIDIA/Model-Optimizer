@@ -52,21 +52,24 @@ def _gptq_scalar_kernel(
     n_amax_blocks,
     quant_block_size,
     block_start,
+    n_cols,
     BLOCK_SIZE: tl.constexpr,
 ):
     row = tl.program_id(0)
     if row >= num_rows:
         return
 
-    w_base = w_ptr + row * BLOCK_SIZE
-    qw_base = qw_ptr + row * BLOCK_SIZE
-    err_base = err_ptr + row * BLOCK_SIZE
+    w_base = w_ptr + row * n_cols
+    qw_base = qw_ptr + row * n_cols
+    err_base = err_ptr + row * n_cols
     amax_base = amax_ptr + row * n_amax_blocks
 
+    # BLOCK_SIZE is n_cols rounded up to a power of two, as tl.arange requires.
     j_range = tl.arange(0, BLOCK_SIZE)
-    w_full = tl.load(w_base + j_range)
+    in_block = j_range < n_cols
+    w_full = tl.load(w_base + j_range, mask=in_block, other=0.0)
 
-    for col in range(0, BLOCK_SIZE, 1):
+    for col in range(0, n_cols, 1):
         block_amax = tl.load(amax_base + (block_start + col) // quant_block_size)
 
         w_scalar = tl.sum(tl.where(j_range == col, w_full, 0.0))
@@ -79,13 +82,13 @@ def _gptq_scalar_kernel(
             )
         )
 
-        d_val = tl.load(hinv_ptr + col * BLOCK_SIZE + col)
+        d_val = tl.load(hinv_ptr + col * n_cols + col)
         err_val = (w_scalar - q_scalar) / d_val
         tl.store(err_base + col, err_val)
         tl.store(qw_base + col, q_scalar)
 
-        remaining = j_range > col
-        hinv_row = tl.load(hinv_ptr + col * BLOCK_SIZE + j_range, mask=remaining, other=0.0)
+        remaining = (j_range > col) & in_block
+        hinv_row = tl.load(hinv_ptr + col * n_cols + j_range, mask=remaining, other=0.0)
         w_full = w_full - err_val * hinv_row
 
 
@@ -133,7 +136,8 @@ def gptq_fused_block_scalar(
             block_amax.shape[1],
             quant_block_size,
             block_start,
-            BLOCK_SIZE=block_size,
+            block_size,
+            BLOCK_SIZE=triton.next_power_of_2(block_size),
         )
 
     return qw_block, err_block
