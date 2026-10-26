@@ -927,13 +927,33 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
                         resolved = np.array(target, copy=True)
                         for index in np.flatnonzero(target == 0):
                             resolved[index] = original_shape[index]
-                        target_name = cache.unique_name(follower.input[1] + "_lstm_layout")
-                        add_unique_initializers(
-                            graph,
-                            unique_initializer,
-                            [numpy_helper.from_array(resolved, target_name)],
+                        target_name = follower.input[1]
+                        copied_axes = np.flatnonzero(target == 0)
+                        shared_resolution = (
+                            target_name not in cache.graph_output_names | captured_names
+                            and all(
+                                user.op_type == "Reshape"
+                                and user.domain in {"", "ai.onnx"}
+                                and not user.overload
+                                and (user.domain, "Reshape", "") not in local_functions
+                                and input_index == 1
+                                and (user_shape := cache.get_shape(user.output[0])) is not None
+                                and all(user_shape[axis] == resolved[axis] for axis in copied_axes)
+                                for user, input_index in cache.get_consumers(target_name)
+                            )
                         )
-                        follower.input[1] = target_name
+                        if shared_resolution:
+                            initializer = cache.get_init(target_name)
+                            assert initializer is not None
+                            initializer.CopyFrom(numpy_helper.from_array(resolved, target_name))
+                        else:
+                            target_name = cache.unique_name(target_name + "_lstm_layout")
+                            add_unique_initializers(
+                                graph,
+                                unique_initializer,
+                                [numpy_helper.from_array(resolved, target_name)],
+                            )
+                            follower.input[1] = target_name
             if noop:
                 for value in graph.value_info:
                     if value.name == consumer.output[0]:
