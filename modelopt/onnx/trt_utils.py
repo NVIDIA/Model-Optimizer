@@ -282,7 +282,7 @@ def infer_types_shapes(model: onnx.ModelProto, all_tensor_info: dict) -> onnx.Mo
     # Topologically sort graph
     graph = gs.import_onnx(model)
     graph.cleanup().toposort()
-    model = gs.export_onnx(graph)
+    model = export_onnx(graph)
 
     return model
 
@@ -308,7 +308,7 @@ def set_trt_plugin_domain(model: onnx.ModelProto, custom_ops: list[str]) -> onnx
             node.domain = trt_plugin_domain
 
     # Add TRT domain and version to the graph
-    model = gs.export_onnx(graph)
+    model = export_onnx(graph)
     model.opset_import.append(onnx.helper.make_opsetid(trt_plugin_domain, trt_plugin_version))
     logger.info(f"Added TRT plugin domain {trt_plugin_domain} version {trt_plugin_version}")
     return model

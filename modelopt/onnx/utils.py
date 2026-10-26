@@ -50,23 +50,23 @@ def _graph_paths(graph):
 
 def export_onnx(graph: gs.Graph, **kwargs) -> onnx.ModelProto:
     """Export a GraphSurgeon graph without serializing oversized initializers during copying."""
-    originals = dict(_graph_paths(graph))
+    originals = {path: subgraph.tensors() for path, subgraph in _graph_paths(graph)}
     large = {
         path: {
             name: tensor
-            for name, tensor in subgraph.tensors().items()
+            for name, tensor in tensors.items()
             if isinstance(tensor, gs.Constant)
             and not isinstance(tensor._values, SparseValues)
             and tensor._values.nbytes >= onnx.checker.MAXIMUM_PROTOBUF
         }
-        for path, subgraph in originals.items()
+        for path, tensors in originals.items()
     }
     if not any(large.values()):
         return gs.export_onnx(graph, **kwargs)
 
     graph = graph.copy()
     for path, subgraph in _graph_paths(graph):
-        original_tensors = originals[path].tensors()
+        original_tensors = originals[path]
         for name, tensor in subgraph.tensors().items():
             original = original_tensors[name]
             if hasattr(original, "explicit_dtype"):
@@ -85,7 +85,10 @@ def export_onnx(graph: gs.Graph, **kwargs) -> onnx.ModelProto:
         for node_index, name, index in path:
             attr = next(a for a in exported_graph.node[node_index].attribute if a.name == name)
             exported_graph = attr.g if index is None else attr.graphs[index]
-        for tensor in tensors.values():
+        for name, tensor in tensors.items():
+            # Captures still need placeholders above: Graph.copy may duplicate constants.
+            if any(tensor is originals[path[:depth]].get(name) for depth in range(len(path))):
+                continue
             # Repeated-field extend serializes each message; CopyFrom avoids that size limit.
             exported_graph.initializer.add().CopyFrom(OnnxExporter.export_tensor_proto(tensor))
         for value_info in list(exported_graph.value_info):

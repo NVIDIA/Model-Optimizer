@@ -22,13 +22,15 @@ import pytest
 
 from modelopt.onnx.quantization.gs_patching import patch_gs_modules
 from modelopt.onnx.quantization.int4 import quantize_rtn
-from modelopt.onnx.trt_utils import load_onnx_model
+from modelopt.onnx.trt_utils import infer_types_shapes, load_onnx_model, set_trt_plugin_domain
 from modelopt.onnx.utils import export_onnx, save_onnx
 
 
 @pytest.mark.manual
 @pytest.mark.timeout(300)
-@pytest.mark.parametrize("route", ["load", "rtn", "subgraph"])
+@pytest.mark.parametrize(
+    "route", ["load", "rtn", "subgraph", "capture", "plugin_domain", "plugin_shapes"]
+)
 def test_export_initializer_over_protobuf_limit(tmp_path, route):
     """Large unquantized weights must survive preprocessing and INT4 graph reconstruction."""
     size = onnx.checker.MAXIMUM_PROTOBUF // 2 + 1
@@ -51,7 +53,7 @@ def test_export_initializer_over_protobuf_limit(tmp_path, route):
         opset=21,
     )
     expected = hashlib.sha256(large.values.tobytes()).digest()
-    if route == "subgraph":
+    if route in ("subgraph", "capture"):
         # Keep the initializer scoped inside an If branch.
         branch = gs.Graph(nodes=[graph.nodes[1]], outputs=[z], opset=21)
         condition = gs.Variable("condition", dtype=np.bool_, shape=[])
@@ -69,8 +71,21 @@ def test_export_initializer_over_protobuf_limit(tmp_path, route):
             outputs=[result],
             opset=21,
         )
+        if route == "capture":
+            # Both branches capture the constant also used by the enclosing graph.
+            graph.nodes[0].attrs["else_branch"].nodes[0].inputs[0] = large
+            outer_result = gs.Variable("outer_result", dtype=np.float16, shape=[size])
+            graph.nodes.insert(0, gs.Node("Identity", inputs=[large], outputs=[outer_result]))
+            graph.outputs.append(outer_result)
         model = export_onnx(graph)
-        initializers = [attr.g.initializer[0] for attr in model.graph.node[0].attribute]
+        branches = model.graph.node[-1].attribute
+        if route == "capture":
+            assert all(not attr.g.initializer for attr in branches)
+            assert len(model.graph.initializer) == 1
+            initializers = list(model.graph.initializer)
+        else:
+            initializers = [attr.g.initializer[0] for attr in branches]
+        assert isinstance(large, gs.Constant)
     else:
         # Construct input data without the repeated-field serialization being tested.
         graph.nodes.pop()
@@ -89,6 +104,12 @@ def test_export_initializer_over_protobuf_limit(tmp_path, route):
             save_onnx(model, input_path, save_as_external_data=True)
             model, _, _, _, external = load_onnx_model(input_path)
             assert external
+        elif route == "plugin_domain":
+            model = set_trt_plugin_domain(model, ["Identity"])
+            assert model.graph.node[-1].domain == "trt.plugins"
+        elif route == "plugin_shapes":
+            pytest.importorskip("tensorrt")
+            model = infer_types_shapes(model, {})
         else:
             patch_gs_modules()
             model = quantize_rtn(model, block_size=2, dq_only=True)
