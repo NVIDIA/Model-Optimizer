@@ -472,7 +472,8 @@ def _test_topk_logits_kl_loss_numerics_ghost_token_reference(
     parallel_state.initialize_model_parallel(tensor_model_parallel_size=size)
     cfg = SimpleNamespace(tensor_model_parallel_size=size)
     device = torch.device("cuda", rank)
-    student, teacher = _make_loss_inputs()
+    # Equal vocab shards (torch.chunk is uneven when size does not divide the vocab)
+    student, teacher = _make_loss_inputs(vocab=16 * size)
     student = student.detach().to(device).requires_grad_()
     teacher = teacher.to(device)
     student_shard = student.chunk(size, dim=-1)[rank].detach().contiguous().requires_grad_()
@@ -515,10 +516,10 @@ def _test_topk_logits_kl_loss_numerics_ghost_token_reference(
     [(None, False, 1.0), (0.5, False, 2.0), (0.5, True, 1.0)],
 )
 def test_topk_logits_kl_loss_numerics_ghost_token_reference(
-    dist_workers, top_p, reverse, temperature
+    dist_workers_size_2, top_p, reverse, temperature
 ):
     """TP loss and gradients match a full-vocab reference on the K+1 bucketed distributions."""
-    dist_workers.run(
+    dist_workers_size_2.run(
         partial(
             _test_topk_logits_kl_loss_numerics_ghost_token_reference, top_p, reverse, temperature
         )
