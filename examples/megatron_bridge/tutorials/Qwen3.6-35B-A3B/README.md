@@ -73,7 +73,7 @@ The six benchmarks above barely test recalling facts, which is what weight quant
 >`pass@1[avg-of-10]`, judged by Gemini 3 Flash. Hallucination rate = incorrect / (100 − correct). The ~0.7% graded partially correct is not shown, so the three columns sum to ~99.3. `±` is the sem across the 10 repeats of one run (≤0.6 on the rows without one); the repeats share seeds across models, so it is not the run-to-run sem used elsewhere on this page.
 
 - **Knowledge is kept.** Every model answers the same ~21% correctly; 4-bit weights, 4-bit activations and QAD all leave recall intact.
-- **Calibration is not.** Each step abstains less and guesses wrong more: the published W4A16 checkpoint already loses 4 index points, W4A4 PTQ 8, and **QAD 500 loses 16**, at an unchanged correct rate. None of the six benchmarks above can see this.
+- **The model guesses more instead of abstaining.** Each step abstains less and answers wrong more often: the published W4A16 checkpoint already loses 4 index points, W4A4 PTQ 8, and **QAD 500 loses 16**, at an unchanged correct rate. None of the six benchmarks above can see this.
 - **QAD does most of it early**: the index drops to −31.4 at iteration 50, then partly recovers (−25.1 at 300, −27.5 at 500), the same shape as SciCode's non-terminating sub-steps (see [ABLATIONS.md](ABLATIONS.md#data-format-pre-tokenized-blend-vs-chat-sft-data)).
 
 If abstaining matters for your use case (assistants that should say "I don't know"), evaluate it explicitly: QAD as run here did not preserve it.

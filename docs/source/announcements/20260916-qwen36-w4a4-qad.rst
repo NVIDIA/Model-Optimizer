@@ -119,9 +119,9 @@ cap (BF16: 0.7%). Qwen's recommended ``presence_penalty: 1.5`` removes nearly al
 time (96 to 2 of 2,704) with no accuracy change, but apply it only where outputs run away: on GPQA
 Diamond it cuts generation throughput 4.8x (5,109 to 1,067 tokens/s) for no accuracy change.
 
-**Knowledge is kept; calibration is not.** On AA-Omniscience, where a wrong answer costs as much as a
-right one earns, every model answers ~21% of questions correctly. What changes is how often it
-abstains instead of guessing:
+**Knowledge is kept, but the model guesses more instead of abstaining.** On AA-Omniscience, where a
+wrong answer costs as much as a right one earns, every model answers ~21% of questions correctly. What
+changes is how often it abstains instead of guessing:
 
 .. list-table::
    :header-rows: 1
