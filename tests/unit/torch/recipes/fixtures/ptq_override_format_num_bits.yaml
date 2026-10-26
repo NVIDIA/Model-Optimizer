@@ -1,0 +1,23 @@
+# Pattern override with format, num_bits, and axis
+_test:
+  description: "Pattern override with format + num_bits + axis"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_config:
+      quantize_config:
+        quant_cfg:
+          "*mlp*weight_quantizer":
+            num_bits: 4
+            axis: 0
+
+version: "1.0"
+quantization:
+  preset: fp8
+  overrides:
+    - pattern: "*mlp*weight_quantizer"
+      format: int4
+      num_bits: 4
+      axis: 0

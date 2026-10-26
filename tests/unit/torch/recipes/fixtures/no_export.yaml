@@ -1,0 +1,14 @@
+# Recipe without export — no export key in result
+_test:
+  description: "No export section means no export key in result"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_has_key: quantize_config
+    check_no_key: export
+
+version: "1.0"
+quantization:
+  preset: fp8
