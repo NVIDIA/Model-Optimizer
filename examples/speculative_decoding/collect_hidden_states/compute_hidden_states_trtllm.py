@@ -223,7 +223,7 @@ def main(args: argparse.Namespace) -> None:
         if not trtllm_dumped_file.exists():
             return False
         with open(trtllm_dumped_file, "rb") as f:
-            trtllm_dumped = torch.load(f)
+            trtllm_dumped = torch.load(f, weights_only=True)
         assert isinstance(trtllm_dumped, list) and len(trtllm_dumped) == 1, (
             "TRTLLM dumped should be a list with one element"
         )

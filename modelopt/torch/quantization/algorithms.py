@@ -753,8 +753,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     def validate_search_input(self, constraints, config) -> None:
         """Validate method-specific inputs before quantizing the model."""
 
-    def load_search_checkpoint(self) -> bool:
-        return super().load_search_checkpoint(strict=False)
+    def load_search_checkpoint(self, strict=False) -> bool:
+        return super().load_search_checkpoint(strict=strict)
 
     @staticmethod
     def _is_auto_quantize_module(module):

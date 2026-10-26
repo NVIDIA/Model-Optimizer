@@ -2773,3 +2773,17 @@ def test_loop_subgraph_high_precision_capture(
     )
     onnx.checker.check_model(converted_model)
     onnx.shape_inference.infer_shapes(converted_model, strict_mode=True, check_type=True)
+
+
+@pytest.mark.parametrize("kind", ["sanitizer", "converter"])
+def test_default_plugin_lists_are_isolated(simple_model, kind):
+    model, value_info_map, initializer_map, node_to_init_map = simple_model
+
+    def create():
+        if kind == "sanitizer":
+            return GraphSanitizer(model)
+        return PrecisionConverter(model, value_info_map, initializer_map, node_to_init_map)
+
+    first = create()
+    first.trt_plugins.append("custom_plugin.so")
+    assert create().trt_plugins == []

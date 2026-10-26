@@ -23,6 +23,7 @@ from _test_utils.torch.quantization.models import QuantConvLinear
 from modelopt.torch.quantization import calib
 from modelopt.torch.quantization import nn as qnn
 from modelopt.torch.quantization import utils as quant_utils
+from modelopt.torch.quantization.calib.histogram import _compute_amax_percentile
 
 
 class TestMaxCalibrator:
@@ -453,3 +454,11 @@ class TestCalibrateWeights:
         ref_calibrator.collect(test_lenet.conv2.weight[1])
         ref_amax = ref_calibrator.compute_amax(method)
         assert torch.allclose(ref_amax, test_lenet.conv2.weight_quantizer.amax[1], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("missing_histogram", [True, False])
+def test_percentile_requires_both_histogram_and_edges(missing_histogram):
+    hist = None if missing_histogram else np.array([1, 2])
+    edges = np.array([0.0, 1.0, 2.0]) if missing_histogram else None
+    with pytest.raises(ValueError, match="both be provided"):
+        _compute_amax_percentile(hist, edges, 99.0)

@@ -249,15 +249,7 @@ class ConcatNodeProcessor(NodeProcessor):
             if len(syms_out) == 0:
                 # TODO: we could create a fake symbol but then there is no module associated with it
                 # --> handling this would be tough...
-                # --> see below for previous solution...
                 return self._process_boundary(node, id, input_nodes)
-
-                # double-check that in_target is not in sym_map (otherwise we should find a sym...)
-                assert in_target not in self._sym_map, "Input node must not be in sym_map."
-                # let's create a fake, disabled symbol for this input node
-                sym_fake = Symbol(cl_type=Symbol.CLType.OUTGOING, elastic_dims={cat_dim})
-                sym_fake.disable()
-                syms_out.append(sym_fake)
             elif len(syms_out) > 1:
                 # we cannot handle multiple out symbols for concat nodes
                 raise RuntimeError("Concat node with multiple out symbols not supported.")

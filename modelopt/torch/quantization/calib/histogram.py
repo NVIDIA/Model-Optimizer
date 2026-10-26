@@ -333,6 +333,8 @@ def _compute_amax_percentile(calib_hist, calib_bin_edges, percentile):
     # If calibrator hasn't collected any data, return none
     if calib_bin_edges is None and calib_hist is None:
         return None
+    if calib_bin_edges is None or calib_hist is None:
+        raise ValueError("Histogram counts and bin edges must both be provided.")
 
     total = calib_hist.sum()
     cdf = np.cumsum(calib_hist / total)

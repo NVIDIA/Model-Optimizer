@@ -43,7 +43,7 @@ from ...pruning.pruning_utils import (
     _init_attention_weights,
     _init_mlp_module,
     _init_moe_module,
-    _load_expert_scores,
+    _select_expert_indices,
 )
 from ...utils.misc import get_attention_head_dim
 from ..logger import aprint, mprint
@@ -326,12 +326,14 @@ def _process_single_layer(
                     layer_idx=layer_idx,
                     mlp_init_mode=mlp_init_mode,
                     mlp_init_config=mlp_init_config,
-                    orig_router_weight=parent_state_dict[router_key],
+                    orig_router_weights={"weight": [parent_state_dict[router_key]]},
                     orig_experts_weights=orig_experts_weights,
-                    new_router_weight=new_state_dict[router_key],
+                    new_router_weights={"weight": [new_state_dict[router_key]]},
                     new_experts_weights=new_experts_weights,
+                    orig_num_experts=parent_moe_config.num_local_experts,
+                    new_num_experts=child_moe_config.num_local_experts,
                 )
-                layer_out_state_dict[router_key] = out_router_weights
+                layer_out_state_dict[router_key] = out_router_weights["weight"][0]
                 for name in new_experts_keys.keys():
                     layer_out_state_dict.update(
                         zip(new_experts_keys[name], out_experts_weights[name])
@@ -784,13 +786,12 @@ def _prune_experts_by_score(
         len(orig_experts_module_weights) == orig_num_experts
         for orig_experts_module_weights in orig_experts_weights.values()
     )
-    expert_scores = _load_expert_scores(mlp_init_config)[layer_idx]
-    assert len(expert_scores) == orig_num_experts
-    selected_experts = sorted(
-        range(orig_num_experts),
-        key=lambda i: expert_scores[i],
-        reverse=mlp_init_config.get("higher_is_better", True),
-    )[:new_num_experts]
+    selected_experts = _select_expert_indices(
+        mlp_init_config=mlp_init_config,
+        layer_idx=layer_idx,
+        orig_num_experts=orig_num_experts,
+        new_num_experts=new_num_experts,
+    )
     result_router_weight = orig_router_weight[selected_experts]
     result_experts_weights = {
         name: [orig_experts_module_weights[i] for i in selected_experts]

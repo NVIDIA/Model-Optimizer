@@ -1238,6 +1238,7 @@ def test_layerwise_checkpoint_resume_matches_one_shot_amax(
     non-mutating calibration case also asserts the on-disk shape (no
     ``weights.pt``, ``quantizer_buffers.pt`` present per layer).
     """
+    monkeypatch.setenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
     _register_test_discoverer(monkeypatch)
 
     calib_data = [torch.randint(0, 32, (2, 8))]

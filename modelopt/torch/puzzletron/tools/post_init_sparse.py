@@ -28,6 +28,7 @@ __all__ = []
 class SparsityMethod:
     def calculate_masks(self, state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Gets a model state_dict, returns a state_dict-like mask_dict with masks"""
+        raise NotImplementedError
 
     @staticmethod
     def fix_state_dict_inplace(state_dict, verbose=False, change_dtype=False):
@@ -51,8 +52,9 @@ class SparsityMethod:
                 state_dict[name] = state_dict[name].to(torch.bfloat16)
         return state_dict, sparsity_masks
 
-    def filter_function(self):
-        pass
+    @staticmethod
+    def filter_function(name, modules_to_sparsify_in_block):
+        raise NotImplementedError
 
     def apply_masks(self, model: nn.Module, mask_dict: dict[str, torch.Tensor]) -> None:
         for name, module in model.named_modules():

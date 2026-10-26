@@ -146,7 +146,7 @@ class QwenImageDMDInferencePipeline:
 
         if ema_path is not None:
             logger.info("[DMD2-Inference] Overlaying EMA shadow from %s", ema_path)
-            ema_state = torch.load(str(ema_path), map_location="cpu")
+            ema_state = torch.load(str(ema_path), map_location="cpu", weights_only=True)
             shadow = (
                 ema_state.get("shadow", ema_state) if isinstance(ema_state, dict) else ema_state
             )

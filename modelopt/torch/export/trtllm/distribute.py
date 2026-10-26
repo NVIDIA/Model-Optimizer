@@ -158,7 +158,7 @@ def get_tensors_parallel(tensor: torch.Tensor, ranks: list[int], group=None):
             else:
                 shm = SharedMemory(name=f"rank_{rank}", create=False)
                 assert shm.buf is not None
-                shared_tensor = torch.load(BytesIO(shm.buf))
+                shared_tensor = torch.load(BytesIO(shm.buf), weights_only=True)
                 tensors.append(shared_tensor)
                 shm_readers.append(shm)
     try:
@@ -280,7 +280,7 @@ def get_configs_parallel(config, ranks: list[int], group, workspace_path: Path |
 
                 if len_json != 0:
                     config_dict = json.loads(shm.buf[8 : 8 + len_json].tobytes().decode())
-                    weights = torch.load(BytesIO(shm.buf[8 + len_json :]))
+                    weights = torch.load(BytesIO(shm.buf[8 + len_json :]), weights_only=True)
                     restore_model_config(config_dict, weights)
                     config = model_config_from_dict(config_dict)
 

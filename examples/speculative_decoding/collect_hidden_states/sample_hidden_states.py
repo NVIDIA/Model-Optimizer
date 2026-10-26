@@ -60,7 +60,7 @@ def main(args: argparse.Namespace) -> None:
     )
 
     for i, file in enumerate(sampled_files):
-        data = torch.load(file)
+        data = torch.load(file, weights_only=True)
         # Require only the keys every dump carries, and report what is missing rather
         # than comparing the whole set: the optional keys are legitimately absent on
         # some dumps -- ``aux_hidden_states`` under ``--no-aux-hidden-states``, and

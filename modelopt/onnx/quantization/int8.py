@@ -133,7 +133,7 @@ def quantize(
     nodes_to_quantize: list[str] | None = None,
     nodes_to_exclude: list[str] | None = None,
     use_external_data_format: bool = False,
-    intermediate_generated_files: list[str] = [],
+    intermediate_generated_files: list[str] | None = None,
     trt_extra_plugin_lib_paths: list[str] | None = None,
     high_precision_dtype: str = "fp16",
     passes: list[str] = ["concat_elimination"],
@@ -151,6 +151,8 @@ def quantize(
     Quantization of ['Add', 'AveragePool', 'BatchNormalization', 'Clip', 'Conv', 'ConvTranspose',
     'Gemm', 'GlobalAveragePool', 'MatMul', 'MaxPool', 'Mul'] op types are supported.
     """
+    if intermediate_generated_files is None:
+        intermediate_generated_files = []
     configure_logging(level=log_level.upper())
     logger.info(f"Starting INT8 quantization with method: {calibration_method}")
     t_start = time.time()
