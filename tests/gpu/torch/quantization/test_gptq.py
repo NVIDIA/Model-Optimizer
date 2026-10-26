@@ -25,7 +25,9 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.model_calib import gptq
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+from modelopt.torch.quantization.utils import calib_utils
 from modelopt.torch.quantization.utils.calib_utils import (
+    GPTQHelper,
     compute_hessian_inverse,
     gptq_blockwise_update,
     gptq_blockwise_update_fused_scalar,
@@ -35,6 +37,45 @@ from modelopt.torch.utils.dataset_utils import create_forward_loop, get_dataset_
 
 RAND_SEED = 42
 torch.manual_seed(RAND_SEED)
+
+
+def test_hessian_of_a_full_gpu_goes_to_an_idle_gpu(need_2_gpus, monkeypatch):
+    """A Hessian whose GPU is full lands on an idle GPU rather than the CPU, with the same values."""
+
+    def used_fraction(device):
+        return 0.9 if torch.device(device).index in (0, None) else 0.1
+
+    monkeypatch.setattr(calib_utils, "get_used_gpu_mem_fraction", used_fraction)
+    linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
+    shard = torch.zeros(1, device="cuda:1")  # the model also lives on cuda:1
+    helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
+    assert helper.hessian.device == shard.device
+
+    inputs = torch.randn(32, 64, device="cuda:0")
+    helper.accumulate(inputs)
+    reference, _ = update_hessian(inputs, torch.zeros(64, 64, device="cuda:0"), 0)
+    torch.testing.assert_close(helper.hessian.to("cuda:0"), reference)
+
+
+@pytest.mark.parametrize("blocker", ["idle_gpu_full", "idle_gpu_too_small", "multi_rank"])
+def test_hessian_of_a_full_gpu_falls_back_to_the_cpu(need_2_gpus, monkeypatch, blocker):
+    """With no other GPU that can take it, or on any rank of a multi-rank run, it goes to the CPU."""
+    idle_fraction = 0.9 if blocker == "idle_gpu_full" else 0.1
+
+    def used_fraction(device):
+        return 0.9 if torch.device(device).index in (0, None) else idle_fraction
+
+    monkeypatch.setattr(calib_utils, "get_used_gpu_mem_fraction", used_fraction)
+    if blocker == "idle_gpu_too_small":
+        # 64 x 64 float32 is 16 KiB; leave 1 KiB free.
+        monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device=None: (1024, 2**40))
+    elif blocker == "multi_rank":
+        monkeypatch.setattr(calib_utils.dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(calib_utils.dist, "get_world_size", lambda group=None: 2)
+    linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
+    shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
+    helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
+    assert helper.hessian.device == torch.device("cpu")
 
 
 @pytest.mark.parametrize(
@@ -130,14 +171,14 @@ def test_gptq_export_roundtrip():
 @pytest.mark.parametrize(
     "quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG]
 )
-def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer):
+def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer, calib_jsonl):
     model = get_tiny_llama(vocab_size=tiny_tokenizer.vocab_size).to("cuda")
     model.eval()
 
     quant_cfg = copy.deepcopy(quant_cfg)
     quant_cfg["algorithm"] = {"method": "gptq", "layerwise": {"enable": True}}
     calib_dataloader = get_dataset_dataloader(
-        dataset_name="cnn_dailymail",
+        dataset_name=calib_jsonl,
         tokenizer=tiny_tokenizer,
         batch_size=2,
         num_samples=8,
@@ -206,6 +247,20 @@ def _run_fused_gptq_nvfp4(
         w, block_amax, global_scale, h_inv, gptq_block_size, quant_block_size
     )
     return w
+
+
+@requires_triton
+def test_fused_nvfp4_gptq_runs_on_the_weights_gpu(need_2_gpus):
+    """A layer device_map placed on another GPU is updated there, not from the current GPU."""
+    torch.manual_seed(42)
+    weight, _, block_amax, global_scale, h_inv = _make_nvfp4_test_data(16, 64, 256)
+    expected = _run_fused_gptq_nvfp4(weight, block_amax, global_scale, h_inv, 128, 16)
+
+    weight, block_amax, h_inv = (t.to("cuda:1") for t in (weight, block_amax, h_inv))
+    got = _run_fused_gptq_nvfp4(weight, block_amax, global_scale, h_inv, 128, 16)
+
+    assert torch.cuda.current_device() == 0
+    torch.testing.assert_close(got.cpu(), expected.cpu(), rtol=0, atol=0)
 
 
 _NVFP4_QUANT_BLOCK_SIZES = [16, 128]

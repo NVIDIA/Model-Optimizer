@@ -1257,17 +1257,17 @@ def test_a_clean_close_elsewhere_does_not_mask_this_block_s_failure(fake_mlflow,
         (URI, URI, None, None),
         # Percent-encoded userinfo: requests decodes what it finds in a URI, so this must too,
         # or the two paths authenticate as different users.
-        ("https://al%3Ace:tok%2Fen@mlflow.example.com", URI, "al:ce", "tok/en"),
+        ("https://al%3Ace:t%2Fk@mlflow.example.com", URI, "al:ce", "t/k"),  # trufflehog:ignore
         # MLflow sends basic auth only with both variables set, so half a credential has
         # nowhere to go; the caller is told rather than handed a URI it would record from.
         ("https://tok@mlflow.example.com", None, None, None),
-        ("https://:tok@mlflow.example.com", None, None, None),
+        ("https://:tok@mlflow.example.com", None, None, None),  # trufflehog:ignore
         # urlparse reads "user:" as the scheme and leaves the credential in .path, where the
         # userinfo check never sees it -- so this fails closed rather than returning it.
         ("user:tok@mlflow.example.com", None, None, None),
     ],
     ids=["pair", "none", "percent-encoded", "no-password", "no-username", "no-scheme"],
-)  # trufflehog:ignore
+)
 def test_credentials_move_out_of_the_uri_into_mlflows_own_variables(
     uri, stripped, username, password
 ):

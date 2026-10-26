@@ -49,23 +49,6 @@ def _export_weight(
 # Preparation handlers are registered in the same precedence as the legacy MoE prepass.
 
 
-# Keyed on the mixin class name too: the generated class is normally named
-# "QuantDbrxExperts", but _DMRegistryCls falls back to a module-prefixed name on
-# collision, while "_QuantDbrxExperts" remains in the generated class's MRO.
-@PrepareMoEInputsRegistry.register("QuantDbrxExperts", "_QuantDbrxExperts")
-def _prepare_dbrx_experts(name: str, moe_module: nn.Module, ctx: ExportContext) -> None:
-    """Fill missing input amax values for DBRX per-expert ModuleLists."""
-    experts_mlp = moe_module.experts.mlp
-    for linear_name in get_expert_linear_names(moe_module, ctx.model_type):
-        if hasattr(experts_mlp, linear_name):
-            linear_modulelist = getattr(experts_mlp, linear_name)
-            if hasattr(linear_modulelist, "__iter__"):
-                set_expert_quantizer_amax(
-                    modules=list(linear_modulelist),
-                    quantizer_attrs=["input_quantizer"],
-                )
-
-
 @PrepareMoEInputsRegistry.register(predicate=_has_fused_experts_quantizers)
 def _prepare_fused_experts(name: str, moe_module: nn.Module, ctx: ExportContext) -> None:
     """Mark fused experts handled; their missing amax fallback occurs during export."""
@@ -125,12 +108,13 @@ def _is_quant_moe_linear(module: nn.Module) -> bool:
     name gets uniquified — would bypass this handler and export without the input-amax
     fallback. The name check is kept as a fallback so stand-in modules match too.
 
-    The wrapper lives in the optional transformers plugin, hence the lazy import.
+    The wrapper lives in the Step PTQ modeling module, imported lazily like other export
+    modules do to avoid an import cycle with ``modelopt.torch.quantization``.
     """
     if not hasattr(module, "experts"):
         return False
     try:
-        from modelopt.torch.quantization.plugins.huggingface import _QuantMoELinear
+        from modelopt.torch.models.step3p5.modeling_ptq import _QuantMoELinear
 
         if isinstance(module, _QuantMoELinear):
             return True

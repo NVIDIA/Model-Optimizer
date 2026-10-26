@@ -27,10 +27,7 @@ from _test_utils.torch.transformers_models import (
 from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModelForCausalLM, LlamaForCausalLM
 
-from modelopt.torch.opt.plugins.transformers import (
-    _TRANSFORMERS_GE_5_0,
-    _legacy_tied_weights_keys_as_dict,
-)
+from modelopt.torch.opt.plugins.transformers import _legacy_tied_weights_keys_as_dict
 
 
 @pytest.mark.parametrize("model_cls", [LlamaForCausalLM, AutoModelForCausalLM])
@@ -84,7 +81,6 @@ def test_save_pretrained_with_legacy_tied_weights_keys(tmp_path, tie_word_embedd
     tf_modelopt_state_and_output_tester(model, model_test)
 
 
-@pytest.mark.skipif(not _TRANSFORMERS_GE_5_0, reason="list-style keys are native to transformers 4")
 def test_legacy_tied_weights_keys_as_dict_restores_class_attribute():
     """The shim must not leave an instance attribute shadowing the class declaration."""
 

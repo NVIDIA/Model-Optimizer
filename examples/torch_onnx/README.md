@@ -80,6 +80,10 @@ Convolutional architectures such as ResNet support only FP8 and INT8 quantizatio
 INT4_AWQ, and AutoQuantize are not supported for these models because TensorRT does not provide
 the required convolution kernels.
 
+Add `--trt_build` to build an engine after export. The builder optimization level defaults to 4;
+use `--trt_builder_optimization_level=0` for faster builds, as the example tests do. Lower levels
+may reduce the resulting engine's inference performance.
+
 ### Conv2d Quantization Override
 
 TensorRT only supports FP8 and INT8 for convolution operations. When quantizing models with Conv2d layers (like SwinTransformer), the script automatically applies the following overrides:

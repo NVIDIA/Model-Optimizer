@@ -280,21 +280,26 @@ def test_worker_names_the_experiment_when_started_without_the_launcher(mlflow_ut
 
 
 def test_start_uploads_the_launchers_command_and_the_serving_settings(
-    mlflow_utils, monkeypatch, fake_mlflow
+    mlflow_utils, monkeypatch, fake_mlflow, tmp_path
 ):
     monkeypatch.setenv("MLFLOW_TRACKING_URI", URI)
     monkeypatch.setenv("MLFLOW_EXPERIMENT_NAME", "tester/vllm_serve_fakequant/Qwen3-0.6B-nvfp4")
     monkeypatch.setenv(
         "MODELOPT_MLFLOW_COMMAND", "python3 vllm_serve_fakequant.py /ckpts/x -tp 8\n"
     )
+    recipe_path = tmp_path / "quant_recipe.yaml"
+    recipe_path.write_text(yaml.safe_dump({"model.layers.0.input_quantizer": {"_disabled": True}}))
     tracker = mlflow_utils.FakeQuantMlflowTracker(
-        _worker(served_model_name="qwen", max_model_len=4096), QUANT_CONFIG
+        _worker(served_model_name="qwen", max_model_len=4096),
+        {**QUANT_CONFIG, "recipe_path": str(recipe_path)},
     )
     tracker.start()
     tracker.finish("FINISHED")
 
     assert fake_mlflow.experiment == "tester/vllm_serve_fakequant/Qwen3-0.6B-nvfp4"
     assert fake_mlflow.texts["command.txt"].startswith("python3 vllm_serve_fakequant.py")
+    assert fake_mlflow.texts["recipe/quant_recipe.yaml"] == recipe_path.read_text()
+    assert "recipe/resolved_recipe.yaml" not in fake_mlflow.texts
     # The quantization settings and the serving settings are both searchable.
     assert fake_mlflow.params["quant_cfg"] == "NVFP4_DEFAULT_CFG"
     assert fake_mlflow.params["calib_size"] == 512

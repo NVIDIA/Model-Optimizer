@@ -79,6 +79,7 @@ from __future__ import annotations
 import argparse
 import copy
 import fnmatch
+import inspect
 import json
 import os
 import re
@@ -114,22 +115,53 @@ def _inject_v4_module(v4_inference_dir: Path) -> None:
 deekseep_v4_model: Any = None
 
 
+_DS_FP8_BLOCK_SIZES = (32, 128)
+
+
+def _ds_fp8_block_size(weight: torch.Tensor, scale: torch.Tensor) -> int:
+    """Detect the FP8 quantization block size used by the loaded DeepSeek V4 module.
+
+    Prefers an explicit module attribute (``fp8_block_size`` on V4.1-Flash,
+    ``block_size`` on V4-Pro), falling back to the one known DS-V4 block size
+    whose scale shape matches the tensors. Shapes alone cannot name a block size:
+    once a block is partial, a whole range of sizes gives the same scale shape.
+    """
+    for attr in ("fp8_block_size", "block_size"):
+        blk = getattr(deekseep_v4_model, attr, None)
+        if isinstance(blk, int) and blk > 0 and scale.shape == _fp8_scale_shape(weight, blk):
+            return blk
+    fits = [b for b in _DS_FP8_BLOCK_SIZES if scale.shape == _fp8_scale_shape(weight, b)]
+    assert len(fits) == 1, (
+        f"cannot infer FP8 block size from weight {tuple(weight.shape)} "
+        f"and scale {tuple(scale.shape)}: known block sizes {_DS_FP8_BLOCK_SIZES} "
+        f"matching these shapes: {fits}"
+    )
+    return fits[0]
+
+
+def _fp8_scale_shape(weight: torch.Tensor, block: int) -> tuple[int, int]:
+    """Ceil-div, matching DS-V4 ``Linear.__init__``'s scale allocation."""
+    m, n = weight.shape
+    return ((m + block - 1) // block, (n + block - 1) // block)
+
+
 def _fp8_ue8m0_blockwise_to_bf16(
     weight: torch.Tensor, scale: torch.Tensor, block: int = 128
 ) -> torch.Tensor:
-    """FP8 E4M3 × UE8M0 128x128 block-scale → BF16 (V4 native FP8 layout).
+    """FP8 E4M3 × UE8M0 ``block``x``block`` block-scale → BF16 (V4 native FP8 layout).
 
     Same math as ``scripts/convert_dsv4_to_bf16.py``'s helper; ModelOpt's
     triton ``weight_dequant`` expects FP32 scales and cannot consume UE8M0
     directly, so we dequant inline.
     """
     m, n = weight.shape
-    assert m % block == 0 and n % block == 0, f"FP8 weight shape {(m, n)} not divisible by {block}"
-    assert scale.shape == (m // block, n // block), (
-        f"FP8 scale shape {tuple(scale.shape)} != expected ({m // block}, {n // block})"
+    expected = _fp8_scale_shape(weight, block)
+    assert scale.shape == expected, (
+        f"FP8 scale shape {tuple(scale.shape)} != expected {expected} for "
+        f"weight {(m, n)} at block size {block}"
     )
     exp = scale.contiguous().view(torch.uint8).to(torch.int32) - 127
-    exp = exp.repeat_interleave(block, 0).repeat_interleave(block, 1)
+    exp = exp.repeat_interleave(block, 0).repeat_interleave(block, 1)[:m, :n]
     return torch.ldexp(weight.to(torch.float32), exp).to(torch.bfloat16)
 
 
@@ -141,7 +173,7 @@ def _dequantize_linear_weight(linear_module) -> torch.Tensor:
     on V4's global default (``set_dtype`` typically sets it to fp8) and on
     the optional ``dtype=`` kwarg passed to ``Expert.__init__``:
       * ``float4_e2m1fn_x2`` + UE8M0 1x32 scale   → MXFP4 dequant.
-      * ``float8_e4m3fn``    + UE8M0 128x128 scale → FP8 dequant (inline).
+      * ``float8_e4m3fn``    + UE8M0 NxN block scale → FP8 dequant (inline).
       * any float dtype without a ``.scale``       → passthrough (already BF16).
     """
     w = linear_module.weight
@@ -159,7 +191,7 @@ def _dequantize_linear_weight(linear_module) -> torch.Tensor:
             block_sizes=[block_size],
         )
     if w.dtype == torch.float8_e4m3fn:
-        return _fp8_ue8m0_blockwise_to_bf16(w, w.scale, block=128)
+        return _fp8_ue8m0_blockwise_to_bf16(w, w.scale, block=_ds_fp8_block_size(w, w.scale))
     return w
 
 
@@ -237,7 +269,11 @@ def install_quant_registry() -> None:
 
 
 def load_deepseek_v4(
-    model_config: str, model_path: str, batch_size: int, dummy_weights: bool = False
+    model_config: str,
+    model_path: str,
+    batch_size: int,
+    dummy_weights: bool = False,
+    tokenizer=None,
 ):
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     rank = int(os.getenv("RANK", "0"))
@@ -251,7 +287,14 @@ def load_deepseek_v4(
         margs = deekseep_v4_model.ModelArgs(**json.load(f))
         margs.max_batch_size = max(batch_size, margs.max_batch_size)
     with torch.device("cuda"):
-        model = deekseep_v4_model.Transformer(margs)
+        if "tokenizer" in inspect.signature(deekseep_v4_model.Transformer.__init__).parameters:
+            assert tokenizer is not None, (
+                "this DS-V4 release's Transformer requires a tokenizer "
+                "(engram hash tables); load it before the model"
+            )
+            model = deekseep_v4_model.Transformer(margs, tokenizer)
+        else:
+            model = deekseep_v4_model.Transformer(margs)
 
     if dummy_weights:
         print(
@@ -605,11 +648,15 @@ def main():
 
     _inject_v4_module(args.dsv4_inference_dir)
     install_quant_registry()
-    model = load_deepseek_v4(
-        args.config, args.model_path, args.batch_size, dummy_weights=args.dummy_weights
-    )
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path, trust_remote_code=args.trust_remote_code
+    )
+    model = load_deepseek_v4(
+        args.config,
+        args.model_path,
+        args.batch_size,
+        dummy_weights=args.dummy_weights,
+        tokenizer=tokenizer,
     )
     model = ptq(
         model,
@@ -626,21 +673,24 @@ def main():
         _run_quantized_generate(model, tokenizer, args.run_generate, args.max_new_tokens)
 
 
-def _run_quantized_generate(model, tokenizer, prompt: str, max_new_tokens: int):
+def _run_quantized_generate(
+    model, tokenizer, prompt: str, max_new_tokens: int, device: str = "cuda"
+):
     """Smoke-test: generate tokens from a prompt through the calibrated+quantized
     model. If the output decodes to coherent text, the quantized forward works
     end-to-end."""
     rank = int(os.getenv("RANK", "0"))
 
-    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda")
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
     tokens = torch.full(
-        (1, input_ids.shape[1] + max_new_tokens), -1, dtype=torch.long, device="cuda"
+        (1, input_ids.shape[1] + max_new_tokens), -1, dtype=torch.long, device=device
     )
     tokens[0, : input_ids.shape[1]] = input_ids[0]
     prev_pos = 0
     with torch.inference_mode():
         for cur_pos in range(input_ids.shape[1], tokens.shape[1]):
-            logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            out = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            logits = out[1] if isinstance(out, tuple) else out
             next_token = logits.argmax(dim=-1)
             tokens[:, cur_pos] = next_token
             prev_pos = cur_pos

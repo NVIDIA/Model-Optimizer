@@ -37,6 +37,46 @@ These instructions apply to AI-assisted work in this repository.
   "ship", or equivalent before running `git push`, `gh pr create`, or any
   push-option flags like `-o merge_request.create`.
 
+## Adding tests
+
+- **Be stingy.** Per [Test design principles](CONTRIBUTING.md#test-design-principles),
+  check existing unit/GPU/example tests first and extend or parametrize rather than add. Skip tests that
+  restate the implementation, assert on mocks or message wording, or cover a helper its caller's test
+  already exercises. Dev scaffolding tests stay out of the commit.
+- **Keep `tests/unit` fast.** The `linux` CI job times out at 20 min. A new unit test must run in
+  well under 5s locally (`--durations`); anything spawning processes/subprocesses, multi-step training or
+  large models goes to `tests/gpu*` (except tests sharing the session-scoped `cpu_dist_workers`). In the pre-push pass, list the tests you added and why each is needed.
+
+## Pre-push review pass
+
+Before asking to push, review the whole diff against its base as a skeptical
+reviewer would, and report what you found. If the pass turns up an opportunity
+below, tell the user and offer to address it before pushing; do not push as-is.
+
+- **Performance and memory, especially on GPU.** Measure peak memory and time
+  of changed heavy paths at realistic sizes (e.g. with
+  `torch.cuda.max_memory_allocated`) instead of reasoning about them. Look for
+  full-size temporaries (float32 copies of narrower tensors, int64
+  intermediates, whole-tensor work a chunked loop could bound), expensive work a
+  cache or earlier result already holds, and host syncs or device-to-host copies
+  on hot paths.
+- **Distributed and offloaded paths.** Every rank must issue the same
+  collectives in the same order; rank-dependent work, and any hook it triggers,
+  must not start one. Do not keep gathered or onloaded weights past their layer.
+- **Simplicity.** Prefer the smallest diff, and extending an existing mechanism
+  over adding a parallel one: ask whether something already does this. Remove
+  dead code, debug leftovers, unused options and unrelated refactors. Keep
+  public API changes minimal and backward compatible. Comments say why, not
+  what.
+- **Correctness.** Validate before mutating, so a refusal leaves state
+  unchanged, and fail loudly rather than silently ignore an option or route.
+  Cover the layouts the change can meet: dtypes, tied or shared weights,
+  offloaded, FSDP2 and meta tensors, fused or grouped modules.
+- **Evidence.** Each fix has a test that fails without it; check by reverting.
+  A test for a hang fails fast instead of hanging CI. Run the paths CI skips
+  (multi-GPU, GPU-only) when the change touches them, and state in the PR what
+  you ran and what you did not.
+
 ## Updating skills
 
 - **Keep skill edits concise.** Skills are loaded into agent context, so every
@@ -48,11 +88,12 @@ These instructions apply to AI-assisted work in this repository.
 
 ## Sizing and splitting PRs
 
-- **Keep each PR that goes up for review under ~500 changed lines of source.**
+- **Keep each PR that goes up for review under ~500 added lines of source.**
   Large PRs stall in review; exceed the budget only when the change genuinely
   cannot be split — a mechanical rename, generated files, or a self-contained
   drop such as a new example or a new model/backend that has no working
-  intermediate state. Check the size with `git diff --stat <base>...HEAD`
+  intermediate state. Deletions, tests, and docs don't count; check the
+  insertions from `git diff --shortstat <base>...HEAD -- . ':!tests' ':!docs'`
   before opening.
 - **Propose the split before opening an oversized PR.** When the work in flight
   is already over budget, offer a series of smaller PRs and, once the user
@@ -67,6 +108,13 @@ These instructions apply to AI-assisted work in this repository.
   order in each description.
 - **Prefix titles with `[x/N]`** — e.g. `[2/4] Add NVFP4 export path` — so
   reviewers know it is one slice of a planned split, and link the sibling PRs.
+- **Optional but strongly recommended: build and ship the series with `gh stack`**
+  (the `github/gh-stack` extension). `gh stack init <branch1 ... branchN>` (bottom
+  to top) turns the split branches into a linear stack, `gh stack submit` pushes
+  them and opens the PRs in order with the stack cross-links added automatically —
+  you still write each `[x/N]` title and description in its editor — and
+  `gh stack sync` / `gh stack rebase` keep the upper slices consistent as the lower
+  ones merge. Pushing and wiring each PR by hand works too.
 - **Every sub-PR stands on its own:** it builds, it carries unit tests for the
   code it introduces, and CI passes on it without the later PRs.
 - **When a split makes the whole hard to follow, the full change may also go

@@ -80,6 +80,25 @@ def test_distillation_model_loss_params():
     assert next(kd_loss.parameters()).dtype == torch.float16
 
 
+def test_mgd_loss_does_not_backprop_into_teacher():
+    teacher_layer = nn.Conv2d(3, 48, 1)
+    out_s = torch.randn(2, 32, 8, 8, requires_grad=True)
+    out_t = teacher_layer(torch.randn(2, 3, 8, 8))
+
+    mtd.MGDLoss(32, 48)(out_s, out_t).backward()
+
+    assert out_s.grad is not None
+    assert teacher_layer.weight.grad is None
+
+
+def test_loss_balancer_requires_forward():
+    class NoForwardBalancer(mtd.DistillationLossBalancer):
+        pass
+
+    with pytest.raises(TypeError, match="abstract"):
+        NoForwardBalancer()
+
+
 def test_distillation_model_no_balancer():
     student = tiny_mobilenet().train()
     config = {
@@ -125,6 +144,23 @@ def test_distillation_model_mft():
     distillation_model(input_tensor)
     loss = distillation_model.compute_kd_loss(labels=labels)
     assert isinstance(loss, torch.Tensor) and loss.numel() == 1
+
+
+def test_mft_loss_accepts_sequence_shaped_logits():
+    """MFTLoss flattens the logits it is given, so the labels have to follow them."""
+    torch.manual_seed(0)
+    batch, seq_len, vocab = 2, 8, 50
+    logits_s = torch.randn(batch, seq_len, vocab)
+    logits_t = torch.randn(batch, seq_len, vocab)
+    labels = torch.randint(0, vocab, (batch, seq_len))
+
+    loss = mtd.MFTLoss()(logits_s, logits_t, labels)
+
+    # One label per position, so flattening first must not change the result.
+    flattened = mtd.MFTLoss()(
+        logits_s.reshape(-1, vocab), logits_t.reshape(-1, vocab), labels.reshape(-1)
+    )
+    assert torch.allclose(loss, flattened)
 
 
 def test_distillation_mode_default_config():

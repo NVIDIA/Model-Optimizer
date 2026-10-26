@@ -27,11 +27,13 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch.opt import apply_mode
 from modelopt.torch.opt.searcher import ConstraintsDict, ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import (
+    _validate_linear_attention_quantizers,
     preserve_quantizer_attributes_context,
     set_quantizer_attributes_partial,
     set_quantizer_by_cfg,
@@ -230,6 +232,81 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
     )
 
 
+_INDEXER_UNITS = "the configs/ptq/units/indexer_*_nvfp4 recipe units"
+_MOE_COMM_UNITS = "the configs/ptq/units/moe_*_nvfp4 recipe units"
+# Quantizers that only framework plugins add: (class-name patterns of the modules they belong on,
+# what those modules are, where the supported models are listed).
+_PLUGIN_QUANTIZERS = {
+    "indexer_q_quantizer": (("*Indexer",), "sparse-attention indexer", _INDEXER_UNITS),
+    "indexer_k_quantizer": (("*Indexer",), "sparse-attention indexer", _INDEXER_UNITS),
+    "indexer_scorer_kwargs_quantizer": (
+        ("*Indexer",),
+        "sparse-attention indexer",
+        'the "Indexer scorer kernel arguments" section of examples/vllm_serve/README.md',
+    ),
+    "dispatch_quantizer": (("*Experts*", "*FusedMoE"), "MoE experts module", _MOE_COMM_UNITS),
+    "combine_quantizer": (("*Experts*", "*FusedMoE"), "MoE experts module", _MOE_COMM_UNITS),
+}
+
+
+def _check_plugin_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
+    """Raise when a config enables a plugin-only quantizer that quantizes nothing.
+
+    The quantizers in ``_PLUGIN_QUANTIZERS`` only exist on modules (sparse-attention indexers, MoE
+    experts) that a framework plugin (vLLM, Megatron-Core) converted. When a plugin does not
+    recognize the installed framework's module class, or the patterns match none of the modules,
+    the tensors silently stay unquantized. Intent is read like in
+    :func:`_check_weight_quantization_took_effect`, but only from patterns naming the quantizer, so
+    catch-all patterns do not count. A model without such a module (another architecture) is
+    skipped. Under ``torch.distributed`` the check covers the whole model: a pipeline stage may hold
+    none of the modules a layer-selective recipe selects. All ranks then raise together instead of
+    some waiting in calibration for the others.
+    """
+    last_entry_per_pattern = {entry.quantizer_name: entry for entry in config.quant_cfg}
+    for quantizer_name, (owner_patterns, owner_kind, supported) in _PLUGIN_QUANTIZERS.items():
+        if not any(
+            entry.enable and quantizer_name in pattern
+            for pattern, entry in last_entry_per_pattern.items()
+        ):
+            continue
+        quantizers = [
+            module
+            for name, module in model.named_modules()
+            # A list-valued ``cfg`` turns the quantizer into a SequentialQuantizer container.
+            if isinstance(module, (TensorQuantizer, SequentialQuantizer))
+            and name.endswith(quantizer_name)
+        ]
+        owners = {
+            type(module).__name__
+            for module in model.modules()
+            if any(fnmatch.fnmatchcase(type(module).__name__, p) for p in owner_patterns)
+        }
+        # (unconverted owner classes, has the quantizer, has an enabled one)
+        local = (
+            [] if quantizers else sorted(owners),
+            bool(quantizers),
+            any(quantizer.is_enabled for quantizer in quantizers),
+        )
+        per_rank: list[Any] = [local]
+        if dist.size() > 1:  # every rank calls quantize() with the same patterns
+            per_rank = [None] * dist.size()
+            torch.distributed.all_gather_object(per_rank, local)
+        unsupported = sorted({name for names, _, _ in per_rank for name in names})
+        if unsupported:
+            raise RuntimeError(
+                f"The quantization config enables {quantizer_name}, but no {owner_kind} of this "
+                f"model ({', '.join(unsupported)}) has one: the ModelOpt plugins do not support "
+                "this model, its runtime backend or the installed vLLM / Megatron-Core version "
+                f"(supported models: see {supported})."
+            )
+        if any(has for _, has, _ in per_rank) and not any(on for _, _, on in per_rank):
+            raise RuntimeError(
+                f"The quantization config enables {quantizer_name}, but no {owner_kind} has an "
+                "enabled one: the patterns naming it match none of them, or a later config entry "
+                "disabled it."
+            )
+
+
 def quantize(
     model: nn.Module,
     config: dict[str, Any | QuantizeConfig],
@@ -333,8 +410,10 @@ def quantize(
     else:
         # Already quantized, so lets apply the quant_cfg from the config
         set_quantizer_by_cfg(model, quantize_config.quant_cfg)
+        _validate_linear_attention_quantizers(model)
     # Fail before calibration rather than after exporting an unquantized checkpoint.
     _check_weight_quantization_took_effect(model, quantize_config)
+    _check_plugin_quantization_took_effect(model, quantize_config)
     return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
 
 
@@ -1017,6 +1096,9 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
     Any weight-quantizer rotation is folded into the weights and disabled so subsequent
     forwards do not re-rotate the already-folded weights.
     """
+    for module in model.modules():
+        if isinstance(module, QuantModule):
+            module._validate_fold_weight()
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             module.fold_weight(keep_attrs)
