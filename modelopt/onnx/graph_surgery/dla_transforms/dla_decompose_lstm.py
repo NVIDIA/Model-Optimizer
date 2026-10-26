@@ -45,7 +45,6 @@ from ..utils.graph_utils import (
     add_unique_initializers,
     batch_replace_nodes,
     get_constant_by_name,
-    is_const_dq_input,
 )
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _subgraph_captures
@@ -143,7 +142,8 @@ def _promote_lstm_input_to_rank4(
     shape = cache.get_shape(tensor_name)
     if shape is not None and len(shape) >= 4:
         return
-    axes_list = [0] if shape is None or len(shape) == 3 else list(range(4 - len(shape)))
+    rank = len(shape) if shape is not None else (2 if input_index == 3 else 3)
+    axes_list = list(range(max(0, 4 - rank)))
 
     axes_name = cache.unique_name(f"{tensor_name}_lstm4d_axes_{lstm_node.name}_{input_index}")
     out_name = cache.unique_name(f"{tensor_name}_lstm4d_{lstm_node.name}_{input_index}")
@@ -537,17 +537,28 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
                 return None
             return list(init.dims)
 
-        init_names = list(cache.init_names)
-        dq_src = is_const_dq_input(init_names, tensor_name, graph)
-        if dq_src:
-            return resolve_lstm_tensor_shape(dq_src, _seen)
-
         prod = cache.get_producer(tensor_name)
-        if prod is None:
+        if (
+            prod is None
+            or prod.overload
+            or (prod.domain, prod.op_type, prod.overload) in local_functions
+        ):
             return None
-        if prod.op_type == "Unsqueeze" and len(prod.input) >= 2:
+        standard = prod.domain in {"", "ai.onnx"}
+        if prod.op_type == "DequantizeLinear" and (
+            standard
+            or (
+                prod.domain == "com.microsoft"
+                and any(
+                    entry.domain == prod.domain and entry.version == 1
+                    for entry in model.opset_import
+                )
+            )
+        ):
+            return resolve_lstm_tensor_shape(prod.input[0], _seen)
+        if standard and prod.op_type == "Unsqueeze" and len(prod.input) >= 2:
             inner = prod.input[0]
-            axes_name = new_name(prod.input[1])
+            axes_name = prod.input[1]
             inner_shape = resolve_lstm_tensor_shape(inner, _seen)
             if inner_shape is None:
                 return None
@@ -558,15 +569,59 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
                 return None
             axes_flat = np.asarray(ax, dtype=np.int64).flatten().tolist()
             out = list(inner_shape)
-            r = len(out)
-            norm = [int(a) + r + 1 if int(a) < 0 else int(a) for a in axes_flat]
+            rank = len(out) + len(axes_flat)
+            norm = [int(a) + rank if int(a) < 0 else int(a) for a in axes_flat]
             for a in sorted(norm):
                 if a < 0 or a > len(out):
                     return None
                 out.insert(a, 1)
             return out
-        if prod.op_type in ("Identity", "Cast") and prod.input and prod.input[0]:
+        if standard and prod.op_type in ("Identity", "Cast") and prod.input and prod.input[0]:
             return resolve_lstm_tensor_shape(prod.input[0], _seen)
+        return None
+
+    def resolve_lstm_tensor_dtype(name, seen=None):
+        """Resolve supported dtype-preserving producers without a prior inference pass."""
+        dtype = cache.get_dtype(name)
+        if dtype is not None:
+            return dtype
+        seen = set() if seen is None else seen
+        if name in seen:
+            return None
+        seen.add(name)
+        producer = cache.get_producer(name)
+        if (
+            producer is None
+            or producer.overload
+            or (producer.domain, producer.op_type, producer.overload) in local_functions
+        ):
+            return None
+        standard = producer.domain in {"", "ai.onnx"}
+        if producer.op_type == "DequantizeLinear" and (
+            standard
+            or (
+                producer.domain == "com.microsoft"
+                and any(
+                    entry.domain == producer.domain and entry.version == 1
+                    for entry in model.opset_import
+                )
+            )
+        ):
+            output_dtype = next(
+                (
+                    attribute.i
+                    for attribute in producer.attribute
+                    if attribute.name == "output_dtype"
+                ),
+                0,
+            )
+            return output_dtype or cache.get_dtype(producer.input[1])
+        if standard and producer.op_type == "Cast":
+            return next(
+                (attribute.i for attribute in producer.attribute if attribute.name == "to"), None
+            )
+        if standard and producer.op_type in {"Identity", "Unsqueeze"}:
+            return resolve_lstm_tensor_dtype(producer.input[0], seen)
         return None
 
     def create_shape_info_map(node):
@@ -868,12 +923,14 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         and next((opset.version for opset in model.opset_import if not opset.domain), 0) < 13
     ):
         raise ValueError("LSTM decomposition requires ONNX opset >= 13")
+    validated_shapes = {}
     for node in lstm_nodes:
         _validate_lstm_supported(node)
         shape_info = create_shape_info_map(node)
         if any(value <= 0 for value in shape_info.values()):
             raise ValueError(f"LSTM {node.name!r}: all dimensions must be static and positive")
-        dtype = cache.get_dtype(node.input[0])
+        validated_shapes[id(node)] = shape_info
+        dtype = resolve_lstm_tensor_dtype(node.input[0])
         if dtype != onnx.TensorProto.FLOAT:
             raise ValueError(f"LSTM {node.name!r}: decomposition supports FP32 inputs")
     names = set()
@@ -890,7 +947,7 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         # Rebuild cache after promotion added new initializers/value_info/nodes
         cache.rebuild()
         nodes_to_add = list(prep_nodes)
-        shape_info_map = create_shape_info_map(node)
+        shape_info_map = validated_shapes[id(node)]
         if direction == "bidirectional" and int(shape_info_map["d"]) != 2:
             raise ValueError(
                 f"LSTM {node.name!r}: direction is bidirectional but num_directions (from W) is "

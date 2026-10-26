@@ -456,3 +456,77 @@ def test_buffered_constant_state_convolution_keeps_sequential_rounding():
     )
     actual = numpy_helper.to_array(next(t for t in graph.initializer if t.name == "folded"))
     assert actual.tobytes() == expected.tobytes()
+
+
+@pytest.mark.parametrize("role", ["X", "W", "R", "B"])
+def test_dequantized_inputs_without_value_info_preserve_numerics(role):
+    """Resolve the native LSTM contract without relying on a prior inference pass."""
+    model = _make_lstm_model("forward")
+    rng = np.random.default_rng(12)
+    values = (
+        rng.standard_normal((_T, _N, _D_IN)).astype(np.float32)
+        if role == "X"
+        else numpy_helper.to_array(next(t for t in model.graph.initializer if t.name == role))
+    )
+    quantized = np.clip(np.rint(values * 16), -128, 127).astype(np.int8)
+    feeds = {"X": rng.standard_normal((_T, _N, _D_IN)).astype(np.float32)}
+    if role == "X":
+        model.graph.input[0].CopyFrom(_vi("X_q", TensorProto.INT8, list(quantized.shape)))
+        feeds = {"X_q": quantized}
+    else:
+        weight = next(t for t in model.graph.initializer if t.name == role)
+        weight.CopyFrom(_init(role + "_q", quantized))
+    model.graph.initializer.extend(
+        [_init(role + "_scale", np.float32(0.0625)), _init(role + "_zero", np.int8(0))]
+    )
+    model.graph.node.insert(
+        0,
+        helper.make_node(
+            "DequantizeLinear", [role + "_q", role + "_scale", role + "_zero"], [role]
+        ),
+    )
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    transformed = _apply_decompose_lstm(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("constant_axes", [False, True])
+def test_unsqueezed_weight_without_value_info_reads_existing_axes(constant_axes):
+    """Look up existing axes by their actual initializer or Constant tensor name."""
+    model = _make_lstm_model("forward")
+    weight = next(t for t in model.graph.initializer if t.name == "W")
+    weight.CopyFrom(_init("W_flat", numpy_helper.to_array(weight).reshape(4 * _H, _D_IN)))
+    axes = _init("weight_axes", np.asarray([0], np.int64))
+    if constant_axes:
+        model.graph.node.insert(0, helper.make_node("Constant", [], ["weight_axes"], value=axes))
+    else:
+        model.graph.initializer.append(axes)
+    model.graph.node.insert(
+        int(constant_axes), helper.make_node("Unsqueeze", ["W_flat", "weight_axes"], ["W"])
+    )
+    feeds = {"X": np.random.default_rng(13).standard_normal((_T, _N, _D_IN)).astype(np.float32)}
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    transformed = _apply_decompose_lstm(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("axes", [[0, 1], [-3, -2]])
+def test_unsqueezed_activation_without_value_info_handles_multiple_axes(axes):
+    """Resolve positive and negative multiple axes against the Unsqueeze output rank."""
+    model = _make_lstm_model("forward")
+    model.graph.input[0].CopyFrom(_vi("X_flat", TensorProto.FLOAT, [_D_IN]))
+    model.graph.initializer.append(_init("activation_axes", np.asarray(axes, np.int64)))
+    model.graph.node.insert(0, helper.make_node("Unsqueeze", ["X_flat", "activation_axes"], ["X"]))
+    model.graph.output[0].CopyFrom(_vi("Y", TensorProto.FLOAT, [1, 1, 1, _H]))
+    for output in model.graph.output[1:]:
+        output.CopyFrom(_vi(output.name, TensorProto.FLOAT, [1, 1, _H]))
+    feeds = {"X_flat": np.random.default_rng(14).standard_normal(_D_IN).astype(np.float32)}
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    transformed = _apply_decompose_lstm(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
