@@ -60,18 +60,34 @@ def _dequantize(
 
     For scalar (rank-0) ``x`` the broadcast reshape is skipped.
     """
-    x = x_arr.astype(np.int32)
-    zp = zp_arr.astype(np.int32)
+    int32_data = x_arr.dtype == np.int32
+    zp = zp_arr.astype(np.int32 if int32_data else np.float32)
     scale = scale_arr.astype(np.float32)
-
-    if x.ndim > 0:
-        # Reshape scale / zp for per-channel broadcasting along ``axis``.
-        broadcast_shape = [1] * x.ndim
+    if zp.size == 1:
+        zp = zp.reshape(())
+    if scale.size == 1:
+        scale = scale.reshape(())
+    if x_arr.ndim > 0 and (zp.size > 1 or scale.size > 1):
+        broadcast_shape = [1] * x_arr.ndim
         broadcast_shape[axis] = -1
         zp = zp.reshape(broadcast_shape)
         scale = scale.reshape(broadcast_shape)
-
-    return ((x - zp) * scale).astype(np.float32)
+    if int32_data:
+        # Keep established INT32 rounding without a whole-weight float64 temporary.
+        result = np.empty(x_arr.shape, dtype=np.float32)
+        with np.nditer(
+            [x_arr, zp, scale, result],
+            flags=["external_loop", "buffered", "zerosize_ok"],
+            op_flags=[["readonly"], ["readonly"], ["readonly"], ["writeonly"]],
+            buffersize=2**18,
+        ) as chunks:
+            for values, zeros, scales, output in chunks:
+                output[...] = (values - zeros) * scales
+        return result
+    result = x_arr.astype(np.float32)
+    np.subtract(result, zp, out=result)
+    np.multiply(result, scale, out=result)
+    return result
 
 
 def _should_skip(
@@ -81,24 +97,21 @@ def _should_skip(
     model: onnx.ModelProto,
     shape_map: dict,
 ) -> bool:
-    """Return True if the DQ node must be kept (downstream op handles quantised weight)."""
-    consumers = consumer_map.get(dq_output, [])
-    if len(consumers) != 1:
-        return False  # multiple consumers → always dequantize
-
-    consumer_node, input_idx = consumers[0]
-    is_weight = input_idx == 1
-    op = consumer_node.op_type
-
-    if op == "Conv" and is_weight and zp_dtype in _CONV_SKIP_ZP:
-        return True
-    if op == "ConvTranspose" and is_weight and zp_dtype in _CONVT_SKIP_ZP:
-        return True
-    if op in ("MatMul", "Gemm") and is_weight and zp_dtype in _MATMUL_SKIP_ZP:
-        try:
-            return check_to_apply_transpose(consumer_node, model, shape_map)
-        except Exception:
-            return False
+    """Retain weights required or potentially required by any downstream consumer."""
+    for consumer_node, input_idx in consumer_map.get(dq_output, []):
+        if input_idx != 1 or consumer_node.domain not in {"", "ai.onnx"} or consumer_node.overload:
+            continue
+        op = consumer_node.op_type
+        if op == "Conv" and zp_dtype in _CONV_SKIP_ZP:
+            return True
+        if op == "ConvTranspose" and zp_dtype in _CONVT_SKIP_ZP:
+            return True
+        if op in ("MatMul", "Gemm") and zp_dtype in _MATMUL_SKIP_ZP:
+            try:
+                if check_to_apply_transpose(consumer_node, model, shape_map):
+                    return True
+            except (ValueError, RuntimeError):
+                return True
     return False
 
 
@@ -109,6 +122,10 @@ def _apply_remove_deqlin(model: onnx.ModelProto) -> onnx.ModelProto:
     """Replace eligible DequantizeLinear nodes with pre-computed float32 initializers."""
     graph = model.graph
     cache = GraphCache(graph)
+    local_functions = {
+        (function.domain, function.name, function.overload) for function in model.functions
+    }
+    opsets = {entry.domain: entry.version for entry in model.opset_import}
 
     # Snapshot for check_to_apply_transpose (expects a plain dict)
     shape_map_snapshot: dict = {}
@@ -124,6 +141,14 @@ def _apply_remove_deqlin(model: onnx.ModelProto) -> onnx.ModelProto:
     cnt = 0
 
     for node in cache.nodes_by_op("DequantizeLinear"):
+        if node.overload or (node.domain, node.op_type, node.overload) in local_functions:
+            continue
+        if node.domain not in {"", "ai.onnx"} and not (
+            node.domain == "com.microsoft" and opsets.get(node.domain) == 1
+        ):
+            continue
+        if any(name in cache.graph_input_names for name in node.input):
+            continue
         if get_node_attr_i(node, "block_size", 0):
             continue
         if not node.input or node.input[0] not in initializer_names:
@@ -134,6 +159,19 @@ def _apply_remove_deqlin(model: onnx.ModelProto) -> onnx.ModelProto:
         # Fetch scale and zero-point initializers (inputs 1 and 2)
         scale_init = cache.get_init(node.input[1]) if len(node.input) > 1 else None
         zp_init = cache.get_init(node.input[2]) if len(node.input) > 2 else None
+
+        if len(node.input) > 2 and node.input[2] and zp_init is None:
+            continue
+        x_init = cache.get_init(node.input[0])
+        if x_init is None:
+            continue
+        if (
+            x_init.data_type
+            not in _CONV_SKIP_ZP | {TensorProto.INT16, TensorProto.UINT16, TensorProto.INT32}
+            or (scale_init is not None and scale_init.data_type != TensorProto.FLOAT)
+            or get_node_attr_i(node, "output_dtype", 0) not in {0, TensorProto.FLOAT}
+        ):
+            continue
 
         if scale_init is None:
             logger.debug(
@@ -148,7 +186,7 @@ def _apply_remove_deqlin(model: onnx.ModelProto) -> onnx.ModelProto:
                 node.name,
             )
 
-        zp_dtype: int = zp_init.data_type if zp_init is not None else scale_init.data_type
+        zp_dtype: int = zp_init.data_type if zp_init is not None else x_init.data_type
 
         if _should_skip(dq_output, zp_dtype, consumer_map, model, shape_map_snapshot):
             logger.debug(
@@ -157,7 +195,6 @@ def _apply_remove_deqlin(model: onnx.ModelProto) -> onnx.ModelProto:
             continue
 
         # ── Dequantize ────────────────────────────────────────────────────────
-        x_init = cache.get_init(node.input[0])
         x_arr = numpy_helper.to_array(x_init)
         scale_arr = numpy_helper.to_array(scale_init)
         zp_arr = (
@@ -166,20 +203,27 @@ def _apply_remove_deqlin(model: onnx.ModelProto) -> onnx.ModelProto:
             else np.zeros(scale_arr.shape, dtype=np.int32)
         )
 
-        axis = get_node_attr_i(node, "axis", 0)
+        axis = get_node_attr_i(node, "axis", 1)
 
         dequantized = _dequantize(x_arr, scale_arr, zp_arr, axis)
+        del x_arr, scale_arr, zp_arr
         new_name = node.input[0] + "_dequantized"
-        previous = next((tensor for tensor in graph.initializer if tensor.name == new_name), None)
+        previous = cache.get_init(new_name)
         if previous is None:
             new_name = cache.unique_name(new_name)
         if previous is not None and (
-            list(previous.dims) != list(dequantized.shape)
+            new_name in cache.graph_input_names
+            or list(previous.dims) != list(dequantized.shape)
             or previous.data_type != TensorProto.FLOAT
             or numpy_helper.to_array(previous).tobytes() != dequantized.tobytes()
         ):
             new_name = cache.unique_name(new_name)
-        new_init = numpy_helper.from_array(dequantized, name=new_name)
+        new_init = (
+            numpy_helper.from_array(dequantized, name=new_name)
+            if new_name not in unique_init
+            else None
+        )
+        del dequantized
 
         # ── Rewire all consumers ──────────────────────────────────────────────
         for consumer_node, _ in consumer_map.get(dq_output, []):
@@ -188,7 +232,10 @@ def _apply_remove_deqlin(model: onnx.ModelProto) -> onnx.ModelProto:
                     consumer_node.input[i] = new_name
             # no break — update every occurrence of dq_output in this node's inputs
 
-        add_unique_initializers(graph, unique_init, [new_init])
+        if new_init is not None:
+            add_unique_initializers(graph, unique_init, [new_init])
+            cache.init_map[new_name] = graph.initializer[-1]
+        del new_init
         if dq_output in cache.graph_output_names:
             position = next(index for index, current in enumerate(graph.node) if current is node)
             graph.node.insert(

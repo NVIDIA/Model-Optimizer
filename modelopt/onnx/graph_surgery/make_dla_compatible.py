@@ -52,6 +52,7 @@ __all__ = []
 
 
 def _remove_deqlin_and_unused_initializers(model):
+    """Fold eligible constant dequantizations and discard unused initializers."""
     return _remove_unused_initializers(_apply_remove_deqlin(model))
 
 

@@ -57,6 +57,7 @@ import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms import dla_remove_deqlin as _mod
 
@@ -75,15 +76,19 @@ _apply = _mod._apply_remove_deqlin
 
 
 def _vi(name: str, elem_type: int, shape: list) -> onnx.ValueInfoProto:
+    """Create typed tensor metadata."""
     return helper.make_tensor_value_info(name, elem_type, shape)
 
 
 def _clamp_ir(model: onnx.ModelProto) -> None:
+    """Use an IR version supported by the test runtime."""
     model.ir_version = min(model.ir_version, _MAX_IR_VERSION_FOR_ORT)
 
 
 def _prepare_model(model: onnx.ModelProto) -> None:
+    """Infer intermediate metadata when the optional runtime supports the graph."""
     try:
+        # ONNX Runtime is optional for these execution tests.
         from onnxruntime.tools.symbolic_shape_infer import (
             SymbolicShapeInference,  # type: ignore[import-untyped]
         )
@@ -97,6 +102,8 @@ def _prepare_model(model: onnx.ModelProto) -> None:
 
 
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
+    """Execute the graph outputs with the CPU runtime."""
+    # ONNX Runtime is optional for these execution tests.
     import onnxruntime as ort  # type: ignore[import-untyped]
 
     _clamp_ir(model)
@@ -105,10 +112,12 @@ def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
 
 
 def _has_dq(model: onnx.ModelProto) -> bool:
+    """Check whether the graph retains a dequantization node."""
     return any(n.op_type == "DequantizeLinear" for n in model.graph.node)
 
 
 def _init_names(model: onnx.ModelProto) -> set[str]:
+    """Collect graph initializer names."""
     return {i.name for i in model.graph.initializer}
 
 
@@ -133,6 +142,7 @@ def _make_dq_init(
 
 
 def _make_dq_node(name: str, output_name: str) -> onnx.NodeProto:
+    """Build a dequantization node using the named controls."""
     return helper.make_node(
         "DequantizeLinear",
         inputs=[f"{name}_x", f"{name}_scale", f"{name}_zp"],
@@ -543,3 +553,325 @@ def test_no_dq_nodes_noop():
 
     assert len(tr.graph.node) == original_count
     np.testing.assert_array_equal(ref["Y"], got["Y"])
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "default-axis",
+        "scalar-rank-one",
+        "scalar-rank-zero",
+        "runtime-zero-point",
+        "overridable-data",
+        "overridable-scale",
+        "overridable-zero-point",
+        "fp16-scale",
+    ],
+)
+def test_constant_folding_preserves_runtime_and_type_contracts(case):
+    """Fold only supported fixed controls, retaining runtime overrides and output types."""
+    data = np.asarray([[2, 4, 6], [8, 10, 12]], dtype=np.uint8)
+    if case == "scalar-rank-zero":
+        data = np.asarray(5, np.uint8)
+    if case == "scalar-rank-one":
+        data = data.reshape(-1)
+    scale = np.asarray(
+        [0.25, 0.5, 1.0] if case == "default-axis" else 0.5,
+        dtype=np.float16 if case == "fp16-scale" else np.float32,
+    )
+    if case == "scalar-rank-zero":
+        scale = np.asarray([0.5], np.float32)
+    initializers = [
+        numpy_helper.from_array(data, name="data"),
+        numpy_helper.from_array(scale, name="scale"),
+    ]
+    inputs, feeds = [], {}
+    node_inputs = ["data", "scale"]
+    if "zero-point" in case:
+        node_inputs.append("zero")
+        inputs.append(_vi("zero", TensorProto.UINT8, []))
+        feeds["zero"] = np.asarray(2, np.uint8)
+        if case == "overridable-zero-point":
+            initializers.append(numpy_helper.from_array(np.asarray(0, np.uint8), name="zero"))
+    for name, value in [("data", data), ("scale", scale)]:
+        if case == f"overridable-{name}":
+            inputs.append(
+                _vi(
+                    name,
+                    TensorProto.UINT8 if name == "data" else TensorProto.FLOAT,
+                    list(value.shape),
+                )
+            )
+            feeds[name] = value + np.asarray(2, dtype=value.dtype)
+    out_type = TensorProto.FLOAT16 if case == "fp16-scale" else TensorProto.FLOAT
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("DequantizeLinear", node_inputs, ["Y"], name="dq")],
+            case,
+            inputs,
+            [_vi("Y", out_type, list(data.shape))],
+            initializer=initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+    )
+    onnx.checker.check_model(model, full_check=True)
+    expected = ReferenceEvaluator(model).run(None, feeds)[0]
+    before = model.SerializeToString()
+    _apply(model)
+    onnx.checker.check_model(model, full_check=True)
+    actual = ReferenceEvaluator(model).run(None, feeds)[0]
+    np.testing.assert_array_equal(actual, expected)
+    assert actual.dtype == expected.dtype
+    if case in {"default-axis", "scalar-rank-one", "scalar-rank-zero"}:
+        assert not _has_dq(model)
+    else:
+        assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("omit_zero", [False, True])
+def test_quantized_conv_weight_retained_for_all_consumers(shared, omit_zero):
+    """Retain a required quantized weight with shared uses or an omitted zero point."""
+    initializers = [
+        numpy_helper.from_array(np.ones([1, 1, 1, 1], dtype=np.uint8), name="weight"),
+        numpy_helper.from_array(np.asarray(0.25, np.float32), name="scale"),
+    ]
+    inputs = ["weight", "scale"]
+    if not omit_zero:
+        inputs.append("zero")
+        initializers.append(numpy_helper.from_array(np.asarray(0, np.uint8), name="zero"))
+    nodes = [
+        helper.make_node("DequantizeLinear", inputs, ["dequantized"], name="dq"),
+        helper.make_node("Conv", ["X", "dequantized"], ["Y"], name="conv"),
+    ]
+    outputs = [_vi("Y", TensorProto.FLOAT, [1, 1, 1, 1])]
+    if shared:
+        nodes.append(helper.make_node("Identity", ["dequantized"], ["shared"], name="shared"))
+        outputs.append(_vi("shared", TensorProto.FLOAT, [1, 1, 1, 1]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "quantized_weight",
+            [_vi("X", TensorProto.FLOAT, [1, 1, 1, 1])],
+            outputs,
+            initializer=initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+    )
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"X": np.asarray([[[[2.0]]]], np.float32)}
+    expected = ReferenceEvaluator(model).run(None, feeds)
+    before = model.SerializeToString()
+    _apply(model)
+    assert model.SerializeToString() == before
+    for actual, reference in zip(ReferenceEvaluator(model).run(None, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
+@pytest.mark.parametrize("overridable", [False, True])
+def test_reused_float_initializer_preserves_override_contract(overridable):
+    """Reuse equal fixed weights while avoiding initializer defaults callers may override."""
+    data = np.asarray([[2, 4, 6]], np.uint8)
+    expected = data.astype(np.float32) * np.float32(0.5)
+    initializers = [
+        numpy_helper.from_array(data, name="data"),
+        numpy_helper.from_array(np.float32(0.5), name="scale"),
+        numpy_helper.from_array(expected, name="data_dequantized"),
+    ]
+    inputs = [_vi("data_dequantized", TensorProto.FLOAT, [1, 3])] if overridable else []
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("DequantizeLinear", ["data", "scale"], ["Y"], name="dq")],
+            "reused",
+            inputs,
+            [_vi("Y", TensorProto.FLOAT, [1, 3])],
+            initializer=initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+    )
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"data_dequantized": expected + 10} if overridable else {}
+    reference = ReferenceEvaluator(model).run(None, feeds)
+    _apply(model)
+    onnx.checker.check_model(model, full_check=True)
+    assert len(model.graph.initializer) == (4 if overridable else 3)
+    np.testing.assert_array_equal(ReferenceEvaluator(model).run(None, feeds)[0], reference[0])
+
+
+@pytest.mark.parametrize("domain", ["custom", "com.microsoft"])
+def test_custom_dequantization_function_remains_unchanged(domain):
+    """Preserve custom functions that share a built-in operation name."""
+    function = helper.make_function(
+        domain,
+        "DequantizeLinear",
+        ["data", "scale"],
+        ["Y"],
+        [
+            helper.make_node("Cast", ["data"], ["cast"], to=TensorProto.FLOAT),
+            helper.make_node("Neg", ["cast"], ["Y"]),
+        ],
+        opset_imports=[helper.make_opsetid("", 21)],
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "DequantizeLinear", ["data", "scale"], ["Y"], domain=domain, name="custom_dq"
+                )
+            ],
+            "custom",
+            [],
+            [_vi("Y", TensorProto.FLOAT, [2])],
+            initializer=[
+                numpy_helper.from_array(np.asarray([2, 4], np.uint8), name="data"),
+                numpy_helper.from_array(np.float32(0.5), name="scale"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid(domain, 1)],
+        functions=[function],
+    )
+    onnx.checker.check_model(model, full_check=True)
+    reference = ReferenceEvaluator(model).run(None, {})
+    before = model.SerializeToString()
+    _apply(model)
+    assert model.SerializeToString() == before
+    np.testing.assert_array_equal(ReferenceEvaluator(model).run(None, {})[0], reference[0])
+
+
+@pytest.mark.parametrize("dtype", [np.int8, np.uint8, np.int16, np.uint16, np.int32])
+@pytest.mark.parametrize("axis", [1, -1])
+def test_supported_integer_axis_folding_is_exact(dtype, axis):
+    """Keep exact float32 results across supported integer widths and negative axes."""
+    bounds = np.iinfo(np.int16 if dtype == np.int32 else dtype)
+    data = np.asarray([[bounds.min, 0, bounds.max], [1, bounds.max, bounds.min]], dtype=dtype)
+    scale = np.asarray([0.1234567, 0.25, 0.75], np.float32)
+    zero = (
+        np.zeros(3, dtype=dtype)
+        if dtype == np.int32
+        else np.asarray([bounds.max, 0, 1], dtype=dtype)
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "DequantizeLinear", ["data", "scale", "zero"], ["Y"], axis=axis, name="dq"
+                )
+            ],
+            "axis_dtype",
+            [],
+            [_vi("Y", TensorProto.FLOAT, [2, 3])],
+            initializer=[
+                numpy_helper.from_array(data, name="data"),
+                numpy_helper.from_array(scale, name="scale"),
+                numpy_helper.from_array(zero, name="zero"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+    )
+    onnx.checker.check_model(model, full_check=True)
+    reference = ReferenceEvaluator(model).run(None, {})
+    _apply(model)
+    onnx.checker.check_model(model, full_check=True)
+    assert not _has_dq(model)
+    np.testing.assert_array_equal(ReferenceEvaluator(model).run(None, {})[0], reference[0])
+
+
+def test_supported_runtime_dequantization_schema_folds():
+    """Execute the supported runtime contrib schema before and after constant folding."""
+    data = np.asarray([[2, 4, 6], [8, 10, 12]], np.uint16)
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "DequantizeLinear",
+                    ["data", "scale", "zero"],
+                    ["Y"],
+                    name="dq",
+                    domain="com.microsoft",
+                )
+            ],
+            "runtime_dq",
+            [],
+            [_vi("Y", TensorProto.FLOAT, [2, 3])],
+            initializer=[
+                numpy_helper.from_array(data, name="data"),
+                numpy_helper.from_array(np.float32(0.5), name="scale"),
+                numpy_helper.from_array(np.uint16(2), name="zero"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("com.microsoft", 1)],
+    )
+    _clamp_ir(model)
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, {})
+    _apply(model)
+    onnx.checker.check_model(model, full_check=True)
+    assert not _has_dq(model)
+    np.testing.assert_array_equal(_run_ort(model, {})["Y"], expected["Y"])
+
+
+@pytest.mark.parametrize("axis", [1, -1])
+def test_large_int32_folding_preserves_established_rounding(axis):
+    """Retain existing INT32 rounding while evaluating intermediate arithmetic in bounded chunks."""
+    data = np.asarray(
+        [[16777217, -1356484993, 1129686157], [16777219, -18865023, 17258856]], np.int32
+    )
+    scale = np.asarray([0.1234567, 0.25, 0.0001], np.float32)
+    zero = np.zeros(3, np.int32)
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "DequantizeLinear", ["data", "scale", "zero"], ["Y"], name="dq", axis=axis
+                )
+            ],
+            "large_int32",
+            [],
+            [_vi("Y", TensorProto.FLOAT, [2, 3])],
+            initializer=[
+                numpy_helper.from_array(data, name="data"),
+                numpy_helper.from_array(scale, name="scale"),
+                numpy_helper.from_array(zero, name="zero"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+    )
+    onnx.checker.check_model(model, full_check=True)
+    reference = ReferenceEvaluator(model).run(None, {})[0]
+    expected = ((data - zero) * scale).astype(np.float32)
+    _apply(model)
+    onnx.checker.check_model(model, full_check=True)
+    actual = ReferenceEvaluator(model).run(None, {})[0]
+    assert not _has_dq(model)
+    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_allclose(actual, reference, rtol=1e-6, atol=0)
+
+
+def test_unknown_matmul_layout_keeps_quantized_weight():
+    """Keep quantized weights until later inference can establish conversion eligibility."""
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "DequantizeLinear", ["weight", "scale", "zero"], ["dequantized"], name="dq"
+                ),
+                helper.make_node("MatMul", ["X", "dequantized"], ["Y"], name="matmul"),
+            ],
+            "unknown_layout",
+            [_vi("X", TensorProto.FLOAT, ["M", "K"])],
+            [_vi("Y", TensorProto.FLOAT, ["M", 4])],
+            initializer=[
+                numpy_helper.from_array(np.arange(12, dtype=np.uint8).reshape(3, 4), name="weight"),
+                numpy_helper.from_array(np.float32(0.5), name="scale"),
+                numpy_helper.from_array(np.uint8(0), name="zero"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+    )
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"X": np.ones([2, 3], np.float32)}
+    expected = ReferenceEvaluator(model).run(None, feeds)
+    before = model.SerializeToString()
+    _apply(model)
+    assert model.SerializeToString() == before
+    np.testing.assert_array_equal(ReferenceEvaluator(model).run(None, feeds)[0], expected[0])
