@@ -21,6 +21,7 @@ import pytest
 from onnx import TensorProto, helper, numpy_helper
 from onnx.reference import ReferenceEvaluator
 
+import modelopt.onnx.graph_surgery.make_dla_compatible as dla_pipeline
 from modelopt.onnx.graph_surgery.dla_transforms.dla_model_boundaries import (
     _apply_fix_instancenorm_channels,
     _apply_non4d_model_inputs,
@@ -201,7 +202,7 @@ def test_internal_normalization_boundary_restores_trailing_singleton(batch):
     )
     feeds = {"x": np.arange(batch * 12, dtype=np.float32).reshape(batch, 3, 4)}
     expected = _checked_run(model, feeds)[0]
-    _apply_non4d_model_outputs(model)
+    _apply_non4d_model_outputs(model, defer_rank_conversion=True)
     _apply_fix_instancenorm_channels(model)
     np.testing.assert_allclose(_checked_run(model, feeds)[0], expected, rtol=1e-6, atol=1e-6)
 
@@ -231,7 +232,7 @@ def test_unnamed_normalizations_keep_distinct_targets():
         "b": np.arange(45, dtype=np.float32).reshape(3, 3, 5),
     }
     expected = _checked_run(model, feeds)
-    _apply_non4d_model_outputs(model)
+    _apply_non4d_model_outputs(model, defer_rank_conversion=True)
     _apply_fix_instancenorm_channels(model)
     for actual, reference in zip(_checked_run(model, feeds), expected):
         np.testing.assert_allclose(actual, reference, rtol=1e-6, atol=1e-6)
@@ -309,7 +310,8 @@ def test_legacy_boundary_adapter_schema_refuses_before_mutation(transform):
     onnx.checker.check_model(model, full_check=True)
     before = model.SerializeToString()
     with pytest.raises(ValueError, match="13"):
-        transform(model)
+        options = {"defer_rank_conversion": True} if transform is _apply_non4d_model_outputs else {}
+        transform(model, **options)
     assert model.SerializeToString() == before
 
 
@@ -324,7 +326,7 @@ def test_legacy_ir_boundary_adapters_register_initializer_inputs():
     feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3)}
     expected = _checked_run(model, feeds)[0]
     _apply_non4d_model_inputs(model)
-    _apply_non4d_model_outputs(model)
+    _apply_non4d_model_outputs(model, defer_rank_conversion=True)
     np.testing.assert_array_equal(_checked_run(model, feeds)[0], expected)
 
 
@@ -420,7 +422,7 @@ def test_output_boundary_orders_a_captured_public_value_before_its_reader():
     feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3), "condition": np.bool_(True)}
     expected = _checked_run(model, feeds)[0]
     _apply_non4d_model_inputs(model)
-    _apply_non4d_model_outputs(model)
+    _apply_non4d_model_outputs(model, defer_rank_conversion=True)
     np.testing.assert_array_equal(_checked_run(model, feeds)[0], expected)
 
 
@@ -440,3 +442,64 @@ def test_input_adapters_resolve_unsqueeze_axes_against_output_rank(axes, output_
     expected = _checked_run(model, feeds)[0]
     transformed = _apply_non4d_model_inputs(model)
     np.testing.assert_array_equal(_checked_run(transformed, feeds)[0], expected)
+
+
+@pytest.mark.parametrize("batch", [1, 2, 3])
+def test_registered_normalization_preserves_native_channel_axis(batch):
+    """Keep direct rank-three normalization inputs on the channel-preserving route."""
+    shape = [batch, 3, 4]
+    model = _make_model(
+        [helper.make_node("InstanceNormalization", ["x", "scale", "bias"], ["y"])],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)],
+        [
+            numpy_helper.from_array(np.asarray([1, 2, 3], np.float32), "scale"),
+            numpy_helper.from_array(np.asarray([-1, 0, 1], np.float32), "bias"),
+        ],
+    )
+    feeds = {"x": np.random.default_rng(19).standard_normal(shape).astype(np.float32)}
+    expected = _checked_run(model, feeds)[0]
+    transformed = _transform_make_dla_compatible(model, verbose=False)
+    np.testing.assert_allclose(_checked_run(transformed, feeds)[0], expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("entrypoint", ["standalone", "pipeline"])
+def test_native_reduction_output_refuses_before_adding_rank_adapters(entrypoint, monkeypatch):
+    """Refuse a native producer when no rank-conversion stage can prepare its output."""
+    model = _make_model(
+        [helper.make_node("ReduceMean", ["x"], ["y"], axes=[2, 3], keepdims=0)],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 3, 4, 4])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 3])],
+    )
+    before = model.SerializeToString()
+    if entrypoint == "standalone":
+        with pytest.raises(ValueError, match="rank"):
+            _apply_non4d_model_outputs(model)
+    else:
+        monkeypatch.setattr(
+            dla_pipeline,
+            "DLA_TRANSFORMS",
+            tuple(
+                (name, transform)
+                for name, transform in dla_pipeline.DLA_TRANSFORMS
+                if name != "StandaloneReduceOperations"
+            ),
+        )
+        with pytest.raises(NotImplementedError, match="reductions"):
+            _transform_make_dla_compatible(model, verbose=False)
+    assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("axes", [[0, 2], [0, -3]])
+def test_output_adapter_refuses_native_rank_five_squeeze_before_mutation(axes):
+    """Avoid remapping axes through an unspecified five-dimensional rank collapse."""
+    model = _make_model(
+        [helper.make_node("Squeeze", ["x", "axes"], ["y"])],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 2, 1, 3, 4])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 3, 4])],
+        [numpy_helper.from_array(np.asarray(axes, np.int64), "axes")],
+    )
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="rank"):
+        _apply_non4d_model_outputs(model, defer_rank_conversion=True)
+    assert model.SerializeToString() == before

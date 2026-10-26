@@ -53,6 +53,7 @@ def _apply_non4d_model_inputs(model):
             for node, _ in cache.get_consumers(value.name)
             if (node.input[0] == value.name or node.op_type == "Concat")
             and not (node.op_type == "Squeeze" and "Gather" in node.name)
+            and node.op_type != "InstanceNormalization"
         ]
         if not consumers:
             continue
@@ -145,8 +146,8 @@ def _apply_non4d_model_inputs(model):
     return model
 
 
-def _apply_non4d_model_outputs(model):
-    """Restore declared output ranks after the ordered rank-promotion sequence."""
+def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False):
+    """Restore four-dimensional outputs, optionally deferring checks to later rank stages."""
     graph = model.graph
     cache = GraphCache(graph)
     captured = _subgraph_captures(graph)
@@ -179,7 +180,14 @@ def _apply_non4d_model_outputs(model):
                 if input_shape is None:
                     raise ValueError(f"Output Squeeze input shape must be known for {value.name!r}")
                 axes = [index for index, dim in enumerate(input_shape) if dim == 1]
+        source_shape = cache.get_shape(existing.input[0] if existing is not None else value.name)
+        if not defer_rank_conversion and (source_shape is None or len(source_shape) != 4):
+            raise ValueError(
+                f"Output restoration requires a known rank-4 producer for {value.name!r}"
+            )
         delta = 4 - len(axes) - len(shape)
+        if delta < 0:
+            raise ValueError(f"Output Squeeze input rank exceeds 4 for {value.name!r}")
         axes = list(range(delta)) + [axis + delta if axis >= 0 else axis for axis in axes]
         plans.append((value, shape, existing, axes))
     if plans:
