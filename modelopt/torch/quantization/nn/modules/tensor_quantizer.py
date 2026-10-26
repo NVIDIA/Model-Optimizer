@@ -1418,7 +1418,9 @@ class TensorQuantizer(nn.Module):
                 modelopt_state.get("_pytorch_state_metadata", {})
             )
 
-    def sync_amax_across_distributed_group(self, parallel_group: DistributedProcessGroup):
+    def sync_amax_across_distributed_group(
+        self, parallel_group: DistributedProcessGroup, state_device: torch.device | None = None
+    ):
         """Synchronize amax across all ranks in ``parallel_group`` with a MAX all-reduce every rank joins.
 
         With data-parallel calibration a module can be activated on some ranks but not others (a
@@ -1429,7 +1431,10 @@ class TensorQuantizer(nn.Module):
         The ranks agree on whether anyone calibrated the quantizer from a presence flag, never from
         the amax value: a calibrated amax can legitimately be zero (an all-zero weight). A quantizer
         that no rank calibrated keeps no amax, so downstream ``amax is None`` handling still applies.
-        A calibrated amax keeps its own dtype and device, exactly as an in-place reduce leaves it.
+        A calibrated amax keeps its own dtype and device, exactly as an in-place reduce leaves it. A rank
+        that never calibrated it adopts the group's amax where it keeps its quantizer state: on a tensor
+        it holds itself, else on ``state_device``, which a caller passes as the device it keeps the
+        module's quantizer state on, else on the collective's device.
         """
         if not parallel_group.is_initialized():
             return
@@ -1498,7 +1503,11 @@ class TensorQuantizer(nn.Module):
         else:
             dtype_code = int(packed[2].item())
             dtype = _AMAX_DTYPES[dtype_code - 1] if dtype_code > 0 else torch.float32
-            self._set_buffer("_amax", packed[0].to(dtype))
+            held = [
+                t for t in (*self._buffers.values(), *self._parameters.values()) if t is not None
+            ]
+            target = held[0].device if held else (state_device or packed.device)
+            self._set_buffer("_amax", packed[0].to(device=target, dtype=dtype))
 
     @contextlib.contextmanager
     def disable_pre_quant_scale(self):

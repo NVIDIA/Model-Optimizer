@@ -19,11 +19,12 @@ import pytest
 import torch
 import torch.distributed as dist
 from _test_utils.torch.quantization.models import SimpleLinear
+from torch import nn
 from torch.nn.parallel import DistributedDataParallel
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.model_calib import max_calibrate
+from modelopt.torch.quantization.model_calib import _quantizer_state_device, max_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils import unwrap_model
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
@@ -96,6 +97,51 @@ def test_the_sync_leaves_every_rank_the_calibrators_dtype(cpu_dist_workers, per_
     amax of its own. Synced as a per-block quantizer, an NVFP4 activation quantizer's uncalibrated
     rank would raise instead."""
     cpu_dist_workers.run(_calibrators_dtype_helper, per_tensor_cfg=per_tensor_cfg)
+
+
+def _cold_rank_device_helper(rank, size, case):
+    # meta stands in for a second device: these CPU ranks' collective device is the CPU.
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
+    if rank == 0:
+        quantizer._set_buffer("_amax", torch.tensor(3.0))
+    elif case == "a-tensor-it-holds":
+        quantizer._set_buffer("_pre_quant_scale", torch.ones(1, device="meta"))
+    hint = {"the-callers-device": torch.device("meta"), "a-tensor-it-holds": torch.device("cpu")}
+    quantizer.sync_amax_across_distributed_group(
+        DistributedProcessGroup(dist.group.WORLD), hint.get(case)
+    )
+    expected = "cpu" if rank == 0 or case == "the-collectives-device" else "meta"
+    assert quantizer.amax.device.type == expected, f"rank {rank}: {quantizer.amax.device}"
+
+
+@pytest.mark.parametrize(
+    "case", ["a-tensor-it-holds", "the-callers-device", "the-collectives-device"]
+)
+def test_a_rank_that_never_calibrated_adopts_the_amax_where_it_keeps_its_state(
+    cpu_dist_workers, case
+):
+    """A calibrated rank keeps its amax where it is. One that never calibrated the quantizer puts
+    the group's amax on a tensor the quantizer holds, else on the device its caller keeps the
+    module's quantizer state on, else on the collective's device."""
+    cpu_dist_workers.run(_cold_rank_device_helper, case=case)
+
+
+@pytest.mark.parametrize("layout", ["a-linear", "fused-experts", "no-weight-quantizer"])
+def test_the_state_device_calibration_passes_is_where_a_weight_quantizers_amax_is(layout):
+    """Every rank calibrates a weight quantizer from the weight before any sync, so its amax shows
+    where the module keeps quantizer state on a rank that saw no tokens; the module's parameters do
+    not, resting on the CPU under offload."""
+    module = nn.Module()
+    module.weight = nn.Parameter(torch.zeros(2, 2))
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
+    quantizer._set_buffer("_amax", torch.tensor(1.0, device="meta"))
+    if layout == "a-linear":
+        module.weight_quantizer = quantizer
+    elif layout == "fused-experts":
+        module.down_proj_weight_quantizers = nn.ModuleList([quantizer])
+    module.input_quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
+    expected = None if layout == "no-weight-quantizer" else torch.device("meta")
+    assert _quantizer_state_device(module) == expected
 
 
 def _zero_or_uncalibrated_helper(rank, size, case):

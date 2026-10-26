@@ -229,6 +229,24 @@ def _iter_leaf_quantizers(quantizer):
     yield quantizer
 
 
+def _quantizer_state_device(module: nn.Module) -> torch.device | None:
+    """The device ``module`` keeps its quantizer state on: that of a weight quantizer's amax.
+
+    Every rank calibrates a weight quantizer from the weight itself before any sync, so a rank that
+    saw no tokens for ``module`` knows it too. The module's parameters are no guide: under CPU offload
+    they rest off the device its quantizer state is kept on.
+    """
+    for name, child in module.named_children():
+        if "weight_quantizer" not in name:
+            continue
+        for quantizer in child if isinstance(child, nn.ModuleList) else (child,):
+            for leaf in _iter_leaf_quantizers(quantizer):
+                amax = getattr(leaf, "_amax", None)
+                if isinstance(amax, torch.Tensor):
+                    return amax.device
+    return None
+
+
 def _check_moe_calibration_complete(quantizer, parallel_state):
     """Raise error if MoE calibration is incomplete across distributed MoE ranks."""
     for leaf_quantizer in _iter_leaf_quantizers(quantizer):
@@ -408,6 +426,7 @@ def max_calibrate(
         ):
             assert module.parallel_state is not None  # _has_expert_parallelism checked it
             ep_group = module.parallel_state.expert_model_parallel_group
+            device = _quantizer_state_device(module)
             for child_name, child in module.named_children():
                 if isinstance(child, (TensorQuantizer, SequentialQuantizer)) and (
                     "input_quantizer" in child_name
@@ -417,7 +436,7 @@ def max_calibrate(
                         # rank skips and another syncs pairs mismatched tensors in every later
                         # all_reduce, which NCCL hangs on rather than reporting.
                         if leaf.is_enabled:
-                            leaf.sync_amax_across_distributed_group(ep_group)
+                            leaf.sync_amax_across_distributed_group(ep_group, device)
 
     # Check MoE calibration completeness (after the EP input-amax share above).
     for name, module in model.named_modules():
@@ -426,11 +445,15 @@ def max_calibrate(
                 if isinstance(child, AnyQuantizer):
                     _check_moe_calibration_complete(child, module.parallel_state)
 
-    def sync_quantizer_amax_across_dp_ep(quantizer, parallel_state, parent_name, child_name):
+    def sync_quantizer_amax_across_dp_ep(
+        quantizer, parallel_state, parent_name, child_name, device=None
+    ):
         """Sync amax across DP (always) and EP (filtered — see _should_sync_amax_across_ep)."""
         if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
             for _q in quantizer:
-                sync_quantizer_amax_across_dp_ep(_q, parallel_state, parent_name, child_name)
+                sync_quantizer_amax_across_dp_ep(
+                    _q, parallel_state, parent_name, child_name, device
+                )
             return
         # Skip DISABLED quantizers: their amax is never used for quantization, so there is nothing to sync.
         # This matters for a VLM whose non-language modules (vision tower / mm-projector) are disabled via a
@@ -446,16 +469,21 @@ def max_calibrate(
         # the group; every rank must still join the collective or the participant set mismatches -> NCCL
         # deadlock. sync_amax_across_distributed_group handles this symmetrically (a rank without a local
         # amax contributes a zero of the locally-known amax shape; the MAX picks up the real value).
-        quantizer.sync_amax_across_distributed_group(parallel_state.data_parallel_group)
+        quantizer.sync_amax_across_distributed_group(parallel_state.data_parallel_group, device)
         if _should_sync_amax_across_ep(parent_name, child_name, sync_expert_weight_amax):
-            quantizer.sync_amax_across_distributed_group(parallel_state.expert_model_parallel_group)
+            quantizer.sync_amax_across_distributed_group(
+                parallel_state.expert_model_parallel_group, device
+            )
 
     # Step 2:Sync amax across data parallelism
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
+            device = _quantizer_state_device(module)
             for child_name, child in module.named_children():
                 if isinstance(child, AnyQuantizer):
-                    sync_quantizer_amax_across_dp_ep(child, module.parallel_state, name, child_name)
+                    sync_quantizer_amax_across_dp_ep(
+                        child, module.parallel_state, name, child_name, device
+                    )
     # Step 3: TP sync
     # Objective: the quantization parameters when TP = 8 then changed to TP=4 then back to TP=8 should be the same
 
@@ -474,12 +502,13 @@ def max_calibrate(
         quantizer_type: str,
         axes_for_sync: list,
         parallel_state: ParallelState,
+        device: torch.device | None = None,
     ):
         # Syncing amax across TP for sequential quantizer
         if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
             for _q in quantizer:
                 sync_quantizer_amax_across_tp(
-                    _q, linear_name, quantizer_type, axes_for_sync, parallel_state
+                    _q, linear_name, quantizer_type, axes_for_sync, parallel_state, device
                 )
             return
         # sync is not needed for block quantization
@@ -497,12 +526,15 @@ def max_calibrate(
         # As in the DP/EP sync above: an enabled quantizer is synced on every rank, with or without
         # a local amax, and a disabled one on none, which the config makes the same on every rank.
         if quantizer.axis in axes_for_sync and quantizer.is_enabled:
-            quantizer.sync_amax_across_distributed_group(parallel_state.tensor_parallel_group)
+            quantizer.sync_amax_across_distributed_group(
+                parallel_state.tensor_parallel_group, device
+            )
 
     # Step 2: Sync amax across relevant parallelism (such as TP / EP)
     for name, module in model.named_modules():
         if getattr(module, "_parallel_state", None) is None:
             continue
+        device = _quantizer_state_device(module)
 
         if is_quantized_column_parallel_linear(module):
             sync_quantizer_amax_across_tp(
@@ -511,6 +543,7 @@ def max_calibrate(
                 "input_quantizer",
                 axes_for_sync=[None, -1],
                 parallel_state=module.parallel_state,
+                device=device,
             )
             sync_quantizer_amax_across_tp(
                 module.weight_quantizer,
@@ -518,6 +551,7 @@ def max_calibrate(
                 "weight_quantizer",
                 axes_for_sync=[None, -1],
                 parallel_state=module.parallel_state,
+                device=device,
             )
 
         if is_quantized_row_parallel_linear(module):
@@ -527,6 +561,7 @@ def max_calibrate(
                 "input_quantizer",
                 axes_for_sync=[None],
                 parallel_state=module.parallel_state,
+                device=device,
             )
 
             sync_quantizer_amax_across_tp(
@@ -535,6 +570,7 @@ def max_calibrate(
                 "weight_quantizer",
                 axes_for_sync=[None, 0],
                 parallel_state=module.parallel_state,
+                device=device,
             )
 
         # KV Cache Quantization
@@ -544,7 +580,7 @@ def max_calibrate(
             for quantizer in [module.k_bmm_quantizer, module.v_bmm_quantizer]:
                 if isinstance(quantizer, TensorQuantizer) and quantizer.is_enabled:  # as above
                     quantizer.sync_amax_across_distributed_group(
-                        module.parallel_state.tensor_parallel_group
+                        module.parallel_state.tensor_parallel_group, device
                     )
 
     # _amax is now cross-rank consistent across ranks.
