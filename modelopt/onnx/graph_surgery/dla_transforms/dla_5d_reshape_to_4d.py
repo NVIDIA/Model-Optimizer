@@ -138,7 +138,12 @@ def _parse_middleware_strict(
 
 def _is_5d_reshape_candidate(cache: GraphCache, node) -> bool:
     """Identify Reshape nodes with a constant five-dimensional target."""
-    if node.op_type != "Reshape" or node.domain not in {"", "ai.onnx"} or node.overload:
+    if (
+        node.op_type != "Reshape"
+        or node.domain not in {"", "ai.onnx"}
+        or node.overload
+        or len(node.input) < 2
+    ):
         return False
     ini = cache.get_init(node.input[1])
     if ini is None:
@@ -260,6 +265,11 @@ def _build_transpose_replacement_or_raise(
     """
     graph = model.graph
     ctx = f"5D Reshape {reshape_node.name!r} → Transpose {tr.name!r}"
+    opset = next(
+        (entry.version for entry in model.opset_import if entry.domain in {"", "ai.onnx"}), 0
+    )
+    if opset < 10:
+        raise ValueError(f"{ctx}: input-based Slice requires ONNX opset 10 or newer, got {opset}")
     transpose_perm = None
     for attr in tr.attribute:
         if attr.name == "perm":

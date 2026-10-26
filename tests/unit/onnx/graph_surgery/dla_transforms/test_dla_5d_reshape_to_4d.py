@@ -257,6 +257,38 @@ class TestDla5dReshapeTo4dReduce:
 
 
 class TestDla5dReshapeTo4dTranspose:
+    @pytest.mark.parametrize(
+        ("opset", "skip_inference"), [(5, True), (7, False), (9, False), (9, True)]
+    )
+    def test_unsupported_slice_schema_refuses_before_mutation(self, opset, skip_inference):
+        """Refuse versions without input-based Slice and restore inferred metadata."""
+        model = _make_transpose_reshape_model()
+        model.opset_import[0].version = opset
+        dims = model.graph.input[0].type.tensor_type.shape.dim
+        dims[0].dim_value, dims[1].dim_value = 2, 12
+        onnx.checker.check_model(model, full_check=True)
+        before = model.SerializeToString()
+        with pytest.raises(ValueError, match="opset"):
+            _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=skip_inference)
+        assert model.SerializeToString() == before
+
+    def test_attribute_reshape_is_not_an_input_shape_candidate(self):
+        """Leave valid legacy attribute-form reshapes intact instead of indexing input 1."""
+        model = _make_transpose_reshape_model()
+        model.opset_import[0].version = 1
+        targets = {
+            init.name: numpy_helper.to_array(init).tolist() for init in model.graph.initializer
+        }
+        for node in model.graph.node:
+            if node.op_type == "Reshape":
+                node.attribute.append(helper.make_attribute("shape", targets[node.input[1]]))
+                del node.input[1:]
+        del model.graph.initializer[:]
+        onnx.checker.check_model(model, full_check=True)
+        before = model.SerializeToString()
+        _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=True)
+        assert model.SerializeToString() == before
+
     @pytest.mark.parametrize("custom_op", ["Reshape", "Clip", "DequantizeLinear"])
     def test_custom_functions_are_not_lowered_as_builtin_ops(self, custom_op):
         """Preserve custom candidates and refuse custom followers before mutation."""
