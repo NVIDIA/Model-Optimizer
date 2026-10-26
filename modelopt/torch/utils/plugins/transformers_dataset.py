@@ -19,6 +19,7 @@ import copy
 import itertools
 import json
 import os
+import time
 
 import torch
 import transformers
@@ -374,6 +375,9 @@ class VisionLanguageDataCollator(LanguageDataCollator):
                 raise ValueError("VLM_MAX_ASSISTANT_TOKENS must be a positive integer.")
         self._assistant_content_truncation_warned = False
         self._empty_assistant_mask_warned = False
+        # Transient media-read retries; see _processor_apply.
+        self._media_retries = int(os.environ.get("VLM_MEDIA_LOAD_RETRIES", "4"))
+        self._media_retry_sleep = float(os.environ.get("VLM_MEDIA_RETRY_SLEEP", "0.5"))
         self.chat_template = chat_template
         self.local_image_path = local_image_path
         self._conversations_warned = False
@@ -628,17 +632,59 @@ class VisionLanguageDataCollator(LanguageDataCollator):
                     )
                     self._prompt_content_truncation_warned = True
 
+    # Messages the media loaders raise when a file does not resolve. On a shared
+    # filesystem these are usually transient, not a statement about the data.
+    _TRANSIENT_MEDIA_ERRORS = (
+        "incorrect image source",
+        "incorrect format used for video",
+        "incorrect padding",
+    )
+
+    def _processor_apply(self, examples, derive_masks_from_markers):
+        """Run the processor, retrying media loads that fail transiently.
+
+        On a parallel filesystem under many ranks, an image or video that exists and is
+        perfectly valid can still fail to open for one call. transformers then reports
+        ``Incorrect image source ... Got <path>`` or ``Incorrect format used for video``,
+        the rank raises, and every other rank in the job dies with it. Verified on the
+        failures this hit: all six reported paths existed and `file` identified them as
+        valid PNG/JPEG. Over several epochs each file is touched repeatedly, so a
+        once-in-a-million read error becomes a recurring job killer.
+
+        Retries only the message shapes above, and only a few times, so genuinely
+        undecodable data (a BMP named .jpg, say) still fails loudly instead of being
+        retried into a silent skip.
+        """
+        last_exc = None
+        for attempt in range(self._media_retries + 1):
+            try:
+                return self.processor.apply_chat_template(
+                    examples,
+                    tokenize=True,
+                    return_tensors="pt",
+                    return_dict=True,
+                    add_generation_prompt=self.add_generation_prompt,
+                    return_assistant_tokens_mask=(
+                        self.answer_only_loss and not derive_masks_from_markers
+                    ),
+                )
+            except (ValueError, TypeError, OSError) as exc:  # noqa: PERF203
+                # PERF203: the try/except IS the retry; the cost is irrelevant next to
+                # a processor call that decodes images and video.
+                text = str(exc).lower()
+                if not any(m in text for m in self._TRANSIENT_MEDIA_ERRORS):
+                    raise
+                last_exc = exc
+                if attempt < self._media_retries:
+                    time.sleep(self._media_retry_sleep * (attempt + 1))
+        raise RuntimeError(
+            f"media load failed {self._media_retries + 1} times: {last_exc}"
+        ) from last_exc
+
     def _apply_chat_template(self, examples):
         """Tokenize VLM messages without passing text-only kwargs to the processor."""
         derive_masks_from_markers = bool(self._assistant_marker_specs())
-        tokenized_messages = self.processor.apply_chat_template(
-            examples,
-            tokenize=True,
-            return_tensors="pt",
-            return_dict=True,
-            add_generation_prompt=self.add_generation_prompt,
-            return_assistant_tokens_mask=self.answer_only_loss and not derive_masks_from_markers,
-        )
+        tokenized_messages = self._processor_apply(examples, derive_masks_from_markers)
         tokenized_messages = self._pad_sequence_tensors(tokenized_messages)
         if self.answer_only_loss and derive_masks_from_markers:
             tokenized_messages["assistant_masks"] = self._build_assistant_masks(tokenized_messages)
