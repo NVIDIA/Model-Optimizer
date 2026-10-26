@@ -17,9 +17,10 @@
 
 import contextlib
 import copy
+import hashlib
+import importlib.abc
 import importlib.util
 import json
-import os
 import sys
 import warnings
 from collections import Counter, defaultdict, deque
@@ -28,12 +29,19 @@ from collections.abc import Mapping
 import torch
 import torch.distributed
 import transformers
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from transformers.cache_utils import DynamicCache
 
 KIMI_K2_REPO_ID = "moonshotai/Kimi-K2-Thinking"
+# These third-party files are executed, so pin them; bump the revision and hashes together after
+# reviewing the upstream diff.
+KIMI_K2_REVISION = "a51ccc050d73dab088bf7b0e2dd9b30ae85a4e55"
+KIMI_K2_FILE_SHA256 = {
+    "configuration_deepseek.py": "54f29dd0d56e9a13f639c703e524daa71794e360050012aea3788ad7cfc38b17",
+    "modeling_deepseek.py": "ce753fc9076ce13ce9557e680e2f5bd68ae8929a8225772968a9a22a1d17b7d4",
+}
 KIMI_K2_PACKAGE_NAME = "kimi_k2_temp"
 
 
@@ -499,38 +507,70 @@ def _patch_dynamic_cache_compatibility() -> None:
         )
 
 
-def _import_module_from_path(module_path: str, module_name: str, package_name: str):
-    """Dynamically import a module from file path."""
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    if spec is None or spec.loader is None:
+class _VerifiedSourceLoader(importlib.abc.InspectLoader):
+    """Execute already-verified source bytes, never re-reading the file or its ``__pycache__``."""
+
+    def __init__(self, path: str, source: bytes):
+        self.path = path
+        self.source = source
+
+    def get_source(self, fullname):
+        return importlib.util.decode_source(self.source)
+
+    def get_code(self, fullname):
+        return self.source_to_code(self.source, self.path)
+
+
+def _import_module_from_path(module_path: str, module_name: str, package_name: str, sha256: str):
+    """Import a module from file path, refusing content that does not match ``sha256``."""
+    with open(module_path, "rb") as f:
+        source = f.read()
+    digest = hashlib.sha256(source).hexdigest()
+    if digest != sha256:
+        raise RuntimeError(
+            f"sha256 of {module_path} is {digest}, expected {sha256}; refusing to execute it."
+        )
+
+    loader = _VerifiedSourceLoader(module_path, source)
+    spec = importlib.util.spec_from_file_location(module_name, module_path, loader=loader)
+    if spec is None:
         raise ImportError(f"Failed to load module {module_name} from {module_path}")
 
     module = importlib.util.module_from_spec(spec)
     module.__package__ = package_name
     sys.modules[module_name] = module
-    spec.loader.exec_module(module)
+    loader.exec_module(module)
     return module
 
 
 def _setup_kimi_k2_decoder():
     """Setup Kimi-K2 decoder with proper imports and patches."""
-    # Download repository files
-    kimi_k2_path = snapshot_download(repo_id=KIMI_K2_REPO_ID, allow_patterns="*.py")
-
-    # Patch deprecated usage in Kimi implementation
-    _patch_dynamic_cache_compatibility()
+    # Not snapshot_download: for a commit revision it calls the Hub even with HF_HUB_OFFLINE set,
+    # so cached runs would fail offline.
+    config_module_path = hf_hub_download(
+        KIMI_K2_REPO_ID, "configuration_deepseek.py", revision=KIMI_K2_REVISION
+    )
+    model_module_path = hf_hub_download(
+        KIMI_K2_REPO_ID, "modeling_deepseek.py", revision=KIMI_K2_REVISION
+    )
 
     # Import required modules
-    config_module_path = os.path.join(kimi_k2_path, "configuration_deepseek.py")
-    model_module_path = os.path.join(kimi_k2_path, "modeling_deepseek.py")
-
     _import_module_from_path(
-        config_module_path, f"{KIMI_K2_PACKAGE_NAME}.configuration_deepseek", KIMI_K2_PACKAGE_NAME
+        config_module_path,
+        f"{KIMI_K2_PACKAGE_NAME}.configuration_deepseek",
+        KIMI_K2_PACKAGE_NAME,
+        KIMI_K2_FILE_SHA256["configuration_deepseek.py"],
     )
 
     kimi_k2_module = _import_module_from_path(
-        model_module_path, f"{KIMI_K2_PACKAGE_NAME}.modeling_deepseek", KIMI_K2_PACKAGE_NAME
+        model_module_path,
+        f"{KIMI_K2_PACKAGE_NAME}.modeling_deepseek",
+        KIMI_K2_PACKAGE_NAME,
+        KIMI_K2_FILE_SHA256["modeling_deepseek.py"],
     )
+
+    # Patch deprecated usage in Kimi implementation
+    _patch_dynamic_cache_compatibility()
 
     # Patch Kimi Attention to init rope lazily to avoid save/load meta tensor error
     original_init_rope = kimi_k2_module.DeepseekV3Attention._init_rope

@@ -24,7 +24,12 @@ import torch
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from transformers import BatchEncoding
 
-from modelopt.torch.speculative.utils import get_conversation_input_ids
+import modelopt.torch.speculative.utils as spec_utils
+from modelopt.torch.speculative.utils import (
+    KIMI_K2_FILE_SHA256,
+    _setup_kimi_k2_decoder,
+    get_conversation_input_ids,
+)
 
 CONVERSATIONS = [
     {"role": "user", "content": "Explain why the sky is blue in a few sentences."},
@@ -73,3 +78,17 @@ def test_normalizes_to_flat_list(wrap):
     assert input_ids == expected
     # The pre-fix code saw len() in {1, 2} here and silently dropped the conversation.
     assert len(input_ids) > 10
+
+
+def test_kimi_k2_decoder_refuses_unverified_code(tmp_path, monkeypatch):
+    """Third-party Kimi-K2 code must match the pinned hashes before any of it runs."""
+    marker = tmp_path / "executed"
+    for filename in KIMI_K2_FILE_SHA256:
+        (tmp_path / filename).write_text(f"open({str(marker)!r}, 'w').close()\n")
+    monkeypatch.setattr(
+        spec_utils, "hf_hub_download", lambda repo_id, filename, **kwargs: str(tmp_path / filename)
+    )
+
+    with pytest.raises(RuntimeError):
+        _setup_kimi_k2_decoder()
+    assert not marker.exists()
