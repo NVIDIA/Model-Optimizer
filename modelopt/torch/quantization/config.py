@@ -155,14 +155,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Literal, TypeAlias
 
-from pydantic import (
-    AliasChoices,
-    Field,
-    ValidationInfo,
-    field_serializer,
-    field_validator,
-    model_validator,
-)
+from pydantic import Field, ValidationInfo, field_serializer, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.opt.config_loader import load_config
@@ -730,13 +723,14 @@ class LayerwiseConfig(ModeloptBaseConfig):
     )
 
     get_qdq_activations_from_prev_layer: bool = ModeloptField(
-        default=False,
+        default=True,
         title="Cache next-layer inputs from QDQ outputs of prior layers.",
         description=(
-            "If True (GPTQ default), capture each layer's next-layer inputs "
+            "If True (default), capture each layer's next-layer inputs "
             "after it is calibrated, so QDQ error and in-place weight updates "
-            "propagate forward. If False (max/mse default), capture before, so "
-            "the next layer sees the same FP activations as a non-layerwise pass."
+            "propagate forward. If False, capture before calibration, so "
+            "the next layer sees the same FP activations as a non-layerwise pass. "
+            "We recommend setting this to True for GPTQ and Local-Hessian."
         ),
     )
 
@@ -761,6 +755,24 @@ class LayerwiseConfig(ModeloptBaseConfig):
         ),
     )
 
+    export_dir: str | None = ModeloptField(
+        default=None,
+        title="Export each layer's quantized checkpoint as soon as it is calibrated.",
+        description=(
+            "If set, each decoder layer is written to a quantized HF checkpoint shard in "
+            "this directory the moment its calibration finishes, replacing the separate "
+            "``export_hf_checkpoint()`` pass and its full-precision intermediate. "
+            "Calibration writes only the layer shards; the checkpoint does not load until "
+            "``finalize()`` is called on the exporter attached to the model, which adds "
+            "the tail shard, the index and the config artifacts. "
+            "Combined with ``checkpoint_dir``, an interrupted run resumes without "
+            "re-exporting finished layers. Supports FP8 and NVFP4 on single-process "
+            "models, resident or accelerate-offloaded; AWQ, SVDQuant, multi-process jobs "
+            "and weight-tied quantized modules raise NotImplementedError. Per-layer export "
+            "leaves the model in memory in export form, never valid for inference."
+        ),
+    )
+
     calib_mutates_weights: bool = ModeloptField(
         default=True,
         title="Whether layerwise calibration mutates layer weights.",
@@ -774,15 +786,7 @@ class LayerwiseConfig(ModeloptBaseConfig):
 
 
 def _coerce_layerwise_input(value):
-    """Normalize a raw ``layerwise`` value to a dict; warn on deprecated bool."""
-    if isinstance(value, bool):
-        warnings.warn(
-            "Passing the layerwise field as a bool is deprecated; use a dict, "
-            "e.g. `{'enable': True}`.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return {"enable": value}
+    """Normalize a raw ``layerwise`` value to a dict."""
     if value is None:
         return {}
     if isinstance(value, LayerwiseConfig):
@@ -822,61 +826,18 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
 
     layerwise: LayerwiseConfig = Field(
         default_factory=LayerwiseConfig,
-        validation_alias=AliasChoices("layerwise", "use_sequential"),
         title="Layerwise calibration configuration.",
         description=(
             "Nested config controlling layer-by-layer calibration. Pass a dict, "
-            "e.g. ``{'enable': True, 'checkpoint_dir': '/path'}``. Bool input is "
-            "accepted for backward compatibility but deprecated."
+            "e.g. ``{'enable': True, 'checkpoint_dir': '/path'}``."
         ),
     )
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_layerwise_checkpoint_dir(cls, data):
-        """Merge the legacy flat ``layerwise_checkpoint_dir`` key into ``layerwise``.
-
-        Raises if both the flat key and a nested ``checkpoint_dir`` are set with conflicting values.
-        """
-        if not isinstance(data, dict) or "layerwise_checkpoint_dir" not in data:
-            return data
-        warnings.warn(
-            "Passing `layerwise_checkpoint_dir` at the top level is deprecated; "
-            "nest it under `layerwise.checkpoint_dir` instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        data = dict(data)
-        flat_dir = data.pop("layerwise_checkpoint_dir")
-        # Resolve the legacy ``use_sequential`` alias before writing ``layerwise``,
-        # otherwise the alias value is silently dropped when AliasChoices picks the
-        # newly-written ``layerwise`` key over ``use_sequential``.
-        raw_layerwise = data.pop("layerwise", data.pop("use_sequential", None))
-        layerwise = _coerce_layerwise_input(raw_layerwise)
-        existing = layerwise.get("checkpoint_dir")
-        if existing is not None and existing != flat_dir:
-            raise ValueError(
-                f"Conflicting checkpoint_dir: layerwise_checkpoint_dir={flat_dir!r} "
-                f"differs from layerwise.checkpoint_dir={existing!r}. Set only one."
-            )
-        data["layerwise"] = {**layerwise, "checkpoint_dir": flat_dir}
-        return data
 
     @field_validator("layerwise", mode="before")
     @classmethod
     def _coerce_layerwise(cls, value):
-        """Coerce ``layerwise=bool/None`` to dict form; also handles the alias path."""
+        """Coerce ``layerwise=None``/``LayerwiseConfig`` to dict form."""
         return _coerce_layerwise_input(value)
-
-    @model_validator(mode="after")
-    def validate_layerwise_checkpoint_dir(self):
-        """Raise if layerwise.checkpoint_dir is set but layerwise.enable is False."""
-        if self.layerwise.checkpoint_dir is not None and not self.layerwise.enable:
-            raise ValueError(
-                "layerwise.checkpoint_dir requires layerwise.enable=True. "
-                "Set layerwise.enable=True or remove layerwise.checkpoint_dir."
-            )
-        return self
 
     @model_validator(mode="after")
     def _validate_non_mutating_layerwise_supported(self):
@@ -963,8 +924,8 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
         description=(
             "If True, max-calibration synchronizes the weight quantizer amax across local "
             "experts within each SequentialMLP layer, so all experts in that layer share "
-            "one effective weight amax. TEGroupedMLP already fuses experts into a single "
-            "GEMM with one weight quantizer, so this flag is irrelevant there."
+            "one effective weight amax. TEGroupedLinear keeps a per-expert weight quantizer "
+            "(GroupedQuantizer) whose amax follows the same expert-parallel sync rule."
         ),
     )
 
@@ -1271,9 +1232,10 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
     )
     block_size: int | None = ModeloptField(
         default=128,
+        gt=0,
         title="Block size for GPTQ weight update.",
-        description="""The block size for GPTQ weight update, which must be a multiple of the
-        group_size used in the quantization.""",
+        description="""The block size for GPTQ weight update, which must be positive and a multiple
+        of the group_size used in the quantization.""",
     )
     fused: bool = ModeloptField(
         default=False,
@@ -1281,21 +1243,29 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         description="""When True, use a fused Triton kernel that combines quantization and
         per-column error propagation into one launch per GPTQ block.""",
     )
+    importance_weighted: bool = ModeloptField(
+        default=False,
+        title="Weight the codebook search by the Hessian diagonal.",
+        description="""When True, formats whose codebook search takes a per-input-column importance
+        (the GGML IQ1 and IQ2 formats) weight it by the square root of the Hessian diagonal,
+        llama.cpp's imatrix statistic. Other formats ignore it.""",
+    )
 
-    @model_validator(mode="after")
-    def _gptq_qdq_default(self):
-        """Inject ``get_qdq_activations_from_prev_layer=True`` unless the user set it.
 
-        GPTQ's Hessian correctness depends on prior-layer QDQ activations, so the
-        default differs from the base class. Uses ``model_fields_set`` to detect
-        whether the user explicitly set the field — covers every input shape
-        (empty constructor, bool, dict) without a per-shape special case.
-        """
-        if "get_qdq_activations_from_prev_layer" not in self.layerwise.model_fields_set:
-            self.layerwise = self.layerwise.model_copy(
-                update={"get_qdq_activations_from_prev_layer": True}
-            )
-        return self
+class ImatrixCalibConfig(QuantizeAlgorithmConfig):
+    """The config for imatrix calibration.
+
+    Encodes each weight once, its codebook search weighted by the square root of its inputs'
+    per-column second moment ``E[x_j^2]`` -- llama.cpp's importance matrix. Covers the GGML formats
+    with a weighted search,
+    on dense linears and on each expert of HF fused-MoE experts. A weight that already holds final
+    codes, such as GPTQ's, is left alone, so ``[{method: gptq}, {method: imatrix}]`` runs GPTQ
+    where it applies and imatrix on any weight it leaves.
+    By default the statistics come from a single forward pass, as llama.cpp collects them; with
+    ``layerwise`` enabled, each layer's are collected after the earlier layers are quantized.
+    """
+
+    method: Literal["imatrix"] = ModeloptField("imatrix")
 
 
 _ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig

@@ -48,8 +48,9 @@ import datasets
 from lm_eval import utils
 from packaging.version import Version
 
-if Version(version("lm_eval")) < Version("0.4.10"):
-    raise ImportError(f"lm_eval_hf.py requires lm-eval >= 0.4.10; found {version('lm_eval')}.")
+if Version(version("lm_eval")) < Version("0.4.12"):
+    # Matches the floor pinned in requirements.txt.
+    raise ImportError(f"lm_eval_hf.py requires lm-eval >= 0.4.12; found {version('lm_eval')}.")
 
 from lm_eval._cli import HarnessCLI
 from lm_eval.api.model import T

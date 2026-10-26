@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 metadata:
-  recipe_type: ptq
   description: INT4 blockwise weight-only (W4A16, block size 128), max calibration.
 
 imports:

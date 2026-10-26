@@ -2,7 +2,7 @@
 ###############################  BUILD CONFIGURATION  ##############################################
 ####################################################################################################
 [build-system]
-requires = ["setuptools>=80", "setuptools-scm>=8,<10"]
+requires = ["setuptools>=80", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools_scm]
@@ -54,41 +54,53 @@ dependencies = [
 [project.optional-dependencies]
 onnx = [
     "cppimport",
-    "cupy-cuda12x; platform_machine != 'aarch64' and platform_system != 'Darwin'",
+    "cupy-cuda12x; (python_version <= '3.10' or platform_system != 'Linux' or platform_machine != 'x86_64') and platform_machine != 'aarch64' and platform_machine != 'ARM64' and platform_system != 'Darwin'",
+    "cupy-cuda13x; python_version > '3.10' and platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "cupy-cuda13x>=14.2.0; python_version > '3.10' and platform_system == 'Windows' and platform_machine == 'ARM64'",
     "lief",
     "ml_dtypes",
     "onnx-graphsurgeon>=0.6.1",
-    "onnx~=1.21.0",
+    "onnx~=1.21.0; platform_system != 'Windows'",
+    "onnx~=1.23.2; platform_system == 'Windows'",
     "onnxconverter-common~=1.16.0",
-    # ORT for Windows
-    "onnxruntime-gpu==1.22.0; platform_system == 'Windows'",
-    # ORT with Python <= 3.10
+    # Python 3.10 support for ModelOpt ONNX is deprecated and will be removed in a future release.
+    # Native Windows ARM64 does not support ModelOpt ONNX on Python 3.10.
+    # ORT for Windows x64
+    "onnxruntime-gpu==1.22.0; platform_system == 'Windows' and platform_machine == 'AMD64'",
+    # ORT host and standalone TensorRT-RTX ABI EP for native Windows ARM64.
+    "onnxruntime~=1.26.0; python_version > '3.10' and platform_system == 'Windows' and platform_machine == 'ARM64'",
+    "onnxruntime-ep-nv-tensorrt-rtx-cu13==0.4.0; python_version > '3.10' and platform_system == 'Windows' and platform_machine == 'ARM64'",
+    # ORT with Python <= 3.10 on supported platforms
     "onnxruntime~=1.22.0; python_version <= '3.10' and (platform_machine == 'aarch64' or platform_system == 'Darwin')",
     "onnxruntime-gpu~=1.22.0; python_version <= '3.10' and platform_machine != 'aarch64' and platform_system != 'Darwin' and platform_system != 'Windows'",
-    # ORT with Python > 3.10
+    # ORT with Python > 3.10; the 1.30 CUDA 13 upgrade is validated on Linux x86-64.
+    # CUDA 12.8 users on that platform: see docs/source/getting_started/_installation_for_Linux.rst.
+    # Retain existing pins on other platforms until their runtime/EP tests pass.
     "onnxruntime~=1.24.2; python_version > '3.10' and (platform_machine == 'aarch64' or platform_system == 'Darwin')",
-    "onnxruntime-gpu~=1.24.2; python_version > '3.10' and platform_machine != 'aarch64' and platform_system != 'Darwin' and platform_system != 'Windows'",
+    "onnxruntime-gpu~=1.24.2; python_version > '3.10' and platform_machine != 'aarch64' and platform_system != 'Darwin' and platform_system != 'Windows' and (platform_system != 'Linux' or platform_machine != 'x86_64')",
+    "onnxruntime-gpu>=1.29,<1.31; python_version > '3.10' and platform_system == 'Linux' and platform_machine == 'x86_64'",
     "onnxscript",
     "onnxslim>=0.1.76",
-    "polygraphy>=0.49.22",
+    "polygraphy>=0.53.4",
 ]
 hf = [
     "accelerate>=1.0.0",
     "datasets>=3.0.0",
     "deepspeed>=0.9.6; platform_system != 'Darwin' and platform_system != 'Windows'",
     "diffusers>=0.32.2",
+    "httpx>=0.23.0,<1",
     "huggingface_hub>=0.24.0",
     "nltk",
     "peft>=0.17.0",
     "sentencepiece>=0.2.1",                                                           # Also implicitly used in test_unified_export_megatron, test_vllm_fakequant_megatron_export
     "tiktoken",
-    "transformers>=4.57,<5.15",                                                       # Should match modelopt/torch/__init__.py and noxfile.py
+    "transformers>=5.5,<5.19",                                                        # Should match modelopt/torch/__init__.py and noxfile.py
     "wonderwords",
 ]
 
 puzzletron = [ # Dependedencies for modelopt.torch.puzzletron subpackage
     "fire",
-    "hydra-core==1.3.2",
+    "hydra-core~=1.3.4",
     "immutabledict",
     "lru-dict",
     "pandas",
@@ -108,8 +120,9 @@ dev-docs = [
     "sphinx-autobuild==2025.8.25; python_version >= '3.12'",
     "sphinx-copybutton~=0.5.2; python_version >= '3.12'",
     "sphinx-inline-tabs==2025.12.21.14; python_version >= '3.12'",
-    "sphinx-rtd-theme~=3.1.0; python_version >= '3.12'",
+    "shibuya~=2026.7.0; python_version >= '3.12'",
     "sphinx-togglebutton~=0.4.0; python_version >= '3.12'",
+    "sphinxext-rediraffe~=0.3.0; python_version >= '3.12'",
 ]
 dev-test = [
     "coverage[toml]~=7.14.0", # a1_coverage.pth for subprocess tracking requires this
@@ -118,6 +131,8 @@ dev-test = [
     "pytest-cov~=7.1.0",
     "pytest-instafail==0.5.0",
     "pytest-timeout~=2.4.0",
+    "pytest-xdist~=3.8.0",
+    "tomli; python_version < '3.11'",
     "uv",
     # test-specific dependencies
     "psutil", # tools/resource_monitor.py sidecar (tests/unit/tools)
@@ -125,6 +140,11 @@ dev-test = [
     "torchprofile==0.0.4", # optional dependency for modelopt.torch
     "torchvision",
     "torch-geometric",
+]
+dev-fla = [
+    "apache-tvm-ffi==0.1.9",
+    "fla-core==0.5.1",
+    "tilelang==0.1.8",
 ]
 # Compound extras via self-references
 mlflow = [ # Dependencies for modelopt.torch.utils.mlflow run tracking
@@ -143,8 +163,30 @@ Homepage = "https://github.com/NVIDIA/Model-Optimizer"
 include = ["modelopt*"]
 
 [tool.setuptools.package-data]
-modelopt = ["**/*.h", "**/*.cpp", "**/*.cu"]
+modelopt = ["**/*.cpp", "**/*.cu", "**/*.cuh", "**/*.h"]
 modelopt_recipes = ["**/*.yml", "**/*.yaml"]
+
+[tool.setuptools.exclude-package-data]
+# The recipe library keeps two backward-compat symlinks: the top-level
+# ``huggingface`` -> ``model_type`` rename alias, and the nested
+# ``model_type/models`` -> ``../models`` alias. The recursive package-data glob above
+# follows both, so drop the aliased copies here to avoid shipping every recipe twice;
+# setuptools' exclude glob is non-recursive, hence the explicit per-depth entries.
+# MANIFEST.in prunes the symlink dir entries themselves (build_py can't copy a
+# symlink-to-dir). Old huggingface/... --recipe paths keep working via the loader
+# alias in modelopt/recipe/loader.py.
+modelopt_recipes = [
+    "huggingface",
+    "model_type/models",
+    # Architecture recipes duplicated via ``huggingface`` -> ``model_type``.
+    "huggingface/*/*/*.yaml", "huggingface/*/*/*.yml",
+    # Checkpoint mirrors duplicated via ``huggingface/models`` and
+    # ``model_type/models`` (both resolve to the real top-level ``models/`` tier).
+    "huggingface/models/*/*/*/*.yaml", "huggingface/models/*/*/*/*.yml",
+    "huggingface/models/*/*/*/*/*.yaml", "huggingface/models/*/*/*/*/*.yml",
+    "model_type/models/*/*/*/*.yaml", "model_type/models/*/*/*/*.yml",
+    "model_type/models/*/*/*/*/*.yaml", "model_type/models/*/*/*/*/*.yml",
+]
 
 [tool.uv]
 managed = true
@@ -218,8 +260,9 @@ extend-ignore = [
 "examples/*" = ["D"]
 "noxfile.py" = ["D", "E501"]
 "tests/*" = ["B017", "D", "E402", "PT012"]
-".agents/skills/*/tests/test_*.py" = ["D", "E402"] # Skill test scripts: docstring (D) + sys.path import-order (E402) exemptions
+"plugins/modelopt/skills/*/tests/test_*.py" = ["D", "E402"] # Skill test scripts: docstring (D) + sys.path import-order (E402) exemptions
 "*/_[a-zA-Z]*" = ["D"] # Private packages (_abc/*.py) or modules (_xyz.py)
+"modelopt/torch/kernels/quantization/linear_attention/fla_*.py" = ["D", "E501"] # Vendored flash-linear-attention kernels
 "*.ipynb" = ["D", "E501"] # Ignore missing docstrings or line length for Jupyter notebooks
 "modelopt/torch/kernels/*" = ["N803", "N806", "E731"] # triton style
 "modelopt/torch/puzzletron/*" = [
@@ -294,6 +337,15 @@ disable_error_code = ["attr-defined"]
 module = ["examples.diffusers.fastgen.preprocess.*"]
 ignore_errors = true
 
+# Vendored from fla-org/flash-linear-attention (MIT); kept faithful to upstream rather than
+# annotated to modelopt's strict mypy (Triton loop indices, ``*tensor.shape`` unpacking).
+[[tool.mypy.overrides]]
+module = [
+    "modelopt.torch.kernels.quantization.linear_attention.fla_chunk_delta_h",
+    "modelopt.torch.kernels.quantization.linear_attention.fla_chunk_gated_delta_rule",
+]
+ignore_errors = true
+
 [tool.bandit]
 exclude_dirs = [".github/", "examples/", "noxfile.py", "tests/"]
 # Do not change `skips`. It should be consistent with NVIDIA's Wheel-CI-CD bandit.yml config.
@@ -321,6 +373,7 @@ timeout_func_only = true
 markers = [
     "integration: Tests that require external services or other non-hermetic dependencies",
     "manual: Only run when --run-manual is given",
+    "nightly: Only run when --run-nightly is given (the scheduled and on-demand CI)",
     "release: Regression tests that should be run before every release",
 ]
 

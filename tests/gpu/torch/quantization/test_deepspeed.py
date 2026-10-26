@@ -44,6 +44,7 @@ def get_ds_config(zero_stage: int = 3):
 
 def _test_deepspeed_simple_linear(zero_stage, rank, size):
     deepspeed.init_distributed()
+    torch.manual_seed(1)
 
     dim = 32
     model = nn.Linear(dim, dim).cuda(rank)
@@ -75,7 +76,7 @@ def _test_deepspeed_simple_linear(zero_stage, rank, size):
 
     assert "weight" in manager.da_keys()
     out_test = deepspeed_model(inputs)
-    assert torch.allclose(out_ref, out_test)
+    torch.testing.assert_close(out_ref, out_test, rtol=1e-5, atol=1e-8)
 
     # Test quantization after DeepSpeed initialization
     optimizer_after_test = torch.optim.Adam(deepspeed_model_after.parameters(), lr=0.1)

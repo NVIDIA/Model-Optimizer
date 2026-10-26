@@ -59,18 +59,48 @@ from pathlib import Path
 
 import torch
 from megatron.bridge import AutoBridge
+from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
+from mlflow_utils import (
+    NON_PARAMS,
+    add_mlflow_args,
+    checkpoint_name,
+    checkpoint_root,
+    mlflow_run,
+    record_exported_checkpoint,
+    resolve_mlflow_args,
+)
 from transformers import AutoConfig
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.export import copy_hf_ckpt_remote_code
+from modelopt.torch.export import copy_non_model_files, ensure_local_checkpoint
 from modelopt.torch.utils import print_args, print_rank_0
+from modelopt.torch.utils.mlflow import Tool, masked_args
 from modelopt.torch.utils.plugins.mbridge import (
+    is_vlm_config,
     load_mbridge_model_from_hf,
     load_modelopt_megatron_checkpoint,
 )
 
 # Megatron-Bridge checkpoint iteration directories use names like ``iter_0000100``.
 _ITER_DIR_PREFIX = "iter_"
+
+
+DISTILL_EXPORT = Tool(
+    name="megatron_bridge_distill_export",
+    tracks=(
+        "Track this export on an MLflow server, uploading the command and the run log, and "
+        "writing .experiment.json into each exported checkpoint."
+    ),
+    variant_help="the distilled checkpoint's directory name",
+    variant=lambda args: checkpoint_name(args.megatron_path),
+    model=lambda args: args.student_hf_path,
+    # The root given, not the per-iteration directories under it: those are pointed at this
+    # run by record_exported_checkpoint.
+    checkpoint=lambda args: args.hf_export_path,
+    source=lambda args: checkpoint_root(args.megatron_path),
+    settles_pointer=False,
+    non_params=NON_PARAMS,
+)
 
 
 def _iteration_dir_name(iteration: int) -> str:
@@ -138,6 +168,7 @@ def export_llm_to_hf(
     AutoConfig.from_pretrained(
         student_hf_path, trust_remote_code=trust_remote_code
     ).save_pretrained(hf_export_path)
+    copy_non_model_files(student_hf_path, hf_export_path)
 
 
 def save_vlm_to_hf(
@@ -164,7 +195,9 @@ def save_vlm_to_hf(
     )
     export_bridge.hf_pretrained.save_artifacts(hf_export_path)
     export_bridge.save_hf_weights([full_model], hf_export_path)
-    copy_hf_ckpt_remote_code(student_hf_path, hf_export_path)
+    # Every rank runs this function (save_hf_weights is collective); one writer is enough.
+    if dist.is_master():
+        copy_non_model_files(student_hf_path, hf_export_path)
 
 
 def get_args() -> argparse.Namespace:
@@ -213,22 +246,48 @@ def get_args() -> argparse.Namespace:
         "correct for homogeneous students; unused for VLMs.",
     )
     parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
+    parser.add_argument(
+        "--no_moe_grouped_gemm",
+        action="store_true",
+        help=(
+            "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
+            "By default grouped GEMM is used unless the architecture cannot export it to "
+            "HuggingFace, in which case SequentialMLP is selected automatically. VLMs only: the "
+            "LLM path reads the expert layout from the checkpoint and ignores this flag."
+        ),
+    )
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
     parser.add_argument("--cp_size", type=int, default=1, help="Context parallel size")
 
+    add_mlflow_args(parser, DISTILL_EXPORT)
+
     args = parser.parse_args()
-    print_args(args)
+    resolve_mlflow_args(args, parser, DISTILL_EXPORT)
+    print_args(masked_args(args))
 
     return args
 
 
 def main(args: argparse.Namespace):
+    # --student_hf_path stays as given. Later steps read the local copy of the whole checkpoint in
+    # student_local_checkpoint_path, since exporters read the source's files from local disk only;
+    # student_hub_model_id is the Hub ID, or None for a local path.
+    args.student_hub_model_id, args.student_local_checkpoint_path = ensure_local_checkpoint(
+        args.student_hf_path
+    )
     checkpoint_export_paths: list[tuple[Path, Path]] = _get_checkpoint_export_paths(args)
-    is_vlm = hasattr(
-        AutoConfig.from_pretrained(args.student_hf_path, trust_remote_code=args.trust_remote_code),
-        "vision_config",
+    # This path drops quantization, so a QAD checkpoint would export silently unquantized.
+    # ``has_modelopt_state`` ignores ``kd_loss``, so plain distillation still passes.
+    quantized = [str(p) for p, _ in checkpoint_export_paths if has_modelopt_state(str(p))]
+    if quantized:
+        raise ValueError(
+            f"{quantized[0]} is quantized; this script exports full precision only and would drop "
+            "the quantizers. Use export_quantized_megatron_to_hf.py instead."
+        )
+    is_vlm = is_vlm_config(
+        args.student_local_checkpoint_path, trust_remote_code=args.trust_remote_code
     )
 
     if is_vlm:
@@ -236,8 +295,10 @@ def main(args: argparse.Namespace):
         # with the distilled checkpoint weights, then export the assembled VLM.
         print_rank_0("Reassembling distilled VLM and exporting to HF format")
         _bridge, _provider, _model, full_model, _tokenizer = load_mbridge_model_from_hf(
-            hf_model_name_or_path=args.student_hf_path,
+            hf_model_name_or_path=args.student_local_checkpoint_path,
             trust_remote_code=args.trust_remote_code,
+            # Mirrors distill.py's unquantized branch
+            moe_grouped_gemm=not args.no_moe_grouped_gemm,
             provider_overrides={
                 "tensor_model_parallel_size": args.tp_size,
                 "pipeline_model_parallel_size": args.pp_size,
@@ -259,9 +320,10 @@ def main(args: argparse.Namespace):
             save_vlm_to_hf(
                 full_model,
                 str(hf_export_path),
-                args.student_hf_path,
+                args.student_local_checkpoint_path,
                 trust_remote_code=args.trust_remote_code,
             )
+            record_exported_checkpoint(args, hf_export_path, dist.is_master())
             print_rank_0(f"Saved distilled VLM to {hf_export_path} in HF format")
     else:
         print_rank_0("Exporting distilled checkpoint(s) to HF format")
@@ -276,10 +338,13 @@ def main(args: argparse.Namespace):
                 export_llm_to_hf(
                     megatron_path=str(megatron_path),
                     hf_export_path=str(hf_export_path),
-                    student_hf_path=args.student_hf_path,
+                    student_hf_path=args.student_local_checkpoint_path,
                     template_hf=args.student_hf_model,
                     trust_remote_code=args.trust_remote_code,
                 )
+                # is_rank_0 was captured before dist.cleanup(): afterwards every rank
+                # reports itself as rank 0, and they would all write.
+                record_exported_checkpoint(args, hf_export_path, is_rank_0)
                 print(f"Exported HuggingFace checkpoint to {hf_export_path}")
 
 
@@ -287,6 +352,11 @@ if __name__ == "__main__":
     dist.setup()
     args = get_args()
     try:
-        main(args)
+        # Entered inside the try: opening the run is fatal by design, and the peers of a rank
+        # that exits without dist.abort() stay blocked on the first collective.
+        with mlflow_run(args, DISTILL_EXPORT):
+            main(args)
+    except BaseException:
+        dist.abort()  # peers may be stuck in a collective this rank will never reach
     finally:
         dist.cleanup()

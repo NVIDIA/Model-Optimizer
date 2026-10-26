@@ -53,12 +53,33 @@ Usage (single node, 4 GPUs, MP=4):
 
 For MP=8 across two nodes use torchrun's ``--nnodes=2 --node_rank=<i>
 --master_addr=<ip>`` flags.
+
+Calibration settings
+--------------------
+
+When the amax dumped here is later consumed by ``quantize_to_nvfp4.py
+--cast_mxfp4_to_nvfp4``, the expert weights are a lossless bit-cast, so the
+activation amax (``input_scale``) is the only calibrated quantity that survives:
+
+  * ``--calib_seq`` sets the tokenizer truncation cap, which decides how much of a
+    long document survives. Raising it is **not** free on this path: the whole
+    corpus is tokenized in one ``padding=True`` call, so every row is padded to
+    the longest surviving sample, and ``calibrate_loop`` passes only ``input_ids``
+    -- so those pad tokens participate in calibration. Choose it from the context
+    length the activations must cover, and re-validate rather than assuming
+    higher is better.
+
+  * ModelOpt's ``mse_calibrate`` has no effect on this path — it tunes weight
+    quantizers only, and the MXFP4->NVFP4 cast overwrites ``weight_scale``
+    afterwards.
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
+import fnmatch
+import inspect
 import json
 import os
 import re
@@ -74,6 +95,7 @@ from safetensors.torch import load_model
 from transformers import AutoTokenizer
 
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.qtensor.mxfp4_tensor import MXFP4QTensor
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
@@ -93,22 +115,53 @@ def _inject_v4_module(v4_inference_dir: Path) -> None:
 deekseep_v4_model: Any = None
 
 
+_DS_FP8_BLOCK_SIZES = (32, 128)
+
+
+def _ds_fp8_block_size(weight: torch.Tensor, scale: torch.Tensor) -> int:
+    """Detect the FP8 quantization block size used by the loaded DeepSeek V4 module.
+
+    Prefers an explicit module attribute (``fp8_block_size`` on V4.1-Flash,
+    ``block_size`` on V4-Pro), falling back to the one known DS-V4 block size
+    whose scale shape matches the tensors. Shapes alone cannot name a block size:
+    once a block is partial, a whole range of sizes gives the same scale shape.
+    """
+    for attr in ("fp8_block_size", "block_size"):
+        blk = getattr(deekseep_v4_model, attr, None)
+        if isinstance(blk, int) and blk > 0 and scale.shape == _fp8_scale_shape(weight, blk):
+            return blk
+    fits = [b for b in _DS_FP8_BLOCK_SIZES if scale.shape == _fp8_scale_shape(weight, b)]
+    assert len(fits) == 1, (
+        f"cannot infer FP8 block size from weight {tuple(weight.shape)} "
+        f"and scale {tuple(scale.shape)}: known block sizes {_DS_FP8_BLOCK_SIZES} "
+        f"matching these shapes: {fits}"
+    )
+    return fits[0]
+
+
+def _fp8_scale_shape(weight: torch.Tensor, block: int) -> tuple[int, int]:
+    """Ceil-div, matching DS-V4 ``Linear.__init__``'s scale allocation."""
+    m, n = weight.shape
+    return ((m + block - 1) // block, (n + block - 1) // block)
+
+
 def _fp8_ue8m0_blockwise_to_bf16(
     weight: torch.Tensor, scale: torch.Tensor, block: int = 128
 ) -> torch.Tensor:
-    """FP8 E4M3 × UE8M0 128x128 block-scale → BF16 (V4 native FP8 layout).
+    """FP8 E4M3 × UE8M0 ``block``x``block`` block-scale → BF16 (V4 native FP8 layout).
 
     Same math as ``scripts/convert_dsv4_to_bf16.py``'s helper; ModelOpt's
     triton ``weight_dequant`` expects FP32 scales and cannot consume UE8M0
     directly, so we dequant inline.
     """
     m, n = weight.shape
-    assert m % block == 0 and n % block == 0, f"FP8 weight shape {(m, n)} not divisible by {block}"
-    assert scale.shape == (m // block, n // block), (
-        f"FP8 scale shape {tuple(scale.shape)} != expected ({m // block}, {n // block})"
+    expected = _fp8_scale_shape(weight, block)
+    assert scale.shape == expected, (
+        f"FP8 scale shape {tuple(scale.shape)} != expected {expected} for "
+        f"weight {(m, n)} at block size {block}"
     )
     exp = scale.contiguous().view(torch.uint8).to(torch.int32) - 127
-    exp = exp.repeat_interleave(block, 0).repeat_interleave(block, 1)
+    exp = exp.repeat_interleave(block, 0).repeat_interleave(block, 1)[:m, :n]
     return torch.ldexp(weight.to(torch.float32), exp).to(torch.bfloat16)
 
 
@@ -120,7 +173,7 @@ def _dequantize_linear_weight(linear_module) -> torch.Tensor:
     on V4's global default (``set_dtype`` typically sets it to fp8) and on
     the optional ``dtype=`` kwarg passed to ``Expert.__init__``:
       * ``float4_e2m1fn_x2`` + UE8M0 1x32 scale   → MXFP4 dequant.
-      * ``float8_e4m3fn``    + UE8M0 128x128 scale → FP8 dequant (inline).
+      * ``float8_e4m3fn``    + UE8M0 NxN block scale → FP8 dequant (inline).
       * any float dtype without a ``.scale``       → passthrough (already BF16).
     """
     w = linear_module.weight
@@ -138,7 +191,7 @@ def _dequantize_linear_weight(linear_module) -> torch.Tensor:
             block_sizes=[block_size],
         )
     if w.dtype == torch.float8_e4m3fn:
-        return _fp8_ue8m0_blockwise_to_bf16(w, w.scale, block=128)
+        return _fp8_ue8m0_blockwise_to_bf16(w, w.scale, block=_ds_fp8_block_size(w, w.scale))
     return w
 
 
@@ -216,7 +269,11 @@ def install_quant_registry() -> None:
 
 
 def load_deepseek_v4(
-    model_config: str, model_path: str, batch_size: int, dummy_weights: bool = False
+    model_config: str,
+    model_path: str,
+    batch_size: int,
+    dummy_weights: bool = False,
+    tokenizer=None,
 ):
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     rank = int(os.getenv("RANK", "0"))
@@ -230,7 +287,14 @@ def load_deepseek_v4(
         margs = deekseep_v4_model.ModelArgs(**json.load(f))
         margs.max_batch_size = max(batch_size, margs.max_batch_size)
     with torch.device("cuda"):
-        model = deekseep_v4_model.Transformer(margs)
+        if "tokenizer" in inspect.signature(deekseep_v4_model.Transformer.__init__).parameters:
+            assert tokenizer is not None, (
+                "this DS-V4 release's Transformer requires a tokenizer "
+                "(engram hash tables); load it before the model"
+            )
+            model = deekseep_v4_model.Transformer(margs, tokenizer)
+        else:
+            model = deekseep_v4_model.Transformer(margs)
 
     if dummy_weights:
         print(
@@ -252,6 +316,96 @@ def load_deepseek_v4(
     # inputs) lands on the right GPU.
     torch.set_default_device("cuda")
     return model
+
+
+_PUBLISHED_RECIPE = "models/deepseek-ai/DeepSeek-V4-Pro-0813/ptq/nvfp4_experts_only"
+
+
+_MTP_PROBE = "mtp.0.ffn.experts.0.w1_weight_quantizer"
+
+
+def _effective_enable(quant_cfg, name: str) -> bool:
+    """Whether ``name`` ends up enabled; mtq applies rules in order, so later ones win."""
+    enabled = False
+    for entry in quant_cfg:
+        if isinstance(entry, dict) and "quantizer_name" in entry:
+            if fnmatch.fnmatch(name, entry["quantizer_name"]):
+                enabled = entry.get("enable", True) is True
+    return enabled
+
+
+def _quant_cfg_from_recipe(recipe_path: str) -> dict:
+    """Load a ModelOpt recipe and return an ``mtq.quantize`` config.
+
+    ``mtq.quantize`` accepts ``algorithm`` as a string or as a dict keyed on
+    ``method``, which is the shape a recipe yields, so no translation is needed.
+
+    The recipe is validated against what the rest of this pipeline can actually
+    export. ``save_amax_and_quant_config`` persists only routed-expert quantizer
+    state and writes ``quantized_layers_manifest.json`` hardcoded to
+    ``NVFP4_W4A4``/``num_bits [2, 1]``/``block_size 16``/``scale_bits [4, 3]``,
+    and ``quantize_to_nvfp4.py`` re-derives expert paths itself and emits E4M3
+    block scales unconditionally. A recipe that enables anything else, or asks
+    for a different numeric format, would silently drop quantizers and describe
+    the result with a manifest that does not match the amax it ships beside.
+    Mirrors the guard in ``examples/kimi/kimi_k3/quantize_to_nvfp4.py``.
+    """
+    recipe = load_recipe(recipe_path)
+    quantize = getattr(recipe, "quantize", None)
+    if quantize is None:
+        raise ValueError(f"recipe {recipe_path!r} has no 'quantize' section; expected a PTQ recipe")
+    cfg = quantize.model_dump()
+
+    algo = cfg.get("algorithm")
+    method = algo.get("method") if isinstance(algo, dict) else algo
+    if method != "max":
+        raise ValueError(f"recipe must use the 'max' calibration algorithm, got {method!r}")
+
+    enabled_experts = False
+    for entry in cfg.get("quant_cfg", []):
+        if not isinstance(entry, dict) or entry.get("enable") is not True:
+            continue
+        name = entry.get("quantizer_name", "")
+        if "ffn.experts." not in name:
+            raise ValueError(
+                f"recipe enables {name!r}, but this pipeline exports only routed-expert "
+                "quantizers (*ffn.experts.*); it would be dropped from the amax dump "
+                "and the manifest without any error"
+            )
+        qcfg = entry.get("cfg") or {}
+        if not isinstance(qcfg, dict):
+            raise ValueError(
+                f"recipe entry {name!r} has a non-dict 'cfg' ({type(qcfg).__name__}); "
+                "this pipeline supports only a single NVFP4 config per quantizer"
+            )
+        block_sizes = qcfg.get("block_sizes") or {}
+        if (
+            tuple(qcfg.get("num_bits") or ()) != (2, 1)
+            or block_sizes.get(-1) != 16
+            or block_sizes.get("type") != "dynamic"
+            or tuple(block_sizes.get("scale_bits") or ()) != (4, 3)
+        ):
+            raise ValueError(
+                f"recipe entry {name!r} must be block-16 NVFP4 (num_bits (2, 1), "
+                f"block_sizes[-1] 16, type 'dynamic', scale_bits (4, 3)) to match "
+                f"the exported manifest, got num_bits={qcfg.get('num_bits')!r} "
+                f"block_sizes={block_sizes!r}"
+            )
+        enabled_experts = True
+
+    if not enabled_experts:
+        raise ValueError("recipe enables no routed-expert quantizers (*ffn.experts.*)")
+
+    # The scope check above is a substring test, so a pattern such as
+    # *mtp.*ffn.experts.* satisfies it. MTP experts match save_amax's
+    # \.experts\.\d+\.w[123]_ regex too, so resolve the rules the way mtq applies
+    # them (in order, last match wins) and reject a recipe that leaves them on.
+    if _effective_enable(cfg.get("quant_cfg", []), _MTP_PROBE):
+        raise ValueError(
+            f"recipe enables MTP quantizers (matched {_MTP_PROBE!r}); this pipeline "
+            "leaves the MTP/DSpark block in its source format"
+        )
+    return cfg
 
 
 def _build_nvfp4_experts_cfg() -> dict:
@@ -296,7 +450,15 @@ def _build_nvfp4_experts_cfg() -> dict:
     }
 
 
-def ptq(model, tokenizer, batch_size: int, calib_size: int, calib_datasets: list[str]):
+def ptq(
+    model,
+    tokenizer,
+    batch_size: int,
+    calib_size: int,
+    calib_datasets: list[str],
+    calib_seq: int = 512,
+    recipe: str | None = None,
+):
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     rank = int(os.getenv("RANK", "0"))
 
@@ -311,6 +473,7 @@ def ptq(model, tokenizer, batch_size: int, calib_size: int, calib_datasets: list
         tokenizer=tokenizer,
         batch_size=batch_size,
         num_samples=[calib_size] * len(calib_datasets),
+        max_sample_length=calib_seq,
         device=device,
     )
     _trace("calib dataloader ready")
@@ -330,7 +493,8 @@ def ptq(model, tokenizer, batch_size: int, calib_size: int, calib_datasets: list
         dist.barrier()
         _trace("pre-calib barrier done")
 
-    mtq_cfg = _build_nvfp4_experts_cfg()
+    mtq_cfg = _quant_cfg_from_recipe(recipe) if recipe else _build_nvfp4_experts_cfg()
+    _trace(f"quant config from {'recipe' if recipe else 'built-in default'}")
     _trace("calling mtq.quantize")
     model = mtq.quantize(model, mtq_cfg, calibrate_loop)
     _trace("mtq.quantize returned")
@@ -348,9 +512,9 @@ def save_amax_and_quant_config(model, output_path: str):
     *not* rely on ``modelopt.torch.export.quant_utils.get_quant_config``
     because its introspection doesn't see weights stored on nested
     submodules — ``QuantExpert``'s ``w{1,2,3}`` are submodules of the
-    container, not direct parameters. The downstream export script
-    (``quantize_to_nvfp4.py``) uses this manifest as ground truth for which
-    tensor paths to replace with NVFP4 packed weight + scales.
+    container, not direct parameters. The manifest is a descriptive record of
+    what was calibrated: ``quantize_to_nvfp4.py`` does not read it, it
+    re-derives the expert tensor paths from the source checkpoint itself.
     """
 
     def _trace(msg):
@@ -435,7 +599,26 @@ def main():
         help="where to dump amax files and quantized_layers_manifest.json",
     )
     p.add_argument("--batch_size", type=int, default=4)
+    p.add_argument(
+        "--recipe",
+        default=None,
+        help=(
+            "ModelOpt recipe describing the quant config, loaded by path relative to "
+            f"modelopt_recipes/ (published: {_PUBLISHED_RECIPE}). Defaults to the "
+            "built-in routed-experts-only NVFP4 config, which this recipe mirrors."
+        ),
+    )
     p.add_argument("--calib_size", type=int, default=64)
+    p.add_argument(
+        "--calib_seq",
+        type=int,
+        default=512,
+        help=(
+            "calibration sequence truncation cap (max_sample_length). Longer documents are "
+            "truncated to this; because the corpus is tokenized in one padded call, shorter "
+            "ones are padded up to it. Re-validate when changing it."
+        ),
+    )
     p.add_argument(
         "--calib_dataset",
         dest="calib_datasets",
@@ -465,34 +648,49 @@ def main():
 
     _inject_v4_module(args.dsv4_inference_dir)
     install_quant_registry()
-    model = load_deepseek_v4(
-        args.config, args.model_path, args.batch_size, dummy_weights=args.dummy_weights
-    )
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path, trust_remote_code=args.trust_remote_code
     )
-    model = ptq(model, tokenizer, args.batch_size, args.calib_size, args.calib_datasets)
+    model = load_deepseek_v4(
+        args.config,
+        args.model_path,
+        args.batch_size,
+        dummy_weights=args.dummy_weights,
+        tokenizer=tokenizer,
+    )
+    model = ptq(
+        model,
+        tokenizer,
+        args.batch_size,
+        args.calib_size,
+        args.calib_datasets,
+        args.calib_seq,
+        args.recipe,
+    )
     save_amax_and_quant_config(model, args.output_path)
 
     if args.run_generate is not None:
         _run_quantized_generate(model, tokenizer, args.run_generate, args.max_new_tokens)
 
 
-def _run_quantized_generate(model, tokenizer, prompt: str, max_new_tokens: int):
+def _run_quantized_generate(
+    model, tokenizer, prompt: str, max_new_tokens: int, device: str = "cuda"
+):
     """Smoke-test: generate tokens from a prompt through the calibrated+quantized
     model. If the output decodes to coherent text, the quantized forward works
     end-to-end."""
     rank = int(os.getenv("RANK", "0"))
 
-    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda")
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
     tokens = torch.full(
-        (1, input_ids.shape[1] + max_new_tokens), -1, dtype=torch.long, device="cuda"
+        (1, input_ids.shape[1] + max_new_tokens), -1, dtype=torch.long, device=device
     )
     tokens[0, : input_ids.shape[1]] = input_ids[0]
     prev_pos = 0
     with torch.inference_mode():
         for cur_pos in range(input_ids.shape[1], tokens.shape[1]):
-            logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            out = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            logits = out[1] if isinstance(out, tuple) else out
             next_token = logits.argmax(dim=-1)
             tokens[:, cur_pos] = next_token
             prev_pos = cur_pos

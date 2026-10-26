@@ -24,7 +24,7 @@ Usage:
     python hf_ptq_mixed_mxfp8_nvfp4.py \\
         --mxfp8_ckpt /models/minimax-m3-mxfp8 \\
         --bf16_ckpt /models/minimax-m3-bf16 \\
-        --recipe huggingface/minimax_m3_vl/ptq/nvfp4_experts_only \\
+        --recipe model_type/minimax_m3_vl/ptq/nvfp4_experts_only \\
         --output_ckpt /workspace/quant/minimax-m3-mxfp8-nvfp4-mixed \\
         --device cuda
 """

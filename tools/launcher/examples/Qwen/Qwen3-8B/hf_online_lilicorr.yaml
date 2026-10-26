@@ -1,0 +1,85 @@
+# LiLiCorr online speculative decoding training for Qwen3-8B.
+#
+# LiLiCorr = the parallel DFlash draft backbone + a reranker over the candidate
+# lattice it already produces. The backbone keeps its top-k tokens per slot, a
+# small transformer scores transitions between adjacent candidates, and serving
+# commits a path greedily instead of taking the per-slot argmax. Trained jointly
+# with the backbone on three absolutely-weighted terms added to the DFlash block
+# loss. See the lilicorr.yaml recipe and
+# modelopt/torch/speculative/plugins/{modeling,hf}_lilicorr.py.
+#
+# 2-step pipeline:
+#   task_0: Build training conversations (Daring-Anteater multi-turn SFT, 50K)
+#   task_1: Online LiLiCorr training + export of the drafter checkpoint
+#
+# NOTE: the inference side is intentionally not wired up here. The reranker is not
+# applied in pseudo_speculative_generate, and its serving path lives in sglang
+# rather than vLLM, so AR measured from this repo would report the backbone alone.
+# Evaluate by exporting the drafter and benchmarking it on the serving stack.
+#
+# Paper: https://arxiv.org/abs/2608.20530
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_online_lilicorr.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/hf_online_lilicorr.yaml --yes
+
+job_name: Qwen3-8B_LiLiCorr_online
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+
+  # Step 1: Build input conversations. example_data_config.yaml enables only the
+  # daring-anteater source (train: 50000) — multi-turn SFT with real assistant
+  # completions. --full-conversations keeps those completions so answer_only_loss
+  # has assistant spans to mask. make_dataset.sh writes /scratchspace/data/train.jsonl.
+  task_0:
+    script: common/eagle3/make_dataset.sh
+    args:
+      - -f modules/Model-Optimizer/examples/dataset/example_data_config.yaml
+      - --full-conversations
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+
+  # Step 2: Online LiLiCorr training (the script exports the drafter at the end).
+  # Consumes the conversations built in task_0 (shared via /scratchspace).
+  task_1:
+    script: common/specdec/dflash_online_training.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/lilicorr.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.data_path=/scratchspace/data/train.jsonl
+      - data.chat_template=examples/Qwen/Qwen3-8B/chat_template_train.jinja
+      - training.output_dir=/scratchspace/lilicorr_bs16
+      - training.per_device_train_batch_size=1
+      - training.num_train_epochs=1
+      - training.max_steps=2000
+      - training.training_seq_len=3072
+      - training.save_steps=5000
+      - training.logging_steps=100
+      - training.disable_tqdm=true
+      - training.answer_only_loss=true
+      # DFlash knobs (also set in the recipe; repeated here for visibility).
+      - dflash.dflash_block_size=16
+      - dflash.dflash_num_anchors=512
+      - dflash.dflash_loss_objective=decay
+      - dflash.dflash_loss_decay_factor=7
+      - dflash.dflash_mask_token_id=151669
+      - dflash.dflash_self_logit_distillation=false
+      # Objective composition: this is the `base` variant. For `margin`, set
+      # w_ce=0.125 and w_margin=0.125 — nothing else changes.
+      - dflash.dflash_lilicorr_w_ce=0.25
+      - dflash.dflash_lilicorr_w_margin=0.0
+      - dflash.dflash_lilicorr_w_pen=0.25
+      - dflash.dflash_lilicorr_margin=2.0
+    environment:
+      - MAX_FINAL_LOSS: "5.0"
+      - MIN_FINAL_ACC: "0.15"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8

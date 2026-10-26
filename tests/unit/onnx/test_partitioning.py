@@ -20,14 +20,14 @@ import onnx_graphsurgeon as gs
 from _test_utils.onnx.lib_test_models import export_as_onnx
 from _test_utils.torch.vision_models import get_tiny_resnet_and_input
 
-from modelopt.onnx.quantization.graph_utils import (
-    build_non_residual_input_map,
-    classify_partition_nodes,
-    filter_quantizable_kgen_heads,
-)
 from modelopt.onnx.quantization.partitioning import (
     find_fusible_partitions,
     get_skipped_output_layers,
+)
+from modelopt.onnx.quantization.qdq_graph import (
+    build_non_residual_input_map,
+    classify_partition_nodes,
+    filter_quantizable_kgen_heads,
 )
 
 

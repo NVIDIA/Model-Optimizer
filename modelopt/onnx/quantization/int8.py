@@ -27,29 +27,32 @@ from onnx_graphsurgeon.ir.node import Node
 from onnxruntime.quantization import CalibrationMethod
 from onnxruntime.quantization.calibrate import CalibrationDataReader
 
-from modelopt.onnx.autocast.convert import convert_to_f16
 from modelopt.onnx.logging_config import configure_logging, logger
 from modelopt.onnx.quantization.calib_utils import import_scales_from_calib_cache
-from modelopt.onnx.quantization.graph_utils import (
-    build_non_residual_input_map,
-    classify_partially_quantized_weighted_ops,
-    classify_partition_nodes,
-    expand_node_names_from_patterns,
-    filter_quantizable_kgen_heads,
-    find_conv_to_layernorm_nodes,
+from modelopt.onnx.quantization.graph_indexing import expand_node_names_from_patterns
+from modelopt.onnx.quantization.graph_selection import (
     find_nodes_from_convs_to_exclude,
     find_nodes_from_matmul_to_exclude,
     find_nodes_to_exclude,
-    get_concat_eliminated_tensors,
-    remove_partial_input_qdq,
 )
-from modelopt.onnx.quantization.ort_patching import _quantize_static as quantize_static
+from modelopt.onnx.quantization.ort_quantization import _quantize_static as quantize_static
 from modelopt.onnx.quantization.ort_utils import configure_ort
 from modelopt.onnx.quantization.partitioning import (
     find_fusible_partitions,
     find_non_quantizable_partitions_from_patterns,
     find_quantizable_nodes,
     get_skipped_output_layers,
+)
+from modelopt.onnx.quantization.precision_utils import _convert_to_runtime_precision
+from modelopt.onnx.quantization.qdq_graph import (
+    build_non_residual_input_map,
+    classify_partially_quantized_weighted_ops,
+    classify_partition_nodes,
+    filter_quantizable_kgen_heads,
+    find_conv_to_layernorm_nodes,
+    get_concat_eliminated_tensors,
+    remove_partial_input_qdq,
+    remove_scalar_input_qdq,
 )
 from modelopt.onnx.quantization.qdq_utils import has_qdq_nodes, replace_scale_values
 
@@ -180,6 +183,7 @@ def quantize(
             calibration_eps,
             calibration_shapes,
             input_shapes_profile,
+            kwargs.get("trt_rtx_backend", "legacy"),
         )
         nodes_to_exclude.extend(matmul_nodes_to_exclude)  # type: ignore[union-attr]
         logger.debug(f"Excluding {len(matmul_nodes_to_exclude)} MatMul nodes due to GEMV pattern")
@@ -205,6 +209,7 @@ def quantize(
         custom_ops_to_quantize,
         kwargs.get("op_types_needing_output_quant"),
         input_shapes_profile,
+        kwargs.get("trt_rtx_backend", "legacy"),
     )
     logger.info(f"Quantizable op types: {[t for t in quantizable_op_types if t in op_types]}")
 
@@ -295,24 +300,22 @@ def quantize(
         onnx_model = onnx.load(tmp_onnx_path)
         graph = gs.import_onnx(onnx_model)
         remove_partial_input_qdq(graph, no_quantize_inputs)
+        remove_scalar_input_qdq(graph, target_dla=kwargs.get("target_dla", False))
         onnx_model = gs.export_onnx(graph)
 
         if calibration_cache_path:
             replace_scale_values(onnx_model.graph, act_scales_dict)
 
-    if high_precision_dtype in ["fp16", "bf16"]:
-        # We need to convert float to float16 so as to speed up layers like LayerNorm or GroupNorm.
-        logger.info(f"Converting float32 tensors to {high_precision_dtype}")
-        # Note: from convert_to_f16's perspective, high_precision_dtype is the precision to reduce to from FP32
-        onnx_model = convert_to_f16(
-            onnx_model,
-            keep_io_types=not direct_io_types,
-            op_block_list=op_types_to_exclude_fp16 or [],
-            tensor_block_dict=custom_ops_to_cast_fp32 or {},
-            low_precision_type=high_precision_dtype,
-            trt_plugins=trt_extra_plugin_lib_paths,
-            opset=opset,
-        )
+    onnx_model = _convert_to_runtime_precision(
+        onnx_model,
+        quantize_mode="int8",
+        high_precision_dtype=high_precision_dtype,
+        direct_io_types=direct_io_types,
+        op_types_to_exclude_fp16=op_types_to_exclude_fp16,
+        custom_ops_to_cast_fp32=custom_ops_to_cast_fp32,
+        trt_extra_plugin_lib_paths=trt_extra_plugin_lib_paths,
+        opset=opset,
+    )
 
     if nodes_to_quantize:
         logger.info(f"Quantization completed successfully in {time.time() - t_start} seconds")

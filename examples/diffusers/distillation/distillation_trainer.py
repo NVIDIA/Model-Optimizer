@@ -1138,7 +1138,7 @@ class DistillationTrainer(LtxvTrainer):
                 k: v.to(save_dtype) if isinstance(v, Tensor) else v
                 for k, v in full_state_dict.items()
             }
-            self._accelerator.save(full_state_dict, saved_weights_path)
+            self._accelerator.save(full_state_dict, saved_weights_path, safe_serialization=True)
 
         rel_path = saved_weights_path.relative_to(self._config.output_dir)
         logger.info(f"Model weights for step {self._global_step} saved in {rel_path}")

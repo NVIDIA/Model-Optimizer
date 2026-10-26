@@ -12,13 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""End-to-end unit tests for ``examples/hf_ptq/example_utils.load_mtp_weights``.
+"""Unit tests for ``examples/hf_ptq/example_utils`` helpers.
 
-One test per supported on-disk MTP convention (inlined-orphaned, inlined-in-state-dict,
-separate-file-standalone, separate-file-indexed) plus a negative case.
+The per-MTP-convention tests are gone with ``load_mtp_weights``: weights the loader could not
+place are now identified from Transformers' own ``unexpected_keys`` rather than by recognising
+storage layouts, so there is no convention matrix left to enumerate. What remains covers the
+recording path, checkpoint-path resolution, and the sidecar copy.
 """
 
-import json
+import warnings
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -26,147 +28,114 @@ from unittest.mock import patch
 import pytest
 import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
+from _test_utils.torch.transformers_models import get_tiny_nemotron_h
 from safetensors.torch import save_file
+from transformers import AutoModelForCausalLM, LlamaConfig
 
-
-class _FakeModel:
-    """Stub exposing only the surface ``load_mtp_weights`` touches."""
-
-    def __init__(self, config, state_dict_keys):
-        self.config = config
-        self._sd = {k: torch.zeros(1) for k in state_dict_keys}
-        self.loaded = {}
-
-    def state_dict(self):
-        return dict(self._sd)
-
-    def load_state_dict(self, state_dict, strict=True):
-        self.loaded.update(state_dict)
-        self._sd.update(state_dict)
+from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 
 def _write_safetensors(path, tensors):
     save_file(tensors, str(path), metadata={"format": "pt"})
 
 
-def test_load_mtp_weights_inlined_orphaned(tmp_path):
-    # GLM-5.1: HF builds only num_hidden decoders → MTP keys orphaned.
-    main_keys = ["model.embed_tokens.weight", "model.layers.0.x.weight"]
-    mtp_keys = ["model.layers.4.eh_proj.weight", "model.layers.4.enorm.weight"]
-    _write_safetensors(
-        tmp_path / "model.safetensors",
-        {k: torch.zeros(2, 2) for k in main_keys + mtp_keys},
+@pytest.mark.parametrize("loader", ["native", "auto"])
+@pytest.mark.parametrize("trust_remote_code", [False, True])
+def test_mtp_preparation_matches_loader(tmp_path, loader, trust_remote_code):
+    """A native architecture and a remote auto_map must prepare the class actually loaded."""
+    native = pytest.importorskip("transformers.models.nemotron_h.modeling_nemotron_h")
+    mtp_adapter = pytest.importorskip("modelopt.torch.models.nemotron_h.mtp")
+    source = get_tiny_nemotron_h(
+        layers_block_type=["attention" if "attention" in native.MIXER_TYPES else "full_attention"],
+        num_hidden_layers=1,
+        hybrid_override_pattern="*",
+        use_mamba_kernels=False,
+        attn_implementation="eager",
+        dtype=torch.float32,
+        num_nextn_predict_layers=1,
+        mtp_layers_block_type=["attention", "moe"],
     )
-
-    cfg = SimpleNamespace(num_hidden_layers=4, num_nextn_predict_layers=1)
-    model = _FakeModel(cfg, state_dict_keys=main_keys)
-    prefixes, orphans = example_utils.load_mtp_weights(model, str(tmp_path))
-
-    assert prefixes == ["model.layers.4"]
-    assert set(orphans) == set(mtp_keys)
-    assert model.loaded == {}  # nothing matched the (MTP-less) state_dict
-
-
-def test_load_mtp_weights_inlined_in_state_dict(tmp_path):
-    # DeepSeek-V3 via trust_remote_code: MTP slots exist → keys loaded, no orphans.
-    main_keys = ["model.embed_tokens.weight"]
-    mtp_keys = ["model.layers.4.eh_proj.weight", "model.layers.4.enorm.weight"]
-    _write_safetensors(
-        tmp_path / "model.safetensors",
-        {k: torch.ones(2, 2) for k in main_keys + mtp_keys},
+    source.mtp = mtp_adapter._NemotronHMTP(source.config)
+    with torch.no_grad():
+        for parameter in source.parameters():
+            parameter.uniform_(-0.1, 0.1)
+    source.config.architectures = ["NemotronHForCausalLM"]
+    source.config.auto_map = {"AutoModelForCausalLM": "modeling_remote.RemoteNemotronH"}
+    source.config.save_pretrained(tmp_path)
+    _write_safetensors(tmp_path / "model.safetensors", source.state_dict())
+    (tmp_path / "modeling_remote.py").write_text(
+        "from transformers import NemotronHForCausalLM\n"
+        "class RemoteNemotronH(NemotronHForCausalLM):\n"
+        "    pass\n"
     )
-
-    cfg = SimpleNamespace(num_hidden_layers=4, num_nextn_predict_layers=1)
-    model = _FakeModel(cfg, state_dict_keys=main_keys + mtp_keys)
-    prefixes, orphans = example_utils.load_mtp_weights(model, str(tmp_path))
-
-    assert prefixes == ["model.layers.4"]
-    assert orphans == {}
-    assert set(model.loaded) == set(mtp_keys)
-
-
-def test_load_mtp_weights_separate_standalone_file(tmp_path):
-    # GLM-4.7: standalone mtp.safetensors with no shard index.
-    _write_safetensors(
-        tmp_path / "model.safetensors", {"model.embed_tokens.weight": torch.zeros(2, 2)}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if loader == "native":
+            model = example_utils.get_model(
+                str(tmp_path), device="cpu", trust_remote_code=trust_remote_code
+            )
+        else:
+            model = load_pretrained(
+                str(tmp_path),
+                AutoModelForCausalLM,
+                model_type=source.config.model_type,
+                trust_remote_code=trust_remote_code,
+            )
+    expected_class = (
+        "RemoteNemotronH" if loader == "auto" and trust_remote_code else "NemotronHForCausalLM"
     )
-    _write_safetensors(
-        tmp_path / "mtp.safetensors",
-        {
-            "mtp.fc.weight": torch.zeros(2, 2),
-            "mtp.layers.0.q_proj.weight": torch.zeros(2, 2),
-        },
-    )
-
-    cfg = SimpleNamespace(num_hidden_layers=4, num_nextn_predict_layers=0)
-    model = _FakeModel(cfg, state_dict_keys=["model.embed_tokens.weight"])
-    prefixes, orphans = example_utils.load_mtp_weights(model, str(tmp_path))
-
-    assert set(prefixes) == {"mtp", "mtp.layers.0"}
-    assert set(orphans) == {"mtp.fc.weight", "mtp.layers.0.q_proj.weight"}
+    assert type(model).__name__ == expected_class
+    assert model.state_dict().keys() == source.state_dict().keys()
+    for name, value in source.state_dict().items():
+        torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
+    assert not any("MTP weights may remain unquantized" in str(w.message) for w in caught)
 
 
-def test_load_mtp_weights_separate_indexed_shard(tmp_path):
-    # Qwen3-Next: mtp.* keys in a dedicated indexed tail shard (filename has no "mtp").
-    main_shard = "model-00001-of-00002.safetensors"
-    mtp_shard = "model-00002-of-00002.safetensors"
-    _write_safetensors(tmp_path / main_shard, {"model.embed_tokens.weight": torch.zeros(2, 2)})
-    mtp_tensors = {
-        "mtp.fc.weight": torch.zeros(2, 2),
-        "mtp.norm.weight": torch.zeros(2),
-        "mtp.layers.0.input_layernorm.weight": torch.zeros(2),
-        "mtp.layers.0.self_attn.q_proj.weight": torch.zeros(2, 2),
-    }
-    _write_safetensors(tmp_path / mtp_shard, mtp_tensors)
-    (tmp_path / "model.safetensors.index.json").write_text(
-        json.dumps(
-            {
-                "weight_map": {
-                    "model.embed_tokens.weight": main_shard,
-                    **dict.fromkeys(mtp_tensors, mtp_shard),
-                }
-            }
-        )
-    )
+@pytest.mark.parametrize("failure_at", [1, 2])
+def test_get_model_preserves_preparation_error(monkeypatch, tmp_path, failure_at):
+    config = LlamaConfig(architectures=["LlamaForCausalLM"])
+    monkeypatch.setattr(example_utils.AutoConfig, "from_pretrained", lambda *a, **k: config)
+    calls = 0
 
-    cfg = SimpleNamespace(num_hidden_layers=4, num_nextn_predict_layers=0)
-    model = _FakeModel(cfg, state_dict_keys=["model.embed_tokens.weight"])
-    prefixes, orphans = example_utils.load_mtp_weights(model, str(tmp_path))
+    def prepare(*args, model_class):
+        nonlocal calls
+        calls += 1
+        assert args == (config.model_type, str(tmp_path), False)
+        assert model_class.__name__ == "LlamaForCausalLM"
+        if calls == failure_at:
+            raise ValueError("MTP preparation failed")
+        return nullcontext()
 
-    assert set(prefixes) == {"mtp", "mtp.layers.0"}
-    assert set(orphans) == set(mtp_tensors)
-
-
-def test_keys_to_prefixes_drops_model_top_level():
-    # nvbug 6108133: inlined keys like "model.layers.92.X" must NOT emit "model"
-    # as a top-level prefix (would become "model*" excluding the whole backbone).
-    out = example_utils._keys_to_prefixes(
-        ["model.layers.92.eh_proj.weight", "mtp.fc.weight", "mtp.layers.0.q_proj.weight"]
-    )
-    assert "model" not in out
-    assert out == {"mtp", "mtp.layers.0", "model.layers.92"}
-
-
-def test_load_mtp_weights_no_mtp_returns_empty(tmp_path):
-    # Also pins the ``num_nextn_predict_layers=None`` regression: some configs
-    # set the field explicitly to None, which must not crash ``int(None)``.
-    _write_safetensors(
-        tmp_path / "model.safetensors",
-        {
-            "model.embed_tokens.weight": torch.zeros(2, 2),
-            "model.layers.0.x.weight": torch.zeros(2, 2),
-        },
-    )
-    cfg = SimpleNamespace(num_hidden_layers=4, num_nextn_predict_layers=None)
-    model = _FakeModel(cfg, state_dict_keys=["model.embed_tokens.weight"])
-    prefixes, orphans = example_utils.load_mtp_weights(model, str(tmp_path))
-    assert prefixes == []
-    assert orphans == {}
+    monkeypatch.setattr(example_utils, "prepare_model_for_loading", prepare)
+    # The second call, around the real load, is load_pretrained's, which imports it from here.
+    monkeypatch.setattr("modelopt.torch.models.hf.prepare_model_for_loading", prepare)
+    with pytest.raises(ValueError, match="MTP preparation failed"):
+        example_utils.get_model(str(tmp_path), device="cpu")
+    assert calls == failure_at
 
 
 # ---------- get_original_hf_quant_method -------------------------------------
 # get_model uses this to detect native MXFP4 checkpoints (e.g. openai/gpt-oss-*) and load
 # them dequantized to BF16 GptOssExperts (so ModelOpt can quantize/export the experts).
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "expected"),
+    [
+        ("max", {"method": "max", "moe_calib_experts_ratio": 0.5}),
+        ({"method": "gptq"}, {"method": "gptq", "moe_calib_experts_ratio": 0.5}),
+        (
+            [{"method": "gptq"}, {"method": "imatrix"}],
+            [
+                {"method": "gptq", "moe_calib_experts_ratio": 0.5},
+                {"method": "imatrix", "moe_calib_experts_ratio": 0.5},
+            ],
+        ),
+    ],
+)
+def test_build_quant_cfg_sets_moe_calib_experts_ratio_on_every_algorithm(algorithm, expected):
+    quant_cfg = example_utils.build_quant_cfg({"quant_cfg": [], "algorithm": algorithm}, None, 0.5)
+    assert quant_cfg["algorithm"] == expected
 
 
 def test_get_original_hf_quant_method_mxfp4_dict():
@@ -247,6 +216,7 @@ def test_resolve_init_config_falls_back_when_rederive_raises():
 )
 def test_get_model_uses_expected_dtype_kwarg(
     monkeypatch,
+    tmp_path,
     architecture,
     model_class_name,
     expected_config_dtype_kwarg,
@@ -275,21 +245,23 @@ def test_get_model_uses_expected_dtype_kwarg(
             return FakeModel()
 
         @staticmethod
-        def from_pretrained(*args, **kwargs):
+        def from_pretrained(*args, output_loading_info=False, **kwargs):
             calls["from_pretrained"] = kwargs
             assert "dtype" not in kwargs
             assert kwargs["torch_dtype"] is torch.float16
-            return FakeModel()
+            m = FakeModel()
+            return (m, {"unexpected_keys": []}) if output_loading_info else m
 
     class FakeLlamaForCausalLM(FakeAutoModelForCausalLM):
         _from_config = FakeAutoModelForCausalLM.from_config
 
         @staticmethod
-        def from_pretrained(*args, **kwargs):
+        def from_pretrained(*args, output_loading_info=False, **kwargs):
             calls["from_pretrained"] = kwargs
             assert kwargs["dtype"] == "auto"
             assert "torch_dtype" not in kwargs
-            return FakeModel()
+            m = FakeModel()
+            return (m, {"unexpected_keys": []}) if output_loading_info else m
 
     monkeypatch.setattr(
         example_utils.AutoConfig,
@@ -307,7 +279,7 @@ def test_get_model_uses_expected_dtype_kwarg(
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
 
-    model = example_utils.get_model("checkpoint", device="cpu", trust_remote_code=True)
+    model = example_utils.get_model(str(tmp_path), device="cpu", trust_remote_code=True)
 
     assert isinstance(model, FakeModel)
     assert calls["eval"]
@@ -333,7 +305,7 @@ def test_get_model_uses_expected_dtype_kwarg(
     ],
 )
 def test_get_model_device_map_for_diffusion_gemma(
-    monkeypatch, model_type, architecture, device_count, expected_device_map
+    monkeypatch, tmp_path, model_type, architecture, device_count, expected_device_map
 ):
     calls = {}
     hf_config = SimpleNamespace(
@@ -356,9 +328,10 @@ def test_get_model_device_map_for_diffusion_gemma(
             return FakeModel()
 
         @staticmethod
-        def from_pretrained(*args, **kwargs):
+        def from_pretrained(*args, output_loading_info=False, **kwargs):
             calls["from_pretrained"] = kwargs
-            return FakeModel()
+            m = FakeModel()
+            return (m, {"unexpected_keys": []}) if output_loading_info else m
 
     monkeypatch.setattr(
         example_utils.AutoConfig, "from_pretrained", lambda *args, **kwargs: hf_config
@@ -374,7 +347,7 @@ def test_get_model_device_map_for_diffusion_gemma(
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
     monkeypatch.setattr(torch.cuda, "device_count", lambda: device_count)
 
-    example_utils.get_model("checkpoint", device="cuda", trust_remote_code=True)
+    example_utils.get_model(str(tmp_path), device="cuda", trust_remote_code=True)
 
     assert calls["from_pretrained"]["device_map"] == expected_device_map
     # Sequential caps per-GPU memory; "auto" must stay unrestricted.
@@ -426,7 +399,7 @@ def test_is_diffusion_gemma(hf_config, expected):
     [(True, True), (False, False)],
 )
 def test_get_model_deepseek_honors_trust_remote_code(
-    monkeypatch, trust_remote_code, expect_bundled_code
+    monkeypatch, tmp_path, trust_remote_code, expect_bundled_code
 ):
     """DeepSeek ships bundled modeling code; --trust_remote_code selects it, else built-in."""
     used = {}
@@ -451,9 +424,10 @@ def test_get_model_deepseek_honors_trust_remote_code(
             _from_config = from_config
 
             @staticmethod
-            def from_pretrained(*args, **kwargs):
+            def from_pretrained(*args, output_loading_info=False, **kwargs):
                 used["path"] = tag
-                return FakeModel()
+                m = FakeModel()
+                return (m, {"unexpected_keys": []}) if output_loading_info else m
 
         return Fake
 
@@ -468,6 +442,166 @@ def test_get_model_deepseek_honors_trust_remote_code(
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
 
-    example_utils.get_model("checkpoint", device="cpu", trust_remote_code=trust_remote_code)
+    example_utils.get_model(str(tmp_path), device="cpu", trust_remote_code=trust_remote_code)
 
     assert used["path"] == ("bundled" if expect_bundled_code else "builtin")
+
+
+# ---------- get_tokenizer ----------------------------------------------------
+
+
+class _StubTokenizer:
+    """Minimal stand-in for a PreTrainedTokenizer."""
+
+    def __init__(self, pad_token, eos_token="<|eos|>"):
+        self.pad_token = pad_token
+        self.eos_token = eos_token
+
+
+@pytest.mark.parametrize(
+    ("pad_token", "eos_token", "expected_pad"),
+    [
+        # Valid existing pad token must be preserved unchanged.
+        ("<|endoftext|>", "<|im_end|>", "<|endoftext|>"),
+        # <unk> as pad must also be preserved (only None triggers the fallback).
+        ("<unk>", "<|im_end|>", "<unk>"),
+        # Missing pad token falls back to eos_token.
+        (None, "<|im_end|>", "<|im_end|>"),
+    ],
+)
+def test_get_tokenizer_pad_token(monkeypatch, pad_token, eos_token, expected_pad):
+    stub = _StubTokenizer(pad_token=pad_token, eos_token=eos_token)
+    monkeypatch.setattr(example_utils.AutoTokenizer, "from_pretrained", lambda *a, **k: stub)
+    tok = example_utils.get_tokenizer("/fake/path")
+    assert tok.pad_token == expected_pad
+
+
+def _layerwise(**kwargs):
+    return {"enable": True, **kwargs}
+
+
+def _blocks(quant_cfg):
+    algorithm = quant_cfg["algorithm"]
+    entries = algorithm if isinstance(algorithm, list) else [algorithm]
+    return [e["layerwise"] for e in entries if "layerwise" in e]
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "expected"),
+    [
+        pytest.param(
+            {"method": "max", "layerwise": _layerwise(export_dir="/placeholder")},
+            ["/out.layerwise_resume"],
+            id="single-entry",
+        ),
+        pytest.param(
+            [
+                {"method": "awq", "layerwise": _layerwise()},
+                {"method": "max", "layerwise": _layerwise(export_dir="/placeholder")},
+            ],
+            [None, "/out.layerwise_resume"],
+            id="only-the-exporting-entry",
+        ),
+        pytest.param(
+            [
+                {"method": "awq", "layerwise": _layerwise(checkpoint_dir="/theirs")},
+                {"method": "max", "layerwise": _layerwise(export_dir="/placeholder")},
+            ],
+            ["/theirs", "/out.layerwise_resume"],
+            id="another-entrys-explicit-path-is-not-this-ones",
+        ),
+    ],
+)
+def test_default_layerwise_resume_dir_targets_the_exporting_entry(algorithm, expected):
+    """Only the pass that exports gets a derived resume dir, and only if it lacks one."""
+    updated, changed = example_utils.default_layerwise_resume_dir({"algorithm": algorithm}, "/out")
+
+    assert [b.get("checkpoint_dir") for b in _blocks(updated)] == expected
+    assert changed is True
+
+
+def test_resolve_checkpoint_dir_keeps_each_entrys_base():
+    """Two layerwise passes must not resolve onto one manifest."""
+    algorithm = [
+        {"method": "awq", "layerwise": _layerwise(checkpoint_dir="/theirs")},
+        {"method": "max", "layerwise": _layerwise(checkpoint_dir="/ours", export_dir="/ph")},
+    ]
+
+    updated, resolved = example_utils.resolve_checkpoint_dir({"algorithm": algorithm}, "/m/Model")
+
+    theirs, ours = (b["checkpoint_dir"] for b in _blocks(updated))
+    assert theirs.startswith("/theirs/") and ours.startswith("/ours/")
+    assert theirs != ours
+    # The exporting pass owns the path the caller reports.
+    assert resolved == ours
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "match"),
+    [
+        pytest.param(
+            [
+                {"layerwise": _layerwise(export_dir="/a")},
+                {"layerwise": _layerwise(export_dir="/b")},
+            ],
+            "only one calibration pass",
+            id="two-exporting-entries",
+        ),
+        pytest.param(
+            [{"layerwise": _layerwise(export_dir="/a")}, {"method": "max"}],
+            "must be the last",
+            id="a-later-pass-would-change-the-model",
+        ),
+    ],
+)
+def test_set_layerwise_export_dir_refuses_ambiguous_ownership(algorithm, match):
+    with pytest.raises(ValueError, match=match):
+        example_utils.set_layerwise_export_dir({"algorithm": algorithm}, "/out")
+
+
+class _Block:
+    """A config object, as the deprecated ``--auto_quantize_*`` path builds."""
+
+    def __init__(self, **fields):
+        self._fields = fields
+
+    def model_dump(self):
+        return dict(self._fields)
+
+
+class _Recipe:
+    def __init__(self, algorithm):
+        self.quantize = SimpleNamespace(algorithm=algorithm)
+
+
+@pytest.mark.parametrize(
+    ("recipe", "expected"),
+    [
+        pytest.param(None, [], id="no-recipe"),
+        pytest.param(_Recipe(None), [], id="no-algorithm"),
+        pytest.param(_Recipe({"method": "max"}), [], id="algorithm-without-layerwise"),
+        pytest.param(
+            _Recipe({"method": "max", "layerwise": {"enable": True}}),
+            [{"enable": True}],
+            id="dict-entry",
+        ),
+        pytest.param(
+            _Recipe(
+                [
+                    {"method": "awq", "layerwise": {"enable": True}},
+                    {"method": "max", "layerwise": {"enable": True, "export_dir": "/x"}},
+                ]
+            ),
+            [{"enable": True}, {"enable": True, "export_dir": "/x"}],
+            id="list-keeps-algorithm-order",
+        ),
+        pytest.param(
+            _Recipe(SimpleNamespace(layerwise=_Block(enable=True, export_dir="/x"))),
+            [{"enable": True, "export_dir": "/x"}],
+            id="config-object-entry",
+        ),
+    ],
+)
+def test_recipe_layerwise_blocks(recipe, expected):
+    """Both recipe shapes normalize to dicts, so callers need no shape-aware access."""
+    assert example_utils.recipe_layerwise_blocks(recipe) == expected

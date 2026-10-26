@@ -35,6 +35,18 @@ DominoDMRegistry = _DMRegistryCls(prefix="Domino")
 # ``dflash_architecture_config.projector_type == "dspark"`` and kept in its own
 # registry so its wrapper (HFDSparkModel) does not overwrite HFDFlashModel.
 DSparkDMRegistry = _DMRegistryCls(prefix="DSpark")
+# DFlash2 also reuses the dflash mode/config/recipe, converting the base model to a
+# DFlash backbone whose sublayers are wrapped in grouped dynamic convolutions, plus a
+# low-rank candidate selector. Selected via
+# ``dflash_architecture_config.projector_type == "dflash2"`` and kept in its own
+# registry so its wrapper (HFDFlash2Model) does not overwrite HFDFlashModel.
+DFlash2DMRegistry = _DMRegistryCls(prefix="DFlash2")
+# LiLiCorr also reuses the dflash mode/config/recipe, converting the base model to a
+# DFlash backbone augmented with a reranker over the candidate lattice the backbone
+# already produces. Selected via
+# ``dflash_architecture_config.projector_type == "lilicorr"`` and kept in its own
+# registry so its wrapper (HFLiLiCorrModel) does not overwrite HFDFlashModel.
+LiLiCorrDMRegistry = _DMRegistryCls(prefix="LiLiCorr")
 
 
 def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertReturnType:
@@ -53,20 +65,19 @@ def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertRe
         registry = DominoDMRegistry
     elif projector_type == "dspark":
         registry = DSparkDMRegistry
+    elif projector_type == "dflash2":
+        registry = DFlash2DMRegistry
+    elif projector_type == "lilicorr":
+        registry = LiLiCorrDMRegistry
     elif projector_type in (None, "dflash"):
         registry = DFlashDMRegistry
     else:
         raise ValueError(
             f"Unsupported dflash_architecture_config.projector_type: {projector_type!r}. "
-            "Expected 'dflash' (default), 'domino' or 'dspark'."
+            "Expected 'dflash' (default), 'domino', 'dspark', 'dflash2' or 'lilicorr'."
         )
 
-    original_cls = type(model)
-    if original_cls not in registry:
-        for cls in registry._registry:
-            if issubclass(original_cls, cls):
-                registry.register({original_cls: "base_model_class"})(registry[cls])
-                break
+    registry.register_subclass(type(model), "base_model_class")
 
     dflash_model = registry.convert(model)
     dflash_model.modify(config)
@@ -80,4 +91,7 @@ def restore_dflash_model(
 ) -> nn.Module:
     """Function for restoring a previously converted model to a DFlash model."""
     assert not metadata, "No metadata expected!"
+    # Warm start is a one-time training-time init; the restored weights would overwrite it
+    # anyway, and replaying it on the meta device would raise.
+    config = config.model_copy(update={"dflash_init_checkpoint": None})
     return convert_to_dflash_model(model, config)[0]

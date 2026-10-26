@@ -11,7 +11,7 @@ The Model Optimizer - Windows (ModelOpt-Windows) can be installed as a standalon
 Before using ModelOpt-Windows, the following components must be installed:
 
       - NVIDIA GPU and Graphics Driver
-      - Python version >= 3.10 and < 3.13
+      - Python version >= 3.10 and < 3.14
       - Visual Studio 2022 / MSVC / C/C++ Build Tools
       - CUDA Toolkit and matching CuDNN for using CUDA path during calibration (e.g. for calibration of ONNX models using `onnxruntime-gpu` or CUDA EP)
 
@@ -39,16 +39,23 @@ To install the ONNX module of ModelOpt-Windows, run the following command:
 
 If you install ModelOpt-Windows without the extra ``[onnx]`` option, only the minimal core dependencies and the PyTorch module (``torch``) will be installed. Support for ONNX model quantization requires installing with ``[onnx]``.
 
+.. note::
+
+    Windows ARM64 users should follow the :ref:`Windows on Arm installation guide
+    <Install-Page-Windows-ARM64>`. Some Windows x64 dependencies selected by the standard
+    ``onnx`` extra are not suitable for ARM64 and must be replaced with native packages.
+
 **4. ONNX Model Quantization: Setup ONNX Runtime Execution Provider for Calibration**
 
 The Post-Training Quantization (PTQ) process for ONNX models usually involves running the base model with user-supplied inputs, a process called calibration. The user-supplied model inputs are referred to as calibration data. To perform calibration, the base model must be run using a suitable ONNX Execution Provider (EP), such as *DmlExecutionProvider* (DirectML EP) or *CUDAExecutionProvider* (CUDA EP). There are different ONNX Runtime packages for each EP:
 
 - *onnxruntime-directml* provides the DirectML EP.
 - *onnxruntime-trt-rtx* provides TensorRT-RTX EP.
+- *onnxruntime-ep-nv-tensorrt-rtx-cu13* provides TensorRT-RTX EP ABI plugin.
 - *onnxruntime-gpu* provides the CUDA EP.
 - *onnxruntime* provides the CPU EP.
 
-By default, ModelOpt-Windows installs *onnxruntime-gpu*. The default CUDA version needed for *onnxruntime-gpu* since v1.19.0 is 12.x. The *onnxruntime-gpu* package (i.e. CUDA EP) has CUDA and cuDNN dependencies:
+By default, ModelOpt-Windows x64 installs *onnxruntime-gpu*. The default CUDA version needed for *onnxruntime-gpu* since v1.19.0 is 12.x. The *onnxruntime-gpu* package (i.e. CUDA EP) has CUDA and cuDNN dependencies:
 
 - Install CUDA and cuDNN:
     - For the ONNX Runtime GPU package, you need to install the appropriate version of CUDA and cuDNN. Refer to the `CUDA Execution Provider requirements <https://onnxruntime.ai/docs/install/#cuda-and-cudnn/>`_ for compatible versions of CUDA and cuDNN.
@@ -59,6 +66,8 @@ If you need to use any other EP for calibration, you can uninstall the existing 
 
       pip uninstall onnxruntime-gpu
       pip install onnxruntime-directml
+
+If you are running on arm64 Windows. CUDA EP is not available yet, instead use TensorRT-RTX EP ABI plugin. Package is already included in ``nvidia-modelopt[onnx]``.
 
 **5. Setup GPU Acceleration Tool for Quantization**
 
@@ -98,6 +107,9 @@ Ensure the following steps are verified:
             - *onnxruntime-trt-rtx* (TensorRT-RTX EP)
             - *onnxruntime-gpu* (CUDA EP)
             - *onnxruntime* (CPU EP)
+
+        The *onnxruntime-ep-nv-tensorrt-rtx-cu13* plugin is installed alongside the selected
+        ONNX Runtime package; it does not replace *onnxruntime-gpu*.
       - **CUDA Toolkit**: For CUDA workflows, verify that the selected Toolkit is found first and that ``nvcc`` reports the expected major version:
 
             .. code-block:: bat
@@ -119,6 +131,15 @@ Ensure the following steps are verified:
                 python -c "import cupy; print(cupy.__version__, cupy.cuda.runtime.runtimeGetVersion(), cupy.arange(3).sum())"
 
       - **Environment Variables**: For workflows using CUDA dependencies (e.g., CUDA EP-based calibration), ensure environment variables such as ``CUDA_PATH``, ``CUDA_PATH_V12_x``, or ``CUDA_PATH_V13_x`` point to the intended Toolkit. Reopen the command prompt after changing persistent environment variables.
+      - **Windows ARM64 Architecture**: For Windows on Arm, verify that the interpreter and any
+        locally built PyArrow wheel are native ARM64 packages:
+
+            .. code-block:: bat
+
+                python -c "import platform; assert platform.machine().lower() in {'arm64', 'aarch64'}; print(platform.machine())"
+                python -c "import pyarrow; import pyarrow.compute; import pyarrow.dataset; import pyarrow.parquet; print(pyarrow.__version__)"
+
+        Skip the PyArrow command when the selected workflow does not require PyArrow.
       - **ModelOpt-Windows Import Check**: Run the following command to ensure the installation is successful:
 
             .. code-block:: python

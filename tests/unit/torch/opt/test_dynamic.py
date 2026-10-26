@@ -26,6 +26,17 @@ from modelopt.torch.opt.dynamic import (
 )
 
 
+def test_force_configurable_restores_state_after_exception():
+    hp = Hparam([1, 2])
+    hp._is_configurable = False
+
+    with pytest.raises(RuntimeError, match="forced failure"), hp._force_configurable():
+        assert hp.is_configurable
+        raise RuntimeError("forced failure")
+
+    assert not hp.is_configurable
+
+
 def test_register_rejects_non_module_classes():
     """Registering a non-class (e.g. a factory function) must fail at the registration site."""
     registry = _DMRegistryCls(prefix="Test")
@@ -141,3 +152,25 @@ def test_dm_attribute_manager():
     manager.pop_attr("bmax")
     manager.pop_level()
     assert not manager, "manager should be empty!"
+
+
+def test_register_subclass_inherits_the_registered_base():
+    """Subclasses that override forward are skipped by the automatic lookup."""
+    registry = _DMRegistryCls("test_subclass")
+
+    @registry.register({nn.Linear: "linear"})
+    class _DynLinear(DynamicModule):
+        def _setup(self):
+            pass
+
+    class _Overriding(nn.Linear):
+        def forward(self, x):
+            return super().forward(x)
+
+    assert _Overriding not in registry
+    registry.register_subclass(_Overriding, "linear")
+    assert _Overriding in registry
+    # idempotent, and a class with no registered base is left alone
+    registry.register_subclass(_Overriding, "linear")
+    registry.register_subclass(nn.LayerNorm, "linear")
+    assert nn.LayerNorm not in registry
