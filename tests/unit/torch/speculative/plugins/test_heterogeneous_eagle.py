@@ -158,6 +158,21 @@ def test_offline_forward_reports_the_first_scored_batch(tmp_path, monkeypatch, c
     assert "HIDDEN_STATE_SANITY" not in capsys.readouterr().out and not path.exists()
 
 
+def test_offline_sanity_scores_the_streamed_hidden_states(tmp_path, monkeypatch):
+    """Producer-supplied logits do not take part: aligned logits with random planes score low."""
+    model = _convert_offline(_tiny_gemma4()).train()
+    path = tmp_path / "sanity.json"
+    monkeypatch.setenv("SPECDEC_HIDDEN_STATE_SANITY_PATH", str(path))
+    torch.manual_seed(0)
+    batch = _offline_batch(model)
+    batch["base_model_outputs"]["base_model_logits"] = _aligned_logits(
+        batch["input_ids"], model.config.vocab_size
+    ).to(model.lm_head.weight.dtype)
+
+    model(**batch)
+    assert json.loads(path.read_text())["base_top1_next_token_agreement"] < 0.5
+
+
 def test_hidden_state_sanity(tmp_path, monkeypatch, capsys):
     """Aligned planes score 1.0, shifted near 0; no scored token stays pending; only rank 0 reports."""
     torch.manual_seed(0)

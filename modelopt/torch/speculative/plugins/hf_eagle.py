@@ -756,15 +756,25 @@ class HFEagleModel(EagleModel):
             # Parse base model outputs forwarded from teacher
             assert "base_model_outputs" in kwargs
             base_outputs = EagleBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
+            streamed_logits = None
             if base_outputs.logits is None:
                 # Re-apply the base final norm when the producer captured a pre-norm hidden
                 # (vLLM streaming); fails loud if pre-norm is declared but no norm was located.
                 out_hiddens = _maybe_apply_base_final_norm(
                     base_outputs.out_hiddens, kwargs["base_model_outputs"], self._base_model_norm
                 )
-                base_outputs.logits = self._base_model_lm_head(out_hiddens)
+                streamed_logits = base_outputs.logits = self._base_model_lm_head(out_hiddens)
             if not getattr(self, "_hidden_state_sanity_reported", False):
-                record = _report_hidden_state_sanity(base_outputs.logits, input_ids, loss_mask)
+                # Score the streamed hidden states, never producer-supplied logits: those can be
+                # correct while the hidden-state stream is misaligned, which is what this catches.
+                if streamed_logits is None:
+                    out_hiddens = _maybe_apply_base_final_norm(
+                        base_outputs.out_hiddens,
+                        kwargs["base_model_outputs"],
+                        self._base_model_norm,
+                    )
+                    streamed_logits = self._base_model_lm_head(out_hiddens)
+                record = _report_hidden_state_sanity(streamed_logits, input_ids, loss_mask)
                 self._hidden_state_sanity_reported = record is not None
             past_key_values = None
         else:
