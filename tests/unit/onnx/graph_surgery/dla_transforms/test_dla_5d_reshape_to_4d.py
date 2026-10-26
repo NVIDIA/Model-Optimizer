@@ -257,6 +257,71 @@ class TestDla5dReshapeTo4dReduce:
 
 
 class TestDla5dReshapeTo4dTranspose:
+    @pytest.mark.parametrize(
+        "controls", ["initializer", "input", "symbolic", "overridable", "dequantizer", "zero_only"]
+    )
+    def test_implicit_per_axis_qdq_refuses_before_mutation(self, controls):
+        """Refuse per-axis controls even when both QDQ nodes omit their axis."""
+        model = _make_transpose_reshape_model()
+        model.opset_import[0].version = 21
+        dims = model.graph.input[0].type.tensor_type.shape.dim
+        dims[0].dim_value, dims[1].dim_value = 2, 12
+        nodes = list(model.graph.node)
+        nodes[1].input[0] = "dequantized"
+        scale = np.array([0.125, 0.25, 0.5, 1], np.float32)
+        zero = np.zeros(4, np.uint8)
+        feeds = {"X": np.random.default_rng(13).standard_normal((2, 12, 4, 16)).astype(np.float32)}
+        leading = []
+        if controls in {"input", "symbolic", "overridable"}:
+            shape = [4] if controls == "input" else ["channels"]
+            model.graph.input.extend(
+                [
+                    helper.make_tensor_value_info("scale", TensorProto.FLOAT, shape),
+                    helper.make_tensor_value_info("zero", TensorProto.UINT8, shape),
+                ]
+            )
+            feeds.update(scale=scale, zero=zero)
+            if controls == "overridable":
+                model.graph.initializer.extend(
+                    [
+                        _init("scale", np.array([0.25], np.float32)),
+                        _init("zero", np.array([0], np.uint8)),
+                    ]
+                )
+        else:
+            model.graph.initializer.append(_init("zero", zero))
+            if controls == "zero_only":
+                model.graph.input.append(
+                    helper.make_tensor_value_info("scale_input", TensorProto.FLOAT, [4])
+                )
+                leading.append(
+                    helper.make_node("Identity", ["scale_input"], ["scale"], name="scale_producer")
+                )
+                feeds["scale_input"] = scale
+            else:
+                model.graph.initializer.append(_init("scale", scale))
+        q_controls = ["scale", "zero"]
+        if controls == "dequantizer":
+            q_controls = ["scalar_scale", "scalar_zero"]
+            model.graph.initializer.extend(
+                [
+                    _init("scalar_scale", np.array(0.25, np.float32)),
+                    _init("scalar_zero", np.array(0, np.uint8)),
+                ]
+            )
+        quantize = helper.make_node("QuantizeLinear", ["T5", *q_controls], ["q"], name="quantize")
+        dequantize = helper.make_node(
+            "DequantizeLinear", ["q", "scale", "zero"], ["dequantized"], name="dequantize"
+        )
+        del model.graph.node[:]
+        model.graph.node.extend([*leading, nodes[0], quantize, dequantize, *nodes[1:]])
+        onnx.checker.check_model(model, full_check=True)
+        ReferenceEvaluator(model).run(None, feeds)
+        before = model.SerializeToString()
+        with pytest.raises(ValueError, match="per-tensor"):
+            _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=True)
+        assert model.SerializeToString() == before
+
     @pytest.mark.parametrize("path", ["transpose", "reduce"])
     @pytest.mark.parametrize("middleware", ["Clip", "QDQ"])
     @pytest.mark.parametrize("skip_inference", [False, True])
@@ -343,10 +408,17 @@ class TestDla5dReshapeTo4dTranspose:
         )
         model.graph.initializer.extend(
             [
-                _init(scale_name, np.array(0.25, np.float32)),
-                _init(zero_name, np.array(0, np.uint8)),
+                _init(scale_name, np.array([0.25] if transpose else 0.25, np.float32)),
+                _init(zero_name, np.array([0] if transpose else 0, np.uint8)),
             ]
         )
+        if transpose:
+            model.graph.value_info.extend(
+                [
+                    helper.make_tensor_value_info(scale_name, TensorProto.FLOAT, ["scale_length"]),
+                    helper.make_tensor_value_info(zero_name, TensorProto.UINT8, ["zero_length"]),
+                ]
+            )
         renames = {
             "X": "u5d_tr_r4_0" if transpose else "u5d_rs_msh_0",
             "shape5": "u5d_tr_slice_axes_0" if transpose else "u5d_rs_ax4_0",

@@ -48,8 +48,26 @@ def _consumers_first_input(graph, tensor_name: str) -> list:
     return [n for n in graph.node if n.input and len(n.input) > 0 and n.input[0] == tensor_name]
 
 
+def _known_non_scalar_control(cache: GraphCache, name: str) -> bool:
+    """Identify controls whose known shape is not a fixed single element."""
+    initializer = cache.get_init(name)
+    if initializer is not None and any(dim != 1 for dim in initializer.dims):
+        return True
+    if initializer is not None and name not in cache.graph_input_names:
+        return False
+    info = cache.vi_map.get(name)
+    return (
+        info is not None
+        and info.type.tensor_type.HasField("shape")
+        and any(
+            not dim.HasField("dim_value") or dim.dim_value != 1
+            for dim in info.type.tensor_type.shape.dim
+        )
+    )
+
+
 def _parse_middleware_strict(
-    graph, start_out: str, stop_op_types: frozenset, *, path_context: str
+    graph, start_out: str, stop_op_types: frozenset, cache: GraphCache, *, path_context: str
 ) -> tuple:
     """Walk ``Clip`` / Q→DQ middleware then a terminal op; raise ``ValueError`` on dead ends or bad ops."""
     middle: list = []
@@ -93,6 +111,9 @@ def _parse_middleware_strict(
                 sum(name == n.output[0] for node in graph.node for name in node.input) != 1
                 or any(value.name == n.output[0] for value in graph.output)
                 or any(a.name in {"axis", "block_size"} for a in dq.attribute)
+                or any(
+                    _known_non_scalar_control(cache, name) for name in {*n.input[1:], *dq.input[1:]}
+                )
             ):
                 raise ValueError(f"{path_context}: QDQ must be unshared and per-tensor")
             middle.extend([n, dq])
@@ -117,13 +138,13 @@ def _is_5d_reshape_candidate(cache: GraphCache, node) -> bool:
     return len(shape_vals) == 5
 
 
-def _classify_5d_reshape_follower(model, reshape_node) -> tuple:
+def _classify_5d_reshape_follower(model, reshape_node, cache: GraphCache) -> tuple:
     r"""Return (``\"transpose\"``, mid_a, transpose_node) or (``\"reduce\"``, middle, reduce_node)."""
     graph = model.graph
     ctx = f"5D Reshape {reshape_node.name!r}"
     r_out = reshape_node.output[0]
     stop = frozenset({"Transpose", *_REDUCE_OPS})
-    middle, term = _parse_middleware_strict(graph, r_out, stop, path_context=ctx)
+    middle, term = _parse_middleware_strict(graph, r_out, stop, cache, path_context=ctx)
     if term.op_type == "Transpose":
         return ("transpose", middle, term)
     elif term.op_type in _REDUCE_OPS:
@@ -249,7 +270,9 @@ def _build_transpose_replacement_or_raise(
         raise ValueError(msg)
 
     tr_out = tr.output[0]
-    mid_b, r2 = _parse_middleware_strict(graph, tr_out, frozenset({"Reshape"}), path_context=ctx)
+    mid_b, r2 = _parse_middleware_strict(
+        graph, tr_out, frozenset({"Reshape"}), cache, path_context=ctx
+    )
     if "_transformed" in r2.name:
         msg = f"{ctx}: final Reshape name contains '_transformed' ({r2.name!r})"
         raise ValueError(msg)
@@ -605,7 +628,7 @@ def _dispatch_5d_reshape_candidate(
     model, reshape_node, unique_initializer: set, counter: int, cache: GraphCache
 ) -> tuple[list, list]:
     """Classify a single 5D Reshape and return ``(nodes_to_remove, nodes_to_add)``."""
-    branch, a, b = _classify_5d_reshape_follower(model, reshape_node)
+    branch, a, b = _classify_5d_reshape_follower(model, reshape_node, cache)
     if branch == "transpose":
         return _build_transpose_replacement_or_raise(
             model, reshape_node, a, b, unique_initializer, counter, cache
