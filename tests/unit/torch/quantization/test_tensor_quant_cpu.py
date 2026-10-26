@@ -18,6 +18,7 @@
 import numpy as np
 import pytest
 import torch
+import yaml
 from _test_utils.torch.quantization.models import SimpleLinear
 from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTester
 
@@ -25,6 +26,7 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.quantization import QuantModuleRegistry, tensor_quant
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, RotateConfig
+from modelopt.torch.quantization.conversion import create_and_replace_svdquant_linear_on_the_fly
 from modelopt.torch.quantization.nn import (
     SequentialQuantizer,
     TensorQuantizer,
@@ -402,6 +404,47 @@ def test_fold_weight_keep_attrs_keeps_calibration_attrs_inactive(monkeypatch):
         unregister_quant_backend(backend_name)
 
 
+def test_fold_weight_folds_svdquant_lora():
+    model = torch.nn.Sequential(torch.nn.Linear(4, 3))
+    inputs = torch.randn(2, 4)
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, config, lambda m: m(inputs))
+    create_and_replace_svdquant_linear_on_the_fly(model)
+    model[0].weight_quantizer.svdquant_lora_a = torch.randn(2, 4)
+    model[0].weight_quantizer.svdquant_lora_b = torch.randn(3, 2)
+    output_before = model(inputs)
+
+    mtq.fold_weight(model)
+
+    assert not hasattr(model[0].weight_quantizer, "_svdquant_lora_a")
+    assert torch.allclose(model(inputs), output_before, atol=1e-6)
+
+
+@torch.no_grad()
+def test_fold_weight_folds_sequential_weight_quantizer():
+    model = SimpleLinear()
+    inputs = model.get_input()
+    mtq.quantize(model, {**WINT4INT8_CFG, "algorithm": "max"}, lambda m: m(inputs))
+    expected = {
+        module: module.weight_quantizer(module.weight)
+        for module in model.modules()
+        if isinstance(getattr(module, "weight_quantizer", None), SequentialQuantizer)
+    }
+    assert expected
+
+    mtq.fold_weight(model)
+
+    for module, weight in expected.items():
+        assert torch.equal(module.weight, weight)
+        assert not any(q.is_enabled or hasattr(q, "_amax") for q in module.weight_quantizer)
+
+
 def test_temporarily_fold_weights_restores_after_exception(monkeypatch):
     calls = []
     backend_name = "test_temporary_fold_backend"
@@ -623,3 +666,27 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
         quantizer.get_modelopt_state(properties_only=True) for quantizer in model.weight_quantizer
     ]
     assert restored_states == original_states
+
+
+@pytest.mark.parametrize(
+    "attribute_cfg",
+    [
+        {
+            "num_bits": (2, 1),
+            "axis": None,
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+        },
+        {"num_bits": (4, 3), "axis": None, "use_constant_amax": True},
+        {"num_bits": 8, "axis": 0, "unsigned": True, "narrow_range": True, "type": "dynamic"},
+        {"num_bits": "custom", "backend": "custom_backend", "backend_extra_args": {"offset": 0.25}},
+        {"enable": False},
+    ],
+)
+def test_attribute_config_from_modelopt_state_round_trips_yaml(attribute_cfg):
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(**attribute_cfg))
+    state = quantizer.get_modelopt_state(properties_only=True)
+    restored_cfg = TensorQuantizer.attribute_config_from_modelopt_state(
+        yaml.safe_load(yaml.safe_dump(state))
+    )
+    restored = TensorQuantizer(QuantizerAttributeConfig(**restored_cfg))
+    assert restored.get_modelopt_state(properties_only=True) == state

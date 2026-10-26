@@ -389,7 +389,11 @@ class ExportManager:
                 self.logger.info(f"Merging base safetensors from {merged_path} for LTX2 export")
                 kwargs["merged_base_safetensor_path"] = merged_path
         if model_config:
-            for key in ("enable_swizzle_layout", "enable_layerwise_quant_metadata"):
+            for key in (
+                "enable_swizzle_layout",
+                "enable_layerwise_quant_metadata",
+                "export_attention_quantizers",
+            ):
                 val = model_config.extra_params.get(key)
                 if val is not None:
                     normalized = str(val).strip().lower()

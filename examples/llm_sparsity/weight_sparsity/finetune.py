@@ -30,6 +30,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import torch
+import torch.distributed.checkpoint.state_dict as dcp_state_dict
 import transformers
 import utils
 from torch.utils.data import Dataset
@@ -206,11 +207,13 @@ def preprocess(
 
 
 def get_model_state_dict(trainer: transformers.Trainer):
-    """Collects the state dict."""
-    state_dict = trainer.model.state_dict()
-    cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
-    del state_dict
-    return cpu_state_dict
+    """Collects the full (unsharded) state dict on rank 0's CPU; must be called on all ranks."""
+    # Under FSDP2 (the transformers 5.x default), model.state_dict() holds sharded DTensors that
+    # cannot be loaded into an unsharded model, so gather full tensors instead.
+    return dcp_state_dict.get_model_state_dict(
+        trainer.model,
+        options=dcp_state_dict.StateDictOptions(full_state_dict=True, cpu_offload=True),
+    )
 
 
 class SupervisedDataset(Dataset):

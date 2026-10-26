@@ -24,6 +24,7 @@ import modelopt.torch.quantization.qtensor.nvfp4_tensor as nvfp4_tensor
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import (
     NVFP4QTensor,
     _cast_per_block_scale_to_fp8,
+    cutlass_fp4_scale_to_modelopt_fp4_scale,
 )
 
 _FP8_E4M3FN_MIN = 2**-9  # 0.001953125 — smallest positive FP8 E4M3FN subnormal
@@ -127,3 +128,25 @@ class TestNVFP4ScaleClamping:
         assert (per_block_scale_f32 <= _FP8_E4M3FN_MAX).all(), (
             f"Static per-block scale exceeds FP8 max 448: {per_block_scale_f32.tolist()}"
         )
+
+
+def _cublas_swizzle(scale):
+    """Flat cuBLAS tiled layout of a ``[rows, cols]`` block-scale matrix (the 128x4-tile swizzle)."""
+    rows, cols = scale.shape
+    row_blocks, col_blocks = -(-rows // 128), -(-cols // 4)
+    padded = torch.zeros(row_blocks * 128, col_blocks * 4, dtype=scale.dtype)
+    padded[:rows, :cols] = scale
+    blocks = padded.view(row_blocks, 128, col_blocks, 4).permute(0, 2, 1, 3)
+    return blocks.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1)
+
+
+@pytest.mark.parametrize("weight_shape", [(128, 64), (3, 16), (130, 80), (256, 128)])
+def test_cutlass_fp4_scale_to_modelopt_fp4_scale_undoes_the_swizzle(weight_shape):
+    m, n = weight_shape
+    scale = torch.randint(0, 256, (m, n // 16), dtype=torch.uint8)
+
+    restored = cutlass_fp4_scale_to_modelopt_fp4_scale(_cublas_swizzle(scale), weight_shape)
+
+    assert restored.dtype == torch.float8_e4m3fn
+    assert restored.is_contiguous()  # consumers index it flatly
+    assert torch.equal(restored.view(torch.uint8), scale)
