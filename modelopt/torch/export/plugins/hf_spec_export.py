@@ -25,23 +25,32 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
+from ..quant_aware_conversion import revert_quant_config_names
 from .hf_spec_configs import kimik2_eagle_template_config, llama_eagle_template_config
 
 ALL_SPEC_MODES = ["eagle", "dflash"]
 
 
 def _get_rope_theta(config, default=None):
-    """Get RoPE theta from either legacy or Transformers 5 config fields."""
-    rope_theta = getattr(config, "rope_theta", None)
-    if rope_theta is not None:
-        return rope_theta
+    """Get RoPE theta from either legacy or Transformers 5 config fields.
 
+    ``rope_parameters`` is checked FIRST. A config can carry both fields with
+    different values: Transformers 5 stores the real base under
+    ``rope_parameters`` while the class default (10000.0 for Qwen3) may still be
+    visible as a top-level ``rope_theta``. Reading ``rope_theta`` first silently
+    exports a draft whose RoPE base is 100x off the target's, which breaks
+    serving because DFlash injects the target's KV into every draft layer.
+    """
     # Transformers 5 stores this under rope_parameters (and exposes the same
     # data through rope_scaling for backwards compatibility).
     for attr in ("rope_parameters", "rope_scaling"):
         rope_config = getattr(config, attr, None)
         if isinstance(rope_config, dict) and rope_config.get("rope_theta") is not None:
             return rope_config["rope_theta"]
+
+    rope_theta = getattr(config, "rope_theta", None)
+    if rope_theta is not None:
+        return rope_theta
 
     return default
 
@@ -336,12 +345,15 @@ class DFlashExporter(SpeculativeDecodingExporter):
     - config.json: Qwen3-style config with dflash_config field
     """
 
+    def _map_export_name(self, name: str) -> str:
+        return name.split("dflash_module.", 1)[-1]
+
     def _extract_state_dict(self, full_state_dict: dict):
         """Extract DFlash module weights, stripping the dflash_module prefix."""
         export_sd = {}
         for key, value in full_state_dict.items():
             if "dflash_module." in key:
-                export_key = key.split("dflash_module.", 1)[1]
+                export_key = self._map_export_name(key)
                 # Skip rotary embedding buffers (not needed, recomputed)
                 if "rotary_emb" in export_key:
                     continue
@@ -457,7 +469,14 @@ class DFlashExporter(SpeculativeDecodingExporter):
         if has_quant_opt(self.model):
             from ..unified_export_hf import _export_transformers_checkpoint
 
+            module_names = tuple(name for name, _ in self.model.named_modules())
             full_sd, hf_quant_config = _export_transformers_checkpoint(self.model, dtype)
+            if hf_quant_config is not None:
+                revert_quant_config_names(
+                    hf_quant_config.get("quantization", {}),
+                    self._map_export_name,
+                    module_names=module_names,
+                )
         else:
             full_sd, hf_quant_config = self.model.state_dict(), None
 
@@ -520,16 +539,77 @@ class DominoExporter(DFlashExporter):
         return config
 
 
+class LiLiCorrExporter(DFlashExporter):
+    """Draft model exporter for LiLiCorr (DFlash backbone + candidate-lattice reranker).
+
+    Same z-lab-compatible format as DFlash, plus the reranker weights (``lilicorr.*``,
+    already captured by the inherited ``dflash_module.`` stripping) and the config fields
+    the serving loader rebuilds the head from. Every geometry field must be emitted:
+    ``lilicorr_logit_scale`` and ``lilicorr_vector_eps`` change the score without changing
+    any tensor shape, so a default guessed in their absence loads cleanly and scores a
+    different function.
+    """
+
+    def _export_config(self):
+        """Extend the DFlash config with the LiLiCorr head fields."""
+        config = super()._export_config()
+        draft_config = self.model.dflash_config
+        head = self.model.dflash_module.lilicorr
+
+        config["architectures"] = ["LiLiCorrDraftModel"]
+        config["dflash_config"].update(
+            {
+                "projector_type": getattr(draft_config, "projector_type", "lilicorr"),
+                "lilicorr_enabled": True,
+                # Read off the built head rather than the config dict, so the exported
+                # geometry is the geometry of the weights in the same directory.
+                "lilicorr_candidate_topk": head.candidate_topk,
+                "lilicorr_hidden_size": head.hidden_size,
+                "lilicorr_num_layers": len(head.layers),
+                "lilicorr_num_heads": head.num_heads,
+                "lilicorr_mlp_ratio": head.mlp_ratio,
+                "lilicorr_factor_dim": head.factor_dim,
+                "lilicorr_vector_eps": head.vector_eps,
+                "lilicorr_logit_scale": head.logit_scale,
+            }
+        )
+
+        # The serving loader builds the conv wrappers from geometry, not from the tensors:
+        # without these two keys it defaults both to 0 and drops the conv tensors silently.
+        conv = getattr(self.model.dflash_module.layers[0], "attention_conv", None)
+        # `taps` is absent on the no-op sublayer wrapper, which is what a conv-free draft
+        # carries, so its presence is the test for whether convolutions were installed.
+        taps = getattr(conv, "taps", None)
+        if conv is not None and taps:
+            config["dflash_config"].update(
+                {
+                    "conv_kernel_size": taps,
+                    "conv_group_size": conv.group_size,
+                }
+            )
+        return config
+
+
 class DSparkExporter(DFlashExporter):
     """Draft model exporter for DSpark (DFlash backbone + sequential Markov head).
 
-    Same z-lab-compatible format as DFlash, plus the DSpark head weights
-    (``markov_w1.*`` / ``markov_w2.*`` / ``gate_proj.*`` / ``joint_proj.*`` /
-    ``confidence_proj.*``, already captured by the inherited ``dflash_module.``
-    stripping) and the extra config fields the loader needs to rebuild the head
-    (``projector_type``, ``markov_rank``, ``markov_head_type``,
-    ``use_confidence_head``, ``shift_label``).
+    Vanilla heads use Qwen3DSparkModel to select vLLM's loader. Gated and recurrent heads keep
+    the native layout because that runtime does not implement those variants.
     """
+
+    def _map_export_name(self, name: str) -> str:
+        is_draft = "dflash_module." in name
+        name = super()._map_export_name(name)
+        if is_draft and self.model.dflash_module.markov_head_type == "vanilla":
+            prefixes = {
+                "markov_w1": "markov_head.markov_w1",
+                "markov_w2": "markov_head.markov_w2",
+                "confidence_proj": "confidence_head.proj",
+            }
+            for old_prefix, new_prefix in prefixes.items():
+                if name == old_prefix or name.startswith(old_prefix + "."):
+                    return new_prefix + name[len(old_prefix) :]
+        return name
 
     def _export_config(self):
         """Extend the DFlash config with the DSpark head fields."""
@@ -541,8 +621,65 @@ class DSparkExporter(DFlashExporter):
                 "projector_type": getattr(draft_config, "projector_type", "dspark"),
                 "shift_label": getattr(draft_config, "shift_label", True),
                 "markov_rank": draft_config.markov_rank,
-                "markov_head_type": getattr(draft_config, "markov_head_type", "vanilla"),
+                "markov_head_type": self.model.dflash_module.markov_head_type,
                 "use_confidence_head": bool(getattr(draft_config, "use_confidence_head", False)),
             }
         )
+        if config["dflash_config"]["markov_head_type"] == "vanilla":
+            config["architectures"] = ["Qwen3DSparkModel"]
+            # vLLM 0.32's DSparkSpeculator samples the anchor for next-token-aligned drafts.
+            # Qwen3DSparkModel's confidence head also consumes ModelOpt's Markov features.
+            config.update(
+                {
+                    "mask_token_id": config["dflash_config"]["mask_token_id"],
+                    "target_layer_ids": config["dflash_config"]["target_layer_ids"],
+                    "markov_rank": config["dflash_config"]["markov_rank"],
+                    "sample_from_anchor": True,
+                    "enable_confidence_head": config["dflash_config"]["use_confidence_head"],
+                    "confidence_head_with_markov": config["dflash_config"]["use_confidence_head"],
+                }
+            )
+        return config
+
+
+class DFlash2Exporter(DFlashExporter):
+    """Draft model exporter for DFlash2 (DFlash backbone + convolutions + selector).
+
+    Same z-lab-compatible format as DFlash, plus the DFlash2 weights
+    (``layers.*.attention_conv.*`` / ``layers.*.mlp_conv.*`` /
+    ``candidate_selector.*``, already captured by the inherited ``dflash_module.``
+    stripping) and the config fields the SGLang/vLLM ``DFlash2DraftModel`` loader
+    needs to rebuild them (``conv_kernel_size``, ``conv_group_size``,
+    ``selector_rank``, ``selector_top_k``).
+
+    The architecture name is what selects the DFlash2 serving path: a checkpoint
+    declaring ``DFlashDraftModel`` loads as a plain DFlash draft and would silently
+    ignore the convolutions and the selector.
+    """
+
+    def _export_config(self):
+        """Extend the DFlash config with the DFlash2 architecture fields."""
+        config = super()._export_config()
+        draft_config = self.model.dflash_config
+
+        config["architectures"] = ["DFlash2DraftModel"]
+        # Present because HFDFlash2Model.modify validates them at convert time.
+        config["dflash_config"].update(
+            {
+                "projector_type": getattr(draft_config, "projector_type", "dflash2"),
+                "conv_kernel_size": draft_config.conv_kernel_size,
+                "conv_group_size": draft_config.conv_group_size,
+                "selector_rank": draft_config.selector_rank,
+                "selector_top_k": draft_config.selector_top_k,
+                # The published DFlash2 checkpoints carry block_size inside
+                # dflash_config; the DFlash loader reads it from the top level.
+                # Emit both so either contract resolves to the same value.
+                "block_size": config["block_size"],
+            }
+        )
+        # vLLM reads is_causal from the TOP level, and the published DFlash2 checkpoints
+        # state it explicitly rather than leaving it to be inferred from layer_types.
+        # Mirror dflash_config.causal, which DFlashExporter writes unconditionally from
+        # dflash_draft_attention; no parent writes a top-level is_causal.
+        config["is_causal"] = config["dflash_config"]["causal"]
         return config

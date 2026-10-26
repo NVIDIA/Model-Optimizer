@@ -58,6 +58,32 @@ _FINAL_NORM_PATHS = [
     "language_model.backbone.norm",
     "model.language_model.norm",
 ]
+
+
+def find_final_norm_path(model) -> str | None:
+    """Return the attribute path of ``model``'s final norm, or ``None`` if it has none.
+
+    The norm is not always at ``model.norm``: a real causal LM keeps it there while
+    ``FakeBaseModel`` holds it at ``.norm``. Returns the path rather than the module
+    because the speculative plugins store the path and resolve it later, while callers
+    that want the module can ``get_submodule`` it.
+
+    Resolves each path with ``get_submodule`` rather than a ``named_modules()`` dict:
+    ``named_modules`` de-duplicates by default, so a norm instance also registered
+    under an earlier path would be missing from the dict and the lookup would return
+    ``None`` for a model that has one. ``get_submodule`` walks the attribute path and
+    is indifferent to aliasing.
+    """
+    for path in _FINAL_NORM_PATHS:
+        try:
+            module = model.get_submodule(path)
+        except AttributeError:
+            continue
+        if isinstance(module, torch.nn.Module):
+            return path
+    return None
+
+
 _BASE_MODEL_PATHS = [
     "language_model.model",
     "model.language_model",
@@ -124,7 +150,12 @@ class FakeBaseConfig(PretrainedConfig):
         )
         self.intermediate_size = intermediate_size
         # For some drafter algo (e.g. DFlash) rope theta must match target model. Extract here.
+        # Published in both shapes: Transformers 5 consumers read the dict first, and it has
+        # to be well-formed -- the EAGLE draft config is built from this class too, and
+        # rotary embeddings index rope_parameters["rope_type"] unconditionally.
         self.rope_theta = rope_theta
+        if rope_theta is not None:
+            self.rope_parameters = {"rope_theta": rope_theta, "rope_type": "default"}
         if isinstance(dtype, str):
             dtype = getattr(torch, dtype)
         self.dtype = dtype
@@ -179,6 +210,8 @@ class FakeBaseModel(PreTrainedModel):
                 local checkpoint; otherwise it is treated as a Hub repo ID and the required
                 files are downloaded via ``huggingface_hub``.
         """
+        from modelopt.torch.export.plugins.hf_spec_export import _get_rope_theta
+
         orig_config = transformers.AutoConfig.from_pretrained(
             source, trust_remote_code=trust_remote_code
         )
@@ -203,7 +236,9 @@ class FakeBaseModel(PreTrainedModel):
             num_key_value_heads=getattr(base_cfg, "num_key_value_heads", None),
             intermediate_size=getattr(base_cfg, "intermediate_size", None),
             rms_norm_eps=getattr(base_cfg, "rms_norm_eps", 1e-6),
-            rope_theta=getattr(base_cfg, "rope_theta", None),
+            # Shared with the exporter: where a config keeps rope_theta depends on the
+            # transformers version, and reading it wrong is silent until serve time.
+            rope_theta=_get_rope_theta(base_cfg),
             final_norm_type=_select_final_norm_type(
                 getattr(base_cfg, "model_type", None), base_cfg
             ),

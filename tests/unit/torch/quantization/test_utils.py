@@ -15,11 +15,17 @@
 
 import pytest
 import torch
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
 
 from modelopt.torch.quantization.utils import (
     convert_quantization_axis_to_reduce_axis,
     reduce_amax,
     reduce_block_amax,
+)
+from modelopt.torch.quantization.utils.core_utils import (
+    _disable_fsdp_unshard_reshard,
+    persistent_materialization,
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
@@ -333,3 +339,49 @@ def test_layer_activation_collector_run_uses_cached_inputs_not_parent(monkeypatc
     assert "L1" not in call_log_for_layer1
 
     assert torch.allclose(inp2[0][0][0], torch.tensor([[10.0 + 1.0 + 2.0]]))
+
+
+def _forward_through_other_layers_while_one_is_materialized(rank, size, writeback):
+    mesh = init_device_mesh("cpu", (size,))
+    torch.manual_seed(0)
+    model = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8))
+    for layer in model:
+        fully_shard(layer, mesh=mesh)
+    fully_shard(model, mesh=mesh)
+    x = torch.randn(2, 8)
+    expected = model(x)
+    # Layerwise calibration runs the whole model to collect the next layer's inputs while one layer
+    # is materialized; the other FSDP modules must still unshard.
+    with persistent_materialization(model[0], writeback=writeback):
+        torch.testing.assert_close(model(x), expected)
+    torch.testing.assert_close(model(x), expected)  # FSDP unshard/reshard restored on exit
+
+
+# writeback=False nests the unshard/reshard override (via _fsdp2_unshard_context).
+@pytest.mark.parametrize("writeback", [True, False])
+def test_persistent_materialization_only_skips_unshard_for_its_layer(cpu_dist_workers, writeback):
+    cpu_dist_workers.run(_forward_through_other_layers_while_one_is_materialized, writeback)
+
+
+def _shared_group_override_restores_prior_attributes(rank, size):
+    mesh = init_device_mesh("cpu", (size,))
+    block = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8))
+    fully_shard(list(block), mesh=mesh)  # both linears share one FSDPParamGroup
+    fully_shard(block, mesh=mesh)
+    group = fully_shard.state(block[0])._fsdp_param_group
+    prior_reshard = group.reshard  # pre-existing instance override must survive
+    group.reshard = prior_reshard
+    with _disable_fsdp_unshard_reshard(block):
+        with _disable_fsdp_unshard_reshard(block):
+            pass
+        assert group.unshard() is None  # outer no-op survives the inner exit
+        assert "unshard" in group.__dict__
+    assert "unshard" not in group.__dict__
+    assert group.__dict__["reshard"] is prior_reshard
+    # A layer that is not itself FSDP-wrapped was not gathered, so its FSDP submodules must unshard.
+    with _disable_fsdp_unshard_reshard(torch.nn.Sequential(*block)):
+        assert "unshard" not in group.__dict__
+
+
+def test_disable_fsdp_unshard_reshard_shared_group_and_nesting(cpu_dist_workers):
+    cpu_dist_workers.run(_shared_group_override_restores_prior_attributes)

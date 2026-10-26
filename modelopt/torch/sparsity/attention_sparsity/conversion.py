@@ -39,6 +39,29 @@ SPARSE_SOFTMAX_METADATA_KEYS = (
 )
 
 
+def export_threshold_scale_factor(calibration_params: dict[str, Any]) -> dict[str, Any]:
+    """Build the canonical per-phase ``threshold_scale_factor`` export block.
+
+    Single source of the exported skip-softmax schema fragment, shared by the
+    HF exporter (:func:`export_sparse_attention_config`) and the vLLM
+    calibration path (``plugins.sparse_attn_calibration``), so the serving
+    loader sees one format regardless of which path produced the checkpoint.
+    """
+    block: dict[str, Any] = {"formula": "a * exp(b * target_sparsity)"}
+    for phase in ("prefill", "decode"):
+        if phase in calibration_params:
+            block[phase] = {
+                "a": float(calibration_params[phase]["a"]),
+                "b": float(calibration_params[phase]["b"]),
+            }
+    return block
+
+
+def export_config_producer() -> dict[str, str]:
+    """Build the canonical ``producer`` block of ``sparse_attention_config``."""
+    return {"name": "modelopt", "version": mo_version}
+
+
 def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) -> None:
     """Set the correct attn_implementation based on the sparse attention method/backend.
 
@@ -309,18 +332,7 @@ def restore_sparse_attention_state(model: nn.Module, state_dict: dict[str, Any])
     for name, module in get_named_sparse_attention_modules(model):
         module_name = get_unwrapped_name(name, model)
         if module_name in state_dict:
-            module_state = state_dict[module_name]
-
-            # Restore method and config
-            if "method" in module_state:
-                module._method = module_state["method"]
-            if "method_config" in module_state:
-                # Restore config attributes
-                for key, val in module_state["method_config"].items():
-                    setattr(module, f"_{key}", val)
-
-            # Re-setup with restored config
-            module._setup()
+            module.set_from_modelopt_state(state_dict[module_name])
 
 
 def update_sparse_attention_metadata(
@@ -333,21 +345,10 @@ def update_sparse_attention_metadata(
         config: Configuration used
         metadata: Metadata dict to update
     """
-    sparse_state = {}
-
-    for name, module in get_named_sparse_attention_modules(model):
-        module_name = get_unwrapped_name(name, model)
-
-        # Save the method configuration that was used
-        # _method_config already contains the validated config dict
-        module_state = {
-            "method": module._sparse_method_instance.name,
-            "method_config": module._method_config.copy(),
-        }
-
-        sparse_state[module_name] = module_state
-
-    metadata["sparse_attention_state"] = sparse_state
+    metadata["sparse_attention_state"] = {
+        get_unwrapped_name(name, model): module.get_modelopt_state()
+        for name, module in get_named_sparse_attention_modules(model)
+    }
     metadata["sparse_attention_config"] = (
         config.model_dump() if hasattr(config, "model_dump") else vars(config)
     )
@@ -469,16 +470,7 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
             skip_group["initial_disabled_steps"] = initial_disabled_steps
         # threshold_scale_factor (a * exp(b * target_sparsity)) and target_sparsity are
         # skip-softmax-specific, so they live in this group.
-        threshold_scale_factor: dict[str, Any] = {
-            "formula": "a * exp(b * target_sparsity)",
-        }
-        for phase in ["prefill", "decode"]:
-            if phase in calibration_params:
-                threshold_scale_factor[phase] = {
-                    "a": calibration_params[phase]["a"],
-                    "b": calibration_params[phase]["b"],
-                }
-        skip_group["threshold_scale_factor"] = threshold_scale_factor
+        skip_group["threshold_scale_factor"] = export_threshold_scale_factor(calibration_params)
         if target_sparse_ratio is not None:
             skip_group["target_sparsity"] = target_sparse_ratio
         config_groups[f"group_{group_idx}"] = skip_group
@@ -495,10 +487,7 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
 
     return {
         "config_groups": config_groups,
-        "producer": {
-            "name": "modelopt",
-            "version": mo_version,
-        },
+        "producer": export_config_producer(),
     }
 
 

@@ -128,10 +128,21 @@ class QuantModule(DynamicModule):
             weight_quantizer = getattr(self, quantizer_attr_names(weight_name).weight_quantizer)
             yield getattr(self, weight_name), weight_quantizer
 
+    def iter_weight_quantizers_for_calibration(self):
+        """Yield just the weight quantizers, without materializing the weight views.
+
+        Callers that only inspect quantizer state must use this rather than discarding the
+        weight from :meth:`iter_weights_for_calibration`. Reading a weight is free here, but a
+        subclass whose weight view costs something -- the fused-MoE modules slice a 3-D DTensor
+        per expert, one redistribute collective each under FSDP2 -- overrides this to skip it.
+        """
+        for _, weight_quantizer in self.iter_weights_for_calibration():
+            yield weight_quantizer
+
     @staticmethod
     @torch.no_grad()
     def _fold_weight_quantizer(
-        quantizer: TensorQuantizer,
+        quantizer: TensorQuantizer | SequentialQuantizer,
         weights: Iterable[torch.Tensor],
         keep_attrs: bool = False,
     ):
@@ -139,40 +150,52 @@ class QuantModule(DynamicModule):
 
         ``weights`` is an iterable so a single quantizer shared across views (e.g. one
         per-tensor quantizer over all experts of a fused MoE weight) can be folded view by
-        view while disabling and dropping its calibration attrs exactly once.
+        view while disabling and dropping its calibration attrs exactly once. A
+        :class:`SequentialQuantizer` is folded as its whole chain.
         """
         if not quantizer.fake_quant:
             return
 
+        members = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
         for weight in weights:
-            weight.data.copy_(quantizer(weight.float().contiguous()).to(weight.dtype))
+            folded = weight
+            # Each member's output is in the weight dtype, as in the forward pass.
+            for member in members:
+                folded = member(folded.float().contiguous()).to(weight.dtype)
+            weight.data.copy_(folded)
         quantizer.disable()
         quantizer.disable_rotate()
-        if keep_attrs and hasattr(quantizer, "_pre_quant_scale"):
-            # The scale is already baked into the folded weight.
-            # Disable pre-quant scaling so it is not applied twice.
-            quantizer._enable_pre_quant_scale = False
-        elif not keep_attrs:
-            for attr_name in ("_pre_quant_scale", "_amax"):
-                if hasattr(quantizer, attr_name):
-                    delattr(quantizer, attr_name)
+        for member in members:
+            if keep_attrs and hasattr(member, "_pre_quant_scale"):
+                # The scale is already baked into the folded weight.
+                # Disable pre-quant scaling so it is not applied twice.
+                member._enable_pre_quant_scale = False
+            elif not keep_attrs:
+                # Each of these only re-derives the folded weight (e.g. a pinned GGML payload).
+                buffers = {name for name, _ in member.named_buffers(recurse=False)}
+                for attr_name in buffers | {"_pre_quant_scale", "_amax"}:
+                    if hasattr(member, attr_name):
+                        delattr(member, attr_name)
+
+    def _validate_fold_weight(self):
+        """Validate that weight folding is supported before any module is modified."""
 
     def fold_weight(self, keep_attrs: bool = False):
         """Bake each fake-quant weight quantizer into its weight for faster eval.
 
         Every fake-quant weight quantizer is folded, including disabled quantizers whose pre-quant
         scale or rotation remains active. The folded transform is baked into the stored weight and
-        then disabled, so subsequent forwards use the stored weight directly. Calibration buffers
-        (``_pre_quant_scale``, ``_amax``) are dropped unless ``keep_attrs``. A retained pre-quant
-        scale remains stored but is made inactive because it has already been applied to the folded
-        weight.
+        then disabled, so subsequent forwards use the stored weight directly. The quantizer's
+        buffers (e.g. ``_pre_quant_scale``, ``_amax``) are dropped unless ``keep_attrs``. A
+        retained pre-quant scale remains stored but is made inactive because it has already been
+        applied to the folded weight.
         """
         # Handle all attributes that end with _weight_quantizer
         for name in dir(self):
             attr = getattr(self, name)
             if (
                 name.endswith("weight_quantizer")
-                and isinstance(attr, TensorQuantizer)
+                and isinstance(attr, (TensorQuantizer, SequentialQuantizer))
                 and attr.fake_quant
             ):
                 # Get the corresponding weight name by removing _weight_quantizer suffix

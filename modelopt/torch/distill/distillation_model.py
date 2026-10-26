@@ -113,9 +113,9 @@ class DistillationModel(DynamicModule):
     def _register_hooks(self):
         """Register hooks for intermediate tensors from teacher models and the student model."""
         for student_layer, teacher_layer in self._layers_to_loss:
-            setattr(student_layer, "_intermediate_output", None)
+            _clear_captured_output(student_layer)
             handle_s = student_layer.register_forward_hook(student_output_capture_fwd_hook)
-            setattr(teacher_layer, "_intermediate_output", None)
+            _clear_captured_output(teacher_layer)
             handle_t = teacher_layer.register_forward_hook(teacher_output_capture_fwd_hook)
             self._hook_handles.update([handle_s, handle_t])
 
@@ -166,30 +166,33 @@ class DistillationModel(DynamicModule):
     @contextmanager
     def only_teacher_forward(self, enable=True):
         """Context manager to temporarily disable forward passes on the student model."""
+        # restore the previous mode so nested contexts keep working
+        only_teacher_fwd = self._only_teacher_fwd
         if enable:
             self._only_teacher_fwd = True
         try:
             yield
         finally:
-            self._only_teacher_fwd = False
+            self._only_teacher_fwd = only_teacher_fwd
 
     @contextmanager
     def only_student_forward(self, enable=True):
         """Context manager to temporarily run forward passes only on the student model."""
+        only_student_fwd = self._only_student_fwd
         if enable:
             self._only_student_fwd = True
         try:
             yield
         finally:
-            self._only_student_fwd = False
+            self._only_student_fwd = only_student_fwd
 
     def train(self, mode: bool = True):
         """Override to prevent warnings of stored intermediate outputs in future forwards."""
         if self.training != mode:
             # When switching between train and eval, clear outputs
             for student_layer, teacher_layer in self._layers_to_loss:
-                student_layer._intermediate_output = None
-                teacher_layer._intermediate_output = None
+                _clear_captured_output(student_layer)
+                _clear_captured_output(teacher_layer)
         super().train(mode)
 
     def state_dict(self, *args, **kwargs) -> dict[str, Any]:
@@ -269,8 +272,8 @@ class DistillationModel(DynamicModule):
         for i, ((student_layer, teacher_layer), loss_fn) in enumerate(self._layers_to_loss.items()):
             out_s = student_layer._intermediate_output
             out_t = teacher_layer._intermediate_output
-            student_layer._intermediate_output = None
-            teacher_layer._intermediate_output = None
+            _clear_captured_output(student_layer)
+            _clear_captured_output(teacher_layer)
 
             loss = loss_fn(out_s, out_t, **loss_fn_kwargs)  # Student is pred, Teacher is target
             if loss_reduction_fn is not None:
@@ -292,6 +295,24 @@ class DistillationModel(DynamicModule):
         return loss_total
 
 
+def _clear_captured_output(layer: nn.Module) -> None:
+    """Drop a captured activation and re-arm its stale-output warning."""
+    layer._intermediate_output = None
+    layer._intermediate_output_warned = False
+
+
+def _warn_once_about_stale_output(module: nn.Module, who: str, expectation: str) -> None:
+    """Report a forward that overwrites an unconsumed capture, once per captured activation."""
+    if getattr(module, "_intermediate_output_warned", False):
+        return
+    module._intermediate_output_warned = True
+    warnings.warn(
+        f"{who}'s Module `{type(module).__name__}` already has an intermediate output stored:"
+        " `DistillationModel.compute_kd_loss()` did not run since the previous forward, so no KD"
+        f" loss is applied. {expectation}"
+    )
+
+
 def student_output_capture_fwd_hook(module: nn.Module, input: Any, output: Any):
     """A hook to capture layer output."""
     # NOTE: Defined externally to allow pickling during DDP initialization.
@@ -299,9 +320,10 @@ def student_output_capture_fwd_hook(module: nn.Module, input: Any, output: Any):
     if getattr(module, "_only_teacher_fwd", False):
         return  # Might be hooked on entire model fwd
     if module.training and module._intermediate_output is not None:
-        warnings.warn(
-            f"Student's Module `{type(module).__name__}` already has an intermediate output stored."
-            " This is undesired behavior unless Activation Checkpointing is in use."
+        _warn_once_about_stale_output(
+            module,
+            "Student",
+            "Expected under Activation Checkpointing, which re-runs a forward.",
         )
 
     module._intermediate_output = output
@@ -313,9 +335,10 @@ def teacher_output_capture_fwd_hook(module: nn.Module, input: Any, output: Any):
 
     if module._intermediate_output is not None:
         # NOTE: cannot tell if train or eval since teacher is always eval
-        warnings.warn(
-            f"Teacher's Module `{type(module).__name__}` already has an intermediate output stored."
-            " This is expected when `DistillationModel.compute_kd_loss` is not called in eval mode."
+        _warn_once_about_stale_output(
+            module,
+            "Teacher",
+            "Expected in eval mode, where the loss is not required.",
         )
 
     module._intermediate_output = output

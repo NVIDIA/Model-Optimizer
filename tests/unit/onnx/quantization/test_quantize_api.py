@@ -30,6 +30,7 @@ from packaging import version
 
 import modelopt.onnx.quantization as moq
 import modelopt.onnx.trt_utils as trt_utils
+from modelopt.onnx.quantization.__main__ import get_parser
 from modelopt.onnx.quantization.autotune import Config, QDQAutotuner
 from modelopt.onnx.quantization.autotune.insertion_points import get_autotuner_quantizable_ops
 from modelopt.onnx.utils import get_opset_version
@@ -85,6 +86,19 @@ OPSET_SCENARIOS = [
     # Requesting opset above minimum should be respected
     ("above_min_respected", 0, 1, 1),
 ]
+
+
+def test_quantize_rejects_trt_plugins_with_trt_rtx_abi():
+    with pytest.raises(
+        ValueError,
+        match="TensorRT plugin paths are not supported with the TensorRT-RTX backend",
+    ):
+        moq.quantize(
+            "model.onnx",
+            calibration_eps=["NvTensorRtRtx"],
+            trt_rtx_backend="abi",
+            trt_plugins=["custom_plugin.dll"],
+        )
 
 
 def test_realign_input_shapes_profile_after_calibration_eps_update():
@@ -294,8 +308,8 @@ def test_quantize_infers_input_profiles_after_ep_support_update(monkeypatch, tmp
         return [{"trt_profile_min_shapes": "trt_profile"}, {}]
 
     def fake_find_nodes_from_mha_to_exclude(*args):
-        captured["find_eps"] = list(args[-2])
-        captured["find_profile"] = args[-1]
+        captured["find_eps"] = list(args[-3])
+        captured["find_profile"] = args[-2]
         return []
 
     def fake_quantize_int8(**kwargs):
@@ -384,3 +398,29 @@ def test_quantize_opset_handling(
     assert output_opset == expected_opset, (
         f"[{scenario_name}] Expected opset {expected_opset} for {quant_mode}, got {output_opset}"
     )
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ([], False),
+        (["--target_dla"], True),
+    ],
+)
+def test_target_dla_cli(args, expected):
+    """Enable DLA targeting with a boolean flag."""
+    assert get_parser().parse_args(["--onnx_path", "model.onnx", *args]).target_dla == expected
+
+
+@pytest.mark.parametrize("value", ["iq", "eq"])
+def test_target_dla_cli_rejects_values(value):
+    with pytest.raises(SystemExit) as exc:
+        get_parser().parse_args(["--onnx_path", "model.onnx", "--target_dla", value])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("target_dla", ["iq", "eq", None, 1])
+def test_target_dla_api_rejects_non_boolean(target_dla):
+    """Reject obsolete modes and non-boolean values before loading the input model."""
+    with pytest.raises(ValueError, match="target_dla"):
+        moq.quantize("missing.onnx", target_dla=target_dla)

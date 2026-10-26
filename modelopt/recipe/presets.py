@@ -32,6 +32,8 @@ that mutate a returned config must deepcopy it first (this mirrors how the
 ``mtq.*_CFG`` module constants — themselves eagerly-loaded shared dicts — are used).
 """
 
+import argparse
+import warnings
 from typing import Any
 
 from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT, load_config
@@ -43,6 +45,7 @@ __all__ = [
     "KV_QUANT_PRESET_DIR",
     "MODEL_QUANT_PRESET_DIR",
     "QUANT_CFG_CHOICES",
+    "RecipeSupersededAction",
     "load_quant_cfg_choices",
 ]
 
@@ -95,3 +98,36 @@ KV_QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = load_quant_cfg_choices(KV_QUAN
 assert KV_CACHE_NONE not in KV_QUANT_CFG_CHOICES, (
     f"KV_CACHE_NONE sentinel {KV_CACHE_NONE!r} collides with a KV preset; rename the preset."
 )
+
+
+class RecipeSupersededAction(argparse.Action):
+    """``argparse`` action for a CLI flag that ``--recipe`` replaces.
+
+    Warns only when the flag is actually passed: argparse invokes an action for options present on
+    the command line, never for a default. That distinction matters here because several of these
+    flags default to a *quantizing* value -- ``--qformat fp8``, ``--kv_cache_qformat fp8_cast`` --
+    so warning unconditionally would fire on every run, including runs that correctly use
+    ``--recipe`` and never mention the deprecated flag.
+
+    Handles both value-taking flags and ``store_true`` ones; for the latter pass
+    ``nargs=0, const=True``.
+
+    The warning is a ``FutureWarning``, not a ``DeprecationWarning``. Python ignores
+    ``DeprecationWarning`` by default everywhere except ``__main__``, and argparse calls this action
+    from its own module, so the attributed frame is ``argparse`` and the default filters would drop
+    it -- the flag would go on working with nothing said, which defeats the point. ``FutureWarning``
+    is the category Python documents for deprecations aimed at end users, and it is shown by
+    default. (Test suites enable all warnings, so this is invisible in tests either way.)
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        """Warn that this flag is deprecated, then store the value as usual."""
+        warnings.warn(
+            f"{option_string} is deprecated and will be removed in a future release. Use "
+            "--recipe with a YAML recipe instead: a recipe carries the quantization config, the "
+            "calibration algorithm and the KV-cache setting together, so they cannot drift apart. "
+            "See modelopt_recipes/general/ptq/ and modelopt.recipe.",
+            FutureWarning,
+            stacklevel=2,
+        )
+        setattr(namespace, self.dest, self.const if self.nargs == 0 else values)

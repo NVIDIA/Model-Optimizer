@@ -45,21 +45,13 @@ def test_qwen_vision_recipes_select_expected_quantizers(
 ):
     model = _get_tiny_qwen_vlm(model_type)
     assert model.config.model_type == model_type
-    quant_cfg = load_recipe(f"huggingface/{model_type}/ptq/{recipe}").quantize.model_dump()
+    quant_cfg = load_recipe(f"model_type/{model_type}/ptq/{recipe}").quantize.model_dump()
 
     mtq.quantize(model, quant_cfg, forward_loop=None)
     modules = dict(model.named_modules())
     enabled = {name for name, module in modules.items() if getattr(module, "is_enabled", False)}
 
     expected_visual_suffixes = {
-        "blocks.0.attn.qkv.weight_quantizer",
-        "blocks.0.attn.qkv.input_quantizer",
-        "blocks.0.attn.proj.weight_quantizer",
-        "blocks.0.attn.proj.input_quantizer",
-        "blocks.0.mlp.linear_fc1.weight_quantizer",
-        "blocks.0.mlp.linear_fc1.input_quantizer",
-        "blocks.0.mlp.linear_fc2.weight_quantizer",
-        "blocks.0.mlp.linear_fc2.input_quantizer",
         "merger.linear_fc1.weight_quantizer",
         "merger.linear_fc1.input_quantizer",
         "merger.linear_fc2.weight_quantizer",
@@ -74,11 +66,11 @@ def test_qwen_vision_recipes_select_expected_quantizers(
                 "deepstack_merger_list.0.linear_fc2.input_quantizer",
             }
         )
-    assert {f"model.visual.{suffix}" for suffix in expected_visual_suffixes} <= enabled
-    assert not any("patch_embed" in name for name in enabled)
+    visual_quantizers = {name for name in enabled if name.startswith("model.visual.")}
+    assert visual_quantizers == {f"model.visual.{suffix}" for suffix in expected_visual_suffixes}
 
-    vision_weight = modules["model.visual.blocks.0.attn.qkv.weight_quantizer"]
-    vision_input = modules["model.visual.blocks.0.attn.qkv.input_quantizer"]
+    vision_weight = modules["model.visual.merger.linear_fc1.weight_quantizer"]
+    vision_input = modules["model.visual.merger.linear_fc1.input_quantizer"]
     assert vision_weight.num_bits == (4, 3)
     assert vision_input.num_bits == (4, 3)
 

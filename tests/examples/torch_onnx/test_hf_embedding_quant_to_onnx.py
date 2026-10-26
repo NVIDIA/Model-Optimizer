@@ -45,12 +45,12 @@ _TINY_CONFIG = {
     [
         (
             "embedding",
-            "huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj",
+            "model_type/nemotron_llama/ptq/nvfp4_output_quant_proj",
             "TRT_FP4DynamicQuantize",
         ),
         (
             "reranking",
-            "huggingface/nemotron_llama/ptq/fp8_output_quant_proj",
+            "model_type/nemotron_llama/ptq/fp8_output_quant_proj",
             "QuantizeLinear",
         ),
     ],

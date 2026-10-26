@@ -14,7 +14,7 @@
 > (including quantized or distilled checkpoints) remain subject to the LTX Community License
 > Agreement and are **not** covered by Apache 2.0.
 
-**Note:** This is a **sample script for illustrating the QAD pipeline**. It has been verified to run on a **Linux RTX 5090** system, but runs into **OOM (Out of Memory)** on that configuration.
+**Note:** This is a **sample script for illustrating the QAD pipeline**. It has been tested on a **Linux RTX 5090** system and currently runs into **OOM (Out of Memory)** on that configuration.
 
 This example demonstrates **Quantization-Aware Distillation (QAD)** for [LTX-2](https://github.com/Lightricks/LTX-2) using the native LTX training loop and [NVIDIA ModelOpt](https://github.com/NVIDIA/Model-Optimizer). It combines:
 
@@ -77,7 +77,7 @@ pip install torch accelerate safetensors pyyaml
 
 ### 1. Prepare your dataset
 
-Run the LTX preprocessing script to extract latents and text embeddings from your videos. Use `preprocess_dataset.py` with the following arguments (matching the LTX training pipeline):
+Run the LTX preprocessing script to extract latents and text embeddings from your videos. Use `process_dataset.py` with the following arguments (matching the LTX training pipeline):
 
 ```bash
 python scripts/process_dataset.py /path/to/dataset.json \

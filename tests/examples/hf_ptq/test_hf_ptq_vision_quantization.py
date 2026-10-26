@@ -33,7 +33,7 @@ def hf_ptq(monkeypatch):
     ("recipe", "extracts_language_model"),
     [
         (None, True),
-        ("huggingface/qwen3_vl/ptq/fp8_vision-kv_none", False),
+        ("model_type/qwen3_vl/ptq/fp8_vision-kv_none", False),
     ],
 )
 def test_image_calibration_model_target_follows_recipe(
@@ -49,7 +49,8 @@ def test_image_calibration_model_target_follows_recipe(
         use_fsdp2=False,
         specdec_offline_dataset=None,
         low_memory_mode=False,
-        pyt_ckpt_path="dummy",
+        local_checkpoint_path="dummy",
+        hub_model_id=None,
         dist_state=SimpleNamespace(device=torch.device("cpu")),
         gpu_max_mem_percentage=0.8,
         trust_remote_code=False,
@@ -63,7 +64,12 @@ def test_image_calibration_model_target_follows_recipe(
     )
 
     monkeypatch.setattr(hf_ptq, "get_model", lambda *args, **kwargs: full_model)
-    monkeypatch.setattr(hf_ptq, "get_model_type", lambda model: "qwen3_vl")
+    # A VLM's extracted language model reports its own sub-config type; hf_ptq must keep the root's.
+    monkeypatch.setattr(
+        hf_ptq,
+        "hf_model_type",
+        lambda model: "qwen3_vl" if model is full_model else "qwen3_vl_text",
+    )
     monkeypatch.setattr(hf_ptq, "is_nemotron_vl", lambda model: False)
     monkeypatch.setattr(
         hf_ptq.AutoProcessor,
@@ -73,7 +79,7 @@ def test_image_calibration_model_target_follows_recipe(
 
     def extract_language_model(model):
         extraction_calls.append(model)
-        return extracted_language_model, "qwen3"
+        return extracted_language_model
 
     monkeypatch.setattr(
         hf_ptq, "extract_and_prepare_language_model_from_vl", extract_language_model
@@ -81,6 +87,7 @@ def test_image_calibration_model_target_follows_recipe(
 
     loaded = hf_ptq.load_model(args)
     quantization_target = loaded[1]
+    assert loaded[2] == "qwen3_vl"  # root model_type, even when the language model is extracted
 
     assert extraction_calls == ([full_model] if extracts_language_model else [])
     assert quantization_target is (
@@ -88,11 +95,22 @@ def test_image_calibration_model_target_follows_recipe(
     )
 
 
+def test_language_model_extraction_fails_closed_on_competing_roots(hf_ptq):
+    full_model = torch.nn.Module()
+    full_model.model = torch.nn.Module()
+    full_model.model.language_model = torch.nn.Module()
+    full_model.language_model = torch.nn.Module()
+
+    with pytest.raises(ValueError, match="multiple language-model roots"):
+        hf_ptq.extract_and_prepare_language_model_from_vl(full_model)
+
+
 def test_image_calibration_uses_full_vlm_forward(hf_ptq, monkeypatch):
     args = SimpleNamespace(
         qformat="fp8",
         calib_with_images=True,
         specdec_offline_dataset=None,
+        layerwise_export=False,
     )
     full_model = torch.nn.Module()
     calib_dataloader = object()
@@ -149,10 +167,10 @@ def test_image_calibration_uses_full_vlm_forward(hf_ptq, monkeypatch):
 @pytest.mark.parametrize(
     "recipe",
     [
-        "huggingface/qwen3_vl/ptq/fp8_vision-kv_none",
-        "huggingface/qwen3_vl/ptq/fp8_vision_lm-kv_fp8_cast",
-        "huggingface/qwen3_5/ptq/fp8_vision-kv_none",
-        "huggingface/qwen3_5/ptq/fp8_vision_lm-kv_fp8_cast",
+        "model_type/qwen3_vl/ptq/fp8_vision-kv_none",
+        "model_type/qwen3_vl/ptq/fp8_vision_lm-kv_fp8_cast",
+        "model_type/qwen3_5/ptq/fp8_vision-kv_none",
+        "model_type/qwen3_5/ptq/fp8_vision_lm-kv_fp8_cast",
     ],
 )
 def test_vision_recipe_requires_image_calibration(hf_ptq, recipe):
@@ -167,7 +185,5 @@ def test_vision_recipe_requires_image_calibration(hf_ptq, recipe):
             calibration_only=False,
             processor=None,
             tokenizer=None,
-            default_padding_side=None,
-            default_pad_token=None,
             device=torch.device("cpu"),
         )

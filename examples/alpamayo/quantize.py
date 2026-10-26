@@ -236,7 +236,11 @@ def _teacher_forced_flow_loss_forward(
         use_cache=True,
         **forward_kwargs,
     )
-    prompt_cache.crop(prefill_seq_len)
+    # Drop the diffusion tokens appended to the prompt cache. A negative count works on every
+    # transformers version; positive (absolute-size) crops are deprecated since 5.15.
+    appended = prompt_cache.get_seq_length() - prefill_seq_len
+    if appended > 0:
+        prompt_cache.crop(-appended)
     last_hidden = expert_out.last_hidden_state[:, -n_diffusion_tokens:]
     v_pred = self.action_out_proj(last_hidden).view(b, *self.action_space.get_action_space_dims())
 

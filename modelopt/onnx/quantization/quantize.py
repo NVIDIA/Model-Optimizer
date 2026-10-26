@@ -56,18 +56,17 @@ from modelopt.onnx.quantization.calib_utils import (
     RandomDataProvider,
 )
 from modelopt.onnx.quantization.fp8 import quantize as quantize_fp8
-from modelopt.onnx.quantization.graph_utils import (
-    cast_custom_ops,
+from modelopt.onnx.quantization.graph_rewrites import cast_custom_ops, remove_redundant_cast_nodes
+from modelopt.onnx.quantization.graph_selection import (
     find_nodes_from_mha_to_exclude,
     get_input_shapes,
-    print_stat,
-    remove_redundant_cast_nodes,
     validate_op_types_spelling,
 )
 from modelopt.onnx.quantization.int4 import quantize as quantize_int4
 from modelopt.onnx.quantization.int8 import quantize as quantize_int8
 from modelopt.onnx.quantization.ort_utils import create_input_shapes_profile, update_trt_ep_support
 from modelopt.onnx.quantization.precision_utils import _convert_to_runtime_precision
+from modelopt.onnx.quantization.qdq_graph import print_stat
 from modelopt.onnx.quantization.qdq_utils import (
     qdq_to_dq,
     remove_graph_input_q,
@@ -514,6 +513,7 @@ def quantize(
     autotune_warmup_runs: int = 50,
     autotune_timing_runs: int = 100,
     autotune_trtexec_args: str | None = None,
+    trt_rtx_backend: str = "legacy",
     **kwargs: Any,
 ) -> None:
     """Quantizes the provided ONNX model.
@@ -539,9 +539,14 @@ def quantize(
         calibration_eps:
             Priority order for the execution providers (EP) to calibrate the model.
             Any subset of ['NvTensorRtRtx', 'trt', 'cuda:x', 'dml:x', 'cpu'], where 'x' is the device id.
+            For TensorRT-RTX, pass 'NvTensorRtRtx' for either backend; select the backend with trt_rtx_backend.
 
             .. note::
                 If a custom op is detected in the model, 'trt' will automatically be added to the EP list.
+        trt_rtx_backend:
+            TensorRT-RTX implementation used when calibration_eps contains 'NvTensorRtRtx'.
+            Either 'legacy' (default) or 'abi'. The legacy backend uses TensorRT-RTX
+            libraries on PATH; the ABI backend uses the standalone EP plugin.
         override_shapes:
             Override model input shapes with static shapes.
         op_types_to_quantize:
@@ -646,8 +651,12 @@ def quantize(
             (19 for int8/fp8, 21 for int4, 23 for nvfp4). If the specified opset is lower than the required minimum,
             a warning will be issued and the opset will be upgraded to the required minimum.
         target_dla:
-            If True, enable Q/DQ nodes to be placed in all tensors for optimal DLA deployment. This only has
-            effect in INT8 quantization. Note that this may cause accuracy degradation, proceed with caution.
+            Expand INT8 Q/DQ coverage for DLA and preserve scalar operator constants.
+            TensorRT 10.7 and earlier require the separate Q/DQ Translator workflow.
+            DLA deployment is unsupported after 10.7 through 11.3. TensorRT 11.4+ supports
+            direct Q/DQ deployment with strongly typed DLA support enabled.
+            Requires a compatible DLA platform and package. False disables DLA targeting.
+            This option only affects INT8 quantization and may reduce accuracy.
         autotune:
             If True, detect optimal Q/DQ node placements according to the TensorRT version and platform available.
             If False, use the default pattern-based quantization approach.
@@ -688,6 +697,17 @@ def quantize(
         None, writes the quantized onnx model in the supplied output_path
         or writes to the same directory with filename like "<model_name>.quant.onnx".
     """
+    if not isinstance(target_dla, bool):
+        raise ValueError("target_dla must be a boolean; use True to enable DLA targeting")
+
+    if trt_rtx_backend not in ("legacy", "abi"):
+        raise ValueError(f"trt_rtx_backend must be 'legacy' or 'abi', got {trt_rtx_backend!r}")
+    if trt_plugins and "NvTensorRtRtx" in calibration_eps:
+        raise ValueError(
+            "TensorRT plugin paths are not supported with the TensorRT-RTX backend. "
+            "Remove --trt_plugins or select the classic TensorRT EP."
+        )
+
     configure_logging(log_level.upper(), log_file)
     logger.info(f"Starting quantization process for model: {onnx_path}")
     logger.info(f"Quantization mode: {quantize_mode}")
@@ -765,7 +785,6 @@ def quantize(
         )
 
     if calibration_data_reader is None:
-        # Use random scales if calibration data is not supplied
         if calibration_data is None:
             calibration_data_reader = RandomDataProvider(onnx_path, calibration_shapes)
         else:
@@ -795,6 +814,7 @@ def quantize(
             calibration_data_reader,
             calibration_eps,
             input_shapes_profile,
+            trt_rtx_backend,
         )
 
     if calibrate_per_node and not calibration_shapes:
@@ -867,6 +887,7 @@ def quantize(
             opset=opset,
             autotune=autotune,
             input_shapes_profile=input_shapes_profile,
+            trt_rtx_backend=trt_rtx_backend,
             **kwargs,
         )
 
@@ -882,6 +903,7 @@ def quantize(
             use_zero_point=use_zero_point,
             log_level=log_level,
             input_shapes_profile=input_shapes_profile,
+            trt_rtx_backend=trt_rtx_backend,
             **kwargs,
         )
     else:

@@ -13,9 +13,13 @@ and holds shared configuration.
 ├── scripts/                # shared helper scripts (sync-upstream-skills.sh, …)
 └── clusters.yaml.example   # remote-cluster config template
 
+.codex/
+└── agents/                 # Codex project role definitions
+
 plugins/modelopt/
 ├── .claude-plugin/
 ├── .codex-plugin/
+├── agents/                 # Claude Code subagent definitions
 └── skills/                 # canonical SKILL.md files
     ├── common/             # shared skill support files
     └── <skill-name>/SKILL.md
@@ -31,10 +35,17 @@ a copy:
 - **Repository agents** use `.agents/skills`, a relative symlink into the
   plugin.
 - **Claude Code and Codex plugins** load `plugins/modelopt/skills` directly.
+- **Claude Code** loads subagents from `plugins/modelopt/agents/` through the
+  plugin, while `.claude/agents/*.md` symlinks expose them to repository users.
+- **Codex** discovers project roles directly under `.codex/agents/`. Codex
+  plugins cannot currently install custom roles.
 
 ## Editing rules
 
 - **Always edit skills under `plugins/modelopt/skills/`**.
+- Claude Code subagents belong in `plugins/modelopt/agents/`, not
+  `.claude/agents/`.
+- Codex custom roles belong in `.codex/agents/`.
 - Vendored-verbatim skills (`launching-evals`, `accessing-mlflow`) are managed
   by `.agents/scripts/sync-upstream-skills.sh` — do not modify by hand.
 - New skills go in `plugins/modelopt/skills/<skill-name>/SKILL.md`.

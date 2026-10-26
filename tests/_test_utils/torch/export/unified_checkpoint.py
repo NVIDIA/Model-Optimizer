@@ -19,6 +19,7 @@ the exported tensors against the HuggingFace checkpoint the model came from.
 """
 
 import json
+import re
 from pathlib import Path
 
 import torch
@@ -28,6 +29,7 @@ from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
 __all__ = [
     "assert_exported_checkpoint_matches",
+    "assert_per_expert_experts_complete",
     "assert_safetensors_index_consistent",
     "load_safetensors_dir",
 ]
@@ -194,3 +196,20 @@ def assert_exported_checkpoint_matches(
             if rel > tol:
                 wrong.append((key, f"max_rel_err={rel:.4f} > {tol}"))
     assert not wrong, f"{len(wrong)} tensor(s) differ from the reference, e.g. {wrong[:8]}"
+
+
+def assert_per_expert_experts_complete(export_dir: Path | str) -> None:
+    """Every routed expert must export all three projections.
+
+    Callers waive the packed-vs-per-expert name difference wholesale via ``allow_unexpected``, so
+    without this a rule that emitted only gate/up would still pass the reference comparison.
+    """
+    pattern = re.compile(r"^(.*\.mlp\.experts)\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$")
+    found: dict[tuple[str, int], set[str]] = {}
+    for key in load_safetensors_dir(export_dir):
+        m = pattern.match(key)
+        if m:
+            found.setdefault((m.group(1), int(m.group(2))), set()).add(m.group(3))
+    assert found, "no per-expert routed-expert tensors in the export"
+    incomplete = {k: sorted(v) for k, v in found.items() if len(v) != 3}
+    assert not incomplete, f"experts missing projections: {sorted(incomplete.items())[:4]}"

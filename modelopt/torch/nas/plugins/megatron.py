@@ -15,7 +15,6 @@
 
 """Plugin to add NAS/Pruning support for megatron-core Language models like GPT and Mamba."""
 
-import copy
 import types
 from abc import ABC
 from collections.abc import Callable, Sequence
@@ -35,10 +34,6 @@ from megatron.core.extensions.transformer_engine import (
 )
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.gpt import GPTModel
-from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
-from megatron.core.models.hybrid.hybrid_layer_specs import (
-    hybrid_stack_spec as _te_hybrid_stack_spec,
-)
 from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
 from megatron.core.ssm.gated_delta_net import GatedDeltaNet
@@ -56,7 +51,6 @@ from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.multi_latent_attention import MLASelfAttention
-from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_layer import TransformerLayer
 
 from modelopt.torch.nas.modules import DynamicModuleList
@@ -91,21 +85,8 @@ except ImportError:
 # Attention module types that _DynamicTransformerLayer converts.
 _ATTENTION_TYPES: tuple[type, ...] = (SelfAttention, MLASelfAttention, GatedDeltaNet)
 
-__all__ = ["get_te_hybrid_stack_spec"]
-
-
-def get_te_hybrid_stack_spec(moe_grouped_gemm: bool = False) -> ModuleSpec:
-    """Return the TE Hybrid stack spec."""
-    if moe_grouped_gemm:
-        return _te_hybrid_stack_spec
-
-    # The upstream TE hybrid stack spec hardcodes TEGroupedMLP for MoE.
-    # Replace it with SequentialMLP (TE linear layers, no grouped gemm dependency).
-    te_hybrid_stack_spec = copy.deepcopy(_te_hybrid_stack_spec)
-    te_hybrid_stack_spec.submodules.moe_layer.submodules.mlp = get_moe_module_spec(
-        use_te=True, num_experts=8, moe_grouped_gemm=False
-    )
-    return te_hybrid_stack_spec
+# This module only registers DynamicModules; it exports no public API.
+__all__ = []
 
 
 # Local Parallel Linear DynamicModules ##########################################################################
@@ -1119,6 +1100,9 @@ class MambaDInnerHp(TracedHp):
         raise NotImplementedError("MambaDInnerHp does not support `_resolve_dependencies`!")
 
 
+torch.serialization.add_safe_globals([NumAttentionHeadsHp, MambaNumHeadsHp, MambaDInnerHp])
+
+
 class _DynamicExtendedRMSNorm(DynamicModule):
     """An ExtendedRMSNorm (GroupNorm) layer with dynamic hyperparams.
 
@@ -1268,13 +1252,34 @@ class _DynamicMambaMixer(DynamicModule):
         """Return the sliced data based on mamba_num_heads's active_slice."""
         return get_sliced_tensor(mod, data, "mamba_num_heads")
 
+    def train(self, mode: bool = True):
+        """Resize MCore's decode cache to the active heads before MCore refreshes it on ``eval()``."""
+        _resize_mamba_decode_cache(self)
+        return super().train(mode)
+
     def export(self) -> torch.nn.Module:
         """Export the dynamic module to a torch.nn.Module."""
         self.in_proj.export()
         self.out_proj.export()
         if self.rmsnorm:
             self.norm.export()
-        return super().export()
+        mod = super().export()
+        _resize_mamba_decode_cache(mod)
+        return mod
+
+
+def _resize_mamba_decode_cache(mixer: torch.nn.Module) -> None:
+    """Resize newer MCore's decode cache when ModelOpt changes the active head count.
+
+    ModelOpt slices ``A_log``, but MCore's ``_A_neg_exp_cache`` keeps its original shape. Allocate
+    matching storage and mark it stale so MCore's ``refresh_cache()`` recomputes ``-exp(A_log)``
+    from the active heads before using the cache.
+    """
+    # TODO: Consider resizing and invalidating the cache whenever ModelOpt changes the active heads.
+    cache = getattr(mixer, "_A_neg_exp_cache", None)
+    if cache is not None and cache.shape != mixer.A_log.shape:
+        mixer._A_neg_exp_cache = torch.empty_like(mixer.A_log, dtype=torch.float32)
+        mixer._A_neg_exp_cache_stale = True
 
 
 class _DynamicMambaLayer(DynamicModule):

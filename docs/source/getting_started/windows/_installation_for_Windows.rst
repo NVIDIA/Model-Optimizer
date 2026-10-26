@@ -11,9 +11,9 @@ The following system requirements are necessary to install and use Model Optimiz
 +-------------------------+-----------------------------+
 | OS                      |  Windows                    |
 +-------------------------+-----------------------------+
-| Architecture            |  amd64 (x86_64)             |
+| Architecture            |  amd64 (x86_64), ARM64*     |
 +-------------------------+-----------------------------+
-| Python                  |  >=3.10,<3.13               |
+| Python                  |  >=3.10,<3.14               |
 +-------------------------+-----------------------------+
 | CUDA                    |  >=12.0                     |
 +-------------------------+-----------------------------+
@@ -27,6 +27,9 @@ The following system requirements are necessary to install and use Model Optimiz
 .. note::
    - Make sure to use GPU-compatible driver and other dependencies (e.g. torch etc.). For instance, support for Blackwell GPU might be present in Nvidia 570+ driver, and CUDA-12.8+.
    - We currently support *Single-GPU* configuration.
+   - Windows ARM64 support is experimental and requires native ARM64 dependencies. Follow the
+     :ref:`Windows on Arm installation guide <Install-Page-Windows-ARM64>` for the tested Python
+     environment and any required source builds.
 
 The Model Optimizer - Windows can be used in following ways:
 
@@ -39,4 +42,5 @@ The Model Optimizer - Windows can be used in following ways:
    :maxdepth: 1
 
    ./_installation_standalone.rst
+   ./_installation_windows_arm64.rst
    ./_installation_with_olive.rst

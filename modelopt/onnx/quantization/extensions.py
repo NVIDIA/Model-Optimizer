@@ -29,7 +29,7 @@ try:
     sys.path.append(path)
     round_and_pack_ext = cppimport.imp("modelopt_round_and_pack_ext")
     sys.path.remove(path)
-except Exception as e:
+except (Exception, SystemExit) as e:  # setuptools exits on a failed build (e.g. no C++ compiler)
     logger.warning(
         f"{e}\nUnable to load `modelopt_round_and_pack_ext', falling back to python based optimized version. "
     )
