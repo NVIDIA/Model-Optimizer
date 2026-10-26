@@ -53,29 +53,27 @@ dependencies = [
 [project.optional-dependencies]
 onnx = [
     "cppimport",
-    "cupy-cuda12x; (platform_system != 'Linux' or platform_machine != 'x86_64') and platform_machine != 'aarch64' and platform_machine != 'ARM64' and platform_system != 'Darwin'",
-    "cupy-cuda13x; platform_system == 'Linux' and platform_machine == 'x86_64'",
-    "cupy-cuda13x>=14.2.0; platform_system == 'Windows' and platform_machine == 'ARM64'",
     "lief",
     "ml_dtypes",
     "onnx-graphsurgeon>=0.6.1",
     "onnx~=1.21.0; platform_system != 'Windows'",
     "onnx~=1.23.2; platform_system == 'Windows'",
     "onnxconverter-common~=1.16.0",
-    # ORT for Windows x64
-    "onnxruntime-gpu==1.22.0; platform_system == 'Windows' and platform_machine == 'AMD64'",
-    # ORT host and standalone TensorRT-RTX ABI EP for native Windows ARM64.
-    "onnxruntime~=1.26.0; platform_system == 'Windows' and platform_machine == 'ARM64'",
-    "onnxruntime-ep-nv-tensorrt-rtx-cu13==0.4.0; platform_system == 'Windows' and platform_machine == 'ARM64'",
-    # ORT on other platforms; the 1.30 CUDA 13 upgrade is validated on Linux x86-64.
-    # CUDA 12.8 users on that platform: see docs/source/getting_started/_installation_for_Linux.rst.
-    # Retain existing pins on other platforms until their runtime/EP tests pass.
-    "onnxruntime~=1.24.2; platform_machine == 'aarch64' or platform_system == 'Darwin'",
-    "onnxruntime-gpu~=1.24.2; platform_machine != 'aarch64' and platform_system != 'Darwin' and platform_system != 'Windows' and (platform_system != 'Linux' or platform_machine != 'x86_64')",
-    "onnxruntime-gpu>=1.29,<1.31; platform_system == 'Linux' and platform_machine == 'x86_64'",
     "onnxscript",
     "onnxslim>=0.1.76",
     "polygraphy>=0.53.4",
+    # Linux x86-64: CUDA 13. For CUDA 12, see docs/source/getting_started/_installation_for_Linux.rst.
+    "cupy-cuda13x; platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "onnxruntime-gpu>=1.29,<1.31; platform_system == 'Linux' and platform_machine == 'x86_64'",
+    # Linux aarch64 and macOS: CPU-only ORT.
+    "onnxruntime~=1.24.2; platform_machine == 'aarch64' or platform_system == 'Darwin'",
+    # Windows x64: CUDA 12.
+    "cupy-cuda12x; platform_system == 'Windows' and platform_machine == 'AMD64'",
+    "onnxruntime-gpu==1.22.0; platform_system == 'Windows' and platform_machine == 'AMD64'",
+    # Windows ARM64: ORT host plus the standalone TensorRT-RTX ABI EP.
+    "cupy-cuda13x>=14.2.0; platform_system == 'Windows' and platform_machine == 'ARM64'",
+    "onnxruntime~=1.26.0; platform_system == 'Windows' and platform_machine == 'ARM64'",
+    "onnxruntime-ep-nv-tensorrt-rtx-cu13==0.4.0; platform_system == 'Windows' and platform_machine == 'ARM64'",
 ]
 hf = [
     "accelerate>=1.0.0",
