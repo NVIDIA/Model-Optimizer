@@ -177,21 +177,26 @@ def test_the_sync_keeps_a_calibrated_zero_apart_from_uncalibrated(cpu_dist_worke
     cpu_dist_workers.run(_zero_or_uncalibrated_helper, case=case)
 
 
-# The forward turns per-token block sizes into a per-channel axis, which a rank that never ran it
-# does not see.
-_PER_CHANNEL_CFGS = {
-    "axis": {"num_bits": 8, "axis": 0},
-    "per-token-block-sizes": {"num_bits": 8, "block_sizes": {-1: None, "type": "dynamic"}},
+# Per-channel amaxes the ranks cannot reduce together: rank 1 holds none, or one of another size or
+# dtype. The forward turns per-token block sizes into a per-channel axis, which a rank that never ran
+# it does not see.
+_UNEVEN_CASES = {
+    "rank-0-only": {"axis": 0},
+    "per-token-block-sizes": {"block_sizes": {-1: None, "type": "dynamic"}},
+    "different-sizes": {"axis": 0},
+    "different-dtypes": {"axis": 0},
 }
 
 
-def _uneven_per_channel_helper(rank, size, per_channel_cfg):
-    quantizer = TensorQuantizer(QuantizerAttributeConfig(**_PER_CHANNEL_CFGS[per_channel_cfg]))
-    if rank == 0:  # only rank 0 calibrates it
+def _uneven_per_channel_helper(rank, size, case):
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, **_UNEVEN_CASES[case]))
+    if rank == 0 or case.startswith("different-"):  # calibrates it
         quantizer.enable_calib()
         quantizer.disable_quant()
-        quantizer(torch.ones(4, 8))
+        quantizer(torch.ones(5 if case == "different-sizes" and rank == 1 else 4, 8))
         quantizer.load_calib_amax()
+    if case == "different-dtypes" and rank == 1:
+        quantizer._set_buffer("_amax", quantizer.amax.bfloat16())
     # A rank left waiting in a collective its peer never joins gives up in seconds on this group.
     group = dist.new_group(timeout=timedelta(seconds=10))
     try:
@@ -205,12 +210,13 @@ def _uneven_per_channel_helper(rank, size, per_channel_cfg):
     assert "unevenly-calibrated" in raised, raised
 
 
-@pytest.mark.parametrize("per_channel_cfg", list(_PER_CHANNEL_CFGS))
-def test_uneven_per_channel_calibration_fails_on_every_rank(cpu_dist_workers, per_channel_cfg):
-    """A rank without the amax cannot rebuild its per-channel shape, so the sync fails, on every
-    rank together: one rank raising alone would leave the other waiting in the collective. Also
-    when only the calibrated rank's layout reads per-channel."""
-    cpu_dist_workers.run(_uneven_per_channel_helper, per_channel_cfg=per_channel_cfg)
+@pytest.mark.parametrize("case", list(_UNEVEN_CASES))
+def test_uneven_per_channel_calibration_fails_on_every_rank(cpu_dist_workers, case):
+    """A per-channel amax is reduced only when every rank holds one of the same size and dtype: a
+    rank without it cannot rebuild its shape, and NCCL hangs on mismatched ones. Otherwise the sync
+    fails, on every rank together: one rank raising alone would leave the other waiting in the
+    collective. Also when only the calibrated rank's layout reads per-channel."""
+    cpu_dist_workers.run(_uneven_per_channel_helper, case=case)
 
 
 def _expert_input_amax_helper(rank, size, share):

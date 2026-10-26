@@ -1452,38 +1452,39 @@ class TensorQuantizer(nn.Module):
         device = _collective_device(group)
         # Every rank joins this all-reduce, and its result alone picks what follows, so every rank
         # issues the same collectives. It carries what only the ranks holding an amax know: whether
-        # any rank calibrated the quantizer, and whether its amax is one value or a tensor
-        # (per-channel, static per-block). The layout attributes cannot tell: the forward rewrites
-        # ``axis`` and ``block_sizes``, so a rank that never ran it reads a different layout.
-        # One value -- per-tensor, or a dynamic block quantizer's global scale (NVFP4) -- rides along
-        # with its dtype, so a rank that never calibrated the quantizer still ends up with it.
-        # float32 throughout: NCCL hangs rather than raising when ranks pair mismatched dtypes, which a
-        # group split between calibrated and uncalibrated ranks otherwise would (Kimi-K3, NVFP4, EP64:
-        # 8 ranks held an expert input amax and 56 did not).
-        present, shaped, dtype_code = amax is not None, False, 0
+        # any rank calibrated the quantizer, and the size and dtype of each rank's amax. The layout
+        # attributes cannot tell: the forward rewrites ``axis`` and ``block_sizes``, so a rank that
+        # never ran it reads a different layout. One value -- per-tensor, or a dynamic block
+        # quantizer's global scale (NVFP4) -- rides along, so a rank that never calibrated the
+        # quantizer still ends up with it. float32 throughout: NCCL hangs rather than raising when
+        # ranks pair mismatched dtypes, which a group split between calibrated and uncalibrated ranks
+        # otherwise would (Kimi-K3, NVFP4, EP64: 8 ranks held an expert input amax and 56 did not).
+        numel, dtype_code = 0, 0  # a rank without an amax holds no elements
         if amax is not None:
-            shaped = amax.numel() != 1
+            numel = amax.numel()
             dtype_code = _AMAX_DTYPES.index(amax.dtype) + 1 if amax.dtype in _AMAX_DTYPES else 0
-        # MAX turns [present, shaped, -shaped] into [any calibrated, any tensor, -(all tensors)].
+        # MAX turns [numel, -numel, dtype, -dtype] into each one's largest and negated smallest value.
         packed = torch.tensor(
-            [0.0, present, dtype_code, shaped, -shaped], dtype=torch.float32, device=device
+            [0.0, numel, -numel, dtype_code, -dtype_code], dtype=torch.float32, device=device
         )
-        if amax is not None and not shaped:
+        if amax is not None and numel == 1:
             packed[0] = amax.detach().reshape(()).to(device=device, dtype=torch.float32)
         _all_reduce_amax(packed, group)
-        if not bool(packed[1] > 0):
+        max_numel, neg_min_numel, max_code, neg_min_code = packed[1:].tolist()  # one host sync
+        if max_numel == 0:
             return  # no rank calibrated it
-        if bool(packed[3] > 0):
-            # A tensor amax has a shape only the ranks holding one know, so the ranks reduce it only
-            # when every rank holds one, and all raise together otherwise.
-            if not bool(-packed[4] > 0):
+        if max_numel > 1:
+            # A tensor amax (per-channel, static per-block) has a shape only the ranks holding one
+            # know, so the ranks reduce it only when every rank holds one of the same size and dtype,
+            # and all raise together otherwise.
+            if -neg_min_numel != max_numel or -neg_min_code != max_code:
                 raise RuntimeError(
                     f"Cannot amax-sync unevenly-calibrated non-per-tensor quantizer {type(self).__name__}: "
-                    "some ranks calibrated it but others did not, and its amax shape is not locally known on "
-                    "the have-nots. Ensure every rank calibrates it (e.g. increase --calib-size)."
+                    "some ranks hold no amax for it, or one of another size or dtype, and a per-channel / "
+                    "per-block amax is reduced only when every rank holds one alike. Ensure every rank "
+                    "calibrates it (e.g. increase --calib-size)."
                 )
             assert amax is not None  # every rank holds one
-            # Every rank calibrated it with the same calibrator, so shapes and dtypes agree.
             reduced = amax.to(device=device)  # the backend's device; a no-op when already there
             _all_reduce_amax(reduced, group)
             if reduced is not amax:
@@ -1492,8 +1493,7 @@ class TensorQuantizer(nn.Module):
         if amax is not None:
             amax.copy_(packed[0])
         else:
-            dtype_code = int(packed[2].item())
-            dtype = _AMAX_DTYPES[dtype_code - 1] if dtype_code > 0 else torch.float32
+            dtype = _AMAX_DTYPES[int(max_code) - 1] if max_code > 0 else torch.float32
             held = [
                 t for t in (*self._buffers.values(), *self._parameters.values()) if t is not None
             ]
