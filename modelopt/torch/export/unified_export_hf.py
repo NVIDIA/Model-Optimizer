@@ -1250,6 +1250,7 @@ def _export_diffusers_checkpoint(
     components: list[str] | None,
     max_shard_size: int | str = "10GB",
     export_attention_quantizers: bool | None = None,
+    save_modelopt_state: bool = False,
     **kwargs,
 ) -> None:
     """Internal: Export diffusion(-like) model/pipeline checkpoint.
@@ -1271,6 +1272,7 @@ def _export_diffusers_checkpoint(
             runtimes that consume legacy attention ``_amax`` keys, such as static FP8 FLUX.
             None preserves these keys for FLUX.1 and omits them for other diffusion
             components. Transformers components always retain them for KV-cache scales.
+        save_modelopt_state: Whether to save ModelOpt state with HF checkpointing enabled.
         **kwargs: Runtime-specific post-processing options forwarded to
             :func:`_postprocess_safetensors`. See its docstring for details.
     """
@@ -1378,7 +1380,9 @@ def _export_diffusers_checkpoint(
                 if hasattr(component, "save_pretrained"):
                     with hide_quantizers_from_state_dict(component, keep_attention_quantizers):
                         component.save_pretrained(
-                            component_export_dir, max_shard_size=max_shard_size
+                            component_export_dir,
+                            max_shard_size=max_shard_size,
+                            save_modelopt_state=save_modelopt_state,
                         )
                 else:
                     with hide_quantizers_from_state_dict(component, keep_attention_quantizers):
@@ -1407,7 +1411,11 @@ def _export_diffusers_checkpoint(
                 _remove_promoted_quantizer_tensors(component)
         # Non-quantized component: just save as-is
         elif hasattr(component, "save_pretrained"):
-            component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
+            component.save_pretrained(
+                component_export_dir,
+                max_shard_size=max_shard_size,
+                save_modelopt_state=save_modelopt_state,
+            )
         else:
             _save_component_state_dict_safetensors(component, component_export_dir)
 
@@ -1994,6 +2002,7 @@ def export_hf_checkpoint(
             export_dir,
             components,
             max_shard_size,
+            save_modelopt_state=save_modelopt_state,
             **kwargs,
         )
         return
