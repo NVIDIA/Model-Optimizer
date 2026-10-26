@@ -164,6 +164,7 @@ class TensorQuantizer(nn.Module):
         "_original_shape",
         "_block_reshape_size",
         "_padding",
+        "_axis_from_block_sizes",
         # Extra flags added by huggingface
         "_is_hf_initialized",
         # Extra flags added by accelerate
@@ -282,6 +283,8 @@ class TensorQuantizer(nn.Module):
                 attribute, (f"_{attribute}", lambda v: v)
             )
             setattr(self, _tq_attribute_name, _setter(val))
+            if attribute in ("axis", "block_sizes"):  # configured, not derived by the forward
+                self._axis_from_block_sizes = False
 
         if isinstance(attribute_cfg, dict) and attribute_cfg == {"enable": False}:
             self.disable_rotate()
@@ -441,6 +444,7 @@ class TensorQuantizer(nn.Module):
     def block_sizes(self, value):
         self._axis = None
         self._block_sizes = value
+        self._axis_from_block_sizes = False
 
     @property
     def bias(self):
@@ -1104,6 +1108,10 @@ class TensorQuantizer(nn.Module):
 
             # remove block_sizes
             self._block_sizes = None
+            # The tensor-parallel amax sync skips per-channel block sizes. A rank that never ran
+            # this forward still reads them; this one reads this flag, as its axis can read
+            # per-tensor (block sizes spanning every dimension).
+            self._axis_from_block_sizes = True
 
     def _sanitize_export_amax(self, amax: torch.Tensor) -> torch.Tensor:
         """Replace zero/NaN amax entries with ``maxbound`` so exported scales stay positive.

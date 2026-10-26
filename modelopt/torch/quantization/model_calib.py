@@ -509,7 +509,11 @@ def max_calibrate(
                     _q, linear_name, quantizer_type, axes_for_sync, parallel_state, device
                 )
             return
-        # sync is not needed for block quantization
+        # sync is not needed for block quantization. Judged alike on every rank: a rank whose forward
+        # turned per-channel block sizes into an axis is flagged, as that axis reads per-tensor when
+        # they span every dimension, and a rank that never ran the forward still holds them.
+        if getattr(quantizer, "_axis_from_block_sizes", False):
+            return
         block_sizes = quantizer.block_sizes
         if block_sizes is not None:
             if hasattr(quantizer, "_padding"):
@@ -517,9 +521,7 @@ def max_calibrate(
                     f"Found block-quantized padded {quantizer_type} for {linear_name}, amax will"
                     " not be synced correctly."
                 )
-            # Skip amax sync for INT4 / W4A8 block quantization and per-channel block sizes. The
-            # forward turns their ``axis`` into a tuple ``axes_for_sync`` never holds, but a rank that
-            # never ran it still holds the configured ``block_sizes``, so judge by those.
+            # Skip amax sync for INT4 / W4A8 block quantization and per-channel block sizes
             # Sync amax for NVFP4 (dynamic per-block, static per-tensor quantized scale)
             per_channel = all(v is None for k, v in block_sizes.items() if isinstance(k, int))
             if per_channel or block_sizes.get("type", "static") != "dynamic":
