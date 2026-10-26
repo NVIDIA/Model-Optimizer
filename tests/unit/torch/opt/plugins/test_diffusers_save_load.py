@@ -23,14 +23,18 @@ from diffusers import UNet2DConditionModel
 
 
 @pytest.mark.parametrize("model_cls", [UNet2DConditionModel])
-def test_unet_save_restore(tmp_path, model_cls):
+@pytest.mark.parametrize("use_subfolder", [False, True], ids=["direct", "subfolder"])
+def test_unet_save_restore(tmp_path, model_cls, use_subfolder):
     tiny_unet_dir = create_tiny_unet_dir(tmp_path)
     model_ref = model_cls.from_pretrained(tiny_unet_dir)
     # TODO: Add calibrate, compress mode to the test
     model_ref = apply_mode_with_sampling(
         model_ref, ["sparse_magnitude", "export_sparse", "quantize"]
     )
-    model_ref.save_pretrained(tiny_unet_dir / "modelopt_model")
+    component_dir = tmp_path / "checkpoint" / "unet"
+    model_ref.save_pretrained(component_dir)
 
-    model_test = model_cls.from_pretrained(tiny_unet_dir / "modelopt_model")
+    load_path = component_dir.parent if use_subfolder else component_dir
+    load_kwargs = {"subfolder": "unet"} if use_subfolder else {}
+    model_test = model_cls.from_pretrained(load_path, local_files_only=True, **load_kwargs)
     df_modelopt_state_and_output_tester(model_ref, model_test)

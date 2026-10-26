@@ -17,6 +17,8 @@
 
 from importlib import import_module as _import_module
 
+from modelopt.torch.utils import import_plugin as _import_plugin
+
 # Initialize mode and plugins
 from . import mode, plugins, utils
 
@@ -24,9 +26,16 @@ from . import mode, plugins, utils
 from .compress import *
 from .config import *
 from .conversion import *
+from .lora import *
 from .model_quant import *
 from .nn.modules.quant_module import QuantModuleRegistry
 from .utils import update_quant_cfg_with_kv_cache_quant
+
+# LoRA modes depend on the quantization mode registry, which framework plugin
+# initialization can reach before mode.py finishes importing.
+with _import_plugin("megatron LoRA"):
+    _import_module(".plugins.megatron_lora", __name__)
+del _import_plugin
 
 # Imported last to register the backend without cycling through quantization.qtensor.
 # A dynamic import prevents isort from hoisting it into the import block above.

@@ -25,9 +25,11 @@ Built-in recipes live in three tiers — pick the most specific that applies:
 ## Folder structure
 
 Recipes are categorized by the Hugging Face `model_type` string — the
-value of the top-level `model_type` field in the model's `config.json`
-(or, for multimodal configs, the `text_config.model_type` of the inner
-language model). Use the exact `model_type` as the directory name:
+value of the top-level `model_type` field in the model's `config.json`.
+For multimodal models, use this top-level value, not the inner language
+model's `text_config.model_type`: sub-config types differ from the
+checkpoint's and change across transformers versions. Use the exact
+`model_type` as the directory name:
 
 ```text
 modelopt_recipes/model_type/

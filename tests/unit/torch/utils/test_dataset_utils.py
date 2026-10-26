@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from torch.utils.data import DataLoader
 
 from modelopt.torch.utils import dataset_utils
@@ -57,6 +58,33 @@ def test_prepare_messages_for_chat_template():
         )
         is messages
     )
+
+
+@pytest.mark.parametrize("include_labels", [False, True])
+def test_calibration_padding_avoids_masked_gradient_rows(monkeypatch, include_labels):
+    tokenizer = get_tiny_tokenizer()
+    monkeypatch.setattr(
+        dataset_utils, "get_dataset_samples", lambda *args, **kwargs: ["a", "a b c"]
+    )
+    batch = next(
+        iter(
+            get_dataset_dataloader(
+                tokenizer=tokenizer,
+                batch_size=2,
+                num_samples=2,
+                include_labels=include_labels,
+                device="cpu",
+            )
+        )
+    )
+    mask = batch["attention_mask"].bool()
+    assert tokenizer.padding_side == "left"
+    if include_labels:
+        causal_mask = torch.ones(mask.shape[-1], mask.shape[-1], dtype=torch.bool).tril()
+        assert (causal_mask & mask[:, None, :]).any(dim=-1).all()
+        assert torch.equal(batch["labels"][~mask], torch.full_like(batch["labels"][~mask], -100))
+    else:
+        assert not mask[0, 0] and mask[0, -1]
 
 
 def setup_test_data():
@@ -139,6 +167,62 @@ def test_batch_contents_preserved():
 
     # Verify all values were processed in the correct order
     assert processed_values == [0, 1, 2, 3]
+
+
+def test_batch_contents_preserved_with_a_known_working_batch_size():
+    # A batch that arrives after an earlier one already had to be split. The
+    # recursive call reports a smaller size than this walk started with, so a
+    # stride fixed up front steps over the rows in between.
+    batch_data = {
+        "input_ids": torch.arange(8).view(8, 1),
+        "attention_mask": torch.ones((8, 1), dtype=torch.long),
+    }
+
+    processed_values = []
+
+    def mock_infer_collect(**kwargs):
+        if kwargs["input_ids"].shape[0] > 2:
+            raise torch.cuda.OutOfMemoryError
+        processed_values.extend(kwargs["input_ids"].flatten().tolist())
+
+    _process_batch(batch_data, mock_infer_collect, max_working_batch_size=4)
+
+    assert processed_values == [0, 1, 2, 3, 4, 5, 6, 7]
+
+
+def test_process_batch_splits_a_batch_holding_none():
+    """A None value is allowed, so halving a batch must keep it rather than slice it."""
+    batch_data = {
+        "input_ids": torch.arange(4).view(4, 1),
+        "position_ids": None,
+    }
+
+    processed_values = []
+
+    def mock_infer_collect(**kwargs):
+        if kwargs["input_ids"].shape[0] > 2:
+            raise torch.cuda.OutOfMemoryError
+        assert kwargs["position_ids"] is None
+        processed_values.extend(kwargs["input_ids"].flatten().tolist())
+
+    _process_batch(batch_data, mock_infer_collect)
+
+    assert processed_values == [0, 1, 2, 3]
+
+
+def test_process_batch_refuses_to_split_a_non_tensor_value():
+    """Rows of a non-tensor value cannot be sliced, so say so instead of raising TypeError."""
+    batch_data = {
+        "input_ids": torch.arange(4).view(4, 1),
+        "base_model_outputs": [{"hidden_states": torch.zeros(4, 8, 16)}],
+    }
+
+    def mock_infer(**kwargs):
+        if kwargs["input_ids"].shape[0] > 2:
+            raise torch.cuda.OutOfMemoryError
+
+    with pytest.raises(ValueError, match="base_model_outputs"):
+        _process_batch(batch_data, mock_infer, allowed_non_tensor_keys={"base_model_outputs"})
 
 
 def test_process_batch_allowed_non_tensor_keys_accepted():
