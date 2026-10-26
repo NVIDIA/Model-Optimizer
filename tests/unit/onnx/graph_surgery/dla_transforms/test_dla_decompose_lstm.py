@@ -24,7 +24,8 @@ import copy
 import numpy as np
 import onnx
 import pytest
-from onnx import TensorProto, helper, numpy_helper
+from onnx import AttributeProto, TensorProto, helper, numpy_helper
+from onnx.compose import add_prefix
 
 from modelopt.onnx.graph_surgery.dla_transforms.dla_decompose_lstm import (
     _apply_decompose_lstm,
@@ -566,3 +567,136 @@ def test_runtime_input_transpose_preserves_existing_tensor_names(role, index):
     transformed = _apply_decompose_lstm(onnx.shape_inference.infer_shapes(copy.deepcopy(model)))
     onnx.checker.check_model(transformed, full_check=True)
     _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+def _make_lstm_followed_by_copied_reshape(target, view="private"):
+    """Create a valid unary-dimension transpose followed by a potentially shared target."""
+    model = _make_lstm_model("forward", 2)
+    model.graph.initializer.append(_init("shape_target", np.asarray(target, np.int64)))
+    model.graph.node.extend(
+        [
+            helper.make_node(
+                "Transpose", ["Y"], ["layout"], perm=[0, 2, 1, 3], name="layout_change"
+            ),
+            helper.make_node(
+                "Reshape", ["layout", "shape_target"], ["reshaped"], name="restore_shape"
+            ),
+        ]
+    )
+    model.graph.output[0].CopyFrom(_vi("reshaped", TensorProto.FLOAT, None))
+    feeds = {"X": np.random.default_rng(17).standard_normal((_T, 2, _D_IN)).astype(np.float32)}
+    if view == "public":
+        model.graph.output.append(_vi("shape_target", TensorProto.INT64, [3]))
+    elif view == "overridable":
+        model.graph.input.append(_vi("shape_target", TensorProto.INT64, [3]))
+    elif view == "captured":
+        model.graph.input.append(_vi("condition", TensorProto.BOOL, []))
+        feeds["condition"] = np.array(True)
+        branch = helper.make_graph(
+            [helper.make_node("Identity", ["layout"], ["branch_output"])],
+            "layout_reader",
+            [],
+            [_vi("branch_output", TensorProto.FLOAT, [_T, 2, 1, _H])],
+        )
+        model.graph.node.append(
+            helper.make_node(
+                "If", ["condition"], ["captured_output"], then_branch=branch, else_branch=branch
+            )
+        )
+        model.graph.output.append(_vi("captured_output", TensorProto.FLOAT, [_T, 2, 1, _H]))
+    elif view == "shared":
+        model.graph.input.append(_vi("other", TensorProto.FLOAT, [_T, 3, _H]))
+        feeds["other"] = np.arange(_T * 3 * _H, dtype=np.float32).reshape(_T, 3, _H)
+        model.graph.node.append(
+            helper.make_node("Reshape", ["other", "shape_target"], ["other_out"])
+        )
+        model.graph.output.append(_vi("other_out", TensorProto.FLOAT, [_T, 3, _H]))
+    model = onnx.shape_inference.infer_shapes(model)
+    onnx.checker.check_model(model, full_check=True)
+    return model, feeds
+
+
+@pytest.mark.parametrize("target", [[0, 0, _H], [0, -1, 0], [-1, 0, 0], [_T, 2, _H]])
+@pytest.mark.parametrize("defer", [False, True])
+def test_deferred_transpose_keeps_copied_reshape_dimensions(target, defer):
+    """Preserve copied dimensions when moving unary axes through a deferred reshape."""
+    model, feeds = _make_lstm_followed_by_copied_reshape(target)
+    expected = _run_ort(model, feeds)
+    transformed = _apply_decompose_lstm(copy.deepcopy(model), defer_rank_conversion=defer)
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("view", ["public", "shared", "overridable", "captured"])
+def test_deferred_copied_reshape_preserves_target_owners(view):
+    """Preserve public, shared and runtime structural controls while changing a private layout."""
+    model, feeds = _make_lstm_followed_by_copied_reshape([0, 0, _H], view)
+    expected = _run_ort(model, feeds)
+    transformed = _apply_decompose_lstm(copy.deepcopy(model), defer_rank_conversion=True)
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("operator", ["Transpose", "Reshape"])
+def test_deferred_layout_gate_preserves_model_local_followers(operator):
+    """Preserve opaque follower functions whose names match standard layout operators."""
+    model, feeds = _make_lstm_followed_by_copied_reshape([_T, 2, _H])
+    node = next(node for node in model.graph.node if node.op_type == operator)
+    node.domain = "custom"
+    if operator == "Transpose":
+        inner = helper.make_node("Transpose", ["X"], ["moved"])
+        inner.attribute.append(
+            AttributeProto(name="perm", type=AttributeProto.INTS, ref_attr_name="perm")
+        )
+        function = helper.make_function(
+            "custom",
+            operator,
+            ["X"],
+            ["Y"],
+            [inner, helper.make_node("Softmax", ["moved"], ["Y"], axis=1)],
+            [helper.make_opsetid("", 17)],
+            attributes=["perm"],
+        )
+    else:
+        function = helper.make_function(
+            "custom",
+            operator,
+            ["X", "shape"],
+            ["Y"],
+            [
+                helper.make_node("Softmax", ["X"], ["probabilities"], axis=1),
+                helper.make_node("Reshape", ["probabilities", "shape"], ["Y"]),
+            ],
+            [helper.make_opsetid("", 17)],
+        )
+    model.functions.append(function)
+    model.opset_import.append(helper.make_opsetid("custom", 1))
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    transformed = _apply_decompose_lstm(copy.deepcopy(model), defer_rank_conversion=True)
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize(
+    ("direction", "actual_directions"), [("forward", 2), ("reverse", 2), ("bidirectional", 1)]
+)
+@pytest.mark.parametrize("late", [False, True])
+def test_direction_count_refusal_precedes_all_lstm_mutation(direction, actual_directions, late):
+    """Refuse a direction-count mismatch before rewriting this or an earlier LSTM."""
+    model = _make_lstm_model("bidirectional" if actual_directions == 2 else "forward")
+    node = model.graph.node[0]
+    next(
+        attribute for attribute in node.attribute if attribute.name == "direction"
+    ).s = direction.encode()
+    if late:
+        first = add_prefix(_make_lstm_model("forward"), "first/")
+        model.graph.node.insert(0, first.graph.node[0])
+        model.graph.initializer.extend(first.graph.initializer)
+        model.graph.input.extend(first.graph.input)
+        model.graph.output.extend(first.graph.output)
+    onnx.checker.check_model(model)
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="num_directions"):
+        _apply_decompose_lstm(model)
+    assert model.SerializeToString() == before

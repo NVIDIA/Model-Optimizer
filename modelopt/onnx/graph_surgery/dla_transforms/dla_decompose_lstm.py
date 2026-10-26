@@ -234,6 +234,7 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
     lstm_counter = 0
     unique_initializer = set()
     allocated_names = {}
+    captured_names = _subgraph_captures(graph)
 
     def new_name(proposed):
         """Reuse internal controls while allocating names outside the original graph namespace."""
@@ -881,6 +882,9 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         if (
             len(consumer_nodes_y_output) == 1
             and consumer_nodes_y_output[0][0].op_type == "Transpose"
+            and consumer_nodes_y_output[0][0].domain in {"", "ai.onnx"}
+            and not consumer_nodes_y_output[0][0].overload
+            and (consumer_nodes_y_output[0][0].domain, "Transpose", "") not in local_functions
         ):
             consumer = consumer_nodes_y_output[0][0]
             shape = cache.get_shape(output_name)
@@ -888,14 +892,17 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
                 (list(attr.ints) for attr in consumer.attribute if attr.name == "perm"), None
             )
             followers = cache.get_consumers(consumer.output[0])
-            # The later rank pass resolves 0 dimensions from original output metadata.
             restored_by_rank_pass = (
                 defer_rank_conversion
-                and consumer.output[0] not in cache.graph_output_names
+                and consumer.output[0] not in cache.graph_output_names | captured_names
                 and bool(followers)
                 and all(
                     next_node.op_type == "Reshape"
+                    and next_node.domain in {"", "ai.onnx"}
+                    and not next_node.overload
+                    and (next_node.domain, "Reshape", "") not in local_functions
                     and len(next_node.input) > 1
+                    and next_node.input[1] not in cache.graph_input_names
                     and (target := cache.get_init_array(next_node.input[1])) is not None
                     and 0 < target.size < 4
                     and cache.get_shape(next_node.output[0]) is not None
@@ -910,6 +917,31 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
                 and [index for index in perm if shape[index] != 1]
                 == [index for index, dim in enumerate(shape) if dim != 1]
             )
+            if noop and restored_by_rank_pass:
+                for follower, _ in followers:
+                    target = cache.get_init_array(follower.input[1])
+                    if np.any(target == 0):
+                        # Copied dimensions refer to the original transpose layout.
+                        original_shape = cache.get_shape(follower.output[0])
+                        assert original_shape is not None
+                        resolved = np.array(target, copy=True)
+                        for index in np.flatnonzero(target == 0):
+                            resolved[index] = original_shape[index]
+                        target_name = cache.unique_name(follower.input[1] + "_lstm_layout")
+                        add_unique_initializers(
+                            graph,
+                            unique_initializer,
+                            [numpy_helper.from_array(resolved, target_name)],
+                        )
+                        follower.input[1] = target_name
+            if noop:
+                for value in graph.value_info:
+                    if value.name == consumer.output[0]:
+                        value.type.tensor_type.shape.CopyFrom(
+                            helper.make_tensor_value_info(
+                                "", onnx.TensorProto.FLOAT, shape
+                            ).type.tensor_type.shape
+                        )
             for attr in consumer.attribute if noop else []:
                 if attr.name == "perm":
                     del attr.ints[:]
@@ -925,10 +957,16 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         raise ValueError("LSTM decomposition requires ONNX opset >= 13")
     validated_shapes = {}
     for node in lstm_nodes:
-        _validate_lstm_supported(node)
+        direction = _validate_lstm_supported(node)
         shape_info = create_shape_info_map(node)
         if any(value <= 0 for value in shape_info.values()):
             raise ValueError(f"LSTM {node.name!r}: all dimensions must be static and positive")
+        expected_directions = 2 if direction == "bidirectional" else 1
+        if int(shape_info["d"]) != expected_directions:
+            raise ValueError(
+                f"LSTM {node.name!r}: direction is {direction} but num_directions (from W) is "
+                f"{shape_info['d']!r}; expected {expected_directions}."
+            )
         validated_shapes[id(node)] = shape_info
         dtype = resolve_lstm_tensor_dtype(node.input[0])
         if dtype != onnx.TensorProto.FLOAT:
@@ -948,11 +986,6 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         cache.rebuild()
         nodes_to_add = list(prep_nodes)
         shape_info_map = validated_shapes[id(node)]
-        if direction == "bidirectional" and int(shape_info_map["d"]) != 2:
-            raise ValueError(
-                f"LSTM {node.name!r}: direction is bidirectional but num_directions (from W) is "
-                f"{shape_info_map['d']!r}; expected 2."
-            )
         transposed_inputs = transpose_inputs(
             graph, node, unique_initializer, shape_info_map, nodes_to_add
         )
