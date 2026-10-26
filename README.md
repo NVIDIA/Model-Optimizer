@@ -12,6 +12,8 @@
 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699) |
 [Announcement Blogs](https://nvidia.github.io/Model-Optimizer/#announcements)
 
+[English](https://github.com/NVIDIA/Model-Optimizer/blob/main/README.md) | [简体中文](https://github.com/NVIDIA/Model-Optimizer/blob/main/README.zh.md)
+
 </div>
 
 ______________________________________________________________________
