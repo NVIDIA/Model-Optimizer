@@ -32,7 +32,7 @@ from onnx import TensorProto, helper, numpy_helper
 from modelopt.onnx.graph_surgery.dla_transforms.dla_5d_reshape_to_4d import _apply_5d_reshape_to_4d
 from modelopt.onnx.graph_surgery.utils.graph_utils import infer_shapes
 
-pytest.importorskip("onnxruntime", reason="onnxruntime required for numerical parity checks")
+ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for numerical parity checks")
 
 # ReduceMin with axes-as-input requires opset 18+.
 # Transpose / NoOp models use opset 13 (axes as attribute) — IR version clamped separately.
@@ -42,16 +42,17 @@ _MAX_IR_VERSION_FOR_ORT = 9
 
 
 def _init(name: str, arr: np.ndarray) -> onnx.TensorProto:
+    """Create a named initializer from an array."""
     return numpy_helper.from_array(arr, name=name)
 
 
 def _clamp_ir(model: onnx.ModelProto) -> None:
+    """Use an IR version supported by the test runtime."""
     model.ir_version = min(model.ir_version, _MAX_IR_VERSION_FOR_ORT)
 
 
 def _run_ort(model: onnx.ModelProto, feeds: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    import onnxruntime as ort
-
+    """Execute all graph outputs with the CPU runtime."""
     m = copy.deepcopy(model)
     _clamp_ir(m)
     sess = ort.InferenceSession(
@@ -179,6 +180,7 @@ def _make_only_4d_reshape_model() -> onnx.ModelProto:
 class TestDla5dReshapeTo4dReduce:
     @pytest.mark.parametrize("unsupported", ["axis", "shared"])
     def test_unsafe_qdq_middleware_refuses_before_mutation(self, unsupported):
+        """Refuse middleware whose branching or axes cannot be preserved."""
         model = _make_reduce_min_axis4_model()
         reshape, reduce = model.graph.node
         attrs = {"axis": 4} if unsupported == "axis" else {}
@@ -204,13 +206,14 @@ class TestDla5dReshapeTo4dReduce:
         assert model.SerializeToString() == before
 
     def test_reduce_min_axis4_ort_matches_reference(self):
+        """Preserve reduction values while generating slices and negative axes."""
         orig = _make_reduce_min_axis4_model()
         x = np.random.default_rng(0).standard_normal((6, 4, 4, 16)).astype(np.float32)
         y_ref = _run_ort(orig, {"X": x})["Y"]
 
         rewritten = copy.deepcopy(orig)
-        rewritten = infer_shapes(rewritten)
         rewritten = _apply_5d_reshape_to_4d(rewritten)
+        onnx.checker.check_model(rewritten)
         y_new = _run_ort(rewritten, {"X": x})["Y"]
 
         assert y_ref.shape == y_new.shape == (2, 4, 12, 4)
@@ -224,73 +227,101 @@ class TestDla5dReshapeTo4dReduce:
         assert len(slice_nodes) == 4, (
             f"Expected 4 Slice nodes (one per chunk), got {len(slice_nodes)}"
         )
+        initializers = {init.name: init for init in rewritten.graph.initializer}
+        for node in rewritten.graph.node:
+            if node.op_type == "ReduceMin":
+                assert numpy_helper.to_array(initializers[node.input[1]]).tolist() == [-1]
 
     def test_reduce_with_clip_ort_matches_reference(self):
+        """Preserve clipped reduction values with one Clip per branch."""
         orig = _make_reduce_with_clip_model()
         x = np.random.default_rng(1).standard_normal((6, 4, 4, 16)).astype(np.float32)
         y_ref = _run_ort(orig, {"X": x})["Y"]
 
         rewritten = copy.deepcopy(orig)
-        rewritten = infer_shapes(rewritten)
         rewritten = _apply_5d_reshape_to_4d(rewritten)
+        onnx.checker.check_model(rewritten)
         y_new = _run_ort(rewritten, {"X": x})["Y"]
 
         assert y_ref.shape == y_new.shape
         np.testing.assert_allclose(y_ref, y_new, rtol=0, atol=0)
 
-        assert not any(n.op_type == "Split" for n in rewritten.graph.node), (
-            "Split must be replaced by Slice nodes"
-        )
-
-    def test_clip_duplicated_per_branch(self):
-        """Clip is applied once per Slice branch (before each Reduce), not on the merged tensor."""
-        orig = _make_reduce_with_clip_model()
-        x = np.random.default_rng(3).standard_normal((6, 4, 4, 16)).astype(np.float32)
-        y_ref = _run_ort(orig, {"X": x})["Y"]
-
-        rewritten = copy.deepcopy(orig)
-        rewritten = infer_shapes(rewritten)
-        rewritten = _apply_5d_reshape_to_4d(rewritten)
-        y_new = _run_ort(rewritten, {"X": x})["Y"]
-
-        assert y_ref.shape == y_new.shape
-        np.testing.assert_allclose(y_ref, y_new, rtol=0, atol=0)
-        # num_splits for the test model: shape [2,4,12,4,4], axis=4 → split_ax=3, num_splits=4
-        clip_nodes = [n for n in rewritten.graph.node if n.op_type == "Clip"]
-        num_splits = 4
-        assert len(clip_nodes) == num_splits, (
-            f"Clip must appear once per branch ({num_splits}), got {len(clip_nodes)}"
-        )
-
-    def test_reduce_nodes_use_negative_axis(self):
-        """Newly created ReduceMin nodes must use a negative axis value (e.g. -1 not 3).
-
-        For the test model: shape [2,4,12,4,4], reduce axis=4 → split_ax=3 → negative axis=-1.
-        """
-        orig = _make_reduce_min_axis4_model()
-        rewritten = copy.deepcopy(orig)
-        rewritten = infer_shapes(rewritten)
-        rewritten = _apply_5d_reshape_to_4d(rewritten)
-
-        reduce_nodes = [n for n in rewritten.graph.node if n.op_type == "ReduceMin"]
-        assert len(reduce_nodes) > 0, "ReduceMin nodes must be present after rewrite"
-
-        for rn in reduce_nodes:
-            # axis is stored as input[1] (opset 18 style) — find its initializer value
-            axes_name = rn.input[1] if len(rn.input) > 1 else None
-            assert axes_name, f"ReduceMin {rn.name!r} must have axes as input[1]"
-            axes_init = next((i for i in rewritten.graph.initializer if i.name == axes_name), None)
-            assert axes_init is not None, f"axes initializer {axes_name!r} not found"
-            axis_val = int(numpy_helper.to_array(axes_init).flat[0])
-            assert axis_val < 0, f"ReduceMin {rn.name!r}: expected negative axis, got {axis_val}"
+        assert sum(node.op_type == "Clip" for node in rewritten.graph.node) == 4
 
     def test_reduce_axis_zero_raises(self):
+        """Refuse the unsupported batch-axis reduction."""
         orig = _make_reduce_axis0_model()
         with pytest.raises(ValueError, match=r"reduce axis must be 1\.\.4"):
             _apply_5d_reshape_to_4d(infer_shapes(copy.deepcopy(orig)))
 
 
 class TestDla5dReshapeTo4dTranspose:
+    @pytest.mark.parametrize("shape", [[0, -1], [0, 0, 4, -1], [0, 0, 0, -1]])
+    def test_final_reshape_zero_dimensions_preserve_values(self, shape):
+        """Resolve copied dimensions against the original five-dimensional input."""
+        model = _make_transpose_reshape_model()
+        dims = model.graph.input[0].type.tensor_type.shape.dim
+        dims[0].dim_value, dims[1].dim_value = 2, 12
+        model.graph.initializer[1].CopyFrom(_init("shape_out", np.array(shape, np.int64)))
+        resolved = [2, 12, 4, 4, 4]
+        target = [resolved[i] if dim == 0 else dim for i, dim in enumerate(shape)]
+        target = np.empty((2, 12, 4, 16)).reshape(target).shape
+        model.graph.output[0].CopyFrom(
+            helper.make_tensor_value_info("Y", TensorProto.FLOAT, target)
+        )
+        values = np.random.default_rng(7).standard_normal((2, 12, 4, 16)).astype(np.float32)
+        expected = _run_ort(model, {"X": values})["Y"]
+        rewritten = _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=True)
+        onnx.checker.check_model(rewritten)
+        np.testing.assert_array_equal(_run_ort(rewritten, {"X": values})["Y"], expected)
+
+    @pytest.mark.parametrize("unsupported", ["dynamic", "overlap", "late_failure"])
+    @pytest.mark.parametrize("skip_inference", [True, False])
+    def test_unsupported_patterns_leave_model_unchanged(self, unsupported, skip_inference):
+        """Refusal preserves nodes, initializers and inferred metadata, even on retry."""
+        model = _make_transpose_reshape_model()
+        dims = model.graph.input[0].type.tensor_type.shape.dim
+        dims[0].dim_value, dims[1].dim_value = 2, 12
+        if unsupported == "dynamic":
+            del model.graph.initializer[1]
+            model.graph.input.append(
+                helper.make_tensor_value_info("shape_out", TensorProto.INT64, [4])
+            )
+        elif unsupported == "overlap":
+            model.graph.initializer[1].CopyFrom(
+                _init("shape_out", np.array([2, 12, 4, 4, 4], np.int64))
+            )
+            model.graph.initializer.append(_init("axes", np.array([4], np.int64)))
+            model.graph.node[-1].output[0] = "second_5d"
+            model.graph.node.append(
+                helper.make_node("ReduceMin", ["second_5d", "axes"], ["Y"], keepdims=0)
+            )
+            model.opset_import[0].version = _REDUCE_OPSET
+            model.graph.output[0].CopyFrom(
+                helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 12, 4, 4])
+            )
+        else:
+            model.graph.initializer.append(
+                _init("late_shape", np.array([2, 4, 12, 4, 4], np.int64))
+            )
+            model.graph.node.extend(
+                [
+                    helper.make_node(
+                        "Reshape", ["X", "late_shape"], ["late_5d"], name="late_reshape"
+                    ),
+                    helper.make_node("Identity", ["late_5d"], ["late_output"], name="unsupported"),
+                ]
+            )
+            model.graph.output.append(
+                helper.make_tensor_value_info("late_output", TensorProto.FLOAT, [2, 4, 12, 4, 4])
+            )
+        onnx.checker.check_model(model)
+        before = model.SerializeToString()
+        for _ in range(2):
+            with pytest.raises(ValueError):
+                _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=skip_inference)
+            assert model.SerializeToString() == before
+
     def test_transpose_pipeline_rewritten(self):
         """The supported leading-slice layout preserves values and output shape."""
         orig = _make_transpose_reshape_model()
@@ -321,6 +352,7 @@ class TestDla5dReshapeTo4dTranspose:
         )
 
     def test_incompatible_leading_slice_layout_refuses_before_mutation(self):
+        """Refuse a leading dimension that does not match the slice count."""
         model = infer_shapes(_make_transpose_reshape_model())
         before = model.SerializeToString()
         with pytest.raises(ValueError, match="leading input dimension"):
@@ -330,6 +362,7 @@ class TestDla5dReshapeTo4dTranspose:
 
 class TestDla5dReshapeTo4dNoOp:
     def test_no_5d_reshape_leaves_graph_unchanged(self):
+        """Leave unrelated reshape nodes and their values unchanged."""
         orig = _make_only_4d_reshape_model()
         x = np.random.default_rng(4).standard_normal((6, 4, 4, 16)).astype(np.float32)
         y_ref = _run_ort(orig, {"X": x})["Y"]

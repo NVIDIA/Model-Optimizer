@@ -43,6 +43,7 @@ _REDUCE_OPS = frozenset({"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"})
 
 
 def _consumers_first_input(graph, tensor_name: str) -> list:
+    """Find consumers using the tensor as their data input."""
     return [n for n in graph.node if n.input and len(n.input) > 0 and n.input[0] == tensor_name]
 
 
@@ -105,6 +106,7 @@ def _parse_middleware_strict(
 
 
 def _is_5d_reshape_candidate(cache: GraphCache, node) -> bool:
+    """Identify Reshape nodes with a constant five-dimensional target."""
     if node.op_type != "Reshape":
         return False
     ini = cache.get_init(node.input[1])
@@ -243,7 +245,8 @@ def _build_transpose_replacement_or_raise(
         msg = f"{ctx}: final Reshape name contains '_transformed' ({r2.name!r})"
         raise ValueError(msg)
     ini2 = cache.get_init(r2.input[1])
-    assert ini2 is not None, f"initializer for node {r2.name} is None"
+    if ini2 is None:
+        raise ValueError(f"{ctx}: final Reshape shape {r2.input[1]!r} must be a graph initializer")
     ini1 = cache.get_init(reshape_node.input[1])
     assert ini1 is not None, f"initializer for node {reshape_node.name} is None"
 
@@ -261,6 +264,14 @@ def _build_transpose_replacement_or_raise(
         shape1 = np.array(resolve_reshape_shape(shape1_raw, list(tr_in_shape)), dtype=np.int64)
     else:
         shape1 = shape1_raw
+    if 0 in shape2:
+        if any(a.name == "allowzero" and a.i for a in r2.attribute):
+            raise ValueError(f"{ctx}: literal zero dimensions are not supported")
+        # Copied dimensions refer to the original 5D Transpose, before Concat merges axes.
+        shape2 = np.array(
+            [shape1[transpose_perm[i]] if dim == 0 else dim for i, dim in enumerate(shape2)],
+            dtype=np.int64,
+        )
     num_slices = int(shape1[0])
     reshape_4d_vals = shape1[1:]
     if reshape_4d_vals.size != 4:
@@ -591,38 +602,56 @@ def _dispatch_5d_reshape_candidate(
 
 
 def _apply_5d_reshape_to_4d(model, *, skip_symbolic_shape_inference: bool = False):
-    """Parse the graph without mutating it, then replace every matching 5D ``Reshape`` subgraph.
+    """Replace matching 5D ``Reshape`` subgraphs, restoring the model if planning fails.
 
     Unless ``skip_symbolic_shape_inference`` is true, runs
     :func:`~modelopt.onnx.graph_surgery.utils.symbolic_shape_inference.run_ort_symbolic_shape_inference`
     first so intermediate tensor shapes are available where needed.
 
-    Phase 1 walks a snapshot of ``graph.node``, dispatches each 5D ``Reshape``, and records
-    ``(nodes_to_remove, nodes_to_add)``. Phase 2 runs :func:`replace_nodes_with_topological_order`
-    for each plan in that same order.
+    Plan disjoint replacements before applying them with :func:`batch_replace_nodes`.
 
     Classification: after optional ``Clip`` / Q→DQ middleware, the first terminal must be ``Transpose``
     (reshape→transpose→reshape pipeline) or a reduce op in :data:`_REDUCE_OPS`. Any other op raises
     ``ValueError`` with ``op_type`` and node ``name``. Pattern validation errors include the same.
     """
-    if not skip_symbolic_shape_inference:
-        model = infer_shapes(model)
     graph = model.graph
-    cache = GraphCache(graph)
-    node_idx = {id(n): i for i, n in enumerate(graph.node)}
-    unique_initializer: set = set()
-    counter = 0
-    batch: dict[int, tuple[list, list]] = {}
-
-    for node in list(graph.node):
-        if not _is_5d_reshape_candidate(cache, node):
-            continue
-        nodes_to_remove, nodes_to_add = _dispatch_5d_reshape_candidate(
-            model, node, unique_initializer, counter, cache
+    initializer_count = len(graph.initializer)
+    metadata = None
+    if not skip_symbolic_shape_inference:
+        metadata = (
+            list(graph.value_info),
+            [output.type.SerializeToString() for output in graph.output],
         )
-        idx = node_idx[id(nodes_to_remove[0])] if nodes_to_remove else len(graph.node)
-        batch[idx] = (nodes_to_remove, nodes_to_add)
-        counter += 1
+    batch: dict[int, tuple[list, list]] = {}
+    consumed: set[int] = set()
+    try:
+        if metadata is not None:
+            infer_shapes(model)
+            for output, output_type in zip(graph.output, metadata[1]):
+                if output.type.HasField("tensor_type") and not output.type.tensor_type.HasField(
+                    "shape"
+                ):
+                    output.type.ParseFromString(output_type)
+        cache = GraphCache(graph)
+        unique_initializer: set = set()
+        for idx, node in enumerate(graph.node):
+            if not _is_5d_reshape_candidate(cache, node):
+                continue
+            if id(node) in consumed:
+                raise ValueError(f"5D Reshape {node.name!r} overlaps another 5D Reshape rewrite")
+            nodes_to_remove, nodes_to_add = _dispatch_5d_reshape_candidate(
+                model, node, unique_initializer, len(batch), cache
+            )
+            consumed.update(id(removed) for removed in nodes_to_remove)
+            batch[idx] = (nodes_to_remove, nodes_to_add)
+    except Exception:
+        del graph.initializer[initializer_count:]
+        if metadata is not None:
+            del graph.value_info[:]
+            graph.value_info.extend(metadata[0])
+            for output, output_type in zip(graph.output, metadata[1]):
+                output.type.ParseFromString(output_type)
+        raise
 
     batch_replace_nodes(graph, batch)
 
