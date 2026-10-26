@@ -23,6 +23,7 @@ pytest.importorskip("transformers")
 
 from unittest.mock import MagicMock, patch
 
+import torch
 import torch.nn as nn
 from _test_utils.torch.sparsity.sparse_attention_common import (
     FLASH_SKIP_SOFTMAX_DEFAULT_CFG,
@@ -31,6 +32,7 @@ from _test_utils.torch.sparsity.sparse_attention_common import (
 )
 
 import modelopt.torch.opt as mto
+import modelopt.torch.sparsity as mts
 import modelopt.torch.sparsity.attention_sparsity as sparse_attn
 from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_CALIB_SPARSE24
 from modelopt.torch.sparsity.attention_sparsity.conversion import (
@@ -41,6 +43,7 @@ from modelopt.torch.sparsity.attention_sparsity.conversion import (
     print_sparse_attention_summary,
 )
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
+from modelopt.torch.sparsity.weight_sparsity.module import SparseModule
 
 
 class TestSparseAttentionReplacement:
@@ -211,6 +214,60 @@ class TestConversionEdgeCases:
             assert method.calibration_params == calibration_params
             assert method.target_sparse_ratio == target_sparse_ratio
             assert module.get_threshold_info()["type"] == "dynamic_calibrated"
+
+    def test_calibrate_after_later_mode_survives_restore(self):
+        """calibrate() persists its results even when sparse_attention is not the last mode."""
+        calibration_params = {"prefill": {"a": 3.14, "b": 7.5}}
+
+        def fake_calibration(model, config, forward_loop=None):
+            for module in model.modules():
+                if isinstance(module, SparseAttentionModule):
+                    module._sparse_method_instance.calibration_params = calibration_params
+
+        model = sparse_attn.sparsify(SimpleAttentionModel(), FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+        model = mts.sparsify(model, "sparse_magnitude")
+        with patch(
+            "modelopt.torch.sparsity.attention_sparsity.model_sparsify.calibrate_sparse_attention",
+            side_effect=fake_calibration,
+        ):
+            sparse_attn.calibrate(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+
+        model_restored = mto.restore_from_modelopt_state(
+            SimpleAttentionModel(), mto.modelopt_state(model)
+        )
+        sparse_modules = [
+            m for m in model_restored.modules() if isinstance(m, SparseAttentionModule)
+        ]
+        assert sparse_modules
+        for module in sparse_modules:
+            assert module._sparse_method_instance.calibration_params == calibration_params
+
+    @pytest.mark.parametrize("weight_first", [True, False])
+    def test_chain_with_weight_sparsity(self, weight_first):
+        """Weight and attention sparsity chain in either order; export folds only weight masks."""
+        steps = [
+            lambda m: mts.sparsify(m, "sparse_magnitude"),
+            lambda m: sparse_attn.sparsify(m, FLASH_SKIP_SOFTMAX_DEFAULT_CFG),
+        ]
+        model = SimpleAttentionModel().eval()
+        for step in steps if weight_first else steps[::-1]:
+            model = step(model)
+        x = SimpleAttentionModel.get_input()
+        with torch.no_grad():
+            output = model(x)
+
+        model_restored = mto.restore_from_modelopt_state(
+            SimpleAttentionModel(), mto.modelopt_state(model)
+        ).eval()
+        model_restored.load_state_dict(model.state_dict())
+        with torch.no_grad():
+            assert torch.allclose(model_restored(x), output)
+
+        mts.export(model)
+        assert not any(isinstance(m, SparseModule) for m in model.modules())
+        assert any(isinstance(m, SparseAttentionModule) for m in model.modules())
+        with torch.no_grad():
+            assert torch.allclose(model(x), output)
 
     def test_restore_keeps_disabled_modules(self):
         """Modules disabled after sparsify stay disabled after restore."""

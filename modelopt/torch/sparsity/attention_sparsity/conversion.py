@@ -354,6 +354,23 @@ def update_sparse_attention_metadata(
     )
 
 
+def get_sparse_attention_mode_state(
+    model: nn.Module,
+) -> tuple[SparseAttentionConfig, MetadataDict] | None:
+    """Return the config and metadata of the latest ``sparse_attention`` mode applied to ``model``."""
+    # A wrapper whose submodule holds the modelopt state has no mode state of its own.
+    if not ModeloptStateManager.is_converted(model) or any(
+        ModeloptStateManager.is_converted(child) for child in model.children()
+    ):
+        return None
+    mode_states = [
+        (config, metadata)
+        for mode, config, metadata in ModeloptStateManager(model).modes_with_states()
+        if str(mode) == "sparse_attention"
+    ]
+    return mode_states[-1] if mode_states else None
+
+
 def _get_sparse_softmax_export_config(module: SparseAttentionModule) -> dict[str, Any] | None:
     """Return N:M sparse-softmax export metadata for one sparse attention module."""
     method_config = getattr(module, "_method_config", {})

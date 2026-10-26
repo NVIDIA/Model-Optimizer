@@ -19,6 +19,8 @@ This module provides access to both weight sparsity and attention sparsity algor
 For backward compatibility, weight sparsity APIs are re-exported at the module level.
 """
 
+from . import attention_sparsity
+
 # Import weight sparsity for backward compatibility
 from .weight_sparsity import mode, module, plugins
 from .weight_sparsity.sparsification import *

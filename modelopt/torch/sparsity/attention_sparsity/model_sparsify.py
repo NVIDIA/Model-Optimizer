@@ -24,7 +24,9 @@ from modelopt.torch.opt.searcher import ForwardLoop
 
 from .calibration import calibrate_sparse_attention
 from .config import SparseAttentionConfig
+from .conversion import get_sparse_attention_mode_state, update_sparse_attention_metadata
 from .mode import SparseAttentionModeRegistry
+from .searcher import SparseAttentionSearcher
 
 __all__ = [
     "calibrate",
@@ -101,7 +103,9 @@ def sparsify(
 
             This requires the model to be loaded with ``attn_implementation="eager"``.
 
-        forward_loop: Reserved for future use.
+        forward_loop: Callable that forwards calibration data through the model, used when
+            ``sparse_cfg`` contains a ``"calibration"`` entry. If None, a RULER calibration
+            dataset is generated from the model's tokenizer.
 
             Here are a few examples for correct ``forward_loop`` definitions:
 
@@ -151,9 +155,8 @@ def sparsify(
     model = apply_mode(
         model, mode=[("sparse_attention", config)], registry=SparseAttentionModeRegistry
     )
-
-    # Calibrate the sparsity ratio of the attention modules
-    return calibrate(model, config, forward_loop=forward_loop)
+    SparseAttentionSearcher().search(model, {}, (), {"forward_loop": forward_loop})
+    return model
 
 
 def calibrate(
@@ -173,5 +176,9 @@ def calibrate(
     Returns:
         The calibrated model with optimized sparse attention thresholds.
     """
+    mode_state = get_sparse_attention_mode_state(model)
     calibrate_sparse_attention(model, config, forward_loop=forward_loop)
+    # Saving refreshes only the last mode's metadata, which may not be sparse_attention.
+    if mode_state is not None:
+        update_sparse_attention_metadata(model, *mode_state)
     return model
