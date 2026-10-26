@@ -186,9 +186,15 @@ def calc_runtime_for_subblocks(
         prefill_seq_len,
         generation_seq_len,
         batch_size,
+        runtime_stats_config.get("data_parallel_size", 1),
+        runtime_stats_config.get("tensor_parallel_size", 1),
+        runtime_stats_config.get("prefill_context_parallel_size", 1),
+        runtime_stats_config.get("decode_context_parallel_size", 1),
+        runtime_stats_config.get("enable_expert_parallel", False),
         runtime_stats_config.get("num_iters", 30),
         runtime_stats_config.get("num_warmup_iters", 10),
         runtime_stats_config.get("gpu_memory_utilization", 0.5),
+        runtime_stats_config.get("extra_args", ""),
     )
 
     runtime_by_subblock_dict = {}
