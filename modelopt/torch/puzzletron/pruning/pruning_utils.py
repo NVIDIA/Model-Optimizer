@@ -32,7 +32,6 @@ __all__ = [
     "LinearInitMode",
     "HiddenSizeInitMode",
     "resolve_pruning_mixin",
-    "lm_head_dim",
 ]
 
 
@@ -66,15 +65,6 @@ class HiddenSizeInitMode(Enum):
     Truncate = "Truncate"
     PruneByChannelRanking = "PruneByChannelRanking"
     CopyAsIs = "CopyAsIs"
-
-
-def lm_head_dim(config, descriptor: Type[ModelDescriptor]) -> int:
-    """Head dimension of the language model: ``head_dim`` if set, else ``hidden_size // num_attention_heads``."""
-    lm_config = descriptor.get_language_model_config(config)
-    head_dim = getattr(lm_config, "head_dim", None)
-    if head_dim is not None:
-        return head_dim
-    return lm_config.hidden_size // lm_config.num_attention_heads
 
 
 def resolve_pruning_mixin(

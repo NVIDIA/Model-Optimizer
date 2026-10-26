@@ -25,6 +25,7 @@ from ..block_config import AttentionConfig, BlockConfig, FFNConfig
 
 __all__ = [
     "calculate_kv_dim",
+    "get_attention_head_dim",
     "raise_unknown_subblock_config_error",
     "sizeof_dtype",
     "load_json",
@@ -55,6 +56,14 @@ def calculate_kv_dim(
     head_size = head_dim if head_dim is not None else n_embd // n_head
     kv_dim = 2 * num_key_value_heads * head_size
     return kv_dim
+
+
+def get_attention_head_dim(lm_config) -> int:
+    """Attention head dimension: ``head_dim`` if set, else ``hidden_size // num_attention_heads``."""
+    head_dim = getattr(lm_config, "head_dim", None)
+    if head_dim is not None:
+        return head_dim
+    return lm_config.hidden_size // lm_config.num_attention_heads
 
 
 def raise_unknown_subblock_config_error(subblock_config: Any) -> None:
