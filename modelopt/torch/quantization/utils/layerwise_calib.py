@@ -640,15 +640,27 @@ def _forward_peak_per_gpu(layer: nn.Module, args: tuple, kwargs: dict) -> dict[i
     }
 
 
+def _gpu_index(device: torch.device) -> int | None:
+    """CUDA device index of *device*; ``None`` if it is not a GPU."""
+    if device.type != "cuda":
+        return None
+    return torch.cuda.current_device() if device.index is None else device.index
+
+
 def _layer_batch_fit(
     model: nn.Module,
     layer: nn.Module,
+    gpus: set[int],
     seq_len: int,
     num_samples: int,
     memory_fraction: float,
     device: torch.device,
 ) -> int | None:
-    """Largest batch whose forward through *layer* fits; ``None`` if no GPU memory grows with it."""
+    """Largest batch whose forward through *layer* fits; ``None`` if no GPU memory grows with it.
+
+    Layers of the same kind on other *gpus* cost what *layer* costs on its own GPU, so those GPUs'
+    memory limits the batch too.
+    """
     # The first forward only warms up: it also allocates one-off buffers like cuBLAS's workspace.
     for _ in range(2):
         args, kwargs = _capture_layer_inputs(model, layer, 1, seq_len, device)
@@ -670,14 +682,19 @@ def _layer_batch_fit(
         torch.cuda.empty_cache()
         return 1
 
-    fits = []
+    costs = {}
     for gpu, peak in two.items():
         per_sample = peak - one.get(gpu, 0)
-        if per_sample <= 0:
-            continue
+        if per_sample > 0:
+            costs[gpu] = (per_sample, one.get(gpu, 0) - per_sample, cached_per_sample.get(gpu, 0))
+    home = _gpu_index(get_module_device(layer))
+    if home in costs:
+        for gpu in gpus:
+            costs.setdefault(gpu, costs[home])
+    fits = []
+    for gpu, (per_sample, fixed, cached) in costs.items():
         # Layerwise calibration caches every sample's inputs for this layer and the next.
-        available = get_available_gpu_memory(gpu) - 2 * num_samples * cached_per_sample.get(gpu, 0)
-        fixed = one.get(gpu, 0) - per_sample
+        available = get_available_gpu_memory(gpu) - 2 * num_samples * cached
         fits.append(int((memory_fraction * available - fixed) // per_sample))
     return min(fits, default=None)
 
@@ -698,7 +715,8 @@ def get_max_layerwise_batch_size(
     overstates the memory a batch needs and risks running out of it. Instead, the first layer
     of each kind (by module classes and parameter shapes: dense or MoE, full or linear attention,
     and per-layer widths such as Nemotron-NAS's) runs on one and two samples of *seq_len* tokens,
-    and the growth of its peak memory on each GPU is that GPU's cost per sample. A batch fits
+    and the growth of its peak memory on each GPU is that GPU's cost per sample; every other GPU
+    that runs a layer of that kind is charged the same. A batch fits
     when the layer's forward stays within *memory_fraction* of the GPU's available memory, after
     the inputs layerwise calibration caches for all *num_samples*; the rest is left for
     quantizers and Hessians. A layer that fits one sample but not two gives a batch of one. The
@@ -708,16 +726,21 @@ def get_max_layerwise_batch_size(
     batch_size = max_batch_size
     layers = LayerActivationCollector.get_decoder_layers(model)
     if layers and torch.cuda.is_available() and max_batch_size > 1:
-        kinds: dict[tuple, nn.Module] = {}
+        kinds: dict[tuple, list[nn.Module]] = {}
         for layer in layers:
             classes = tuple(sorted({type(m).__name__ for m in layer.modules()}))
-            kinds.setdefault((classes, tuple(tuple(p.shape) for p in layer.parameters())), layer)
+            shapes = tuple(tuple(p.shape) for p in layer.parameters())
+            kinds.setdefault((classes, shapes), []).append(layer)
         device = device or get_module_device(model)
         collector = LayerActivationCollector(model)
         collector._patch_all_layers(layers)
         try:
-            for layer in kinds.values():
-                fit = _layer_batch_fit(model, layer, seq_len, num_samples, memory_fraction, device)
+            for same_kind in kinds.values():
+                indexes = (_gpu_index(get_module_device(layer)) for layer in same_kind)
+                gpus = {gpu for gpu in indexes if gpu is not None}
+                fit = _layer_batch_fit(
+                    model, same_kind[0], gpus, seq_len, num_samples, memory_fraction, device
+                )
                 if fit is not None:
                     batch_size = min(batch_size, fit)
         finally:

@@ -90,15 +90,17 @@ def _own_quantizers(module):
             yield from _own_quantizers(child)
 
 
+# A quantizer's calibrators: its amax calibrator, and its bias calibrator under static bias.
+_CALIBRATORS = ("_calibrator", "_bias_calibrator")
+
+
 def _quantizer_tensors(module):
     """``(key, tensor)`` for the state of ``module``'s own quantizers and their calibrators."""
     for quantizer in _own_quantizers(module):
-        calibrator = getattr(quantizer, "_calibrator", None)
-        sources = {
-            "_parameters": quantizer._parameters,
-            "_buffers": quantizer._buffers,
-            "_calibrator": vars(calibrator) if calibrator is not None else {},
-        }
+        sources = {"_parameters": quantizer._parameters, "_buffers": quantizer._buffers}
+        for source in _CALIBRATORS:
+            calibrator = getattr(quantizer, source, None)
+            sources[source] = vars(calibrator) if calibrator is not None else {}
         for source, tensors in sources.items():
             for name, tensor in tensors.items():
                 if isinstance(tensor, torch.Tensor):
@@ -143,7 +145,7 @@ def _carry_quantizers_with_offload(hook):
                     tensor.data = tensor.data.cpu()
                     continue
                 master = entry[1]
-                if key[1] != "_calibrator" or entry[2] != tensor._version:
+                if key[1] not in _CALIBRATORS or entry[2] != tensor._version:
                     if master.shape != tensor.shape or master.dtype != tensor.dtype:
                         tensor.data = tensor.data.cpu()
                         continue

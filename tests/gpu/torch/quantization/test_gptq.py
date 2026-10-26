@@ -33,6 +33,7 @@ from modelopt.torch.quantization.utils.calib_utils import (
     gptq_blockwise_update_fused_scalar,
     update_hessian,
 )
+from modelopt.torch.utils import get_available_gpu_memory
 from modelopt.torch.utils.dataset_utils import create_forward_loop, get_dataset_dataloader
 
 RAND_SEED = 42
@@ -97,6 +98,20 @@ def test_a_measured_calibration_forward_sets_the_hessian_reserve(
     linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
     helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
     assert helper.hessian.device == (torch.device("cuda", 0) if stays else torch.device("cpu"))
+
+
+def test_available_gpu_memory_is_what_one_allocation_can_get(monkeypatch):
+    """Free pieces of partly used cached blocks do not count: one allocation of all the memory
+    reported beyond the driver's free memory comes from the cache."""
+    torch.cuda.empty_cache()
+    whole = torch.empty(64 * 2**20, dtype=torch.uint8, device="cuda")
+    pieces = [torch.empty(3 * 2**20, dtype=torch.uint8, device="cuda") for _ in range(24)]
+    del whole, pieces[::2]  # a whole free block, and free pieces of partly used ones
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device=None: (0, 2**40))
+    available = get_available_gpu_memory(torch.cuda.current_device())
+    reserved = torch.cuda.memory_reserved()
+    block = torch.empty(available, dtype=torch.uint8, device="cuda")  # noqa: F841
+    assert torch.cuda.memory_reserved() == reserved
 
 
 def test_gptq_records_its_calibration_forward_memory(monkeypatch):

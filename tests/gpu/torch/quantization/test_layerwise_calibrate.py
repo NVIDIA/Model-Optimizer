@@ -414,3 +414,28 @@ def test_layerwise_batch_probe_falls_back_to_one_sample(monkeypatch, where):
 
     assert get_max_layerwise_batch_size(model, seq_len=8, max_batch_size=64, num_samples=1) == 1
     assert not any(hasattr(layer, "_layerwise_calib") for layer in model.layers)
+
+
+class _MultiGPUModel(_SimpleTransformerModel):
+    """Decoder layers spread over GPUs, as a ``device_map`` places them."""
+
+    def forward(self, x, **kwargs):
+        x = self.embed(x)
+        for layer in self.layers:
+            x = layer(x.to(layer.norm.weight.device))
+        return x
+
+
+def test_layerwise_batch_probe_fits_every_gpu_a_kind_of_layer_runs_on(need_2_gpus, monkeypatch):
+    """Of two identical layers, only the first is probed, but the second's GPU, with less memory,
+    sets the batch."""
+    _register_test_discoverer(monkeypatch)
+    model = _MultiGPUModel(n_layers=2, dim=256).cuda()
+    model.layers[1].to("cuda:1")
+
+    def probe(budgets):
+        monkeypatch.setattr(layerwise_calib, "get_available_gpu_memory", lambda gpu: budgets[gpu])
+        return get_max_layerwise_batch_size(model, seq_len=512, max_batch_size=4096, num_samples=1)
+
+    small, large = 256 * 2**20, 1024 * 2**20
+    assert probe({0: large, 1: small}) == probe({0: small, 1: small}) < probe({0: large, 1: large})
