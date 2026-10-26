@@ -22,6 +22,7 @@ import onnx
 import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms.dla_indexing import (
     _apply_gather,
@@ -58,7 +59,7 @@ def test_index_dtype_and_rank_conversion_preserves_selected_values(operation):
     model.ir_version = 9
     candidate = transform(copy.deepcopy(model))
     candidate = _apply_non4d_model_inputs(candidate)
-    candidate = _apply_non4d_model_outputs(candidate)
+    candidate = _apply_non4d_model_outputs(candidate, defer_rank_conversion=True)
     options = ort.SessionOptions()
     options.intra_op_num_threads = 1
     data = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
@@ -135,8 +136,6 @@ def test_late_refusal_preserves_the_original_model():
 
 @pytest.mark.parametrize("axes", [[-2], [-1, 0], [0, -1]])
 def test_reduction_preserves_negative_and_mixed_axes(axes):
-    from onnx.reference import ReferenceEvaluator
-
     model = helper.make_model(
         helper.make_graph(
             [helper.make_node("ReduceSum", ["x", "axes"], ["y"], keepdims=int(len(axes) > 1))],
@@ -151,7 +150,7 @@ def test_reduction_preserves_negative_and_mixed_axes(axes):
     data = np.arange(6, dtype=np.float32).reshape(2, 3)
     expected = ReferenceEvaluator(model).run(None, {"x": data})[0]
     candidate = _apply_non4d_model_inputs(copy.deepcopy(model))
-    candidate = _apply_non4d_model_outputs(candidate)
+    candidate = _apply_non4d_model_outputs(candidate, defer_rank_conversion=True)
     candidate = _apply_standalone_reduce_operations(candidate)
     onnx.checker.check_model(candidate)
     actual = ReferenceEvaluator(candidate).run(None, {"x": data})[0]
