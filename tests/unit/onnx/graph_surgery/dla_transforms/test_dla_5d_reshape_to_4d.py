@@ -257,6 +257,65 @@ class TestDla5dReshapeTo4dReduce:
 
 
 class TestDla5dReshapeTo4dTranspose:
+    @pytest.mark.parametrize("custom_op", ["Reshape", "Clip", "DequantizeLinear"])
+    def test_custom_functions_are_not_lowered_as_builtin_ops(self, custom_op):
+        """Preserve custom candidates and refuse custom followers before mutation."""
+        model = _make_transpose_reshape_model()
+        model.opset_import[0].version = 21
+        model.opset_import.append(helper.make_opsetid("custom", 1))
+        dims = model.graph.input[0].type.tensor_type.shape.dim
+        dims[0].dim_value, dims[1].dim_value = 2, 12
+        if custom_op == "Reshape":
+            model.graph.node[0].domain = "custom"
+            inputs = ["data", "shape"]
+            body = [
+                helper.make_node("Reshape", inputs, ["reshaped"]),
+                helper.make_node("Neg", ["reshaped"], ["result"]),
+            ]
+        else:
+            model.graph.node[1].input[0] = "middle"
+            inputs = ["data", "scale", "zero"]
+            if custom_op == "Clip":
+                nodes = [
+                    helper.make_node("Clip", ["T5", "scale", "zero"], ["middle"], domain="custom")
+                ]
+                body = [helper.make_node("Identity", ["data"], ["result"])]
+                zero = np.array(0.5, np.float32)
+            else:
+                nodes = [
+                    helper.make_node("QuantizeLinear", ["T5", "scale", "zero"], ["q"]),
+                    helper.make_node(
+                        "DequantizeLinear", ["q", "scale", "zero"], ["middle"], domain="custom"
+                    ),
+                ]
+                body = [helper.make_node("Cast", ["data"], ["result"], to=TensorProto.FLOAT)]
+                zero = np.array(0, np.uint8)
+            for index, node in enumerate(nodes, start=1):
+                model.graph.node.insert(index, node)
+            model.graph.initializer.extend(
+                [
+                    _init("scale", np.array(0.25, np.float32)),
+                    _init("zero", zero),
+                ]
+            )
+        model.functions.append(
+            helper.make_function(
+                "custom", custom_op, inputs, ["result"], body, [helper.make_opsetid("", 21)]
+            )
+        )
+        onnx.checker.check_model(model, full_check=True)
+        feeds = {"X": np.random.default_rng(17).standard_normal((2, 12, 4, 16)).astype(np.float32)}
+        expected = ReferenceEvaluator(model).run(None, feeds)
+        before = model.SerializeToString()
+        if custom_op == "Reshape":
+            rewritten = _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=True)
+            for actual, reference in zip(ReferenceEvaluator(rewritten).run(None, feeds), expected):
+                np.testing.assert_array_equal(actual, reference)
+        else:
+            with pytest.raises(ValueError):
+                _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=True)
+        assert model.SerializeToString() == before
+
     @pytest.mark.parametrize(
         "controls", ["initializer", "input", "symbolic", "overridable", "dequantizer", "zero_only"]
     )

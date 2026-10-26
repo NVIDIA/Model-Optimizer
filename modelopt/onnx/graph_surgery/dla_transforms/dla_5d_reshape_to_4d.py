@@ -86,6 +86,11 @@ def _parse_middleware_strict(
             )
             raise ValueError(msg)
         n = cands[0]
+        if n.domain not in {"", "ai.onnx"} or n.overload:
+            raise ValueError(
+                f"{path_context}: unsupported follower {n.op_type!r} in domain {n.domain!r} "
+                f"with overload {n.overload!r}"
+            )
         if n.op_type in stop_op_types:
             return middle, n
         if n.op_type == "Clip":
@@ -107,6 +112,10 @@ def _parse_middleware_strict(
                 )
                 raise ValueError(msg)
             dq = dq_nodes[0]
+            if dq.domain not in {"", "ai.onnx"} or dq.overload:
+                raise ValueError(
+                    f"{path_context}: custom DequantizeLinear middleware is unsupported"
+                )
             if (
                 sum(name == n.output[0] for node in graph.node for name in node.input) != 1
                 or any(value.name == n.output[0] for value in graph.output)
@@ -129,7 +138,7 @@ def _parse_middleware_strict(
 
 def _is_5d_reshape_candidate(cache: GraphCache, node) -> bool:
     """Identify Reshape nodes with a constant five-dimensional target."""
-    if node.op_type != "Reshape":
+    if node.op_type != "Reshape" or node.domain not in {"", "ai.onnx"} or node.overload:
         return False
     ini = cache.get_init(node.input[1])
     if ini is None:
