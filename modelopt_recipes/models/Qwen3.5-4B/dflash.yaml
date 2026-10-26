@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Per-model DFlash training recipe for Qwen3.5-4B.
+#
+# NOTE: Qwen3.5-4B has non-standard head_dim=160. The draft model overrides the
+# attention architecture (32 heads, head_dim=128) for vLLM KV cache compatibility.
+
+metadata:
+  recipe_type: speculative_dflash
+  description: DFlash training recipe for Qwen3.5-4B (head_dim workaround for vLLM).
+
+# maps to ModelArguments (main.py)
+model:
+  model_name_or_path: Qwen/Qwen3.5-4B
+  trust_remote_code: false
+  use_fake_base_for_offline: false
+
+# maps to DataArguments (main.py)
+data:
+  data_path:
+  offline_data_path:
+
+# maps to TrainingArguments (main.py)
+training:
+  output_dir:
+  training_seq_len: 4096
+
+# maps to DFlashConfig (modelopt/torch/speculative/config.py).
+dflash:
+  dflash_mask_token_id: 248070  # Qwen3.5 tokenizer mask token (different from Qwen3)
+  dflash_architecture_config:
+    # Override base head_dim=160 to head_dim=128 for vLLM KV cache compatibility.
+    num_attention_heads: 32
+    num_key_value_heads: 8
+    head_dim: 128
+    intermediate_size: 9728
+    rope_theta: 10000000
