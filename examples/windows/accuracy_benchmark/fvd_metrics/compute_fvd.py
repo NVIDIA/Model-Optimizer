@@ -307,8 +307,8 @@ def resolve_weights(weights_arg: str | None, expected_sha256: str | None = None)
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 
-def main():
-    """Parse arguments, load model, extract features, compute and report FVD."""
+def parse_args() -> argparse.Namespace:
+    """Parse and validate FVD command-line options."""
     parser = argparse.ArgumentParser(
         description="Compute FVD between two video sets (I3D, 1024-dim features).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -352,6 +352,13 @@ def main():
     args = parser.parse_args()
     if args.weights_sha256 and not args.weights:
         parser.error("--weights-sha256 requires --weights")
+
+    return args
+
+
+def main():
+    """Load the model, extract features, compute and report FVD."""
+    args = parse_args()
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     log.info(f"Device: {device}")

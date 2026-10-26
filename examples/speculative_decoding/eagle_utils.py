@@ -514,21 +514,25 @@ class EagleTrainingPlot(TrainerCallback):
             print_rank_0(f"Step {state.global_step} Estimated Training AR: {est_ar:.4f}")
             logs["estimated_training_ar"] = est_ar
 
-        # log to wandb
-        if wandb is not None and wandb.run is not None and is_master():
-            if logs:
-                wandb.log({k: v for k, v in logs.items() if v is not None}, step=state.global_step)
-
-            # Log per-component losses
-            if hasattr(state, "component_losses"):
-                for key, vals in state.component_losses.items():
-                    if vals:
-                        wandb.log({f"{key}_loss": np.mean(vals)}, step=state.global_step)
+        self._log_to_wandb(state, logs)
 
         # reset training_accs and component_losses
         state.training_accs = []
         if hasattr(state, "component_losses"):
             state.component_losses = {"eagle": [], "preservation": []}
+
+    @staticmethod
+    def _log_to_wandb(state, logs):
+        if wandb is None or wandb.run is None or not is_master():
+            return
+        if logs:
+            wandb.log({k: v for k, v in logs.items() if v is not None}, step=state.global_step)
+
+        # Log per-component losses
+        if hasattr(state, "component_losses"):
+            for key, vals in state.component_losses.items():
+                if vals:
+                    wandb.log({f"{key}_loss": np.mean(vals)}, step=state.global_step)
 
     def on_step_end(self, args, state, control, **kwargs):
         """Run AR validation periodically, if available."""

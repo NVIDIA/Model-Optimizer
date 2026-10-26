@@ -49,3 +49,13 @@ def test_custom_weights_checksum_is_enforced(tmp_path):
     assert compute_fvd.resolve_weights(str(path), digest.upper()) == path
     with pytest.raises(RuntimeError, match="Supplied I3D weights failed"):
         compute_fvd.resolve_weights(str(path), "0" * 64)
+
+
+def test_checksum_option_requires_custom_weights(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["compute_fvd.py", "--ref-dir", "ref", "--gen-dir", "gen", "--weights-sha256", "0" * 64],
+    )
+    with pytest.raises(SystemExit) as exc:
+        compute_fvd.parse_args()
+    assert exc.value.code == 2

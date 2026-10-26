@@ -18,8 +18,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
-from transformers import TrainerControl
+from transformers import TrainerControl, TrainerState
 
 _EXAMPLE = Path(__file__).parents[3] / "examples" / "speculative_decoding"
 sys.path.insert(0, str(_EXAMPLE))
@@ -29,10 +30,11 @@ eagle_utils = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(eagle_utils)
 
 
-def test_callbacks_preserve_control_and_conditional_side_effects(tmp_path):
+@pytest.mark.parametrize("estimate_ar", [False, True])
+def test_callbacks_preserve_control_and_conditional_side_effects(tmp_path, estimate_ar):
     control = TrainerControl()
     args = SimpleNamespace(output_dir=str(tmp_path))
-    state = SimpleNamespace(global_step=1)
+    state = TrainerState(global_step=1)
     model = torch.nn.Linear(2, 2)
     model._lora_cotraining_active = False
     warmup = eagle_utils.LoRAWarmupCallback(warmup_steps=2)
@@ -44,11 +46,15 @@ def test_callbacks_preserve_control_and_conditional_side_effects(tmp_path):
     assert warmup.on_step_begin(args, state, control, model=model) is control
     export = eagle_utils.DFlashFSDP2ShardedSDExportCallback()
     assert export.on_save(args, state, control, model=model) is control
-    plot = eagle_utils.EagleTrainingPlot(estimate_ar=False, ar_validate_steps=0)
+    plot = eagle_utils.EagleTrainingPlot(estimate_ar=estimate_ar, ar_validate_steps=0)
     assert plot.on_log(args, state, control) is control
     state.training_accs = [[[0.5, 0.25]]]
     logs = {"loss": 1.0}
+    state.log_history.append(logs.copy())
     assert plot.on_log(args, state, control, logs=logs) is control
     assert logs["train_acc/parallel_0_step_1"] == 0.25
+    assert state.log_history[-1]["train_acc/parallel_0_step_1"] == 0.25
+    if estimate_ar:
+        assert logs["estimated_training_ar"] == pytest.approx(1.625)
     assert state.training_accs == []
     assert plot.on_step_end(args, state, control) is control
