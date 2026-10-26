@@ -1626,11 +1626,13 @@ def _all_reduce_amax(tensor: torch.Tensor, group) -> None:
 def _collective_device(group) -> torch.device:
     """The device every rank of ``group`` hands its collectives: CUDA when NCCL serves it, else CPU.
 
-    Derived from the group's backend, which all ranks share, rather than from a local tensor: a rank
+    Derived from the group's backends, which all ranks share, rather than from a local tensor: a rank
     that never calibrated a quantizer has no amax to ask, and ranks that disagree on the device type
-    reach different backends and hang. A gloo-only group has no CUDA backend at all.
+    reach different backends and hang. Read from the group's configuration, not its name:
+    ``init_process_group()`` without a backend names the group ``undefined`` but configures it
+    ``cpu:gloo,cuda:nccl``. A gloo-only group has no CUDA backend at all.
     """
-    if torch.cuda.is_available() and "nccl" in str(dist.get_backend(group)):
+    if torch.cuda.is_available() and "nccl" in dist.get_backend_config(group):
         return torch.device("cuda", torch.cuda.current_device())
     return torch.device("cpu")
 

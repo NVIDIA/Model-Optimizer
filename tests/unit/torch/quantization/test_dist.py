@@ -26,6 +26,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.model_calib import _quantizer_state_device, max_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.nn.modules.tensor_quantizer import _collective_device
 from modelopt.torch.utils import unwrap_model
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 
@@ -124,6 +125,16 @@ def test_a_rank_that_never_calibrated_adopts_the_amax_where_it_keeps_its_state(
     the group's amax on a tensor the quantizer holds, else on the device its caller keeps the
     module's quantizer state on, else on the collective's device."""
     cpu_dist_workers.run(_cold_rank_device_helper, case=case)
+
+
+def test_a_group_initialized_without_a_backend_collects_on_cuda(monkeypatch):
+    """``init_process_group()`` without a backend names its group ``undefined`` and, in a CUDA
+    build of torch, configures it ``cpu:gloo,cuda:nccl``. CI's CPU build configures no NCCL."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(dist, "get_backend", lambda group=None: "undefined")
+    monkeypatch.setattr(dist, "get_backend_config", lambda group=None: "cpu:gloo,cuda:nccl")
+    assert _collective_device(None) == torch.device("cuda", 0)
 
 
 @pytest.mark.parametrize("layout", ["a-linear", "fused-experts", "no-weight-quantizer"])
