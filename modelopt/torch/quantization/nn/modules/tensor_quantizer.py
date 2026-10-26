@@ -1459,6 +1459,10 @@ class TensorQuantizer(nn.Module):
         if not parallel_group.is_initialized():
             return
         group = parallel_group.group
+        # A fully dynamic quantizer stores no amax on any rank, and a one-rank group reduces to the
+        # local value: both settled by the config, so every rank returns alike.
+        if self._dynamic or dist.get_world_size(group) == 1:
+            return
         amax = getattr(self, "_amax", None)
         device = _collective_device(group)
         # Every rank joins this all-reduce, and its result alone picks what follows, so every rank
