@@ -38,6 +38,7 @@ from ..utils.graph_utils import (
     infer_shapes,
     resolve_reshape_shape,
 )
+from .dla_reorder_nodes import priority_topological_order
 
 _REDUCE_OPS = frozenset({"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"})
 
@@ -637,6 +638,7 @@ def _apply_5d_reshape_to_4d(model, *, skip_symbolic_shape_inference: bool = Fals
         )
     batch: dict[int, tuple[list, list]] = {}
     consumed: set[int] = set()
+    needs_reorder = False
     try:
         if metadata is not None:
             infer_shapes(model)
@@ -646,6 +648,12 @@ def _apply_5d_reshape_to_4d(model, *, skip_symbolic_shape_inference: bool = Fals
                 ):
                     output.type.ParseFromString(output_type)
         cache = GraphCache(graph)
+        producer_positions = {
+            output: index
+            for index, node in enumerate(graph.node)
+            for output in node.output
+            if output
+        }
         unique_initializer: set = set()
         for idx, node in enumerate(graph.node):
             if not _is_5d_reshape_candidate(cache, node):
@@ -654,6 +662,11 @@ def _apply_5d_reshape_to_4d(model, *, skip_symbolic_shape_inference: bool = Fals
                 raise ValueError(f"5D Reshape {node.name!r} overlaps another 5D Reshape rewrite")
             nodes_to_remove, nodes_to_add = _dispatch_5d_reshape_candidate(
                 model, node, unique_initializer, len(batch), cache
+            )
+            needs_reorder |= any(
+                producer_positions.get(name, -1) > idx
+                for removed in nodes_to_remove
+                for name in removed.input[1:]
             )
             consumed.update(id(removed) for removed in nodes_to_remove)
             batch[idx] = (nodes_to_remove, nodes_to_add)
@@ -667,6 +680,12 @@ def _apply_5d_reshape_to_4d(model, *, skip_symbolic_shape_inference: bool = Fals
         raise
 
     batch_replace_nodes(graph, batch)
+    if needs_reorder:
+        order, _, _ = priority_topological_order(graph)
+        nodes = list(graph.node)
+        positions = {id(nodes[index]): rank for rank, index in enumerate(order)}
+        # Sorting the container in place avoids copying Constant tensor payloads.
+        graph.node.sort(key=lambda node: positions[id(node)])
 
     logger.debug(
         "5D reshape to 4D: classified and rewrote %d 5D Reshape subgraph(s) (transpose or reduce path)",

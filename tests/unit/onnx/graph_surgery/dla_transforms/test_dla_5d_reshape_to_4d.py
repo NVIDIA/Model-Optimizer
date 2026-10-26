@@ -258,6 +258,53 @@ class TestDla5dReshapeTo4dReduce:
 
 class TestDla5dReshapeTo4dTranspose:
     @pytest.mark.parametrize("path", ["transpose", "reduce"])
+    @pytest.mark.parametrize("middleware", ["Clip", "QDQ"])
+    @pytest.mark.parametrize("skip_inference", [False, True])
+    def test_late_dynamic_controls_preserve_values(self, path, middleware, skip_inference):
+        """Keep runtime controls before their duplicated consumers after rewriting."""
+        model = (
+            _make_transpose_reshape_model()
+            if path == "transpose"
+            else _make_reduce_min_axis4_model()
+        )
+        model.opset_import[0].version = 21
+        if path == "transpose":
+            dims = model.graph.input[0].type.tensor_type.shape.dim
+            dims[0].dim_value, dims[1].dim_value = 2, 12
+        nodes = list(model.graph.node)
+        data = nodes[0].output[0]
+        control = helper.make_node("Identity", ["bound"], ["control"], name="late_control")
+        if middleware == "Clip":
+            middle = [helper.make_node("Clip", [data, "control"], ["middle"], name="clip")]
+            bound = np.float32(-0.5)
+        else:
+            middle = [
+                helper.make_node(
+                    "QuantizeLinear", [data, "control", "zero"], ["q"], name="quantize"
+                ),
+                helper.make_node(
+                    "DequantizeLinear", ["q", "control", "zero"], ["middle"], name="dequantize"
+                ),
+            ]
+            model.graph.initializer.append(_init("zero", np.array(0, np.uint8)))
+            bound = np.float32(0.25)
+        nodes[1].input[0] = "middle"
+        del model.graph.node[:]
+        model.graph.node.extend([nodes[0], control, *middle, *nodes[1:]])
+        model.graph.input.append(helper.make_tensor_value_info("bound", TensorProto.FLOAT, []))
+        onnx.checker.check_model(model, full_check=True)
+        shape = [dim.dim_value for dim in model.graph.input[0].type.tensor_type.shape.dim]
+        feeds = {
+            "X": np.random.default_rng(11).standard_normal(shape).astype(np.float32),
+            "bound": bound,
+        }
+        expected = ReferenceEvaluator(model).run(None, feeds)
+        rewritten = _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=skip_inference)
+        onnx.checker.check_model(rewritten, full_check=True)
+        for actual, reference in zip(ReferenceEvaluator(rewritten).run(None, feeds), expected):
+            np.testing.assert_array_equal(actual, reference)
+
+    @pytest.mark.parametrize("path", ["transpose", "reduce"])
     def test_generated_names_preserve_existing_controls_and_branches(self, path):
         """Reserve generated names without retargeting existing data or QDQ controls."""
         transpose = path == "transpose"
