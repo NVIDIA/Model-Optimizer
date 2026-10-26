@@ -15,13 +15,14 @@
 
 """Boundary promotion refuses unsupported exposed adapters before changing the graph."""
 
+from importlib import import_module
+
 import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 from onnx.reference import ReferenceEvaluator
 
-import modelopt.onnx.graph_surgery.make_dla_compatible as dla_pipeline
 from modelopt.onnx.graph_surgery.dla_transforms.dla_model_boundaries import (
     _apply_fix_instancenorm_channels,
     _apply_non4d_model_inputs,
@@ -476,6 +477,7 @@ def test_native_reduction_output_refuses_before_adding_rank_adapters(entrypoint,
         with pytest.raises(ValueError, match="rank"):
             _apply_non4d_model_outputs(model)
     else:
+        dla_pipeline = import_module(_transform_make_dla_compatible.__module__)
         monkeypatch.setattr(
             dla_pipeline,
             "DLA_TRANSFORMS",
