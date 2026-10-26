@@ -42,11 +42,6 @@ from .dla_reorder_nodes import priority_topological_order
 _REDUCE_OPS = frozenset({"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"})
 
 
-def _consumers_first_input(graph, tensor_name: str) -> list:
-    """Find consumers using the tensor as their data input."""
-    return [n for n in graph.node if n.input and len(n.input) > 0 and n.input[0] == tensor_name]
-
-
 def _known_non_scalar_control(cache: GraphCache, name: str) -> bool:
     """Identify controls whose known shape is not a fixed single element."""
     initializer = cache.get_init(name)
@@ -66,15 +61,15 @@ def _known_non_scalar_control(cache: GraphCache, name: str) -> bool:
 
 
 def _parse_middleware_strict(
-    graph, start_out: str, stop_op_types: frozenset, cache: GraphCache, *, path_context: str
+    start_out: str, stop_op_types: frozenset, cache: GraphCache, *, path_context: str
 ) -> tuple:
     """Walk ``Clip`` / Q→DQ middleware then a terminal op; raise ``ValueError`` on dead ends or bad ops."""
     middle: list = []
     cur = start_out
     while True:
-        cands = _consumers_first_input(graph, cur)
-        uses = sum(name == cur for node in graph.node for name in node.input)
-        if uses != 1 or any(value.name == cur for value in graph.output):
+        consumers = cache.get_consumers(cur)
+        cands = [node for node, port in consumers if port == 0]
+        if len(consumers) != 1 or cur in cache.graph_output_names:
             raise ValueError(
                 f"{path_context}: cannot replace shared or graph-output tensor {cur!r}"
             )
@@ -99,10 +94,11 @@ def _parse_middleware_strict(
         if n.op_type == "QuantizeLinear":
             if any(a.name in {"axis", "block_size"} for a in n.attribute):
                 raise ValueError(f"{path_context}: only per-tensor QDQ middleware is supported")
+            q_consumers = cache.get_consumers(n.output[0])
             dq_nodes = [
-                x
-                for x in _consumers_first_input(graph, n.output[0])
-                if x.op_type == "DequantizeLinear"
+                node
+                for node, port in q_consumers
+                if port == 0 and node.op_type == "DequantizeLinear"
             ]
             if not dq_nodes:
                 msg = (
@@ -116,8 +112,8 @@ def _parse_middleware_strict(
                     f"{path_context}: custom DequantizeLinear middleware is unsupported"
                 )
             if (
-                sum(name == n.output[0] for node in graph.node for name in node.input) != 1
-                or any(value.name == n.output[0] for value in graph.output)
+                len(q_consumers) != 1
+                or n.output[0] in cache.graph_output_names
                 or any(a.name in {"axis", "block_size"} for a in dq.attribute)
                 or any(
                     _known_non_scalar_control(cache, name) for name in {*n.input[1:], *dq.input[1:]}
@@ -153,11 +149,10 @@ def _is_5d_reshape_candidate(cache: GraphCache, node) -> bool:
 
 def _classify_5d_reshape_follower(model, reshape_node, cache: GraphCache) -> tuple:
     r"""Return (``\"transpose\"``, mid_a, transpose_node) or (``\"reduce\"``, middle, reduce_node)."""
-    graph = model.graph
     ctx = f"5D Reshape {reshape_node.name!r}"
     r_out = reshape_node.output[0]
     stop = frozenset({"Transpose", *_REDUCE_OPS})
-    middle, term = _parse_middleware_strict(graph, r_out, stop, cache, path_context=ctx)
+    middle, term = _parse_middleware_strict(r_out, stop, cache, path_context=ctx)
     if term.op_type == "Transpose":
         return ("transpose", middle, term)
     elif term.op_type in _REDUCE_OPS:
@@ -288,9 +283,7 @@ def _build_transpose_replacement_or_raise(
         raise ValueError(msg)
 
     tr_out = tr.output[0]
-    mid_b, r2 = _parse_middleware_strict(
-        graph, tr_out, frozenset({"Reshape"}), cache, path_context=ctx
-    )
+    mid_b, r2 = _parse_middleware_strict(tr_out, frozenset({"Reshape"}), cache, path_context=ctx)
     if "_transformed" in r2.name:
         msg = f"{ctx}: final Reshape name contains '_transformed' ({r2.name!r})"
         raise ValueError(msg)
