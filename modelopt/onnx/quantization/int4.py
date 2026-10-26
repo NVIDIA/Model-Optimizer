@@ -56,7 +56,7 @@ from modelopt.onnx.quantization.quant_utils import (
     rtn,
     update_block_size,
 )
-from modelopt.onnx.utils import save_onnx
+from modelopt.onnx.utils import export_onnx, save_onnx
 
 __all__ = ["quantize"]
 
@@ -360,7 +360,7 @@ def quantize_rtn(
             )
 
     logger.info(f"RTN quantization completed in {time.time() - t_start:.2f} seconds")
-    model = gs.export_onnx(graph)
+    model = export_onnx(graph)
     model.ir_version = 10
 
     return model

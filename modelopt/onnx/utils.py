@@ -28,11 +28,70 @@ import onnx
 import onnx_graphsurgeon as gs
 from onnx.helper import get_attribute_value
 from onnx_graphsurgeon import Constant, Node, Variable
+from onnx_graphsurgeon.exporters.onnx_exporter import OnnxExporter
+from onnx_graphsurgeon.ir.tensor import SparseValues
 
 from modelopt.onnx.logging_config import logger
 
 # Base minimum opset for quantization (opset 19 is the first to support fp16 scales)
 BASE_MIN_OPSET = 19
+
+
+def _graph_paths(graph):
+    yield (), graph
+    for node_index, node in enumerate(graph.nodes):
+        for name, value in node.attrs.items():
+            children = enumerate(value) if isinstance(value, list) else [(None, value)]
+            for index, child in children:
+                if isinstance(child, gs.Graph):
+                    for path, subgraph in _graph_paths(child):
+                        yield ((node_index, name, index), *path), subgraph
+
+
+def export_onnx(graph: gs.Graph, **kwargs) -> onnx.ModelProto:
+    """Export a GraphSurgeon graph without serializing oversized initializers during copying."""
+    originals = dict(_graph_paths(graph))
+    large = {
+        path: {
+            name: tensor
+            for name, tensor in subgraph.tensors().items()
+            if isinstance(tensor, gs.Constant)
+            and not isinstance(tensor._values, SparseValues)
+            and tensor._values.nbytes >= onnx.checker.MAXIMUM_PROTOBUF
+        }
+        for path, subgraph in originals.items()
+    }
+    if not any(large.values()):
+        return gs.export_onnx(graph, **kwargs)
+
+    graph = graph.copy()
+    for path, subgraph in _graph_paths(graph):
+        original_tensors = originals[path].tensors()
+        for name, tensor in subgraph.tensors().items():
+            original = original_tensors[name]
+            if hasattr(original, "explicit_dtype"):
+                tensor.explicit_dtype = original.explicit_dtype
+            if isinstance(tensor, gs.Constant):
+                tensor.data_location = original.data_location
+            if name in large[path]:
+                tensor.to_variable(dtype=tensor.dtype, shape=tensor.shape)
+                tensor.type = "tensor_type"
+
+    model = gs.export_onnx(graph, **kwargs)
+    for path, tensors in large.items():
+        if not tensors:
+            continue
+        exported_graph = model.graph
+        for node_index, name, index in path:
+            attr = next(a for a in exported_graph.node[node_index].attribute if a.name == name)
+            exported_graph = attr.g if index is None else attr.graphs[index]
+        for tensor in tensors.values():
+            # Repeated-field extend serializes each message; CopyFrom avoids that size limit.
+            exported_graph.initializer.add().CopyFrom(OnnxExporter.export_tensor_proto(tensor))
+        for value_info in list(exported_graph.value_info):
+            if value_info.name in tensors:
+                exported_graph.value_info.remove(value_info)
+    return model
 
 
 def get_input_names_from_bytes(model_bytes: bytes, external_inputs_only: bool = True) -> list[str]:

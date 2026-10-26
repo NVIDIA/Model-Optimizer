@@ -27,6 +27,7 @@ import onnx_graphsurgeon as gs
 
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.utils import (
+    export_onnx,
     get_dynamic_graph_inputs,
     get_tensor_by_name,
     parse_shapes_spec,
@@ -434,7 +435,7 @@ def load_onnx_model(
     # Ensure nodes are topologically sorted
     graph = gs.import_onnx(onnx_model)
     graph.toposort()
-    onnx_model = gs.export_onnx(graph)
+    onnx_model = export_onnx(graph)
 
     # Enforce IR version = 10
     ir_version_onnx_path = None
