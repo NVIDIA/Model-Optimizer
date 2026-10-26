@@ -51,7 +51,7 @@ from .kv_cache_auto_quant import (
 )
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
-from .nn import QuantModule, SequentialQuantizer, TensorQuantizer
+from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized
 
 __all__ = [
@@ -114,8 +114,13 @@ def calibrate(
             def forward_loop(model):
                 return original_forward_loop()  # type: ignore[call-arg]
 
-    # move the model to eval mode
-    is_training = model.training
+    # move the model to eval mode, remembering each module's mode; quantizers, and plain containers of them,
+    # follow the module they quantize instead
+    training_modes = {
+        module: module.training
+        for module in model.modules()
+        if module is model or not _holds_only_quantizers(module)
+    }
     model.eval()
 
     with forward_with_reshard(model):
@@ -133,9 +138,37 @@ def calibrate(
     # TODO: Re-enable when the CUDA error: unspecified launch failure is fixed.
     # clear_cuda_cache()
 
-    model.train(is_training)
+    _restore_training_modes(model, training_modes)
 
     return model
+
+
+def _holds_only_quantizers(module: nn.Module) -> bool:
+    if isinstance(module, AnyQuantizer):
+        return True
+    # A plain container of quantizers, such as the one some plugins create for fused experts.
+    children = list(module.children())
+    return (
+        isinstance(module, (nn.ModuleList, nn.ModuleDict))
+        and bool(children)
+        and all(_holds_only_quantizers(child) for child in children)
+    )
+
+
+def _restore_training_modes(model: nn.Module, training_modes: dict[nn.Module, bool]) -> None:
+    """Give each module back its mode from ``training_modes``; one not in it takes its parent's mode.
+
+    ``model.train()`` runs first, as it always did, so every module's ``train()`` is called; then the modules
+    whose own mode differs get it back, parents first, because ``train()`` also sets every module below.
+    """
+    model.train(training_modes[model])
+    stack = [(child, model.training) for child in model.children()]
+    while stack:
+        module, parent_mode = stack.pop()
+        mode = training_modes.get(module, parent_mode)
+        if module.training != mode:
+            module.train(mode)
+        stack.extend((child, mode) for child in module.children())
 
 
 def postprocess_amax(model: nn.Module, key: str, post_process_fn) -> nn.Module:

@@ -107,6 +107,25 @@ def test_export_diffusers_models_non_quantized(tmp_path, model_factory):
     assert "quantization_config" not in config_data
 
 
+@pytest.mark.parametrize("quantized", [False, True])
+@pytest.mark.parametrize("save_modelopt_state", [False, True])
+@torch.no_grad()
+def test_export_diffusers_save_modelopt_state(
+    tmp_path, enable_hf_checkpointing, quantized, save_modelopt_state
+):
+    model = get_tiny_unet().eval()
+    inputs = generate_diffusion_dummy_inputs(model, torch.device("cpu"), torch.float32)
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(**inputs))
+    if not quantized:
+        # Keep ModelOpt state while exercising the non-quantized save branch.
+        mtq.disable_quantizer(model, "*")
+    export_dir = tmp_path / "export_unet"
+
+    export_hf_checkpoint(model, export_dir=export_dir, save_modelopt_state=save_modelopt_state)
+
+    assert (export_dir / "modelopt_state.pth").is_file() == save_modelopt_state
+
+
 @pytest.fixture
 def tiny_pipeline(request, tmp_path, tiny_tokenizer):
     """Build and reload a tiny pipeline without accessing the Hugging Face Hub."""

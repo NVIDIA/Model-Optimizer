@@ -188,6 +188,60 @@ class TestConversionEdgeCases:
                 assert hasattr(module, "_method")
                 assert module._method == "flash_skip_softmax"
 
+    def test_restore_keeps_calibration_params(self, tmp_path):
+        """Calibrated thresholds survive an mto.save/mto.restore roundtrip."""
+        calibration_params = {"prefill": {"a": 3.14, "b": 7.5}, "decode": {"a": 0.5, "b": 9.0}}
+        target_sparse_ratio = {"prefill": 0.4, "decode": 0.6}
+
+        model = sparse_attn.sparsify(SimpleAttentionModel(), FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+        for module in model.modules():
+            if isinstance(module, SparseAttentionModule):
+                module._sparse_method_instance.calibration_params = calibration_params
+                module._sparse_method_instance.target_sparse_ratio = target_sparse_ratio
+
+        mto.save(model, tmp_path / "model.pth")
+        model_restored = mto.restore(SimpleAttentionModel(), tmp_path / "model.pth")
+
+        sparse_modules = [
+            m for m in model_restored.modules() if isinstance(m, SparseAttentionModule)
+        ]
+        assert sparse_modules
+        for module in sparse_modules:
+            method = module._sparse_method_instance
+            assert method.calibration_params == calibration_params
+            assert method.target_sparse_ratio == target_sparse_ratio
+            assert module.get_threshold_info()["type"] == "dynamic_calibrated"
+
+    def test_restore_keeps_disabled_modules(self):
+        """Modules disabled after sparsify stay disabled after restore."""
+        model = sparse_attn.sparsify(SimpleAttentionModel(), FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+        disable_sparse_attention(model, "*attention*")
+
+        model_restored = mto.restore_from_modelopt_state(
+            SimpleAttentionModel(), mto.modelopt_state(model)
+        )
+
+        sparse_modules = [
+            m for m in model_restored.modules() if isinstance(m, SparseAttentionModule)
+        ]
+        assert sparse_modules
+        assert not any(m.is_enabled for m in sparse_modules)
+
+    def test_restore_legacy_state_without_calibration_keys(self):
+        """Metadata saved before calibration state was persisted still restores."""
+        model = sparse_attn.sparsify(SimpleAttentionModel(), FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+        modelopt_state = mto.modelopt_state(model)
+        for _, mode_state in modelopt_state["modelopt_state_dict"]:
+            for module_state in mode_state["metadata"]["sparse_attention_state"].values():
+                module_state.pop("enabled", None)
+
+        model_restored = mto.restore_from_modelopt_state(SimpleAttentionModel(), modelopt_state)
+
+        for module in model_restored.modules():
+            if isinstance(module, SparseAttentionModule):
+                assert module.is_enabled
+                assert module._sparse_method_instance.calibration_params is None
+
 
 class TestSparseAttentionModuleMethods:
     """Test SparseAttentionModule methods."""
