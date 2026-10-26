@@ -245,6 +245,7 @@ Changelog
 - Fix the Hugging Face export of a quantized Wan VAE (``AutoencoderKLWan``), which declared NVFP4 or FP8 in its ``quantization_config`` but saved its ``Conv3d`` weights unquantized: NVFP4 weights are now packed with their scales, other formats raise an error, and ``examples/diffusers`` quantizes only the decoder convolutions that text-to-video calibration runs. Re-quantize affected VAEs with the updated example: a VAE restored with ``--restore-from`` from an older example checkpoint keeps its uncalibrated encoder quantizers, and exporting it now raises.
 - The Hugging Face export of a diffusers model now raises an error, instead of writing a checkpoint without ``input_scale``, when a component's static input quantizers (e.g. NVFP4 or FP8) were never calibrated, as with Wan 2.2's ``transformer_2`` calibrated with ``--n-steps 1``. Calibrate with enough denoising steps to run every quantized component and re-export.
 - Fix ``examples/megatron_bridge/distill.py`` crashing on the first step when distilling a model that uses mRoPE (e.g. Qwen-VL, Qwen3.5) with ``--pp_size`` greater than 1.
+- Fix ``--dq_only`` ONNX export producing a model that ONNX Runtime cannot load when the weights are quantized to an unsigned type. Such exports now load and match the source model.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
