@@ -177,14 +177,16 @@ def test_the_sync_keeps_a_calibrated_zero_apart_from_uncalibrated(cpu_dist_worke
     cpu_dist_workers.run(_zero_or_uncalibrated_helper, case=case)
 
 
-# Per-channel amaxes the ranks cannot reduce together: rank 1 holds none, or one of another size or
-# dtype. The forward turns per-token block sizes into a per-channel axis, which a rank that never ran
-# it does not see.
+# Per-channel amaxes the ranks cannot reduce together: rank 1 holds none, or one of another size,
+# shape or dtype, or the two hold unlisted dtypes. The forward turns per-token block sizes into a
+# per-channel axis, which a rank that never ran it does not see.
 _UNEVEN_CASES = {
     "rank-0-only": {"axis": 0},
     "per-token-block-sizes": {"block_sizes": {-1: None, "type": "dynamic"}},
     "different-sizes": {"axis": 0},
+    "different-shapes": {"axis": 0},
     "different-dtypes": {"axis": 0},
+    "unlisted-dtypes": {"axis": 0},
 }
 
 
@@ -197,6 +199,10 @@ def _uneven_per_channel_helper(rank, size, case):
         quantizer.load_calib_amax()
     if case == "different-dtypes" and rank == 1:
         quantizer._set_buffer("_amax", quantizer.amax.bfloat16())
+    elif case == "different-shapes":  # of one size
+        quantizer._set_buffer("_amax", torch.ones((4, 2) if rank == 0 else (2, 4)))
+    elif case == "unlisted-dtypes":
+        quantizer._set_buffer("_amax", torch.ones(4, dtype=(torch.int32, torch.int64)[rank]))
     # A rank left waiting in a collective its peer never joins gives up in seconds on this group.
     group = dist.new_group(timeout=timedelta(seconds=10))
     try:
@@ -212,8 +218,8 @@ def _uneven_per_channel_helper(rank, size, case):
 
 @pytest.mark.parametrize("case", list(_UNEVEN_CASES))
 def test_uneven_per_channel_calibration_fails_on_every_rank(cpu_dist_workers, case):
-    """A per-channel amax is reduced only when every rank holds one of the same size and dtype: a
-    rank without it cannot rebuild its shape, and NCCL hangs on mismatched ones. Otherwise the sync
+    """A per-channel amax is reduced only when every rank holds one of the same shape and listed
+    dtype: a rank without it cannot rebuild its shape, and NCCL hangs on mismatched ones. Otherwise the sync
     fails, on every rank together: one rank raising alone would leave the other waiting in the
     collective. Also when only the calibrated rank's layout reads per-channel."""
     cpu_dist_workers.run(_uneven_per_channel_helper, case=case)
