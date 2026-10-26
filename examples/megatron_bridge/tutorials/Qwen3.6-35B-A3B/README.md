@@ -7,8 +7,8 @@ End-to-end W4A4 optimization of [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qw
 
 ## Highlights
 
-- **W4A4 PTQ is close to BF16**: a six-benchmark average of 69.9 vs 70.4, matching the published W4A16 checkpoint (69.8). Only IFBench (−2.6 pp) and MMMU-Pro (−1.2 pp) drop by more than run-to-run noise.
-- **QAD (500 iterations, ~735 GB200 GPU-hours) brings IFBench back to BF16** and closes about 40% of the MMMU-Pro gap, for an average of 70.1.
+- **W4A4 PTQ is close to BF16**: a six-benchmark average of 69.9 vs 70.4, matching the published W4A16 checkpoint (69.8). Only IFBench (−2.6 pp) and MMMU-Pro (−1.2 pp) drop by more than run-to-run noise ([paired per-question deltas](#where-qad-actually-helps)).
+- **QAD (500 iterations, ~735 GB200 GPU-hours) brings IFBench back to BF16** and closes about 40% of the MMMU-Pro gap (same paired comparison), for an average of 70.1.
 - **W4A4 is faster than BF16, W4A16 is not**: up to 1.30× BF16 output throughput in vLLM and faster in 9 of 12 shapes, while weight-only NVFP4 is slower than BF16 in 10 of 12. The checkpoint shrinks from 67 to 22 GiB.
 - **Caveats**: each step makes the model guess more instead of abstaining (AA-Omniscience), most of all QAD, and QAD lengthens SciCode outputs by 91% through non-terminating sub-steps, which `presence_penalty: 1.5` fixes at decode time.
 
