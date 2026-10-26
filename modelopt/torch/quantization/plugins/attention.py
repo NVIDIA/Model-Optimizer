@@ -52,7 +52,8 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
     model_module = inspect.getmodule(attention_cls)
     head = ast.parse(source_code)
 
-    # No baddbmm: its matrix operands are args[1] and args[2], and patch() wires args[0] and args[1]
+    # No baddbmm: patch() wires args[0] and args[1], which miss its batch1 and batch2 operands
+    # (torch.baddbmm passes the additive input first, and Bloom passes them as keywords)
     bmm_ops = ("matmul", "bmm")
     sdpa_ops = ("scaled_dot_product_attention",)
 
