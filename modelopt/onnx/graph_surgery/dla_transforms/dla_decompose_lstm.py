@@ -47,13 +47,16 @@ from ..utils.graph_utils import (
     get_constant_by_name,
     is_const_dq_input,
 )
+from .dla_constants_to_initializers import _add_legacy_initializer_inputs
+from .dla_graph_cleanup import _subgraph_captures
 
 # Promote ONNX LSTM inputs listed at https://onnx.ai/onnx/operators/onnx__LSTM.html (see module docstring).
-# Initializers / DQ weights: numpy expand-to-4D. Graph tensors: Unsqueeze (axis 0 for typical 3-D X / states).
+# Preserve DQ layouts by promoting their outputs; fixed initializer views can use metadata alone.
 _LSTM_PROMOTE_INPUT_INDICES = (0, 1, 2, 3, 5, 6)
 
 
 def _expand_array_to_rank4(arr: np.ndarray) -> np.ndarray:
+    """Prepend singleton dimensions for the LSTM convolution layout."""
     rank = len(arr.shape)
     if rank >= 4:
         return arr
@@ -75,7 +78,7 @@ def _validate_lstm_supported(node: onnx.NodeProto) -> str:
             direction = attr.s.decode("utf-8").strip().lower()
         elif attr.name == "layout" and int(attr.i) != 0:
             unsupported.append(f"layout={int(attr.i)}")
-        elif attr.name == "clip" and float(attr.f) != 0.0:
+        elif attr.name == "clip":
             unsupported.append(f"clip={float(attr.f)}")
         elif attr.name == "input_forget" and int(attr.i) != 0:
             unsupported.append("input_forget=1")
@@ -108,7 +111,7 @@ def _promote_lstm_input_to_rank4(
     """Promote one LSTM input slot to rank 4 for the decomposition path.
 
     Shapes follow ONNX ``LSTM`` (layout 0): https://onnx.ai/onnx/operators/onnx__LSTM.html
-    Initializers and DQ-backed weights are expanded in numpy; runtime tensors get ``Unsqueeze``.
+    Fixed private views use initializer metadata; DQ and runtime values use ``Unsqueeze``.
     """
     if input_index >= len(lstm_node.input):
         return
@@ -116,47 +119,21 @@ def _promote_lstm_input_to_rank4(
     if not tensor_name:
         return
 
-    init_list = list(cache.init_names)
-    dq_init_name = is_const_dq_input(init_list, tensor_name, graph)
-
-    if dq_init_name is not None:
-        deq_node = next(
-            (
-                n
-                for n in graph.node
-                if n.op_type == "DequantizeLinear"
-                and n.output[0] == tensor_name
-                and n.input[0] == dq_init_name
-            ),
-            None,
-        )
-        if deq_node is None:
-            return
-        initializer = cache.get_init(dq_init_name)
-        if initializer is None:
-            return
-        init_arr = numpy_helper.to_array(initializer)
-        init_arr = _expand_array_to_rank4(init_arr)
-        new_init = numpy_helper.from_array(
-            init_arr, name=initializer.name + f"_lstm4d_{lstm_node.name}_{input_index}"
-        )
-        add_unique_initializers(graph, unique_initializer, [new_init])
-        graph.initializer.remove(initializer)
-        deq_node.input[0] = new_init.name
-        return
-
-    if cache.is_init(tensor_name):
+    if cache.is_init(tensor_name) and tensor_name not in cache.graph_input_names:
         initializer = cache.get_init(tensor_name)
         if initializer is None:
             return
-        init_arr = numpy_helper.to_array(initializer)
-        new_arr = _expand_array_to_rank4(init_arr)
-        new_init = numpy_helper.from_array(
-            new_arr, name=initializer.name + f"_lstm4d_{lstm_node.name}_{input_index}"
+        new_init = graph.initializer.add()
+        new_init.CopyFrom(initializer)
+        new_init.name = cache.unique_name(
+            initializer.name + f"_lstm4d_{lstm_node.name}_{input_index}"
         )
-        add_unique_initializers(graph, unique_initializer, [new_init])
+        original_dims = list(new_init.dims)
+        del new_init.dims[:]
+        new_init.dims.extend([1] * max(0, 4 - len(original_dims)) + original_dims)
+        unique_initializer.add(new_init.name)
         refs = sum(1 for n in graph.node for inp in n.input if inp == tensor_name)
-        if refs <= 1:
+        if refs <= 1 and tensor_name not in cache.graph_output_names | _subgraph_captures(graph):
             graph.initializer.remove(initializer)
         lstm_node.input[input_index] = new_init.name
         return
@@ -168,15 +145,15 @@ def _promote_lstm_input_to_rank4(
         return
     axes_list = [0] if shape is None or len(shape) == 3 else list(range(4 - len(shape)))
 
-    axes_name = f"{tensor_name}_lstm4d_axes_{lstm_node.name}_{input_index}"
-    out_name = f"{tensor_name}_lstm4d_{lstm_node.name}_{input_index}"
+    axes_name = cache.unique_name(f"{tensor_name}_lstm4d_axes_{lstm_node.name}_{input_index}")
+    out_name = cache.unique_name(f"{tensor_name}_lstm4d_{lstm_node.name}_{input_index}")
     axes_init = numpy_helper.from_array(np.array(axes_list, dtype=np.int64), name=axes_name)
     add_unique_initializers(graph, unique_initializer, [axes_init])
     unsq = helper.make_node(
         "Unsqueeze",
         [tensor_name, axes_name],
         [out_name],
-        name=f"lstm_prep_unsqueeze_{lstm_node.name}_{input_index}",
+        name=cache.unique_name(f"lstm_prep_unsqueeze_{lstm_node.name}_{input_index}"),
     )
     prep_nodes.append(unsq)
     lstm_node.input[input_index] = out_name
@@ -216,10 +193,16 @@ def _fold_lstm_constants(graph, nodes, unique_initializer):
             and arrays[1].shape[1:] == (arrays[0].shape[1], 1, 1)
         ):
             # The reference accumulates these dot products sequentially in double precision.
-            products = arrays[1].reshape(arrays[1].shape[0], -1).astype(np.float64)
-            products = products * arrays[0].reshape(-1).astype(np.float64)
-            terms = np.concatenate([np.zeros((products.shape[0], 1)), products], axis=1)
-            values = np.cumsum(terms, axis=1)[:, -1].astype(arrays[0].dtype)
+            weights = arrays[1].reshape(arrays[1].shape[0], -1)
+            state = arrays[0].reshape(-1).astype(np.float64)
+            values = np.empty(weights.shape[0], dtype=arrays[0].dtype)
+            rows = max(1, 2**18 // (weights.shape[1] + 1))
+            for start in range(0, len(values), rows):
+                stop = min(start + rows, len(values))
+                terms = np.zeros((stop - start, weights.shape[1] + 1), dtype=np.float64)
+                np.multiply(weights[start:stop], state, out=terms[:, 1:])
+                np.cumsum(terms, axis=1, out=terms)
+                values[start:stop] = terms[:, -1]
             outputs = [values.reshape(1, arrays[1].shape[0], 1, 1)]
         else:
             remaining.append(node)
@@ -235,11 +218,28 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
     """Decompose ``LSTM`` nodes into basic ONNX ops (IO per ONNX LSTM layout 0)."""
     graph = model.graph
     cache = GraphCache(graph)
-    lstm_nodes = [n for n in list(graph.node) if n.op_type == "LSTM"]
+    local_functions = {
+        (function.domain, function.name, function.overload) for function in model.functions
+    }
+    lstm_nodes = [
+        n
+        for n in graph.node
+        if n.op_type == "LSTM"
+        and n.domain in {"", "ai.onnx"}
+        and not n.overload
+        and (n.domain, n.op_type, n.overload) not in local_functions
+    ]
     node_idx = {id(n): i for i, n in enumerate(graph.node)}
     replacements_batch: dict[int, tuple[list, list]] = {}
     lstm_counter = 0
     unique_initializer = set()
+    allocated_names = {}
+
+    def new_name(proposed):
+        """Reuse internal controls while allocating names outside the original graph namespace."""
+        if proposed not in allocated_names:
+            allocated_names[proposed] = cache.unique_name(proposed)
+        return allocated_names[proposed]
 
     def add_nodes_for_time_step(
         time_step,
@@ -253,25 +253,26 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         shape_info_map=None,
     ):
         # add it = sigmoid(Ht * R_i + Z_i)
+        """Build the gates and state update for one sequence position."""
         matmul_h_r_i_node = helper.make_node(
             "Conv",
             [h_t, r_t_iofc["i"]],
-            [f"{prefix}_h_r_i_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_conv_h_r_i_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_h_r_i_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_conv_h_r_i_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(matmul_h_r_i_node)
         add_h_r_i_z_i_node = helper.make_node(
             "Add",
             [matmul_h_r_i_node.output[0], z_t_iofc["i"]],
-            [f"{prefix}_h_r_i_z_i_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_add_h_r_i_z_i_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_h_r_i_z_i_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_add_h_r_i_z_i_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(add_h_r_i_z_i_node)
         i_t_node = helper.make_node(
             "Sigmoid",
             [add_h_r_i_z_i_node.output[0]],
-            [f"{prefix}_i_t_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_sigmoid_i_t_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_i_t_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_sigmoid_i_t_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(i_t_node)
 
@@ -279,22 +280,22 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         matmul_h_r_f_node = helper.make_node(
             "Conv",
             [h_t, r_t_iofc["f"]],
-            [f"{prefix}_h_r_f_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_conv_h_r_f_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_h_r_f_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_conv_h_r_f_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(matmul_h_r_f_node)
         add_h_r_f_z_f_node = helper.make_node(
             "Add",
             [matmul_h_r_f_node.output[0], z_t_iofc["f"]],
-            [f"{prefix}_h_r_f_z_f_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_add_h_r_f_z_f_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_h_r_f_z_f_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_add_h_r_f_z_f_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(add_h_r_f_z_f_node)
         ft_node = helper.make_node(
             "Sigmoid",
             [add_h_r_f_z_f_node.output[0]],
-            [f"{prefix}_ft_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_sigmoid_ft_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_ft_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_sigmoid_ft_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(ft_node)
 
@@ -302,22 +303,22 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         matmul_h_r_o_node = helper.make_node(
             "Conv",
             [h_t, r_t_iofc["o"]],
-            [f"{prefix}_h_r_o_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_conv_h_r_o_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_h_r_o_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_conv_h_r_o_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(matmul_h_r_o_node)
         add_h_r_o_z_o_node = helper.make_node(
             "Add",
             [matmul_h_r_o_node.output[0], z_t_iofc["o"]],
-            [f"{prefix}_h_r_o_z_o_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_add_h_r_o_z_o_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_h_r_o_z_o_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_add_h_r_o_z_o_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(add_h_r_o_z_o_node)
         ot_node = helper.make_node(
             "Sigmoid",
             [add_h_r_o_z_o_node.output[0]],
-            [f"{prefix}_ot_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_sigmoid_ot_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_ot_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_sigmoid_ot_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(ot_node)
 
@@ -325,22 +326,22 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         matmul_h_r_c_node = helper.make_node(
             "Conv",
             [h_t, r_t_iofc["c"]],
-            [f"{prefix}_h_r_c_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_conv_h_r_c_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_h_r_c_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_conv_h_r_c_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(matmul_h_r_c_node)
         add_h_r_c_z_c_node = helper.make_node(
             "Add",
             [matmul_h_r_c_node.output[0], z_t_iofc["c"]],
-            [f"{prefix}_h_r_c_z_c_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_add_h_r_c_z_c_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_h_r_c_z_c_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_add_h_r_c_z_c_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(add_h_r_c_z_c_node)
         ct_node = helper.make_node(
             "Tanh",
             [add_h_r_c_z_c_node.output[0]],
-            [f"{prefix}_ct_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_tanh_ct_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_ct_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_tanh_ct_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(ct_node)
 
@@ -348,22 +349,22 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         mul_ft_ct_1_node = helper.make_node(
             "Mul",
             [ft_node.output[0], c_t],
-            [f"{prefix}_ft_ct_1_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_mul_ft_ct_1_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_ft_ct_1_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_mul_ft_ct_1_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(mul_ft_ct_1_node)
         mul_it_ct_node = helper.make_node(
             "Mul",
             [i_t_node.output[0], ct_node.output[0]],
-            [f"{prefix}_it_ct_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_mul_it_ct_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_it_ct_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_mul_it_ct_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(mul_it_ct_node)
         add_ft_ct_1_it_ct_node = helper.make_node(
             "Add",
             [mul_ft_ct_1_node.output[0], mul_it_ct_node.output[0]],
-            [f"{prefix}_C_t_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_add_ft_ct_1_it_ct_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_C_t_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_add_ft_ct_1_it_ct_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(add_ft_ct_1_it_ct_node)
 
@@ -371,54 +372,24 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         tanh_ct_node = helper.make_node(
             "Tanh",
             [add_ft_ct_1_it_ct_node.output[0]],
-            [f"{prefix}_tanh_Ct_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_tanh_Ct_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_tanh_Ct_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_tanh_Ct_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(tanh_ct_node)
         mul_ot_tanh_ct_node = helper.make_node(
             "Mul",
             [ot_node.output[0], tanh_ct_node.output[0]],
-            [f"{prefix}_H_t_{node.name}_seq_{time_step}"],
-            name=f"{prefix}_mul_ot_tanh_ct_{node.name}_seq_{time_step}",
+            [new_name(f"{prefix}_H_t_{node.name}_seq_{time_step}")],
+            name=new_name(f"{prefix}_mul_ot_tanh_ct_{node.name}_seq_{time_step}"),
         )
         nodes_to_add.append(mul_ot_tanh_ct_node)
 
         return mul_ot_tanh_ct_node.output[0], add_ft_ct_1_it_ct_node.output[0]
 
     def transpose_tensor(graph, tensor_name, perm, nodes_to_add, unique_initializer):
+        """Transpose a private initializer or preserve runtime data through a node."""
         init_list = [init.name for init in graph.initializer]
-        if is_const_dq_input(init_list, tensor_name, graph) is not None:
-            init_name = is_const_dq_input(init_list, tensor_name, graph)
-            deq_node = next(
-                (
-                    n
-                    for n in graph.node
-                    if n.op_type == "DequantizeLinear"
-                    and n.output[0] == tensor_name
-                    and n.input[0] == init_name
-                ),
-                None,
-            )
-            if deq_node is None:
-                raise ValueError(
-                    f"LSTM transpose_tensor: DequantizeLinear for DQ input {tensor_name!r} (init {init_name!r}) "
-                    "not found in graph."
-                )
-            initializer = cache.get_init(init_name)
-            if initializer is None:
-                raise ValueError(
-                    f"LSTM transpose_tensor: initializer {init_name!r} missing for DQ tensor {tensor_name!r}."
-                )
-            init_arr = numpy_helper.to_array(initializer)
-            init_arr = _expand_array_to_rank4(init_arr)
-
-            init_arr = np.transpose(init_arr, axes=perm)
-            new_init = numpy_helper.from_array(init_arr, name=initializer.name + "_transposed")
-            add_unique_initializers(graph, unique_initializer, [new_init])
-            graph.initializer.remove(initializer)
-            deq_node.input[0] = new_init.name
-            return tensor_name
-        elif tensor_name in init_list:
+        if tensor_name in init_list:
             initializer = cache.get_init(tensor_name)
             if initializer is None:
                 raise ValueError(
@@ -427,7 +398,9 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
             init_arr = numpy_helper.to_array(initializer)
             init_arr = _expand_array_to_rank4(init_arr)
             init_arr = np.transpose(init_arr, axes=perm)
-            new_init = numpy_helper.from_array(init_arr, name=initializer.name + "_transposed")
+            new_init = numpy_helper.from_array(
+                init_arr, name=new_name(initializer.name + "_transposed")
+            )
             add_unique_initializers(graph, unique_initializer, [new_init])
             graph.initializer.remove(initializer)
             return new_init.name
@@ -436,7 +409,7 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
                 "Transpose",
                 inputs=[tensor_name],
                 outputs=[tensor_name + "_transposed"],
-                name=tensor_name + "_transpose",
+                name=new_name(tensor_name + "_transpose"),
                 perm=perm,
             )
             nodes_to_add.append(transpose_node)
@@ -448,6 +421,7 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         # When batch_size==1 the batch dim is already a leading unary dim after
         # 4D promotion.  Use [0,3,2,1] to keep it in place instead of swapping
         # it to the back with [2,3,0,1].
+        """Prepare activation, weight, bias and initial-state convolution layouts."""
         transpose_perm1 = [0, 3, 2, 1] if shape_info_map.get("N", 0) == 1 else [2, 3, 0, 1]
         transpose_perm2 = [2, 3, 1, 0]
         transpose_perm3 = [0, 3, 2, 1]
@@ -473,15 +447,15 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
 
             bw_br_split_init = numpy_helper.from_array(
                 np.array([4 * shape_info_map["H"], 4 * shape_info_map["H"]], dtype=np.int64),
-                name=f"bw_br_split_init_{node.name}",
+                name=new_name(f"bw_br_split_init_{node.name}"),
             )
             add_unique_initializers(graph, unique_initializer, [bw_br_split_init])
             bw_br_split_node = helper.make_node(
                 "Split",
                 [b_transposed, bw_br_split_init.name],
-                [f"bw_{node.name}", f"br_{node.name}"],
+                [new_name(f"bw_{node.name}"), new_name(f"br_{node.name}")],
                 axis=1,
-                name=f"split_B_{node.name}_axis_updated",
+                name=new_name(f"split_B_{node.name}_axis_updated"),
             )
             nodes_to_add.append(bw_br_split_node)
             bw_transposed = bw_br_split_node.output[0]
@@ -498,7 +472,7 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
                     [shape_info_map["N"], shape_info_map["H"], shape_info_map["d"], 1],
                     dtype=np.float32,
                 ),
-                name=node.name + "/ih",
+                name=new_name(node.name + "/ih"),
             )
             add_unique_initializers(graph, unique_initializer, [ih_init])
             ih_transposed = ih_init.name
@@ -513,20 +487,20 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
                     [shape_info_map["N"], shape_info_map["H"], shape_info_map["d"], 1],
                     dtype=np.float32,
                 ),
-                name=node.name + "/ic",
+                name=new_name(node.name + "/ic"),
             )
             add_unique_initializers(graph, unique_initializer, [ic_init])
             ic_transposed = ic_init.name
         if bw_transposed is None and br_transposed is None:
             # Optional B (ONNX LSTM): zero biases broadcast with Add(bw, br) and Add(..., conv_out).
-            zscalar = np.zeros((1, 1, 1, 1), dtype=np.float32)
+            zscalar = np.zeros((1, 1, shape_info_map["d"], 1), dtype=np.float32)
             bw_init = numpy_helper.from_array(
                 zscalar,
-                name=(node.name + "/zero_bw").replace("/", "_"),
+                name=new_name((node.name + "/zero_bw").replace("/", "_")),
             )
             br_init = numpy_helper.from_array(
                 np.array(zscalar, copy=True),
-                name=(node.name + "/zero_br").replace("/", "_"),
+                name=new_name((node.name + "/zero_br").replace("/", "_")),
             )
             add_unique_initializers(graph, unique_initializer, [bw_init, br_init])
             bw_transposed = bw_init.name
@@ -561,7 +535,7 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
             init = cache.get_init(tensor_name)
             if init is None:
                 return None
-            return list(numpy_helper.to_array(init).shape)
+            return list(init.dims)
 
         init_names = list(cache.init_names)
         dq_src = is_const_dq_input(init_names, tensor_name, graph)
@@ -573,7 +547,7 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
             return None
         if prod.op_type == "Unsqueeze" and len(prod.input) >= 2:
             inner = prod.input[0]
-            axes_name = prod.input[1]
+            axes_name = new_name(prod.input[1])
             inner_shape = resolve_lstm_tensor_shape(inner, _seen)
             if inner_shape is None:
                 return None
@@ -596,6 +570,7 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         return None
 
     def create_shape_info_map(node):
+        """Resolve the fixed dimensions required for sequence unrolling."""
         x, w = node.input[:2]
         x_shape = resolve_lstm_tensor_shape(x)
         w_shape = resolve_lstm_tensor_shape(w)
@@ -626,12 +601,13 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
     def split_direction_wise(
         graph, node, unique_initializer, shape_info_map, transposed_inputs, nodes_to_add
     ):
+        """Separate the forward and reverse convolution inputs."""
         if shape_info_map["d"] == 1:
             # Unidirectional: reverse and forward paths use the same tensors (only timestep order differs).
             return [transposed_inputs, transposed_inputs]
 
         direction_split_init = numpy_helper.from_array(
-            np.array([1, 1], dtype=np.int64), name=f"direction_split_init_{node.name}"
+            np.array([1, 1], dtype=np.int64), name=new_name(f"direction_split_init_{node.name}")
         )
         add_unique_initializers(graph, unique_initializer, [direction_split_init])
 
@@ -651,11 +627,11 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
                 "Split",
                 [str(input_value), direction_split_init.name],
                 [
-                    f"forward_direction_split_{input_name}_{node.name}",
-                    f"reverse_direction_split_{input_name}_{node.name}",
+                    new_name(f"forward_direction_split_{input_name}_{node.name}"),
+                    new_name(f"reverse_direction_split_{input_name}_{node.name}"),
                 ],
                 axis=2,
-                name=f"split_direction_wise_{input_name}_{node.name}_axis_updated",
+                name=new_name(f"split_direction_wise_{input_name}_{node.name}_axis_updated"),
             )
             nodes_to_add.append(direction_split_node)
             forward_list[input_name] = direction_split_node.output[0]
@@ -665,6 +641,7 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
     def precompute_and_split_seq_len(
         graph, node, unique_initializer, shape_info_map, input_list, nodes_to_add, direction, prefix
     ):
+        """Compute input contributions and split them by sequence position."""
         x_input = input_list["x"]
         w_input = input_list["w"]
         bw_input = input_list["bw"]
@@ -682,24 +659,24 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         add_bw_br_node = helper.make_node(
             "Add",
             [str(bw_input), str(br_input)],
-            [f"{prefix}_add_bw_br_{node.name}"],
-            name=f"{prefix}_add_bw_br_{node.name}",
+            [new_name(f"{prefix}_add_bw_br_{node.name}")],
+            name=new_name(f"{prefix}_add_bw_br_{node.name}"),
         )
         nodes_to_add.append(add_bw_br_node)
 
         conv_x_w_node = helper.make_node(
             "Conv",
             [str(x_input), str(w_input)],
-            [f"{prefix}_conv_x_w_{node.name}"],
-            name=f"{prefix}_conv_x_w_{node.name}",
+            [new_name(f"{prefix}_conv_x_w_{node.name}")],
+            name=new_name(f"{prefix}_conv_x_w_{node.name}"),
         )
         nodes_to_add.append(conv_x_w_node)
 
         z_node = helper.make_node(
             "Add",
             [add_bw_br_node.output[0], conv_x_w_node.output[0]],
-            [f"{prefix}_add_bw_br_conv_x_w_{node.name}"],
-            name=f"{prefix}_add_bw_br_conv_x_w_{node.name}",
+            [new_name(f"{prefix}_add_bw_br_conv_x_w_{node.name}")],
+            name=new_name(f"{prefix}_add_bw_br_conv_x_w_{node.name}"),
         )
         nodes_to_add.append(z_node)
 
@@ -713,26 +690,26 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
                 ],
                 dtype=np.int64,
             ),
-            name=f"split_z_iofc_init_{node.name}",
+            name=new_name(f"split_z_iofc_init_{node.name}"),
         )
         add_unique_initializers(graph, unique_initializer, [split_z_iofc_init])
         split_z_iofc_node = helper.make_node(
             "Split",
             [z_node.output[0], split_z_iofc_init.name],
             [
-                f"{prefix}_split_z_i_{node.name}",
-                f"{prefix}_split_z_o_{node.name}",
-                f"{prefix}_split_z_f_{node.name}",
-                f"{prefix}_split_z_c_{node.name}",
+                new_name(f"{prefix}_split_z_i_{node.name}"),
+                new_name(f"{prefix}_split_z_o_{node.name}"),
+                new_name(f"{prefix}_split_z_f_{node.name}"),
+                new_name(f"{prefix}_split_z_c_{node.name}"),
             ],
             axis=1,
-            name=f"{prefix}_split_z_iofc_{node.name}_axis_updated",
+            name=new_name(f"{prefix}_split_z_iofc_{node.name}_axis_updated"),
         )
         nodes_to_add.append(split_z_iofc_node)
 
         split_seq_init = numpy_helper.from_array(
             np.array([1] * shape_info_map["T"], dtype=np.int64),
-            name=f"split_z_iofc_seq_init_{node.name}",
+            name=new_name(f"split_z_iofc_seq_init_{node.name}"),
         )
         add_unique_initializers(graph, unique_initializer, [split_seq_init])
 
@@ -744,11 +721,13 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
                 "Split",
                 [split_z_iofc_output, split_seq_init.name],
                 [
-                    f"{prefix}_split_z_{split_z_iofc_name}_{time_step}_{node.name}"
+                    new_name(f"{prefix}_split_z_{split_z_iofc_name}_{time_step}_{node.name}")
                     for time_step in range(shape_info_map["T"])
                 ],
                 axis=3,
-                name=f"{prefix}_split_z_iofc_seq_{split_z_iofc_name}_{node.name}_axis_updated",
+                name=new_name(
+                    f"{prefix}_split_z_iofc_seq_{split_z_iofc_name}_{node.name}_axis_updated"
+                ),
             )
             nodes_to_add.append(split_seq_node)
             split_z_iofc_seq[split_z_iofc_name] = (split_seq_node.output)[::direction]
@@ -758,6 +737,7 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
     def split_r_iofc(
         graph, node, unique_initializer, shape_info_map, input_list, nodes_to_add, prefix
     ):
+        """Split the recurrent kernels into the four gate weights."""
         r_input = input_list["r"]
         if not r_input:
             raise ValueError(
@@ -773,20 +753,20 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
                 ],
                 dtype=np.int64,
             ),
-            name=f"split_r_iofc_init_{node.name}",
+            name=new_name(f"split_r_iofc_init_{node.name}"),
         )
         add_unique_initializers(graph, unique_initializer, [split_r_iofc_init])
         split_r_iofc_node = helper.make_node(
             "Split",
             [str(r_input), split_r_iofc_init.name],
             [
-                f"{prefix}_split_r_i_{node.name}",
-                f"{prefix}_split_r_o_{node.name}",
-                f"{prefix}_split_r_f_{node.name}",
-                f"{prefix}_split_r_c_{node.name}",
+                new_name(f"{prefix}_split_r_i_{node.name}"),
+                new_name(f"{prefix}_split_r_o_{node.name}"),
+                new_name(f"{prefix}_split_r_f_{node.name}"),
+                new_name(f"{prefix}_split_r_c_{node.name}"),
             ],
             axis=0,
-            name=f"{prefix}_split_r_iofc_{node.name}_axis_updated",
+            name=new_name(f"{prefix}_split_r_iofc_{node.name}_axis_updated"),
         )
         nodes_to_add.append(split_r_iofc_node)
         return {
@@ -808,7 +788,7 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
             return None
         transpose_perm = [3, 2, 0, 1]
         if squeeze_axes:
-            transposed_tmp = f"{output_name}_lstm_tr_{node.name}".replace("/", "_")
+            transposed_tmp = new_name(f"{output_name}_lstm_tr_{node.name}".replace("/", "_"))
             transpose_out = transposed_tmp
         else:
             transpose_out = output_name
@@ -821,13 +801,13 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
             "Transpose",
             [str(input_name)],
             [str(transpose_out)],
-            name=f"{output_name}_transpose_{node.name}",
+            name=new_name(f"{output_name}_transpose_{node.name}"),
             perm=transpose_perm,
         )
         nodes_to_add.append(transpose_node)
 
         if squeeze_axes:
-            axes_name = f"{output_name}_lstm_squeeze_axes_{node.name}".replace("/", "_")
+            axes_name = new_name(f"{output_name}_lstm_squeeze_axes_{node.name}".replace("/", "_"))
             axes_init = numpy_helper.from_array(
                 np.array(squeeze_axes, dtype=np.int64), name=axes_name
             )
@@ -836,7 +816,7 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
                 "Squeeze",
                 [transpose_out, axes_name],
                 [output_name],
-                name=f"{output_name}_lstm_squeeze_{node.name}",
+                name=new_name(f"{output_name}_lstm_squeeze_{node.name}"),
             )
             nodes_to_add.append(squeeze_node)
             return squeeze_node.output[0]
@@ -972,8 +952,8 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
             h_t_concat_node = helper.make_node(
                 "Concat",
                 h_t_list,
-                [f"{prefix}_h_t_concat_{node.name}"],
-                name=f"{prefix}_concat_h_t_concat_{node.name}_axis_updated",
+                [new_name(f"{prefix}_h_t_concat_{node.name}")],
+                name=new_name(f"{prefix}_concat_h_t_concat_{node.name}_axis_updated"),
                 axis=3,
             )
             nodes_to_add.append(h_t_concat_node)
@@ -1024,8 +1004,8 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
             h_t_concat_node = helper.make_node(
                 "Concat",
                 h_t_list[::-1],
-                [f"{prefix}_h_t_concat_{node.name}"],
-                name=f"{prefix}_concat_h_t_concat_{node.name}_axis_updated",
+                [new_name(f"{prefix}_h_t_concat_{node.name}")],
+                name=new_name(f"{prefix}_concat_h_t_concat_{node.name}_axis_updated"),
                 axis=3,
             )
             nodes_to_add.append(h_t_concat_node)
@@ -1046,8 +1026,8 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
             y_concat_node = helper.make_node(
                 "Concat",
                 [str(y_forward), str(y_reverse)],
-                [f"y_concat_{node.name}"],
-                name=f"concat_y_concat_{node.name}_axis_updated",
+                [new_name(f"y_concat_{node.name}")],
+                name=new_name(f"concat_y_concat_{node.name}_axis_updated"),
                 axis=2,
             )
             nodes_to_add.append(y_concat_node)
@@ -1062,8 +1042,8 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
                 y_h_concat_node = helper.make_node(
                     "Concat",
                     [str(y_h_forward), str(y_h_reverse)],
-                    [f"y_h_concat_{node.name}"],
-                    name=f"concat_y_h_concat_{node.name}_axis_updated",
+                    [new_name(f"y_h_concat_{node.name}")],
+                    name=new_name(f"concat_y_h_concat_{node.name}_axis_updated"),
                     axis=2,
                 )
                 nodes_to_add.append(y_h_concat_node)
@@ -1078,8 +1058,8 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
                 y_c_concat_node = helper.make_node(
                     "Concat",
                     [str(y_c_forward), str(y_c_reverse)],
-                    [f"y_c_concat_{node.name}"],
-                    name=f"concat_y_c_concat_{node.name}_axis_updated",
+                    [new_name(f"y_c_concat_{node.name}")],
+                    name=new_name(f"concat_y_c_concat_{node.name}_axis_updated"),
                     axis=2,
                 )
                 nodes_to_add.append(y_c_concat_node)
@@ -1125,6 +1105,7 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
         lstm_counter += 1
 
     batch_replace_nodes(graph, replacements_batch)
+    _add_legacy_initializer_inputs(model)
     logger.debug("Updated %d LSTM nodes with manual decomposition", lstm_counter)
 
     return model

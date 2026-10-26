@@ -13,23 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
 # Unit tests for :mod:`modelopt.onnx.graph_surgery.dla_transforms.dla_decompose_lstm`.
 
-"""ORT CPU parity tests for LSTM decomposition (forward / reverse / bidirectional).
-
-Each parametrized run writes two ONNX files under
-``scratch_space/lstm_decompose_test_models/`` (base + decomposed for that direction).
-The decomposed file is passed through :func:`onnx.shape_inference.infer_shapes` before save
-(when inference succeeds).
-"""
+"""ORT CPU parity tests for LSTM decomposition (forward / reverse / bidirectional)."""
 
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 
 import numpy as np
 import onnx
@@ -40,34 +30,9 @@ from modelopt.onnx.graph_surgery.dla_transforms.dla_decompose_lstm import (
     _apply_decompose_lstm,
     _fold_lstm_constants,
 )
+from modelopt.onnx.graph_surgery.utils.graph_utils import infer_shapes
 
-pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
-
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-# Written on each parametrized run (six files total: three base + three decomposed).
-_SAVED_MODELS_DIR = _REPO_ROOT / "scratch_space" / "lstm_decompose_test_models"
-
-
-def _save_lstm_test_pair(
-    base: onnx.ModelProto, transformed: onnx.ModelProto, direction: str
-) -> None:
-    _SAVED_MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    base_path = _SAVED_MODELS_DIR / f"lstm_base_{direction}.onnx"
-    dec_path = _SAVED_MODELS_DIR / f"lstm_decomposed_{direction}.onnx"
-    onnx.save(base, str(base_path))
-    try:
-        from onnxruntime.tools.symbolic_shape_infer import (
-            SymbolicShapeInference,  # type: ignore[import-untyped]
-        )
-
-        inferred = SymbolicShapeInference.infer_shapes(transformed, auto_merge_symbolic_dims=True)
-        transformed_to_save = inferred if inferred is not None else transformed
-    except Exception:
-        transformed_to_save = transformed
-    onnx.save(transformed_to_save, str(dec_path))
-    print(
-        f"[test_dla_decompose_lstm] saved {base_path.name} and {dec_path.name} under {_SAVED_MODELS_DIR}"
-    )
+ort = pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 
 
 @pytest.mark.parametrize(
@@ -77,6 +42,7 @@ def _save_lstm_test_pair(
 def test_constant_initial_state_convolution_matches_cpp_double_accumulation(
     state, kernel, expected
 ):
+    """Constant initial state convolution matches cpp double accumulation."""
     values = np.array(state, dtype=np.float32).reshape(1, 3, 1, 1)
     weights = np.array(kernel, dtype=np.float32).reshape(1, 3, 1, 1)
     graph = helper.make_graph(
@@ -107,52 +73,18 @@ _H = 16
 
 
 def _init(name: str, arr: np.ndarray) -> onnx.TensorProto:
+    """Init."""
     return numpy_helper.from_array(arr, name=name)
 
 
 def _vi(name: str, elem_type: int, shape: list[int | str]) -> onnx.ValueInfoProto:
+    """Vi."""
     return helper.make_tensor_value_info(name, elem_type, shape)
 
 
 def _clamp_ir_version(model: onnx.ModelProto) -> None:
+    """Clamp ir version."""
     model.ir_version = min(model.ir_version, _MAX_IR_VERSION_FOR_ORT)
-
-
-def _lstm_input_shape_summary(model: onnx.ModelProto, input_name: str) -> str | tuple:
-    """Return a printable shape for an LSTM input (initializer, graph input, or value_info)."""
-    graph = model.graph
-    for init in graph.initializer:
-        if init.name == input_name:
-            return tuple(numpy_helper.to_array(init).shape)
-    for vi in list(graph.input) + list(graph.value_info):
-        if vi.name != input_name:
-            continue
-        dims: list[int | str] = []
-        for d in vi.type.tensor_type.shape.dim:
-            if d.dim_value:
-                dims.append(int(d.dim_value))
-            elif d.dim_param:
-                dims.append(d.dim_param)
-            else:
-                dims.append("?")
-        return tuple(dims)
-    return f"<unknown tensor {input_name!r}>"
-
-
-def _print_lstm_input_shapes(model: onnx.ModelProto, *, direction: str) -> None:
-    graph = model.graph
-    lstm_nodes = [n for n in graph.node if n.op_type == "LSTM"]
-    if not lstm_nodes:
-        print(f"[test_dla_decompose_lstm] direction={direction}: no LSTM node in graph")
-        return
-    node = lstm_nodes[0]
-    print(f"[test_dla_decompose_lstm] direction={direction} LSTM name={node.name!r} input slots:")
-    for idx, inp in enumerate(node.input):
-        if not inp:
-            print(f"  [{idx}] (empty optional)")
-            continue
-        sh = _lstm_input_shape_summary(model, inp)
-        print(f"  [{idx}] {inp!r} shape={sh}")
 
 
 def _make_lstm_model(direction: str) -> onnx.ModelProto:
@@ -192,10 +124,12 @@ def _make_lstm_model(direction: str) -> onnx.ModelProto:
 
 
 def _single_lstm_node(model: onnx.ModelProto) -> onnx.NodeProto:
+    """Single lstm node."""
     return next(n for n in model.graph.node if n.op_type == "LSTM")
 
 
 def test_downstream_transpose_keeps_its_nontrivial_permutation():
+    """Downstream transpose keeps its nontrivial permutation."""
     model = _make_lstm_model("bidirectional")
     model.graph.node.append(
         helper.make_node("Transpose", ["Y"], ["permuted"], perm=[0, 2, 1, 3], name="downstream")
@@ -211,16 +145,14 @@ def test_downstream_transpose_keeps_its_nontrivial_permutation():
 
 
 def _expect_unsupported_lstm(model: onnx.ModelProto, expected: str) -> None:
-    from modelopt.onnx.graph_surgery.utils.graph_utils import infer_shapes
-
+    """Expect unsupported lstm."""
     model = infer_shapes(copy.deepcopy(model))
     with pytest.raises(ValueError, match=expected):
         _apply_decompose_lstm(model)
 
 
 def _run_ort(model: onnx.ModelProto, feeds: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    import onnxruntime as ort  # type: ignore[import-not-found]
-
+    """Run ort."""
     _clamp_ir_version(model)
     sess = ort.InferenceSession(
         model.SerializeToString(),
@@ -233,6 +165,7 @@ def _run_ort(model: onnx.ModelProto, feeds: dict[str, np.ndarray]) -> dict[str, 
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity."""
     a64 = np.asarray(a, dtype=np.float64).ravel()
     b64 = np.asarray(b, dtype=np.float64).ravel()
     na = float(np.linalg.norm(a64))
@@ -245,6 +178,7 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _assert_outputs_match(ref: dict[str, np.ndarray], got: dict[str, np.ndarray]) -> None:
+    """Assert outputs match."""
     assert ref.keys() == got.keys()
     for name in ref:
         a, b = ref[name], got[name]
@@ -258,7 +192,6 @@ def _assert_outputs_match(ref: dict[str, np.ndarray], got: dict[str, np.ndarray]
 def test_lstm_decompose_ort_cpu_parity(direction: str) -> None:
     """Decomposed graph matches reference LSTM on CPU EP (cosine ~1, tight allclose)."""
     model = _make_lstm_model(direction)
-    _print_lstm_input_shapes(model, direction=direction)
     rng = np.random.default_rng(7)
     x = rng.standard_normal((_T, _N, _D_IN)).astype(np.float32)
     feeds = {"X": x}
@@ -266,15 +199,12 @@ def test_lstm_decompose_ort_cpu_parity(direction: str) -> None:
     ref = _run_ort(model, feeds)
 
     dec = copy.deepcopy(model)
-    from modelopt.onnx.graph_surgery.utils.graph_utils import infer_shapes
-
     dec = infer_shapes(dec)
     dec = _apply_decompose_lstm(dec)
     _clamp_ir_version(dec)
     onnx.checker.check_model(dec)
 
     got = _run_ort(dec, feeds)
-    _save_lstm_test_pair(model, dec, direction)
     _assert_outputs_match(ref, got)
 
 
@@ -338,3 +268,191 @@ def test_lstm_decompose_rejects_activation_params() -> None:
     node.attribute.append(helper.make_attribute("activation_alpha", [0.1]))
 
     _expect_unsupported_lstm(model, "activation_alpha")
+
+
+@pytest.mark.parametrize("direction", ["forward", "reverse", "bidirectional"])
+def test_optional_bias_omission_preserves_all_outputs(direction):
+    """Execute all three directions without an optional bias tensor."""
+    model = _make_lstm_model(direction)
+    del model.graph.node[0].input[3:]
+    model.graph.initializer.remove(next(t for t in model.graph.initializer if t.name == "B"))
+    feeds = {"X": np.random.default_rng(2).standard_normal((_T, _N, _D_IN)).astype(np.float32)}
+    expected = _run_ort(model, feeds)
+    transformed = _apply_decompose_lstm(onnx.shape_inference.infer_shapes(copy.deepcopy(model)))
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("name", ["W", "R", "B"])
+@pytest.mark.parametrize("axis", [None, 1, -1])
+def test_shared_dq_weight_preserves_source_layout_and_axes(name, axis):
+    """Preserve a public quantized source and DQ view while decomposing its LSTM use."""
+    model = _make_lstm_model("forward")
+    weight = next(t for t in model.graph.initializer if t.name == name)
+    values = numpy_helper.to_array(weight)
+    quantized = np.clip(np.rint(values * 16), -128, 127).astype(np.int8)
+    dims = list(quantized.shape)
+    weight.CopyFrom(_init(name + "_q", quantized))
+    controls = np.float32(0.0625) if axis is None else np.full(dims[axis], 0.0625, np.float32)
+    zeros = np.int8(0) if axis is None else np.zeros(dims[axis], np.int8)
+    model.graph.initializer.extend([_init(name + "_scale", controls), _init(name + "_zero", zeros)])
+    dq = helper.make_node(
+        "DequantizeLinear", [name + "_q", name + "_scale", name + "_zero"], [name], name="weight_dq"
+    )
+    if axis is not None:
+        dq.attribute.append(helper.make_attribute("axis", axis))
+    model.graph.node.insert(0, dq)
+    model.graph.output.extend(
+        [_vi(name + "_q", TensorProto.INT8, dims), _vi(name, TensorProto.FLOAT, dims)]
+    )
+    feeds = {"X": np.random.default_rng(3).standard_normal((_T, _N, _D_IN)).astype(np.float32)}
+    expected = _run_ort(model, feeds)
+    transformed = _apply_decompose_lstm(onnx.shape_inference.infer_shapes(copy.deepcopy(model)))
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("name", ["W", "R", "B"])
+def test_public_fixed_lstm_inputs_keep_their_original_view(name):
+    """Retain fixed weights or bias that are also graph outputs."""
+    model = _make_lstm_model("forward")
+    weight = next(t for t in model.graph.initializer if t.name == name)
+    model.graph.output.append(_vi(name, TensorProto.FLOAT, list(weight.dims)))
+    feeds = {"X": np.random.default_rng(4).standard_normal((_T, _N, _D_IN)).astype(np.float32)}
+    expected = _run_ort(model, feeds)
+    transformed = _apply_decompose_lstm(onnx.shape_inference.infer_shapes(copy.deepcopy(model)))
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("name", ["W", "R", "B"])
+def test_overridable_lstm_inputs_use_runtime_values(name):
+    """Preserve graph-input initializer defaults as runtime LSTM controls."""
+    model = _make_lstm_model("forward")
+    weight = next(t for t in model.graph.initializer if t.name == name)
+    model.graph.input.append(_vi(name, TensorProto.FLOAT, list(weight.dims)))
+    feeds = {
+        "X": np.random.default_rng(5).standard_normal((_T, _N, _D_IN)).astype(np.float32),
+        name: -numpy_helper.to_array(weight),
+    }
+    expected = _run_ort(model, feeds)
+    transformed = _apply_decompose_lstm(onnx.shape_inference.infer_shapes(copy.deepcopy(model)))
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("outputs", [["", "Y_h", "Y_c"], ["Y"], ["", "Y_h"]])
+def test_optional_lstm_outputs_remain_valid(outputs):
+    """Support omitted sequence and state output slots without introducing empty names."""
+    model = _make_lstm_model("forward")
+    del model.graph.node[0].output[:]
+    model.graph.node[0].output.extend(outputs)
+    retained = [value for value in model.graph.output if value.name in outputs]
+    del model.graph.output[:]
+    model.graph.output.extend(retained)
+    feeds = {"X": np.random.default_rng(6).standard_normal((_T, _N, _D_IN)).astype(np.float32)}
+    expected = _run_ort(model, feeds)
+    transformed = _apply_decompose_lstm(onnx.shape_inference.infer_shapes(copy.deepcopy(model)))
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+def test_explicit_zero_clip_refuses_before_mutation():
+    """Reject a zero clipping threshold rather than interpreting it as omitted clipping."""
+    model = _make_lstm_model("forward")
+    model.graph.node[0].attribute.append(helper.make_attribute("clip", 0.0))
+    onnx.checker.check_model(model, full_check=True)
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="clip"):
+        _apply_decompose_lstm(model)
+    assert model.SerializeToString() == before
+
+
+def test_custom_lstm_function_is_preserved():
+    """Leave a model-local operation whose name happens to be LSTM unchanged."""
+    function = helper.make_function(
+        "custom",
+        "LSTM",
+        ["X"],
+        ["Y"],
+        [helper.make_node("Neg", ["X"], ["Y"])],
+        [helper.make_opsetid("", 17)],
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("LSTM", ["X"], ["Y"], domain="custom")],
+            "local_lstm",
+            [_vi("X", TensorProto.FLOAT, [2, 3])],
+            [_vi("Y", TensorProto.FLOAT, [2, 3])],
+        ),
+        functions=[function],
+        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("custom", 1)],
+    )
+    _clamp_ir_version(model)
+    onnx.checker.check_model(model, full_check=True)
+    before = model.SerializeToString()
+    _apply_decompose_lstm(model)
+    assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("kind", ["node", "initializer"])
+def test_generated_names_preserve_existing_public_values(kind):
+    """Allocate private names without overwriting an unrelated public graph value."""
+    model = _make_lstm_model("forward")
+    name = "forward_conv_x_w_lstm0" if kind == "node" else "split_z_iofc_init_lstm0"
+    if kind == "node":
+        model.graph.node.insert(0, helper.make_node("Identity", ["X"], [name], name="existing"))
+        model.graph.output.append(_vi(name, TensorProto.FLOAT, [_T, _N, _D_IN]))
+    else:
+        model.graph.initializer.append(_init(name, np.asarray([97], np.int64)))
+        model.graph.output.append(_vi(name, TensorProto.INT64, [1]))
+    feeds = {"X": np.random.default_rng(9).standard_normal((_T, _N, _D_IN)).astype(np.float32)}
+    expected = _run_ort(model, feeds)
+    transformed = _apply_decompose_lstm(onnx.shape_inference.infer_shapes(copy.deepcopy(model)))
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+def test_legacy_ir_registers_all_new_lstm_initializers():
+    """Keep the legacy initializer-input contract after standalone decomposition."""
+    model = _make_lstm_model("forward")
+    model.ir_version = 3
+    for tensor in model.graph.initializer:
+        model.graph.input.append(_vi(tensor.name, tensor.data_type, list(tensor.dims)))
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"X": np.random.default_rng(10).standard_normal((_T, _N, _D_IN)).astype(np.float32)}
+    expected = _run_ort(model, feeds)
+    transformed = _apply_decompose_lstm(onnx.shape_inference.infer_shapes(copy.deepcopy(model)))
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+def test_buffered_constant_state_convolution_keeps_sequential_rounding():
+    """Retain established double accumulation across multiple bounded row buffers."""
+    rng = np.random.default_rng(11)
+    weights = rng.standard_normal((513, 1024)).astype(np.float32)
+    state = rng.standard_normal(1024).astype(np.float32)
+    terms = np.concatenate(
+        [np.zeros((513, 1)), weights.astype(np.float64) * state.astype(np.float64)], axis=1
+    )
+    expected = np.cumsum(terms, axis=1)[:, -1].astype(np.float32)
+    graph = helper.make_graph(
+        [],
+        "buffered_state",
+        [],
+        [],
+        initializer=[
+            _init("state", state.reshape(1, 1024, 1, 1)),
+            _init("weights", weights.reshape(513, 1024, 1, 1)),
+        ],
+    )
+    assert (
+        _fold_lstm_constants(
+            graph,
+            [helper.make_node("Conv", ["state", "weights"], ["folded"])],
+            {"state", "weights"},
+        )
+        == []
+    )
+    actual = numpy_helper.to_array(next(t for t in graph.initializer if t.name == "folded"))
+    assert actual.tobytes() == expected.tobytes()
