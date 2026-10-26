@@ -154,6 +154,8 @@ Changelog
 
 **Backward Breaking Changes**
 
+- The Windows FVD example rejects I3D checkpoints requiring unrestricted pickle loading. Custom TorchScript archives now require ``--weights-sha256`` with a trusted checksum; tensor state dictionaries continue to load directly.
+
 - ``modelopt.torch.utils.distributed.broadcast``/``allgather`` now reject objects of unregistered custom classes. Register them with ``torch.serialization.add_safe_globals``.
 - Bump minimum transformers version to ``5.5`` instead of ``4.57``; transformers 4.x is no longer supported. Upgrade with ``pip install -U "nvidia-modelopt[hf]"``.
 - ``modelopt.torch.distill.plugins.megatron.TopKLogitsKLLoss`` (``logit_kl_topk`` in ``DistillationConfig``) is renamed to ``TopLogitsKLLoss``, keeping the old name as a deprecated alias. It now normalizes both distributions over the full vocabulary instead of re-normalizing over the Top-K entries, and always appends a "ghost" token holding the probability mass outside the Top-K to both student and teacher (matching Megatron-LM's offline cached-logits KD loss). Loss values change for existing ``logit_kl_topk`` runs.
