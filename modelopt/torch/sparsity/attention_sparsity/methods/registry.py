@@ -26,6 +26,9 @@ import torch
 class SparseAttentionMethod(ABC):
     """Base class for sparse attention methods."""
 
+    # True for methods that replace ``F.scaled_dot_product_attention`` via ``forward_attention``.
+    patches_sdpa: bool = False
+
     def __init__(self):
         """Initialize base sparse attention method."""
         # Flag to indicate calibration mode (set by calibrator)
@@ -66,6 +69,12 @@ class SparseAttentionMethod(ABC):
             Tuple of (attention_output, stats_dict).
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement forward_attention.")
+
+    def sdpa_fallback_reason(
+        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, **sdpa_kwargs
+    ) -> str | None:
+        """Why this SDPA call must stay dense, or ``None`` if ``forward_attention`` replaces it."""
+        return "method does not replace SDPA"
 
     def calculate_sparsity(
         self,
