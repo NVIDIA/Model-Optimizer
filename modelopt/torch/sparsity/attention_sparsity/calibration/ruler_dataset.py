@@ -55,6 +55,8 @@ from typing import Any
 
 from tqdm import tqdm
 
+from modelopt.cache import get_cache_dir
+
 logger = logging.getLogger(__name__)
 
 
@@ -676,7 +678,8 @@ class RulerDatasetBuilder:
             seed: Random seed for reproducibility
             num_length_bins: Number of length bins to generate (default: 4)
             max_length_filter: Maximum sequence length to keep (default: 65536)
-            cache_dir: Optional cache directory. If None, uses ~/.cache/modelopt/data/
+            cache_dir: Optional cache directory. If None, uses the ``data`` subdirectory of
+                ModelOpt's cache directory (``$XDG_CACHE_HOME/modelopt``, ``~/.cache/modelopt`` if unset).
             data_dir: Optional path to RULER data directory (contains 'essays' subdir).
                 Required for NIAH tasks with essay haystack when not using pip default layout.
 
@@ -733,7 +736,7 @@ class RulerDatasetBuilder:
         if self.cache_dir:
             base_dir = Path(self.cache_dir)
         else:
-            base_dir = Path.home() / ".cache" / "modelopt" / "data"
+            base_dir = get_cache_dir("data")
         return base_dir / filename
 
     def _load_cached_data(self, cache_path: Path) -> list[dict[str, Any]] | None:
