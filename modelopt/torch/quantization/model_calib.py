@@ -512,15 +512,19 @@ def max_calibrate(
                 )
             return
         # sync is not needed for block quantization
-        if quantizer.block_sizes is not None:
+        block_sizes = quantizer.block_sizes
+        if block_sizes is not None:
             if hasattr(quantizer, "_padding"):
                 warnings.warn(
                     f"Found block-quantized padded {quantizer_type} for {linear_name}, amax will"
                     " not be synced correctly."
                 )
-            # Skip amax sync for INT4 / W4A8 block quantization
+            # Skip amax sync for INT4 / W4A8 block quantization and per-channel block sizes. The
+            # forward turns their ``axis`` into a tuple ``axes_for_sync`` never holds, but a rank that
+            # never ran it still holds the configured ``block_sizes``, so judge by those.
             # Sync amax for NVFP4 (dynamic per-block, static per-tensor quantized scale)
-            if getattr(quantizer.block_sizes, "type", None) == "dynamic":
+            per_channel = all(v is None for k, v in block_sizes.items() if isinstance(k, int))
+            if per_channel or block_sizes.get("type", "static") != "dynamic":
                 return
 
         # As in the DP/EP sync above: an enabled quantizer is synced on every rank, with or without

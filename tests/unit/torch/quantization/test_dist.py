@@ -176,10 +176,21 @@ def test_the_sync_keeps_a_calibrated_zero_apart_from_uncalibrated(cpu_dist_worke
     cpu_dist_workers.run(_zero_or_uncalibrated_helper, case=case)
 
 
-def _uneven_per_channel_helper(rank, size):
-    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=0))
-    if rank == 0:
-        quantizer._set_buffer("_amax", torch.full((4,), 3.0))
+# The forward turns per-token block sizes into a per-channel axis, which a rank that never ran it
+# does not see.
+_PER_CHANNEL_CFGS = {
+    "axis": {"num_bits": 8, "axis": 0},
+    "per-token-block-sizes": {"num_bits": 8, "block_sizes": {-1: None, "type": "dynamic"}},
+}
+
+
+def _uneven_per_channel_helper(rank, size, per_channel_cfg):
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(**_PER_CHANNEL_CFGS[per_channel_cfg]))
+    if rank == 0:  # only rank 0 calibrates it
+        quantizer.enable_calib()
+        quantizer.disable_quant()
+        quantizer(torch.ones(4, 8))
+        quantizer.load_calib_amax()
     # A rank left waiting in a collective its peer never joins gives up in seconds on this group.
     group = dist.new_group(timeout=timedelta(seconds=10))
     try:
@@ -193,10 +204,12 @@ def _uneven_per_channel_helper(rank, size):
     assert "unevenly-calibrated" in raised, raised
 
 
-def test_uneven_per_channel_calibration_fails_on_every_rank(cpu_dist_workers):
+@pytest.mark.parametrize("per_channel_cfg", list(_PER_CHANNEL_CFGS))
+def test_uneven_per_channel_calibration_fails_on_every_rank(cpu_dist_workers, per_channel_cfg):
     """A rank without the amax cannot rebuild its per-channel shape, so the sync fails, on every
-    rank together: one rank raising alone would leave the other waiting in the collective."""
-    cpu_dist_workers.run(_uneven_per_channel_helper)
+    rank together: one rank raising alone would leave the other waiting in the collective. Also
+    when only the calibrated rank's layout reads per-channel."""
+    cpu_dist_workers.run(_uneven_per_channel_helper, per_channel_cfg=per_channel_cfg)
 
 
 def _expert_input_amax_helper(rank, size, share):
@@ -227,16 +240,25 @@ def test_only_modules_that_opt_in_share_expert_input_amax_before_the_check(cpu_d
     cpu_dist_workers.run(_expert_input_amax_helper, share=share)
 
 
-def _tensor_parallel_sync_helper(rank, size, kv_cache):
+# Block sizes the forward turns into a tuple axis, which the tensor-parallel sync skips.
+_TP_UNSYNCED_BLOCK_SIZES = {
+    "static-blocks": {-1: 4},
+    "per-token-block-sizes": {-1: None, "type": "dynamic"},
+}
+
+
+def _tensor_parallel_sync_helper(rank, size, case):
     model = torch.nn.Sequential(torch.nn.Linear(16, 16))
     mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop=None)
     linear = model[0]
-    if kv_cache:
+    if case == "kv-cache":
         linear.k_bmm_quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
         linear.v_bmm_quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
         synced = [linear.k_bmm_quantizer, linear.v_bmm_quantizer]
     else:
         linear._is_column_parallel = True
+        if case in _TP_UNSYNCED_BLOCK_SIZES:
+            linear.input_quantizer.block_sizes = _TP_UNSYNCED_BLOCK_SIZES[case]
         synced = [linear.input_quantizer]
     # A rank left waiting for a peer that skips the sync gives up in seconds on this group.
     tp_group = dist.new_group(timeout=timedelta(seconds=10))
@@ -252,11 +274,21 @@ def _tensor_parallel_sync_helper(rank, size, kv_cache):
     finally:
         dist.destroy_process_group(tp_group)
     for quantizer in synced:
-        assert quantizer.amax is not None
-        assert quantizer.amax.item() == 1.0
+        if case in _TP_UNSYNCED_BLOCK_SIZES:
+            assert (getattr(quantizer, "_amax", None) is not None) == (rank == 0)
+        else:
+            assert quantizer.amax is not None
+            assert quantizer.amax.item() == 1.0
 
 
-@pytest.mark.parametrize("kv_cache", [False, True], ids=["column-parallel", "kv-cache"])
-def test_a_rank_without_amax_still_joins_the_tensor_parallel_sync(cpu_dist_workers, kv_cache):
+@pytest.mark.parametrize("case", ["column-parallel", "kv-cache"])
+def test_a_rank_without_amax_still_joins_the_tensor_parallel_sync(cpu_dist_workers, case):
     """Rather than leave the rank that has one waiting in the sync for it."""
-    cpu_dist_workers.run(_tensor_parallel_sync_helper, kv_cache=kv_cache)
+    cpu_dist_workers.run(_tensor_parallel_sync_helper, case=case)
+
+
+@pytest.mark.parametrize("case", list(_TP_UNSYNCED_BLOCK_SIZES))
+def test_a_rank_without_amax_skips_the_tensor_parallel_sync_its_peers_skip(cpu_dist_workers, case):
+    """Block quantizers are not synced across tensor parallelism. A calibrated rank tells by the
+    tuple axis its forward made of the block sizes, one that never ran it by the block sizes."""
+    cpu_dist_workers.run(_tensor_parallel_sync_helper, case=case)

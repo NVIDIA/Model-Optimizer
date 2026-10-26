@@ -1441,63 +1441,45 @@ class TensorQuantizer(nn.Module):
         group = parallel_group.group
         amax = getattr(self, "_amax", None)
         device = _collective_device(group)
-        # A DYNAMIC block quantizer (e.g. NVFP4 activation: per-block scales computed at runtime) stores only
-        # a per-TENSOR scalar amax (the global scale -> ``input_scale``); its block_sizes drive the runtime
-        # scales, not the stored amax shape. So treat it as per-tensor here -- only STATIC per-channel/
-        # per-block amax has a shape a have-not rank can't reconstruct.
-        _block = self.block_sizes
-        _static_non_per_tensor = self.axis is not None or (
-            _block is not None and _block.get("type", "static") != "dynamic"
+        # Every rank joins this all-reduce, and its result alone picks what follows, so every rank
+        # issues the same collectives. It carries what only the ranks holding an amax know: whether
+        # any rank calibrated the quantizer, and whether its amax is one value or a tensor
+        # (per-channel, static per-block). The layout attributes cannot tell: the forward rewrites
+        # ``axis`` and ``block_sizes``, so a rank that never ran it reads a different layout.
+        # One value -- per-tensor, or a dynamic block quantizer's global scale (NVFP4) -- rides along
+        # with its dtype, so a rank that never calibrated the quantizer still ends up with it.
+        # float32 throughout: NCCL hangs rather than raising when ranks pair mismatched dtypes, which a
+        # group split between calibrated and uncalibrated ranks otherwise would (Kimi-K3, NVFP4, EP64:
+        # 8 ranks held an expert input amax and 56 did not).
+        present, shaped, dtype_code = amax is not None, False, 0
+        if amax is not None:
+            shaped = amax.numel() != 1
+            dtype_code = _AMAX_DTYPES.index(amax.dtype) + 1 if amax.dtype in _AMAX_DTYPES else 0
+        # MAX turns [present, shaped, -shaped] into [any calibrated, any tensor, -(all tensors)].
+        packed = torch.tensor(
+            [0.0, present, dtype_code, shaped, -shaped], dtype=torch.float32, device=device
         )
-        if _static_non_per_tensor:
-            # A non-per-tensor amax (per-channel / static per-block) has a shape that is NOT known locally
-            # when this rank never calibrated the quantizer, so a have-not rank cannot join the MAX all-reduce
-            # with a correctly-shaped zero. Before diverging, every rank symmetrically agrees -- via a single MAX
-            # all-reduce of the packed flag ``[present, -present]`` (which yields ``[any_present,
-            # -all_present]``) that all ranks join -- on the group-wide calibration state:
-            #   - none present -> the quantizer is uncalibrated group-wide (a module that no rank's calib
-            #     data exercised, e.g. a VLM path never hit by the image-text batches); skip the sync and
-            #     leave ``_amax`` None so downstream ``amax is None`` handling applies.
-            #   - all present  -> reduce the amax itself below.
-            #   - some present -> genuinely uneven calibration whose amax shape the have-nots cannot recover;
-            #     every rank raises together (symmetric, no deadlock).
-            present = 1.0 if amax is not None else 0.0
-            flag = torch.tensor([present, -present], dtype=torch.float32, device=device)
-            dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=group)
-            any_present = bool(flag[0] > 0)
-            all_present = bool(-flag[1] > 0)
-            if not any_present:
-                return
-            if not all_present:
+        if amax is not None and not shaped:
+            packed[0] = amax.detach().reshape(()).to(device=device, dtype=torch.float32)
+        _all_reduce_amax(packed, group)
+        if not bool(packed[1] > 0):
+            return  # no rank calibrated it
+        if bool(packed[3] > 0):
+            # A tensor amax has a shape only the ranks holding one know, so the ranks reduce it only
+            # when every rank holds one, and all raise together otherwise.
+            if not bool(-packed[4] > 0):
                 raise RuntimeError(
                     f"Cannot amax-sync unevenly-calibrated non-per-tensor quantizer {type(self).__name__}: "
                     "some ranks calibrated it but others did not, and its amax shape is not locally known on "
                     "the have-nots. Ensure every rank calibrates it (e.g. increase --calib-size)."
                 )
-            assert amax is not None  # all_present
+            assert amax is not None  # every rank holds one
             # Every rank calibrated it with the same calibrator, so shapes and dtypes agree.
             reduced = amax.to(device=device)  # the backend's device; a no-op when already there
             _all_reduce_amax(reduced, group)
             if reduced is not amax:
                 amax.copy_(reduced)
             return
-
-        # Per-tensor (or dynamic-block, whose stored amax is a scalar): one all-reduce carries the value,
-        # whether this rank calibrated the quantizer, and the dtype it did so in, so a rank that never
-        # calibrated it joins with a locally known scalar and still ends up with the group's amax.
-        # float32 throughout: NCCL hangs rather than raising when ranks pair mismatched dtypes, which a
-        # group split between calibrated and uncalibrated ranks otherwise would (Kimi-K3, NVFP4, EP64:
-        # 8 ranks held an expert input amax and 56 did not).
-        packed = torch.zeros(3, dtype=torch.float32, device=device)
-        if amax is not None:
-            packed[0] = amax.detach().reshape(()).to(device=device, dtype=torch.float32)
-            packed[1] = 1.0
-            packed[2] = (
-                float(_AMAX_DTYPES.index(amax.dtype) + 1) if amax.dtype in _AMAX_DTYPES else 0.0
-            )
-        _all_reduce_amax(packed, group)
-        if not bool(packed[1] > 0):
-            return  # no rank calibrated it
         if amax is not None:
             amax.copy_(packed[0])
         else:
