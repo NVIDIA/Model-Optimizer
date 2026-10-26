@@ -1,0 +1,20 @@
+defaults:
+  - /pruning/pruning_defaults@_here_
+
+eval_samples: 10
+activations_log_dir: ${puzzle_dir}/pruning/pruning_scores/expert_removal/${pruning.experiment_id}
+pruning_mixin:
+  _target_: modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin.ExpertRemovalPruningMixIn
+  layer_descriptor:
+    _target_: modelopt.torch.puzzletron.anymodel.models.qwen3_vl.qwen3_vl_model_descriptor.Qwen3VLExpertRemovalLayerDescriptor
+    target_name: "mlp"
+
+hook_class: ${get_object:modelopt.torch.prune.importance_hooks.expert_removal_hooks.Qwen3VLRemoveExpertsIndependentHook}
+activation_hooks_kwargs:
+
+# num_experts_to_keep must be >= num_experts_per_tok (can't route to more experts than exist)
+num_experts_to_keep_list: [8] # num_experts in test model is 16, num_experts_per_tok is 8
+mlp_init_mode: "ExpertRemoval"
+mlp_init_config_yaml:
+  expert_scores_key: "expert_ranks_mse"
+  layer_prefix_template: "model.language_model.layers.{layer_idx}.mlp"

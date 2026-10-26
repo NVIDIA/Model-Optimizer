@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  nvfp4_static: configs/numerics/nvfp4_static
+  nvfp4: configs/numerics/nvfp4
+
+metadata:
+  recipe_type: ptq
+  description: NVFP4 weight and activation (W4A4), gptq layerwise calibration.
+quantize:
+  algorithm:
+    method: gptq
+    layerwise: true
+    layerwise_checkpoint_dir: output/layerwise_ckpts/
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*weight_quantizer'
+      cfg:
+        $import: nvfp4_static
+    - quantizer_name: '*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*[kv]_bmm_quantizer'
+      enable: false
+    - $import: default_disabled_quantizers

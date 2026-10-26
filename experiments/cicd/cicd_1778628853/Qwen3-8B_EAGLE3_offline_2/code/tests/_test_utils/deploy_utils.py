@@ -1,0 +1,427 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import itertools
+import os
+import subprocess
+import sys
+
+import pytest
+import torch
+
+# Cache for available backends detection (computed once at import time)
+_AVAILABLE_BACKENDS = None
+
+
+def get_available_backends():
+    """Detect which backends are available in the current environment.
+
+    Returns:
+        set: A set of available backend names ('trtllm', 'vllm', 'sglang')
+    """
+    global _AVAILABLE_BACKENDS
+    if _AVAILABLE_BACKENDS is not None:
+        return _AVAILABLE_BACKENDS
+
+    available = set()
+
+    try:
+        import tensorrt_llm  # noqa: F401
+
+        available.add("trtllm")
+    except ImportError:
+        pass
+
+    try:
+        import vllm  # noqa: F401
+
+        available.add("vllm")
+    except ImportError:
+        pass
+
+    try:
+        import sglang  # noqa: F401
+
+        available.add("sglang")
+    except ImportError:
+        pass
+
+    _AVAILABLE_BACKENDS = available
+    print(f"[deploy_utils] Detected available backends: {available}")
+    return _AVAILABLE_BACKENDS
+
+
+def _run_trtllm_deploy(
+    model_id: str,
+    tensor_parallel_size: int,
+    mini_sm: int,
+    attn_backend: str,
+    base_model: str,
+    eagle3_one_model: bool,
+) -> None:
+    """Top-level entry for subprocess: run TensorRT-LLM deploy in a child process."""
+    try:
+        deployer = ModelDeployer(
+            backend="trtllm",
+            model_id=model_id,
+            tensor_parallel_size=tensor_parallel_size,
+            mini_sm=mini_sm,
+            attn_backend=attn_backend,
+            base_model=base_model,
+            eagle3_one_model=eagle3_one_model,
+        )
+        deployer._deploy_trtllm_impl()
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        pytest.fail(traceback.format_exc())
+
+
+def _run_vllm_deploy(
+    model_id: str,
+    tensor_parallel_size: int,
+    mini_sm: int,
+    attn_backend: str,
+    base_model: str,
+    eagle3_one_model: bool,
+) -> None:
+    """Top-level entry for subprocess: run vLLM deploy in a child process."""
+    try:
+        deployer = ModelDeployer(
+            backend="vllm",
+            model_id=model_id,
+            tensor_parallel_size=tensor_parallel_size,
+            mini_sm=mini_sm,
+            attn_backend=attn_backend,
+            base_model=base_model,
+            eagle3_one_model=eagle3_one_model,
+        )
+        deployer._deploy_vllm_impl()
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        pytest.fail(traceback.format_exc())
+
+
+def _run_sglang_deploy(
+    model_id: str,
+    tensor_parallel_size: int,
+    mini_sm: int,
+    attn_backend: str,
+    base_model: str,
+    eagle3_one_model: bool,
+) -> None:
+    """Top-level entry for subprocess: run SGLang deploy in a child process."""
+    try:
+        deployer = ModelDeployer(
+            backend="sglang",
+            model_id=model_id,
+            tensor_parallel_size=tensor_parallel_size,
+            mini_sm=mini_sm,
+            attn_backend=attn_backend,
+            base_model=base_model,
+            eagle3_one_model=eagle3_one_model,
+        )
+        deployer._deploy_sglang_impl()
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        pytest.fail(traceback.format_exc())
+
+
+def _run_deploy_via_subprocess(
+    backend: str,
+    model_id: str,
+    tensor_parallel_size: int,
+    mini_sm: int,
+    attn_backend: str,
+    base_model: str,
+    eagle3_one_model: bool,
+) -> None:
+    """Run deploy in a subprocess and print its stdout/stderr so pytest capture=tee-sys captures to DB."""
+    tests_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    project_root = os.path.dirname(tests_dir)
+    env = {
+        **os.environ,
+        "PYTHONPATH": project_root + os.pathsep + os.environ.get("PYTHONPATH", ""),
+    }
+    code = f"""from _test_utils.deploy_utils import _run_{backend}_deploy
+_run_{backend}_deploy(
+    {model_id!r}, {tensor_parallel_size}, {mini_sm}, {attn_backend!r}, {base_model!r}, {eagle3_one_model}
+)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tests_dir,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if result.stdout:
+        print(result.stdout, end="", flush=True)
+    result.check_returncode()
+
+
+# Common test prompts for all backends
+COMMON_PROMPTS = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
+
+
+class ModelDeployer:
+    def __init__(
+        self,
+        backend: str = "trtllm",
+        model_id: str = "",
+        tensor_parallel_size: int = 1,
+        mini_sm: int = 89,
+        attn_backend: str = "TRTLLM",
+        base_model: str = "",
+        eagle3_one_model: bool = True,
+    ):
+        """
+        Initialize the ModelDeployer.
+
+        Args:
+            backend: The backend to use ('vllm', 'trtllm', or 'sglang')
+            model_id: Path to the model
+            tensor_parallel_size: Tensor parallel size for distributed inference
+            mini_sm: Minimum SM (Streaming Multiprocessor) requirement for the model
+            attn_backend: is for TRT LLM deployment
+        """
+        self.backend = backend
+        self.model_id = model_id
+        self.tensor_parallel_size = tensor_parallel_size
+        self.mini_sm = mini_sm
+        self.attn_backend = attn_backend
+        self.base_model = base_model
+        self.eagle3_one_model = eagle3_one_model
+
+    def run(self):
+        """Run the deployment based on the specified backend."""
+        if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
+            pytest.skip("CUDA is not available")
+            return
+        if torch.cuda.get_device_capability() < (
+            self.mini_sm // 10,
+            self.mini_sm % 10,
+        ):
+            pytest.skip(reason=f"Requires sm{self.mini_sm} or higher")
+            return
+
+        if torch.cuda.device_count() < self.tensor_parallel_size:
+            pytest.skip(reason=f"Requires at least {self.tensor_parallel_size} GPUs")
+            return
+
+        print(f"Deploying model: {self.model_id} with backend: {self.backend}")
+        print(f"Tensor parallel size: {self.tensor_parallel_size}")
+        # Use subprocess + capture so pytest capture=tee-sys (and DB plugins) see deploy output.
+        if self.backend in ("vllm", "trtllm", "sglang"):
+            _run_deploy_via_subprocess(
+                backend=self.backend,
+                model_id=self.model_id,
+                tensor_parallel_size=self.tensor_parallel_size,
+                mini_sm=self.mini_sm,
+                attn_backend=self.attn_backend,
+                base_model=self.base_model,
+                eagle3_one_model=self.eagle3_one_model,
+            )
+        else:
+            raise ValueError(f"Unknown backend: {self.backend}")
+
+    def _deploy_trtllm_impl(self):
+        """Run TensorRT-LLM deploy (used by subprocess in run())."""
+        from tensorrt_llm import LLM, SamplingParams
+        from tensorrt_llm.llmapi import CudaGraphConfig, EagleDecodingConfig, KvCacheConfig
+
+        sampling_params = SamplingParams(max_tokens=32)
+        qwen3_models = (
+            "nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4",
+            "nvidia/Qwen3-Next-80B-A3B-Thinking-NVFP4",
+        )
+        nemotron_models = (
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+        )
+        kv_cache_config = KvCacheConfig(
+            enable_block_reuse=self.model_id not in qwen3_models,
+            free_gpu_memory_fraction=0.8,
+            mamba_ssm_cache_dtype="float32" if self.model_id not in nemotron_models else "auto",
+        )
+        base_kw = {
+            "tensor_parallel_size": self.tensor_parallel_size,
+            "enable_attention_dp": False,
+            "attn_backend": self.attn_backend,
+            "trust_remote_code": True,
+            "max_batch_size": 8,
+        }
+
+        if "eagle" in self.model_id.lower():
+            spec_config = EagleDecodingConfig(
+                max_draft_len=3,
+                speculative_model_dir=self.model_id,
+                eagle3_one_model=self.eagle3_one_model,
+            )
+            llm = LLM(
+                model=self.base_model,
+                disable_overlap_scheduler=True,
+                enable_autotuner=False,
+                speculative_config=spec_config,
+                cuda_graph_config=CudaGraphConfig(max_batch_size=1),
+                kv_cache_config=kv_cache_config,
+                **base_kw,
+            )
+        else:
+            llm = LLM(
+                model=self.model_id,
+                kv_cache_config=kv_cache_config,
+                **base_kw,
+            )
+
+        outputs = llm.generate(COMMON_PROMPTS, sampling_params)
+        # Print outputs
+        for output in outputs:
+            prompt = output.prompt
+            generated_text = output.outputs[0].text
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        del llm
+
+    def _deploy_vllm_impl(self):
+        """Run vLLM deploy (used by subprocess in run())."""
+        from vllm import LLM, SamplingParams
+
+        quantization_method = "modelopt"
+        if "fp4" in self.model_id.lower():
+            quantization_method = "modelopt_fp4"
+        llm = LLM(
+            model=self.model_id,
+            quantization=quantization_method,
+            tensor_parallel_size=self.tensor_parallel_size,
+            trust_remote_code=True,
+        )
+        sampling_params = SamplingParams(temperature=0.8, top_p=0.9)
+        outputs = llm.generate(COMMON_PROMPTS, sampling_params)
+
+        # Assertions and output
+        assert len(outputs) == len(COMMON_PROMPTS), (
+            f"Expected {len(COMMON_PROMPTS)} outputs, got {len(outputs)}"
+        )
+
+        for i, output in enumerate(outputs):
+            assert output.prompt == COMMON_PROMPTS[i], f"Prompt mismatch at index {i}"
+            assert hasattr(output, "outputs"), f"Output {i} missing 'outputs' attribute"
+            assert len(output.outputs) > 0, f"Output {i} has no generated text"
+            assert hasattr(output.outputs[0], "text"), f"Output {i} missing 'text' attribute"
+            assert isinstance(output.outputs[0].text, str), f"Output {i} text is not a string"
+            assert len(output.outputs[0].text) > 0, f"Output {i} generated empty text"
+
+            print(f"Model: {self.model_id}")
+            print(f"Prompt: {output.prompt!r}, Generated text: {output.outputs[0].text!r}")
+            print("-" * 50)
+        del llm
+
+    def _deploy_sglang_impl(self):
+        """Run SGLang deploy (used by subprocess in run())."""
+        import sglang as sgl
+
+        quantization_method = "modelopt"
+        if "fp4" in self.model_id.lower():
+            quantization_method = "modelopt_fp4"
+        if "eagle" in self.model_id.lower():
+            llm = sgl.Engine(
+                model_path=self.base_model,
+                speculative_algorithm="EAGLE3",
+                speculative_num_steps=3,
+                speculative_eagle_topk=1,
+                speculative_num_draft_tokens=4,
+                speculative_draft_model_path=self.model_id,
+                tp_size=self.tensor_parallel_size,
+                trust_remote_code=True,
+                mem_fraction_static=0.7,
+                context_length=1024,
+            )
+        elif self.model_id in (
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+        ):
+            llm = sgl.Engine(
+                model_path=self.model_id,
+                quantization=quantization_method,
+                tp_size=self.tensor_parallel_size,
+                trust_remote_code=True,
+                attention_backend="flashinfer",
+            )
+        else:
+            llm = sgl.Engine(
+                model_path=self.model_id,
+                quantization=quantization_method,
+                tp_size=self.tensor_parallel_size,
+                trust_remote_code=True,
+            )
+        print(llm.generate(["What's the age of the earth? "]))
+        llm.shutdown()
+        del llm
+
+
+class ModelDeployerList:
+    def __init__(self, **params):
+        self.params = {}
+        for key, value in params.items():
+            if isinstance(value, (list, tuple)):
+                self.params[key] = list(value)
+            else:
+                self.params[key] = [value]
+
+        # Filter backends to only include available ones
+        if "backend" in self.params:
+            available = get_available_backends()
+            original_backends = self.params["backend"]
+            self.params["backend"] = [b for b in original_backends if b in available]
+
+        # Pre-generate all deployers for pytest compatibility
+        self._deployers = list(self._generate_deployers())
+
+    def _generate_deployers(self):
+        # If no backends available after filtering, yield nothing
+        if "backend" in self.params and not self.params["backend"]:
+            return
+
+        for values in itertools.product(*self.params.values()):
+            deployer = ModelDeployer(**dict(zip(self.params.keys(), values)))
+            # Set test case ID in format "model_id_backend"
+            deployer.test_id = f"{deployer.model_id}_{deployer.backend}"
+            yield deployer
+
+    def __iter__(self):
+        return iter(self._deployers)
+
+    def __len__(self):
+        return len(self._deployers)
+
+    def __getitem__(self, index):
+        return self._deployers[index]
+
+    def __str__(self):
+        return f"ModelDeployerList({len(self._deployers)} items)"
+
+    def __repr__(self):
+        return f"ModelDeployerList({len(self._deployers)} items)"

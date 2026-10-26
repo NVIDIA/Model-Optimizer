@@ -1,0 +1,43 @@
+# Data synthesis for Qwen3.5-4B using the Speculative-Decoding-Multilingual-Prompt-v2 dataset.
+#
+# Starts a TRT-LLM server with Qwen3.5-4B, then runs query.py against it to generate
+# synthetic assistant responses for EAGLE3 draft model training.
+#
+# Local run (requires GPU + Docker):
+#   uv run launch.py --yaml examples/Qwen/Qwen3.5-4B/query_specdec_dataset.yaml \
+#       hf_local=/home/omniml_data_3/hf-local --yes
+#
+# Slurm run:
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3.5-4B/query_specdec_dataset.yaml --yes
+
+job_name: Qwen3.5-4B_specdec_query
+
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3.5-4B
+
+  task_0:
+    script: common/vllm/query.sh
+    args:
+      - --model <<global_vars.hf_model>>
+      - --tensor-parallel-size 1
+      - --max-num-seqs 32
+      - --trust-remote-code
+      - --gpu-memory-utilization 0.87
+      - --
+      - --data /hf-local/nvidia/Speculative-Decoding-Multilingual-Prompt-v2/sample-1K.jsonl
+      - --save /scratchspace/data
+      - --num-shards 10
+      - --num-proc 4
+      - --max-tokens 4096
+    environment:
+      - HF_LOCAL: /hf-local
+      - LOGNAME: chenhany
+      - USER: chenhany
+      - HOME: /tmp
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: vllm/vllm-openai:qwen3_5-cu130

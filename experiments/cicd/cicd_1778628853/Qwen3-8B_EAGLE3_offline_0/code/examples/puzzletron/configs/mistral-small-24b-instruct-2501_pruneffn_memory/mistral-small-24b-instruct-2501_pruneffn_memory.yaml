@@ -1,0 +1,21 @@
+defaults:
+  - Mistral-Small-24B
+  - _self_
+
+# Input Hugging Face model to compress
+input_hf_model_path: /workspace/hf_models/mistralai/Mistral-Small-24B-Instruct-2501
+
+# Dataset path for pruning and NAS scoring
+dataset_path: /workspace/datasets/Nemotron-Post-Training-Dataset-v2
+
+# Working directory for compression outputs
+puzzle_dir: /workspace/puzzle_dir
+
+# MIP memory constraint (in MiB)
+mip:
+  human_constraints:
+    target_memory: 234_000 # 234 GiB
+
+# FFN intermediate sizes to search over (heterogeneous architecture)
+pruning:
+  intermediate_size_list: [8192, 16384, 24576]  # teacher_intermediate_size is 32768
