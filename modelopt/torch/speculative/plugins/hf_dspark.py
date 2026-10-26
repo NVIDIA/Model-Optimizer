@@ -376,6 +376,9 @@ class HFDSparkModel(HFDFlashModel):
         anchor_positions, block_keep_mask = self._sample_anchor_positions(
             seq_len, loss_mask, device
         )
+        loss_mask, loss_scale = self._position_weighting(
+            loss_mask, block_keep_mask, kwargs.pop("num_items_in_batch", None)
+        )
         n_blocks = anchor_positions.shape[1]
 
         if n_blocks == 0 or not block_keep_mask.any():
@@ -422,7 +425,9 @@ class HFDSparkModel(HFDFlashModel):
             base_outputs,
         )
 
-        return ModelOutput(loss=loss, logits=None, train_acc=[[accuracy]], dspark_metrics=metrics)
+        return ModelOutput(
+            loss=loss * loss_scale, logits=None, train_acc=[[accuracy]], dspark_metrics=metrics
+        )
 
     @torch.no_grad()
     def pseudo_speculative_generate(self, input_ids, steps=1):

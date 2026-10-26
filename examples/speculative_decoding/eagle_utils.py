@@ -29,6 +29,7 @@ from scripts.ar_validate import validate_ar
 from transformers import Trainer, TrainerCallback
 
 import modelopt
+from modelopt.torch.speculative.dflash.dflash_model import DFlashModel
 from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
@@ -321,7 +322,9 @@ class EagleTrainerWithAccLog(Trainer):
             self.state.training_accs = []
         if not hasattr(self.state, "component_losses"):
             self.state.component_losses = {"eagle": [], "preservation": []}
-        kwargs.pop("num_items_in_batch", None)
+        # DFlash-family models weight their loss by it; the others average per micro-batch.
+        if not isinstance(self.accelerator.unwrap_model(args[0]), DFlashModel):
+            kwargs.pop("num_items_in_batch", None)
         loss, outputs = super().compute_loss(return_outputs=True, *args, **kwargs)
         if hasattr(outputs, "train_acc") and any(outputs.train_acc):
             self.state.training_accs.append(outputs.train_acc)

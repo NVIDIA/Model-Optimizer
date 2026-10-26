@@ -30,7 +30,9 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from _test_utils.torch.speculative.dflash import get_dflash_config
 from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_tokenizer
+from transformers import TrainingArguments
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.eagle.default_config import default_eagle_config
@@ -765,3 +767,30 @@ def test_collator_batches_multiple(tmp_path):
         train_len,
         HIDDEN_SIZE,
     )
+
+
+# ---------------------------------------------------------------------------
+# EagleTrainerWithAccLog
+# ---------------------------------------------------------------------------
+
+
+def test_trainer_hands_num_items_in_batch_to_dflash(tmp_path, monkeypatch):
+    """DFlash-family losses normalize by it; without it each micro-batch is a plain mean."""
+    model = get_tiny_llama(num_hidden_layers=4)
+    mtsp.convert(model, [("dflash", get_dflash_config())])
+    model.train()
+    args = TrainingArguments(output_dir=str(tmp_path), report_to="none", use_cpu=True)
+    trainer = _eagle_utils.EagleTrainerWithAccLog(model=model, args=args)
+
+    received = []
+    forward = model.forward
+
+    def spy(**kwargs):
+        received.append(kwargs.get("num_items_in_batch"))
+        return forward(**kwargs)
+
+    monkeypatch.setattr(model, "forward", spy)
+    ids = torch.randint(1, 32, (1, SEQ_LEN))
+    inputs = {"input_ids": ids, "attention_mask": torch.ones_like(ids), "labels": ids}
+    trainer.compute_loss(model, inputs, num_items_in_batch=torch.tensor(12))
+    assert received == [12]

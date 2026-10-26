@@ -230,6 +230,10 @@ class _DFlashLossTerms(NamedTuple):
 class HFDFlashModel(DFlashModel):
     """DFlash Model for HuggingFace transformers."""
 
+    # The training loss is normalized by HF Trainer's num_items_in_batch, also on base
+    # models that declare otherwise (see _position_weighting).
+    accepts_loss_kwargs = True
+
     @property
     def _base_model(self):
         return self.get_submodule(self.base_model_path)
@@ -629,6 +633,25 @@ class HFDFlashModel(DFlashModel):
         keep = cols < torch.minimum(valid_counts, cap).unsqueeze(1)
         anchors = torch.where(keep, anchors, torch.tensor(0, dtype=torch.long, device=device))
         return anchors, keep
+
+    def _position_weighting(self, loss_mask, block_keep_mask, num_items_in_batch):
+        """Weight the loss so that every anchor position of the global batch counts the same.
+
+        A sequence's sampled anchors (at most ``dflash_num_anchors``) stand for all its anchor
+        positions, and the micro-batch's mean loss is scaled by its share of the global batch's
+        tokens (``num_items_in_batch``, which HF Trainer counts across micro-batches and ranks).
+        Otherwise a micro-batch of one sequence weighs the same whatever its answer length.
+
+        Returns ``loss_mask`` with each sequence's rows reweighted, and the micro-batch's loss
+        scale.
+        """
+        max_anchor = max(loss_mask.shape[1] - self.dflash_block_size, 0)
+        positions = (loss_mask[:, : max_anchor + 1] > 0.5).sum(dim=1)
+        sampled = block_keep_mask.sum(dim=1).clamp(min=1)
+        loss_mask = loss_mask * (positions / sampled).unsqueeze(1)
+        if num_items_in_batch is None:  # eval, or a trainer that averages per micro-batch
+            return loss_mask, 1.0
+        return loss_mask, positions.sum() / num_items_in_batch
 
     def _build_noise_embedding(self, input_ids, anchor_positions, block_keep_mask, n_blocks):
         """Build noise embeddings: anchor token at block start, mask_token elsewhere."""
@@ -1036,6 +1059,9 @@ class HFDFlashModel(DFlashModel):
         anchor_positions, block_keep_mask = self._sample_anchor_positions(
             seq_len, loss_mask, device
         )
+        loss_mask, loss_scale = self._position_weighting(
+            loss_mask, block_keep_mask, kwargs.pop("num_items_in_batch", None)
+        )
         n_blocks = anchor_positions.shape[1]
 
         if n_blocks == 0 or not block_keep_mask.any():
@@ -1087,7 +1113,7 @@ class HFDFlashModel(DFlashModel):
         )
 
         return ModelOutput(
-            loss=loss,
+            loss=loss * loss_scale,
             logits=base_outputs.logits,
             train_acc=[[accuracy]],
         )
