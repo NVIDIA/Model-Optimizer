@@ -733,10 +733,10 @@ def _kv_attention(k_cfg, v_cfg, k_amax=896.0, v_amax=224.0) -> nn.Module:
 @pytest.mark.parametrize(
     ("k_cfg", "v_cfg", "quantization_format", "k_scale", "v_scale"),
     [
-        # FP8 scales are amax / 448, raised to at least 1.0 like the other exporters do.
+        # Scales are amax / 448; FP8 ones are raised to at least 1.0 like the other exporters do.
         (_FP8_KV, _FP8_KV, "FP8", 2.0, 1.0),
-        (_NVFP4_KV, _NVFP4_KV, "NVFP4", 896 / (6 * 448), 224 / (6 * 448)),
-        (_FP8_KV, _NVFP4_KV, "FP8_K_NVFP4_V", 2.0, 224 / (6 * 448)),
+        (_NVFP4_KV, _NVFP4_KV, "NVFP4", 2.0, 0.5),
+        (_FP8_KV, _NVFP4_KV, "FP8_K_NVFP4_V", 2.0, 0.5),
     ],
 )
 def test_kv_cache_capture(k_cfg, v_cfg, quantization_format, k_scale, v_scale):
