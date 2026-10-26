@@ -90,6 +90,8 @@ jobs:
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+      - if: contains(matrix.container_image, 'nvidia/nemo:')
+        uses: ./.github/actions/megatron-from-source
       - name: Run gpu tests
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
@@ -99,9 +101,9 @@ jobs:
           # sys.monitoring records the same lines as the default C tracer at a fraction of the
           # overhead on import-heavy worker processes. Needs Python 3.12+.
           COVERAGE_CORE: sysmon
-          # Tests marked `manual` (real-weight downloads and the like) run on nightly and on-demand
-          # runs, as in the unit tests, not on pull requests (copy-pr-bot runs those as `push`).
-          PYTEST_ADDOPTS: ${{ github.event_name != 'push' && '--run-manual' || '' }}
+          # Tests marked `manual` (real-weight downloads and the like) or `nightly` run on nightly and
+          # on-demand runs, as in the unit tests, not on pull requests (copy-pr-bot runs those as `push`).
+          PYTEST_ADDOPTS: ${{ github.event_name != 'push' && '--run-manual --run-nightly' || '' }}
         run: |
           # Use `python3` (the vllm image has no `python` on PATH)
           python3 -m pip install nox && nox -s ${{ matrix.example }}

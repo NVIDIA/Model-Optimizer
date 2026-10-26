@@ -119,18 +119,21 @@ def gptq_fused_block_scalar(
     qw_block = torch.empty_like(w_block)
     err_block = torch.empty_like(w_block)
 
-    _gptq_scalar_kernel[(num_rows,)](
-        w_block.contiguous(),
-        qw_block,
-        err_block,
-        block_amax.contiguous(),
-        global_scale,
-        h_inv_cho_blk.contiguous(),
-        num_rows,
-        block_amax.shape[1],
-        quant_block_size,
-        block_start,
-        BLOCK_SIZE=block_size,
-    )
+    # Triton launches on the current device; a model sharded with device_map="auto" keeps later
+    # layers on other GPUs, where launching from the current one reads another GPU's memory.
+    with torch.cuda.device(w_block.device):
+        _gptq_scalar_kernel[(num_rows,)](
+            w_block.contiguous(),
+            qw_block,
+            err_block,
+            block_amax.contiguous(),
+            global_scale,
+            h_inv_cho_blk.contiguous(),
+            num_rows,
+            block_amax.shape[1],
+            quant_block_size,
+            block_start,
+            BLOCK_SIZE=block_size,
+        )
 
     return qw_block, err_block

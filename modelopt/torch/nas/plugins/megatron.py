@@ -1252,13 +1252,34 @@ class _DynamicMambaMixer(DynamicModule):
         """Return the sliced data based on mamba_num_heads's active_slice."""
         return get_sliced_tensor(mod, data, "mamba_num_heads")
 
+    def train(self, mode: bool = True):
+        """Resize MCore's decode cache to the active heads before MCore refreshes it on ``eval()``."""
+        _resize_mamba_decode_cache(self)
+        return super().train(mode)
+
     def export(self) -> torch.nn.Module:
         """Export the dynamic module to a torch.nn.Module."""
         self.in_proj.export()
         self.out_proj.export()
         if self.rmsnorm:
             self.norm.export()
-        return super().export()
+        mod = super().export()
+        _resize_mamba_decode_cache(mod)
+        return mod
+
+
+def _resize_mamba_decode_cache(mixer: torch.nn.Module) -> None:
+    """Resize newer MCore's decode cache when ModelOpt changes the active head count.
+
+    ModelOpt slices ``A_log``, but MCore's ``_A_neg_exp_cache`` keeps its original shape. Allocate
+    matching storage and mark it stale so MCore's ``refresh_cache()`` recomputes ``-exp(A_log)``
+    from the active heads before using the cache.
+    """
+    # TODO: Consider resizing and invalidating the cache whenever ModelOpt changes the active heads.
+    cache = getattr(mixer, "_A_neg_exp_cache", None)
+    if cache is not None and cache.shape != mixer.A_log.shape:
+        mixer._A_neg_exp_cache = torch.empty_like(mixer.A_log, dtype=torch.float32)
+        mixer._A_neg_exp_cache_stale = True
 
 
 class _DynamicMambaLayer(DynamicModule):

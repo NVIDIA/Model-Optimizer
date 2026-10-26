@@ -140,6 +140,16 @@ def default_worker_teardown(rank, world_size):
     torch.cuda.empty_cache()
 
 
+def reseeding_worker_teardown(rank, world_size):
+    """``default_worker_teardown``, then the seed a freshly spawned rank starts from.
+
+    A job that draws a different amount of randomness on each rank would otherwise leave the next
+    job's ranks out of step, where spawned ranks would start it in step.
+    """
+    default_worker_teardown(rank, world_size)
+    torch.manual_seed(1234)
+
+
 class DistributedWorkerPool:
     """Persistent worker pool that keeps distributed processes alive across multiple test dispatches.
 

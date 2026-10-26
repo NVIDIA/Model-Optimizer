@@ -67,8 +67,8 @@ jobs:
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
-          # Everything but PRs also runs the slow tests marked ``manual`` (e.g. AutoNAS).
-          PYTEST_EXTRA: ${{ github.event_name != 'pull_request' && '--run-manual' || '' }}
+          # Everything but PRs also runs the slow tests marked ``manual`` (e.g. AutoNAS) and ``nightly``.
+          PYTEST_EXTRA: ${{ github.event_name != 'pull_request' && '--run-manual --run-nightly' || '' }}
           # sys.monitoring records the same lines as the default C tracer at a fraction of the overhead
           COVERAGE_CORE: sysmon
           # One single-threaded xdist worker per vCPU (`-n auto` counts physical cores); torch's

@@ -41,6 +41,12 @@ def pytest_addoption(parser):
         help="Run manual tests",
     )
     parser.addoption(
+        "--run-nightly",
+        action="store_true",
+        default=False,
+        help="Run nightly tests (skipped on pull requests)",
+    )
+    parser.addoption(
         "--run-release",
         action="store_true",
         default=False,
@@ -69,6 +75,7 @@ def pytest_collection_modifyitems(config, items):
     """Skip flag-gated tests and apply a default per-test timeout based on the test directory."""
     skip_marks = [
         ("manual", "--run-manual"),
+        ("nightly", "--run-nightly"),
         ("release", "--run-release"),
     ]
 

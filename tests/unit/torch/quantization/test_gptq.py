@@ -17,9 +17,11 @@
 
 from functools import partial
 
+import pytest
 import torch
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 
+import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.utils.calib_utils import GPTQHelper, update_hessian
 from modelopt.torch.utils.distributed import ParallelState
 
@@ -121,6 +123,33 @@ def test_update_hessian_zero_token_input_noops():
     assert updated_hessian is hessian
     assert new_n_samples == n_samples
     torch.testing.assert_close(hessian, expected_hessian)
+
+
+@pytest.mark.parametrize(("input_quantized", "forwards"), [(False, 1), (True, 2)])
+def test_gptq_runs_a_max_calibration_forward_only_for_activation_amax(input_quantized, forwards):
+    """Weight amax comes from the weights; only an input quantizer needs a forward before GPTQ's."""
+    quant_cfg = [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}, "enable": True},
+    ]
+    if input_quantized:
+        quant_cfg.append(
+            {
+                "quantizer_name": "*input_quantizer",
+                "cfg": {"num_bits": 8, "axis": None},
+                "enable": True,
+            }
+        )
+    calls = []
+
+    def forward_loop(model):
+        calls.append(model)
+        model(torch.randn(4, 32))
+
+    config = {"quant_cfg": quant_cfg, "algorithm": {"method": "gptq", "block_size": 16}}
+    mtq.quantize(torch.nn.Linear(32, 8, bias=False), config, forward_loop)
+
+    assert len(calls) == forwards
 
 
 def _gptq_hessian_dp_sync_helper(rank, size, token_counts):

@@ -198,7 +198,9 @@ nox -s "unit-3.12(torch_211, tf_latest)"
   subprocesses (`spawn_multiprocess_job`, `subprocess.run` importing torch), train for many steps, or build
   real-size models belong in `tests/gpu*`; batch several cases into one spawn rather than one spawn per case,
   or reuse the session-scoped `cpu_dist_workers` fixture for multi-rank CPU tests.
-  Slow tests for features without active maintenance (e.g. AutoNAS) should be `@pytest.mark.manual` or nightly-only.
+  Slow tests for features without active maintenance (e.g. AutoNAS) should be `@pytest.mark.manual` or `@pytest.mark.nightly`.
+  `nightly` tests are skipped on pull requests and run in the scheduled and on-demand CI; both marks are skipped unless
+  you pass `--run-nightly` / `--run-manual`.
 - **Exercise the behavior a test claims to validate.** Mocks are useful for focused interface and wiring coverage, but
   replacing the implementation under test does not validate its real behavior. Include an end-to-end test that runs
   the actual implementation whenever the test claims backend or runtime behavior. For example, a test of
