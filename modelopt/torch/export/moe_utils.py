@@ -23,44 +23,150 @@ import torch
 import torch.nn as nn
 
 
-def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
+def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
+    """Remove the 3-D fused source params and per-expert quantizer ModuleLists.
+
+    Called once the per-expert subtree exists (either via the fast-path
+    aliases or via the full unpack/pack path) so the redundant fused form
+    doesn't appear in the exported state_dict alongside the per-expert form.
+    """
+    first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
+    first_proj_weight_quantizers_attr = f"{first_proj_attr}_weight_quantizers"
+    first_proj_input_quantizer_attr = f"{first_proj_attr}_input_quantizer"
+    for attr in (
+        first_proj_attr,
+        first_proj_weight_quantizers_attr,
+        first_proj_input_quantizer_attr,
+        "down_proj",
+        "down_proj_weight_quantizers",
+        "down_proj_input_quantizer",
+        f"{first_proj_attr}_scale_inv",
+        "down_proj_scale_inv",
+        "gate_up_proj_activation_scale",
+        "up_proj_activation_scale",
+        "down_proj_activation_scale",
+    ):
+        if hasattr(module, attr):
+            delattr(module, attr)
+
+
+def _tensor_quantizers(quantizer) -> list:
+    """The ``TensorQuantizer`` stages of ``quantizer`` (several for W4A8's SequentialQuantizer).
+
+    A SequentialQuantizer has no ``_amax`` of its own and forwards ``amax`` writes to every
+    stage, so each stage must be checked and set on its own.
+    """
+    # Deferred: ``export/__init__`` star-imports this module, so keep quantization out of its
+    # import-time dependencies.
+    from modelopt.torch.quantization.nn import SequentialQuantizer
+
+    return list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
+
+
+def _is_uncalibrated(quantizer) -> bool:
+    amax = getattr(quantizer, "_amax", None)
+    return getattr(quantizer, "is_enabled", False) and (amax is None or bool(torch.all(amax == 0)))
+
+
+def _fallback_amax(weight: torch.Tensor, quantizer) -> torch.Tensor:
+    """Weight-derived amax for an uncalibrated expert, in the shape export expects.
+
+    The amax setter rejects shape changes, and a block/channel-wise quantizer (e.g. the INT4
+    stage of W4A8 AWQ) keeps a zero ``_amax`` of that shape, so a scalar fallback would raise.
+    A missing ``_amax`` on an INT4 block quantizer still needs per-block ``(rows, blocks)``.
+    """
+    like = getattr(quantizer, "_amax", None)
+    block_sizes = getattr(quantizer, "block_sizes", None)
+    block = block_sizes.get(-1) if block_sizes and block_sizes.get("type") == "static" else None
+    # Integer static-block stages (INT4 of W4A8) need a per-block amax. Float-block formats
+    # (NVFP4) keep a per-tensor amax plus separate block scales, so they take the scalar path.
+    if like is None and isinstance(quantizer.num_bits, int) and block:
+        if weight.shape[-1] % block:
+            raise ValueError(
+                f"Weight of shape {tuple(weight.shape)} is not divisible into blocks of {block}."
+            )
+        like = weight.new_empty(weight.shape[0], weight.shape[-1] // block)
+    if like is None or like.numel() == 1:
+        amax = torch.maximum(weight.amax(), -weight.amin()).float()
+        return amax if like is None else amax.view_as(like)
+    # Block-quant calibration records the flat (rows * blocks, 1); also accept (rows, blocks) and
+    # a per-row (rows,). Refuse any other layout (e.g. per input channel) rather than guess its
+    # grouping.
+    rows = weight.shape[0]
+    if like.dim() == 1 and like.shape[0] == rows:
+        blocks = 1
+    elif like.dim() == 2 and like.shape[-1] == 1 and like.shape[0] % rows == 0:
+        blocks = like.shape[0] // rows
+    elif like.dim() == 2 and like.shape[0] == rows:
+        blocks = like.shape[1]
+    else:
+        blocks = 0
+    if not blocks or weight.shape[-1] % blocks:
+        raise ValueError(
+            f"Cannot derive amax of shape {tuple(like.shape)} from a weight of shape "
+            f"{tuple(weight.shape)}."
+        )
+    groups = weight.reshape(rows, blocks, -1)
+    return torch.maximum(groups.amax(dim=-1), -groups.amin(dim=-1)).float().reshape(like.shape)
+
+
+def _export_fused_experts(
+    module: nn.Module,
+    dtype: torch.dtype,
+) -> None:
     """Split fused MoE expert weights and export per-expert quantization scales.
 
-    Works with any module wrapped by ``_QuantFusedExperts`` — i.e. any HF
-    transformers 5.0+ fused expert container that stores ``gate_up_proj`` and
-    ``down_proj`` as 3-D ``nn.Parameter`` tensors with per-expert quantizer
-    ``nn.ModuleList`` s.
+    Works with any module wrapped by ``_QuantFusedExperts`` (gated, with a fused
+    ``gate_up_proj``) or ``_QuantNonGatedFusedExperts`` (non-gated, with a single
+    ``up_proj`` — e.g. NemotronH). Both store their projections as 3-D
+    ``nn.Parameter`` tensors with per-expert quantizer ``nn.ModuleList`` s.
 
     Steps:
 
-    1. Handle amax fallback for uncalibrated expert input quantizers.
-    2. Split fused 3-D weights into per-expert 2-D projections
-       (``gate_proj``, ``up_proj``, ``down_proj``).
+    1. Handle amax fallback for uncalibrated expert weight quantizers.
+    2. Split fused 3-D weights into per-expert 2-D projections — gated:
+       (``gate_proj``, ``up_proj``, ``down_proj``); non-gated: (``up_proj``,
+       ``down_proj``).
     3. Call ``_export_quantized_weight`` on each projection.
     4. Register results under the standard naming convention::
 
-           {E}.gate_proj.weight, {E}.gate_proj.weight_scale, ...
+           {E}.gate_proj.weight, {E}.gate_proj.weight_scale, ...  # gated only
            {E}.up_proj.weight, {E}.up_proj.weight_scale, ...
            {E}.down_proj.weight, {E}.down_proj.weight_scale, ...
+
+    Tied experts are not deduped here: when multiple fused-expert modules share their
+    3-D source params via HF ``_tied_weights_keys``, each is split and packed
+    independently to byte-identical per-expert tensors, and the duplicate keys are
+    dropped by name in ``postprocess_state_dict`` (the single dedup authority).
     """
     from modelopt.torch.export.unified_export_hf import _export_quantized_weight
-    from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
 
     n = module.num_experts
-    expert_dim = _get_fused_expert_intermediate_dim(module)
+    # Gated experts fuse gate+up into ``gate_up_proj`` and must be split on export;
+    is_gated = getattr(module, "_is_gated", True)
+    first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
+    # Only the gated split needs the per-expert intermediate dim (gate|up boundary).
+    # Deferred: the huggingface plugin imports transformers at module scope, and transformers is
+    # an optional extra.
+    from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
+
+    expert_dim = _get_fused_expert_intermediate_dim(module) if is_gated else None
 
     # 1. Shared input quantizers — one per projection type, shared across all experts.
-    gate_up_input_q = module.gate_up_proj_input_quantizer
+    first_proj_input_q = getattr(module, f"{first_proj_attr}_input_quantizer")
+    first_proj_weight_quantizers = getattr(module, f"{first_proj_attr}_weight_quantizers")
     down_input_q = module.down_proj_input_quantizer
 
-    gate_up = module.gate_up_proj.data
+    first_proj = getattr(module, first_proj_attr).data  # gate_up_proj or up_proj
     down = module.down_proj.data
 
     # 2-3. Split + export each per-expert projection.
-    fused_dim0 = gate_up.shape[1]  # 2 * expert_dim
+    fused_dim0 = first_proj.shape[1]  # gated: 2 * expert_dim; non-gated: expert_dim
 
     for idx in range(n):
         expert = nn.Module()
+        first_weight = module.get_expert_weight(first_proj_attr, idx, dtype)
+        down_weight = module.get_expert_weight("down_proj", idx, dtype)
 
         # If the gate_up source quantizer was never calibrated (rare expert
         # that received no calibration tokens), derive its amax once from the
@@ -70,13 +176,20 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
         # fallback further down would otherwise compute amax independently from
         # each half — gate's max and up's max generally differ — producing
         # mismatched weight_scale_2 and garbled MoE output at inference.
-        gate_up_q = module.gate_up_proj_weight_quantizers[idx]
-        if getattr(gate_up_q, "is_enabled", False) and (
-            not hasattr(gate_up_q, "_amax")
-            or gate_up_q._amax is None
-            or torch.all(gate_up_q._amax == 0)
-        ):
-            gate_up_q.amax = gate_up[idx].abs().amax().to(torch.float32)
+        # Non-gated experts have no gate/up fusion, so this shared-amax step is
+        # skipped — their single up_proj uses the generic per-projection fallback.
+        uncalibrated_stages = (
+            [
+                q
+                for q in _tensor_quantizers(first_proj_weight_quantizers[idx])
+                if _is_uncalibrated(q)
+            ]
+            if is_gated
+            else []
+        )
+        for q in uncalibrated_stages:
+            q.amax = _fallback_amax(first_weight, q)
+        if uncalibrated_stages:
             warnings.warn(
                 f"Expert {idx} gate_up_proj weight quantizer was not calibrated "
                 f"(amax missing or zero). Using fused-tensor amax as fallback "
@@ -85,69 +198,78 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                 stacklevel=2,
             )
 
-        projections = [
-            ("gate_proj", gate_up[idx, :expert_dim, :], 0, fused_dim0, True),
-            ("up_proj", gate_up[idx, expert_dim:, :], expert_dim, fused_dim0, True),
-            ("down_proj", down[idx], 0, down.shape[1], False),
-        ]
+        if is_gated:
+            projections = [
+                ("gate_proj", first_weight[:expert_dim, :], 0, fused_dim0, True),
+                ("up_proj", first_weight[expert_dim:, :], expert_dim, fused_dim0, True),
+                ("down_proj", down_weight, 0, down.shape[1], False),
+            ]
+        else:
+            # Non-gated: the single up_proj maps 1:1 to its weight quantizer, so it
+            # is exported whole (no dim-0 split, no shared gate/up weight_scale_2).
+            projections = [
+                ("up_proj", first_weight, 0, fused_dim0, True),
+                ("down_proj", down_weight, 0, down.shape[1], False),
+            ]
 
-        for proj_name, weight_slice, fused_start, fused_total, is_gate_up in projections:
+        for (
+            proj_name,
+            weight_slice,
+            fused_start,
+            fused_total,
+            uses_first_proj_quantizers,
+        ) in projections:
             w_quantizer_src = (
-                module.gate_up_proj_weight_quantizers[idx]
-                if is_gate_up
+                first_proj_weight_quantizers[idx]
+                if uses_first_proj_quantizers
                 else module.down_proj_weight_quantizers[idx]
             )
-            i_quantizer = gate_up_input_q if is_gate_up else down_input_q
+            i_quantizer = first_proj_input_q if uses_first_proj_quantizers else down_input_q
 
             # gate/up share a weight quantizer — clone so each gets independent amax.
-            w_quantizer = copy.deepcopy(w_quantizer_src) if is_gate_up else w_quantizer_src
+            w_quantizer = (
+                copy.deepcopy(w_quantizer_src) if uses_first_proj_quantizers else w_quantizer_src
+            )
 
-            # For per-channel amax (dim >= 1), proportionally slice dim-0
-            # to match the split weight.
-            if (
-                hasattr(w_quantizer, "_amax")
-                and w_quantizer._amax is not None
-                and w_quantizer._amax.dim() >= 1
-            ):
-                amax = w_quantizer._amax
-                # Per-block _amax (NVFP4 static) collapses the row axis we want
-                # to slice on; restore it so dim-0 slicing splits gate/up.
-                if amax.numel() != fused_total and amax.numel() % fused_total == 0:
-                    amax = amax.contiguous().view(fused_total, amax.numel() // fused_total)
-                amax_dim0 = amax.shape[0]
-                if fused_total % amax_dim0 == 0:
-                    slice_start = fused_start * amax_dim0 // fused_total
-                    slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
-                    sliced = amax[slice_start:slice_end].contiguous()
-                    # The amax setter refuses shape changes; drop _amax first.
-                    if hasattr(w_quantizer, "_amax"):
-                        delattr(w_quantizer, "_amax")
-                    w_quantizer.amax = sliced
-                else:
+            for stage in _tensor_quantizers(w_quantizer):
+                # For per-channel amax (dim >= 1), proportionally slice dim-0
+                # to match the split weight.
+                if getattr(stage, "_amax", None) is not None and stage._amax.numel() > 1:
+                    amax = stage._amax
+                    # Per-block _amax (NVFP4 static) collapses the row axis we want
+                    # to slice on; restore it so dim-0 slicing splits gate/up.
+                    if amax.numel() != fused_total and amax.numel() % fused_total == 0:
+                        amax = amax.contiguous().view(fused_total, amax.numel() // fused_total)
+                    amax_dim0 = amax.shape[0]
+                    if fused_total % amax_dim0 == 0:
+                        slice_start = fused_start * amax_dim0 // fused_total
+                        slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
+                        sliced = amax[slice_start:slice_end].contiguous()
+                        # The amax setter refuses shape changes; drop _amax first.
+                        delattr(stage, "_amax")
+                        stage.amax = sliced
+                        # Block-quant calibration recorded the fused amax's row count here, and
+                        # export_amax() reshapes to it, undoing the slice.
+                        export_shape = getattr(stage, "_amax_shape_for_export", None)
+                        if export_shape is not None and export_shape[0] == amax_dim0:
+                            stage._amax_shape_for_export = (sliced.shape[0], *export_shape[1:])
+                    else:
+                        warnings.warn(
+                            f"Expert {idx} {proj_name}: fused amax dim0 ({amax_dim0}) does not "
+                            f"evenly divide fused_total ({fused_total}). Skipping amax slicing, "
+                            f"which may produce incorrect quantization scales.",
+                            stacklevel=2,
+                        )
+
+                # If the weight quantizer was never calibrated, compute amax from weights.
+                if _is_uncalibrated(stage):
+                    stage.amax = _fallback_amax(weight_slice, stage)
                     warnings.warn(
-                        f"Expert {idx} {proj_name}: fused amax dim0 ({amax_dim0}) does not "
-                        f"evenly divide fused_total ({fused_total}). Skipping amax slicing, "
-                        f"which may produce incorrect quantization scales.",
+                        f"Expert {idx} {proj_name} weight quantizer was not calibrated "
+                        f"(amax missing or zero). Using weight-derived amax as fallback. "
+                        f"Consider using more calibration data to activate all experts.",
                         stacklevel=2,
                     )
-
-            # If the weight quantizer was never calibrated, compute amax from weights.
-            if (
-                hasattr(w_quantizer, "is_enabled")
-                and w_quantizer.is_enabled
-                and (
-                    not hasattr(w_quantizer, "_amax")
-                    or w_quantizer._amax is None
-                    or torch.all(w_quantizer._amax == 0)
-                )
-            ):
-                w_quantizer.amax = weight_slice.abs().amax().to(torch.float32)
-                warnings.warn(
-                    f"Expert {idx} {proj_name} weight quantizer was not calibrated "
-                    f"(amax missing or zero). Using weight-derived amax as fallback. "
-                    f"Consider using more calibration data to activate all experts.",
-                    stacklevel=2,
-                )
 
             wrapper = nn.Module()
             wrapper.weight = nn.Parameter(weight_slice.contiguous(), requires_grad=False)
@@ -167,16 +289,7 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
         module.add_module(str(idx), expert)
 
     # 4. Remove fused params and quantizer lists — replaced by per-expert submodules
-    for attr in (
-        "gate_up_proj",
-        "down_proj",
-        "gate_up_proj_weight_quantizers",
-        "gate_up_proj_input_quantizer",
-        "down_proj_weight_quantizers",
-        "down_proj_input_quantizer",
-    ):
-        if hasattr(module, attr):
-            delattr(module, attr)
+    _delete_fused_moe_source_attrs(module)
 
 
 def save_expert_token_count_table(model: nn.Module, output_dir: str | Path | None = None):

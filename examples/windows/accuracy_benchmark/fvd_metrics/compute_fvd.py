@@ -342,9 +342,7 @@ def main():
     parser.add_argument("--output", default=None, help="Path to save JSON results")
     args = parser.parse_args()
 
-    device = torch.device(
-        args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
-    )
+    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     log.info(f"Device: {device}")
 
     weights_path = resolve_weights(args.weights)

@@ -26,7 +26,7 @@ export HF_FP4_PATH={path_to_save_the_final_FP4_checkpoint}
 ### DeepSeek V3 R1 V3.1
 
 ```bash
-# download the FP8 checkpoint from Hugginface. This is an example of DeepSeek-R1
+# download the FP8 checkpoint from Hugging Face. This is an example of DeepSeek-R1
 huggingface-cli download deepseek-ai/DeepSeek-R1 --local-dir $HF_FP8_CKPT
 
 # clone DeepSeek-V3 (base model of R1) Github repository for FP8 inference,
@@ -36,7 +36,7 @@ git clone https://github.com/deepseek-ai/DeepSeek-V3.git && cd DeepSeek-V3 && gi
 ### [Experimental] DeepSeek V3.2
 
 ```bash
-# download the FP8 checkpoint from Hugginface.
+# download the FP8 checkpoint from Hugging Face.
 huggingface-cli download deepseek-ai/DeepSeek-V3.2-Exp --local-dir $HF_FP8_CKPT
 
 # clone DeepSeek-V3.2 Github repository for FP8 inference,
@@ -128,6 +128,10 @@ python ${DS_V4}/inference/convert.py \
 
 ### Calibrate routed experts
 
+The quantization config defaults to the built-in routed-expert NVFP4 setup. Pass
+`--recipe models/deepseek-ai/DeepSeek-V4-Pro-0813/ptq/nvfp4_experts_only`
+to load the same config from [modelopt_recipes](../../modelopt_recipes/ptq.md) instead.
+
 Single node:
 
 ```bash
@@ -174,3 +178,47 @@ python deepseek_v4/quantize_to_nvfp4.py \
 The output includes an updated `model.safetensors.index.json`, a `config.json`
 with `quantization_config.moe_quant_algo = "NVFP4"`, and `hf_quant_config.json`
 describing the mixed NVFP4 expert layers.
+
+When the source routed experts are MXFP4 (as in the V4 release), add
+`--cast_mxfp4_to_nvfp4` for a lossless weight conversion — recommended over the
+default lossy dequant/re-quant path. See below.
+
+#### Lossless MXFP4 → NVFP4 weight cast (`--cast_mxfp4_to_nvfp4`)
+
+The routed experts in the source checkpoint are already MXFP4 (E2M1 nibbles +
+a power-of-two E8M0 scale per 32-element block). Without the flag, the export
+dequantizes them to BF16 and re-quantizes to NVFP4 using the calibrated
+per-tensor weight amax, which re-derives the per-block scales from the data and
+is therefore lossy. With `--cast_mxfp4_to_nvfp4`, the per-tensor `scale_2` is
+pinned to `2^(k_max - 8)` and each per-block E4M3 scale to `2^(k_j - m)` straight
+from the source E8M0 scales, so `per_block_scale * scale_2 = 2^k_j` and the NVFP4
+nibbles equal the source MXFP4 nibbles bit-for-bit (for every block whose `k_j`
+lands in E4M3's representable window; the rare out-of-range block falls back to a
+data-derived scale). The flag only affects routed-expert **weights** — activation
+`input_scale` still comes from `${AMAX}` calibration — and the run prints a
+`[cast] lossless MXFP4->NVFP4 blocks: …` summary. This mirrors the GPTOSS cast in
+[`examples/hf_ptq/cast_mxfp4_to_nvfp4.py`](../hf_ptq/cast_mxfp4_to_nvfp4.py); the
+V4 twist is that w1/w3 share one `scale_2` (fused GEMM1), so `k_max` is taken over
+both projections.
+
+### DeepSeek-V4.1-Flash
+
+The same three steps produce `nvidia/DeepSeek-V4.1-Flash-NVFP4`, with these differences:
+
+- V4.1-Flash's `convert.py` has no `--n-experts` flag (it infers the expert counts from
+  the tensor names). Pass `--expert-dtype fp4` to keep the routed experts in MXFP4:
+
+  ```bash
+  python ${DS_V4}/inference/convert.py \
+      --hf-ckpt-path ${DS_V4} \
+      --save-path ${MP_CKPT} \
+      --model-parallel ${MP} \
+      --expert-dtype fp4
+  ```
+
+- The published checkpoint was calibrated with `--calib_size 512` (512 samples from each
+  default dataset), `--calib_seq 512` and `--batch_size 4` at `MP=8` on two 4-GPU nodes,
+  and exported with `--cast_mxfp4_to_nvfp4`.
+
+`ptq.py` detects V4.1's 32x32 FP8 blocks and its tokenizer-aware `Transformer` on its own;
+`--trust_remote_code` is not needed.

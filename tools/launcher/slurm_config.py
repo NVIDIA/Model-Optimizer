@@ -24,6 +24,8 @@ from typing import Optional
 
 import nemo_run as run
 
+__all__ = ["SlurmConfig", "slurm_factory"]
+
 
 @dataclass
 class SlurmConfig:
@@ -43,11 +45,23 @@ class SlurmConfig:
     container_mounts: Optional[list[str]] = None
     srun_args: Optional[list[str]] = None
     array: Optional[str] = None
+    requeue: bool = False
     nodes: int = 1
     ntasks_per_node: int = 1
-    gpus_per_node: int = 1
+    # Docker-only: user for local `docker run` (e.g. "root" to read root-owned image
+    # paths like /opt/Megatron-Bridge). None -> host uid:gid. Ignored on Slurm.
+    docker_user: Optional[str] = None
+    # None means omit GPU GRES entirely. Some clusters expose GPU nodes without
+    # Slurm GRES, so requesting --gpus-per-node would make valid jobs fail.
+    gpus_per_node: Optional[int] = 1
     time: str = "04:00:00"
+    mem: str = "0"
     local: bool = False
+    # Slurm --segment=<N>: force the job's nodes into a single topology block.
+    # On a topology/block cluster (e.g. GB200 NVL72, where one block = one NVLink
+    # domain) set this to the node count to keep all nodes in one NVL72 so
+    # inter-node traffic rides NVLink. None = let the scheduler place freely.
+    segment: Optional[int] = None
 
 
 @run.cli.factory
@@ -59,15 +73,19 @@ def slurm_factory(
     qos: Optional[str] = os.environ.get("SLURM_QOS"),
     nodes: int = 1,
     ntasks_per_node: int = 1,
-    gpus_per_node: int = 1,
-    container: str = "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc8",
+    gpus_per_node: Optional[int] = 1,
+    docker_user: Optional[str] = None,
+    container: str = "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20",
     modelopt_install_path: str = "/usr/local/lib/python3.12/dist-packages/modelopt",
     container_mounts: list[str] = [
         "{}:/hf-local".format(os.environ.get("SLURM_HF_LOCAL", "/hf-local")),
     ],
     srun_args: list[str] = ["--no-container-mount-home"],
     array: Optional[str] = None,
+    requeue: bool = False,
     time: str = "04:00:00",
+    mem: str = os.environ.get("SLURM_MEM", "0"),
+    segment: Optional[int] = None,
 ) -> SlurmConfig:
     """Generic Slurm factory — configure via environment variables or CLI overrides."""
     return SlurmConfig(
@@ -78,10 +96,14 @@ def slurm_factory(
         nodes=nodes,
         ntasks_per_node=ntasks_per_node,
         gpus_per_node=gpus_per_node,
+        docker_user=docker_user,
         container=container,
         modelopt_install_path=modelopt_install_path,
         container_mounts=container_mounts,
         srun_args=srun_args,
         array=array,
+        requeue=requeue,
         time=time,
+        mem=mem,
+        segment=segment,
     )

@@ -20,6 +20,7 @@ TODO: Consider moving this a separate module dedicated for scoring
 
 # mypy: ignore-errors
 
+import gc
 import json
 import warnings
 from functools import partial
@@ -218,6 +219,15 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
             stitched_model.cpu()
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+
+            # Stitching installs hooks that create reference cycles between the
+            # model and its hook closures, so the per-solution CPU model is not
+            # reclaimed by refcounting alone. Drop references and force a cyclic
+            # GC pass to avoid accumulating one full model per iteration (host
+            # RAM OOM / SIGKILL after ~25 solutions on an 8B model).
+            del stitched_model
+            del model
+            gc.collect()
 
         dist.barrier()
 

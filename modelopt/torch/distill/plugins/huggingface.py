@@ -83,6 +83,18 @@ class DistillArguments(ModelOptHFArguments):
             )
         },
     )
+    kd_loss_alpha: float = field(
+        default=1.0,
+        metadata={
+            "help": (
+                "Weight for KD loss in the combined training loss. "
+                "The CE (cross-entropy) loss weight is (1 - kd_loss_alpha). "
+                "Set to 1.0 (default) for pure KD loss. "
+                "Set to a value in (0, 1) to blend KD and CE losses, "
+                "e.g. 0.7 for 70% KD loss + 30% CE loss."
+            )
+        },
+    )
 
 
 class DistillArgsWithTeacherModel(DistillArguments):
@@ -143,7 +155,15 @@ class KDTrainer(ModelOptHFTrainer):
             temperature=distill_args.temperature, reduction="none"
         )
         self._teacher_prepared = False
-        self._eval_kd_loss_totals = None
+        self._eval_ce_loss_totals = None
+
+        kd_loss_alpha = distill_args.kd_loss_alpha
+        if not 0.0 < kd_loss_alpha <= 1.0:
+            raise ValueError(
+                f"`kd_loss_alpha` must be in (0, 1]. Got {kd_loss_alpha}. "
+                "Set to 1.0 for pure KD loss or a value in (0, 1) to blend KD and CE losses."
+            )
+        self._kd_loss_alpha = kd_loss_alpha
 
         if self.use_liger_kernel:
             self._liger_temperature = distill_args.temperature
@@ -188,25 +208,48 @@ class KDTrainer(ModelOptHFTrainer):
             yield
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        """Train on KD loss and evaluate on CE loss with KD as a metric."""
+        """Compute combined KD and CE training loss, with eval CE tracked as a secondary metric.
+
+        During training and evaluation, the total loss is::
+
+            loss = kd_loss_alpha * kd_loss + (1 - kd_loss_alpha) * ce_loss
+
+        When ``kd_loss_alpha=1.0`` (the default), this reduces to pure KD loss and the
+        student is forwarded without labels to skip CE computation.
+
+        When ``kd_loss_alpha < 1.0``, the blended loss is used consistently during both
+        training and evaluation; the pure CE component is additionally recorded separately
+        as ``eval_ce_loss``.
+        """
         self._ensure_teacher_prepared()
-        kd_inputs = {k: v for k, v in inputs.items() if k != "labels"}
+        # ``skip_logits`` (added for Liger eval by transformers>=5.15) would make the teacher's
+        # Liger forward demand labels; the fused KD loss needs its hidden states instead.
+        kd_inputs = {k: v for k, v in inputs.items() if k not in ("labels", "skip_logits")}
         labels = inputs.get("labels")
         is_training = model.training
 
         if is_training:
             student_context = self._liger_identity_lm_head if self.use_liger_kernel else nullcontext
             with student_context():
-                outputs = model(**kd_inputs)
+                if self._kd_loss_alpha < 1.0 and not self.use_liger_kernel:
+                    ce_loss, outputs = super().compute_loss(
+                        model, inputs, return_outputs=True, **kwargs
+                    )
+                else:
+                    outputs = model(**kd_inputs)
+                    if self._kd_loss_alpha < 1.0:
+                        ce_loss = self._liger_loss_func(outputs, labels, **kwargs)
         else:
-            loss, outputs = super().compute_loss(model, inputs, return_outputs=True, **kwargs)
+            ce_loss, outputs = super().compute_loss(model, inputs, return_outputs=True, **kwargs)
+            batch_size = find_batch_size(inputs)
+            self._record_eval_ce_loss(ce_loss, batch_size)
 
         kd_loss = self._compute_kd_loss(outputs, labels, kd_inputs, **kwargs)
-        if is_training:
-            loss = kd_loss
+
+        if self._kd_loss_alpha < 1.0:
+            loss = self._kd_loss_alpha * kd_loss + (1.0 - self._kd_loss_alpha) * ce_loss
         else:
-            batch_size = find_batch_size(inputs)
-            self._record_eval_kd_loss(kd_loss, batch_size)
+            loss = kd_loss
 
         return (loss, outputs) if return_outputs else loss
 
@@ -233,7 +276,7 @@ class KDTrainer(ModelOptHFTrainer):
             self._teacher_model.eval()
             return self._teacher_model(**inputs)
 
-    def _standard_kd_loss(self, outputs, labels, **kwargs):
+    def _standard_kd_loss(self, outputs, labels, num_items_in_batch=None, **kwargs):
         """KD loss with causal shift and ignore-index masking."""
         # Match causal LM CE: logits at position t are scored against label t+1.
         student_logits = outputs.logits[..., :-1, :].float()
@@ -244,7 +287,22 @@ class KDTrainer(ModelOptHFTrainer):
             return per_token_loss.mean()
         shift_labels = labels[..., 1:]
         mask = shift_labels != IGNORE_INDEX
-        loss = (per_token_loss * mask).sum() / mask.sum().clamp(min=1)
+        num_tokens = mask.sum().clamp(min=1)
+        loss = (per_token_loss * mask).sum() / num_tokens
+
+        if num_items_in_batch is not None:
+            if num_items_in_batch == 0:
+                loss = loss * 0.0
+            else:
+                loss = loss * (num_tokens / num_items_in_batch)
+                # Match HF Trainer's DDP compensation: when
+                # average_tokens_across_devices is active, num_items_in_batch is
+                # the global count and DDP will average gradients across ranks.
+                # HF's parent compute_loss already multiplies CE by world_size;
+                # we must do the same for KD so the configured kd_loss_alpha
+                # ratio is preserved.
+                if getattr(self.args, "average_tokens_across_devices", False):
+                    loss = loss * self.args.world_size
         return loss
 
     @contextmanager
@@ -259,7 +317,7 @@ class KDTrainer(ModelOptHFTrainer):
         finally:
             teacher_lm_head.forward = teacher_orig
 
-    def _liger_kd_loss(self, outputs, labels, **kwargs):
+    def _liger_kd_loss(self, outputs, labels, num_items_in_batch=None, **kwargs):
         """Fused lm_head + JSD for KD."""
         from liger_kernel.transformers import LigerFusedLinearJSD
 
@@ -296,7 +354,19 @@ class KDTrainer(ModelOptHFTrainer):
                 teacher_lm_head,
             )
 
-        return super()._sharded_liger_compute(_compute)
+        loss = super()._sharded_liger_compute(_compute)
+
+        if num_items_in_batch is not None and labels is not None:
+            if num_items_in_batch == 0:
+                loss = loss * 0.0
+            else:
+                mask = shift_labels != IGNORE_INDEX
+                num_tokens = mask.sum().clamp(min=1)
+                loss = loss * (num_tokens / num_items_in_batch)
+                if getattr(self.args, "average_tokens_across_devices", False):
+                    loss = loss * self.args.world_size
+
+        return loss
 
     def _teacher_liger_enabled(self, fn, teacher_lm_head):
         if self.is_fsdp_enabled:
@@ -315,8 +385,8 @@ class KDTrainer(ModelOptHFTrainer):
         ignore_keys=None,
         metric_key_prefix="eval",
     ):
-        """Add KD loss as a secondary evaluation metric."""
-        self._eval_kd_loss_totals = None
+        """Add CE loss as a secondary evaluation metric."""
+        self._eval_ce_loss_totals = None
         output = super().evaluation_loop(
             dataloader,
             description,
@@ -324,20 +394,20 @@ class KDTrainer(ModelOptHFTrainer):
             ignore_keys=ignore_keys,
             metric_key_prefix=metric_key_prefix,
         )
-        if self._eval_kd_loss_totals is not None:
-            output.metrics[f"{metric_key_prefix}_kd_loss"] = self._get_eval_kd_loss()
+        if self._eval_ce_loss_totals is not None:
+            output.metrics[f"{metric_key_prefix}_ce_loss"] = self._get_eval_ce_loss()
         return output
 
-    def _record_eval_kd_loss(self, loss, batch_size):
+    def _record_eval_ce_loss(self, loss, batch_size):
         count = loss.new_tensor(float(batch_size or 1))
         totals = torch.stack([loss.detach() * count, count])
-        self._eval_kd_loss_totals = (
+        self._eval_ce_loss_totals = (
             totals
-            if self._eval_kd_loss_totals is None
-            else self._eval_kd_loss_totals + totals.to(self._eval_kd_loss_totals.device)
+            if self._eval_ce_loss_totals is None
+            else self._eval_ce_loss_totals + totals.to(self._eval_ce_loss_totals.device)
         )
 
-    def _get_eval_kd_loss(self):
-        totals = self.accelerator.gather_for_metrics(self._eval_kd_loss_totals)
+    def _get_eval_ce_loss(self):
+        totals = self.accelerator.gather_for_metrics(self._eval_ce_loss_totals)
         totals = totals.reshape(-1, 2).sum(dim=0)
         return (totals[0] / totals[1].clamp(min=1)).item()

@@ -13,11 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for EAGLE export rope scaling logic in hf_spec_export.py."""
+"""Unit tests for EAGLE/DFlash export rope scaling logic in hf_spec_export.py."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from modelopt.torch.export.plugins.hf_spec_export import EagleExporter
+import pytest
+import torch
+
+from modelopt.torch.export.plugins.hf_spec_export import (
+    DFlashExporter,
+    EagleExporter,
+    _get_rope_theta,
+)
 
 DEFAULT_ROPE_SCALING = {
     "rope_type": "yarn",
@@ -76,3 +84,138 @@ def test_rope_theta_fallback_from_rope_scaling():
     """rope_theta is populated from rope_scaling when not available as top-level attr."""
     config = _make_exporter(rope_type="default", rope_theta=500000)._export_config()
     assert config["rope_theta"] == 500000
+
+
+# ---------------------------------------------------------------------------
+# DFlash export rope scaling (config-field convergence, mirrors the eagle style)
+# ---------------------------------------------------------------------------
+
+DFLASH_YARN = {
+    "type": "yarn",
+    "factor": 48.0,
+    "original_max_position_embeddings": 4096,
+    "beta_fast": 1.0,
+    "beta_slow": 1.0,
+    "mscale": 1.0,
+    "mscale_all_dim": 1.0,
+}
+
+
+def _make_dflash_exporter(dflash_export_rope_scaling=None, base_rope_theta=5000000.0):
+    base_config = SimpleNamespace(
+        hidden_size=128,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        intermediate_size=256,
+        vocab_size=1000,
+        max_position_embeddings=196608,
+        initializer_range=0.02,
+        num_hidden_layers=8,
+        rope_theta=base_rope_theta,
+        torch_dtype=torch.bfloat16,
+    )
+    draft_config = SimpleNamespace(num_hidden_layers=2)
+    model = SimpleNamespace(
+        config=base_config,
+        dflash_config=draft_config,
+        dflash_block_size=8,
+        mask_token_id=999,
+        target_layer_ids=[1, 3, 5, 7],
+        dflash_export_rope_scaling=dflash_export_rope_scaling,
+    )
+    exporter = DFlashExporter.__new__(DFlashExporter)
+    exporter.model = model
+    return exporter
+
+
+def test_dflash_yarn_rope_injected_from_config_field():
+    """YaRN rope_scaling from dflash_export_rope_scaling is injected verbatim."""
+    config = _make_dflash_exporter(dflash_export_rope_scaling=DFLASH_YARN)._export_config()
+    assert config["rope_scaling"] == DFLASH_YARN
+
+
+def test_dflash_rope_not_injected_when_field_empty():
+    """Empty dict (default) disables rope scaling injection."""
+    config = _make_dflash_exporter(dflash_export_rope_scaling={})._export_config()
+    assert config["rope_scaling"] is None
+
+
+def test_dflash_rope_theta_inherits_base():
+    """rope_theta is inherited from the target/base config (draft drafts for the base)."""
+    config = _make_dflash_exporter(base_rope_theta=5000000.0)._export_config()
+    assert config["rope_theta"] == 5000000.0
+
+
+def test_dflash_rope_theta_inherits_base_rope_parameters():
+    """Transformers 5 stores the target RoPE base in rope_parameters."""
+    exporter = _make_dflash_exporter(base_rope_theta=None)
+    exporter.model.config.rope_parameters = {
+        "rope_type": "default",
+        "rope_theta": 5000000.0,
+    }
+
+    config = exporter._export_config()
+
+    assert config["rope_theta"] == 5000000.0
+
+
+class TestGetRopeTheta:
+    """Where a config keeps rope_theta depends on the transformers version.
+
+    Every consumer of a base config -- the exporter, the draft builder, the fake base --
+    has to agree on this, so they share this one reader. Reading it wrong is silent: the
+    draft trains and exports without complaint against a RoPE base the target never used,
+    and only misbehaves at serve time.
+    """
+
+    def test_reads_the_rope_parameters_dict(self):
+        """The transformers 5.12+ layout: the value lives only in the dict."""
+        assert _get_rope_theta(SimpleNamespace(rope_parameters={"rope_theta": 1000000.0})) == (
+            1000000.0
+        )
+
+    def test_reads_the_legacy_rope_scaling_dict(self):
+        """Older transformers spell the same dict rope_scaling."""
+        assert _get_rope_theta(SimpleNamespace(rope_scaling={"rope_theta": 1000000.0})) == (
+            1000000.0
+        )
+
+    def test_prefers_the_dict_over_a_disagreeing_flat_field(self):
+        """Both present and disagreeing: the dict wins.
+
+        This is the regression guard. The precedence was the other way round on main from
+        2026-07-30 to 2026-09-09, and no test noticed -- a config can carry the real base
+        in the dict while the class default (10000.0 for Qwen3) stays visible as a flat
+        rope_theta, so reading flat first exports a drafter whose RoPE base is 100x off.
+        """
+        config = SimpleNamespace(rope_theta=10000.0, rope_parameters={"rope_theta": 1000000.0})
+        assert _get_rope_theta(config) == 1000000.0
+
+    def test_falls_back_to_a_flat_attribute(self):
+        """The transformers 4.x layout: only the flat field exists."""
+        assert _get_rope_theta(SimpleNamespace(rope_theta=12345.0)) == 12345.0
+
+    def test_missing_everywhere_returns_the_default(self):
+        """An absent base must stay absent rather than become a wrong number."""
+        assert _get_rope_theta(SimpleNamespace()) is None
+        assert _get_rope_theta(SimpleNamespace(), 7.0) == 7.0
+
+    def test_reads_a_real_config_whichever_layout_it_uses(self):
+        """A real config resolves on every supported transformers version.
+
+        Asserts the outcome, not the layout: 5.12 keeps the value only in the dict while
+        the minimum supported version (4.57) has only the flat field and no dict at all.
+        The layouts themselves are pinned above, built explicitly, so they stay covered
+        where transformers is absent -- this is the only test here that needs it.
+        """
+        transformers = pytest.importorskip("transformers")
+        config = transformers.Qwen3Config(
+            hidden_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            intermediate_size=64,
+            vocab_size=64,
+            rope_theta=1000000.0,
+        )
+        assert _get_rope_theta(config) == 1000000.0

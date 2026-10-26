@@ -30,7 +30,6 @@ from typing import Any
 import torch
 import torch.nn as nn
 import transformers
-from packaging.version import Version
 from transformers import HfArgumentParser, PreTrainedModel, Trainer, TrainerCallback
 from transformers import modeling_utils as tf_modeling_utils
 
@@ -64,31 +63,6 @@ def is_liger_available():
     return True
 
 
-@contextmanager
-def _undo_torch_init_override_by_transformers():
-    if not hasattr(tf_modeling_utils, "TORCH_INIT_FUNCTIONS"):
-        yield
-        return
-    # transformers override weight initialization during model instantiation for faster loading;
-    # this leads to a secondary bug causing fx symbolic tracing to fail (torch does not allow
-    # overriding torch.nn.init functions - fx tracing asserts that this does not happen and fails)
-    # correct fx symbolic tracing is needed for NAS/Pruned model restoration
-    # lets restore the original init functions before modelopt restore so that tracing works during nas restore
-    # weight initialization is anyways done, so this wont affect performance
-    modelopt_reverted_torch_init_funcs = {}
-    for name, init_func in tf_modeling_utils.TORCH_INIT_FUNCTIONS.items():
-        torch_init_func = getattr(torch.nn.init, name)
-        # Check if the init function has been overridden by transformers
-        if id(torch_init_func) != id(init_func):
-            modelopt_reverted_torch_init_funcs[name] = torch_init_func
-            setattr(torch.nn.init, name, init_func)
-
-    yield
-
-    for name, init_func in modelopt_reverted_torch_init_funcs.items():
-        setattr(torch.nn.init, name, init_func)
-
-
 def _restore_qtensor_wrappers(model, model_path):
     """Re-wrap QTensorWrapper weights that were replaced during HF weight loading.
 
@@ -110,23 +84,39 @@ def _restore_qtensor_wrappers(model, model_path):
         q_tensor_state = mode_config.get("metadata", {}).get("q_tensor_state", {})
         if not q_tensor_state:
             continue
-        for name, module in model.named_modules():
-            if (
-                isinstance(module, RealQuantLinear)
-                and name in q_tensor_state
-                and not isinstance(module.weight, QTensorWrapper)
-            ):
-                module._parameters["weight"] = QTensorWrapper(
-                    qtensor=module.weight.data,
-                    metadata=q_tensor_state[name]["metadata"],
-                )
+        # PEFT nests the quantized linear as `<name>.base_layer`, and either the saved keys or the
+        # live names may carry that suffix. Normalize both so the lookup works in either direction.
+        q_tensor_state = {k.removesuffix(".base_layer"): v for k, v in q_tensor_state.items()}
+
+        pending = [
+            (name, module)
+            for name, module in model.named_modules()
+            if isinstance(module, RealQuantLinear) and not isinstance(module.weight, QTensorWrapper)
+        ]
+        matched = 0
+        for name, module in pending:
+            key = name.removesuffix(".base_layer")
+            if key not in q_tensor_state:
+                continue
+            module._parameters["weight"] = QTensorWrapper(
+                qtensor=module.weight.data,
+                metadata=q_tensor_state[key]["metadata"],
+            )
+            matched += 1
+
+        # A total miss means some wrapper renamed the modules. Warn instead of letting it surface
+        # as an opaque shape error at dequantization.
+        if pending and not matched:
+            warnings.warn(
+                f"Found {len(q_tensor_state)} compressed weight(s) in {modelopt_state_path} but "
+                f"re-wrapped none of the {len(pending)} candidate module(s); their names may have "
+                "been remapped. The model will likely fail when the packed weights are used."
+            )
 
 
 def _new_from_pretrained(cls, /, pretrained_model_name_or_path, *args, **kwargs):
     """Patch for `cls.from_pretrained` method to restore ModelOpt state."""
-    with _patch_model_init_for_modelopt(
-        cls, pretrained_model_name_or_path, extra_context=_undo_torch_init_override_by_transformers
-    ):
+    with _patch_model_init_for_modelopt(cls, pretrained_model_name_or_path):
         model = types.MethodType(cls._modelopt_cache["from_pretrained"].__func__, cls)(
             pretrained_model_name_or_path, *args, **kwargs
         )
@@ -138,13 +128,44 @@ def _new_from_pretrained(cls, /, pretrained_model_name_or_path, *args, **kwargs)
 
 def _new_from_config(cls, /, config, **kwargs):
     """Patch for `cls.from_config` method to restore ModelOpt state."""
-    with _patch_model_init_for_modelopt(
-        cls, config._name_or_path, extra_context=_undo_torch_init_override_by_transformers
-    ):
+    with _patch_model_init_for_modelopt(cls, config._name_or_path):
         model = types.MethodType(cls._modelopt_cache["_from_config"].__func__, cls)(
             config, **kwargs
         )
     return model
+
+
+@contextmanager
+def _legacy_tied_weights_keys_as_dict(model: nn.Module):
+    """Temporarily normalize legacy list-style ``_tied_weights_keys`` to dict-style.
+
+    transformers 5.0 changed ``_tied_weights_keys`` from ``list[str]`` to a
+    ``{target: source}`` dict, and ``save_pretrained`` calls ``.keys()`` on the attribute of
+    every submodule (``_get_tied_weight_keys``) without a type check. Modeling code still on
+    the 4.x list format - common for ``trust_remote_code`` checkpoints, e.g.
+    ``stepfun-ai/Step-3.7-Flash`` - therefore loads fine but dies on save with
+    ``AttributeError: 'list' object has no attribute 'keys'``.
+
+    Mapping each entry to itself preserves the legacy semantics: the list entries were exactly
+    the dedup patterns ``_get_tied_weight_keys`` is expected to return. The original attribute
+    is restored on exit so the shim stays invisible to the rest of the model's lifetime.
+    """
+    patched = []
+    try:
+        for module in model.modules():
+            tied = getattr(module, "_tied_weights_keys", None)
+            if isinstance(tied, (list, tuple, set)):
+                # The attribute is usually a class attribute; remember whether this instance
+                # had its own so the restore does not leave a shadowing copy behind.
+                patched.append((module, tied, "_tied_weights_keys" in module.__dict__))
+                module._tied_weights_keys = {key: key for key in tied}
+        yield
+    finally:
+        for module, tied, had_own_attr in patched:
+            if had_own_attr:
+                module._tied_weights_keys = tied
+            else:
+                del module._tied_weights_keys
 
 
 def _save_pretrained_with_checks(self, save_directory, *args, **kwargs):
@@ -152,23 +173,18 @@ def _save_pretrained_with_checks(self, save_directory, *args, **kwargs):
         raise NotImplementedError(
             "ModelOpt does not support saving tensor parallel sharded Huggingface transformer models yet. "
         )
-    return _new_save_pretrained(self, save_directory, *args, **kwargs)
+    with _legacy_tied_weights_keys_as_dict(self):
+        return _new_save_pretrained(self, save_directory, *args, **kwargs)
 
 
 # [Fix for huggingface bug] deepspeed zero3 training backend only loads params into the model from
 # state_dict, but not buffers. So lets explicitly load the buffers into the model from state_dict.
-# The `load_config` parameter was added to `_load_state_dict_into_zero3_model` in transformers 5.0.
-_TRANSFORMERS_GE_5_0 = Version(transformers.__version__) >= Version("5.0")
-
-
 def _load_params_and_buffers_into_zero3_model(model_to_load, state_dict, load_config=None):
     buffer_names = [name for name, _ in model_to_load.named_buffers()]
     buffer_state_dict = {k: v for k, v in state_dict.items() if k in buffer_names}
     model_to_load.load_state_dict(buffer_state_dict, strict=False)
     cached_fn = tf_modeling_utils._modelopt_cache["_load_state_dict_into_zero3_model"]
-    if _TRANSFORMERS_GE_5_0:
-        return cached_fn(model_to_load, state_dict, load_config)
-    return cached_fn(model_to_load, state_dict)
+    return cached_fn(model_to_load, state_dict, load_config)
 
 
 pretrained_model_patch_methods = [
@@ -231,7 +247,7 @@ class ModelOptTrainerArguments(ModelOptHFArguments):
             "help": (
                 "Path to a YAML file mapping fnmatch patterns to optimizer kwargs "
                 "(e.g. lr, weight_decay). First matching pattern wins per parameter. "
-                "See examples/llm_qat/configs/train/lr_config_example.yaml."
+                "See examples/llm_qat/configs/train/lr/lr_config_example.yaml."
             ),
         },
     )
@@ -253,6 +269,13 @@ class ModelOptTrainerArguments(ModelOptHFArguments):
             ),
         },
     )
+
+
+def _translate_warmup_keys(config: dict, actions) -> None:
+    """Map ``warmup_ratio``, removed in transformers 5.15, to ``warmup_steps`` (below 1 it is a ratio)."""
+    dests = {a.dest for a in actions}
+    if "warmup_ratio" in config and "warmup_ratio" not in dests and "warmup_steps" in dests:
+        config.setdefault("warmup_steps", config.pop("warmup_ratio"))
 
 
 class ModelOptArgParser(HfArgumentParser):
@@ -288,9 +311,10 @@ class ModelOptArgParser(HfArgumentParser):
             args = args[:idx] + args[idx + 2 :]  # strip --config <path> from argv
             import yaml
 
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8") as f:
                 config = yaml.safe_load(f)
             if config:
+                _translate_warmup_keys(config, self._actions)
                 known_by_parser = {a.dest for a in self._actions}
                 all_modelopt_fields = self._all_modelopt_fields()
                 applicable = {}
@@ -620,7 +644,7 @@ class ModelOptHFTrainer(Trainer):
         """
         import yaml
 
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
         if not isinstance(cfg, dict):
             raise ValueError(f"lr_config must be a YAML mapping, got {type(cfg).__name__}")
@@ -735,6 +759,9 @@ class ModelOptHFTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """Compute loss, patching lm_head to identity when using liger fused loss."""
         if self.use_liger_kernel:
+            # The fused loss is computed here from the hidden states, so drop the ``skip_logits``
+            # that transformers>=5.15 adds for eval: Liger would then need the popped labels.
+            inputs = {k: v for k, v in inputs.items() if k != "skip_logits"}
             with self._liger_identity_lm_head():
                 return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
         return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)

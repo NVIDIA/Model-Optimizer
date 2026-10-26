@@ -1,18 +1,36 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "modelopt-launcher"
 version = "0.1.0"
 description = "ModelOpt Launcher — submit quantization, training, and evaluation jobs to Slurm clusters"
 requires-python = ">=3.10"
 dependencies = [
+    "leptonai<0.47",  # 0.47 removed leptonai.api.v1, which nemo-run (<=0.11.1) imports
     "nemo-run>=0.8.0",
     "pyyaml",
 ]
 
+[project.scripts]
+modelopt-launcher = "modelopt_launcher.launch:main"
+
 [tool.setuptools]
-py-modules = []
+packages = ["modelopt_launcher"]
+
+[tool.setuptools.package-dir]
+modelopt_launcher = "."
+
+[tool.setuptools.package-data]
+modelopt_launcher = [
+    "common/**/*",
+    "examples/**/*.yaml",
+    "examples/**/*.jinja",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [dependency-groups]
-dev = []
+dev = ["pytest"]

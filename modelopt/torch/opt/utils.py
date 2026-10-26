@@ -113,6 +113,7 @@ def forward_with_reshard(model: nn.Module):
                 fsdp_state._lazy_init = types.MethodType(_lazy_init_retain_mesh_info, fsdp_state)
 
                 fsdp_states.append(fsdp_state)
+
     yield
     for fsdp_state in fsdp_states:
         if fsdp_state._fsdp_param_group and hasattr(fsdp_state, "_post_forward_mesh_info_after"):

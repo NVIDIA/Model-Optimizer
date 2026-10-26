@@ -259,13 +259,13 @@ class TestCalibrationIntegration:
         assert config.max_seqlen == 32768
 
         # Invalid target_sparse_ratio (> 1.0)
-        with pytest.raises(ValueError, match="target_sparse_ratio.*must be between 0.0 and 1.0"):
+        with pytest.raises(ValueError, match=r"target_sparse_ratio.*must be between 0.0 and 1.0"):
             CalibrationConfig(
                 target_sparse_ratio={"prefill": 1.5, "decode": 0.5}, samples=48, max_seqlen=32768
             )
 
         # Invalid target_sparse_ratio (< 0.0)
-        with pytest.raises(ValueError, match="target_sparse_ratio.*must be between 0.0 and 1.0"):
+        with pytest.raises(ValueError, match=r"target_sparse_ratio.*must be between 0.0 and 1.0"):
             CalibrationConfig(
                 target_sparse_ratio={"prefill": -0.1, "decode": 0.5}, samples=48, max_seqlen=32768
             )

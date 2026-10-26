@@ -59,7 +59,7 @@ class HostDeviceMem:
 
 def get_engine_bytes(engine: trt.tensorrt.ICudaEngine) -> bytes:
     """Return serialized TensorRT engine bytes."""
-    return bytearray(engine.serialize())  # type: ignore[return-value]
+    return bytes(engine.serialize())
 
 
 def load_engine(buffer: bytes, log_level: int = trt.Logger.ERROR) -> trt.tensorrt.ICudaEngine:

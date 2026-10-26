@@ -15,6 +15,7 @@
 
 import datetime
 import hashlib
+import inspect
 import json
 import os
 import subprocess
@@ -35,7 +36,20 @@ _SENSITIVE_KEY_ALLOWLIST = frozenset(
 
 
 def get_tokenizer(path, trust_remote_code=False):
-    return AutoTokenizer.from_pretrained(path, trust_remote_code=trust_remote_code)
+    extra_special_tokens = None
+    tokenizer_config_path = os.path.join(path, "tokenizer_config.json")
+    if os.path.exists(tokenizer_config_path):
+        with open(tokenizer_config_path) as f:
+            tokenizer_config = json.load(f)
+        extra_special_tokens = tokenizer_config.get("extra_special_tokens")
+
+    kwargs = {"trust_remote_code": trust_remote_code}
+    if isinstance(extra_special_tokens, list):
+        kwargs["extra_special_tokens"] = {
+            token.strip("<|>").replace("|", "_") + "_token": token for token in extra_special_tokens
+        }
+
+    return AutoTokenizer.from_pretrained(path, **kwargs)
 
 
 def encode_chat(tokenizer, messages, chat_template_args={}, completions=False):
@@ -196,6 +210,8 @@ def _checkpoint_provenance(model_dir):
 
 
 def _is_sensitive_key(key):
+    # Engine configs can carry non-string dict keys (e.g. int layer ids in a
+    # serving_config); those are never sensitive field *names*, so skip them.
     if not isinstance(key, str):
         return False
     klow = key.lower()
@@ -307,3 +323,28 @@ def dump_env(args, save_dir, overrides=None):
     os.makedirs(save_dir, exist_ok=True)
     with open(os.path.join(save_dir, "configuration.json"), "w") as f:
         json.dump(config, f, indent=4, default=str)
+
+
+def shutdown_engine(engine, loop, timeout=None):
+    """Call ``engine.shutdown()``, whichever shape the installed release exposes.
+
+    vLLM v1's ``AsyncLLM.shutdown`` is synchronous and takes ``timeout``. Signatures
+    without ``timeout`` and awaitable results are also accepted; an awaitable is run
+    to completion on ``loop``.
+    """
+    shutdown = engine.shutdown
+    try:
+        accepts_timeout = "timeout" in inspect.signature(shutdown).parameters
+    except (TypeError, ValueError):  # builtins / C extensions without a signature
+        accepts_timeout = False
+    result = shutdown(timeout=timeout) if accepts_timeout else shutdown()
+    if inspect.isawaitable(result):
+        loop.run_until_complete(result)
+
+
+def stop_runner(runner):
+    """Stop the runner's engine; a failure here must not fail a run whose results are written."""
+    try:
+        runner.stop()
+    except Exception as e:
+        print(f"Warning: engine shutdown failed: {e!r}", flush=True)

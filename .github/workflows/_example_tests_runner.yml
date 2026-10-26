@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       example:
-        description: "Example name to test (e.g. 'llm_ptq')"
+        description: "Example name to test (e.g. 'hf_ptq'), or up to 3 names separated by spaces: they share the job (one container start and one base install) and run one after the other, each in its own step, in the order given. List an example that pins or upgrades packages last."
         required: true
         type: string
       timeout_minutes:
@@ -26,54 +26,110 @@ on:
         description: "GitHub runner to use"
         required: false
         type: string
-        default: "linux-amd64-gpu-h100-latest-1"
+        default: "linux-amd64-gpu-rtxpro6000-latest-1"
+      allow_failure_examples:
+        description: "Comma-separated example names whose test failures are reported as a warning and do not fail the job (used to keep a known-broken example non-blocking)"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   run-test:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
     container:
       image: ${{ inputs.docker_image }}
-      options: --shm-size=2gb # TRT-LLM tests on 2-GPU runner needs more shared memory
+      # Fixed rather than caller-supplied so no caller can pass e.g. --privileged or host mounts.
+      # TRT-LLM tests on 2-GPU runner need more shared memory; the vLLM image needs root.
+      options: --shm-size=2gb ${{ (startsWith(inputs.docker_image, 'vllm/') || startsWith(inputs.docker_image, 'docker.io/vllm/')) && '--user 0' || '' }}
       env:
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        # Build CUDA kernels only for the runner's RTX PRO 6000 (sm_120), not the image's ~6 archs.
+        TORCH_CUDA_ARCH_LIST: "12.0"
     steps:
+      - name: Split the examples of this job
+        id: examples
+        shell: bash
+        env:
+          EXAMPLES: ${{ inputs.example }}
+        run: |
+          max=3  # the cap; the "Example N" steps and the final failure check below must match it
+          read -ra examples <<< "$EXAMPLES"
+          (( ${#examples[@]} >= 1 && ${#examples[@]} <= max )) || { echo "::error::A job runs 1 to $max examples, got: '$EXAMPLES'"; exit 1; }
+          for (( i = 0; i < max; i++ )); do echo "e$i=${examples[$i]:-}" >> "$GITHUB_OUTPUT"; done
+          # Expressions have no replace(), and a cache key is better without spaces
+          echo "key=$(IFS=+; echo "${examples[*]}")" >> "$GITHUB_OUTPUT"
+      - name: Install git for vLLM image
+        if: startsWith(inputs.docker_image, 'vllm/') || startsWith(inputs.docker_image, 'docker.io/vllm/')
+        run: apt-get update && apt-get install -y git
       - uses: actions/checkout@v6
-      - uses: nv-gha-runners/setup-proxy-cache@main
+      - uses: nv-gha-runners/setup-proxy-cache@eadc57871cde0c92a223d0f486ab669a2360f978 # main
+      - uses: ./.github/actions/cache-extensions
+        id: ext-cache
+        with:
+          # Per job (its examples): jobs sharing an image build different extensions, and the first to save wins the key.
+          cache-key: rtxpro6000-example-${{ steps.examples.outputs.key }}-${{ inputs.docker_image }}
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu:/usr/local/tensorrt/targets/x86_64-linux-gnu/lib" >> $GITHUB_ENV
           echo "PATH=${PATH}:/usr/local/tensorrt/targets/x86_64-linux-gnu/bin" >> $GITHUB_ENV
+      - if: contains(inputs.docker_image, 'nvidia/nemo:')
+        uses: ./.github/actions/megatron-from-source
       - name: Install dependencies
+        shell: bash
         run: |
           # Uninstall conflicting system-wide installed modelopt in nemo containers
           pip uninstall -y nvidia-modelopt || true
 
-          # Use `python -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
-          # Editable install so example scripts launched as subprocesses resolve modelopt to the same source path as the test process
-          python -m pip install -e ".${{ inputs.pip_install_extras }}"
-
-          if [[ "${{ inputs.example }}" == *"diffusers"* ]]; then
-            echo "Uninstalling apex for diffusers: T5 Int8 (PixArt) + Apex is not supported as per https://github.com/huggingface/transformers/issues/21391"
-            python -m pip uninstall -y apex || true
+          # nvcr.io/nvidia/tensorrt:26.05-py3 ships cuDNN 9.22 with no preinstalled torch, and
+          # torch 2.14 pins cuDNN 9.24: mixing them fails with CUDNN_SUBLIBRARY_LOADING_FAILED.
+          if [[ "${{ inputs.docker_image }}" == *"/tensorrt:"* ]]; then
+            echo "torch<2.14" > /tmp/pip-constraints.txt
+            export PIP_CONSTRAINT=/tmp/pip-constraints.txt
+            # The requirements of each example are installed later, in their own step
+            echo "PIP_CONSTRAINT=/tmp/pip-constraints.txt" >> "$GITHUB_ENV"
           fi
 
-          find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do python -m pip install -r "$req_file" || exit 1; done
-      - name: Run tests
-        env:
-          # Absolute paths so subprocesses running from different working directories
-          # all find the config and write .coverage.* files to the same location.
-          COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
-          COVERAGE_FILE: ${{ github.workspace }}/.coverage
-        run: |
-          echo "Running tests for: ${{ inputs.example }}"
-          python -m pytest tests/examples/${{ inputs.example }} --cov
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+          # Use `python3 -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
+          # Editable install so example scripts launched as subprocesses resolve modelopt to the same source path as the test process
+          python3 -m pip install -e ".${{ inputs.pip_install_extras }}"
+
+      # One step per example. A failing example does not fail its step (the action reports `failed`
+      # instead, because a failed step would end the job at once), so the examples after it still run, as
+      # when each had its own job, and the last step of the job fails it. These three steps and that final
+      # check hold the job's cap of 3 (`max` in the first step).
+      - name: "Example 1: ${{ steps.examples.outputs.e0 }}"
+        id: example0
+        uses: ./.github/actions/run-example
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage.xml
-          flags: examples
-          fail_ci_if_error: false # test may be skipped if relevant file changes are not detected
-          verbose: true
+          example: ${{ steps.examples.outputs.e0 }}
+          allow-failure-examples: ${{ inputs.allow_failure_examples }}
+          codecov-token: ${{ secrets.CODECOV_TOKEN }}
+      - name: "Example 2: ${{ steps.examples.outputs.e1 || '-' }}"
+        id: example1
+        if: steps.examples.outputs.e1 != ''
+        uses: ./.github/actions/run-example
+        with:
+          example: ${{ steps.examples.outputs.e1 }}
+          allow-failure-examples: ${{ inputs.allow_failure_examples }}
+          codecov-token: ${{ secrets.CODECOV_TOKEN }}
+      - name: "Example 3: ${{ steps.examples.outputs.e2 || '-' }}"
+        id: example2
+        if: steps.examples.outputs.e2 != ''
+        uses: ./.github/actions/run-example
+        with:
+          example: ${{ steps.examples.outputs.e2 }}
+          allow-failure-examples: ${{ inputs.allow_failure_examples }}
+          codecov-token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Save extensions
+        # Not tied to the tests passing, see the action description
+        if: always() && steps.ext-cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/save-extensions
+        with:
+          cache-key: ${{ steps.ext-cache.outputs.cache-key }}
+      - name: Fail the job for an example that failed
+        if: steps.example0.outputs.failed == 'true' || steps.example1.outputs.failed == 'true' || steps.example2.outputs.failed == 'true'
+        run: exit 1

@@ -31,7 +31,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+
+__all__ = ["DataArguments", "ModelArguments", "TrainingArguments"]
 
 
 class ModelArguments(BaseModel):
@@ -42,6 +44,11 @@ class ModelArguments(BaseModel):
     model_name_or_path: str | None = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     use_fake_base_for_offline: bool = False
     trust_remote_code: bool = False
+    # Optional config field overrides applied to the loaded model config (and its
+    # text_config) before instantiation. Needed for checkpoints whose config doesn't
+    # round-trip cleanly through transformers (e.g. Cosmos3's Qwen3-VL text tower,
+    # where intermediate_size/num_key_value_heads don't propagate from text_config).
+    config_overrides: dict | None = None
 
 
 class DataArguments(BaseModel):
@@ -51,9 +58,18 @@ class DataArguments(BaseModel):
 
     # Derived in ``_check_mode_requirements`` from the data-source fields; accepted as input
     # only for backward compatibility (existing ``mode:`` keys / overrides), then overwritten.
-    mode: Literal["online", "offline", "streaming"] | None = None
+    mode: Literal["online", "offline", "streaming", "sparse"] | None = None
     data_path: str | None = None
     offline_data_path: str | None = None
+    # Dumped top-k teacher deployment policy (external draft mode); see sparse_data.py.
+    sparse_data_path: str | None = None
+    # Oversample sources by their ``source`` field, e.g. {"cnn": 5.0}. Weight by tokens,
+    # not rows: response lengths differ by an order of magnitude across sources.
+    sparse_source_weights: dict[str, float] | None = None
+    # Where to build the memmapped cache. Defaults to a .sparse_cache beside the shards,
+    # which fails when the dump lives on a read-only mount -- the normal case for a shared
+    # corpus -- and leaves concurrent runs over the same shards fighting over one cache.
+    sparse_cache_dir: str | None = None
     lazy_preprocess: bool = True
     draft_vocab_cache: str | None = None
     chat_template: str | None = None
@@ -62,9 +78,11 @@ class DataArguments(BaseModel):
     sample_size: int = -1
     streaming_server_url: str | None = None
     streaming_model_name: str | None = None
-    streaming_prefetch: int = Field(default=64, ge=1)
-    # Mirror of the vLLM connector's ``shared_storage_path``; trainer-side allowlist.
-    streaming_shared_storage_path: str | None = None
+    # Set for a draft whose top aux layer already is the base's last layer (e.g. the released
+    # Nemotron-3.5 DSpark draft: aux ids [1,5,19,29,41,51], zero-based, on a 52-layer base).
+    # vLLM captures each layer once, so there is no distinct extra plane for the base hidden
+    # and the final plane must serve both roles.
+    final_aux_is_base_hidden: bool = False
 
     @field_validator("sample_size")
     @classmethod
@@ -80,18 +98,25 @@ class DataArguments(BaseModel):
         # override round-trip and silently select the wrong training path.
         has_offline = self.offline_data_path is not None
         has_streaming = self.streaming_server_url is not None
-        if has_offline and has_streaming:
+        has_sparse = self.sparse_data_path is not None
+        if sum([has_offline, has_streaming, has_sparse]) > 1:
             raise ValueError(
-                "ambiguous: set only one of data.offline_data_path / data.streaming_server_url"
+                "ambiguous: set only one of data.offline_data_path / "
+                "data.streaming_server_url / data.sparse_data_path"
             )
-        self.mode = "offline" if has_offline else "streaming" if has_streaming else "online"
-        if self.mode == "streaming" and not (
-            self.streaming_model_name and self.streaming_shared_storage_path
-        ):
+        self.mode = (
+            "sparse"
+            if has_sparse
+            else "offline"
+            if has_offline
+            else "streaming"
+            if has_streaming
+            else "online"
+        )
+        if self.mode == "streaming" and not self.streaming_model_name:
             raise ValueError(
-                "data.mode='streaming' requires data.streaming_server_url, "
-                "data.streaming_model_name, and data.streaming_shared_storage_path "
-                "(the trainer-side allowlist for paths returned by the vLLM server)"
+                "data.mode='streaming' requires data.streaming_server_url and "
+                "data.streaming_model_name"
             )
         return self
 

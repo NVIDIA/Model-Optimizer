@@ -164,35 +164,27 @@ class SVDQuantLinear(QuantLinearConvBase):
 
     def fold_weight(self, keep_attrs: bool = False):
         """Fold the weight for faster eval."""
-        super().fold_weight(keep_attrs)
-        if (
+        should_fold = (
             hasattr(self, "weight_quantizer")
             and hasattr(self, "weight")
+            and isinstance(self.weight, torch.Tensor)
+            and isinstance(self.weight_quantizer, TensorQuantizer)
             and self.weight_quantizer.fake_quant
-        ):
-            if (
-                self._not_sequential_quantizers()
-                and self.weight_quantizer.svdquant_lora_a is not None
-                and self.weight_quantizer.svdquant_lora_b is not None
-            ):
-                self.weight.data.copy_(
-                    self.weight
-                    + self.weight_quantizer.svdquant_lora_b @ self.weight_quantizer.svdquant_lora_a
-                )
-            if not keep_attrs:
-                _attrs = [
-                    "_svdquant_lora_a",
-                    "_svdquant_lora_b",
-                ]
-                for attr in _attrs:
-                    if hasattr(self.weight_quantizer, attr):
-                        delattr(self.weight_quantizer, attr)
+        )
+        # Read the LoRA factors first: folding drops the weight quantizer's buffers.
+        lora_a = lora_b = None
+        if should_fold and not keep_attrs and self._not_sequential_quantizers():
+            lora_a = self.weight_quantizer.svdquant_lora_a
+            lora_b = self.weight_quantizer.svdquant_lora_b
+        super().fold_weight(keep_attrs)
+        if lora_a is not None and lora_b is not None:
+            self.weight.data.copy_(self.weight + lora_b @ lora_a)
 
 
 class RealQuantLinear(QuantModule):
     """Quantized version of nn.Linear with real quantization."""
 
-    list_of_scale_tensors = ["_scale", "double_scale", "_scale_zeros"]
+    list_of_scale_tensors = ["_scale", "_double_scale", "_scale_zeros"]
     allow_real_quant_gemm = True
 
     @property

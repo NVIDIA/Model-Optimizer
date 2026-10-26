@@ -13,12 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import platform
+import sys
 from pathlib import Path
 
 import pytest
 import torch
 import torch.distributed as dist
+from _test_utils.fs_utils import assert_unmodified_tree
+from _test_utils.mlflow import FakeMlflow, pin_tracking_env
 from _test_utils.torch.distributed.utils import init_process
 
 import modelopt.torch.opt as mto
@@ -37,6 +41,12 @@ def pytest_addoption(parser):
         help="Run manual tests",
     )
     parser.addoption(
+        "--run-nightly",
+        action="store_true",
+        default=False,
+        help="Run nightly tests (skipped on pull requests)",
+    )
+    parser.addoption(
         "--run-release",
         action="store_true",
         default=False,
@@ -48,13 +58,16 @@ def pytest_addoption(parser):
 # Every collectible test group must be listed here else collection errors occur
 # A test can override its cap by adding ``@pytest.mark.timeout(...)``
 _DEFAULT_TIMEOUT = {
-    "examples": 300,
+    "examples": int(os.environ.get("MODELOPT_QA_TEST_TIMEOUT", 300)),
     "gpu": 120,
     "gpu_megatron": 120,
     "gpu_trtllm": 60,
     "gpu_vllm": 60,
     "regression": 180,
-    "unit": 60,
+    # Tests that spawn processes take 2-3x longer under pytest-xdist: 4 workers and their children
+    # share the 4 vCPUs of a CI runner (test_dist.py::test_data_parallel: 8-15 s serial, 25-35 s with
+    # xdist, over 60 s on a slow runner).
+    "unit": 120,
 }
 
 
@@ -62,6 +75,7 @@ def pytest_collection_modifyitems(config, items):
     """Skip flag-gated tests and apply a default per-test timeout based on the test directory."""
     skip_marks = [
         ("manual", "--run-manual"),
+        ("nightly", "--run-nightly"),
         ("release", "--run-release"),
     ]
 
@@ -90,16 +104,7 @@ def pytest_collection_modifyitems(config, items):
         item.add_marker(pytest.mark.timeout(_DEFAULT_TIMEOUT[group]))
 
 
-@pytest.fixture
-def tiny_tokenizer():
-    """Real tiny HF tokenizer (vocab=128) shared across unit and gpu test lanes."""
-    # Lazy import: transformers_models.py runs ``pytest.importorskip("transformers")``
-    # at module load, which we don't want to trigger at conftest import time.
-    from _test_utils.torch.transformers_models import get_tiny_tokenizer
-
-    return get_tiny_tokenizer()
-
-
+# General Fixtures #################################################################################
 @pytest.fixture
 def skip_on_windows():
     if platform.system() == "Windows":
@@ -160,3 +165,40 @@ def enable_hf_checkpointing():
 def project_root_path(request: pytest.FixtureRequest) -> Path:
     """Fixture providing the project root path for tests."""
     return Path(request.config.rootpath)
+
+
+# Transformers Models Fixtures #####################################################################
+@pytest.fixture
+def tiny_tokenizer():
+    """Real tiny HF tokenizer (vocab=128) shared across unit and gpu test lanes."""
+    # Lazy import: transformers_models.py runs ``pytest.importorskip("transformers")``
+    # at module load, which we don't want to trigger at conftest import time.
+    from _test_utils.torch.transformers_models import get_tiny_tokenizer
+
+    return get_tiny_tokenizer()
+
+
+@pytest.fixture(scope="session")
+def tiny_wan22_path(tmp_path_factory):
+    """Tiny Wan 2.2 pipeline dir, built once per session (the build is the expensive part).
+
+    Shared by the gpu sparse-attention tests and the diffusers example tests.
+    """
+    # Lazy import for the same reason as ``tiny_tokenizer``: diffusers_models.py pulls in
+    # transformers at module load.
+    from _test_utils.torch.diffusers_models import create_tiny_wan22_pipeline_dir
+
+    pipeline_dir = create_tiny_wan22_pipeline_dir(tmp_path_factory.mktemp("tiny_wan22"))
+    with assert_unmodified_tree(pipeline_dir) as path:
+        yield str(path)
+
+
+@pytest.fixture
+def fake_mlflow(monkeypatch):
+    """Stand in for the ``mlflow`` module; see ``_test_utils.mlflow.FakeMlflow``."""
+    # A suite that takes the fake without also importing clean_env would otherwise read the
+    # developer's own $MLFLOW_TRACKING_URI and flip the branch under test.
+    pin_tracking_env(monkeypatch)
+    fake = FakeMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", fake)
+    return fake

@@ -12,15 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import copy
+import json
 from copy import deepcopy
 
 import pytest
 import torch
-import transformers
+from _test_utils.torch.quantization.offload import make_cpu_offloaded_model, make_layerwise_cfg
 from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_qwen3_moe_dir
-from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_vllm_fq_checkpoint
@@ -29,7 +28,7 @@ from modelopt.torch.quantization.utils import enable_weight_access_and_writeback
 from modelopt.torch.utils import safe_load
 
 
-def _test_hf_vllm_export(tmp_path, quant_cfg, model_dir):
+def _test_hf_vllm_export(tmp_path, quant_cfg, model_dir, resize_vocab=False):
     """Test HuggingFace model export for vLLM with fake quantization.
 
     This test verifies:
@@ -40,7 +39,10 @@ def _test_hf_vllm_export(tmp_path, quant_cfg, model_dir):
     """
 
     # Load the model
+    source_config = (model_dir / "config.json").read_bytes()
     model = AutoModelForCausalLM.from_pretrained(model_dir)
+    if resize_vocab:
+        model.resize_token_embeddings(model.config.vocab_size + 8)
     model = model.cuda()
     model.eval()
 
@@ -84,6 +86,13 @@ def _test_hf_vllm_export(tmp_path, quant_cfg, model_dir):
     export_dir.mkdir(exist_ok=True)
 
     export_hf_vllm_fq_checkpoint(model, export_dir=export_dir)
+
+    export_config = export_dir / "config.json"
+    if resize_vocab:
+        assert json.loads(export_config.read_text())["vocab_size"] == model.config.vocab_size
+    else:
+        # An unchanged config retains the source bytes for remote-code parity.
+        assert export_config.read_bytes() == source_config
 
     # Verify the input model is not mutated: all state dict values unchanged
     state_dict_after_export = model.state_dict()
@@ -130,36 +139,6 @@ def _test_hf_vllm_export(tmp_path, quant_cfg, model_dir):
             assert any("_amax" in k for k in state), f"input quantizer {name} should preserve _amax"
 
 
-def _make_cpu_offloaded_model(tmp_path, num_hidden_layers=3):
-    """Create a tiny LLaMA model with layer 0 offloaded to CPU via accelerate."""
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=num_hidden_layers)
-    config = AutoConfig.from_pretrained(tiny_llama_dir)
-
-    with init_empty_weights():
-        model = AutoModelForCausalLM.from_config(config)
-
-    device_map = {
-        n: 0
-        for n, m in model.named_modules()
-        if "layers" not in n or n.split("layers.")[-1].isdigit()
-    }
-    device_map["model.layers.0"] = "cpu"
-
-    model = load_checkpoint_and_dispatch(model, tiny_llama_dir, device_map=device_map)
-    return model, config, tiny_llama_dir
-
-
-def _make_layerwise_cfg(base_cfg):
-    """Add layerwise=True to a quant config's algorithm field."""
-    cfg = copy.deepcopy(base_cfg)
-    algo = cfg.get("algorithm", "max")
-    if isinstance(algo, str):
-        cfg["algorithm"] = {"method": algo, "layerwise": True}
-    else:
-        algo["layerwise"] = True
-    return cfg
-
-
 @pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG])
 def test_hf_vllm_export_offload(tmp_path, quant_cfg):
     """Verifies the inplace_mem_efficient=True path mutates offloaded weights in place
@@ -169,12 +148,12 @@ def test_hf_vllm_export_offload(tmp_path, quant_cfg):
     """
     num_hidden_layers = 3
 
-    model, _config, _tiny_llama_dir = _make_cpu_offloaded_model(
+    model, _config, _tiny_llama_dir, _inputs = make_cpu_offloaded_model(
         tmp_path / "offloaded", num_hidden_layers=num_hidden_layers
     )
     model.eval()
 
-    seq_cfg = _make_layerwise_cfg(quant_cfg)
+    seq_cfg = make_layerwise_cfg(quant_cfg)
 
     def forward_loop(model):
         input_ids = torch.randint(0, model.config.vocab_size, (1, 128)).cuda()
@@ -250,12 +229,20 @@ def test_hf_vllm_export_offload(tmp_path, quant_cfg):
 @pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.INT4_AWQ_CFG])
 def test_hf_vllm_export_tiny_llama(tmp_path, quant_cfg):
     tiny_model_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=2)
+    config_path = tiny_model_dir / "config.json"
+    # Keep the config values but distinct bytes so the source copy is observable.
+    config_path.write_text("\n" + json.dumps(json.loads(config_path.read_text()), indent=4))
     _test_hf_vllm_export(tmp_path, quant_cfg, tiny_model_dir)
 
 
-@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.INT4_AWQ_CFG])
+def test_hf_vllm_export_resized_vocab(tmp_path):
+    tiny_model_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=2)
+    _test_hf_vllm_export(tmp_path, mtq.FP8_DEFAULT_CFG, tiny_model_dir, resize_vocab=True)
+
+
+@pytest.mark.parametrize(
+    "quant_cfg", [mtq.FP8_DEFAULT_CFG]
+)  # INT4_AWQ_CFG is unsupported on fused MoE
 def test_hf_vllm_export_tiny_qwen3_moe(tmp_path, quant_cfg):
-    if quant_cfg == mtq.INT4_AWQ_CFG and transformers.__version__.startswith("5."):
-        pytest.skip("INT4_AWQ_CFG is not supported for Qwen3 MoE in transformers > 5.x")
     tiny_model_dir = create_tiny_qwen3_moe_dir(tmp_path, num_hidden_layers=2)
     _test_hf_vllm_export(tmp_path, quant_cfg, tiny_model_dir)

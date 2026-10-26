@@ -27,10 +27,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity.attention_sparsity as mtsa
-from modelopt.torch.export import export_hf_checkpoint
+from modelopt.torch.export import ensure_local_checkpoint, export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity.config import (
     SKIP_SOFTMAX_CALIB,
     SKIP_SOFTMAX_CALIB_SPARSE24,
+    SKIP_SOFTMAX_TRITON_CALIB,
     SPARSE_SOFTMAX_DEFAULT,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
@@ -44,6 +45,7 @@ mto.enable_huggingface_checkpointing()
 SPARSE_ATTN_CFG_CHOICES = {
     "skip_softmax_calib": SKIP_SOFTMAX_CALIB,
     "skip_softmax_calib_sparse24": SKIP_SOFTMAX_CALIB_SPARSE24,
+    "skip_softmax_triton_calib": SKIP_SOFTMAX_TRITON_CALIB,
     "sparse_softmax": SPARSE_SOFTMAX_DEFAULT,
 }
 
@@ -144,14 +146,18 @@ def main(args):
     np.random.seed(RAND_SEED)
     launch_memory_monitor()
 
-    print(f"Loading model: {args.pyt_ckpt_path}")
+    # --pyt_ckpt_path stays as given. Later steps read the local copy of the whole checkpoint in
+    # local_checkpoint_path, since exporters read the source's files from local disk only;
+    # hub_model_id is the Hub ID, or None for a local path.
+    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(args.pyt_ckpt_path)
+    print(f"Loading model: {args.local_checkpoint_path}")
 
     # No need to specify attn_implementation here — mtsa.sparsify() sets it
     # automatically ("eager" for pytorch backend, "modelopt_triton" for triton).
     model = AutoModelForCausalLM.from_pretrained(
-        args.pyt_ckpt_path, attn_implementation="eager", dtype="auto", device_map="auto"
+        args.local_checkpoint_path, attn_implementation="eager", dtype="auto", device_map="auto"
     )
-    tokenizer = AutoTokenizer.from_pretrained(args.pyt_ckpt_path)
+    tokenizer = AutoTokenizer.from_pretrained(args.local_checkpoint_path)
 
     # Set pad token if not set
     if tokenizer.pad_token is None:
@@ -186,6 +192,15 @@ def main(args):
             calib["max_seqlen"] = args.calib_max_seqlen
         if args.calib_chunk_size is not None:
             calib["chunk_size"] = args.calib_chunk_size
+        # Point RULER calibration at the data downloaded by download_ruler_data.sh
+        # (next to this script) unless the user overrides it. The NIAH essay
+        # haystack requires this directory.
+        calib.setdefault(
+            "data_dir",
+            args.calib_data_dir
+            if args.calib_data_dir is not None
+            else str(Path(__file__).parent / "data"),
+        )
 
     model = mtsa.sparsify(model, config=sparse_config)
     print("Sparse attention applied successfully!")
@@ -221,10 +236,11 @@ def main(args):
         export_dir = Path(args.export_dir)
         export_dir.mkdir(parents=True, exist_ok=True)
 
+        # The export copies the source tokenizer files unchanged; the pad token set above is only
+        # for generation here.
         with torch.inference_mode():
             export_hf_checkpoint(model, export_dir=export_dir)
 
-        tokenizer.save_pretrained(export_dir)
         print(f"Model exported successfully to: {export_dir}")
 
 
@@ -301,6 +317,14 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Chunk size for calibration prefill. Overrides config value.",
+    )
+    parser.add_argument(
+        "--calib_data_dir",
+        type=str,
+        default=None,
+        help="Path to RULER calibration data (contains an 'essays' subdir). "
+        "Defaults to the 'data' directory next to this script "
+        "(populated by download_ruler_data.sh).",
     )
 
     args = parser.parse_args()

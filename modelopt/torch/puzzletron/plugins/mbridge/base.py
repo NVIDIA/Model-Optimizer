@@ -32,7 +32,6 @@ from megatron.bridge.models.transformer_config import (
     HeterogeneousTransformerConfig,
     TransformerConfig,
 )
-from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
 from megatron.core.models.gpt.heterogeneous.heterogeneous_layer_specs import (
     get_gpt_heterogeneous_layer_spec,
 )
@@ -43,9 +42,14 @@ from megatron.core.transformer.spec_utils import ModuleSpec
 if not hasattr(TransformerConfig, "get_config_for_layer"):
     TransformerConfig.get_config_for_layer = lambda self, layer_number: self
 
-__all__ = ["heterogeneous_layer_spec", "GenericHeterogeneousProvider", "HeterogeneousBridgeMixin"]
+try:  # nemo:26.04.01 onwards needs this fix
+    from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
 
-register_allowed_target_prefix("modelopt.")
+    register_allowed_target_prefix("modelopt.")
+except ImportError:
+    pass
+
+__all__ = ["heterogeneous_layer_spec", "GenericHeterogeneousProvider", "HeterogeneousBridgeMixin"]
 
 
 def heterogeneous_layer_spec(config) -> ModuleSpec:
@@ -118,7 +122,10 @@ class HeterogeneousBridgeMixin:
         # use model-specific parameters not supported by GenericHeterogeneousProvider (e.g.,
         # scale_factor, yarn_rotary_scaling_factor, moe_* parameters). In such cases, create a
         # model-specific heterogeneous provider that inherits from the model-specific provider.
-        valid_fields = {f.name for f in fields(GenericHeterogeneousProvider)}
+        # Newer Megatron-Bridge computes some fields in __post_init__ and excludes them from the
+        # constructor (init=False). asdict() still includes them, so filter them out to avoid a
+        # TypeError in GenericHeterogeneousProvider(**provider_kwargs).
+        valid_fields = {f.name for f in fields(GenericHeterogeneousProvider) if f.init}
 
         # Only keep kwargs that are valid fields
         provider_kwargs = {k: v for k, v in provider_kwargs.items() if k in valid_fields}

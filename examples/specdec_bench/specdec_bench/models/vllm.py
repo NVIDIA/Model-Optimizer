@@ -16,6 +16,7 @@
 import asyncio
 import time
 
+from ..utils import shutdown_engine
 from .base import Model
 
 try:
@@ -26,6 +27,19 @@ try:
 except ImportError:
     print("vllm is not installed.")
     vllm = None
+
+
+# Forwarded from ``--runtime_params`` ``engine_args.<key>``; extend as needed.
+PASSTHROUGH_ENGINE_ARGS = (
+    "mamba_backend",
+    "mamba_ssm_cache_dtype",
+    "mamba_cache_mode",
+    "mamba_cache_philox_rounds",
+    "enable_mamba_cache_stochastic_rounding",
+)
+
+# Bounds the engine-manager shutdown in stop(), so a stuck EngineCore cannot hold the job.
+ENGINE_SHUTDOWN_TIMEOUT_S = 60
 
 
 class VLLMModel(Model):
@@ -63,15 +77,63 @@ class VLLMModel(Model):
                 specdec["disable_padded_drafter_batch"] = True
                 specdec["parallel_draft_block_sizes"] = kwargs.get("parallel_draft_block_sizes")
         elif kwargs.get("speculative_algorithm") == "MTP":
+            # vLLM's ``SpeculativeConfig.__post_init__`` (vllm/config/
+            # speculative.py:529-602) does method auto-detection ONLY
+            # when ``method`` is unset — when ``model`` is provided and
+            # ``method`` is None, the default branch sets
+            # ``method = "draft_model"`` (the generic same-architecture
+            # draft path), NOT MTP. That path enforces equal num_heads
+            # between target and draft and raises
+            # ``AssertionError: All layers in one attention group must
+            # share num_heads`` on heterogeneous-head models like
+            # Gemma 4 (target=8 heads, assistant=4).
+            #
+            # The canonical config for ALL MTP variants is to ALWAYS
+            # pass ``method="mtp"`` AND ADD ``model=<assistant>`` only
+            # when the family uses a separate assistant model. vLLM's
+            # own test at ``tests/v1/e2e/spec_decode/test_spec_decode.py``
+            # (lines 818-823) does exactly this for the gemma4-e4b
+            # parametrization:
+            #
+            #     speculative_config = {
+            #         "method": "mtp",
+            #         "num_speculative_tokens": ...,
+            #     }
+            #     if draft_model is not None:        # Gemma 4 case
+            #         speculative_config["model"] = draft_model
+            #
+            # Surfaced on OMNIML-5024 pipeline #54356795: dropping the
+            # ``method`` key when ``draft_model_dir`` was provided sent
+            # the call into the generic draft_model path, hitting the
+            # num_heads assertion. Restored both keys.
             specdec = {
                 "method": "mtp",
                 "num_speculative_tokens": kwargs.get("speculative_num_steps", 3),
             }
+            draft_model_dir = kwargs.get("draft_model_dir")
+            if draft_model_dir:
+                # Gemma 4 family (E2B / E4B / 26B-A4B / 31B) uses a
+                # separate assistant checkpoint as the MTP draft.
+                # vLLM auto-detects Gemma4 MTP from the assistant
+                # ``model_type=gemma4_assistant`` and rewrites it to
+                # ``gemma4_mtp`` (speculative.py:511-522). For
+                # families where the MTP layer ships inside the
+                # target (Qwen 3.5 etc.), omit ``--draft_model_dir``
+                # and let vLLM use the target model as its own draft
+                # (handled in speculative.py:562-573).
+                specdec["model"] = draft_model_dir
         elif kwargs.get("speculative_algorithm") == "DFLASH":
             specdec = {
                 "method": "dflash",
                 "model": kwargs.get("draft_model_dir"),
                 "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 8),
+            }
+        elif kwargs.get("speculative_algorithm") == "DSPARK":
+            specdec = {
+                "method": "dspark",
+                "model": kwargs.get("draft_model_dir"),
+                "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 7),
+                "draft_sample_method": kwargs.get("draft_sample_method", "greedy"),
             }
         elif kwargs.get("speculative_algorithm") == "NONE":
             specdec = None
@@ -92,8 +154,9 @@ class VLLMModel(Model):
             max_num_seqs=max_concurrent_requests * num_speculative_tokens,
             skip_tokenizer_init=False,
             async_scheduling=kwargs.get("async_scheduling", True),
-            enforce_eager=False,
+            enforce_eager=kwargs.get("enforce_eager", False),
             max_model_len=kwargs.get("max_model_len"),
+            **{key: kwargs[key] for key in PASSTHROUGH_ENGINE_ARGS if kwargs.get(key) is not None},
         )
         self.engine_args = engine_args
         self.model = AsyncLLM.from_engine_args(engine_args)
@@ -177,9 +240,8 @@ class VLLMModel(Model):
             pass
         return cfg
 
-    def stop(self):  # pragma: no cover
+    def stop(self):
         try:
-            self.loop.run_until_complete(self.model.shutdown())
+            shutdown_engine(self.model, loop=self.loop, timeout=ENGINE_SHUTDOWN_TIMEOUT_S)
+        finally:
             self.loop.close()
-        except Exception:
-            pass

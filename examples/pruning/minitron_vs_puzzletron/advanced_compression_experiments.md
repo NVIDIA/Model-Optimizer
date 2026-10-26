@@ -141,6 +141,8 @@ BLD transforms Puzzletron's results at this compression level. The pre-distillat
 
 Unlike the moderate compression case where BLD had negligible impact, at aggressive compression BLD substantially changes the architecture the MIP selects and the quality of the resulting model.
 
+> **Future work:** An improved bypass feature will be merged to `main` in a future release.
+
 ---
 
 ## 4. Beyond Dense Transformers: Compressing a Mamba-Transformer Hybrid

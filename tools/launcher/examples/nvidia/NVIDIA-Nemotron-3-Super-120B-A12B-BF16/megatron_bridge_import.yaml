@@ -1,8 +1,8 @@
 # Megatron-Bridge import for nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16.
 #
-# Imports HF weights to a Megatron-LM checkpoint via AutoBridge.import_ckpt
-# (use_cpu_initialization=True). Uses a single 4-GPU Slurm node — Megatron-Bridge
-# requires at least 1 GPU for nccl init even with CPU-resident weights.
+# Imports HF weights to a Megatron-LM checkpoint with Megatron-Bridge's distributed GPU
+# conversion backend (scripts/conversion/convert.sh) on a single 4-GPU Slurm node, sharding
+# the experts across the 4 ranks (EP=4).
 #
 # Usage:
 #   export SLURM_HOST=<slurm-host>
@@ -29,10 +29,12 @@ pipeline:
     environment:
       - HF_MODEL_ID: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
       - OUTPUT_DIR: <<global_vars.output_dir>>
+      # Expert parallelism over the 4 GPUs; a replicated (EP=1) import does not fit.
+      - EP: 4
     slurm_config:
       _factory_: "slurm_factory"
-      # Megatron-Bridge is preinstalled in nemo:26.04 at /opt/Megatron-Bridge.
-      container: nvcr.io/nvidia/nemo:26.04
+      # Megatron-Bridge is preinstalled in nemo:26.08 at /opt/Megatron-Bridge.
+      container: nvcr.io/nvidia/nemo:26.08
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       partition: batch
       nodes: 1

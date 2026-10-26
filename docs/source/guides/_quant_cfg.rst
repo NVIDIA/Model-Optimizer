@@ -10,8 +10,8 @@ patterns for composing quantization configurations.
 
 .. tip::
 
-    For the list of built-in configs and supported formats, see :any:`quantization-formats`.
-    For how to apply a config to a model, see :any:`_pytorch_quantization`.
+    For the list of built-in configs and supported formats, see :ref:`quantization-formats`.
+    For how to apply a config to a model, see :doc:`_pytorch_quantization`.
 
 ----------
 

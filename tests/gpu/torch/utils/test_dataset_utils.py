@@ -19,17 +19,65 @@ These live under ``tests/gpu`` (networked infra) rather than ``tests/unit``,
 which is kept hermetic with toy local fixtures.
 """
 
+import importlib
 import json
+from pathlib import Path
 
 import pytest
+import torch
+from _test_utils.torch.transformers_models import get_tiny_llama
 from datasets import load_dataset
 from huggingface_hub import get_token
+from transformers import AutoTokenizer
 
+from modelopt.recipe import load_recipe
 from modelopt.torch.utils.dataset_utils import (
-    SUPPORTED_DATASET_CONFIG,
+    DATASET_COMBOS,
     get_dataset_dataloader,
     get_dataset_samples,
 )
+
+
+@pytest.fixture(scope="module")
+def qwen3_tokenizer():
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+    return tokenizer
+
+
+@pytest.mark.manual(
+    reason="Streams the 7 gated Nemotron v3 datasets; runs on the nightly schedule."
+)
+def test_get_dataset_dataloader_nemotron_v3_chat_template(qwen3_tokenizer):
+    if not get_token():
+        pytest.skip(
+            "No HF token (env HF_TOKEN or `hf auth login`); skipping gated Nemotron smoke test"
+        )
+
+    num_samples = len(DATASET_COMBOS["nemotron-post-training-v3"]) * 2
+    seq_length = 32
+    loader = get_dataset_dataloader(
+        dataset_name="nemotron-post-training-v3",
+        tokenizer=qwen3_tokenizer,
+        batch_size=2,
+        num_samples=num_samples,
+        max_sample_length=seq_length,
+        apply_chat_template=True,
+    )
+    batches = list(loader)
+    assert batches
+    total_rows = sum(batch["input_ids"].shape[0] for batch in batches)
+    assert total_rows == num_samples
+    assert all(batch["input_ids"].shape[1] == seq_length for batch in batches)
+    assert all(batch["attention_mask"].shape == batch["input_ids"].shape for batch in batches)
+
+
+# Live HF dataset round-trips. ``hf-internal-testing/dataset_with_data_files`` is a
+# 10-row x {train,test} fixture maintained by HF for their own CI — tiny enough to
+# download in a test and stable across releases, and ungated (no HF token needed).
+_HF_TINY = "hf-internal-testing/dataset_with_data_files"  # train, test splits, ``text`` col
 
 
 def _write_jsonl(path, rows):
@@ -37,72 +85,6 @@ def _write_jsonl(path, rows):
     with open(path, "w", encoding="utf-8") as f:
         f.writelines(json.dumps(row) + "\n" for row in rows)
     return str(path)
-
-
-_NEW_NEMOTRON_KEYS = [
-    "nemotron-sft-instruction-following-chat-v2",
-    "nemotron-science-v1",
-    "nemotron-competitive-programming-v1",
-    "nemotron-sft-agentic-v2",
-    "nemotron-math-v2",
-    "nemotron-sft-swe-v2",
-    "nemotron-sft-multilingual-v1",
-]
-
-
-@pytest.mark.parametrize("dataset_key", _NEW_NEMOTRON_KEYS)
-def test_new_nemotron_registry_shape(dataset_key):
-    """Shape check on the 7 newly registered nvidia/Nemotron-* entries.
-
-    Complements the gated smoke test below — catches typos in dataset paths or
-    split names even when the runner has no HF credentials.
-    """
-    assert dataset_key in SUPPORTED_DATASET_CONFIG
-    entry = SUPPORTED_DATASET_CONFIG[dataset_key]
-    config = entry["config"]
-    assert config["path"].startswith("nvidia/Nemotron-")
-    splits = config["split"]
-    assert isinstance(splits, list) and splits
-    assert all(isinstance(s, str) and s for s in splits)
-    assert len(set(splits)) == len(splits)
-    assert callable(entry["preprocess"])
-    assert entry["chat_key"] == "messages"
-
-
-@pytest.mark.parametrize(
-    "dataset_key",
-    [
-        # nvidia/Nemotron-SFT-Agentic-v2's ``search`` split currently fails the HF datasets
-        # JSON schema cast (upstream column drift), so skip its live download smoke; the
-        # registry shape check above still validates its configuration.
-        pytest.param(k, marks=pytest.mark.skip(reason="upstream search-split schema cast failure"))
-        if k == "nemotron-sft-agentic-v2"
-        else k
-        for k in _NEW_NEMOTRON_KEYS
-    ],
-)
-def test_get_dataset_samples_new_nemotron(dataset_key):
-    """Smoke-test the 7 newly registered nvidia/Nemotron-* calibration datasets.
-
-    Skipped when no HF token is available because these datasets live behind the HF Hub.
-    ``huggingface_hub.get_token()`` covers both the ``HF_TOKEN`` env var and tokens
-    cached by ``hf auth login``.
-    """
-    if not get_token():
-        pytest.skip(
-            "No HF token (env HF_TOKEN or `hf auth login`); skipping gated Nemotron smoke test"
-        )
-
-    samples = get_dataset_samples(dataset_key, num_samples=2)
-    assert isinstance(samples, list)
-    assert len(samples) == 2
-    assert all(isinstance(s, str) and len(s) > 0 for s in samples)
-
-
-# Live HF dataset round-trips. ``hf-internal-testing/dataset_with_data_files`` is a
-# 10-row x {train,test} fixture maintained by HF for their own CI — tiny enough to
-# download in a test and stable across releases, and ungated (no HF token needed).
-_HF_TINY = "hf-internal-testing/dataset_with_data_files"  # train, test splits, ``text`` col
 
 
 def _hf_dump_to_jsonl(name: str, split: str, path) -> str:
@@ -165,3 +147,25 @@ class TestHfTinyDataset:
         )
         batches = list(loader)
         assert sum(b["input_ids"].shape[0] for b in batches) == 5
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_kl_memory_probe_reserves_logit_working_memory(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[4] / "examples" / "hf_ptq"))
+    autoquant_utils = importlib.import_module("autoquant_utils")
+    recipe = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits")
+    model = get_tiny_llama(vocab_size=32768).to(device="cuda", dtype=torch.bfloat16).eval()
+    model.config.use_cache = False
+    tokens = torch.ones((2, 32), dtype=torch.long, device="cuda")
+    probe = autoquant_utils._get_autoquant_memory_probe(recipe)
+    peaks = []
+    with torch.no_grad():
+        model(tokens)
+        for workload in (lambda: model(tokens), lambda: probe(model, tokens)):
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+            baseline = torch.cuda.memory_allocated()
+            workload()
+            torch.cuda.synchronize()
+            peaks.append(torch.cuda.max_memory_allocated() - baseline)
+    assert peaks[1] > peaks[0] + tokens.numel() * model.config.vocab_size * 4

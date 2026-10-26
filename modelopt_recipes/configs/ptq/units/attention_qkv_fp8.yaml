@@ -14,7 +14,10 @@
 # limitations under the License.
 
 # QuantizerCfgList snippet that enables per-tensor FP8 E4M3 on attention q/k/v
-# bmm and softmax quantizers. Pair with a model preset to add bmm2-output entries.
+# bmm and the softmax-P quantizer. The softmax-P quantizer has a different attribute
+# name per backend (diffusers attention: softmax_quantizer; HF attention:
+# p_bmm_quantizer), so both are listed -- each is a no-op on the backend that lacks it.
+# Pair with a model preset to add bmm2-output entries.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
 imports:
@@ -23,6 +26,11 @@ imports:
   - quantizer_name: '*[qkv]_bmm_quantizer'
     cfg:
       $import: fp8
+  # softmax-P quantizer, diffusion attention (no-op for HF).
   - quantizer_name: '*softmax_quantizer'
+    cfg:
+      $import: fp8
+  # softmax-P quantizer, HF (LLM) attention (no-op for diffusion).
+  - quantizer_name: '*p_bmm_quantizer'
     cfg:
       $import: fp8

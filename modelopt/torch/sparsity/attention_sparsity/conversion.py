@@ -39,6 +39,29 @@ SPARSE_SOFTMAX_METADATA_KEYS = (
 )
 
 
+def export_threshold_scale_factor(calibration_params: dict[str, Any]) -> dict[str, Any]:
+    """Build the canonical per-phase ``threshold_scale_factor`` export block.
+
+    Single source of the exported skip-softmax schema fragment, shared by the
+    HF exporter (:func:`export_sparse_attention_config`) and the vLLM
+    calibration path (``plugins.sparse_attn_calibration``), so the serving
+    loader sees one format regardless of which path produced the checkpoint.
+    """
+    block: dict[str, Any] = {"formula": "a * exp(b * target_sparsity)"}
+    for phase in ("prefill", "decode"):
+        if phase in calibration_params:
+            block[phase] = {
+                "a": float(calibration_params[phase]["a"]),
+                "b": float(calibration_params[phase]["b"]),
+            }
+    return block
+
+
+def export_config_producer() -> dict[str, str]:
+    """Build the canonical ``producer`` block of ``sparse_attention_config``."""
+    return {"name": "modelopt", "version": mo_version}
+
+
 def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) -> None:
     """Set the correct attn_implementation based on the sparse attention method/backend.
 
@@ -392,18 +415,24 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
 
         {
             "config_groups": {
-                "group_0": {"sparse_algo": "softmax_skip", "targets": ["LlamaAttention"]}
-            },
-            "threshold_scale_factor": {
-                "formula": "a * exp(b * target_sparsity)",
-                "prefill": {"a": 7.93, "b": 8.61},
-                "decode": {"a": 0.12, "b": 9.85},
-            },
-            "sparse_softmax": {
-                "sparsity_n": 2,
-                "sparsity_m": 4,
-                "dense_sink_tokens": 0,
-                "dense_recent_tokens": 64,
+                "group_0": {
+                    "algorithm": "skip_softmax",
+                    "targets": ["LlamaAttention"],
+                    "threshold_scale_factor": {
+                        "formula": "a * exp(b * target_sparsity)",
+                        "prefill": {"a": 7.93, "b": 8.61},
+                        "decode": {"a": 0.12, "b": 9.85},
+                    },
+                    "target_sparsity": {"prefill": 0.5},
+                },
+                "group_1": {
+                    "algorithm": "sparse_softmax",
+                    "targets": ["LlamaAttention"],
+                    "sparsity_n": 2,
+                    "sparsity_m": 4,
+                    "dense_sink_tokens": 0,
+                    "dense_recent_tokens": 64,
+                },
             },
             "producer": {"name": "modelopt", "version": "0.37.0"},
         }
@@ -413,15 +442,24 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
     target_sparse_ratio = None
     sparse_softmax_config = None
     target_classes: set[str] = set()
+    disabled_layer_names: list[str] = []
+    initial_disabled_steps = 0
 
-    for module in get_sparse_attention_modules(model):
+    for name, module in get_named_sparse_attention_modules(model):
         # Get the original wrapped module's class name
         if hasattr(module, "get_original_cls_by_level"):
             original_cls = module.get_original_cls_by_level(level=0)
             if original_cls is not None:
                 target_classes.add(original_cls.__name__)
 
-        # Get calibration params from first module that has them
+        # Record layers kept dense (e.g. cross-attention, first/last blocks) so the
+        # deployment side sparsifies the same subset that was calibrated, rather than
+        # every instance of the target class.
+        if not module.is_enabled:
+            disabled_layer_names.append(get_unwrapped_name(name, model))
+            continue
+
+        # Get calibration params from first enabled module that has them
         if calibration_params is None:
             calibration_params = getattr(module._sparse_method_instance, "calibration_params", None)
         if target_sparse_ratio is None:
@@ -430,53 +468,49 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
             )
         if sparse_softmax_config is None:
             sparse_softmax_config = _get_sparse_softmax_export_config(module)
+        # A single run-wide value: take it from the first enabled module that sets it
+        # (same harvesting pattern as calibration_params / target_sparse_ratio above).
+        if not initial_disabled_steps:
+            initial_disabled_steps = module._method_config.get("initial_disabled_steps", 0)
 
     if calibration_params is None and sparse_softmax_config is None:
         return None
 
     targets = sorted(target_classes) if target_classes else ["Attention"]
-    config_groups = {}
+    config_groups: dict[str, Any] = {}
     group_idx = 0
+
+    # Each algorithm's parameters live inside its own config group.
     if calibration_params is not None:
-        config_groups[f"group_{group_idx}"] = {
-            "sparse_algo": "softmax_skip",
+        skip_group: dict[str, Any] = {
+            "algorithm": "skip_softmax",
             "targets": targets,
         }
+        if disabled_layer_names:
+            skip_group["ignore"] = disabled_layer_names
+        if initial_disabled_steps:
+            skip_group["initial_disabled_steps"] = initial_disabled_steps
+        # threshold_scale_factor (a * exp(b * target_sparsity)) and target_sparsity are
+        # skip-softmax-specific, so they live in this group.
+        skip_group["threshold_scale_factor"] = export_threshold_scale_factor(calibration_params)
+        if target_sparse_ratio is not None:
+            skip_group["target_sparsity"] = target_sparse_ratio
+        config_groups[f"group_{group_idx}"] = skip_group
         group_idx += 1
+
     if sparse_softmax_config is not None:
-        config_groups[f"group_{group_idx}"] = {
-            "sparse_algo": "sparse_softmax",
+        # N:M sparse-softmax params live in this group.
+        sparse_group: dict[str, Any] = {
+            "algorithm": "sparse_softmax",
             "targets": targets,
         }
+        sparse_group.update(sparse_softmax_config)
+        config_groups[f"group_{group_idx}"] = sparse_group
 
-    # Build the export config
-    export_config: dict[str, Any] = {
+    return {
         "config_groups": config_groups,
-        "producer": {
-            "name": "modelopt",
-            "version": mo_version,
-        },
+        "producer": export_config_producer(),
     }
-
-    if calibration_params is not None:
-        # Build threshold_scale_factor with model parameters
-        threshold_scale_factor: dict[str, Any] = {
-            "formula": "a * exp(b * target_sparsity)",
-        }
-        for phase in ["prefill", "decode"]:
-            if phase in calibration_params:
-                threshold_scale_factor[phase] = {
-                    "a": calibration_params[phase]["a"],
-                    "b": calibration_params[phase]["b"],
-                }
-        export_config["threshold_scale_factor"] = threshold_scale_factor
-
-    if calibration_params is not None and target_sparse_ratio is not None:
-        export_config["target_sparse_ratio"] = target_sparse_ratio
-    if sparse_softmax_config is not None:
-        export_config["sparse_softmax"] = sparse_softmax_config
-
-    return export_config
 
 
 def disable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Callable):

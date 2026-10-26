@@ -18,11 +18,9 @@ from functools import partial
 from pathlib import Path
 
 import pytest
-import transformers
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.misc import set_seed
 from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
-from packaging.version import Version
 
 import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.utils.distributed as dist
@@ -30,23 +28,29 @@ import modelopt.torch.utils.distributed as dist
 # The e2e test to compress a model based on Local Neural Architecture Search (Mixed Integer Programing NAS search)
 # using a one-click command.
 #
-# Note: Bypass is disabled now in the test.
+# The test covers the standard Puzzletron pipeline.
 #
 
 SEED = 1234
+_MANUAL = pytest.mark.manual(reason="~40s each; run with --run-manual")
 
 
 @pytest.mark.parametrize(
     ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers"),
     [
-        ("meta-llama/Llama-3.1-8B-Instruct", "llama", None, False),
-        ("meta-llama/Llama-3.2-3B-Instruct", "llama", None, False),
-        ("mistralai/Mistral-Small-24B-Instruct-2501", "mistral_small", None, False),
+        # Puzzletron is not actively maintained, so CI runs only Nemotron-3-Nano, gpt-oss and Qwen3-VL.
+        pytest.param("meta-llama/Llama-3.1-8B-Instruct", "llama", None, False, marks=_MANUAL),
+        pytest.param("meta-llama/Llama-3.2-3B-Instruct", "llama", None, False, marks=_MANUAL),
+        pytest.param(
+            "mistralai/Mistral-Small-24B-Instruct-2501", "mistral_small", None, False, marks=_MANUAL
+        ),
         ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16", "nemotron_h", "*E", True),
-        ("nvidia/NVIDIA-Nemotron-Nano-12B-v2", "nemotron_h_v2", "*-", False),
+        pytest.param(
+            "nvidia/NVIDIA-Nemotron-Nano-12B-v2", "nemotron_h_v2", "*-", False, marks=_MANUAL
+        ),
         ("openai/gpt-oss-20b", "gpt_oss", None, True),
-        ("Qwen/Qwen2.5-7B-Instruct", "qwen2", None, False),
-        ("Qwen/Qwen3-8B", "qwen3", None, False),
+        pytest.param("Qwen/Qwen2.5-7B-Instruct", "qwen2", None, False, marks=_MANUAL),
+        pytest.param("Qwen/Qwen3-8B", "qwen3", None, False, marks=_MANUAL),
         ("Qwen/Qwen3-VL-30B-A3B-Instruct", "qwen3_vl", None, True),
     ],
 )
@@ -59,9 +63,6 @@ def test_puzzletron(
     hybrid_override_pattern: str,
     has_moe_layers: bool,
 ):
-    if "Qwen3-VL" in hf_model_name and Version(transformers.__version__) < Version("4.57.0"):
-        pytest.skip("Qwen3-VL is not supported with transformers < 4.57.0")
-
     if "Nemotron" in hf_model_name:
         pytest.importorskip("mamba_ssm", reason="mamba_ssm required for Nemotron tests")
 
@@ -288,17 +289,18 @@ EXPECTED_LM_LOSS = {
 }
 
 
-# Expected teacher memory from subblock_stats (MiB)
+# Expected teacher memory from subblock_stats (MiB). The toy models keep the parent's head_dim
+# (64 for gpt-oss, None for Qwen2.5, else 128), so the KV cache dominates.
 EXPECTED_TEACHER_MEMORY_MIB = {
-    "meta-llama/Llama-3.1-8B-Instruct": 395.63,
-    "meta-llama/Llama-3.2-3B-Instruct": 395.63,
-    "mistralai/Mistral-Small-24B-Instruct-2501": 395.63,
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 432.81,
-    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 197.63,
-    "openai/gpt-oss-20b": 437.33,
+    "meta-llama/Llama-3.1-8B-Instruct": 6155.63,
+    "meta-llama/Llama-3.2-3B-Instruct": 6155.63,
+    "mistralai/Mistral-Small-24B-Instruct-2501": 6155.63,
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 3312.81,
+    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 3077.63,
+    "openai/gpt-oss-20b": 3125.33,
     "Qwen/Qwen2.5-7B-Instruct": 386.25,
-    "Qwen/Qwen3-8B": 395.63,
-    "Qwen/Qwen3-VL-30B-A3B-Instruct": 406.14,
+    "Qwen/Qwen3-8B": 6155.63,
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": 6166.14,
 }
 
 

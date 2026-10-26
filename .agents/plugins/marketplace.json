@@ -1,0 +1,20 @@
+{
+  "name": "modelopt",
+  "interface": {
+    "displayName": "NVIDIA Model Optimizer"
+  },
+  "plugins": [
+    {
+      "name": "modelopt",
+      "source": {
+        "source": "local",
+        "path": "./plugins/modelopt"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

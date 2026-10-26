@@ -15,14 +15,15 @@
 
 # Composed PTQ recipe for MLP/MoE-only dynamic NVFP4 quantization with FP8 KV-cache quantization.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  mixer_mlp_nvfp4: configs/ptq/units/mixer_mlp_nvfp4
   nvfp4: configs/numerics/nvfp4
   kv_fp8: configs/ptq/units/kv_fp8
 
 metadata:
-  recipe_type: ptq
   description: >-
     Applies dynamic NVFP4 only to MLP/MoE weight and input quantizers, plus FP8 KV-cache
     quantization; uses max calibration.
@@ -36,6 +37,7 @@ quantize:
     - quantizer_name: '*mlp*input_quantizer'
       cfg:
         $import: nvfp4
+    - $import: mixer_mlp_nvfp4
     - quantizer_name: '*block_sparse_moe*weight_quantizer'
       cfg:
         $import: nvfp4

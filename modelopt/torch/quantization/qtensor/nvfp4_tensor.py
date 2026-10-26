@@ -20,6 +20,7 @@ import torch
 from ..backends.utils import fp4_compatible
 from ..qtensor.base_qtensor import BaseQuantizedTensor
 from ..utils import reduce_amax, reduce_block_amax, reduce_block_padding
+from ..utils.numeric_utils import E2M1_MAX, E4M3_MAX, fp8_max_for_normalization
 
 # Define conversion tables
 e2m1_bounds = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5])
@@ -31,21 +32,40 @@ __all__ = ["NVFP4QTensor"]
 def _cast_per_block_scale_to_fp8(
     per_block_scale: torch.Tensor,
     per_block_scale_max: torch.Tensor | None = None,
+    fp8_max_for_normalization: float = E4M3_MAX,
 ) -> torch.Tensor:
     """Clamp to FP8 E4M3FN range [2**-9, 448] and cast — avoids underflow→0 / overflow→NaN.
 
     When ``per_block_scale_max`` is provided, first rescales as
-    ``per_block_scale.float() * 448 / per_block_scale_max`` — the static-export
+    ``per_block_scale.float() * fp8_max_for_normalization / per_block_scale_max`` — the static-export
     path needs this because the ``[==0]=1.0`` safety net combined with a small
     ``global_amax`` can drive the rescaled value above 448 (see PR #1397).
     """
     if per_block_scale_max is not None:
-        per_block_scale = per_block_scale.float() * 448.0 / per_block_scale_max
-    return per_block_scale.clamp(min=2**-9, max=448.0).to(torch.float8_e4m3fn)
+        per_block_scale = per_block_scale.float() * fp8_max_for_normalization / per_block_scale_max
+    return per_block_scale.clamp(min=2**-9, max=E4M3_MAX).to(torch.float8_e4m3fn)
+
+
+def cutlass_fp4_scale_to_modelopt_fp4_scale(
+    cutlass_scale: torch.Tensor, weight_shape: tuple[int, int]
+) -> torch.Tensor:
+    """Undo the cuBLAS/cutlass tiled swizzle of NVFP4 block scales (TensorRT-LLM ``fp4_quantize``).
+
+    The swizzled scale holds 128x4 tiles, each stored as ``[row % 32, row // 32, col]``; this is the
+    inverse of the rearrangement in ``swizzle_nvfp4_scales``. Returns the ``[m, n // 16]`` E4M3
+    scales of an ``[m, n]`` weight with block size 16.
+    """
+    m, n = weight_shape
+    n //= 16
+    row_blocks, col_blocks = -(-m // 128), -(-n // 4)
+    tiles = cutlass_scale.reshape(row_blocks, col_blocks, 32, 4, 4)
+    padded = tiles.permute(0, 3, 2, 1, 4).reshape(row_blocks * 128, col_blocks * 4)
+    # contiguous(): the slice is a strided view, and fp4_dequantize indexes the scale flatly.
+    return padded[:m, :n].contiguous().view(torch.float8_e4m3fn)
 
 
 class NVFP4QTensor(BaseQuantizedTensor):
-    """Implements the INT4 quantization on tensors for more efficient storage or computation.
+    """Implements the NVFP4 quantization on tensors for more efficient storage or computation.
 
     Attributes:
         quantized_data (torch.Tensor): The quantized data stored as a packed uint8 tensor.
@@ -53,6 +73,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
 
     e2m1_values_on_device = {}
     e2m1_bounds_on_device = {}
+    _cast_per_block_scale_to_fp8 = staticmethod(_cast_per_block_scale_to_fp8)
 
     @classmethod
     def get_e2m1_values(cls, device):
@@ -95,14 +116,15 @@ class NVFP4QTensor(BaseQuantizedTensor):
         Returns:
             The global scaling factor as a float tensor.
         """
+        m_fp8 = fp8_max_for_normalization(weight_quantizer)
         global_amax = cls._get_static_global_amax(weight_quantizer)
         if global_amax is not None:
-            return global_amax.float() / (6.0 * 448.0)
+            return global_amax.float() / (E2M1_MAX * m_fp8)
         else:
             assert hasattr(weight_quantizer, "_amax"), (
                 "Weight quantizer does not have attribute amax"
             )
-            return weight_quantizer._amax.float() / (6.0 * 448.0)
+            return weight_quantizer._amax.float() / (E2M1_MAX * m_fp8)
 
     @classmethod
     def get_weights_scaling_factor_from_quantizer(
@@ -139,8 +161,8 @@ class NVFP4QTensor(BaseQuantizedTensor):
             per_block_amax = weight_quantizer._amax.float()
 
             # Compute scales in float
-            per_block_scale_max = global_amax / 6.0
-            per_block_scale = per_block_amax / 6.0
+            per_block_scale_max = global_amax / E2M1_MAX
+            per_block_scale = per_block_amax / E2M1_MAX
             per_block_scale[per_block_scale == 0] = 1.0
 
             # Reshape per_block_scale to match weight's block structure
@@ -148,8 +170,13 @@ class NVFP4QTensor(BaseQuantizedTensor):
             expected_shape = (*weight.shape[:-1], num_blocks_per_row)
             per_block_scale = per_block_scale.view(expected_shape)
 
+            # 4/6 M=4/M=6 is folded into _amax during MSE weight calibration.
             if not keep_high_precision:
-                per_block_scale = _cast_per_block_scale_to_fp8(per_block_scale, per_block_scale_max)
+                per_block_scale = _cast_per_block_scale_to_fp8(
+                    per_block_scale,
+                    per_block_scale_max,
+                    fp8_max_for_normalization=fp8_max_for_normalization(weight_quantizer),
+                )
             return per_block_scale, weights_scaling_factor_2
         else:
             # Dynamic path: compute from weight tensor
@@ -182,12 +209,13 @@ class NVFP4QTensor(BaseQuantizedTensor):
 
         # Get per block amax
         per_block_amax = reduce_block_amax(input, block_sizes={-1: block_size}).float()
-        # Get per-block-scale
+        # Get per-block-scale (default M=6)
         per_block_scale = per_block_amax / (
-            6.0 * weights_scaling_factor_2.to(per_block_amax.device)
+            E2M1_MAX * weights_scaling_factor_2.to(per_block_amax.device)
         )
         # Set all zero values in scale to 1.0
         per_block_scale[per_block_scale == 0] = 1.0
+
         if not keep_high_precision:
             per_block_scale = _cast_per_block_scale_to_fp8(per_block_scale)
         return per_block_scale, weights_scaling_factor_2
@@ -195,7 +223,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
     @classmethod
     def get_weights_scaling_factor_2(cls, input: torch.Tensor):
         """Returns per tensor weight scaling factor."""
-        return reduce_amax(input).float() / (6.0 * 448.0)
+        return reduce_amax(input).float() / (E2M1_MAX * E4M3_MAX)
 
     @classmethod
     def get_activation_scaling_factor(cls, quantizer):
@@ -209,7 +237,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
         if amax is None:
             return None
 
-        activation_scaling_factor = amax.float() / (quantizer.maxbound * 448.0)
+        activation_scaling_factor = amax.float() / (quantizer.maxbound * E4M3_MAX)
 
         assert torch.all(activation_scaling_factor > 0), (
             f" activation scaling factor {activation_scaling_factor} not positive."
@@ -230,9 +258,9 @@ class NVFP4QTensor(BaseQuantizedTensor):
         e2m1_bounds = cls.get_e2m1_bounds(device)
         ord = torch.searchsorted(e2m1_bounds, weight_abs, out_int32=True).to(torch.uint8)
 
-        # Efficiently check for rounding at odd-indexed bounds [0.75, 1.75, 2.5]
+        # Efficiently check for rounding at odd-indexed bounds [0.75, 1.75, 3.5]
         # Only need to check bounds at indices 1, 3, 5
-        odd_bounds = e2m1_bounds[[1, 3, 5]]  # [0.75, 1.75, 2.5]
+        odd_bounds = e2m1_bounds[[1, 3, 5]]  # [0.75, 1.75, 3.5]
         equals_odd_bounds = torch.any(weight_abs.unsqueeze(-1) == odd_bounds, dim=-1).to(
             torch.uint8
         )
@@ -274,20 +302,15 @@ class NVFP4QTensor(BaseQuantizedTensor):
 
         # try call trtllm fp4 quantization if possible
         if (
-            fp4_compatible()
-            and weights_scaling_factor is None
-            and try_tensorrt
+            try_tensorrt
             and block_size == 16
             and input.is_cuda
             and input.dtype in [torch.half, torch.bfloat16]
+            and weights_scaling_factor is None
+            and fp4_compatible()
         ):
             try:
                 import tensorrt_llm  # noqa: F401
-
-                # Make sure this utils is available for dequantize
-                from tensorrt_llm._torch.auto_deploy.utils.quantization_utils import (
-                    cutlass_fp4_scale_to_modelopt_fp4_scale,  # noqa: F401
-                )
 
                 packed_weight, weights_scaling_factor = torch.ops.trtllm.fp4_quantize(
                     input, 1.0 / weights_scaling_factor_2, block_size, False
@@ -354,18 +377,9 @@ class NVFP4QTensor(BaseQuantizedTensor):
         # Get scales from kwargs
         if kwarg["scale"].dtype == torch.uint8 and kwarg["scale"].ndim == 1:
             # If quantization is done by trtllm, convert cutlass fp4 scale to modelopt fp4 scale
-            try:
-                from tensorrt_llm._torch.auto_deploy.utils.quantization_utils import (
-                    cutlass_fp4_scale_to_modelopt_fp4_scale,
-                )
-
-                kwarg["scale"] = cutlass_fp4_scale_to_modelopt_fp4_scale(
-                    kwarg["scale"], self.metadata["shape"][-2:]
-                )
-            except ImportError as e:
-                raise ImportError(
-                    "This tensor is quantized by trtllm, but tensorrt_llm cannot be imported."
-                ) from e
+            kwarg["scale"] = cutlass_fp4_scale_to_modelopt_fp4_scale(
+                kwarg["scale"], self.metadata["shape"][-2:]
+            )
 
         if fast:
             from modelopt.torch.kernels.quantization.gemm.fp4_kernel import fp4_dequantize

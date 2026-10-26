@@ -4,7 +4,7 @@
 
 Speculative decoding accelerates auto-regressive generation in large language models (LLMs) by leveraging a lightweight draft model to predict the next γ tokens. The main LLM then verifies these candidate tokens in a single forward pass. If the draft model correctly predicts α tokens, the LLM can accept and generate α+1 tokens per verification step, significantly improving generation speed.
 
-This folder contains an end-to-end runnable speculative decoding fine‑tuning pipeline in which Llama‑3.2‑1B (Hugging Face) is trained on the [UltraChat-200k](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k) dataset.
+This folder contains an end-to-end runnable speculative decoding fine‑tuning pipeline in which Llama‑3.2‑1B (Hugging Face) is trained on the [Daring-Anteater](https://huggingface.co/datasets/nvidia/Daring-Anteater) dataset.
 
 This example focuses on training with Hugging Face. To train with Megatron‑LM, see the [Megatron‑LM example](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt).
 
@@ -18,6 +18,8 @@ This example focuses on training with Hugging Face. To train with Megatron‑LM,
 | Simplified Workflow | Train, evaluate, and export EAGLE model with one-line command | \[[Link](#getting-started-simplified-workflow)\] |
 | Online Training | Train draft model alongside base model in GPU memory | \[[Link](#training-draft-model-with-online-base-model)\] |
 | Offline Training | Train draft model using pre-computed hidden states | \[[Link](#training-draft-model-with-offline-base-model)\] |
+| Streaming Training | Train draft on hidden states streamed from a live vLLM serve (no disk dump) | \[[Link](#training-draft-model-with-streaming-base-model)\] |
+| External Draft Training | Train a standalone pretrained LM as the draft, not a grafted head | \[[Link](#training-a-standalone-external-draft-model)\] |
 | After Training | Evaluation, export and deployment | \[[Link](#model-validation)\] |
 | Advanced Usage | Data synthesis, vocab compression, and configuration | \[[Link](#advanced-usage)\] |
 | Support Matrix | Supported models for speculative decoding training | \[[Link](#support-matrix)\] |
@@ -45,7 +47,7 @@ pip install -r requirements.txt
 
 ### Data Preparation
 
-We support a range of input datasets. In this example, we will use the [UltraChat-200k](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k) dataset.
+We support a range of input datasets. In this example, we will use the [Daring-Anteater](https://huggingface.co/datasets/nvidia/Daring-Anteater) dataset.
 
 ```bash
 python ../dataset/make_dataset.py -f ../dataset/example_data_config.yaml --full-conversations
@@ -77,7 +79,7 @@ For small base models that fit in GPU memory, we can collocate them with draft m
 ```bash
 ./launch_train.sh \
     --config ../../modelopt_recipes/general/speculative_decoding/eagle3.yaml \
-    model.model_name_or_path=meta-llama/Llama-3.2-1B \
+    model.model_name_or_path=meta-llama/Llama-3.2-1B-Instruct \
     data.data_path=input_conversations/train.jsonl \
     training.output_dir=ckpts/llama-3.2-1b-online
 ```
@@ -91,9 +93,9 @@ The saved modelopt checkpoint is similar in architecture to HF models. It can be
 
 For large models, you can export intermediate hidden states to disk and train only the draft model. This significantly reduces GPU memory requirements, but requires several to tens of terabytes of disk storage depending on dataset size.
 
-### Dumpping Hidden States to Disk
+### Dumping Hidden States to Disk
 
-We support two backends for generating base model hidden states. For better effciency, it is recommended to use TRT-LLM:
+We support two backends for generating base model hidden states. For better efficiency, it is recommended to use TRT-LLM:
 
 ```bash
 python collect_hidden_states/compute_hidden_states_trtllm.py \
@@ -122,10 +124,39 @@ Once we finish dumping hidden states, launch offline training pointing to the hi
 ```bash
 ./launch_train.sh \
     --config ../../modelopt_recipes/general/speculative_decoding/eagle3.yaml \
-    model.model_name_or_path=meta-llama/Llama-3.2-1B \
+    model.model_name_or_path=meta-llama/Llama-3.2-1B-Instruct \
     data.offline_data_path=$HIDDEN_STATES_DIR \
     training.output_dir=ckpts/llama-3.2-1b-offline
 ```
+
+## Training Draft Model with Streaming Base Model
+
+For large base models, you can stream hidden states from a live `vllm serve` instead of dumping them to disk: a co-located server produces the base-model hidden states on the fly and sends them to the trainer over NIXL RDMA, scaling to multiple nodes (dedicated serve replicas + DDP trainers). See the launcher examples, e.g. [Kimi-K2.5 streaming EAGLE3](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_eagle3_multi_node.yaml) and [streaming DFlash](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_dflash_multi_node.yaml).
+
+## Training a Standalone (External) Draft Model
+
+The modes above graft a draft head onto the target. The `external` mode instead
+trains an ordinary pretrained causal LM as the draft: it keeps its own embeddings
+and lm_head, the target is never modified, and the result exports as a plain HF
+checkpoint that TRT-LLM, vLLM and SGLang load with no mode-specific support.
+
+Dump the target's top-k deployment policy once, then train against it:
+
+```bash
+python collect_hidden_states/compute_sparse_policy_hf.py \
+  --model $BASE_MODEL --input-data $CONVERSATIONS --output-dir $POLICY_DIR \
+  --top-k 20 --top-p 0.95 --answer-only-loss
+
+torchrun --nproc_per_node 8 main.py \
+  --config ../../modelopt_recipes/general/speculative_decoding/external_draft.yaml \
+  model.model_name_or_path=$BASE_MODEL \
+  draft_model_name_or_path=$DRAFT_MODEL \
+  data.sparse_data_path=$POLICY_DIR \
+  training.output_dir=$OUTPUT_DIR
+```
+
+See [doc/external_draft.md](doc/external_draft.md) for the recipe parameters, the
+dense hidden-state alternative, the objectives, and the cross-tokenizer vocabulary swap.
 
 ## Model Validation
 
@@ -182,7 +213,7 @@ Please refer to [TRT-LLM Doc: Speculative Decoding](https://nvidia.github.io/Ten
 
 Please refer to [VLLM Doc: Speculative Decoding](https://docs.vllm.ai/en/latest/features/spec_decode/) for detailed usage.
 
-Optionally, you can convert the exported checkpoint to contain target model information, which is accepted by vLLM to simplify depployment:
+Optionally, you can convert the exported checkpoint to contain target model information, which is accepted by vLLM to simplify deployment:
 
 ```bash
 python scripts/convert_to_vllm_ckpt.py --input <exported_ckpt> --verifier <target_model> --output <output_dir>
@@ -198,7 +229,7 @@ One can also use [examples/specdec_bench](../specdec_bench) to validate the trai
 
 ### Deploying Quantized model
 
-See more details on deployment of quantized model to TRTLLM [here](../llm_ptq/README.md).
+See more details on deployment of quantized model to TRTLLM [here](../hf_ptq/README.md).
 
 ## Advanced Usage
 
@@ -208,8 +239,6 @@ In addition to the default dataset, we support adding several other commonly use
 
 - MTBench (for debugging)
 - ShareGPT
-- UltraChat
-- Daring-Anteater
 - Magpie (Full 1M, and 500k and 300k filtered)
 - Nemotron Post-Training Dataset V2
 
@@ -268,10 +297,12 @@ First, prepare input conversation skeletons using `--mode generate` (default) fr
 
 ```bash
 pip install vllm
-vllm serve meta-llama/Llama-3.2-1B-Instruct --api-key token-abc123 --port 8000  --tensor-parallel-size 1
+vllm serve meta-llama/Llama-3.2-1B-Instruct --api-key token-abc123 --port 8000 --generation-config vllm --tensor-parallel-size 1
 ```
 
 Note: Add `--quantization=modelopt` flag for quantized models.
+
+The `--generation-config vllm` server option avoids a checkpoint-specific output cap.
 
 Then, we generate conversations with the base model using the prepared prompts:
 
@@ -279,7 +310,48 @@ Then, we generate conversations with the base model using the prepared prompts:
 python scripts/server_generate.py --data_path input_conversations/train.jsonl --output_path synthetic/train.jsonl
 ```
 
-To add a system prompt, use the `--system_prompt <system_prompt_text>` argument.
+Inputs can use `conversations` or `messages`, with either full conversations or user-only
+skeletons. Every user turn gets a fresh response using the previously generated responses
+as history. Input system messages are preserved; `--system_prompt <system_prompt_text>`
+overrides them and emits a warning when an input system message is replaced.
+Output remains one full conversation per JSONL record, with no train/eval/test
+split or expansion into separate assistant-turn examples. Existing output IDs are skipped on resume.
+
+Use `--extra_body` to pass model-specific chat parameters, including thinking controls and
+sampling settings. For example, with a compatible Qwen server and reasoning parser:
+
+```bash
+python scripts/server_generate.py --data_path input_conversations/train.jsonl \
+    --output_path synthetic/train.jsonl --model qwen3.8-27b --temperature 1.0 --max_tokens 8192 \
+    --extra_body '{"reasoning_effort":"medium","top_p":0.95,"top_k":20,"chat_template_kwargs":{"enable_thinking":true,"preserve_thinking":true}}'
+```
+
+The client uses the server's default thinking mode and effort unless overridden through
+`--extra_body`. Returned reasoning is saved in the
+assistant's `reasoning_content` field and included in subsequent requests. Token-capped
+conversations retain the existing `truncated: true` flag and need filtering before training.
+Failed conversations and partial answers are excluded from training output. Generation continues
+after per-conversation failures and records each one in `<output_path>.failures`, a JSONL journal
+whose filename deliberately does not end in `.jsonl` so the shard combiner ignores it.
+
+Rerun the same command with the same input ordering and output path to resume. Completed
+conversation IDs are skipped. Connection errors, timeouts, rate limits, and temporary server
+errors remain retryable on resume. Empty final answers also remain retryable when `--temperature`
+is greater than zero. At temperature zero, empty final answers are recorded as rejected to
+avoid repeating greedy-generation failures. Other rejected inputs and responses, including
+unsupported tool roles or calls and HTTP 400/422 responses, are skipped on ordinary resume.
+Inspect the journal and use `--retry_failed` to retry these rejections after correcting the
+input or request settings. This script has no tool-execution loop.
+
+Use `--fail_on_error` to return a nonzero exit status if failures remain after the batch finishes.
+Authentication failures, missing endpoints or models, and unexpected internal or output-write
+errors still exit nonzero by default. When `--log_empty_conversations` is enabled, the `finished` marker means
+every conversation is either saved or recorded as rejected; no marker is appended while
+retryable failures remain. Always inspect the failure journal before using the generated data.
+
+For chat generation, `--max_tokens 0` sends no fixed response cap; the server determines
+the budget from its configured context window and generation defaults. Increase
+`--request_timeout` (seconds, default 600) when long responses need more time.
 
 For large scale data generation, please see [SLURM prepare data](SLURM_prepare_data.md) for SLURM support.
 
@@ -334,6 +406,7 @@ See `main.py` for the full example including tokenizer setup, dataset loading, a
 | Mistral | ✅ | ✅ | ✅ |
 | Phi 3 | ✅ | ✅ | ✅ |
 | QWen 1.5,2,2.5,3 | ✅ | ✅ | ✅ |
+| Kimi-K2.5, K2.6 |  |  | ✅ |
 
 ## Speculation Module Checkpoints
 
@@ -343,7 +416,7 @@ More models coming soon!
 
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699)
 - 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 🎯 [Benchmarks](../benchmark.md)
 - 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)

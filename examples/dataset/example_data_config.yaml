@@ -5,16 +5,13 @@ outputs:
       - name: "sharegpt"
         splits:
           all: 0
-      - name: "ultrachat"
-        splits:
-          train_gen: 25000
-          train_sft: 25000
       - name: "mtbench"
         splits:
           all: 0
       - name: "daring-anteater"
+        # Multi-turn SFT conversations WITH assistant completions (real split: train).
         splits:
-          all: 0
+          train: 50000
       - name: "magpie"
         splits:
           300k: 0

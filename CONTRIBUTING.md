@@ -65,6 +65,9 @@ and conciseness.
   Prefer making the code self-explanatory first. Use comments only for non-obvious
   intent or constraints that remain unclear from the code. Apply this guidance to new
   comments only; do not rewrite or delete existing comments just for style.
+  Keep comments to one or two lines. Keep docstrings to a one-line summary with optionally a short
+  description plus only the `Args:`/`Returns:` entries whose meaning isn't obvious from the signature.
+  Benchmark numbers and root-cause analysis belong in the PR description, not the source.
 - **Document public APIs.** Public and higher-level APIs should have docstrings, including examples when useful.
   Internal helpers should usually be self-documenting through clear names and structure.
 - **Fix the bug cause, not the side effect.** For bug fixes, find the root cause instead of patching for its side effect.
@@ -107,6 +110,12 @@ Currently we have 2 places where we mention pip dependencies: [pyproject.toml](.
 
 If adding a new PIP dependency to any of these, make sure to verify the LICENSE of the dependency. If its not a permissive license (e.g. MIT, Apache 2), you need to provide a justification for the use of the dependency in the PR and check with `@NVIDIA/modelopt-setup-codeowners` if its allowed or not.
 
+Do not regenerate or commit `uv.lock` in your PR, even when changing dependencies in `pyproject.toml`. A [weekly workflow](./.github/workflows/bump_uv_lock.yml) refreshes it automatically.
+
+## Using a third-party GitHub Action or container image
+
+Pin third-party actions in `.github/` to a full commit SHA with the version in a trailing comment, e.g. `uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1`. Tags such as `@v7` or `@v7.1.1` can be moved to different code by the action's owner or anyone who compromises it, while a commit SHA cannot. GitHub-owned `actions/*` may stay on major tags. Pin Docker Hub images by digest (`image:tag@sha256:...`). [Dependabot](./.github/dependabot.yml) bumps the pinned actions monthly.
+
 ## 🔒 Security coding practices
 
 All contributors must follow the security coding practices documented in *Security Coding Practices for
@@ -142,6 +151,8 @@ See [`modelopt/torch/quantization/utils/calib_utils.py`](./modelopt/torch/quanti
 
 We use [pytest](https://docs.pytest.org/) for all tests. For any new features / examples, make sure to add tests and that the coverage check in your PR passes. The tests are organized into the following directories:
 
+Test filenames must mirror the production module they primarily cover: tests for `foo.py` belong in `test_foo.py`. When a production module is renamed, split, or removed, rename or split its tests in the same change so test filenames do not preserve obsolete module names. A cross-module integration test may use a feature-oriented name only when no single production module owns the behavior.
+
 - `tests/unit`: Fast cpu-based unit tests for the core ModelOpt library. They should not take more than a few seconds to run.
 - `tests/gpu`: Fast GPU-based unit tests for the core ModelOpt library. In most cases, they should not take more than a few seconds to run.
 - `tests/gpu_megatron`: Fast GPU-based unit tests for the core ModelOpt library for Megatron-Core features. In most cases, they should not take more than a few seconds to run.
@@ -163,20 +174,46 @@ nox -s "unit-3.12(torch_211, tf_latest)"
 
 ### Test design principles
 
+- **Prefer the highest-level test that runs the real code path.** Choose an end-to-end test over a mock-heavy one
+  whenever the real path can run in CI. If the behavior needs a GPU or a framework (Megatron-Core, TensorRT-LLM,
+  vLLM), put the real test in the matching `tests/gpu*` directory rather than approximating it with monkeypatched
+  CPU tests in `tests/unit`. Monkeypatching is for isolating what you genuinely cannot run — network, absent
+  hardware, nondeterminism — not for avoiding the setup cost of the real path. One test that runs the real code
+  beats five that assert on mocks.
 - **Develop with focused tests.** During development, write as many focused tests as needed, including lower-level
-  unit tests or internal probes, to understand and harden behavior.
+  unit tests or internal probes, to understand and harden behavior. These are scaffolding; most should not be
+  checked in.
 - **Curate production tests and keep them lean.** Before staging or committing, decide which tests should be checked
   in. Checked-in tests should document expected behavior, protect against regressions, or flag backward-incompatible
   behavior changes. Remove redundant lower-level tests when a higher-level test already covers the same behavior,
-  keeping CI/CD fast and lean.
+  keeping CI/CD fast and lean. Default to one test per behavior: use `@pytest.mark.parametrize` instead of
+  near-duplicate test functions, and don't add a per-branch test for a helper that a higher-level test already
+  exercises. More tests is not better coverage — every checked-in test is CI time and maintenance forever.
+  Before adding a test, check whether an existing unit, GPU, or example test already exercises the path; if so,
+  extend it instead. Do not add tests that only restate the implementation, assert on mocks, pin log/warning
+  wording, or re-cover a branch of a helper whose caller is tested. A PR that adds many tests should be able to
+  say what regression each one catches.
+- **Keep `tests/unit` fast — the `linux` job has a hard 20-minute limit** and runs the whole suite serially.
+  A unit test should take well under 5s (check with `pytest --durations=20`). Tests that spawn processes or
+  subprocesses (`spawn_multiprocess_job`, `subprocess.run` importing torch), train for many steps, or build
+  real-size models belong in `tests/gpu*`; batch several cases into one spawn rather than one spawn per case,
+  or reuse the session-scoped `cpu_dist_workers` fixture for multi-rank CPU tests.
+  Slow tests for features without active maintenance (e.g. AutoNAS) should be `@pytest.mark.manual` or `@pytest.mark.nightly`.
+  `nightly` tests are skipped on pull requests and run in the scheduled and on-demand CI; both marks are skipped unless
+  you pass `--run-nightly` / `--run-manual`.
+- **Exercise the behavior a test claims to validate.** Mocks are useful for focused interface and wiring coverage, but
+  replacing the implementation under test does not validate its real behavior. Include an end-to-end test that runs
+  the actual implementation whenever the test claims backend or runtime behavior. For example, a test of
+  `torch.compile` execution must invoke the real `torch.compile`; if the call also needs to be counted or traced, wrap
+  and delegate to the original function instead of replacing it with a fake.
 - **Keep `tests/unit` offline — no HuggingFace Hub access.** Unit tests must be hermetic so they never flake on
   network/timeout issues. Do not call `from_pretrained("<org>/<model>")`, `load_dataset("<hub-id>")`,
   `snapshot_download(...)`, etc. with Hub IDs. Instead build dummy models, tokenizers, configs, and datasets locally —
   e.g. the `create_tiny_*` helpers and `get_tiny_tokenizer()` in `tests/_test_utils/`, or a small on-disk dataset
   directory written with `datasets.Dataset.from_dict(...).to_parquet(...)`.
 - **Respect the per-test timeout.** `tests/conftest.py` applies a default per-test call timeout by directory; override a
-  single slow test with `@pytest.mark.timeout(<seconds>)`, and register any new top-level `tests/<group>/` in that
-  mapping (collection errors until you do).
+  single slow test with `@pytest.mark.timeout(<seconds>)` if absolutely necessary, and register any new top-level
+  `tests/<group>/` in that mapping (collection errors until you do).
 
 ## ✍️ Signing your work
 
@@ -247,5 +284,19 @@ nox -s "unit-3.12(torch_211, tf_latest)"
 ## Submitting your code
 
 - Submit a pull request and let auto-assigned reviewers (based on [CODEOWNERS](./.github/CODEOWNERS)) review your PR.
+- **Fork PRs:** An authorized vetter must comment `/ok to test <full-head-sha>` to run NVIDIA-hosted CI.
+- **Contributors without write access:** When GitHub requests workflow approval, a reviewer with write permission
+  must select **Approve and run workflows** to start GitHub Actions CI.
 - If any CI/CD checks fail, fix the issues and push again.
+- **Stacked PRs:** GPU, example and regression tests run only for PRs that target `main`, `release/*`
+  or `feature/*`, the same branches the unit tests run for. A PR based on another PR's branch gets
+  failing `*-pr-required-check`s that say the tests are deferred; once it targets `main`, push or use
+  **Re-run all jobs** to run them. To test a stacked PR before then, run the tests on its branch by
+  hand: in the repo's **Actions** tab, open **GPU tests** (or **Example tests** / **Regression
+  tests**), click **Run workflow** and pick your branch, or run
+  `gh workflow run gpu_tests.yml --ref <your-branch>`. This runs every test in that workflow, and only
+  works for branches in this repo, not forks.
 - Once your PR is approved and all checks pass, one of the reviewers will merge the PR.
+- If your PR is a bug fix that should also land in an ongoing release branch, add the
+  `cherry-pick-<X.Y.Z>` label (e.g. `cherry-pick-0.47.0`) matching that release. Labeled PRs are
+  cherry-picked into the release branch so the fix is included in the next release candidate.

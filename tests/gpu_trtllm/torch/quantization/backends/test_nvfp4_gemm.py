@@ -19,15 +19,12 @@ from _test_utils.torch.quantization.models import OneLayerLinear
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.backends.utils import fp4_compatible
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import cutlass_fp4_scale_to_modelopt_fp4_scale
 
 
 @pytest.mark.skipif(not fp4_compatible(), reason="FP4 is not supported on this GPU")
 @pytest.mark.parametrize("shape", [(128, 64), (3, 16)])
 def test_nvfp4_quantization(shape):
-    from tensorrt_llm._torch.auto_deploy.utils.quantization_utils import (
-        cutlass_fp4_scale_to_modelopt_fp4_scale,
-    )
-
     block_sizes = {-1: 16, "type": "dynamic", "scale_bits": (4, 3)}
     weight = torch.randn(shape).to(torch.float16).cuda()
 

@@ -38,9 +38,35 @@
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source ${SCRIPT_DIR}/../service_utils.sh
 
+OUTPUT_DIR=$(python3 -c "
+import sys
+for arg in sys.argv[1:]:
+    if arg.startswith('training.output_dir='):
+        print(arg.split('=', 1)[1])
+        break
+" "$@")
+# A verdict left in a reused output_dir by an earlier run must never be read as this run's,
+# so remove it before anything below can stop the script.
+if [ "${SLURM_PROCID:-0}" = "0" ] && [ -n "$OUTPUT_DIR" ]; then
+    rm -f "${OUTPUT_DIR}/regression_check.json"
+fi
+
+# Checked before any work: a typo such as "true" must not cost a full training run.
+case "${REGRESSION_STRICT:-0}" in
+    0|1) ;;
+    *) echo "ERROR: REGRESSION_STRICT must be 0 or 1, got '${REGRESSION_STRICT}'" >&2; exit 1 ;;
+esac
+
 pip install -r modules/Model-Optimizer/examples/speculative_decoding/requirements.txt
 pip install huggingface-hub>=1.2.1
 export PATH=$PATH:/workspace/.local/bin
+
+# Some trust_remote_code MoE models pin an older transformers (e.g. MiniMax-M2.7
+# needs 4.57.x; its modeling code is incompatible with the 5.x the recipe defaults
+# pull in). Override here when the model needs it.
+if [ -n "${OVERRIDE_TRANSFORMERS:-}" ]; then
+    pip install "transformers==${OVERRIDE_TRANSFORMERS}"
+fi
 
 ###################################################################################################
 
@@ -99,22 +125,34 @@ fi
 
 export TOKENIZERS_PARALLELISM=False
 
+# ACCELERATE_CONFIG selects an explicit accelerate config file (e.g. an FSDP2 YAML).
+# Required for trust_remote_code MoE models that need FSDP2 via accelerate config
+# rather than transformers-native ParallelismConfig (MiniMax-M2.7 on transformers 4.57.x).
+ACCEL_CONFIG_ARGS=""
+if [ -n "${ACCELERATE_CONFIG:-}" ] && [ -f "${ACCELERATE_CONFIG}" ]; then
+    ACCEL_CONFIG_ARGS="--config_file ${ACCELERATE_CONFIG}"
+    echo "Using accelerate config: ${ACCELERATE_CONFIG}"
+fi
+
 set -x
 start_time=$(date +%s)
-accelerate launch --mixed_precision bf16 $MULTI_NODE_ARGS $MAIN_PY "$@"
+# The ERR trap only records a failure and lets the script go on, so test the status here:
+# a crashed run must not export or write a regression verdict from whatever checkpoints
+# and trainer_state.json it, or an earlier run, left behind.
+if accelerate launch $ACCEL_CONFIG_ARGS --mixed_precision "${MIXED_PRECISION:-bf16}" $MULTI_NODE_ARGS $MAIN_PY "$@"; then
+    TRAIN_STATUS=0
+else
+    # The if suppresses the ERR trap, so report as it would; $? is still the launch status.
+    error_handler "$0" "$LINENO"
+    TRAIN_STATUS=1
+fi
 echo "Training time: $(( $(date +%s) - start_time )) seconds"
 set +x
 
+if [ "$TRAIN_STATUS" != 0 ]; then
+    echo "ERROR: training failed; skipping export and regression check." >&2
 # Export last checkpoint to deployment format (rank 0 only, single GPU)
-if [ "${SLURM_PROCID:-0}" = "0" ]; then
-    OUTPUT_DIR=$(python3 -c "
-import sys
-for arg in sys.argv[1:]:
-    if arg.startswith('training.output_dir='):
-        print(arg.split('=', 1)[1])
-        break
-" "$@")
-
+elif [ "${SLURM_PROCID:-0}" = "0" ]; then
     if [ -n "$OUTPUT_DIR" ]; then
         # Export all checkpoints that don't already have an exported version
         EXPORTED=0
@@ -146,8 +184,15 @@ for arg in sys.argv[1:]:
         fi
     fi
 
-    # Regression check (uses env vars MAX_FINAL_LOSS, MIN_FINAL_ACC, etc.)
+    # Regression check (uses env vars MAX_FINAL_LOSS, MIN_FINAL_ACC, etc.). The verdict
+    # lands next to the exports for downstream gates. A regression only warns unless
+    # REGRESSION_STRICT=1, which fails the task (via the ERR trap) so Slurm reports it.
     if [ -n "$OUTPUT_DIR" ]; then
-        python3 common/check_regression.py "${OUTPUT_DIR}" || true
+        REGRESSION_ARGS=("${OUTPUT_DIR}" --json "${OUTPUT_DIR}/regression_check.json")
+        if [ "${REGRESSION_STRICT:-0}" = 1 ]; then
+            python3 common/check_regression.py "${REGRESSION_ARGS[@]}"
+        else
+            python3 common/check_regression.py "${REGRESSION_ARGS[@]}" || true
+        fi
     fi
 fi

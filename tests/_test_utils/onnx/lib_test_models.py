@@ -260,12 +260,12 @@ def find_init(onnx_model: onnx.ModelProto, init_name: str) -> np.ndarray:
 #           conv_4
 #             |
 #
-def build_conv_concat_model():
+def build_conv_concat_model(channels=128, height=240, width=64):
     # Define your model inputs and outputs
     input_names = ["input_0"]
     output_names = ["conv4_conv/Conv2D:0"]
-    input_shapes = [(1, 128, 240, 64)]
-    output_shapes = [(1, 256, 240, 64)]
+    input_shapes = [(1, channels, height, width)]
+    output_shapes = [(1, 2 * channels, height, width)]
 
     inputs = [
         helper.make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, input_shape)
@@ -340,26 +340,26 @@ def build_conv_concat_model():
         helper.make_tensor(
             name="ReadVariableOp:0",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128, 128, 3, 3),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128 * 128 * 3 * 3),
+            dims=(channels, channels, 3, 3),
+            vals=np.random.uniform(low=0.5, high=1.0, size=channels * channels * 3 * 3),
         ),
         helper.make_tensor(
             name="ReadVariableOp:1",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128, 128, 3, 3),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128 * 128 * 3 * 3),
+            dims=(channels, channels, 3, 3),
+            vals=np.random.uniform(low=0.5, high=1.0, size=channels * channels * 3 * 3),
         ),
         helper.make_tensor(
             name="ReadVariableOp:2",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128, 128, 3, 3),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128 * 128 * 3 * 3),
+            dims=(channels, channels, 3, 3),
+            vals=np.random.uniform(low=0.5, high=1.0, size=channels * channels * 3 * 3),
         ),
         helper.make_tensor(
             name="ReadVariableOp:3",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(256, 384, 1, 1),
-            vals=np.random.uniform(low=0.5, high=1.0, size=256 * 384 * 1 * 1),
+            dims=(2 * channels, 3 * channels, 1, 1),
+            vals=np.random.uniform(low=0.5, high=1.0, size=2 * channels * 3 * channels),
         ),
     ]
 
@@ -833,8 +833,9 @@ def build_conv_isinf_model(opset_version=13):
     # Define your model inputs and outputs
     input_names = ["input_0"]
     output_names = ["output_0"]
-    input_shapes = [(6, 32, 900, 256)]
-    output_shapes = [(6, 32, 900, 256)]
+    # Small: the tests check node dtypes, not values, and a large activation costs GBs per worker
+    input_shapes = [(1, 32, 64, 64)]
+    output_shapes = [(1, 32, 64, 64)]
 
     inputs = [
         helper.make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, input_shape)
@@ -1126,3 +1127,253 @@ def build_conv_layernorm_model():
     onnx.checker.check_model(model_inferred)
 
     return model_inferred
+
+
+def build_small_grouped_conv_model():
+    """Build a model with grouped (depthwise) Convs with kernel 1x1 and 2x2.
+
+    Topology:
+      Conv(256->128, 3x3) -> Relu -> Resize(2x nearest) -+-> DWConv(128, 2x2) -------------------> Mul -> output
+                                                         |                                         ^
+                                                         |                                         |
+                                                         +-> DWConv(128, 1x1) -> DWConv(128, 2x2) -+
+    """
+    channels = 128
+    input_names = ["input_0"]
+    output_names = ["output_0"]
+    input_shapes = [(1, 256, 36, 52)]
+    output_shapes = [(1, channels, 72, 104)]
+
+    inputs = [
+        helper.make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, input_shape)
+        for input_name, input_shape in zip(input_names, input_shapes)
+    ]
+    outputs = [
+        helper.make_tensor_value_info(output_name, onnx.TensorProto.FLOAT, output_shape)
+        for output_name, output_shape in zip(output_names, output_shapes)
+    ]
+
+    nodes = [
+        helper.make_node(
+            op_type="Conv",
+            inputs=["input_0", "conv1_weights", "conv1_bias"],
+            outputs=["conv1_out"],
+            name="conv1",
+            dilations=[1, 1],
+            group=1,
+            kernel_shape=[3, 3],
+            pads=[1, 1, 1, 1],
+            strides=[1, 1],
+        ),
+        helper.make_node(
+            op_type="Relu",
+            inputs=["conv1_out"],
+            outputs=["relu1_out"],
+            name="relu1",
+        ),
+        helper.make_node(
+            op_type="Resize",
+            inputs=["relu1_out", "resize1_roi", "resize1_scales"],
+            outputs=["resize1_out"],
+            name="resize1",
+            coordinate_transformation_mode="half_pixel",
+            mode="nearest",
+            nearest_mode="round_prefer_ceil",
+        ),
+        # Main upsample path: depthwise 2x2 conv
+        helper.make_node(
+            op_type="Conv",
+            inputs=["resize1_out", "dw_conv1_weights"],
+            outputs=["dw_conv1_out"],
+            name="dw_conv1",
+            dilations=[1, 1],
+            group=channels,
+            kernel_shape=[2, 2],
+            pads=[0, 0, 1, 1],
+            strides=[1, 1],
+        ),
+        # Scaling path: 1x1 depthwise conv with zero weights + bias
+        helper.make_node(
+            op_type="Conv",
+            inputs=["resize1_out", "dw_conv2_weights", "dw_conv2_bias"],
+            outputs=["dw_conv2_out"],
+            name="dw_conv2",
+            dilations=[1, 1],
+            group=channels,
+            kernel_shape=[1, 1],
+            pads=[0, 0, 0, 0],
+            strides=[1, 1],
+        ),
+        # Scaling path continued: depthwise 2x2 conv on the bias-only output
+        helper.make_node(
+            op_type="Conv",
+            inputs=["dw_conv2_out", "dw_conv3_weights"],
+            outputs=["dw_conv3_out"],
+            name="dw_conv3",
+            dilations=[1, 1],
+            group=channels,
+            kernel_shape=[2, 2],
+            pads=[0, 0, 1, 1],
+            strides=[1, 1],
+        ),
+        helper.make_node(
+            op_type="Mul",
+            inputs=["dw_conv1_out", "dw_conv3_out"],
+            outputs=["output_0"],
+            name="mul1",
+        ),
+    ]
+
+    rng = np.random.default_rng(0)
+    initializers = [
+        helper.make_tensor(
+            "conv1_weights",
+            onnx.TensorProto.FLOAT,
+            [channels, 256, 3, 3],
+            rng.standard_normal(channels * 256 * 3 * 3).astype(np.float32).tolist(),
+        ),
+        helper.make_tensor(
+            "conv1_bias",
+            onnx.TensorProto.FLOAT,
+            [channels],
+            rng.standard_normal(channels).astype(np.float32).tolist(),
+        ),
+        helper.make_tensor(
+            "resize1_roi",
+            onnx.TensorProto.FLOAT,
+            [0],
+            [],
+        ),
+        helper.make_tensor(
+            "resize1_scales",
+            onnx.TensorProto.FLOAT,
+            [4],
+            [1.0, 1.0, 2.0, 2.0],
+        ),
+        helper.make_tensor(
+            "dw_conv1_weights",
+            onnx.TensorProto.FLOAT,
+            [channels, 1, 2, 2],
+            rng.standard_normal(channels * 1 * 2 * 2).astype(np.float32).tolist(),
+        ),
+        helper.make_tensor(
+            "dw_conv2_weights",
+            onnx.TensorProto.FLOAT,
+            [channels, 1, 1, 1],
+            np.zeros(channels).astype(np.float32).tolist(),
+        ),
+        helper.make_tensor(
+            "dw_conv2_bias",
+            onnx.TensorProto.FLOAT,
+            [channels],
+            rng.standard_normal(channels).astype(np.float32).tolist(),
+        ),
+        helper.make_tensor(
+            "dw_conv3_weights",
+            onnx.TensorProto.FLOAT,
+            [channels, 1, 2, 2],
+            rng.standard_normal(channels * 1 * 2 * 2).astype(np.float32).tolist(),
+        ),
+    ]
+
+    graph = helper.make_graph(
+        nodes, "small_grouped_conv", inputs, outputs, initializer=initializers
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.ir_version = 10
+
+    model_inferred = onnx.shape_inference.infer_shapes(model)
+    onnx.checker.check_model(model_inferred)
+
+    return model_inferred
+
+
+def build_matmul_1xn_model():
+    """A minimal MatMul-1xN (GEMV) graph.
+
+    The MatMul has m=1 (2D input), making it a GEMV that is excluded from int8
+    quantization by the GEMV detection in int8.py (line 168) when target_dla=False.
+    The exclusion is bypassed when target_dla=True.
+
+    Using a 2D input [m, k] so the 2D output [m, n] satisfies the
+    ``len(dims) < 3 and any(dim == 1)`` branch in _exclude_matmuls_by_shape_inference
+    (the weight is a Constant initializer, not a Variable, so the dims[-2] == 1
+    branch does not apply).
+
+    Topology:
+      input [1, 32] -> MatMul([32, 64]) -> output [1, 64]
+    """
+    m, k, n = 1, 32, 64
+    input_names = ["input_0"]
+    output_names = ["output_0"]
+    input_shapes = [(m, k)]
+    output_shapes = [(m, n)]
+
+    inputs = [
+        helper.make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, input_shape)
+        for input_name, input_shape in zip(input_names, input_shapes)
+    ]
+    outputs = [
+        helper.make_tensor_value_info(output_name, onnx.TensorProto.FLOAT, output_shape)
+        for output_name, output_shape in zip(output_names, output_shapes)
+    ]
+
+    nodes = [
+        helper.make_node(
+            op_type="MatMul",
+            inputs=["input_0", "matmul_weights"],
+            outputs=["output_0"],
+            name="matmul1",
+        ),
+    ]
+
+    rng = np.random.default_rng(0)
+    initializers = [
+        helper.make_tensor(
+            "matmul_weights",
+            onnx.TensorProto.FLOAT,
+            [k, n],
+            rng.standard_normal(k * n).astype(np.float32).tolist(),
+        ),
+    ]
+
+    graph = helper.make_graph(nodes, "matmul_1xn", inputs, outputs, initializer=initializers)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.ir_version = 10
+
+    model_inferred = onnx.shape_inference.infer_shapes(model)
+    onnx.checker.check_model(model_inferred)
+
+    return model_inferred
+
+
+#   x ----- relu -------------+
+#                             |
+#   cls (initializer, or  --- +--- concat --- matmul --- out
+#        relu(y) if not constant_input)
+#
+# ``cls`` mimics a ViT class token: a constant Concat input that has no producer node.
+def build_concat_with_constant_input_model(constant_input=True):
+    x = helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1, 4, 8])
+    y = helper.make_tensor_value_info("y", onnx.TensorProto.FLOAT, [1, 1, 8])
+    out = helper.make_tensor_value_info("out", onnx.TensorProto.FLOAT, [1, 5, 8])
+    nodes = [helper.make_node("Relu", ["x"], ["relu_out"], name="relu")]
+    inputs = [x]
+    initializers = [
+        helper.make_tensor("weight", onnx.TensorProto.FLOAT, [8, 8], np.ones(64, dtype=np.float32))
+    ]
+    if constant_input:
+        cls = helper.make_tensor(
+            "cls", onnx.TensorProto.FLOAT, [1, 1, 8], np.ones(8, dtype=np.float32)
+        )
+        initializers.append(cls)
+    else:
+        inputs.append(y)
+        nodes.append(helper.make_node("Relu", ["y"], ["cls"], name="relu_cls"))
+    nodes += [
+        helper.make_node("Concat", ["cls", "relu_out"], ["concat_out"], name="concat", axis=1),
+        helper.make_node("MatMul", ["concat_out", "weight"], ["out"], name="matmul"),
+    ]
+    graph = helper.make_graph(nodes, "concat_with_constant_input", inputs, [out], initializers)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    return onnx.shape_inference.infer_shapes(model)

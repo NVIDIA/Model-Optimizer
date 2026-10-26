@@ -1,6 +1,10 @@
 # Diffusers Model Optimizations
 
-Model Optimizer supports techniques like Cache Diffusion and Quantization for Diffusion models, along with scripts to evaluate models using popular evaluation metrics.
+> [!WARNING]
+> The Diffusers ONNX export and TensorRT engine deployment workflow is deprecated in ModelOpt 0.48.0 and will be removed no earlier than 0.49.0, after the one-release migration period described in the [Deprecation Policy](../../README.md#deprecation-policy) section of the main README. The legacy workflow remains available during this period.
+> Export a unified Hugging Face checkpoint with `--hf-ckpt-dir` for deployment with a compatible diffusion backend. Diffusers quantization, HF export, and PyTorch workflows remain supported.
+
+Model Optimizer supports techniques like Cache Diffusion and Quantization for Diffusion models.
 
 Post-training quantization (PTQ) is an effective model optimization technique that compresses your models to lower precision like INT8, FP8, NVFP4, etc. Quantization with Model Optimizer can compress model size by 2x-4x, speeding up inference while preserving model quality. Quantization-Aware Training (QAT) is a powerful technique for optimizing your models, particularly when PTQ methods fail to meet the requirements for your tasks.
 
@@ -12,15 +16,15 @@ Cache Diffusion is a technique that reuses cached outputs from previous diffusio
 | :------------: | :------------: | :------------: | :------------: |
 | Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
 | Getting Started | Learn how to optimize your models using quantization/cache diffusion to reduce precision and improve inference efficiency | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
-| Support Matrix | View the support matrix to see quantization/cahce diffusion compatibility and feature availability across different models | \[[Link](#support-matrix)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
+| Support Matrix | View the support matrix to see quantization/cache diffusion compatibility and feature availability across different models | \[[Link](#support-matrix)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Sparse Attention (Skip-Softmax) | Skip-softmax sparse attention for diffusion models | \[[Link](#sparse-attention-skip-softmax)\] | |
 | Cache Diffusion | Caching technique to accelerate inference without compromising quality | \[[Link](#cache-diffusion)\] | |
 | Post Training Quantization (PTQ) | Example scripts on how to run PTQ on diffusion models | \[[Link](#post-training-quantization-ptq)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Quantization Aware Training (QAT) | Example scripts on how to run QAT on diffusion models | \[[Link](#quantization-aware-training-qat)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Quantization Aware Distillation (QAD) | Example scripts on how to run QAD on diffusion models | \[[Link](#quantization-aware-distillation-qad)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
-| Build and Run with TensorRT | How to build and run your quantized model with TensorRT | \[[Link](#build-and-run-with-tensorrt-compiler-framework)\] | |
+| HF Checkpoint Deployment | Migrate to diffusion backends using unified HF checkpoints | \[[Link](#hf-checkpoint-deployment)\] | |
+| Build and Run with TensorRT (Deprecated) | Legacy ONNX export and TensorRT engine deployment | \[[Link](#build-and-run-with-tensorrt-compiler-framework)\] | |
 | LoRA | Fuse your LoRA weights prior to quantization | \[[Link](#lora)\] | |
-| Evaluate Accuracy | Evaluate your model's accuracy! | \[[Link](#evaluate-accuracy)\] | |
 | Pre-Quantized Checkpoints | Ready to deploy Hugging Face pre-quantized checkpoints | \[[Link](#pre-quantized-checkpoints)\] | |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
 
@@ -43,7 +47,7 @@ pip install nvidia-modelopt[onnx,hf]
 pip install -r requirements.txt
 ```
 
-Each subsection (eval, etc.) may have their own `requirements.txt` file that needs to be installed separately.
+Each subsection (fastgen, distillation, etc.) may have their own `requirements.txt` file that needs to be installed separately.
 
 You can find the latest TensorRT [here](https://developer.nvidia.com/tensorrt/download).
 
@@ -69,6 +73,9 @@ mtq.quantize(model=transformer, config=quant_config, forward_func=forward_pass)
 
 ### TensorRT Compiler Framework
 
+> [!WARNING]
+> This ONNX/TensorRT deployment path is deprecated in 0.48.0, with removal no earlier than 0.49.0. This matrix describes the legacy path; it does not establish compatibility with HF checkpoint deployment backends.
+
 | Model | fp8 | int8_sq | int4_awq | w4a8_awq<sup>1</sup> | nvfp4<sup>2</sup> | nvfp4_svdquant<sup>3</sup> | Cache Diffusion |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | [FLUX](https://huggingface.co/black-forest-labs/FLUX.1-dev) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | - |
@@ -79,7 +86,7 @@ mtq.quantize(model=transformer, config=quant_config, forward_func=forward_pass)
 
 > *<sup>1.</sup>The w4a8_awq is an experimental quantization scheme that may result in a higher accuracy penalty.*
 
-> *<sup>2.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v0.17 or later*
+> *<sup>2.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v1.2 or later*
 
 > *<sup>3.</sup>The SVDQuant Perf in TRT might not good as the [Nunchaku: MIT-Nvidia](https://github.com/nunchaku-tech/nunchaku) at this moment.*
 
@@ -90,7 +97,7 @@ We support calibration for INT8, FP8 and FP4 precision and for both weights and 
 We also provide instructions on deploying and running E2E diffusion pipelines with Model Optimizer quantized INT8 and FP8 Backbone to generate images and measure latency on target GPUs. Note, Jetson devices are not supported at this time due to the incompatibility of the software.
 
 > [!NOTE]
-> Model calibration requires relatively more GPU computing power then deployment. It does not need to be on the same GPUs as the deployment target GPUs. ONNX export and TensorRT engine instructions live in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
+> Model calibration requires relatively more GPU computing power than deployment. It does not need to be on the same GPUs as the deployment target GPUs. Deprecated ONNX export and TensorRT engine instructions remain available in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
 
 ### Quantize scripts
 
@@ -116,6 +123,17 @@ python quantize.py \
     --n-steps 20 --quantized-torch-ckpt-save-path ./{MODEL_NAME}.pt --collect-method default \
     --hf-ckpt-dir ./hf_ckpt
 ```
+
+HF exports omit attention quantizer state by default, including when calibration uses
+`--quantize-mha`, except for FLUX.1. Qwen-Image's TRT-LLM loader requires this clean
+checkpoint. FLUX.1 retains enabled Q/K/V `_amax` keys by default for compatibility with
+the static FP8 attention path in [TensorRT-LLM PR #18396](https://github.com/NVIDIA/TensorRT-LLM/pull/18396).
+Use `--extra-param export_attention_quantizers=true` to retain enabled Q/K/V quantizers
+explicitly, or `export_attention_quantizers=false` to omit them, including for FLUX.1.
+Disabled quantizers are always omitted. The equivalent Python option is
+`export_hf_checkpoint(pipe, export_dir="./hf_ckpt", export_attention_quantizers=True)`.
+Diffusion attention quantization, including native LTX-2 components, is not exported
+as KV-cache quantization. Transformers components retain their KV-cache metadata.
 
 #### Wan 2.2 VAE NVFP4 (Conv3D Implicit GEMM)
 
@@ -176,7 +194,7 @@ To additionally apply NVFP4 scale swizzle and padding , add:
 - `calib-size`: For SDXL INT8, we recommend 32 or 64, for SDXL FP8, 128 is recommended.
 - `n_steps`: Recommendation: SD/SDXL 20 or 30, SDXL-Turbo 4.
 
-**You can use the generated checkpoint directly in PyTorch, export a Hugging Face checkpoint (`--hf-ckpt-dir`) to deploy the model on SGLang/vLLM/TRTLLM, or follow the ONNX/TensorRT workflow in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).**
+Use the generated checkpoint directly in PyTorch or export a unified Hugging Face checkpoint with `--hf-ckpt-dir`. Choose a diffusion deployment backend that supports your model, quantization format, and hardware; compatibility must be checked for each backend. The deprecated [ONNX/TensorRT workflow](./quantization/ONNX-TRT-Deployment.md) remains available during the migration period.
 
 ## Quantization Aware Training (QAT)
 
@@ -261,9 +279,49 @@ transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
 
 ```
 
+## HF Checkpoint Deployment
+
+Replace `--onnx-dir` with `--hf-ckpt-dir` in the [quantization commands](#quantize-scripts). For example, from `examples/diffusers/quantization`:
+
+```bash
+python quantize.py \
+    --model flux-schnell --model-dtype BFloat16 \
+    --format fp8 --collect-method default \
+    --batch-size 1 --calib-size 128 --n-steps 4 \
+    --hf-ckpt-dir ./flux-schnell-fp8
+```
+
+To reuse a ModelOpt PyTorch checkpoint, add `--restore-from /path/to/checkpoint_dir/` to the matching model's command. This is the directory passed as `--quantized-torch-ckpt-save-path` in the original run; it must contain a `<backbone>.pt` file for each selected backbone (for example, `transformer.pt` for FLUX or `unet.pt` for SDXL). Keep the original model selection and any model-specific options. An ONNX file or TensorRT engine cannot be restored this way; use the saved ModelOpt checkpoint or quantize the original model again.
+
+The export contains weights and configuration for downstream loading. Preserve the complete export directory, including component configuration and quantization metadata. See the [unified HF export guide](../../docs/source/deployment/3_unified_hf.rst) for the artifact format.
+
+Select a backend using its diffusion-specific model and quantization support guide:
+
+| Backend | Deployment guidance | Compatibility considerations |
+| --- | --- | --- |
+| vLLM-Omni | [ModelOpt quantization guide](https://docs.vllm.ai/projects/vllm-omni/en/stable/user_guide/quantization/modelopt/) | Documents FP8 and mixed FP8/NVFP4 diffusion checkpoints. Check the model-specific recipe; its NVFP4 recipes are validated on Blackwell. |
+| SGLang Diffusion | [Diffusion quantization guide](https://github.com/sgl-project/sglang/blob/main/docs/docs/sglang-diffusion/quantization.mdx) | Distinguishes full Diffusers repos from converted transformer components. Some exports need backend-specific conversion or component overrides. |
+| TensorRT-LLM VisualGen | [Visual generation guide](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/models/visual-generation.md) and [serving examples](https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/visual_gen/serve) | Supports pre-quantized checkpoints with ModelOpt metadata. Consult the model/precision matrix and model-specific configuration; VisualGen is beta. |
+
+Install the backend separately using its installation instructions and use documentation matching that backend version. The following command forms illustrate loading a **full pipeline checkpoint supported by the selected backend**; they do not establish support for every export produced above:
+
+```bash
+# vLLM-Omni: follow the model recipe for parallelism and kernel options.
+vllm serve /path/to/supported-hf-checkpoint --omni
+
+# SGLang Diffusion: full pipeline checkpoint, including model_index.json.
+sglang generate --model-path /path/to/supported-hf-checkpoint \
+    --prompt "A red ceramic teapot on a wooden table" --save-output
+
+# TensorRT-LLM VisualGen: use the model's serving configuration as needed.
+trtllm-serve /path/to/supported-hf-checkpoint
+```
+
+If no backend supports your model and precision yet, keep using the [legacy workflow](./quantization/ONNX-TRT-Deployment.md) during the migration period and report the gap to the maintainers.
+
 ## Build and Run with TensorRT Compiler Framework
 
-ONNX export and TensorRT engine instructions are documented in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
+This workflow is deprecated in 0.48.0, with removal no earlier than 0.49.0. Legacy ONNX export and TensorRT engine instructions remain available in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
 
 ### LoRA
 
@@ -314,7 +372,7 @@ By following these steps, your PEFT LoRA model should be efficiently quantized u
 
 ## Sparse Attention (Skip-Softmax)
 
-Skip-softmax sparse attention skips KV tiles whose attention scores are negligible during the softmax computation, reducing FLOPs without retraining. An exponential model (`scale_factor = a * exp(b * target_sparsity)`) is calibrated once, then the target sparsity can be adjusted at runtime without recalibration.
+Skip-softmax sparse attention skips KV tiles whose attention scores are negligible during the softmax computation, reducing FLOPs without retraining. An exponential model (`scale_factor = a * exp(b * target_sparsity)`) is calibrated once, then the target sparsity can be adjusted at runtime without recalibration. Calibrated coefficients can be exported as a Hugging Face checkpoint (embedded in each component's `config.json` under `sparse_attention_config`) consumed directly by TRT-LLM's `SkipSoftmaxAttentionConfig.resolve_for_target_sparsity` — no extra conversion needed downstream.
 
 ### Getting Started
 
@@ -358,10 +416,11 @@ The 14B model automatically sparsifies both `transformer` and `transformer_2`.
 
 ```bash
 
-# 5B/14B model
+# 5B/14B model — calibrate and export a TRT-LLM-ready checkpoint
 python sparsity/wan22_skip_softmax.py \
     --model-path Wan-AI/Wan2.2-T2V-A14B-Diffusers|Wan-AI/Wan2.2-TI2V-5B-Diffusers \
     --calibrate --target-sparsity 0.5 --calib-size 4 \
+    --export-dir /path/to/wan22-skip-softmax-ckpt \
     --prompt "A sunset over mountains" --output out.mp4
 ```
 
@@ -415,7 +474,10 @@ Please refer to [example.ipynb](./cache_diffusion/example.ipynb) for more detail
 
 ### TensorRT Compiler Framework
 
-To execute cache diffusion in TensorRT, follow these steps:
+> [!WARNING]
+> The ONNX/TensorRT deployment instructions below are part of the deprecated workflow (0.48.0; removal no earlier than 0.49.0). PyTorch Cache Diffusion remains supported.
+
+During the migration period, the legacy TensorRT instructions remain available:
 
 ```python
 # Load the model
@@ -427,7 +489,7 @@ compile(
     engine_path=Path("./engine"),
 )
 
-cachify.prepare(pipe, num_inference_steps, SDXL_DEFAULT_CONFIG)
+cachify.prepare(pipe, SDXL_DEFAULT_CONFIG)
 ```
 
 Afterward, use it as a standard cache diffusion pipeline to generate the image.
@@ -446,7 +508,7 @@ SDXL_DEFAULT_CONFIG = [
     }
 ]
 
-cachify.prepare(pipe, num_inference_steps, SDXL_DEFAULT_CONFIG)
+cachify.prepare(pipe, SDXL_DEFAULT_CONFIG)
 ```
 
 Two parameters are essential: `wildcard_or_filter_func` and `select_cache_step_func`.
@@ -471,58 +533,6 @@ Comparing with naively reducing the generation steps, cache diffusion can achiev
 
 Stable Diffusion pipelines rely heavily on random sampling operations, which include creating Gaussian noise tensors to denoise and adding noise in the scheduling step. In the quantization recipe, we don't fix the random seed. As a result, every time you run the calibration pipeline, you could get different quantizer amax values. This may lead to the generated images being different from the ones generated with the original model. We suggest to run a few more times and choose the best one.
 
-## Evaluate Accuracy
-
-This simple code demonstrates how to evaluate images generated by diffusion (or other generative) models using popular metrics such as [imagereward](https://arxiv.org/abs/2304.05977), [clip-iqa](https://arxiv.org/abs/2207.12396), and [clip](https://arxiv.org/abs/2104.08718).
-
-### Install Requirements
-
-```bash
-pip install -r eval/requirments.txt
-```
-
-### Data Format
-
-Prepare a JSON file with your prompts and corresponding images in the structure below:
-
-```json
-[
-    {
-        "prompt": "YOUR_PROMPT",
-        "images": {
-            "MODEL_NAME": "PATH_TO_THE_IMAGE",
-            "MODEL_NAME": "PATH_TO_THE_IMAGE",
-            ...
-        }
-    },
-    ...
-]
-```
-
-- `prompt`: The text prompt used to generate the images.
-- `images`: Key-value pairs of model names and image file paths.
-
-### Evaluate
-
-Run the evaluation script with your JSON file:
-
-```bash
-python eval/main.py --data-path {PATH_TO_THE_IMAGE_JSON_PATH} --metrics imagereward
-```
-
-- `--data-path`: Path to your JSON file.
-- `--metrics`: One or more metrics to compute (e.g. imagereward, clip-iqa, clip).
-
-### Sample results
-
-Example metrics obtained with 30 sampling steps on a set of 1K prompts (values will vary based on data and model configurations):
-
-| Model | Precision | ImageReward | CLIP-IQA | CLIP |
-|:------------:|:------------:|:------------:|:------------:|:------------:|
-| FLUX 1 Dev | BF16 | 1.118 | 0.927 | 30.15 |
-| | FP4 PTQ | 1.096 | 0.923 | 29.86 |
-| | FP4 QAT | 1.119 | 0.928 | 29.919 |
-
 ## Pre-Quantized Checkpoints
 
 - Ready-to-deploy checkpoints \[[🤗 Hugging Face - Black Forest Labs](https://huggingface.co/black-forest-labs)\]
@@ -531,7 +541,7 @@ Example metrics obtained with 30 sampling steps on a set of 1K prompts (values w
 
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699)
 - 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 🎯 [Benchmarks](../benchmark.md)
 - 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)

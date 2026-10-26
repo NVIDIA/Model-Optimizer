@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import math
 
+import pytest
 import torch
 import torch.nn as nn
 from _test_utils.torch.export.utils import ToyModel, partial_w4a8_config
@@ -22,9 +24,30 @@ from torch.nn import functional as F
 from torch.nn import init
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.quant_format import (
+    QUANTIZATION_MXFP8,
+    QUANTIZATION_NVFP4,
+    QUANTIZATION_W4A16_NVFP4,
+)
+from modelopt.torch.export.quant_utils import (
+    get_activation_scaling_factor,
+    get_quantization_format,
+    get_weight_block_size,
+    get_weight_scaling_factor,
+    get_weight_scaling_factor_2,
+    postprocess_state_dict,
+    to_quantized_weight,
+)
+from modelopt.torch.export.quantized_weight_export import (
+    capture_quantized_weight_export_state,
+    export_quantized_weight_tensors,
+    select_quantized_weight_export_state,
+)
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn.modules.quant_module import QuantModule, QuantModuleRegistry
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import TensorQuantizer
+from modelopt.torch.quantization.qtensor import MXFP4QTensor
 from modelopt.torch.quantization.tensor_quant import QUANT_DESC_8BIT_PER_TENSOR
 from modelopt.torch.quantization.utils import quantizer_attr_names
 
@@ -121,3 +144,183 @@ def test_export_per_block_quantized_weight():
     assert hasattr(model.linears[2], quantizer_attrs.output_quantizer)
     assert not getattr(model.linears[2], quantizer_attrs.output_quantizer).is_enabled
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
+
+
+@pytest.mark.parametrize(
+    "quant_cfg",
+    [
+        mtq.NVFP4_DEFAULT_CFG,
+        mtq.W4A16_NVFP4_CFG,
+        mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
+        mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,
+        mtq.MXFP8_DEFAULT_CFG,
+        mtq.MXFP4_DEFAULT_CFG,
+        mtq.W4A8_MXFP4_FP8_CFG,
+        mtq.W4A8_NVFP4_FP8_CFG,
+    ],
+)
+def test_functional_export_matches_existing_helpers_without_mutation(quant_cfg):
+    in_features = 256
+    torch.manual_seed(0)
+    module = nn.Linear(in_features, in_features, bias=False, device="cuda", dtype=torch.bfloat16)
+    calib_input = torch.randn(2, 4, in_features, device="cuda", dtype=torch.bfloat16)
+    module = mtq.quantize(module, copy.deepcopy(quant_cfg), lambda model: model(calib_input))
+    original_weight = module.weight.detach().clone()
+    original_buffers = {name: value.detach().clone() for name, value in module.named_buffers()}
+
+    state = capture_quantized_weight_export_state(module)
+    actual = export_quantized_weight_tensors(module.weight, state, torch.float16)
+
+    quantization_format = get_quantization_format(module)
+    weight_scale = get_weight_scaling_factor(module)
+    weight_scale_2 = get_weight_scaling_factor_2(module)
+    if quantization_format in {QUANTIZATION_NVFP4, QUANTIZATION_W4A16_NVFP4}:
+        assert weight_scale_2 is not None
+        if module.input_quantizer.is_enabled:
+            assert module.input_quantizer.amax is not None
+    expected = {
+        "weight": to_quantized_weight(
+            module.weight.to(torch.float16),
+            weight_scale,
+            quantization_format,
+            weight_scale_2,
+            get_weight_block_size(module),
+        ),
+        "weight_scale": weight_scale,
+    }
+    if weight_scale_2 is not None:
+        expected["weight_scale_2"] = weight_scale_2.squeeze()
+    if module.input_quantizer.is_enabled and module.input_quantizer.amax is not None:
+        expected["input_scale"] = get_activation_scaling_factor(module).squeeze()
+
+    assert actual.keys() == expected.keys()
+    for name, value in actual.items():
+        torch.testing.assert_close(value, expected[name], rtol=0, atol=0)
+    torch.testing.assert_close(module.weight, original_weight)
+    assert set(dict(module.named_buffers())) == set(original_buffers)
+    for name, value in module.named_buffers():
+        torch.testing.assert_close(value, original_buffers[name])
+
+    _export_quantized_weight(module, torch.float16)
+
+    for name, value in actual.items():
+        torch.testing.assert_close(getattr(module, name), value, rtol=0, atol=0)
+    if quantization_format == QUANTIZATION_MXFP8:
+        assert hasattr(module, "weight_scale")
+        assert not hasattr(module.weight_quantizer, "_scale")
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_functional_mxfp4_packs_transposed_experts(dtype):
+    class TransposedExperts(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.randn(2, 32, 64, device="cuda", dtype=torch.bfloat16))
+            cfg = QuantizerAttributeConfig(
+                num_bits=(2, 1),
+                block_sizes={-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            )
+            self.weight_quantizer = TensorQuantizer(cfg)
+            self.input_quantizer = TensorQuantizer(cfg)
+
+        def iter_weights_for_calibration(self):
+            yield self.weight.transpose(-1, -2), self.weight_quantizer
+
+    module = TransposedExperts()
+    state = capture_quantized_weight_export_state(module)
+    assert state.packing_permutation == (0, 2, 1)
+    exported = export_quantized_weight_tensors(module.weight, state, dtype)
+    packed, scales = MXFP4QTensor.quantize(
+        module.weight.transpose(-1, -2).to(dtype).contiguous(), block_size=32
+    )
+
+    torch.testing.assert_close(exported["weight"], packed._quantized_data.transpose(-1, -2))
+    torch.testing.assert_close(exported["weight_scale"], scales.reshape(2, 64, 1).transpose(-1, -2))
+
+
+def test_functional_mxfp8_preserves_cached_scale_during_selection():
+    features = 256
+    module = nn.Linear(features, features, bias=False, device="cuda", dtype=torch.bfloat16)
+    calib_input = torch.randn(2, 4, features, device="cuda", dtype=torch.bfloat16)
+    module = mtq.quantize(
+        module,
+        copy.deepcopy(mtq.MXFP8_DEFAULT_CFG),
+        lambda model: model(calib_input),
+    )
+    cached_scale = get_weight_scaling_factor(module).clone()
+    cached_scale[0].add_(1)
+    module.weight_quantizer._scale = cached_scale
+
+    indices = torch.arange(features // 2)
+    state = select_quantized_weight_export_state(
+        capture_quantized_weight_export_state(module),
+        0,
+        indices,
+    )
+    exported = export_quantized_weight_tensors(
+        module.weight.index_select(0, indices.to(module.weight.device)),
+        state,
+        torch.float16,
+    )
+
+    torch.testing.assert_close(exported["weight_scale"], cached_scale[: features // 2])
+
+
+def test_weight_derived_mxfp4_state_rejects_partial_block_selection():
+    features = 256
+    module = nn.Linear(features, features, bias=False, device="cuda", dtype=torch.bfloat16)
+    calib_input = torch.randn(2, 4, features, device="cuda", dtype=torch.bfloat16)
+    module = mtq.quantize(
+        module,
+        copy.deepcopy(mtq.MXFP4_DEFAULT_CFG),
+        lambda model: model(calib_input),
+    )
+
+    with pytest.raises(ValueError, match="complete quantization blocks"):
+        select_quantized_weight_export_state(
+            capture_quantized_weight_export_state(module),
+            1,
+            (0,),
+        )
+
+
+def test_export_compressed_nvfp4_weight():
+    """``mtq.compress`` (used by ``hf_ptq --low_memory_mode``) leaves the weight as packed NVFP4
+    nibbles, so per-block scales cannot be recomputed from it. The export must reuse the scales
+    stored on the quantizer and must not leak those internal buffers into the state_dict.
+    """
+    in_features, block_size = 256, 16
+    calib = lambda x: x(torch.randn(1, 4, in_features).cuda())  # noqa: E731
+
+    model = ToyModel(dims=[in_features, in_features, in_features, in_features]).cuda()
+    reference = mtq.quantize(copy.deepcopy(model), mtq.NVFP4_DEFAULT_CFG, calib)
+    compressed = mtq.quantize(copy.deepcopy(model), mtq.NVFP4_DEFAULT_CFG, calib)
+    mtq.compress(compressed)
+
+    quantizer_attrs = quantizer_attr_names("weight")
+    ref_module, compressed_module = reference.linears[2], compressed.linears[2]
+    _export_quantized_weight(ref_module, torch.float16, "weight")
+    _export_quantized_weight(compressed_module, torch.float16, "weight")
+
+    ref_scale = getattr(ref_module, quantizer_attrs.weight_scale)
+    compressed_scale = getattr(compressed_module, quantizer_attrs.weight_scale)
+
+    # Per-block scale covers the logical input dim, not the packed one.
+    assert compressed_scale.shape == ref_scale.shape
+    assert compressed_scale.shape[-1] == in_features // block_size
+
+    # weight_scale * weight_scale_2 is what dequantization consumes; it must match the
+    # uncompressed export rather than the compression-time normalization.
+    ref_2 = getattr(ref_module, quantizer_attrs.weight_scale_2)
+    compressed_2 = getattr(compressed_module, quantizer_attrs.weight_scale_2)
+    assert torch.allclose(
+        compressed_scale.float() * compressed_2.float(),
+        ref_scale.float() * ref_2.float(),
+        rtol=0.05,
+    )
+
+    # Internal compression buffers must be stripped by postprocess_state_dict, which keys off
+    # RealQuantLinear.list_of_scale_tensors -- a missing underscore there let _double_scale leak.
+    stripped = postprocess_state_dict(compressed.state_dict(), 1.0, None)
+    assert not any(key.endswith("weight_quantizer._double_scale") for key in stripped)
+    assert not any(key.endswith("weight_quantizer._scale") for key in stripped)

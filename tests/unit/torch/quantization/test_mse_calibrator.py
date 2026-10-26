@@ -23,16 +23,19 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.model_calib import (
     _FP8_SWEEP_CALIBRATOR_REGISTRY,
     _make_weight_mse_calibrator,
-    _promote_nvfp4_static_quantizers_with_global_amax_sync,
     _register_fp8_sweep_calibrator,
     mse_calibrate,
 )
-from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, QuantLinear, TensorQuantizer
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     _QUANT_FUNCTIONAL_BACKENDS,
     register_quant_backend,
 )
-from modelopt.torch.quantization.utils import enable_fake_quant, promote_nvfp4_static_quantizers
+from modelopt.torch.quantization.utils import (
+    SharedWeightGlobalAmaxState,
+    enable_fake_quant,
+    promote_nvfp4_static_quantizers,
+)
 
 
 # TODO: avoid code duplication in this file
@@ -642,9 +645,9 @@ class TestRegisterFP8SweepCalibrator:
             ),
             amax=torch.tensor([1.0, 2.0]),
         )
-        model = torch.nn.Module()
+        model = QuantLinear(16, 1, bias=False)
         model.weight_quantizer = q
-        _promote_nvfp4_static_quantizers_with_global_amax_sync(model)
+        promote_nvfp4_static_quantizers(model)
 
         cal = _make_weight_mse_calibrator(
             q,
@@ -682,6 +685,25 @@ class TestRegisterFP8SweepCalibrator:
         )
 
         assert isinstance(cal, calib.MseCalibrator)
+
+    def test_dynamic_mxfp8_skipped_by_mse_calibration(self):
+        q = TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits=(4, 3),
+                block_sizes={-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            ),
+            amax=torch.tensor(2.0),
+        )
+
+        cal = _make_weight_mse_calibrator(
+            q,
+            step_size=0.1,
+            start_multiplier=0.25,
+            stop_multiplier=4.0,
+            fp8_scale_sweep=False,
+        )
+
+        assert cal is None
 
     def test_max_calibrate_bootstraps_non_nvfp4_dead_weight_quantizer(self):
         """Non-NVFP4 weights skipped by the forward loop still get weight amax."""
@@ -734,10 +756,9 @@ class TestRegisterFP8SweepCalibrator:
 
 
 class TestStaticNVFP4Promotion:
-    class _LinearLike(torch.nn.Module):
+    class _LinearLike(QuantLinear):
         def __init__(self, amax):
-            super().__init__()
-            self.weight = torch.nn.Parameter(torch.empty(1, 16))
+            super().__init__(16, 1, bias=False)
             cfg = QuantizerAttributeConfig(
                 num_bits=(2, 1),
                 block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},
@@ -750,7 +771,7 @@ class TestStaticNVFP4Promotion:
     def test_standalone_static_nvfp4_quantizer_is_promoted(self):
         model = self._LinearLike(torch.tensor([1.0, 5.0]))
 
-        _promote_nvfp4_static_quantizers_with_global_amax_sync(model)
+        promote_nvfp4_static_quantizers(model)
 
         assert isinstance(model.weight_quantizer, NVFP4StaticQuantizer)
         assert torch.equal(model.weight_quantizer.global_amax, torch.tensor(5.0))
@@ -770,7 +791,9 @@ class TestStaticNVFP4Promotion:
         model.k_proj = self._LinearLike(torch.tensor([3.0, 4.0]))
         model.v_proj = self._LinearLike(torch.tensor([5.0, 6.0]))
 
-        _promote_nvfp4_static_quantizers_with_global_amax_sync(model)
+        SharedWeightGlobalAmaxState.attach(model, patterns=[r"(?:(.*)\.)?(?:q_proj|k_proj|v_proj)"])
+        SharedWeightGlobalAmaxState.populate(model)
+        promote_nvfp4_static_quantizers(model)
 
         for child in (model.q_proj, model.k_proj, model.v_proj):
             assert isinstance(child.weight_quantizer, NVFP4StaticQuantizer)

@@ -68,7 +68,6 @@ def run_full_puzzletron(hydra_config_path: str):
         config_path: Path to the YAML configuration file
     """
     mtpz.tools.mprint("Puzzletron Progress 1/8: starting puzzletron pipeline")
-    dist.setup(timeout=timedelta(minutes=10))
 
     # Register Hydra custom resolvers (needed for config resolution)
     mtpz.tools.register_hydra_resolvers()
@@ -83,6 +82,14 @@ def run_full_puzzletron(hydra_config_path: str):
         config_name=hydra_config_name,
         overrides=[],
     )
+
+    # Default timeout: 10 minutes, or extended to nccl_timeout_minutes if set in config
+    if hasattr(hydra_cfg, "nccl_timeout_minutes"):
+        timeout_minutes = hydra_cfg.nccl_timeout_minutes
+    else:
+        timeout_minutes = timedelta(minutes=10)
+
+    dist.setup(timeout=timeout_minutes)
 
     # Convert model (convert from HF to DeciLM, score pruning activations,
     # prune the model and save pruned checkpoints)
@@ -149,7 +156,7 @@ def run_mip_only(hydra_config_path: str):
         mtpz.mip.run_mip_sweep(hydra_cfg)
     else:
         # mip_and_realize_models (distributed processing)
-        # TODO: How to make it part of mnt.search() api, similarly to run_full_puzzletron() API
+        # TODO: How to make it part of mtn.search() api, similarly to run_full_puzzletron() API
         mtpz.tools.mprint("Puzzletron Progress 7/8: running MIP and realizing models (multi-gpu)")
         mtpz.mip.launch_mip_and_realize_model(hydra_cfg)
 

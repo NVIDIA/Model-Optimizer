@@ -79,7 +79,7 @@ class PuzzleConstraints:
     _ALLOWED_HUMAN_CONSTRAINTS = {
         "target_memory",
         "target_throughput",
-        "target_latency",
+        "target_latency_seconds",
         "target_time_to_first_token",
         "num_params",
         "stats.has_attention",
@@ -175,8 +175,8 @@ class PuzzleConstraints:
             throughput_constraints.append(
                 batch_size * generation_seq_len / self.constraints["target_throughput"]
             )
-        if "target_latency" in self.constraints:
-            throughput_constraints.append(self.constraints["target_latency"])
+        if "target_latency_seconds" in self.constraints:
+            throughput_constraints.append(self.constraints["target_latency_seconds"])
         if throughput_constraints:
             mip_constraints["stats.runtime_ms"] = 1000 * min(throughput_constraints)
 
@@ -439,7 +439,7 @@ def _get_minimal_unique_names(dicts: list[dict]) -> list[str]:
 def run_puzzle(args: DictConfig) -> list[str]:
     # Loads config from args/puzzle_profile
     if args.puzzle_profile is not None:
-        with open(args.puzzle_profile) as f:
+        with open(args.puzzle_profile, encoding="utf-8") as f:
             puzzle_profile = yaml.safe_load(f)
         _override_args_from_profile(args, puzzle_profile)
         mprint(f"Loaded Puzzle profile from {args.puzzle_profile}")

@@ -17,6 +17,7 @@ import json
 
 import pytest
 from _test_utils.torch.diffusers_models import get_tiny_dit, get_tiny_flux, get_tiny_unet
+from safetensors import safe_open
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.diffusers_utils import generate_diffusion_dummy_inputs
@@ -26,6 +27,13 @@ from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 def _load_config(config_path):
     with open(config_path) as file:
         return json.load(file)
+
+
+def _calib_with_dummy_inputs(m):
+    param = next(m.parameters())
+    dummy_inputs = generate_diffusion_dummy_inputs(m, param.device, param.dtype)
+    assert dummy_inputs is not None
+    m(**dummy_inputs)
 
 
 @pytest.mark.parametrize("model_factory", [get_tiny_unet, get_tiny_dit, get_tiny_flux])
@@ -78,3 +86,33 @@ def test_export_diffusers_real_quantized_fp4(tmp_path):
 
     config_data = _load_config(config_path)
     assert "quantization_config" in config_data
+
+
+def test_export_diffusers_sharded_default_no_header_metadata(tmp_path):
+    """A default (non-opt-in) sharded FP8 export succeeds and writes no header metadata.
+
+    Regression test for the FLUX FP8 export crash (NotImplementedError on sharded
+    safetensors). A tiny max_shard_size forces the tiny model to split into multiple
+    shards (+ index.json), reproducing the large-model path. With the header quant
+    metadata off by default, post-processing is a no-op: the export must succeed and
+    leave a clean safetensors header (the ComfyUI metadata is opt-in).
+    """
+    model = get_tiny_flux()
+    export_dir = tmp_path / "export_flux_fp8_sharded_default"
+
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop=_calib_with_dummy_inputs)
+
+    # Tiny shard size forces sharding even for this tiny model.
+    export_hf_checkpoint(model, export_dir=export_dir, max_shard_size="1KB")
+
+    assert list(export_dir.glob("*.safetensors.index.json")), (
+        "expected a sharded export (index.json) with a tiny max_shard_size"
+    )
+    shard_files = sorted(export_dir.glob("*.safetensors"))
+    assert len(shard_files) >= 2, "expected the model to split across multiple shards"
+
+    for shard in shard_files:
+        with safe_open(str(shard), framework="pt") as f:
+            md = f.metadata() or {}
+        assert "quantization_config" not in md, f"unexpected header metadata in {shard.name}"
+        assert "_quantization_metadata" not in md, f"unexpected header metadata in {shard.name}"

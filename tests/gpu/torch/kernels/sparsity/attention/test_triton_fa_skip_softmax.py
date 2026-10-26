@@ -217,17 +217,26 @@ class TestSkipSoftmaxVsPytorchRef:
         locs = torch.arange(batch, device="cuda", dtype=torch.int32) * seq_len
         lens = torch.full((batch,), seq_len, device="cuda", dtype=torch.int32)
 
-        triton_out = attention(
-            q_flat,
-            k_flat,
-            v_flat,
-            locs,
-            lens,
-            seq_len,
-            is_causal=True,
-            softmax_scale=scale,
-            skip_softmax_threshold=threshold,
-        )
+        try:
+            triton_out = attention(
+                q_flat,
+                k_flat,
+                v_flat,
+                locs,
+                lens,
+                seq_len,
+                is_causal=True,
+                softmax_scale=scale,
+                skip_softmax_threshold=threshold,
+            )
+        except RuntimeError as err:
+            if "shared memory" in str(err):
+                # Active skip requires the fixed 128x128 calibration tile; fp32
+                # inputs cannot compile it on ~100KB-shared-memory GPUs and the
+                # configuration is rejected by design. fp32 is kept here for a
+                # tight reference comparison on GPUs that support it.
+                pytest.skip("fp32 skip tile exceeds this GPU's shared memory")
+            raise
         triton_out_4d = triton_out.view(batch, seq_len, num_heads, head_dim).permute(0, 2, 1, 3)
 
         # Both outputs should be close — same algorithm, different implementations.
@@ -271,5 +280,8 @@ class TestSkipSoftmaxHFIntegration:
 
         assert not torch.isnan(logits_skip).any(), "NaN in skip-softmax logits"
         assert not torch.isinf(logits_skip).any(), "Inf in skip-softmax logits"
-        # On short sequences (64 tokens), no tiles are skipped — output should match dense
-        torch.testing.assert_close(logits_skip, logits_dense, rtol=1e-3, atol=1e-3)
+        # On short sequences (64 tokens), no tiles are skipped — output should match
+        # dense up to bf16 accumulation-order noise: active skip launches run on the
+        # fixed 128x128 calibration tile, so their summation order differs from the
+        # HF dense reference (and from the autotuned dense Triton tile).
+        torch.testing.assert_close(logits_skip, logits_dense, rtol=1e-2, atol=8e-3)

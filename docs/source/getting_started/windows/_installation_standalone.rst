@@ -11,9 +11,9 @@ The Model Optimizer - Windows (ModelOpt-Windows) can be installed as a standalon
 Before using ModelOpt-Windows, the following components must be installed:
 
       - NVIDIA GPU and Graphics Driver
-      - Python version >= 3.10 and < 3.13
+      - Python version >= 3.10 and < 3.14
       - Visual Studio 2022 / MSVC / C/C++ Build Tools
-      - CUDA Toolkit, CuDNN for using CUDA path during calibration (e.g. for calibration of ONNX models using `onnxruntime-gpu` or CUDA EP)
+      - CUDA Toolkit and matching CuDNN for using CUDA path during calibration (e.g. for calibration of ONNX models using `onnxruntime-gpu` or CUDA EP)
 
 Update ``PATH`` environment variable as needed for above prerequisites.
 
@@ -39,16 +39,23 @@ To install the ONNX module of ModelOpt-Windows, run the following command:
 
 If you install ModelOpt-Windows without the extra ``[onnx]`` option, only the minimal core dependencies and the PyTorch module (``torch``) will be installed. Support for ONNX model quantization requires installing with ``[onnx]``.
 
+.. note::
+
+    Windows ARM64 users should follow the :ref:`Windows on Arm installation guide
+    <Install-Page-Windows-ARM64>`. Some Windows x64 dependencies selected by the standard
+    ``onnx`` extra are not suitable for ARM64 and must be replaced with native packages.
+
 **4. ONNX Model Quantization: Setup ONNX Runtime Execution Provider for Calibration**
 
 The Post-Training Quantization (PTQ) process for ONNX models usually involves running the base model with user-supplied inputs, a process called calibration. The user-supplied model inputs are referred to as calibration data. To perform calibration, the base model must be run using a suitable ONNX Execution Provider (EP), such as *DmlExecutionProvider* (DirectML EP) or *CUDAExecutionProvider* (CUDA EP). There are different ONNX Runtime packages for each EP:
 
 - *onnxruntime-directml* provides the DirectML EP.
 - *onnxruntime-trt-rtx* provides TensorRT-RTX EP.
+- *onnxruntime-ep-nv-tensorrt-rtx-cu13* provides TensorRT-RTX EP ABI plugin.
 - *onnxruntime-gpu* provides the CUDA EP.
 - *onnxruntime* provides the CPU EP.
 
-By default, ModelOpt-Windows installs *onnxruntime-gpu*. The default CUDA version needed for *onnxruntime-gpu* since v1.19.0 is 12.x. The *onnxruntime-gpu* package (i.e. CUDA EP) has CUDA and cuDNN dependencies:
+By default, ModelOpt-Windows x64 installs *onnxruntime-gpu*. The default CUDA version needed for *onnxruntime-gpu* since v1.19.0 is 12.x. The *onnxruntime-gpu* package (i.e. CUDA EP) has CUDA and cuDNN dependencies:
 
 - Install CUDA and cuDNN:
     - For the ONNX Runtime GPU package, you need to install the appropriate version of CUDA and cuDNN. Refer to the `CUDA Execution Provider requirements <https://onnxruntime.ai/docs/install/#cuda-and-cudnn/>`_ for compatible versions of CUDA and cuDNN.
@@ -60,25 +67,35 @@ If you need to use any other EP for calibration, you can uninstall the existing 
       pip uninstall onnxruntime-gpu
       pip install onnxruntime-directml
 
+If you are running on arm64 Windows. CUDA EP is not available yet, instead use TensorRT-RTX EP ABI plugin. Package is already included in ``nvidia-modelopt[onnx]``.
+
 **5. Setup GPU Acceleration Tool for Quantization**
 
-By default, ModelOpt-Windows utilizes the `cupy-cuda12x <https://cupy.dev//>`_ tool for GPU acceleration during the INT4 ONNX quantization process. This is compatible with CUDA 12.x.
+ModelOpt uses `CuPy <https://docs.cupy.dev/en/stable/install.html>`_ to accelerate
+INT4 ONNX quantization. The ``nvidia-modelopt[onnx]`` extra installs ``cupy-cuda12x`` and
+a CUDA 12-compatible *onnxruntime-gpu* version by default.
 
-If you are using CUDA 13.x, update CUDA-dependent packages manually:
+**CUDA 13.x Setup**
 
-For official ONNX Runtime guidance, see `Nightly builds for CUDA 13.x <https://onnxruntime.ai/docs/install/#nightly-for-cuda-13x>`_.
+The steps below assume a CUDA 13.x Toolkit, compatible cudnn, and a compatible driver are already installed on the host.
 
-1. Uninstall ``cupy-cuda12x`` and install ``cupy-cuda13x``.
-2. Uninstall ``onnxruntime-genai-cuda`` and ``onnxruntime-gpu``.
-3. Install ONNX Runtime CUDA 13 nightly and the pre-release ``onnxruntime-genai-cuda`` package.
+Replace the CUDA-dependent packages installed by the default ONNX extra:
 
-.. code-block:: bash
+.. code-block:: bat
 
-    pip uninstall -y cupy-cuda12x onnxruntime-genai-cuda onnxruntime-gpu
-    pip install cupy-cuda13x
-    pip install coloredlogs flatbuffers numpy packaging protobuf sympy
-    pip install --pre --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/ onnxruntime-gpu
-    pip install --pre onnxruntime-genai-cuda
+    python -m pip uninstall -y cupy-cuda12x onnxruntime-gpu
+    python -m pip install cupy-cuda13x "onnxruntime-gpu>=1.27"
+
+ONNX Runtime 1.27 and later GPU packages published on PyPI use CUDA 13.x by default.
+Refer to the `ONNX Runtime CUDA Execution Provider requirements
+<https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements>`_
+before selecting or pinning an ONNX Runtime version.
+
+.. note::
+
+    Make sure a cuDNN 9 build for CUDA 13 is available on the host (for example, via the
+    NVIDIA Windows installer/zip package, or the ``nvidia-cudnn-cu13`` Python wheel), and
+    that the relevant environment variables like ``CUDA_PATH``, ``CUDA_HOME``, and ``PATH`` point to the CUDA 13.x installation).
 
 **6. Verify Installation**
 
@@ -90,11 +107,39 @@ Ensure the following steps are verified:
             - *onnxruntime-trt-rtx* (TensorRT-RTX EP)
             - *onnxruntime-gpu* (CUDA EP)
             - *onnxruntime* (CPU EP)
-      - **Onnx and Onnxruntime Import**: Ensure that following python command runs successfully.
+
+        The *onnxruntime-ep-nv-tensorrt-rtx-cu13* plugin is installed alongside the selected
+        ONNX Runtime package; it does not replace *onnxruntime-gpu*.
+      - **CUDA Toolkit**: For CUDA workflows, verify that the selected Toolkit is found first and that ``nvcc`` reports the expected major version:
+
+            .. code-block:: bat
+
+                where nvcc
+                nvcc --version
+
+      - **ONNX and ONNX Runtime**: Ensure that imports succeed and that CUDA EP is available for CUDA workflows:
+
             .. code-block:: python
 
-                python -c "import onnx; import onnxruntime"
-      - **Environment Variables**: For workflows using CUDA dependencies (e.g., CUDA EP-based calibration), ensure environment variables like *CUDA_PATH*, *CUDA_V12_4*, or *CUDA_V11_8* etc. are set correctly. Reopen the command-prompt if any environment variable is updated or newly created.
+                python -c "import onnx; import onnxruntime as ort; print(ort.__version__, ort.get_available_providers())"
+
+      - **CuPy**: Verify that CuPy can allocate and execute on the GPU. For CUDA 13.x,
+        ``runtimeGetVersion()`` should report a value beginning with ``13``:
+
+            .. code-block:: python
+
+                python -c "import cupy; print(cupy.__version__, cupy.cuda.runtime.runtimeGetVersion(), cupy.arange(3).sum())"
+
+      - **Environment Variables**: For workflows using CUDA dependencies (e.g., CUDA EP-based calibration), ensure environment variables such as ``CUDA_PATH``, ``CUDA_PATH_V12_x``, or ``CUDA_PATH_V13_x`` point to the intended Toolkit. Reopen the command prompt after changing persistent environment variables.
+      - **Windows ARM64 Architecture**: For Windows on Arm, verify that the interpreter and any
+        locally built PyArrow wheel are native ARM64 packages:
+
+            .. code-block:: bat
+
+                python -c "import platform; assert platform.machine().lower() in {'arm64', 'aarch64'}; print(platform.machine())"
+                python -c "import pyarrow; import pyarrow.compute; import pyarrow.dataset; import pyarrow.parquet; print(pyarrow.__version__)"
+
+        Skip the PyArrow command when the selected workflow does not require PyArrow.
       - **ModelOpt-Windows Import Check**: Run the following command to ensure the installation is successful:
 
             .. code-block:: python

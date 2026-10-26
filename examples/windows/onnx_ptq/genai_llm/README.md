@@ -27,6 +27,8 @@ This example takes an ONNX model as input, along with the necessary quantization
    pip install -r requirements.txt
    ```
 
+> **CUDA 12.x / 13.x:** ModelOpt-Windows installs CUDA 12 packages (`cupy-cuda12x`, CUDA 12 `onnxruntime-gpu`) by default. To run on CUDA 13.x, switch to CUDA 13 packages (`cupy-cuda13x`, `onnxruntime-gpu>=1.27`) with a matching CUDA 13 toolkit and cuDNN. See the [standalone installation instructions](https://nvidia.github.io/Model-Optimizer/getting_started/windows/_installation_standalone.html) for details.
+
 ## Prepare ORT-GenAI Compatible Base Model
 
 You may generate the base model using the model builder that comes with onnxruntime-genai. The ORT-GenAI's [model-builder](https://github.com/microsoft/onnxruntime-genai/tree/main/src/python/py/models) downloads the original Pytorch model from Hugging Face, and produces an ONNX GenAI-compatible base model in ONNX format. See example command-line below:
@@ -66,6 +68,7 @@ The table below lists key command-line arguments of the ONNX PTQ example script.
 | `--awqclip_alpha_min` | 0.5 (default) | Minimum AWQ weight-clipping threshold, user-defined |
 | `--awqclip_bsz_col` | 1024 (default) | Chunk size in columns during weight clipping, user-defined |
 | `--calibration_eps` | dml, cuda, cpu, NvTensorRtRtx (default: [cuda,cpu]) | List of execution-providers to use for session run during calibration |
+| `--trt_rtx_backend` | legacy (default), abi | TensorRT-RTX implementation used when calibration_eps includes NvTensorRtRtx. Legacy uses TensorRT-RTX libraries on PATH; ABI uses the standalone EP plugin. |
 | `--add_position_ids` | Default: position_ids input is disabled | Use this option to enable position_ids input in calibration data|
 | `--enable_mixed_quant` | Default: mixed-quant is disabled | Use this option to enable mixed precision quantization|
 | `--layers_8bit` | Default: None | Use this option to override default mixed-quant strategy|
@@ -125,7 +128,7 @@ The quantization strategy selects which layers to quantize to INT8 vs INT4:
 
 1. **INT8 Layers** (Higher Precision): Important layers that significantly impact model quality. Quantized per-channel
 
-2. **INT4 Layers** (Maximum Compression): All other layers. Qunatized blockwise.
+2. **INT4 Layers** (Maximum Compression): All other layers. Quantized blockwise.
 
 This strategy preserves accuracy for the most sensitive layers while maintaining aggressive compression elsewhere.
 
@@ -241,4 +244,4 @@ Refer to the following example scripts and tutorials for deployment:
 
 1. **Error - Invalid Position-IDs input to the ONNX model**
 
-   The ONNX models produced using ONNX GenerativeAI (GenAI) have different IO bindings for models produced using different execution-providers (EPs). For instance, model built with DML EP has position-ids input in the ONNX model but models builts using CUDA EP or NvTensorRtRtx EP don't have position-ids inputs. So, if base model requires, use `--add_position_ids` command-line argument for enabling position_ids calibration input or set "add_position_ids" variable to `True` value (hard-code) in the quantize script if required.
+   The ONNX models produced using ONNX GenerativeAI (GenAI) have different IO bindings for models produced using different execution-providers (EPs). For instance, model built with DML EP has position-ids input in the ONNX model but models built using CUDA EP or NvTensorRtRtx EP don't have position-ids inputs. So, if base model requires, use `--add_position_ids` command-line argument for enabling position_ids calibration input or set "add_position_ids" variable to `True` value (hard-code) in the quantize script if required.

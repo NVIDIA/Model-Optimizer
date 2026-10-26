@@ -22,6 +22,6 @@ trap 'error_handler $0 $LINENO' ERR
 
 ###################################################################################################
 
-python modules/Model-Optimizer/examples/llm_ptq/hf_ptq.py \
+python modules/Model-Optimizer/examples/hf_ptq/hf_ptq.py \
     --model ${HF_MODEL_CKPT} \
     ${@}

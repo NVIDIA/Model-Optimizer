@@ -154,10 +154,7 @@ def _add_cross_kv_outputs(
     # Update the graph output
     for output in list(graph.output):
         if output.name == hidden_state_output_name:
-            dims = [
-                d.dim_param if d.dim_param else d.dim_value
-                for d in output.type.tensor_type.shape.dim
-            ]
+            dims = [d.dim_param or d.dim_value for d in output.type.tensor_type.shape.dim]
             new_output = helper.make_tensor_value_info(
                 encoder_hidden_states_name,
                 output.type.tensor_type.elem_type,

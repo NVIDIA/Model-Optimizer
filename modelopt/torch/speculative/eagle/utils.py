@@ -41,6 +41,8 @@ import torch
 from torch.utils.data import Dataset
 from transformers.trainer_pt_utils import LabelSmoother
 
+from modelopt.torch.utils.loss_mask import get_loss_mask_recovery
+
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
 
@@ -88,7 +90,9 @@ class OfflineSupervisedDataset(Dataset):
 
     - ``input_ids``: token IDs of shape ``(seq_len,)``
     - ``hidden_states``: base model last hidden states of shape ``(seq_len, hidden_size)``
-    - ``aux_hidden_states``: auxiliary hidden states of shape ``(seq_len, hidden_size)``
+    - ``aux_hidden_states``: auxiliary hidden states of shape ``(seq_len, hidden_size)``.
+      Absent from dumps written with ``--no-aux-hidden-states``; reading one of those
+      requires ``aux_hidden_states_optional=True``.
     - ``loss_mask`` (optional): per-token assistant mask of shape ``(seq_len,)``,
       present when the dump was produced with ``--answer-only-loss``.
 
@@ -96,23 +100,47 @@ class OfflineSupervisedDataset(Dataset):
         dumped_files (list): A list of file paths to the dumped .pt files.
         answer_only_loss (bool): If True, use the ``loss_mask`` stored in each .pt
             file so that only assistant-produced tokens contribute to the loss.
-            Raises ``ValueError`` on ``__getitem__`` if the file lacks ``loss_mask``.
+            If a file lacks ``loss_mask`` and ``tokenizer`` has a registered
+            model-specific recovery (see ``modelopt.torch.utils.loss_mask``), the
+            mask is rebuilt from ``input_ids``; otherwise ``__getitem__`` raises
+            ``ValueError``.
             If False (default), a uniform all-ones mask is used regardless of what
             is stored in the file (backward compatible).
+        tokenizer: Optional tokenizer used to recover the assistant mask for dumps
+            that lack a stored ``loss_mask``.
+        aux_hidden_states_optional (bool): Tolerate dumps written with
+            ``--no-aux-hidden-states``, yielding an empty ``(seq_len, 0)`` plane in
+            their place. Only modes that never read the aux planes may set this; for
+            the others a missing key must still raise.
     """
 
     def __init__(
         self,
         dumped_files,
         answer_only_loss: bool = False,
+        tokenizer=None,
+        aux_hidden_states_optional: bool = False,
     ):
         """Initialize with a list of .pt file paths."""
         super().__init__()
         self.dumped_files = dumped_files
         self.answer_only_loss = answer_only_loss
+        self.tokenizer = tokenizer
+        self.aux_hidden_states_optional = aux_hidden_states_optional
 
     def __len__(self):
         return len(self.dumped_files)
+
+    def _aux_hidden_states(self, offline_data):
+        """Aux planes from the dump, or an empty plane when the consumer never reads them."""
+        if "aux_hidden_states" in offline_data:
+            return offline_data["aux_hidden_states"]
+        if not self.aux_hidden_states_optional:
+            raise KeyError(
+                "aux_hidden_states missing from the offline dump. Re-dump without "
+                "--no-aux-hidden-states, or use a mode that does not read them."
+            )
+        return offline_data["hidden_states"].new_zeros((offline_data["hidden_states"].shape[0], 0))
 
     def __getitem__(self, i) -> dict[str, torch.Tensor]:
         offline_data = torch.load(self.dumped_files[i], weights_only=True)
@@ -121,23 +149,35 @@ class OfflineSupervisedDataset(Dataset):
         labels[..., :-1] = offline_data["input_ids"][..., 1:]
 
         if self.answer_only_loss:
-            if "loss_mask" not in offline_data:
+            recovery = get_loss_mask_recovery(self.tokenizer) if self.tokenizer else None
+            if "loss_mask" in offline_data:
+                loss_mask = offline_data["loss_mask"].to(offline_data["input_ids"].dtype)
+            elif recovery is not None:
+                # Dumps from tokenizers that cannot emit assistant masks carry no
+                # loss_mask; rebuild it from the token ids.
+                loss_mask = recovery.compute(self.tokenizer, offline_data["input_ids"]).to(
+                    offline_data["input_ids"].dtype
+                )
+            else:
                 raise ValueError(
                     f"answer_only_loss=True requires a 'loss_mask' entry in the offline "
                     f".pt file, but {self.dumped_files[i]} does not have one. Re-dump "
-                    f"with --answer-only-loss in compute_hidden_states_*.py."
+                    f"with --answer-only-loss in compute_hidden_states_*.py, or pass a "
+                    f"tokenizer with a registered loss-mask recovery."
                 )
-            loss_mask = offline_data["loss_mask"].to(offline_data["input_ids"].dtype)
         else:
             loss_mask = torch.ones_like(offline_data["input_ids"])
 
         ret = {
             "input_ids": offline_data["input_ids"],
             "base_model_hidden_states": offline_data["hidden_states"],
-            "aux_hidden_states": offline_data["aux_hidden_states"],
+            "aux_hidden_states": self._aux_hidden_states(offline_data),
             "attention_mask": torch.ones_like(offline_data["input_ids"]),
             "loss_mask": loss_mask,
             "labels": labels,
+            # Whether the dumped hidden is pre-(final-)norm (the consumer re-applies the base
+            # norm if so). Read from the dump; default False = post-norm, the prior behavior.
+            "base_hidden_prenorm": bool(offline_data.get("hidden_states_prenorm", False)),
         }
         return ret
 
@@ -177,6 +217,19 @@ class EagleOfflineDataCollator:
             k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
             for k in ["base_model_hidden_states", "aux_hidden_states"]
         }
+        # Propagate the producer's pre-norm declaration. DFlash honors it to decide whether to
+        # re-apply the base final norm; other heads ignore it. It must be constant across the
+        # batch: a batch is normed as a whole, so mixing pre-norm (True) and post-norm (False)
+        # dumps — e.g. a directory blending pre-PR and pre-norm dumps — would silently feed
+        # un-normed hiddens to lm_head for the minority. Fail loud rather than corrupt the target.
+        if "base_hidden_prenorm" in features[0]:
+            prenorm_flags = {bool(f["base_hidden_prenorm"]) for f in features}
+            if len(prenorm_flags) > 1:
+                raise ValueError(
+                    "base_hidden_prenorm is not constant across the batch "
+                    f"(got {prenorm_flags}); do not mix pre-norm and post-norm dumps."
+                )
+            base_model_outputs["base_hidden_prenorm"] = prenorm_flags.pop()
 
         batch = {
             **base_batch,

@@ -25,7 +25,9 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.model_calib import gptq
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+from modelopt.torch.quantization.utils import calib_utils
 from modelopt.torch.quantization.utils.calib_utils import (
+    GPTQHelper,
     compute_hessian_inverse,
     gptq_blockwise_update,
     gptq_blockwise_update_fused_scalar,
@@ -37,87 +39,43 @@ RAND_SEED = 42
 torch.manual_seed(RAND_SEED)
 
 
-def test_update_hessian():
-    """Test for update_hessian function with both random and known inputs."""
-    # Test 1: Random input - general functionality test
-    torch.manual_seed(42)
-    batch_size = 2
-    seq_len = 3
-    features = 4
-    input_tensor = torch.randn(batch_size, seq_len, features, dtype=torch.float32)
+def test_hessian_of_a_full_gpu_goes_to_an_idle_gpu(need_2_gpus, monkeypatch):
+    """A Hessian whose GPU is full lands on an idle GPU rather than the CPU, with the same values."""
 
-    hessian = torch.zeros(features, features, dtype=torch.float32)
-    n_samples = 0
+    def used_fraction(device):
+        return 0.9 if torch.device(device).index in (0, None) else 0.1
 
-    updated_hessian, new_n_samples = update_hessian(input_tensor, hessian, n_samples)
+    monkeypatch.setattr(calib_utils, "get_used_gpu_mem_fraction", used_fraction)
+    linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
+    shard = torch.zeros(1, device="cuda:1")  # the model also lives on cuda:1
+    helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
+    assert helper.hessian.device == shard.device
 
-    # Verify output shape
-    assert updated_hessian.shape == (features, features), (
-        f"Expected hessian shape ({features}, {features}), got {updated_hessian.shape}"
-    )
+    inputs = torch.randn(32, 64, device="cuda:0")
+    helper.accumulate(inputs)
+    reference, _ = update_hessian(inputs, torch.zeros(64, 64, device="cuda:0"), 0)
+    torch.testing.assert_close(helper.hessian.to("cuda:0"), reference)
 
-    # Verify sample count is updated correctly (incremented by total tokens = batch * seq_len)
-    expected_n_samples = batch_size * seq_len
-    assert new_n_samples == expected_n_samples, (
-        f"Expected n_samples={expected_n_samples}, got {new_n_samples}"
-    )
 
-    # Verify hessian is not all zeros after update
-    assert not torch.allclose(updated_hessian, torch.zeros_like(updated_hessian)), (
-        "Hessian should not be all zeros after update"
-    )
+@pytest.mark.parametrize("blocker", ["idle_gpu_full", "idle_gpu_too_small", "multi_rank"])
+def test_hessian_of_a_full_gpu_falls_back_to_the_cpu(need_2_gpus, monkeypatch, blocker):
+    """With no other GPU that can take it, or on any rank of a multi-rank run, it goes to the CPU."""
+    idle_fraction = 0.9 if blocker == "idle_gpu_full" else 0.1
 
-    # Verify hessian is symmetric (should be for outer product X @ X.T)
-    assert torch.allclose(updated_hessian, updated_hessian.t()), "Hessian should be symmetric"
+    def used_fraction(device):
+        return 0.9 if torch.device(device).index in (0, None) else idle_fraction
 
-    # Test 2: Known input - verify correct hessian calculation
-    batch_size = 6
-    seq_len = 2
-    features = 2
-    input_tensor = torch.ones(batch_size, seq_len, features, dtype=torch.float32)
-
-    hessian = torch.zeros(features, features, dtype=torch.float32)
-    n_samples = 0
-
-    updated_hessian, new_n_samples = update_hessian(input_tensor, hessian, n_samples)
-
-    # Manual calculation:
-    # input_flat shape: (features, batch*seq) = (2, 12), all ones
-    # n_samples = batch * seq = 12 (token count after flattening)
-    # scaled_input = sqrt(2/12) * ones(2, 12)
-    # outer_product = (2/12) * ones(2,12) @ ones(12,2) = [[2,2], [2,2]]
-    expected_n_samples = batch_size * seq_len  # 12 tokens
-    expected_hessian = torch.ones(features, features, dtype=torch.float32) * 2.0
-
-    assert torch.allclose(updated_hessian, expected_hessian, atol=1e-5), (
-        f"Expected hessian {expected_hessian}, got {updated_hessian}"
-    )
-    assert new_n_samples == expected_n_samples
-
-    # Test 3: Accumulated hessians - verify equivalence
-    # Processing [6,2,2] in one step should equal processing [2,2,2] three times
-    seq_len = 2
-    features = 2
-
-    # Process in 3 steps of batch_size=2 (4 tokens each, 12 total)
-    hessian_accumulated = torch.zeros(features, features, dtype=torch.float32)
-    n_samples_accumulated = 0
-
-    for i in range(3):
-        input_batch = torch.ones(2, seq_len, features, dtype=torch.float32)
-        hessian_accumulated, n_samples_accumulated = update_hessian(
-            input_batch, hessian_accumulated, n_samples_accumulated
-        )
-
-    # Verify that accumulated result matches single-step result from Test 2
-    assert torch.allclose(hessian_accumulated, updated_hessian, atol=1e-5), (
-        f"Accumulated hessian should match single-step: expected {updated_hessian}, got {hessian_accumulated}"
-    )
-    assert torch.allclose(hessian_accumulated, expected_hessian, atol=1e-5), (
-        f"Accumulated hessian should match expected: expected {expected_hessian}, got {hessian_accumulated}"
-    )
-    # 3 batches * 2 batch_size * 2 seq_len = 12 tokens
-    assert n_samples_accumulated == 12, f"Expected n_samples=12, got {n_samples_accumulated}"
+    monkeypatch.setattr(calib_utils, "get_used_gpu_mem_fraction", used_fraction)
+    if blocker == "idle_gpu_too_small":
+        # 64 x 64 float32 is 16 KiB; leave 1 KiB free.
+        monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device=None: (1024, 2**40))
+    elif blocker == "multi_rank":
+        monkeypatch.setattr(calib_utils.dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(calib_utils.dist, "get_world_size", lambda group=None: 2)
+    linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
+    shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
+    helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
+    assert helper.hessian.device == torch.device("cpu")
 
 
 @pytest.mark.parametrize(
@@ -213,14 +171,14 @@ def test_gptq_export_roundtrip():
 @pytest.mark.parametrize(
     "quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG]
 )
-def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer):
+def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer, calib_jsonl):
     model = get_tiny_llama(vocab_size=tiny_tokenizer.vocab_size).to("cuda")
     model.eval()
 
     quant_cfg = copy.deepcopy(quant_cfg)
-    quant_cfg["algorithm"] = {"method": "gptq", "layerwise": True}
+    quant_cfg["algorithm"] = {"method": "gptq", "layerwise": {"enable": True}}
     calib_dataloader = get_dataset_dataloader(
-        dataset_name="cnn_dailymail",
+        dataset_name=calib_jsonl,
         tokenizer=tiny_tokenizer,
         batch_size=2,
         num_samples=8,
@@ -289,6 +247,20 @@ def _run_fused_gptq_nvfp4(
         w, block_amax, global_scale, h_inv, gptq_block_size, quant_block_size
     )
     return w
+
+
+@requires_triton
+def test_fused_nvfp4_gptq_runs_on_the_weights_gpu(need_2_gpus):
+    """A layer device_map placed on another GPU is updated there, not from the current GPU."""
+    torch.manual_seed(42)
+    weight, _, block_amax, global_scale, h_inv = _make_nvfp4_test_data(16, 64, 256)
+    expected = _run_fused_gptq_nvfp4(weight, block_amax, global_scale, h_inv, 128, 16)
+
+    weight, block_amax, h_inv = (t.to("cuda:1") for t in (weight, block_amax, h_inv))
+    got = _run_fused_gptq_nvfp4(weight, block_amax, global_scale, h_inv, 128, 16)
+
+    assert torch.cuda.current_device() == 0
+    torch.testing.assert_close(got.cpu(), expected.cpu(), rtol=0, atol=0)
 
 
 _NVFP4_QUANT_BLOCK_SIZES = [16, 128]

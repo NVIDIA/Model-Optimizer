@@ -72,5 +72,6 @@ class _DynamicLinear(DynamicModule):
                 if features_ratio is not None
                 else set(hp.choices)
             )
-            choices = {int(make_divisible(c, feature_divisor)) for c in choices}
+            # hparam choices are broadly typed (may include tuple/CustomHPType) but are numeric here
+            choices = {int(make_divisible(c, feature_divisor)) for c in choices}  # type: ignore[arg-type]
             hp.choices = list(set(hp.choices) & choices | {hp.original})

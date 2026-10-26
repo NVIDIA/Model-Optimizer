@@ -74,6 +74,7 @@ extensions = [
     "sphinx_copybutton",  # line numbers getting copied so cannot use `:linenos:`
     "sphinx_inline_tabs",
     "sphinx_togglebutton",
+    "sphinxext.rediraffe",  # redirect pages for moved docs, see rediraffe_redirects
     "sphinxcontrib.autodoc_pydantic",
     "modelopt_autodoc_pydantic",
 ]
@@ -94,15 +95,23 @@ copybutton_selector = ", ".join(
 exclude_patterns = []
 templates_path = ["_templates"]
 
+# Suppress ambiguous cross-reference warnings that arise because EMAConfig and
+# QuantizerAttributeConfig both define a field named `type`.  Renaming would be
+# an API break; silencing the warning here is the least-invasive fix.
+suppress_warnings = ["ref.python"]
+
 
 # -- Options for HTML output -------------------------------------------------
 
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
-html_theme = "sphinx_rtd_theme"
+html_theme = "shibuya"
 html_theme_options = {
-    "style_external_links": True,
+    "accent_color": "green",
+    "color_mode": "auto",
+    "dark_code": True,
+    "globaltoc_expand_depth": 1,
 }
 
 # Add any paths that contain custom static files (such as style sheets) here,
@@ -111,7 +120,8 @@ html_theme_options = {
 html_static_path = ["_static"]
 
 html_title = f"Model Optimizer {version}"
-html_css_files = ["custom.css"]
+html_css_files = ["custom.css", "announcements.css"]
+html_js_files = ["announcements.js"]
 html_permalinks_icon = "#"  # default icon not rendering properly
 
 # TODO: left here as reference for future
@@ -124,7 +134,7 @@ html_permalinks_icon = "#"  # default icon not rendering properly
 
 
 # Mock imports for autodoc
-autodoc_mock_imports = ["mpi4py", "tensorrt_llm", "triton"]
+autodoc_mock_imports = ["mpi4py", "tensorrt_llm", "triton", "vllm"]
 
 autosummary_generate = True
 autosummary_imported_members = False
@@ -206,6 +216,23 @@ class PatchedHTMLTranslator(HTML5Translator):
 
         if node.get("secnumber"):
             self.body.append(("%s" + self.secnumber_suffix) % ".".join(map(str, node["secnumber"])))
+
+
+# Pages that moved, as {old docname: new docname}; sphinxext-rediraffe writes a redirect page at
+# each old path. Announcements gained a <yyyymmdd>- prefix so the source tree sorts by date.
+rediraffe_redirects = {
+    f"announcements/{slug}": f"announcements/{date}-{slug}"
+    for date, slug in [
+        ("20260713", "dspark-vs-domino"),
+        ("20260813", "github-pages-announcements"),
+        ("20260824", "autoquantize"),
+        ("20260909", "local-hessian"),
+        ("20260916", "qwen36-w4a4-qad"),
+        ("20260916", "scale-learning"),
+        ("20260928", "single-gpu-ptq"),
+        ("20261008", "autoquant-kv"),
+    ]
+}
 
 
 def setup(app: sphinx.application.Sphinx) -> None:

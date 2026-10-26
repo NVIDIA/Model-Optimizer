@@ -19,14 +19,15 @@ import copy
 import json
 import os
 import random
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
-import requests
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from .logging import print_rank_0, warn_rank_0
@@ -34,9 +35,102 @@ from .logging import print_rank_0, warn_rank_0
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
 
+ReasoningContentMode = Literal["strip", "inline", "native"]
+REASONING_CONTENT_MODES: frozenset[ReasoningContentMode] = frozenset(("strip", "inline", "native"))
+
 
 def _join_messages_content(sample: dict) -> str:
     return "\n".join(turn["content"] for turn in sample["messages"])
+
+
+def _fix_tool_call_arguments(args: Any) -> dict:
+    """Ensure tool_call.arguments is a dict for Jinja2 ``|items`` compatibility."""
+    if isinstance(args, dict):
+        return args
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+            return parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
+
+
+def prepare_messages_for_chat_template(
+    messages: list[dict],
+    *,
+    reasoning_content: ReasoningContentMode = "strip",
+    normalize_tool_calls: bool = True,
+) -> list[dict]:
+    """Prepare OpenAI-style messages before ``apply_chat_template``.
+
+    Args:
+        messages: Conversation turns.
+        reasoning_content: How to handle ``reasoning_content`` on assistant turns:
+            ``"strip"`` (default) removes the field, ``"inline"`` prepends a
+            ``<think>…</think>`` block to ``content``, and
+            ``"native"`` leaves the field intact for the tokenizer chat template.
+        normalize_tool_calls: Parse JSON-string ``tool_calls`` arguments to dicts
+            so Nemotron v3 chat templates can iterate them with Jinja2 ``|items``.
+    """
+    if reasoning_content not in REASONING_CONTENT_MODES:
+        raise ValueError(
+            f"reasoning_content must be one of {sorted(REASONING_CONTENT_MODES)!r}, "
+            f"got {reasoning_content!r}."
+        )
+    if reasoning_content == "native" and not normalize_tool_calls:
+        return messages
+
+    processed: list[dict] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            processed.append(msg)
+            continue
+        has_tool_calls = "tool_calls" in msg and isinstance(msg.get("tool_calls"), list)
+        needs_copy = (reasoning_content != "native" and "reasoning_content" in msg) or (
+            normalize_tool_calls and has_tool_calls
+        )
+        if not needs_copy:
+            processed.append(msg)
+            continue
+        msg = dict(msg)
+        if reasoning_content != "native":
+            rc = msg.pop("reasoning_content", None)
+            if reasoning_content == "inline" and rc:
+                msg["content"] = f"<think>\n{rc}\n</think>\n{msg.get('content', '')}"
+        if normalize_tool_calls and has_tool_calls:
+            fixed_tool_calls = []
+            for tc in msg["tool_calls"]:
+                if not isinstance(tc, dict):
+                    fixed_tool_calls.append(tc)
+                    continue
+                tc = dict(tc)
+                if "arguments" in tc and not isinstance(tc["arguments"], dict):
+                    tc["arguments"] = _fix_tool_call_arguments(tc["arguments"])
+                if isinstance(tc.get("function"), dict):
+                    fn = dict(tc["function"])
+                    if "arguments" in fn and not isinstance(fn["arguments"], dict):
+                        fn["arguments"] = _fix_tool_call_arguments(fn["arguments"])
+                    tc["function"] = fn
+                fixed_tool_calls.append(tc)
+            msg["tool_calls"] = fixed_tool_calls
+        processed.append(msg)
+    return processed
+
+
+def _apply_chat_template_to_messages(
+    tokenizer: "PreTrainedTokenizerBase",
+    messages: list[dict],
+    *,
+    tools: Any | None = None,
+) -> str:
+    kwargs: dict[str, Any] = {}
+    if tools is not None:
+        kwargs["tools"] = tools
+    prepared = prepare_messages_for_chat_template(
+        messages, reasoning_content="native", normalize_tool_calls=True
+    )
+    return tokenizer.apply_chat_template(prepared, tokenize=False, **kwargs)
 
 
 # Use dict to store the config for each dataset.
@@ -118,6 +212,12 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-SFT-Agentic-v2",
             "split": ["search"],
         },
+        # ``datasets>=4`` strictly casts each JSONL chunk to the repo's declared
+        # ``dataset_info`` features, which don't match the raw rows (extra ``uuid`` /
+        # ``used_in`` columns, different ``metadata`` / ``tools`` structs) -> ``CastError``.
+        # Reading the raw files through the generic ``json`` builder infers the schema
+        # from the actual data and sidesteps the cast.  ``{split}`` is substituted per split.
+        "data_files": "data/{split}*.jsonl",
         "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
@@ -194,7 +294,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
         "preprocess": lambda sample: sample["text"],
     },
     "wikitext": {
-        "config": {"path": "wikitext", "name": "wikitext-103-v1", "split": ["train"]},
+        "config": {"path": "Salesforce/wikitext", "name": "wikitext-103-v1", "split": ["train"]},
         "preprocess": lambda sample: sample["text"],
     },
 }
@@ -236,6 +336,8 @@ def _validate_dataset_combos() -> None:
 _validate_dataset_combos()
 
 __all__ = [
+    "REASONING_CONTENT_MODES",
+    "ReasoningContentMode",
     "create_forward_loop",
     "download_hf_dataset_as_jsonl",
     "get_dataset_dataloader",
@@ -243,6 +345,7 @@ __all__ = [
     "get_jsonl_text_samples",
     "get_max_batch_size",
     "get_supported_datasets",
+    "prepare_messages_for_chat_template",
 ]
 
 
@@ -318,11 +421,9 @@ def _auto_preprocess_sample(
                 f"Dataset '{dataset_name}' has a '{chat_key}' column but no tokenizer with "
                 "apply_chat_template was provided."
             )
-        kwargs: dict[str, Any] = {}
-        tools = sample.get("tools")
-        if tools is not None:
-            kwargs["tools"] = tools
-        return tokenizer.apply_chat_template(sample[chat_key], tokenize=False, **kwargs)
+        return _apply_chat_template_to_messages(
+            tokenizer, sample[chat_key], tools=sample.get("tools")
+        )
 
     if _has_non_null_value("prompt"):
         parts = [sample["prompt"]]
@@ -395,6 +496,8 @@ def get_dataset_samples(
             "Use ``get_dataset_dataloader`` to expand combos, or pass one of "
             f"its members: {DATASET_COMBOS[dataset_name]}"
         )
+    if num_samples < 0:
+        raise ValueError(f"``num_samples`` must be non-negative, got {num_samples}.")
 
     # Local JSONL: load via HF's ``json`` builder and route through the same
     # auto-preprocess path as unregistered HF datasets so chat / prompt / text
@@ -437,11 +540,19 @@ def get_dataset_samples(
 
     is_registered = not is_jsonl and dataset_name in SUPPORTED_DATASET_CONFIG
 
+    # Optional per-dataset ``data_files`` template (e.g. ``"data/{split}*.jsonl"``).  When
+    # set, the split is loaded from the repo's raw files via the generic ``json`` builder
+    # instead of the declared ``dataset_info`` schema, sidestepping ``datasets>=4`` casts.
+    # Only applies to remote registered datasets (not local-path overrides).
+    data_files_tmpl: str | None = None
+
     if is_registered:
         dataset_config = SUPPORTED_DATASET_CONFIG[dataset_name]
         config = dataset_config["config"].copy()
         if local_dataset_path:
             config["path"] = local_dataset_path
+        else:
+            data_files_tmpl = dataset_config.get("data_files")
         splits = requested_splits if requested_splits is not None else config.pop("split", [None])
         if split is not None:
             config.pop("split", None)
@@ -457,12 +568,8 @@ def get_dataset_samples(
 
         def _preprocess(sample: dict) -> str:
             if apply_chat_template and "chat_key" in dataset_config:
-                kwargs: dict[str, Any] = {}
-                tools = sample.get("tools")
-                if tools is not None:
-                    kwargs["tools"] = tools
-                return tokenizer.apply_chat_template(  # type: ignore[union-attr]
-                    sample[dataset_config["chat_key"]], tokenize=False, **kwargs
+                return _apply_chat_template_to_messages(
+                    tokenizer, sample[dataset_config["chat_key"]], tools=sample.get("tools")
                 )
             return dataset_config["preprocess"](sample)
 
@@ -507,16 +614,30 @@ def get_dataset_samples(
         pass
 
     # load_dataset does not support a list of splits while streaming, so load each separately.
-    print_rank_0(f"Loading dataset with {config=} and {splits=}")
-    try:
-        dataset_splits = [load_dataset(streaming=True, **config, split=s) for s in splits]
+    print_rank_0(f"Loading dataset with {config=} and {splits=} {data_files_tmpl=}")
 
-        num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
+    def _load_split(s: str | None):
+        if data_files_tmpl:
+            # Raw files via the ``json`` builder: schema is inferred from data, and the
+            # file-based builder labels everything as the ``train`` split.
+            return load_dataset(
+                config["path"],
+                data_files=data_files_tmpl.format(split=s),
+                split="train",
+                streaming=True,
+            )
+        return load_dataset(streaming=True, **config, split=s)
+
+    try:
+        num_per_split = [num_samples // len(splits)] * len(splits)
         num_per_split[-1] += num_samples - sum(num_per_split)
 
         samples: list[str] = []
-        for dataset, n in zip(dataset_splits, num_per_split):
-            for i, sample in enumerate(dataset):
+        for split_name, n in zip(splits, num_per_split):
+            # Skip zero-quota splits: starting a streamed split fetches its first record batch.
+            if n == 0:
+                continue
+            for i, sample in enumerate(_load_split(split_name)):
                 if i >= n:
                     break
                 text = _preprocess(sample)
@@ -613,9 +734,9 @@ def get_dataloader_from_dataset(
 ) -> DataLoader:
     """Wrap a pre-tokenized torch Dataset in a DataLoader, with optional DistributedSampler."""
     if distributed:
-        from torch.utils.data.distributed import DistributedSampler
-
-        sampler = DistributedSampler(dataset, **(sampler_kwargs or {}))
+        # Default the sampler's shuffle to this function's ``shuffle`` (DistributedSampler otherwise
+        # defaults to True); an explicit ``sampler_kwargs["shuffle"]`` still wins.
+        sampler = DistributedSampler(dataset, **{"shuffle": shuffle, **(sampler_kwargs or {})})
         return DataLoader(dataset, batch_size=batch_size, sampler=sampler)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
@@ -630,6 +751,8 @@ def get_dataset_dataloader(
     include_labels: bool = False,
     apply_chat_template: bool = False,
     pack: bool = False,
+    distributed: bool = False,
+    sampler_kwargs: dict | None = None,
 ) -> DataLoader:
     """Get a dataloader with the dataset name and tokenizer of the target model.
 
@@ -642,7 +765,7 @@ def get_dataset_dataloader(
         batch_size: Batch size of the returned dataloader.
         num_samples: Number of samples from the dataset (interpreted as number of *output
             rows* in both ``pack=False`` and ``pack=True`` modes — in packed mode the
-            loader oversamples raw text 4x to ensure enough docs to fill all rows).
+            loader oversamples raw text 16x to ensure enough docs to fill all rows).
         max_sample_length: Maximum length of a sample (or per-row length under ``pack=True``).
         device: Target device for the returned dataloader.
         include_labels: Whether to include labels in the dataloader (ignored when
@@ -659,6 +782,10 @@ def get_dataset_dataloader(
             ``num_samples`` rows) is padded. Default ``False`` for backwards-compatibility
             with the prior one-doc-per-row tokenize-and-pad behavior; calibration
             callers should pass ``True``.
+        distributed: If True, shard the dataset across ranks with a ``DistributedSampler``
+            (e.g. for data-parallel calibration). ``sampler_kwargs`` supplies ``num_replicas``
+            and ``rank``.
+        sampler_kwargs: Keyword args for the ``DistributedSampler`` when ``distributed=True``.
 
     Returns:
         An instance of dataloader.
@@ -712,9 +839,9 @@ def get_dataset_dataloader(
 
     # Sample count semantics:
     # - pack=False: gather exactly `num_sample` raw docs per source, one per output row.
-    # - pack=True:  oversample 8x per source to ensure enough raw docs to fill all rows,
+    # - pack=True:  oversample 16x per source to ensure enough raw docs to fill all rows,
     #               since each row greedily packs multiple docs.
-    sample_multiplier = 8 if pack else 1
+    sample_multiplier = 16 if pack else 1
     all_samples = []
     for ds_name, num_sample in zip(dataset_name, num_samples):
         samples = get_dataset_samples(
@@ -737,10 +864,11 @@ def get_dataset_dataloader(
         )
         if input_ids.shape[0] < total_rows:
             warn_rank_0(
-                f"pack=True produced {input_ids.shape[0]} rows out of {total_rows} "
-                f"requested — raw text exhausted before filling all rows (8x oversample "
-                f"of num_samples was insufficient). Increase `num_samples` or shorten "
-                f"`max_sample_length`."
+                f"pack=True produced {input_ids.shape[0]} rows out of {total_rows} requested — "
+                f"raw text exhausted before filling all rows ({sample_multiplier}x oversample of "
+                "num_samples was insufficient). Shorten `max_sample_length` or supply longer, "
+                "more token-dense samples; increasing `num_samples` only helps if the source can "
+                "provide additional useful content."
             )
         if device:
             input_ids = input_ids.to(device)
@@ -748,12 +876,19 @@ def get_dataset_dataloader(
         tokenized_dataset = _CustomDataset(
             {"input_ids": input_ids, "attention_mask": attention_mask}
         )
-        return DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=False)
+        return get_dataloader_from_dataset(
+            tokenized_dataset,
+            batch_size=batch_size,
+            distributed=distributed,
+            sampler_kwargs=sampler_kwargs,
+        )
 
     batch_encoded = tokenizer(
         all_samples,
         return_tensors="pt",
         padding=True,
+        # Left padding creates fully masked causal rows, which can yield NaNs in cuDNN backward.
+        padding_side="right" if include_labels else None,
         truncation=True,
         max_length=max_sample_length,
     )
@@ -781,9 +916,12 @@ def get_dataset_dataloader(
             }
         )
 
-    calib_dataloader = DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=False)
-
-    return calib_dataloader
+    return get_dataloader_from_dataset(
+        tokenized_dataset,
+        batch_size=batch_size,
+        distributed=distributed,
+        sampler_kwargs=sampler_kwargs,
+    )
 
 
 def get_supported_datasets() -> list[str]:
@@ -803,9 +941,29 @@ def get_supported_datasets() -> list[str]:
     return list(SUPPORTED_DATASET_CONFIG.keys()) + list(DATASET_COMBOS.keys())
 
 
+_NESTED_USE_CACHE_CONFIG_ATTRS = ("text_config",)
+
+
+def _iter_use_cache_configs(model: torch.nn.Module) -> Iterator[Any]:
+    """Yield the top-level config and Step3.7-style nested text config."""
+    seen: set[int] = set()
+    config = getattr(model, "config", None)
+    if config is None:
+        return
+
+    for candidate in (
+        config,
+        *(getattr(config, attr, None) for attr in _NESTED_USE_CACHE_CONFIG_ATTRS),
+    ):
+        if candidate is None or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        yield candidate
+
+
 @contextmanager
 def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
-    """Set ``model.config.use_cache = False`` for the duration of the block.
+    """Set model config ``use_cache`` flags to ``False`` for the duration of the block.
 
     KV caching is unwanted during calibration / memory-probe forward passes:
     it wastes memory, and for hybrid Mamba/attention models (e.g., NemotronH)
@@ -814,23 +972,26 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
     present) also sidesteps configs that never assign the attribute at all
     — e.g., ``Step3p5Config`` from stepfun-ai/Step-3.5-Flash — where forward
     code that reads ``self.config.use_cache`` would otherwise raise
-    ``AttributeError``. The prior value is restored on exit if one existed.
+    ``AttributeError``. Step3.7 keeps the relevant language config nested
+    under ``text_config``; that config object is handled the same way. The
+    prior value is restored on exit if one existed.
     """
-    config = getattr(model, "config", None)
-    if config is None:
-        yield
-        return
-    had_attr = hasattr(config, "use_cache")
-    prev = config.use_cache if had_attr else None
-    config.use_cache = False
+    states = []
+    for config in _iter_use_cache_configs(model):
+        had_attr = hasattr(config, "use_cache")
+        prev = config.use_cache if had_attr else None
+        config.use_cache = False
+        states.append((config, had_attr, prev))
+
     try:
         yield
     finally:
-        if had_attr:
-            config.use_cache = prev
-        else:
-            with suppress(AttributeError):
-                delattr(config, "use_cache")
+        for config, had_attr, prev in reversed(states):
+            if had_attr:
+                config.use_cache = prev
+            else:
+                with suppress(AttributeError):
+                    delattr(config, "use_cache")
 
 
 def get_max_batch_size(
@@ -839,8 +1000,13 @@ def get_max_batch_size(
     sample_memory_usage_ratio: float = 1.0,
     sample_input_single_batch: torch.Tensor | None = None,
     enable_grad: bool = False,
+    forward_step: Callable[[torch.nn.Module, torch.Tensor], Any] | None = None,
 ):
-    """Get the maximum batch size that can be used for the model."""
+    """Get the maximum batch size that can be used for the model.
+
+    ``forward_step(model, inputs)`` optionally probes a custom workload, including during
+    OOM retries. By default, probe a model forward (or generation for encoder-decoder models).
+    """
 
     def _get_free_gpu_mem():
         min_gpu_free_mem = torch.cuda.get_device_properties(0).total_memory
@@ -856,7 +1022,14 @@ def get_max_batch_size(
 
     free_mem_before, max_allocated_before = _get_free_gpu_mem()
     is_enc_dec = model_type_is_enc_dec(model)
-    infer_method = model.generate if is_enc_dec else model.forward
+    # Call the module (not .forward) so nn.Module.__call__ runs pre/post-forward hooks — this is how
+    # FSDP2 unshards/reshards a sharded root. generate() also calls the module internally.
+    if forward_step is None:
+        infer_method = model.generate if is_enc_dec else model
+    else:
+
+        def infer_method(inputs):
+            return forward_step(model, inputs)
 
     if sample_input_single_batch is None:
         sample_input_single_batch = (
@@ -918,6 +1091,32 @@ def get_max_batch_size(
         return 512
 
 
+def _slice_batch(batch_data, start, end):
+    """Return rows [start, end) of a batch, leaving None entries as they are.
+
+    Args:
+        batch_data: Dictionary containing the batch data
+        start: First row of the slice
+        end: One past the last row of the slice
+
+    Returns:
+        A dictionary holding the slice
+    """
+    sliced = {}
+    for key, data in batch_data.items():
+        if data is None:
+            sliced[key] = None
+        elif torch.is_tensor(data):
+            sliced[key] = data[start:end, ...]
+        else:
+            raise ValueError(
+                f"Cannot split a batch holding the non-tensor key '{key}'. Its rows cannot be "
+                "sliced, so a sub-batch would not line up with the inputs. Reduce the "
+                "dataloader's batch size so the batch fits without splitting."
+            )
+    return sliced
+
+
 def _process_batch(
     batch_data, infer_method, max_working_batch_size=None, allowed_non_tensor_keys=None
 ):
@@ -942,19 +1141,17 @@ def _process_batch(
 
     # If we know a smaller batch size works, preemptively split
     if max_working_batch_size is not None and batch_size > max_working_batch_size:
-        # Split the batch to avoid OOM
-        for i in range(0, batch_size, max_working_batch_size):
-            end_idx = min(i + max_working_batch_size, batch_size)
-            split_data = {}
-            for key in batch_data:
-                if batch_data[key] is None:
-                    split_data[key] = None
-                else:
-                    split_data[key] = batch_data[key][i:end_idx, ...]
-
+        # Walk by the width actually used: a recursive call can come back with a
+        # smaller size than this walk started with, and a stride fixed up front
+        # would then step over the rows between the two widths.
+        offset = 0
+        while offset < batch_size:
+            width = min(max_working_batch_size, batch_size - offset)
+            split_data = _slice_batch(batch_data, offset, offset + width)
             max_working_batch_size = _process_batch(
                 split_data, infer_method, max_working_batch_size, allowed_non_tensor_keys
             )
+            offset += width
 
         return max_working_batch_size
 
@@ -977,8 +1174,8 @@ def _process_batch(
     # Split the batch in half
     mid = (batch_size + 1) // 2
     warn_rank_0(f"CUDA out of memory with batch size {batch_size}, trying with batch size {mid}")
-    split_data_1 = {key: batch_data[key][:mid, ...] for key in batch_data}
-    split_data_2 = {key: batch_data[key][mid:, ...] for key in batch_data}
+    split_data_1 = _slice_batch(batch_data, 0, mid)
+    split_data_2 = _slice_batch(batch_data, mid, batch_size)
 
     # Recursively process each half and track max working batch size
     max_working_batch_size = _process_batch(
@@ -1006,7 +1203,9 @@ def _forward_loop(
     """
     with _disable_use_cache(model), torch.no_grad():
         is_enc_dec = model_type_is_enc_dec(model)
-        infer_method = model.generate if is_enc_dec else model.forward
+        # Call the module (not .forward) so nn.Module.__call__ runs pre/post-forward hooks — this is
+        # how FSDP2 unshards/reshards a sharded root. generate() also calls the module internally.
+        infer_method = model.generate if is_enc_dec else model
         max_working_batch_size = None  # Initialize max working batch size as None
 
         for _, data in enumerate(tqdm(dataloader)):
@@ -1091,7 +1290,17 @@ def create_forward_loop(
 
 
 def model_type_is_enc_dec(model):
-    enc_dec_model_list = ["t5", "bart", "whisper"]
+    # Substring match against `model.__class__.__name__.lower()` — entries are
+    # the lowercased class-name form (no underscores). Calibration then uses
+    # `model.generate` to run the full denoising loop.
+    #
+    # Note: this list intentionally diverges from ``is_enc_dec`` in
+    # ``examples/hf_ptq/example_utils.py`` (which keys by ``model_type``
+    # string and is used for preview-decode slicing). DiffusionGemma is
+    # included here so calibration uses ``.generate()`` end-to-end, but
+    # deliberately excluded there so the preview decode treats its
+    # prompt+canvas output as AR-style.
+    enc_dec_model_list = ["t5", "bart", "whisper", "diffusiongemma"]
     return any(model_name in model.__class__.__name__.lower() for model_name in enc_dec_model_list)
 
 
@@ -1118,6 +1327,7 @@ def download_hf_dataset_as_jsonl(
     Returns:
         List of paths to downloaded JSONL files.
     """
+    import requests
     from datasets import load_dataset
     from huggingface_hub.utils import build_hf_headers
 
@@ -1126,15 +1336,28 @@ def download_hf_dataset_as_jsonl(
         json_keys = [json_keys]
     jsonl_paths: list[str] = []
 
-    try:
-        response = requests.get(
-            f"https://datasets-server.huggingface.co/splits?dataset={dataset_name}",
-            headers=build_hf_headers(),
-            timeout=10,
-        )
-        response.raise_for_status()
-    except requests.RequestException as e:
-        raise RuntimeError(f"Failed to fetch dataset splits for {dataset_name}: {e}") from e
+    # The HF datasets-server /splits endpoint is intermittently unavailable
+    # (transient 5xx). Retry with backoff so a momentary outage doesn't fail the
+    # whole preprocess run; fail fast on client errors (e.g. 404 unknown dataset).
+    splits_url = f"https://datasets-server.huggingface.co/splits?dataset={dataset_name}"
+    response = None
+    last_exc: Exception | None = None
+    for attempt in range(4):
+        try:
+            response = requests.get(splits_url, headers=build_hf_headers(), timeout=10)
+            response.raise_for_status()
+            break
+        except requests.RequestException as e:
+            last_exc = e
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status is not None and status < 500:
+                break  # client error — retrying won't help
+            if attempt < 3:
+                time.sleep(2**attempt)  # 1s, 2s, 4s
+    if response is None or not response.ok:
+        raise RuntimeError(
+            f"Failed to fetch dataset splits for {dataset_name}: {last_exc}"
+        ) from last_exc
 
     response_json = response.json()
     print_rank_0(f"\nFound {len(response_json['splits'])} total splits for {dataset_name}:")
