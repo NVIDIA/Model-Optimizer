@@ -238,8 +238,11 @@ class VerifyMasterWeightsCallback(TrainerCallback):
         restored through anything that does not go through ``MasterWeightAdamW``'s own
         ``load_state_dict`` comes back at the parameter's dtype.
         """
-        if self._checked or optimizer is None:
-            return control
+        if not self._checked and optimizer is not None:
+            self._check_moment_dtypes(optimizer)
+        return control
+
+    def _check_moment_dtypes(self, optimizer):
         inner = getattr(optimizer, "optimizer", optimizer)  # unwrap accelerate
         dtypes = {
             value.dtype
@@ -250,7 +253,7 @@ class VerifyMasterWeightsCallback(TrainerCallback):
         if not dtypes:
             # Nothing allocated, so no step landed -- a ``GradScaler`` can skip the first one
             # on a non-finite gradient. Disarming here would pass the run on an empty check.
-            return control
+            return
         self._checked = True
         if dtypes != {torch.float32}:
             raise RuntimeError(
@@ -259,4 +262,3 @@ class VerifyMasterWeightsCallback(TrainerCallback):
                 f"has to build {MasterWeightAdamW.__name__}; see "
                 f"examples/speculative_decoding/eagle_utils.py for how the shipped one does it."
             )
-        return control

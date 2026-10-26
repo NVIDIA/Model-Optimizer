@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import inspect
+import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -25,6 +27,7 @@ import torch
 import transformers
 from datasets import load_dataset
 from packaging.version import Version
+from safetensors.torch import save_file
 from scripts.ar_validate import validate_ar
 from transformers import Trainer, TrainerCallback
 
@@ -345,9 +348,7 @@ class LoRAWarmupCallback(TrainerCallback):
 
     def on_step_begin(self, args, state, control, **kwargs):
         """Check if warmup is over and activate LoRA co-training."""
-        if self._activated:
-            return control
-        if state.global_step >= self.warmup_steps:
+        if not self._activated and state.global_step >= self.warmup_steps:
             model = kwargs["model"]
             # Unwrap DDP/FSDP if needed
             raw_model = model.module if hasattr(model, "module") else model
@@ -375,15 +376,12 @@ class DFlashFSDP2ShardedSDExportCallback(TrainerCallback):
 
     def on_save(self, args, state, control, **kwargs):
         """Export DFlash draft module weights + config after checkpoint save."""
-        import json
-        import os
-
-        from safetensors.torch import save_file
-
         model = kwargs["model"]
-        if not hasattr(model, "dflash_module"):
-            return control
+        if hasattr(model, "dflash_module"):
+            self._export_checkpoint(args, state, model)
+        return control
 
+    def _export_checkpoint(self, args, state, model):
         step = state.global_step
         export_dir = os.path.join(args.output_dir, f"exported-checkpoint-{step}")
 
@@ -441,7 +439,7 @@ class DFlashFSDP2ShardedSDExportCallback(TrainerCallback):
 
         if not drafter_sd:
             print_rank_0(f"Warning: No dflash_module weights found at step {step}, skipping export")
-            return control
+            return
 
         # Only rank 0 writes files
         if is_master():
@@ -461,8 +459,6 @@ class DFlashFSDP2ShardedSDExportCallback(TrainerCallback):
             except Exception as e:
                 print_rank_0(f"Warning: DFlash export failed at step {step}: {e}")
 
-        return control
-
 
 class EagleTrainingPlot(TrainerCallback):
     """Callback that plot training acc and AR during training."""
@@ -475,8 +471,11 @@ class EagleTrainingPlot(TrainerCallback):
 
     def on_log(self, args, state, control, **kwargs):
         """Log training acc and estimate AR during log step."""
-        if not hasattr(state, "training_accs") or len(state.training_accs) == 0:
-            return control
+        if hasattr(state, "training_accs") and len(state.training_accs) > 0:
+            self._log_training_metrics(state, **kwargs)
+        return control
+
+    def _log_training_metrics(self, state, **kwargs):
         average_acc = np.mean(state.training_accs, axis=0)
         # Always print accuracy to console
         try:
@@ -530,13 +529,14 @@ class EagleTrainingPlot(TrainerCallback):
         state.training_accs = []
         if hasattr(state, "component_losses"):
             state.component_losses = {"eagle": [], "preservation": []}
-        return control
 
     def on_step_end(self, args, state, control, **kwargs):
         """Run AR validation periodically, if available."""
-        if self.ar_validate_steps <= 0:
-            return control
-        if state.global_step % self.ar_validate_steps == 0 and state.global_step > 0:
+        if (
+            self.ar_validate_steps > 0
+            and state.global_step % self.ar_validate_steps == 0
+            and state.global_step > 0
+        ):
             print_rank_0("Running AR validation...")
             torch.cuda.empty_cache()
             try:

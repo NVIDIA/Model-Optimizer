@@ -118,11 +118,12 @@ class _ExportHandlerRegistryCls:
             for i, (_, _, existing) in enumerate(self._entries):
                 if (existing.__module__, existing.__qualname__) == identity:
                     self._entries[i] = entry
-                    return handler
-            if prepend:
-                self._entries.insert(0, entry)
+                    break
             else:
-                self._entries.append(entry)
+                if prepend:
+                    self._entries.insert(0, entry)
+                else:
+                    self._entries.append(entry)
             return handler
 
         return decorator

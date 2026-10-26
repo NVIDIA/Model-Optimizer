@@ -1701,13 +1701,11 @@ class _AutoQuantizeGradientScoringSession(_AutoQuantizeCandidateReplayScoringSes
         output, base = self._run_unquantized(module, *args, **kwargs)
 
         # Checkpointed modules recompute with gradients enabled during backward.
-        if not torch.is_grad_enabled() or not base.requires_grad:
-            return output
-
-        output_diffs = self._replay_candidates(
-            module, base, lambda hparam: hparam.choices, *args, **kwargs
-        )
-        self._register_candidate_score_hook(module, base, output_diffs)
+        if torch.is_grad_enabled() and base.requires_grad:
+            output_diffs = self._replay_candidates(
+                module, base, lambda hparam: hparam.choices, *args, **kwargs
+            )
+            self._register_candidate_score_hook(module, base, output_diffs)
         return output
 
     def _score_contribution(self, grad_output, output_diff):

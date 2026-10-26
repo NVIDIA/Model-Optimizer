@@ -353,23 +353,21 @@ def collect_shared_input_modules(
             handle = module.register_forward_hook(_input_hook)
             handles.append(handle)
 
-    if not handles:
-        return input_to_linear, output_to_layernorm
-
-    # Run dummy forward pass to collect modules sharing same input.
-    # `_disable_use_cache` keeps the probe forward working on configs that don't
-    # set `use_cache` (e.g., stepfun-ai/Step-3.5-Flash's Step3p5Config).
-    try:
-        with (
-            torch.no_grad(),
-            set_quantizer_by_cfg_context(model, [{"quantizer_name": "*", "enable": False}]),
-            _disable_use_cache(model),
-        ):
-            dummy_forward_fn()
-    finally:
-        # Always remove hooks
-        for handle in handles:
-            handle.remove()
+    if handles:
+        # Run dummy forward pass to collect modules sharing same input.
+        # `_disable_use_cache` keeps the probe forward working on configs that don't
+        # set `use_cache` (e.g., stepfun-ai/Step-3.5-Flash's Step3p5Config).
+        try:
+            with (
+                torch.no_grad(),
+                set_quantizer_by_cfg_context(model, [{"quantizer_name": "*", "enable": False}]),
+                _disable_use_cache(model),
+            ):
+                dummy_forward_fn()
+        finally:
+            # Always remove hooks
+            for handle in handles:
+                handle.remove()
 
     return input_to_linear, output_to_layernorm
 
