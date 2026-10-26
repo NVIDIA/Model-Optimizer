@@ -255,16 +255,22 @@ LLAVA_VISION_PREFIXES = ("multi_modal_projector", "vision_model")
 
 def with_language_model_prefix(
     mapping: dict[str, CustomModuleMapping],
+    old_prefix: str = "model.",
+    new_prefix: str = "model.language_model.",
 ) -> dict[str, CustomModuleMapping]:
-    """Nest a text-model mapping under ``model.language_model.``; other prefixes are unchanged."""
+    """Nest a text-model mapping under the VLM's language-model prefix.
+
+    Targets starting with ``old_prefix`` have it replaced by ``new_prefix``; other targets are
+    unchanged. ``old_prefix=""`` matches every target, prefixing the whole mapping.
+    """
     result = {}
     for key, m in mapping.items():
         if not isinstance(m, CustomModuleMapping):
             result[key] = m  # plain flags such as ``use_packed_local_experts``
             continue
         prefix = m.target_name_or_prefix
-        if prefix.startswith("model."):
-            prefix = "model.language_model." + prefix[len("model.") :]
+        if prefix.startswith(old_prefix):
+            prefix = new_prefix + prefix[len(old_prefix) :]
         result[key] = type(m)(
             target_name_or_prefix=prefix, func_kwargs=copy.deepcopy(m.func_kwargs)
         )
@@ -388,10 +394,15 @@ def save_safetensors_by_layer_index(
         }
         for layer_index in range(total_layers):
             meta_filename = name_template.format(layer_index + 1, total_layers) + ".json"
-            with open(save_directory + "/" + meta_filename) as f:
-                shard = json.load(f)
-            safetensor_index["metadata"]["total_size"] += shard["metadata"]["total_size"]
-            safetensor_index["weight_map"].update(shard["weight_map"])
+            # Plus the expert shards that EP ranks other than 0 write beside the layer's own.
+            ep_shards = sorted(
+                Path(save_directory).glob(meta_filename[: -len(".json")] + "-ep*.json")
+            )
+            for shard_file in [Path(save_directory) / meta_filename, *ep_shards]:
+                with open(shard_file) as f:
+                    shard = json.load(f)
+                safetensor_index["metadata"]["total_size"] += shard["metadata"]["total_size"]
+                safetensor_index["weight_map"].update(shard["weight_map"])
 
         with open(save_directory + "/model.safetensors.index.json", "w") as f:
             json.dump(safetensor_index, f, indent=4)

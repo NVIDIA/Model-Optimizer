@@ -723,13 +723,14 @@ class LayerwiseConfig(ModeloptBaseConfig):
     )
 
     get_qdq_activations_from_prev_layer: bool = ModeloptField(
-        default=False,
+        default=True,
         title="Cache next-layer inputs from QDQ outputs of prior layers.",
         description=(
-            "If True (GPTQ default), capture each layer's next-layer inputs "
+            "If True (default), capture each layer's next-layer inputs "
             "after it is calibrated, so QDQ error and in-place weight updates "
-            "propagate forward. If False (max/mse default), capture before, so "
-            "the next layer sees the same FP activations as a non-layerwise pass."
+            "propagate forward. If False, capture before calibration, so "
+            "the next layer sees the same FP activations as a non-layerwise pass. "
+            "We recommend setting this to True for GPTQ and Local-Hessian."
         ),
     )
 
@@ -1231,9 +1232,10 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
     )
     block_size: int | None = ModeloptField(
         default=128,
+        gt=0,
         title="Block size for GPTQ weight update.",
-        description="""The block size for GPTQ weight update, which must be a multiple of the
-        group_size used in the quantization.""",
+        description="""The block size for GPTQ weight update, which must be positive and a multiple
+        of the group_size used in the quantization.""",
     )
     fused: bool = ModeloptField(
         default=False,
@@ -1241,21 +1243,29 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         description="""When True, use a fused Triton kernel that combines quantization and
         per-column error propagation into one launch per GPTQ block.""",
     )
+    importance_weighted: bool = ModeloptField(
+        default=False,
+        title="Weight the codebook search by the Hessian diagonal.",
+        description="""When True, formats whose codebook search takes a per-input-column importance
+        (the GGML IQ1 and IQ2 formats) weight it by the square root of the Hessian diagonal,
+        llama.cpp's imatrix statistic. Other formats ignore it.""",
+    )
 
-    @model_validator(mode="after")
-    def _gptq_qdq_default(self):
-        """Inject ``get_qdq_activations_from_prev_layer=True`` unless the user set it.
 
-        GPTQ's Hessian correctness depends on prior-layer QDQ activations, so the
-        default differs from the base class. Uses ``model_fields_set`` to detect
-        whether the user explicitly set the field — covers every input shape
-        (empty constructor, bool, dict) without a per-shape special case.
-        """
-        if "get_qdq_activations_from_prev_layer" not in self.layerwise.model_fields_set:
-            self.layerwise = self.layerwise.model_copy(
-                update={"get_qdq_activations_from_prev_layer": True}
-            )
-        return self
+class ImatrixCalibConfig(QuantizeAlgorithmConfig):
+    """The config for imatrix calibration.
+
+    Encodes each weight once, its codebook search weighted by the square root of its inputs'
+    per-column second moment ``E[x_j^2]`` -- llama.cpp's importance matrix. Covers the GGML formats
+    with a weighted search,
+    on dense linears and on each expert of HF fused-MoE experts. A weight that already holds final
+    codes, such as GPTQ's, is left alone, so ``[{method: gptq}, {method: imatrix}]`` runs GPTQ
+    where it applies and imatrix on any weight it leaves.
+    By default the statistics come from a single forward pass, as llama.cpp collects them; with
+    ``layerwise`` enabled, each layer's are collected after the earlier layers are quantized.
+    """
+
+    method: Literal["imatrix"] = ModeloptField("imatrix")
 
 
 _ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig

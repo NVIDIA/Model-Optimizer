@@ -20,12 +20,11 @@ import copy
 import importlib
 import json
 import re
-import shutil
 import tempfile
 import warnings
 from builtins import ValueError
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -36,6 +35,13 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt.torch.models import hf_model_type, is_moe
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    copy_non_model_files,
+    copy_off_index_safetensors,
+    locate_source_keys,
+    off_index_safetensors_files,
+    sanitize_hf_config_for_deployment,
+)
 
 from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
 
@@ -58,20 +64,32 @@ try:
 except ImportError:
     HAS_DIFFUSERS = False
 
+try:
+    from transformers import PreTrainedModel
+
+    _TRANSFORMERS_MODEL_TYPES: tuple[type, ...] = (PreTrainedModel,)
+except ImportError:
+    _TRANSFORMERS_MODEL_TYPES = ()
+
 
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
-from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import (
+    _cast_per_block_scale_to_fp8,
+    cutlass_fp4_scale_to_modelopt_fp4_scale,
+)
 from modelopt.torch.quantization.utils import (
     fsdp2_aware_weight_update,
     module_name_maps,
     quantizer_attr_names,
 )
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
+from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import is_fsdp2_model
 from modelopt.torch.utils.perf import maybe_clear_cuda_cache
@@ -86,7 +104,7 @@ from . import hf_export_handlers as _hf_export_handlers  # noqa: F401
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import get_experts_list, is_layernorm, is_quantlinear, sync_moe_gate_up_amax
 from .model_utils import TiedWeightMap, get_language_model_from_vl, is_multimodal_model
-from .plugins import SpeculativeDecodingExporter, has_spec_opt, sanitize_hf_config_for_deployment
+from .plugins import SpeculativeDecodingExporter, has_spec_opt
 from .quant_aware_conversion import (
     build_reverse_name_mapper,
     revert_quant_config_names,
@@ -94,6 +112,7 @@ from .quant_aware_conversion import (
 )
 from .quant_format import (
     FUSION_FREE_FORMATS,
+    GGML_FORMATS,
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
     QUANTIZATION_FP8_PC_PT,
@@ -311,7 +330,6 @@ def collect_shared_input_modules(
     def _input_hook(module, input, output):
         """Update dictionary with list of all modules that share the same input."""
         if len(input) > 0 and isinstance(input[0], torch.Tensor):
-            # TODO: Handle DBRX MoE case
             input_to_linear[input[0]].append(module)
 
     def _output_hook(module, input, output):
@@ -450,11 +468,60 @@ def _fusion_update_context(model: nn.Module, modules: list[nn.Module], names=Non
     return fsdp2_aware_weight_update(model, modules, names=names)
 
 
+def _llm_dummy_forward(model: torch.nn.Module) -> None:
+    """Run a dummy forward that reaches every fusable linear of an LLM or VLM language model."""
+    model_hf_type = hf_model_type(model)
+    fake_input = torch.ones([1, 2], dtype=torch.long).to(model.device)
+    decoder_fake_input = fake_input
+
+    # Check if this is a VL model that needs special input handling
+    is_vl_model = is_multimodal_model(model)
+
+    if model_hf_type == "whisper":
+        # For Whisper models, we need to pass a fake input with the specific sequence length
+        from transformers import AutoFeatureExtractor
+
+        feature_extractor = AutoFeatureExtractor.from_pretrained(model.name_or_path)
+        fake_input = torch.ones(
+            [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
+        ).to(model.device)
+
+    # Nemotron VL checkpoints are remote-code models: match on config.architectures, the
+    # field the loader dispatches on, as is_multimodal_model does, and on the class name for a
+    # model built from a config without architectures.
+    architectures = getattr(getattr(model, "config", None), "architectures", None) or []
+    is_nemotron = any("nemotron" in name.lower() for name in [*architectures, type(model).__name__])
+    if is_vl_model and is_nemotron:
+        # For Nemotron VL models, run optimization on just the language model/decoder.
+        # This avoids needing pixel_values for the vision encoder.
+        language_model_lineage = get_language_model_from_vl(model)
+
+        if language_model_lineage is not None:
+            language_model = language_model_lineage[-1]
+            print(
+                f"Running optimization on language model with fake_input shape: {fake_input.shape}"
+            )
+            # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
+            language_model(fake_input, use_cache=False)
+        else:
+            raise ValueError(
+                f"Cannot extract language_model from Nemotron VL model ({type(model).__name__}). "
+                "This is required for requantization/resmoothing optimization. "
+                "Please ensure the model architecture is supported or file an issue."
+            )
+    elif getattr(model.config, "is_encoder_decoder", False):
+        # For other encoder-decoder models (non-VL), pass both encoder and decoder input ids
+        model(fake_input, decoder_input_ids=decoder_fake_input)
+    elif hasattr(model, "get_dummy_inputs"):
+        # For speculative decoding models (EAGLE, etc.), use model-provided dummy inputs
+        model(**model.get_dummy_inputs())
+    else:
+        model(fake_input)
+
+
 def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     """Group modules that take the same input and register shared parameters in module."""
-    # TODO: Handle DBRX MoE
     quantization_format = get_quantization_format(model)
-    model_type = type(model).__name__.lower()
     model_hf_type = hf_model_type(model)
     module_names = set()
     # Built once: every fusion below resolves module names through it.
@@ -483,52 +550,8 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 with _fusion_update_context(model, modules, names):
                     preprocess_linear_fusion(modules, resmooth_only=True)
 
-    # Define the dummy forward function for LLM
-    def llm_dummy_forward():
-        fake_input = torch.ones([1, 2], dtype=torch.long).to(model.device)
-        decoder_fake_input = fake_input
-
-        # Check if this is a VL model that needs special input handling
-        is_vl_model = is_multimodal_model(model)
-
-        if model_type.startswith("whisper"):
-            # For Whisper models, we need to pass a fake input with the specific sequence length
-            from transformers import AutoFeatureExtractor
-
-            feature_extractor = AutoFeatureExtractor.from_pretrained(model.name_or_path)
-            fake_input = torch.ones(
-                [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
-            ).to(model.device)
-
-        if is_vl_model and "nemotron" in model_type:
-            # For Nemotron VL models, run optimization on just the language model/decoder.
-            # This avoids needing pixel_values for the vision encoder.
-            language_model_lineage = get_language_model_from_vl(model)
-
-            if language_model_lineage is not None:
-                language_model = language_model_lineage[-1]
-                print(
-                    f"Running optimization on language model with fake_input shape: {fake_input.shape}"
-                )
-                # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
-                language_model(fake_input, use_cache=False)
-            else:
-                raise ValueError(
-                    f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
-                    "This is required for requantization/resmoothing optimization. "
-                    "Please ensure the model architecture is supported or file an issue."
-                )
-        elif getattr(model.config, "is_encoder_decoder", False):
-            # For other encoder-decoder models (non-VL), pass both encoder and decoder input ids
-            model(fake_input, decoder_input_ids=decoder_fake_input)
-        elif hasattr(model, "get_dummy_inputs"):
-            # For speculative decoding models (EAGLE, etc.), use model-provided dummy inputs
-            model(**model.get_dummy_inputs())
-        else:
-            model(fake_input)
-
     input_to_linear, output_to_layernorm = collect_shared_input_modules(
-        model, llm_dummy_forward, collect_layernorms=True
+        model, lambda: _llm_dummy_forward(model), collect_layernorms=True
     )
 
     fused_linears = _fuse_shared_input_modules(
@@ -578,15 +601,6 @@ def _compressed_per_block_scale(
     scale = getattr(weight_quantizer, "_scale", None)
     if scale is None or not (scale.dtype == torch.uint8 and scale.ndim == 1):
         return scale
-    try:
-        from tensorrt_llm._torch.auto_deploy.utils.quantization_utils import (
-            cutlass_fp4_scale_to_modelopt_fp4_scale,
-        )
-    except ImportError as e:
-        raise ImportError(
-            "This weight was compressed by TensorRT-LLM, so its NVFP4 block scale is "
-            "cutlass-swizzled, but tensorrt_llm cannot be imported to convert it for export."
-        ) from e
     return cutlass_fp4_scale_to_modelopt_fp4_scale(scale, weight.metadata["shape"][-2:])
 
 
@@ -620,6 +634,19 @@ def _export_quantized_weight(
             "export. If the model was loaded with disk/CPU offload, use export_hf_checkpoint() "
             "which dispatches to the streaming writer that materialises weights layer-by-layer."
         )
+
+    if quantization_format in GGML_FORMATS:
+        if weight_name != "weight":
+            raise NotImplementedError(
+                "GGML unified export currently supports modules with a standard 'weight' "
+                f"attribute, got {weight_name!r} on {type(sub_module).__name__}"
+            )
+        packed_weight = GGML_FORMAT_REGISTRY[quantization_format].pack(
+            weight.to(dtype), getattr(sub_module, quantizer_attrs.weight_quantizer, None)
+        )
+        setattr(sub_module, weight_name, nn.Parameter(packed_weight, requires_grad=False))
+        maybe_clear_cuda_cache()
+        return
 
     weight_quantizer: TensorQuantizer | SequentialQuantizer = getattr(
         sub_module, quantizer_attrs.weight_quantizer
@@ -839,10 +866,14 @@ def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContex
     if ctx.is_modelopt_qlora and hasattr(sub_module, "base_layer"):
         return
     # Restore unpacked weight so the export path can read the live quantizer state.
-    if hasattr(sub_module, "weight_packed") or (
-        "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
-    ):
+    if hasattr(sub_module, "weight_packed"):
         sub_module.unpack_weight()
+    elif "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1:
+        sub_module.unpack_weight()
+        # unpack_weight() dequantizes to torch's default dtype (fp32). A layer the recipe leaves
+        # unquantized is written as-is, so cast it to the export dtype like the rest of the model.
+        if get_quantization_format(sub_module) == QUANTIZATION_NONE:
+            sub_module.weight = nn.Parameter(sub_module.weight.to(ctx.dtype), requires_grad=False)
     handler = ExportModuleRegistry.match(sub_module)
     if handler is not None:
         handler(name, sub_module, ctx)
@@ -896,22 +927,6 @@ def _prepare_moe_inputs(
                     f"Please file an issue or add support for this model architecture."
                 )
             handler(name, sub_module, prepare_ctx)
-
-
-def _add_mtp_exclusions(model: nn.Module, quant_config: dict) -> None:
-    """Add MTP layer prefixes to exclude_modules if they were excluded from quantization.
-
-    This ensures they appear in ``quantization_config["ignore"]`` in ``config.json``.
-    """
-    mtp_layer_prefixes = getattr(model, "_mtp_layer_prefixes", None)
-    if mtp_layer_prefixes:
-        exclude_modules = quant_config["quantization"].setdefault("exclude_modules", [])
-        for prefix in mtp_layer_prefixes:
-            # Add wildcard pattern to exclude all submodules under this MTP layer
-            pattern = f"{prefix}*"
-            if pattern not in exclude_modules:
-                exclude_modules.append(pattern)
-                print(f"Adding MTP layer to quantization_config ignore: {pattern}")
 
 
 def _warn_on_unsynced_moe_gate_up(model: nn.Module) -> None:
@@ -997,8 +1012,6 @@ def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
 
     quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
 
-    _add_mtp_exclusions(model, quant_config)
-
     _warn_on_unsynced_moe_gate_up(model)
 
     # Merge per-side input_quantizer amaxes BEFORE export, so the retained tied weight's single
@@ -1015,10 +1028,9 @@ def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
 
 def pack_quantized_weights(model, dtype, is_modelopt_qlora: bool = False) -> None:
     """Quantize every module's weight in place, then rebuild the fused MoE linears."""
-    # Deferred: modelopt.torch.quantization.plugins.huggingface imports transformers at module
-    # scope, and transformers is an optional extra -- importing it here keeps
-    # ``import modelopt.torch.export`` working without it.
-    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+    # Deferred: modelopt.torch.quantization imports modelopt.torch.export, so importing the
+    # per-model PTQ module at module scope here would risk an import cycle.
+    from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
 
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
     _reconstruct_fused_moe_linear(model)
@@ -1231,6 +1243,8 @@ def _export_diffusers_checkpoint(
     export_dir: Path,
     components: list[str] | None,
     max_shard_size: int | str = "10GB",
+    export_attention_quantizers: bool | None = None,
+    save_modelopt_state: bool = False,
     **kwargs,
 ) -> None:
     """Internal: Export diffusion(-like) model/pipeline checkpoint.
@@ -1248,6 +1262,11 @@ def _export_diffusers_checkpoint(
         max_shard_size: Maximum size of each shard file. If the model exceeds this size,
             it will be sharded into multiple files and a .safetensors.index.json will be
             created. Use smaller values like "5GB" or "2GB" to force sharding.
+        export_attention_quantizers: Preserve enabled Q/K/V BMM quantizer state for
+            runtimes that consume legacy attention ``_amax`` keys, such as static FP8 FLUX.
+            None preserves these keys for FLUX.1 and omits them for other diffusion
+            components. Transformers components always retain them for KV-cache scales.
+        save_modelopt_state: Whether to save ModelOpt state with HF checkpointing enabled.
         **kwargs: Runtime-specific post-processing options forwarded to
             :func:`_postprocess_safetensors`. See its docstring for details.
     """
@@ -1292,6 +1311,14 @@ def _export_diffusers_checkpoint(
 
         # Infer dtype if not provided
         component_dtype = dtype if dtype is not None else infer_dtype_from_model(component)
+        is_transformers_component = isinstance(component, _TRANSFORMERS_MODEL_TYPES)
+        # TRT-LLM's static FP8 FLUX.1 path consumes the legacy Q/K/V amax keys.
+        # Transformers components need these keys for their declared KV-cache scheme.
+        keep_attention_quantizers = is_transformers_component or (
+            isinstance(component, diffusers.FluxTransformer2DModel)
+            if export_attention_quantizers is None
+            else export_attention_quantizers
+        )
 
         if is_quantized:
             # Fuse QKV linears that share the same input (unify amax values)
@@ -1303,7 +1330,13 @@ def _export_diffusers_checkpoint(
             # dummy forward fails for it, fail loudly rather than silently skipping
             # fusion (which would export un-unified amax values).
             is_qwen_component = "qwen" in type(component).__name__.lower()
-            _fuse_qkv_linears_diffusion(component, strict=is_qwen_component)
+            # Image-conditioned Wan also requires a successful dummy forward for fusion.
+            is_wan_i2v_component = (
+                HAS_DIFFUSERS
+                and isinstance(component, getattr(diffusers, "WanTransformer3DModel", ()))
+                and getattr(getattr(component, "config", None), "image_dim", None) is not None
+            )
+            _fuse_qkv_linears_diffusion(component, strict=is_qwen_component or is_wan_i2v_component)
 
             # Process quantized modules (convert weights, register scales)
             _process_quantized_modules(component, component_dtype, is_modelopt_qlora=False)
@@ -1318,7 +1351,12 @@ def _export_diffusers_checkpoint(
             # promoted buffers are always removed, even if save / post-process / config
             # update raises (keeps the live module reusable for a repeated export).
             try:
-                quant_config = get_quant_config(component, is_modelopt_qlora=False)
+                quant_config = get_quant_config(
+                    component,
+                    is_modelopt_qlora=False,
+                    # Native diffusion components (including LTX-2) have no KV cache.
+                    include_kv_cache=is_transformers_component,
+                )
                 if quant_config:
                     quantization_details = quant_config.get("quantization", {})
                     # Record the SVDQuant low-rank size so consumers know the LoRA shape.
@@ -1334,12 +1372,14 @@ def _export_diffusers_checkpoint(
                 # - diffusers ModelMixin.save_pretrained does NOT accept state_dict parameter
                 # - for non-diffusers modules (e.g., LTX-2 transformer), fall back to torch.save
                 if hasattr(component, "save_pretrained"):
-                    with hide_quantizers_from_state_dict(component):
+                    with hide_quantizers_from_state_dict(component, keep_attention_quantizers):
                         component.save_pretrained(
-                            component_export_dir, max_shard_size=max_shard_size
+                            component_export_dir,
+                            max_shard_size=max_shard_size,
+                            save_modelopt_state=save_modelopt_state,
                         )
                 else:
-                    with hide_quantizers_from_state_dict(component):
+                    with hide_quantizers_from_state_dict(component, keep_attention_quantizers):
                         _save_component_state_dict_safetensors(component, component_export_dir)
 
                 # Post-process — merge, metadata, padding, swizzle
@@ -1365,7 +1405,11 @@ def _export_diffusers_checkpoint(
                 _remove_promoted_quantizer_tensors(component)
         # Non-quantized component: just save as-is
         elif hasattr(component, "save_pretrained"):
-            component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
+            component.save_pretrained(
+                component_export_dir,
+                max_shard_size=max_shard_size,
+                save_modelopt_state=save_modelopt_state,
+            )
         else:
             _save_component_state_dict_safetensors(component, component_export_dir)
 
@@ -1436,12 +1480,20 @@ def _export_diffusers_checkpoint(
         if not is_partial_export and not model_index_path.exists() and hasattr(pipe, "save_config"):
             pipe.save_config(export_dir)
 
-        # Last resort: synthesize a minimal model_index.json from exported components.
+        # Preserve pipeline settings while listing only the exported components.
         if not model_index_path.exists() and hasattr(pipe, "config") and pipe.config is not None:
+            pipeline_components = pipe.components
             model_index = {
-                "_class_name": type(pipe).__name__,
-                "_diffusers_version": diffusers.__version__,
+                key: value
+                for key, value in json.loads(pipe.to_json_string()).items()
+                if key not in pipeline_components and not key.startswith("_")
             }
+            model_index.update(
+                {
+                    "_class_name": type(pipe).__name__,
+                    "_diffusers_version": diffusers.__version__,
+                }
+            )
             for name, comp in all_components.items():
                 module = type(comp).__module__
                 library = module.split(".")[0]
@@ -1508,13 +1560,34 @@ def _sanitize_generation_config_for_save(model: torch.nn.Module) -> None:
         gc.do_sample = True
 
 
+def _copy_non_model_files_from_source(model: nn.Module, export_dir: "str | Path") -> None:
+    """Copy the source checkpoint's non-model files into the export, from local disk only.
+
+    See ``copy_non_model_files``. Exporters never fetch from the Hub: a model loaded by Hub ID
+    gets a warning instead, since its cache holds only the files loading needed.
+    """
+    source = _source_checkpoint(model)
+    if source is None:
+        return
+    if not Path(source).is_dir():
+        warnings.warn(
+            f"The source checkpoint {source!r} is not a local directory, so its non-model files "
+            "(tokenizer, processor, remote code, chat templates, ...) were not copied into the "
+            "export. Get a local copy first with modelopt.torch.export.ensure_local_checkpoint "
+            "and load the model from that directory."
+        )
+        return
+    copy_non_model_files(source, export_dir)
+
+
 def save_non_weight_artifacts(model: nn.Module, export_dir: Path) -> None:
-    """Write config.json, generation_config.json, and trust_remote_code modeling files.
+    """Write config.json and generation_config.json, then copy the source's non-model files.
 
     For exporters that stream weights out themselves and never hand a state dict to
     ``save_pretrained``, which is not an option here: MoE models (e.g. DSR1) share expert
     storage across layers, so safetensors' shared-tensor check fires even on an empty dict.
-    The ``*.py`` files are what ``trust_remote_code`` checkpoints (e.g. NemotronH) need.
+    The non-model files include the ``*.py`` modules ``trust_remote_code`` checkpoints (e.g.
+    NemotronH) need.
     """
     _sanitize_generation_config_for_save(model)
     # transformers' own revert_weight_conversion cannot handle quantized state dicts.
@@ -1528,12 +1601,7 @@ def save_non_weight_artifacts(model: nn.Module, export_dir: Path) -> None:
         with contextlib.suppress(Exception):
             model.generation_config.save_pretrained(str(export_dir))
 
-    src_dir = Path(getattr(model.config, "_name_or_path", "") or "")
-    if src_dir.is_dir():
-        for py_file in src_dir.glob("*.py"):
-            dst = export_dir / py_file.name
-            if not dst.exists():
-                shutil.copy2(py_file, dst)
+    _copy_non_model_files_from_source(model, export_dir)
 
 
 def export_speculative_decoding(
@@ -1579,10 +1647,17 @@ def _write_hf_export_config(
         json.dump(config_data, file, indent=4)
 
 
-def _revert_hf_quant_config_names(hf_quant_config: dict, name_mapper: Callable[[str], str]) -> dict:
+def _revert_hf_quant_config_names(
+    hf_quant_config: dict,
+    name_mapper: Callable[[str], str],
+    *,
+    module_names: Iterable[str] = (),
+) -> dict:
     """Return a name-reverted copy, leaving the input untouched if mapping fails."""
     mapped_quant_config = copy.deepcopy(hf_quant_config)
-    revert_quant_config_names(mapped_quant_config.get("quantization", {}), name_mapper)
+    revert_quant_config_names(
+        mapped_quant_config.get("quantization", {}), name_mapper, module_names=module_names
+    )
     return mapped_quant_config
 
 
@@ -1596,13 +1671,215 @@ def _revert_quant_config_names_best_effort(
     try:
         name_mapper = build_reverse_name_mapper(model)
         if name_mapper is not None and hf_quant_config:
-            return _revert_hf_quant_config_names(hf_quant_config, name_mapper)
+            return _revert_hf_quant_config_names(
+                hf_quant_config,
+                name_mapper,
+                module_names=(name for name, _ in model.named_modules()),
+            )
     except Exception as exc:
         warnings.warn(
             f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
             "names may not match the original HF hub checkpoint."
         )
     return hf_quant_config
+
+
+def _source_checkpoint(model: nn.Module) -> str | None:
+    """Where the model's original checkpoint lives, or ``None`` if nothing is known.
+
+    Prefers ``_modelopt_source_checkpoint`` (recorded at load time by
+    ``record_unplaced_source_keys``). A model that reached export without going through that path
+    still knows its own provenance via ``config._name_or_path``, and the several places this is
+    asked must agree on the answer -- otherwise, for instance, a weight is carried but its off-index
+    tensors never reach ``exclude_modules`` because the two halves disagreed about where the
+    checkpoint was.
+    """
+    # ``or None``: a model built with ``from_config`` has ``_name_or_path == ""``, which would
+    # otherwise name the current directory.
+    return (
+        getattr(model, "_modelopt_source_checkpoint", None)
+        or getattr(getattr(model, "config", None), "_name_or_path", None)
+        or None
+    )
+
+
+def carryable_unplaced_keys(model: nn.Module) -> list[str]:
+    """Unplaced checkpoint keys a shard actually provides.
+
+    ``_modelopt_unplaced_source_keys`` answers "does the model have a parameter for this key",
+    which is a wider question than "is there a tensor to carry". Checkpoints routinely list keys
+    no shard backs -- a stale ``rotary_emb.inv_freq`` buffer, leftovers after a
+    ``conversion_mapping`` rename -- and those carry nothing. Callers that want to know whether
+    real weights would be dropped must ask this, not the raw recorded list.
+
+    Best-effort by design: it is used to decide how loudly to complain, so an unreadable index
+    answers "nothing to carry" rather than raising from inside a diagnostic.
+    """
+    ckpt = _source_checkpoint(model)
+    if not ckpt or not Path(ckpt).is_dir():
+        return []
+    keys = unplaced_keys_for(model, ckpt)
+    if not keys:
+        return []
+    try:
+        located = locate_source_keys(ckpt, keys)
+    except Exception:
+        return []
+    return sorted(located)
+
+
+def off_index_tensor_names(model: nn.Module) -> list[str]:
+    """Tensor names in the checkpoint's off-index weight files.
+
+    Those files (GLM-4.7's ``mtp.safetensors``) are copied into the export verbatim by
+    :func:`~modelopt.torch.utils.plugins.hf_checkpoint_utils.copy_off_index_safetensors` rather
+    than loaded, so they are never among the unplaced source keys and
+    :func:`carryable_unplaced_keys` cannot see them -- yet their tensors land in the export in
+    original precision exactly like a carried weight, and must reach ``exclude_modules`` the same
+    way. Before this mechanism existed
+    ``_add_mtp_exclusions`` covered them by globbing for ``mtp*``.
+
+    Reads safetensors headers only, never tensor data, and stays silent when those files or the
+    library cannot be read: an absent exclusion is a deployment problem, but so is an export that
+    dies while computing one.
+    """
+    ckpt = _source_checkpoint(model)
+    if not ckpt or not Path(ckpt).is_dir():
+        return []
+    try:
+        names: list[str] = []
+        for file_name in off_index_safetensors_files(ckpt):
+            with safe_open(str(Path(ckpt) / file_name), framework="pt") as f:
+                names.extend(f.keys())
+        return sorted(set(names))
+    except Exception:
+        return []
+
+
+def unplaced_keys_for(model: nn.Module, ckpt: "str | Path") -> list[str]:
+    """The source keys the model has no parameter for, as recorded when it was loaded.
+
+    The loaders that build a model for export --
+    :func:`~modelopt.torch.utils.plugins.model_load_utils.load_pretrained` and
+    ``parallel_load_and_prepare_fsdp2`` -- work this out once, at load time
+    (``record_unplaced_source_keys``), and the export only reads it back. A model loaded some other
+    way, by a caller's own ``from_pretrained`` say, has no record: the same derivation then runs
+    once, here, and is recorded so nothing derives it again.
+
+    That derivation needs ``model_load_utils``, which imports transformers and accelerate at module
+    scope. Where those are absent an unrecorded model carries nothing, with a warning; a recorded
+    one needs neither.
+    """
+    # Local import breaks the cycle: layerwise_export imports this module.
+    from .layerwise_export import LAYERWISE_EXPORTER_ATTR
+
+    exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
+    snapshot = getattr(exporter, "_source_key_snapshot", None)
+    if snapshot is not None and snapshot[0] == str(ckpt):
+        return list(snapshot[1])
+
+    if hasattr(model, "_modelopt_unplaced_source_keys"):
+        return list(model._modelopt_unplaced_source_keys)
+    try:
+        from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
+
+        return record_unplaced_source_keys(model, str(ckpt))
+    except Exception as exc:
+        warnings.warn(
+            f"Could not derive unplaced source keys ({exc}), so the export carries none. Loading "
+            "with modelopt.torch.utils.plugins.model_load_utils.load_pretrained records them."
+        )
+        return []
+
+
+# Placeholder for keys_only resolution: the name is real, the tensor is never read.
+_NO_TENSOR: Any = None
+
+
+def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[str, torch.Tensor]:
+    """Read back checkpoint weights the model never loaded, so the export stays complete.
+
+    A checkpoint can hold parameters the built model has no home for -- an MTP head, an auxiliary
+    tower -- which means quantization never sees them and they would be missing from the exported
+    checkpoint unless they are copied across verbatim. The loader records which keys those were
+    (:attr:`_modelopt_unplaced_source_keys`) and where they came from (see :func:`unplaced_keys_for`);
+    this reads them on demand rather than holding them in memory from load to export.
+
+    Deliberately architecture-agnostic: the question asked at load time was "does the model have a
+    parameter for this checkpoint key", not "is this an MTP head", so anything the model did not
+    load is carried through. Returns an empty dict when there is no source checkpoint to read.
+
+    Best-effort: a checkpoint that cannot be re-read warns rather than failing the export, since
+    the rest of the weights are already correct.
+
+    With ``keys_only`` the shard lookup still runs -- so the answer matches what a real read would
+    carry -- but no tensor is loaded and the values are ``None``. Ranks that do not write the extra
+    state use this: the FSDP2 writer only emits ``extra_state_dict`` from rank 0, so having every
+    rank materialize an MTP head (10 GB+ in bf16 on a large MoE) is host memory read and dropped.
+    """
+    # These are pure filesystem checks and deliberately sit ABOVE the try below: deciding that
+    # there is nothing to carry must not depend on an optional import succeeding.
+    ckpt = _source_checkpoint(model)
+    if not ckpt or not Path(ckpt).is_dir():
+        # A hub id rather than a local path, or no provenance at all -- nothing to read. Quiet
+        # when nothing was recorded, because there is no reason to think anything is missing. But
+        # if the loader DID record unplaced keys, they are about to be dropped, and dropping them
+        # silently is the failure this whole path exists to prevent.
+        recorded = getattr(model, "_modelopt_unplaced_source_keys", None) or []
+        if recorded:
+            warnings.warn(
+                f"Could not copy {len(recorded)} unplaced source weight(s) into the export: "
+                f"the source checkpoint is not a readable directory ({ckpt}); "
+                "the checkpoint will be missing them."
+            )
+        return {}
+    # A checkpoint with no safetensors at all (pytorch_model.bin) has nothing this path can read.
+    # Returning quietly is right: there is nothing to carry, so warning about weights "missing"
+    # from the export would be alarming and wrong.
+    if (
+        not (Path(ckpt) / "model.safetensors.index.json").exists()
+        and not (Path(ckpt) / "model.safetensors").exists()
+    ):
+        return {}
+
+    keys: list[str] | None = None
+    try:
+        keys = unplaced_keys_for(model, ckpt)
+        if not keys:
+            return {}
+
+        by_file: dict[str, list[str]] = {}
+        for k, shard in locate_source_keys(ckpt, list(keys)).items():
+            by_file.setdefault(shard, []).append(k)
+
+        if keys_only:
+            # The caller wants the names, not the bytes: every rank needs an identical key list
+            # to build an identical quant config, but only the writing rank should pay the memory.
+            return dict.fromkeys(
+                (k for shard_keys in by_file.values() for k in shard_keys), _NO_TENSOR
+            )
+
+        out: dict[str, torch.Tensor] = {}
+        for shard, shard_keys in by_file.items():
+            with safe_open(str(Path(ckpt) / shard), framework="pt") as f:
+                for k in shard_keys:
+                    out[k] = f.get_tensor(k)
+    except Exception as exc:
+        # ``keys`` can still be None here -- the failure may land before it is resolved (a failed
+        # import, or unplaced_source_keys itself raising). Counting it unconditionally would throw
+        # from inside the handler whose whole job is to leave the export standing.
+        count = f"{len(keys)} " if keys is not None else ""
+        warnings.warn(
+            f"Could not copy {count}unplaced source weight(s) into the export ({exc}); "
+            "the checkpoint will be missing them."
+        )
+        return {}
+    if out and not keys_only:
+        print_rank_0(
+            f"Carrying {len(out)} source weight(s) the model never loaded into the export "
+            f"(e.g. {min(out)})"
+        )
+    return out
 
 
 def export_hf_checkpoint(
@@ -1633,19 +1910,54 @@ def export_hf_checkpoint(
         export_dir: The target export path.
         save_modelopt_state: Whether to save the modelopt state_dict.
         components: Only used for diffusers pipelines. Optional list of component names
-            to export. If None, all quantized components are exported.
+            to export. If None, all components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
         max_shard_size: Maximum size of each safetensors shard file. Defaults to "10GB".
         **kwargs: Runtime-specific post-processing options forwarded to
             :func:`_postprocess_safetensors` for diffusion model exports.
-            See its docstring for supported keys.
+            See its docstring for supported keys. Diffusion exports also accept
+            ``export_attention_quantizers=True`` to retain enabled Q/K/V BMM quantizer
+            state for runtimes using legacy ``*_bmm_quantizer._amax`` keys, or False
+            to omit it. When unspecified, FLUX.1 retains enabled Q/K/V quantizers for
+            runtime compatibility; other diffusion components omit them.
+            Transformers components always retain them for KV-cache scales.
     """
+    # Weights the model never loaded (MTP head, auxiliary tower, ...) are copied straight from the
+    # source so the exported checkpoint is the complete model. Merged here, ahead of the path
+    # dispatch, so the gather and no-gather writers behave identically. An explicit extra_state_dict
+    # wins on conflict: the caller asked for that tensor by name.
+    # Only the rank that writes extra_state_dict should read it. _export_fsdp2_checkpoint_streaming
+    # emits it from rank 0 alone, so on the other ranks a full read is host memory spent and thrown
+    # away -- and the carried set is the large stuff. The KEY list is still resolved everywhere,
+    # because get_quant_config runs per rank and the configs have to agree.
+    _writes_extra = (
+        not (
+            torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+            and is_fsdp2_model(model)
+        )
+        or torch.distributed.get_rank() == 0
+    )
+    _carried = read_unplaced_weights(model, keys_only=not _writes_extra)
+    if _writes_extra and _carried:
+        extra_state_dict = {**_carried, **(extra_state_dict or {})}
+    # Everything the export writes in original precision straight from the source, by either
+    # mechanism: tensors carried above, and the off-index weight files copied verbatim alongside.
+    # get_quant_config reads this to seed exclude_modules; recorded here because it runs before
+    # that, and because only this point knows what was actually written rather than what was
+    # merely unplaced.
+    model._modelopt_carried_over_names = sorted({*_carried, *off_index_tensor_names(model)})
+
     from .layerwise_export import LAYERWISE_EXPORTER_ATTR
 
     exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
     if exporter is not None:
         # Per-layer export wrote the shards during calibration; this writes the rest.
         exporter.finalize(extra_state_dict=extra_state_dict)
+        # Into the exporter's directory, which is where finalize() wrote: export_dir may differ
+        # when the recipe's layerwise.export_dir chose it.
+        if _writes_extra:
+            copy_off_index_safetensors(_source_checkpoint(model), exporter.export_dir)
         return
 
     export_dir = Path(export_dir)
@@ -1661,6 +1973,7 @@ def export_hf_checkpoint(
             export_dir,
             components,
             max_shard_size,
+            save_modelopt_state=save_modelopt_state,
             **kwargs,
         )
         return
@@ -1750,14 +2063,22 @@ def export_hf_checkpoint(
                 mapped_quant_config = hf_quant_config
                 if name_mapper is not None and hf_quant_config:
                     mapped_quant_config = _revert_hf_quant_config_names(
-                        hf_quant_config, name_mapper
+                        hf_quant_config,
+                        name_mapper,
+                        module_names=(
+                            key.removesuffix(".weight")
+                            for key in export_state_dict
+                            if key.endswith(".weight")
+                        ),
                     )
                 export_state_dict = mapped_state_dict
                 hf_quant_config = mapped_quant_config
             except Exception as exc:
                 warnings.warn(
-                    f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
-                    "names may not match the original HF hub checkpoint."
+                    f"Quant-aware reverse weight conversion skipped ({exc}); all exported "
+                    "tensors and quantization config retain their in-memory names, including "
+                    "unrelated submodels. Deployment loaders expecting the original HF hub "
+                    "layout may fail to load or skip these weights."
                 )
 
             _sanitize_generation_config_for_save(model)
@@ -1779,6 +2100,10 @@ def export_hf_checkpoint(
 
         if rank == 0:
             _write_hf_export_config(model, hf_quant_config, export_dir)
+            copy_off_index_safetensors(_source_checkpoint(model), export_dir)
+            if not (_offloaded or is_fsdp2_sharded):
+                # The streaming paths already did, from save_non_weight_artifacts.
+                _copy_non_model_files_from_source(model, export_dir)
 
     except Exception as e:
         warnings.warn(

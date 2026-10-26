@@ -128,7 +128,11 @@ model benefits from them.
    - Existing production recipe if one exists.
 
 4. Pick first candidates:
-   - Start from `modelopt_recipes` when ModelOpt is available.
+   - Start from `modelopt_recipes` when ModelOpt is available. Before selecting a
+     ModelOpt recipe, read `modelopt_recipes/ptq.md` in the source checkout used
+     for PTQ. Use it to understand the available schemes and model-specific
+     exceptions, then apply the search strategy and evaluation criteria in this
+     reference.
    - Prefer model-specific recipes, then general PTQ presets, then recipe
      fragments.
    - Add one AutoQuant candidate in the requested primary family when AutoQuant
@@ -226,7 +230,7 @@ paths and validation gates are authoritative.
 When ModelOpt is available, start from `modelopt_recipes`:
 
 1. Check model-specific recipes first, for example
-   `modelopt_recipes/huggingface/<model_family>/ptq/`.
+   `modelopt_recipes/model_type/<model_family>/ptq/`.
 2. Check general PTQ recipes and presets.
 3. Use recipe fragments to build controlled manual variants.
 4. Summarize include/exclude coverage before calibration. If a pattern misses the

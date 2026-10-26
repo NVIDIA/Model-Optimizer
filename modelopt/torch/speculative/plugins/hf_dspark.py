@@ -78,7 +78,12 @@ logger = logging.getLogger(__name__)
 __all__ = ["HFDSparkModel"]
 
 
-def _tvd_per_token(final_logits, teacher_logits, chunk_size=1024):
+def _tvd_chunk(a, b):
+    """Per-token TVD for one row chunk: ``(softmax(a) - softmax(b)).abs().sum(-1)``."""
+    return (torch.softmax(a.float(), dim=-1) - torch.softmax(b.float(), dim=-1)).abs().sum(dim=-1)
+
+
+def _tvd_per_token(final_logits, teacher_logits, chunk_size=1024, chunk_fn=None):
     """Total-variation distance ||softmax(a)-softmax(b)||_1 / ... per token, memory-lean.
 
     Materializing both [N, vocab] float32 softmax tensors at once OOMs at large
@@ -86,16 +91,17 @@ def _tvd_per_token(final_logits, teacher_logits, chunk_size=1024):
     gradient-checkpoint each chunk so the wide softmaxes are recomputed in backward
     rather than held — peak memory ~ chunk_size*vocab instead of N*vocab. The math
     is identical to ``(softmax(final)-softmax(teacher)).abs().sum(-1)``.
+
+    Chunks with ``Tensor.split``, not slicing (each slice's backward zero-fills a full
+    [N, vocab] tensor) nor ``torch.chunk`` (different chunk shapes, so recompiles).
     """
-
-    def _chunk(a, b):
-        return (
-            (torch.softmax(a.float(), dim=-1) - torch.softmax(b.float(), dim=-1)).abs().sum(dim=-1)
-        )
-
+    _chunk = chunk_fn or _tvd_chunk
     outs = []
-    for i in range(0, final_logits.size(0), chunk_size):
-        a, b = final_logits[i : i + chunk_size], teacher_logits[i : i + chunk_size]
+    for a, b in zip(
+        final_logits.split(chunk_size, dim=0),
+        teacher_logits.split(chunk_size, dim=0),
+        strict=True,
+    ):
         if torch.is_grad_enabled() and a.requires_grad:
             outs.append(torch.utils.checkpoint.checkpoint(_chunk, a, b, use_reentrant=False))
         else:
@@ -134,6 +140,12 @@ class HFDSparkModel(HFDFlashModel):
                 "dflash_confidence_head_alpha > 0 but the confidence head was not built; "
                 "set dflash_architecture_config.use_confidence_head=true."
             )
+        # Compiling fuses the chunk's six vocab-wide elementwise passes.
+        self._tvd_chunk_fn = (
+            torch.compile(_tvd_chunk, dynamic=False, fullgraph=True)
+            if self.dflash_use_torch_compile
+            else _tvd_chunk
+        )
 
     def get_exporter(self):
         """Get the exporter for the DSpark draft model."""
@@ -176,13 +188,14 @@ class HFDSparkModel(HFDFlashModel):
         anchor_positions,
         block_keep_mask,
         loss_mask,
-        target_model_logits,
+        base_outputs,
     ):
         """Compute the three-term DSpark loss (CE + TVD + confidence BCE) and metrics.
 
         Uses next-token (shift_label) alignment: block position k predicts the token
         at anchor+k+1; the aligned target distribution is the base model's own
-        next-token distribution at position anchor+k (= label index - 1).
+        next-token distribution at position anchor+k (= label index - 1), read from
+        ``base_outputs``.
         """
         bsz, seq_len = input_ids.shape
         bs = self.dflash_block_size
@@ -222,20 +235,19 @@ class HFDSparkModel(HFDFlashModel):
         flat_weights = weight_mask.reshape(-1)
         valid_count = flat_weights.sum() + 1e-6
 
+        if valid_count <= 1.0:
+            # Touch every draft parameter, as forward()'s early return does, so DDP with
+            # find_unused_parameters=False still sees the confidence head's gradient.
+            loss = (
+                flat_final.sum() * 0.0 + sum(p.sum() for p in self.dflash_module.parameters()) * 0.0
+            )
+            metrics = {"ce_loss": 0.0, "l1_loss": 0.0, "confidence_loss": 0.0, "base_accuracy": 0.0}
+            return loss, 0.0, metrics
+
         # Aligned target distribution: base-model logits that predict token anchor+k+1
         # sit at position anchor+k (= label index - 1).
         teacher_indices = (safe_label_indices - 1).clamp(min=0)
-        teacher_logits = torch.gather(
-            target_model_logits.unsqueeze(1).expand(-1, n_blocks, -1, -1),
-            2,
-            teacher_indices.unsqueeze(-1).expand(-1, -1, -1, vocab),
-        )
-        flat_teacher = teacher_logits.reshape(-1, vocab).detach()
-
-        if valid_count <= 1.0:
-            loss = flat_final.sum() * 0.0
-            metrics = {"ce_loss": 0.0, "l1_loss": 0.0, "confidence_loss": 0.0, "base_accuracy": 0.0}
-            return loss, 0.0, metrics
+        flat_teacher = self._teacher_logits(base_outputs, teacher_indices).reshape(-1, vocab)
 
         # Term 1: cross-entropy on the corrected (final) logits.
         ce_per_token = F.cross_entropy(flat_final, flat_targets, reduction="none")
@@ -243,7 +255,11 @@ class HFDSparkModel(HFDFlashModel):
 
         # Term 2: total-variation distance between the corrected draft and target.
         # Chunked + checkpointed to avoid materializing two [N, vocab] softmaxes at once.
-        l1_per_token = _tvd_per_token(flat_final, flat_teacher)
+        l1_per_token = _tvd_per_token(
+            flat_final,
+            flat_teacher,
+            chunk_fn=self._tvd_chunk_fn,
+        )
         l1_loss = (l1_per_token * flat_weights).sum() / valid_count
 
         # Term 3: confidence head BCE against the analytical accept rate c* = 1 - 0.5*TVD.
@@ -264,19 +280,21 @@ class HFDSparkModel(HFDFlashModel):
         with torch.no_grad():
             eval_count = binary_eval_mask.sum() + 1e-6
             keep = binary_eval_mask > 0.5
-            accuracy = (
-                ((flat_final.argmax(dim=-1) == flat_targets) & keep).sum().float() / eval_count
-            ).item()
-            base_accuracy = (
-                ((flat_base.argmax(dim=-1) == flat_targets) & keep).sum().float() / eval_count
-            ).item()
+            acc = ((flat_final.argmax(dim=-1) == flat_targets) & keep).sum().float() / eval_count
+            base_acc = (
+                (flat_base.argmax(dim=-1) == flat_targets) & keep
+            ).sum().float() / eval_count
+            # One device sync for all five scalars instead of one per .item().
+            acc_v, base_acc_v, ce_v, l1_v, conf_v = torch.stack(
+                [acc, base_acc, ce_loss.detach(), l1_loss.detach(), confidence_loss.detach()]
+            ).tolist()
             metrics = {
-                "ce_loss": ce_loss.detach().item(),
-                "l1_loss": l1_loss.detach().item(),
-                "confidence_loss": float(confidence_loss.detach().item()),
-                "base_accuracy": base_accuracy,
+                "ce_loss": ce_v,
+                "l1_loss": l1_v,
+                "confidence_loss": conf_v,
+                "base_accuracy": base_acc_v,
             }
-        return loss, accuracy, metrics
+        return loss, acc_v, metrics
 
     def forward(
         self,
@@ -322,37 +340,27 @@ class HFDSparkModel(HFDFlashModel):
                 f"Adjust training_seq_len or use padding."
             )
 
-        # 1. Target hidden states AND target-model logits (DSpark's L1/confidence
-        #    terms both need the base model's next-token distribution).
+        # 1. Target hidden states, plus what the TVD/confidence terms read the base
+        #    distribution from (the loss projects only the rows it uses).
         if self.dflash_offline:
             assert "base_model_outputs" in kwargs
-            # Reconstruct base logits through the shared DFlash offline path so the base
-            # final norm is re-applied when the producer captured a pre-(final-)norm hidden
-            # (vLLM streaming) — feeding an un-normed hidden straight to lm_head would make a
-            # corrupt distillation target. DSpark always needs the base distribution (its
-            # TVD/confidence terms), so need_logits=True unconditionally.
-            base_outputs = DFlashBaseModelOutput.from_offline_dict(
-                kwargs["base_model_outputs"],
-                self._base_model_norm,
-                self._base_model_lm_head,
-                need_logits=True,
-            )
-            target_hidden = base_outputs.target_hidden
-            target_model_logits = base_outputs.logits
+            base_outputs = DFlashBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
         else:
             # Call the inner base model directly (NOT super().forward(), which during
-            # training runs the full DFlash pipeline). Compute target-model logits via
-            # the lm_head — DSpark's TVD/confidence terms need the base distribution.
+            # training runs the full DFlash pipeline).
             with torch.no_grad():
                 base_out = self._base_model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     output_hidden_states=True,
                 )
-                target_model_logits = self._base_model_lm_head(base_out.last_hidden_state)
             offset = 1
             selected = [base_out.hidden_states[lid + offset] for lid in self.target_layer_ids]
-            target_hidden = torch.cat(selected, dim=-1)  # [B, seq, num_layers * H]
+            base_outputs = DFlashBaseModelOutput(
+                target_hidden=torch.cat(selected, dim=-1),  # [B, seq, num_layers * H]
+                base_hidden=base_out.last_hidden_state,
+            )
+        target_hidden = base_outputs.target_hidden
 
         # 2. Build loss mask (same convention as DFlash/Domino).
         if labels is not None:
@@ -411,7 +419,7 @@ class HFDSparkModel(HFDFlashModel):
             anchor_positions,
             block_keep_mask,
             loss_mask,
-            target_model_logits,
+            base_outputs,
         )
 
         return ModelOutput(loss=loss, logits=None, train_acc=[[accuracy]], dspark_metrics=metrics)
@@ -443,25 +451,26 @@ class HFDSparkModel(HFDFlashModel):
 
         hid_offset = 1
         selected = [model_output.hidden_states[lid + hid_offset] for lid in self.target_layer_ids]
-        target_hidden = torch.cat(selected, dim=-1)
+        # Same sharding hazard as HFDFlashModel.pseudo_speculative_generate: gather onto the
+        # draft's device before the cat rather than assuming one GPU holds every target layer.
+        device = self._base_device()
+        target_hidden = torch.cat([h.to(device) for h in selected], dim=-1)
 
         block_size = self.dflash_block_size
         bsz = input_ids.shape[0]
-        device = input_ids.device
 
         # Block input: anchor at position 0, mask tokens elsewhere (parallel backbone).
         block_ids = torch.full(
             (bsz, block_size), self.mask_token_id, dtype=torch.long, device=device
         )
-        block_ids[:, 0] = base_token.squeeze(-1)
-        noise_embedding = self._base_model_embeddings(block_ids)
+        block_ids[:, 0] = base_token.squeeze(-1).to(device)
+        noise_embedding = self._base_model_embeddings(block_ids).to(device)
 
         ctx_len = target_hidden.shape[1]
         ctx_positions = torch.arange(ctx_len, device=device)
         block_positions = torch.arange(ctx_len, ctx_len + block_size, device=device)
         pos_ids = torch.cat([ctx_positions, block_positions]).unsqueeze(0).expand(bsz, -1)
 
-        self._require_autocast_for_promoted_draft(device)
         draft_hidden = self.dflash_module(
             noise_embedding=noise_embedding,
             target_hidden=target_hidden,
@@ -473,7 +482,7 @@ class HFDSparkModel(HFDFlashModel):
         # Autoregressive Markov sampling over the block.
         m = self.dflash_module
         num_tokens = min(steps, block_size)
-        prev_token = base_token.squeeze(-1)  # anchor precedes block position 0
+        prev_token = base_token.squeeze(-1).to(device)  # anchor precedes block position 0
         state = None
         draft_tokens = []
         for k in range(num_tokens):
@@ -481,4 +490,4 @@ class HFDSparkModel(HFDFlashModel):
             tok = (backbone_logits[:, k, :] + bias).argmax(dim=-1)
             draft_tokens.append(tok)
             prev_token = tok
-        return base_token, torch.stack(draft_tokens, dim=1)
+        return base_token, torch.stack(draft_tokens, dim=1).to(input_ids.device)

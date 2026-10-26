@@ -8,8 +8,8 @@
 # loss: ce_alpha*CE + l1_alpha*TVD + conf_alpha*confidence_BCE. Online training is
 # the default path (data.mode=online). Override fields via an OmegaConf dotlist.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptDFlashRecipe
 metadata:
-  recipe_type: speculative_dflash
   description: DSpark training recipe (DFlash backbone + Markov head + confidence head).
 
 # maps to ModelArguments (main.py)

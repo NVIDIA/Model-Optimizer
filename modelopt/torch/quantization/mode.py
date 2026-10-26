@@ -38,6 +38,7 @@ from .config import (
     AWQLiteCalibConfig,
     CompressConfig,
     GPTQCalibConfig,
+    ImatrixCalibConfig,
     LocalHessianCalibConfig,
     LSQConfig,
     MaxCalibConfig,
@@ -62,6 +63,7 @@ from .conversion import (
 from .model_calib import (
     awq,
     gptq,
+    imatrix_calibrate,
     layerwise_calibrate,
     local_hessian_calibrate,
     lsq,
@@ -231,7 +233,7 @@ def wrapped_calib_func(
     layerwise = layerwise_cfg.get("enable", False)
     checkpoint_dir = layerwise_cfg.get("checkpoint_dir")
     export_dir = layerwise_cfg.get("export_dir")
-    qdq_from_prev = layerwise_cfg.get("get_qdq_activations_from_prev_layer", False)
+    qdq_from_prev = layerwise_cfg.get("get_qdq_activations_from_prev_layer", True)
     save_every = layerwise_cfg.get("save_every", 1)
     calib_mutates_weights = layerwise_cfg.get("calib_mutates_weights", True)
     if method is not None and "awq" in method:
@@ -556,6 +558,18 @@ class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
         return GPTQCalibConfig
 
     _calib_func = gptq
+
+
+@CalibrateModeRegistry.register_mode
+class ImatrixModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for imatrix calibration algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return ImatrixCalibConfig
+
+    _calib_func = imatrix_calibrate
 
 
 @CalibrateModeRegistry.register_mode

@@ -142,13 +142,6 @@ class PrecisionConverter:
         self.low_precision_type = PRECISION_MAP[low_precision_type]
         self.high_precision_type = PRECISION_MAP["fp32"]
 
-        # Preserve original network inputs and outputs for sanity checks
-        self.original_network_io = {
-            io.name: io.type.tensor_type.elem_type for io in self.model.graph.input
-        }
-        self.original_network_io.update(
-            {io.name: io.type.tensor_type.elem_type for io in self.model.graph.output}
-        )
         self.original_network_io_metadata = (
             {
                 "input": [deepcopy(io) for io in self.model.graph.input],
@@ -160,6 +153,13 @@ class PrecisionConverter:
                 for field, values in original_network_io_metadata.items()
             }
         )
+        # Preserve the public I/O types captured at the API boundary. Type inference may have
+        # changed the working model's declarations before the converter is initialized.
+        self.original_network_io = {
+            io.name: io.type.tensor_type.elem_type
+            for values in self.original_network_io_metadata.values()
+            for io in values
+        }
         self.min_opset = min_opset
         self.max_ir_version = max_ir_version
         self.trt_plugins = trt_plugins
@@ -1440,7 +1440,10 @@ class PrecisionConverter:
         # Update network output
         for output in self.model.graph.output:
             if output.name == tensor_name and (
-                (self.keep_io_types and cast_to.onnx_type == output.type.tensor_type.elem_type)
+                (
+                    self.keep_io_types
+                    and cast_to.onnx_type == self.original_network_io.get(tensor_name)
+                )
                 or (
                     not self.keep_io_types
                     and cast_to.onnx_type == self.low_precision_type.onnx_type

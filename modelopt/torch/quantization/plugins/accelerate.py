@@ -45,6 +45,7 @@ def _get_offload_hook(hook):
 
 def _writeback_params_to_weights_map(module, align_hook):
     """Write all non-meta parameters and buffers back to the hook's CPU weights_map."""
+    buffer_names = {name for name, _ in module.named_buffers()}
     for name, tensor in module.state_dict(keep_vars=True).items():
         if tensor.device.type == "meta":
             continue
@@ -72,6 +73,10 @@ def _writeback_params_to_weights_map(module, align_hook):
                 RuntimeWarning,
                 stacklevel=2,
             )
+        elif align_hook.offload_buffers and name in buffer_names:
+            # A buffer first registered inside the context, such as a GPTQ payload pin: without a
+            # backing value the hook cannot reload it after offloading the module again.
+            w_map[key] = tensor.detach().cpu()
 
 
 @contextmanager
@@ -228,6 +233,9 @@ def init_quantized_weights(
                 "dtype", kwargs.get("torch_dtype", getattr(config, "torch_dtype", torch.float16))
             )
             model = cls.from_config(config, dtype=torch_dtype)
+        # init_empty_weights re-wraps every registered parameter, so the tie made inside
+        # from_config is lost; without it the absent tied checkpoint key (e.g. lm_head) stays meta.
+        model.tie_weights()
 
         mtq.quantize(model, quant_cfg)
         mtq.compress(model, config=mtq.CompressConfig(quant_gemm=quant_gemm))

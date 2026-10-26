@@ -23,7 +23,7 @@ import onnx_graphsurgeon as gs
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.autotune.common import Region, RegionType
 from modelopt.onnx.quantization.autotune.region_pattern import RegionPattern
-from modelopt.onnx.quantization.graph_utils import get_tensor_consumer_node_indices
+from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_node_indices
 
 DEFAULT_MAX_STEPS = 10
 DEFAULT_MAX_NODES_TO_SHOW = 20

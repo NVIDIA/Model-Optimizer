@@ -2,5 +2,7 @@
 accelerate>=1.0.0,<1.14
 flash-attn>=2.6.0
 liger-kernel>=0.5.0; platform_system != 'Darwin' and platform_system != 'Windows'
+# peft 0.21 stops writing adapter_model.safetensors where export.py expects it.
+peft<0.21
 py7zr
 tensorboard

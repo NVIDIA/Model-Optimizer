@@ -26,7 +26,7 @@ from onnx import helper, numpy_helper
 import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.autocast.logging_config import logger
-from modelopt.onnx.quantization.graph_utils import cast_custom_ops
+from modelopt.onnx.quantization.graph_rewrites import cast_custom_ops
 from modelopt.onnx.trt_utils import (
     get_custom_layers,
     infer_types_shapes_tensorrt,

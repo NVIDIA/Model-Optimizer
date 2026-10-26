@@ -60,7 +60,7 @@ def test_qwen_vision_recipe_calibrates_and_exports(
 ):
     model = _get_tiny_qwen_vlm(model_type).to("cuda").eval()
     model.config.architectures = [architecture]
-    quant_cfg = load_recipe(f"huggingface/{model_type}/ptq/{recipe}").quantize.model_dump()
+    quant_cfg = load_recipe(f"model_type/{model_type}/ptq/{recipe}").quantize.model_dump()
     vision_config = model.config.vision_config
     pixel_width = (
         vision_config.in_channels * vision_config.temporal_patch_size * vision_config.patch_size**2
@@ -92,7 +92,7 @@ def test_qwen_vision_recipe_calibrates_and_exports(
     scale_names = {name for name in tensor_names if name.endswith(("input_scale", "weight_scale"))}
     assert scale_names
     assert any(name.startswith("model.visual.") for name in scale_names)
-    assert any(".attn.qkv.weight_scale" in name for name in scale_names)
+    assert not any(".blocks." in name for name in scale_names)
     assert any(".merger.linear_fc1.weight_scale" in name for name in scale_names)
     if model_type == "qwen3_vl":
         assert any(
