@@ -552,6 +552,7 @@ EXPECTED_MOE_LAYOUTS = [
         ("gate_proj", "up_proj"),
     ),
     ("gpt_oss", ("GptOssMLP", "GptOssMoE"), ("gate_up_proj", "down_proj"), True, None),
+    ("llama4", ("Llama4TextMoe",), ("gate_up_proj", "down_proj"), True, None),
     ("minimax", ("MiniMaxSparseMoeBlock",), ("w1", "w2", "w3"), False, ("w1", "w3")),
     ("mixtral", ("MixtralSparseMoeBlock",), ("w1", "w2", "w3"), False, ("w1", "w3")),
     ("phimoe", ("PhimoeSparseMoeBlock",), ("w1", "w2", "w3"), False, ("w1", "w3")),
@@ -583,6 +584,13 @@ EXPECTED_MOE_LAYOUTS = [
         ("gate_proj", "down_proj", "up_proj"),
         False,
         ("gate_proj", "up_proj"),
+    ),
+    (
+        "qwen3_vl_moe",
+        ("Qwen3VLMoeTextSparseMoeBlock",),
+        ("gate_up_proj", "down_proj"),
+        True,
+        None,
     ),
 ]
 
@@ -717,6 +725,7 @@ def test_iterable_experts_matches_pre_refactor_support():
         "gemma4": "Gemma4ForConditionalGeneration",
         "gemma4_text": "Gemma4TextForCausalLM",
         "gpt_oss": "GptOssForCausalLM",
+        "llama4": "Llama4ForConditionalGeneration",
         "minimax": "MiniMaxForCausalLM",
         "mixtral": "MixtralForCausalLM",
         "phimoe": "PhimoeForCausalLM",
@@ -725,6 +734,7 @@ def test_iterable_experts_matches_pre_refactor_support():
         "qwen3_5_moe": "Qwen3_5MoeForCausalLM",
         "qwen3_moe": "Qwen3MoeForCausalLM",
         "qwen3_next": "Qwen3NextForCausalLM",
+        "qwen3_vl_moe": "Qwen3VLMoeForConditionalGeneration",
     }
     moe_specs = [s for s in get_specs() if _layouts(s)]
     assert {s.model_type for s in moe_specs} == set(root_class_names), (

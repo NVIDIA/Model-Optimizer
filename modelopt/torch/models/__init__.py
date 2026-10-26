@@ -26,6 +26,9 @@ and read its sections.
 
 The per-model file is named for what it holds, not for who reads it: a model's spec is
 general model data, and export is only its first consumer.
+
+A package may also hold ``modeling_ptq.py``, the model-specific PTQ wrappers. It is not imported
+here; the HF quantization plugin imports it (see ``README.md``).
 """
 
 from .moe import is_moe
@@ -70,6 +73,7 @@ from . import (  # isort: skip
     deepseek,
     deepseek_v3,
     deepseek_v4,
+    falcon,
     gemma,
     gemma2,
     gemma3,
@@ -77,6 +81,7 @@ from . import (  # isort: skip
     gemma4_text,
     gpt_oss,
     llama,
+    llama4,
     minimax,
     mixtral,
     phimoe,
@@ -87,4 +92,7 @@ from . import (  # isort: skip
     qwen3_5_moe,
     qwen3_moe,
     qwen3_next,
+    qwen3_vl_moe,
+    step3p5,
+    step3p7,
 )

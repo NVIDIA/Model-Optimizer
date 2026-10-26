@@ -46,7 +46,7 @@
     enable: false
   - quantizer_name: '*router*'
     enable: false
-  - quantizer_name: 'mtp.*'
+  - quantizer_name: '*mtp.*'
     enable: false
   - quantizer_name: 'output.*'
     enable: false
@@ -84,5 +84,10 @@
     quantizer_name: '*'
     enable: false
   - parent_class: 'nn.Embedding'
+    quantizer_name: '*'
+    enable: false
+  # nn.LayerNorm quantizers are opt-in (e.g. the FP8 MHA LayerNorm output); a recipe
+  # that wants them must enable them after importing this unit.
+  - parent_class: 'nn.LayerNorm'
     quantizer_name: '*'
     enable: false

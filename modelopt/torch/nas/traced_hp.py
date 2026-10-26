@@ -17,6 +17,8 @@
 
 from collections.abc import Callable
 
+import torch
+
 from modelopt.torch.opt.hparam import Hparam
 from modelopt.torch.trace import Symbol
 
@@ -147,3 +149,6 @@ class TracedHp(Hparam):
             self.choices = [self.original]
 
         return mapping
+
+
+torch.serialization.add_safe_globals([TracedHp])

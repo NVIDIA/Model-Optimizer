@@ -39,6 +39,9 @@ independent validation item fails, label the result incomplete or invalid and
 return findings and a recommendation to the parent (or user); do not
 automatically resubmit a completed run.
 
+For Terminal-Bench 2.1, also complete the [run health screen](../recipes/tasks/aa_next/terminal_bench_2_1.md#run-health-screen)
+and include its evidence and verdict before reporting `pass@1`.
+
 ### Bounded Evaluation-Failure Policy (Parent and Evaluator)
 
 Accept complete runs with **<2% failures in each applicable gate**, measured
@@ -89,7 +92,7 @@ percentages, explicit denominators, and artifact paths before the score:
 |---|---|
 | Coverage | Expected trials including repeats; completed/scored, failed/skipped/missing; score denominator and whether failures receive zero or are excluded. |
 | Timeouts | Timed-out / all request attempts; affected unique trials / expected trials; terminal-timeout trials / expected trials. Separate recovered retries and terminal failures by layer: client/proxy, agent/task, judge, sandbox/verifier. |
-| Output limits | Limit-stopped / observed responses; affected unique trials / expected trials. Use termination metadata such as `finish_reason: length`; distinguish output caps, context exhaustion, and agent step/total-token limits where possible. |
+| Output limits | Limit-stopped / observed responses; affected unique trials / expected trials. Use termination metadata such as `finish_reason: length` (and [doom-loop](doom_loops.md) `repetition` stops, counted separately); distinguish output caps, context exhaustion, and agent step/total-token limits where possible. |
 | Limits | Effective request/proxy, agent/task, judge/verifier, output-token and context limits, timeout strategy, overrides, concurrency, sharding, and serving setup. |
 
 Deduplicate resumed records by sample/trial/repeat ID; keep request attempts

@@ -28,6 +28,10 @@
 //   store(payload, picks, choices, d_bits)  writes every vector's pick -- its grid entry, with
 //                 its own shift in bit kIq1EntryBits when the shift is per vector -- and every
 //                 group's choice; called by every thread once the search is done
+//
+// A weighted encode scales each value's squared error by its column's importance w, so a vector's
+// error under scale * (q + delta) is sum w x^2 - 2 scale sum w x (q + delta) +
+// scale^2 sum w (q + delta)^2. With w = 1 every term is computed exactly as the unweighted one.
 
 #pragma once
 
@@ -42,9 +46,53 @@ constexpr int kIq1EntryBits = 11; // 2048 entries; a per-vector shift sits just 
 
 __device__ __forceinline__ float iq1_delta(int shift) { return shift ? -kIq1Delta : kIq1Delta; }
 
-template <typename Format, typename scalar_t>
+// Loads vector slot's importance from the block's 256 weights, and replaces xnorm, xsum and
+// weight_sum by sum w x^2, sum w x and sum w.
+template <bool kWeighted>
+__device__ __forceinline__ void
+load_iq1_importance(const float *weights, int slot, const float (&x)[kVectorSize],
+                    float (&w)[kVectorSize], float &xnorm, float &xsum, float &weight_sum) {
+  if constexpr (kWeighted) {
+    const float *source = weights + slot * kVectorSize;
+    xnorm = 0.0f;
+    xsum = 0.0f;
+    weight_sum = 0.0f;
+#pragma unroll
+    for (int j = 0; j < kVectorSize; ++j) {
+      w[j] = source[j];
+      const float wx = w[j] * x[j];
+      xnorm = fmaf(wx, x[j], xnorm);
+      xsum += wx;
+      weight_sum += w[j];
+    }
+  }
+}
+
+// grid_terms, weighted: sum w x q, sum w q^2 and sum w q.
+template <bool kWeighted>
+__device__ __forceinline__ void iq1_grid_terms(const float (&x)[kVectorSize],
+                                               const float (&w)[kVectorSize], const float *q,
+                                               float &dot, float &qnorm, float &qsum) {
+  if constexpr (kWeighted) {
+    dot = 0.0f;
+    qnorm = 0.0f;
+    qsum = 0.0f;
+#pragma unroll
+    for (int j = 0; j < kVectorSize; ++j) {
+      const float wq = w[j] * q[j];
+      dot = fmaf(x[j], wq, dot);
+      qnorm = fmaf(wq, q[j], qnorm);
+      qsum += wq;
+    }
+  } else {
+    grid_terms(x, q, dot, qnorm, qsum);
+  }
+}
+
+template <typename Format, bool kWeighted, typename scalar_t>
 __global__ void iq1_encode(const scalar_t *input, int64_t num_blocks, const float *grid,
-                           const __half *scales, uint8_t *output) {
+                           const __half *scales, const float *importance, int64_t blocks_per_row,
+                           uint8_t *output) {
   constexpr int kGroups = Format::kGroups;
   constexpr int kVectorsPerGroup = Format::kVectorsPerGroup;
   constexpr int kChoices = Format::kChoices;
@@ -72,6 +120,7 @@ __global__ void iq1_encode(const scalar_t *input, int64_t num_blocks, const floa
   const float d = __half2float(d_half);
   if (!Format::begin(payload, d_bits))
     return;
+  const float *weights = kWeighted ? importance + (block % blocks_per_row) * kBlockSize : nullptr;
 
 #pragma unroll 1
   for (int group = 0; group < kGroups; ++group) {
@@ -83,29 +132,31 @@ __global__ void iq1_encode(const scalar_t *input, int64_t num_blocks, const floa
     // per-vector shift, a vector takes the better of the two before the group chooses.
 #pragma unroll
     for (int vector = 0; vector < kVectorsPerGroup; ++vector) {
-      float x[kVectorSize];
-      float xnorm, xsum;
-      load_vector(source + (group * kVectorsPerGroup + vector) * kVectorSize, x, xnorm, xsum);
+      const int slot = group * kVectorsPerGroup + vector;
+      float x[kVectorSize], w[kVectorSize];
+      float xnorm, xsum, weight_sum = kVectorSize;
+      load_vector(source + slot * kVectorSize, x, xnorm, xsum);
+      load_iq1_importance<kWeighted>(weights, slot, x, w, xnorm, xsum, weight_sum);
       float local_best[kChoices];
 #pragma unroll
       for (int choice = 0; choice < kChoices; ++choice)
         local_best[choice] = FLT_MAX;
       for (int entry = tid; entry < kIq1sEntries; entry += blockDim.x) {
         float dot, qnorm, qsum;
-        grid_terms(x, grid + entry * kVectorSize, dot, qnorm, qsum);
+        iq1_grid_terms<kWeighted>(x, w, grid + entry * kVectorSize, dot, qnorm, qsum);
 #pragma unroll
         for (int choice = 0; choice < kChoices; ++choice) {
           const float scale = d * (2 * (choice & 7) + 1);
           if constexpr (kSharedShift) {
             local_best[choice] =
-                fminf(local_best[choice],
-                      shifted_error(xnorm, xsum, dot, qnorm, qsum, scale, iq1_delta(choice >> 3)));
+                fminf(local_best[choice], shifted_error(xnorm, xsum, dot, qnorm, qsum, scale,
+                                                        iq1_delta(choice >> 3), weight_sum));
           } else {
 #pragma unroll
             for (int shift = 0; shift < 2; ++shift)
               local_best[choice] =
-                  fminf(local_best[choice],
-                        shifted_error(xnorm, xsum, dot, qnorm, qsum, scale, iq1_delta(shift)));
+                  fminf(local_best[choice], shifted_error(xnorm, xsum, dot, qnorm, qsum, scale,
+                                                          iq1_delta(shift), weight_sum));
           }
         }
       }
@@ -132,23 +183,24 @@ __global__ void iq1_encode(const scalar_t *input, int64_t num_blocks, const floa
 #pragma unroll
     for (int vector = 0; vector < kVectorsPerGroup; ++vector) {
       const int slot = group * kVectorsPerGroup + vector;
-      float x[kVectorSize];
-      float xnorm, xsum;
+      float x[kVectorSize], w[kVectorSize];
+      float xnorm, xsum, weight_sum = kVectorSize;
       load_vector(source + slot * kVectorSize, x, xnorm, xsum);
+      load_iq1_importance<kWeighted>(weights, slot, x, w, xnorm, xsum, weight_sum);
       unsigned long long key = ~0ULL;
       for (int entry = tid; entry < kIq1sEntries; entry += blockDim.x) {
         float dot, qnorm, qsum;
-        grid_terms(x, grid + entry * kVectorSize, dot, qnorm, qsum);
+        iq1_grid_terms<kWeighted>(x, w, grid + entry * kVectorSize, dot, qnorm, qsum);
         if constexpr (kSharedShift) {
           const float error = shifted_error(xnorm, xsum, dot, qnorm, qsum, selected_scale,
-                                            iq1_delta(selected_choice >> 3));
+                                            iq1_delta(selected_choice >> 3), weight_sum);
           const unsigned long long candidate = error_key(error, entry);
           key = candidate < key ? candidate : key;
         } else {
 #pragma unroll
           for (int shift = 0; shift < 2; ++shift) {
-            const float error =
-                shifted_error(xnorm, xsum, dot, qnorm, qsum, selected_scale, iq1_delta(shift));
+            const float error = shifted_error(xnorm, xsum, dot, qnorm, qsum, selected_scale,
+                                              iq1_delta(shift), weight_sum);
             const unsigned long long candidate = error_key(error, (shift << kIq1EntryBits) | entry);
             key = candidate < key ? candidate : key;
           }
@@ -163,13 +215,16 @@ __global__ void iq1_encode(const scalar_t *input, int64_t num_blocks, const floa
   Format::store(payload, picks, choices, d_bits);
 }
 
-// Packs one IQ1 format from per-block FP16 scales, once its inputs have been validated.
+// Packs one IQ1 format from per-block FP16 scales, once its inputs (and check_importance, if
+// given) have been validated.
 template <typename Format>
 at::Tensor iq1_encode_blocks(const at::Tensor &input, const at::Tensor &grid,
-                             const at::Tensor &scales) {
+                             const at::Tensor &scales,
+                             const std::optional<at::Tensor> &importance) {
   const auto values = input.contiguous();
   const auto table = grid.contiguous();
   const auto block_scales = scales.contiguous();
+  const auto weights = importance.has_value() ? importance->contiguous() : at::Tensor();
   c10::cuda::CUDAGuard guard(values.device());
   const int64_t num_blocks = values.numel() / kBlockSize;
   at::Tensor output =
@@ -177,10 +232,18 @@ at::Tensor iq1_encode_blocks(const at::Tensor &input, const at::Tensor &grid,
   const auto stream = c10::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::ScalarType::Half, at::ScalarType::BFloat16, values.scalar_type(), "iq1_pack", [&] {
-        iq1_encode<Format, scalar_t><<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
-            values.data_ptr<scalar_t>(), num_blocks, table.data_ptr<float>(),
-            reinterpret_cast<const __half *>(block_scales.data_ptr<at::Half>()),
-            output.data_ptr<uint8_t>());
+        const auto *half_scales =
+            reinterpret_cast<const __half *>(block_scales.data_ptr<at::Half>());
+        if (weights.defined()) {
+          iq1_encode<Format, true, scalar_t><<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
+              values.data_ptr<scalar_t>(), num_blocks, table.data_ptr<float>(), half_scales,
+              weights.data_ptr<float>(), weights.size(0), output.data_ptr<uint8_t>());
+        } else {
+          iq1_encode<Format, false, scalar_t>
+              <<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
+                  values.data_ptr<scalar_t>(), num_blocks, table.data_ptr<float>(), half_scales,
+                  nullptr, 1, output.data_ptr<uint8_t>());
+        }
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
   return output;

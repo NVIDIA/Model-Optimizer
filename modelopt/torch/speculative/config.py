@@ -30,6 +30,7 @@ __all__ = [
     "EAGLE_MTP_DEFAULT_CFG",
     "DFlashConfig",
     "EagleConfig",
+    "ExternalDraftConfig",
     "MedusaConfig",
     "eagle3_default_config",
     "eagle_mtp_default_config",
@@ -145,8 +146,20 @@ class DFlashConfig(ModeloptBaseConfig):
     )
 
     dflash_use_torch_compile: bool = ModeloptField(
-        default=True,
-        description="Whether to use torch.compile on DFlash forward/loss methods.",
+        default=False,
+        description=(
+            "Whether to torch.compile the draft decoder stack and the DSpark TVD chunk in "
+            "training. Compiles once, on the first step, and needs a working Inductor "
+            "toolchain."
+        ),
+    )
+
+    dflash_use_flex_attention: bool = ModeloptField(
+        default=False,
+        description=(
+            "Compute the draft's attention with FlexAttention over a block-sparse BlockMask "
+            "instead of SDPA with a dense [B, 1, Q, KV] mask, skipping fully-masked tiles."
+        ),
     )
 
     dflash_swa_window_size: int | None = ModeloptField(
@@ -465,6 +478,84 @@ class MedusaConfig(ModeloptBaseConfig):
     medusa_num_layers: int = ModeloptField(
         default=1,
         description=("The number of ResBlocks used in medusa head."),
+    )
+
+
+class ExternalDraftConfig(ModeloptBaseConfig):
+    """External (standalone) draft model config.
+
+    The converted module is a pretrained causal LM used directly as the draft. It
+    keeps its own embeddings and lm_head; the base model contributes only cached
+    hidden states, projected by the base lm_head to obtain teacher logits.
+    """
+
+    external_loss: Literal["soft_ce", "tvd", "tvd_deploy", "tvd_ce"] = ModeloptField(
+        default="tvd",
+        description=(
+            "Training objective. ``soft_ce`` matches the Eagle offline objective. "
+            "``tvd`` is total-variation distance between the two untruncated "
+            "distributions. ``tvd_deploy`` puts both through the serving filter first "
+            "(``external_top_k`` then ``external_top_p``), making it the acceptance the "
+            "deployed pair will see: ``alpha = 1 - TVD``. ``tvd_ce`` adds a cross-entropy "
+            "term. Sparse data requires one of the TVD objectives, since the dump is "
+            "already a truncated policy and ``soft_ce`` needs full base logits."
+        ),
+    )
+
+    external_vocab_swap: bool = ModeloptField(
+        default=False,
+        description=(
+            "Re-index the draft onto the base model's vocabulary when the two tokenizers "
+            "differ, instead of raising. Rebuilds the draft's embeddings, carrying over "
+            "rows for tokens both tokenizers spell identically. The replacement matrix is "
+            "``base_vocab_size * hidden_size`` parameters, so this is a large change to a "
+            "small draft; validate with an acceptance measurement, not a loss curve."
+        ),
+    )
+
+    external_tvd_alpha: float = ModeloptField(
+        default=0.9,
+        ge=0.0,
+        description=(
+            "Weight on the TVD term when ``external_loss='tvd_ce'``. The two weights "
+            "are not normalised: they scale the loss as given, so 0.9/0.1 is a "
+            "convention rather than a constraint, and setting only one of them moves "
+            "the overall gradient magnitude as well as the ratio."
+        ),
+    )
+
+    external_ce_alpha: float = ModeloptField(
+        default=0.1,
+        ge=0.0,
+        description=(
+            "Weight on the cross-entropy term when ``external_loss='tvd_ce'``. CE is "
+            "added because TVD is bounded and so discriminates weakly between tokens "
+            "inside the base's support."
+        ),
+    )
+
+    external_top_k: int = ModeloptField(
+        default=20,
+        ge=0,
+        description=(
+            "Top-k of the serving filter, applied to *both* the base and the "
+            "draft by ``external_loss='tvd_deploy'``. 0 disables the top-k stage."
+        ),
+    )
+
+    external_top_p: float = ModeloptField(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Top-p of the serving filter, applied to *both* the base and the "
+            "draft by ``external_loss='tvd_deploy'``. 0 or 1.0 disables the nucleus stage."
+        ),
+    )
+
+    external_report_acc: bool = ModeloptField(
+        default=True,
+        description=("Whether to report top-1 agreement with the base model during training."),
     )
 
 

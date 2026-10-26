@@ -20,6 +20,7 @@ storage layouts, so there is no convention matrix left to enumerate. What remain
 recording path, checkpoint-path resolution, and the sidecar copy.
 """
 
+import warnings
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -27,105 +28,114 @@ from unittest.mock import patch
 import pytest
 import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
+from _test_utils.torch.transformers_models import get_tiny_nemotron_h
 from safetensors.torch import save_file
+from transformers import AutoModelForCausalLM, LlamaConfig
+
+from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
 
 
 def _write_safetensors(path, tensors):
     save_file(tensors, str(path), metadata={"format": "pt"})
 
 
-def test_copy_custom_model_files_preserves_non_weight_sidecars(tmp_path):
-    source_dir = tmp_path / "source"
-    export_dir = tmp_path / "export"
-    source_dir.mkdir()
-    export_dir.mkdir()
-
-    source_files = {
-        "super_v3_reasoning_parser.py": "class Parser: pass\n",
-        "modeling_custom.py": "class Model: pass\n",
-        "README.md": "# Source model\n",
-        "LICENSE": "license text\n",
-        "chat_template.jinja": "{{ messages }}\n",
-        "tokenizer_config.json": '{"chat_template": "source"}\n',
-        "generation_config.json": '{"source": "generation"}\n',
-        "config.json": '{"source": "config"}\n',
-        "hf_quant_config.json": '{"source": "quant"}\n',
-        "quant_config.json": '{"source": "stale quant"}\n',
-        "quantize_config.json": '{"source": "stale quant"}\n',
-        "recipe.yaml": "quantize: {}\n",
-        "model.safetensors.index.json": '{"weight_map": {}}\n',
-        "model-00001-of-00001.safetensors": "source weights\n",
-        "model.gguf": "source weights\n",
-    }
-    for file_name, contents in source_files.items():
-        (source_dir / file_name).write_text(contents)
-
-    (export_dir / "config.json").write_text('{"export": "config"}\n')
-    (export_dir / "generation_config.json").write_text('{"export": "generation"}\n')
-    (export_dir / "hf_quant_config.json").write_text('{"export": "quant"}\n')
-    (export_dir / "chat_template.jinja").write_text("{{ exported_messages }}\n")
-    (export_dir / "tokenizer_config.json").write_text('{"chat_template": "export"}\n')
-
-    example_utils.copy_custom_model_files(str(source_dir), str(export_dir), trust_remote_code=False)
-
-    for file_name in [
-        "super_v3_reasoning_parser.py",
-        "modeling_custom.py",
-        "README.md",
-        "LICENSE",
-        "chat_template.jinja",
-        "generation_config.json",
-    ]:
-        assert (export_dir / file_name).read_text() == source_files[file_name]
-
-    assert (export_dir / "config.json").read_text() == '{"export": "config"}\n'
-    assert (export_dir / "hf_quant_config.json").read_text() == '{"export": "quant"}\n'
-    assert (export_dir / "tokenizer_config.json").read_text() == '{"chat_template": "export"}\n'
-    assert not (export_dir / "quant_config.json").exists()
-    assert not (export_dir / "quantize_config.json").exists()
-    assert not (export_dir / "recipe.yaml").exists()
-    assert not (export_dir / "model.safetensors.index.json").exists()
-    assert not (export_dir / "model-00001-of-00001.safetensors").exists()
-    assert not (export_dir / "model.gguf").exists()
-
-    (export_dir / "generation_config.json").write_text('{"export": "generation"}\n')
-    example_utils.copy_custom_model_files(
-        str(source_dir),
-        str(export_dir),
-        exclude_files={"generation_config.json"},
+@pytest.mark.parametrize("loader", ["native", "auto"])
+@pytest.mark.parametrize("trust_remote_code", [False, True])
+def test_mtp_preparation_matches_loader(tmp_path, loader, trust_remote_code):
+    """A native architecture and a remote auto_map must prepare the class actually loaded."""
+    native = pytest.importorskip("transformers.models.nemotron_h.modeling_nemotron_h")
+    mtp_adapter = pytest.importorskip("modelopt.torch.models.nemotron_h.mtp")
+    source = get_tiny_nemotron_h(
+        layers_block_type=["attention" if "attention" in native.MIXER_TYPES else "full_attention"],
+        num_hidden_layers=1,
+        hybrid_override_pattern="*",
+        use_mamba_kernels=False,
+        attn_implementation="eager",
+        dtype=torch.float32,
+        num_nextn_predict_layers=1,
+        mtp_layers_block_type=["attention", "moe"],
     )
-    assert (export_dir / "generation_config.json").read_text() == '{"export": "generation"}\n'
-
-
-def test_resolve_model_path_snapshot_download_stays_allowlisted(monkeypatch, tmp_path):
-    snapshot_dir = tmp_path / "snapshot"
-
-    def fake_snapshot_download(**kwargs):
-        assert kwargs == {
-            "repo_id": "org/model",
-            "allow_patterns": example_utils._HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS,
-        }
-        return str(snapshot_dir)
-
-    def fake_from_pretrained(*args, **kwargs):
-        assert (args, kwargs) == (("org/model",), {"trust_remote_code": False})
-        return SimpleNamespace(_name_or_path="org/model")
-
-    monkeypatch.setattr(
-        example_utils.AutoConfig,
-        "from_pretrained",
-        fake_from_pretrained,
+    source.mtp = mtp_adapter._NemotronHMTP(source.config)
+    with torch.no_grad():
+        for parameter in source.parameters():
+            parameter.uniform_(-0.1, 0.1)
+    source.config.architectures = ["NemotronHForCausalLM"]
+    source.config.auto_map = {"AutoModelForCausalLM": "modeling_remote.RemoteNemotronH"}
+    source.config.save_pretrained(tmp_path)
+    _write_safetensors(tmp_path / "model.safetensors", source.state_dict())
+    (tmp_path / "modeling_remote.py").write_text(
+        "from transformers import NemotronHForCausalLM\n"
+        "class RemoteNemotronH(NemotronHForCausalLM):\n"
+        "    pass\n"
     )
-    monkeypatch.setattr(example_utils, "snapshot_download", fake_snapshot_download)
-
-    assert example_utils._resolve_model_path("org/model", trust_remote_code=False) == str(
-        snapshot_dir
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if loader == "native":
+            model = example_utils.get_model(
+                str(tmp_path), device="cpu", trust_remote_code=trust_remote_code
+            )
+        else:
+            model = load_pretrained(
+                str(tmp_path),
+                AutoModelForCausalLM,
+                model_type=source.config.model_type,
+                trust_remote_code=trust_remote_code,
+            )
+    expected_class = (
+        "RemoteNemotronH" if loader == "auto" and trust_remote_code else "NemotronHForCausalLM"
     )
+    assert type(model).__name__ == expected_class
+    assert model.state_dict().keys() == source.state_dict().keys()
+    for name, value in source.state_dict().items():
+        torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
+    assert not any("MTP weights may remain unquantized" in str(w.message) for w in caught)
+
+
+@pytest.mark.parametrize("failure_at", [1, 2])
+def test_get_model_preserves_preparation_error(monkeypatch, tmp_path, failure_at):
+    config = LlamaConfig(architectures=["LlamaForCausalLM"])
+    monkeypatch.setattr(example_utils.AutoConfig, "from_pretrained", lambda *a, **k: config)
+    calls = 0
+
+    def prepare(*args, model_class):
+        nonlocal calls
+        calls += 1
+        assert args == (config.model_type, str(tmp_path), False)
+        assert model_class.__name__ == "LlamaForCausalLM"
+        if calls == failure_at:
+            raise ValueError("MTP preparation failed")
+        return nullcontext()
+
+    monkeypatch.setattr(example_utils, "prepare_model_for_loading", prepare)
+    # The second call, around the real load, is load_pretrained's, which imports it from here.
+    monkeypatch.setattr("modelopt.torch.models.hf.prepare_model_for_loading", prepare)
+    with pytest.raises(ValueError, match="MTP preparation failed"):
+        example_utils.get_model(str(tmp_path), device="cpu")
+    assert calls == failure_at
 
 
 # ---------- get_original_hf_quant_method -------------------------------------
 # get_model uses this to detect native MXFP4 checkpoints (e.g. openai/gpt-oss-*) and load
 # them dequantized to BF16 GptOssExperts (so ModelOpt can quantize/export the experts).
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "expected"),
+    [
+        ("max", {"method": "max", "moe_calib_experts_ratio": 0.5}),
+        ({"method": "gptq"}, {"method": "gptq", "moe_calib_experts_ratio": 0.5}),
+        (
+            [{"method": "gptq"}, {"method": "imatrix"}],
+            [
+                {"method": "gptq", "moe_calib_experts_ratio": 0.5},
+                {"method": "imatrix", "moe_calib_experts_ratio": 0.5},
+            ],
+        ),
+    ],
+)
+def test_build_quant_cfg_sets_moe_calib_experts_ratio_on_every_algorithm(algorithm, expected):
+    quant_cfg = example_utils.build_quant_cfg({"quant_cfg": [], "algorithm": algorithm}, None, 0.5)
+    assert quant_cfg["algorithm"] == expected
 
 
 def test_get_original_hf_quant_method_mxfp4_dict():
@@ -206,6 +216,7 @@ def test_resolve_init_config_falls_back_when_rederive_raises():
 )
 def test_get_model_uses_expected_dtype_kwarg(
     monkeypatch,
+    tmp_path,
     architecture,
     model_class_name,
     expected_config_dtype_kwarg,
@@ -268,7 +279,7 @@ def test_get_model_uses_expected_dtype_kwarg(
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
 
-    model = example_utils.get_model("checkpoint", device="cpu", trust_remote_code=True)
+    model = example_utils.get_model(str(tmp_path), device="cpu", trust_remote_code=True)
 
     assert isinstance(model, FakeModel)
     assert calls["eval"]
@@ -294,7 +305,7 @@ def test_get_model_uses_expected_dtype_kwarg(
     ],
 )
 def test_get_model_device_map_for_diffusion_gemma(
-    monkeypatch, model_type, architecture, device_count, expected_device_map
+    monkeypatch, tmp_path, model_type, architecture, device_count, expected_device_map
 ):
     calls = {}
     hf_config = SimpleNamespace(
@@ -336,7 +347,7 @@ def test_get_model_device_map_for_diffusion_gemma(
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
     monkeypatch.setattr(torch.cuda, "device_count", lambda: device_count)
 
-    example_utils.get_model("checkpoint", device="cuda", trust_remote_code=True)
+    example_utils.get_model(str(tmp_path), device="cuda", trust_remote_code=True)
 
     assert calls["from_pretrained"]["device_map"] == expected_device_map
     # Sequential caps per-GPU memory; "auto" must stay unrestricted.
@@ -388,7 +399,7 @@ def test_is_diffusion_gemma(hf_config, expected):
     [(True, True), (False, False)],
 )
 def test_get_model_deepseek_honors_trust_remote_code(
-    monkeypatch, trust_remote_code, expect_bundled_code
+    monkeypatch, tmp_path, trust_remote_code, expect_bundled_code
 ):
     """DeepSeek ships bundled modeling code; --trust_remote_code selects it, else built-in."""
     used = {}
@@ -431,7 +442,7 @@ def test_get_model_deepseek_honors_trust_remote_code(
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
     monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
 
-    example_utils.get_model("checkpoint", device="cpu", trust_remote_code=trust_remote_code)
+    example_utils.get_model(str(tmp_path), device="cpu", trust_remote_code=trust_remote_code)
 
     assert used["path"] == ("bundled" if expect_bundled_code else "builtin")
 
@@ -594,60 +605,3 @@ class _Recipe:
 def test_recipe_layerwise_blocks(recipe, expected):
     """Both recipe shapes normalize to dicts, so callers need no shape-aware access."""
     assert example_utils.recipe_layerwise_blocks(recipe) == expected
-
-
-# --- carry-over of weights the loader could not place -------------------------------------------
-
-
-class _StubAuto:
-    """Minimal stand-in for an ``AutoModelFor*`` class."""
-
-    def __init__(self, unexpected, model=None):
-        self._unexpected = unexpected
-        self._model = model if model is not None else SimpleNamespace()
-        self.saw_output_loading_info = None
-        self.saw_kwargs = None
-
-    def from_pretrained(self, ckpt_path, output_loading_info=False, **kwargs):
-        self.saw_output_loading_info = output_loading_info
-        self.saw_kwargs = kwargs
-        return self._model, {
-            "missing_keys": [],
-            "unexpected_keys": list(self._unexpected),
-            "mismatched_keys": [],
-            "error_msgs": [],
-        }
-
-
-def test_from_pretrained_recording_asks_the_loader_for_its_accounting(tmp_path):
-    """The point of this path: take unexpected_keys from the loader rather than re-deriving it."""
-    auto = _StubAuto(["mtp.layers.0.eh_proj.weight", "mtp.fc.weight"])
-    model = example_utils._from_pretrained_recording(auto, str(tmp_path), device_map="cpu")
-
-    assert auto.saw_output_loading_info is True, "must request the loading info"
-    assert auto.saw_kwargs == {"device_map": "cpu"}, "caller kwargs must pass through untouched"
-    assert model._modelopt_unplaced_source_keys == [
-        "mtp.fc.weight",
-        "mtp.layers.0.eh_proj.weight",
-    ], "recorded sorted, so export order is stable"
-    assert model._modelopt_source_checkpoint == str(tmp_path)
-
-
-def test_from_pretrained_recording_is_quiet_when_everything_was_placed(tmp_path):
-    """Record an empty answer too, so the exporter can tell 'nothing to carry' from 'never asked'."""
-    auto = _StubAuto([])
-    model = example_utils._from_pretrained_recording(auto, str(tmp_path))
-
-    assert model._modelopt_unplaced_source_keys == []
-    assert model._modelopt_source_checkpoint == str(tmp_path)
-
-
-def test_recording_is_architecture_agnostic(tmp_path):
-    """Nothing keys off the string 'mtp': an auxiliary tower is carried by the same rule."""
-    auto = _StubAuto(["aux_tower.blocks.0.weight", "something_else.weight"])
-    model = example_utils._from_pretrained_recording(auto, str(tmp_path))
-
-    assert model._modelopt_unplaced_source_keys == [
-        "aux_tower.blocks.0.weight",
-        "something_else.weight",
-    ]

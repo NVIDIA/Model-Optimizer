@@ -92,7 +92,7 @@ def test_qwen_vision_recipe_calibrates_and_exports(
     scale_names = {name for name in tensor_names if name.endswith(("input_scale", "weight_scale"))}
     assert scale_names
     assert any(name.startswith("model.visual.") for name in scale_names)
-    assert any(".attn.qkv.weight_scale" in name for name in scale_names)
+    assert not any(".blocks." in name for name in scale_names)
     assert any(".merger.linear_fc1.weight_scale" in name for name in scale_names)
     if model_type == "qwen3_vl":
         assert any(

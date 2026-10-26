@@ -24,7 +24,7 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="gemma3",
-        min_transformers_version="4.57",
+        min_transformers_version="5.5",
         export_spec=ExportSpec(weight_plus_one_norm_names=("Gemma3RMSNorm",)),
     )
 )

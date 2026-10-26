@@ -18,7 +18,7 @@ import sys
 
 import pytest
 import torch
-from _test_utils.examples.models import PIXART_PATH, SDXL_PATH
+from _test_utils.examples.models import SDXL_PATH
 from _test_utils.examples.run_command import MODELOPT_ROOT
 from diffusers import DiffusionPipeline, PixArtAlphaPipeline
 
@@ -45,18 +45,25 @@ def test_sdxl_cachify():
     torch.cuda.empty_cache()
 
 
-def test_pixart_cachify():
+def test_pixart_cachify(tiny_pixart_path):
     # Fail test if apex is installed
     if "apex" in subprocess.check_output(["pip", "list"]).decode("utf-8"):
         pytest.xfail("Apex is installed, test is expected to fail")
 
-    pipe = PixArtAlphaPipeline.from_pretrained(PIXART_PATH, torch_dtype=torch.float16).to("cuda")
+    pipe = PixArtAlphaPipeline.from_pretrained(tiny_pixart_path, torch_dtype=torch.float16).to(
+        "cuda"
+    )
     cachify.prepare(pipe, PIXART_DEFAULT_CONFIG)
 
     prompt = "a small cactus with a happy face in the Sahara desert"
     generator = torch.Generator(device="cuda").manual_seed(2946901)
     # 8 steps still exercises the step-modulo cache pattern; this is a runs-without-error smoke test.
-    pipe(prompt=prompt, generator=generator, num_inference_steps=8).images[0]
+    pipe(
+        prompt=prompt,
+        generator=generator,
+        num_inference_steps=8,
+        use_resolution_binning=False,  # the tiny transformer's sample_size has no resolution bin
+    ).images[0]
     # Clear cuda memory as pytest doesnt clear it between tests
     del pipe
     torch.cuda.empty_cache()

@@ -337,12 +337,7 @@ def main():
         "per_device_eval_batch_size": 1,
         "gradient_accumulation_steps": args.grad_accum,
         "learning_rate": args.lr,
-        # transformers 5.15 removed warmup_ratio; from 5.0, a warmup_steps below 1 is a ratio.
-        (
-            "warmup_ratio"
-            if "warmup_ratio" in transformers.TrainingArguments.__dataclass_fields__
-            else "warmup_steps"
-        ): args.warmup_ratio,
+        "warmup_steps": args.warmup_ratio,  # a warmup_steps below 1 is a ratio
         "max_steps": args.max_steps,
         "logging_steps": args.logging_steps,
         "save_steps": args.save_steps,

@@ -54,6 +54,20 @@ def test_pre_quantize_generation_skip(hf_ptq, model_type: str, skips_generation:
 
 
 @pytest.mark.parametrize(
+    ("ids", "mask"), [([0, 0, 1, 2], [0, 0, 1, 1]), ([1, 2, 0, 0], [1, 1, 0, 0])]
+)
+def test_pre_quantize_preview_removes_padding(hf_ptq, ids, mask):
+    calls = []
+    model = SimpleNamespace(generate=lambda ids, **kwargs: calls.append((ids, kwargs)) or ids)
+    args = SimpleNamespace(specdec_offline_dataset=None, skip_generate=False)
+    batch = {"input_ids": torch.tensor([ids]), "attention_mask": torch.tensor([mask])}
+    prompt, attention_mask, _ = hf_ptq.pre_quantize(args, model, "llama", None, [batch], False)
+    assert torch.equal(prompt, torch.tensor([[1, 2]]))
+    assert torch.equal(attention_mask, torch.ones_like(prompt))
+    assert torch.equal(calls[0][0], prompt)
+
+
+@pytest.mark.parametrize(
     ("model_type", "expected"),
     [
         ("t5", True),
@@ -127,8 +141,6 @@ def test_post_quantize_preview_keeps_whole_answer(
         None,
         torch.tensor(generated),
         False,
-        None,
-        None,
         None,
         None,
     )

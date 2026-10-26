@@ -52,6 +52,9 @@ NAMES = sorted(FORMATS)
 DISPATCHED = sorted(IQ_FORMAT_REGISTRY)
 # IQ1 grids are ternary; IQ2 grids hold the magnitudes 8, 25 and 43.
 TERNARY = {"iq1_s", "iq1_m"}
+# Weights sharing one sub-block scale: the formats with an extra 0.19-0.25 bits per weight spend
+# them on scales twice as fine.
+INT8_GROUP_SIZES = {"iq1_s": 32, "iq1_m": 16, "iq2_xxs": 32, "iq2_xs": 16, "iq2_s": 16}
 # name -> (largest representable magnitude, scale anchor at peak-to-RMS 1, 4, 8 and 16), where the
 # anchor is d * native max / amax. IQ1_S is flat; IQ1_M rises with peak-to-RMS and the IQ2 formats
 # fall with it, each clamped at both ends. Written out rather than read from the modules, so a
@@ -295,6 +298,24 @@ def test_decoder_matches_llama_cpp_on_captured_blocks(name):
     assert np.array_equal(decoded.numpy(), expected_values(name))
 
 
+@pytest.mark.parametrize("name", NAMES)
+def test_int8_view_matches_llama_cpp_on_captured_blocks(name):
+    """Integer levels times their group's step are llama.cpp's decoding, exactly."""
+    record = IQ_FORMAT_REGISTRY[name]
+    blocks = torch.from_numpy(packed_blocks(name))
+    count, group_size = blocks.shape[0], INT8_GROUP_SIZES[name]
+
+    levels, steps = record.decode_int8(blocks.reshape(count, 1, -1), torch.tensor([count, 256]))
+
+    assert record.int8_group_size == group_size
+    assert levels.dtype == torch.int8
+    assert set(levels.abs().unique().tolist()) <= (
+        {8, 25, 43} if name not in TERNARY else {1, 7, 9}
+    )
+    decoded = levels.float().reshape(count, -1, group_size) * steps.unsqueeze(-1)
+    assert np.array_equal(decoded.reshape(count, 256).numpy(), expected_values(name))
+
+
 def test_every_format_has_conformance_vectors():
     """A new format must arrive with blocks captured from a real llama.cpp checkpoint."""
     assert sorted(formats()) == NAMES
@@ -318,3 +339,52 @@ def test_error_decreases_with_bit_width():
 def test_every_registered_format_is_covered():
     """A format registered for dispatch must also be listed here, or it escapes this contract."""
     assert set(IQ_FORMAT_REGISTRY) <= set(FORMATS)
+
+
+# Formats whose encoder takes a per-input-column importance, read from the registry so a format
+# that starts declaring it is covered here.
+WEIGHTED = sorted(name for name, fmt in IQ_FORMAT_REGISTRY.items() if fmt.weighted)
+
+
+def _importance(columns, seed=0):
+    generator = torch.Generator().manual_seed(seed)
+    return torch.randn(columns, generator=generator).mul(1.5).exp()
+
+
+@pytest.mark.parametrize("name", WEIGHTED)
+def test_uniform_importance_matches_the_unweighted_search(name):
+    _, quantize, *_ = _parts(name)
+    weight = torch.randn((8, 512), generator=torch.Generator().manual_seed(0))
+
+    assert torch.equal(quantize(weight, importance=torch.ones(512))[0], quantize(weight)[0])
+
+
+@pytest.mark.parametrize("name", WEIGHTED)
+def test_importance_lowers_the_importance_weighted_error(name):
+    _, quantize, dequantize, *_ = _parts(name)
+    weight = torch.randn((16, 1024), generator=torch.Generator().manual_seed(1))
+    importance = _importance(1024)
+
+    def weighted_error(packed, shape):
+        return (((dequantize(packed, shape, dtype=torch.float32) - weight) ** 2) * importance).sum()
+
+    unweighted = weighted_error(*quantize(weight))
+    weighted = weighted_error(*quantize(weight, importance=importance))
+    assert weighted < 0.75 * unweighted
+
+
+@pytest.mark.parametrize("name", WEIGHTED)
+@pytest.mark.parametrize(
+    ("importance", "match"),
+    [
+        (torch.ones(256), "must be a floating-point \\[512\\] vector"),
+        (torch.ones(512, dtype=torch.int64), "must be a floating-point \\[512\\] vector"),
+        (-torch.ones(512), "must be finite and non-negative"),
+        (torch.full((512,), float("nan")), "must be finite and non-negative"),
+    ],
+)
+def test_rejects_invalid_importance(name, importance, match):
+    _, quantize, *_ = _parts(name)
+
+    with pytest.raises(ValueError, match=match):
+        quantize(torch.randn(4, 512), importance=importance)
