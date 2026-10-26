@@ -1,4 +1,4 @@
-# AA-LCR eval for Qwen3.6-35B-A3B. See README section 5 for the task/metric table.
+# AA-LCR eval for Qwen3.6-35B-A3B. See README.md in this directory for the task/metric table.
 #
 # Set `execution.hostname`, `execution.account` and `deployment.checkpoint_path` (BF16, W4A4 PTQ or QAD)
 # before running. Serves BF16 and NVFP4 unchanged: vLLM reads the FP8 KV-cache setting from the

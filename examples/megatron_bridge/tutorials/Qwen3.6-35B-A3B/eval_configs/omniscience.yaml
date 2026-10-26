@@ -1,5 +1,5 @@
-# AA-Omniscience (public set) eval for Qwen3.6-35B-A3B: knowledge recall and calibration. See README
-# "Knowledge recall and calibration".
+# AA-Omniscience (public set) eval for Qwen3.6-35B-A3B: knowledge recall and calibration. See the tutorial
+# README, "Knowledge recall and calibration".
 #
 # Set `execution.hostname`, `execution.account` and `deployment.checkpoint_path` (BF16, W4A4 PTQ or QAD)
 # before running. Serves BF16 and NVFP4 unchanged: vLLM reads the FP8 KV-cache setting from the
