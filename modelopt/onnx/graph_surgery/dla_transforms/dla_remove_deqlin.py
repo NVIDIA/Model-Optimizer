@@ -38,6 +38,7 @@ from ..utils.graph_utils import (
     check_to_apply_transpose,
     get_node_attr_i,
 )
+from .dla_graph_cleanup import _subgraph_captures
 
 # ── Zero-point types that trigger the skip rule ──────────────────────────────
 _CONV_SKIP_ZP = frozenset(
@@ -122,6 +123,7 @@ def _apply_remove_deqlin(model: onnx.ModelProto) -> onnx.ModelProto:
     """Replace eligible DequantizeLinear nodes with pre-computed float32 initializers."""
     graph = model.graph
     cache = GraphCache(graph)
+    captured = _subgraph_captures(graph)
     local_functions = {
         (function.domain, function.name, function.overload) for function in model.functions
     }
@@ -155,6 +157,8 @@ def _apply_remove_deqlin(model: onnx.ModelProto) -> onnx.ModelProto:
             continue  # data input is not a static initializer — skip
 
         dq_output = node.output[0]
+        if dq_output in captured:
+            continue
 
         # Fetch scale and zero-point initializers (inputs 1 and 2)
         scale_init = cache.get_init(node.input[1]) if len(node.input) > 1 else None

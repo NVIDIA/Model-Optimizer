@@ -228,3 +228,120 @@ def test_later_refusal_restores_earlier_planning_initializers():
     with pytest.raises(ValueError, match="per-tensor"):
         _apply_reshape_qdq_reduce_sum(first)
     assert first.SerializeToString() == before
+
+
+def _attach_if_capture(model, tensor, shape, dtype=TensorProto.FLOAT):
+    """Attach a checked control-flow output that captures the requested outer tensor."""
+    branch = helper.make_graph(
+        [helper.make_node("Identity", [tensor], ["branch_output"])],
+        "branch",
+        [],
+        [helper.make_tensor_value_info("branch_output", dtype, shape)],
+    )
+    model.graph.input.append(helper.make_tensor_value_info("condition", TensorProto.BOOL, []))
+    model.graph.node.append(
+        helper.make_node(
+            "If",
+            ["condition"],
+            ["capture_output"],
+            name="capture",
+            then_branch=branch,
+            else_branch=copy.deepcopy(branch),
+        )
+    )
+    model.graph.output.append(helper.make_tensor_value_info("capture_output", dtype, shape))
+    onnx.checker.check_model(model, full_check=True)
+
+
+@pytest.mark.parametrize(
+    ("pattern", "tensor"),
+    [
+        ("plain", "reshaped"),
+        ("fallback", "reshaped"),
+        ("qdq", "reshaped"),
+        ("qdq", "quantized"),
+        ("qdq", "dequantized"),
+        ("transpose", "reshaped"),
+        ("transpose", "transposed"),
+    ],
+)
+def test_reshape_refuses_captured_intermediates(pattern, tensor):
+    """Reject removal of captured intermediate names and restore all planned initializers."""
+    model, feeds = _make_model(pattern)
+    shape = (
+        [2, 1, 3, 4, 5]
+        if pattern == "transpose"
+        else [2, 1, 3, 3 if pattern == "fallback" else 2, 4]
+    )
+    if tensor == "transposed":
+        shape = [2, 3, 1, 5, 4]
+    _attach_if_capture(
+        model, tensor, shape, TensorProto.UINT8 if tensor == "quantized" else TensorProto.FLOAT
+    )
+    feeds["condition"] = np.asarray(True)
+    ReferenceEvaluator(model).run(None, feeds)
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="captur"):
+        _transform(pattern)(model)
+    assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("pattern", ["plain", "fallback", "qdq", "transpose"])
+def test_reshape_preserves_captured_terminal_outputs(pattern):
+    """Allow a captured terminal output when the replacement recreates the same name."""
+    model, feeds = _make_model(pattern)
+    shape = [dim.dim_value for dim in model.graph.output[0].type.tensor_type.shape.dim]
+    _attach_if_capture(model, "Y", shape)
+    expected = {
+        condition: ReferenceEvaluator(model).run(
+            None, {**feeds, "condition": np.asarray(condition)}
+        )
+        for condition in [False, True]
+    }
+    transformed = _transform(pattern)(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    for condition, references in expected.items():
+        for actual, reference in zip(
+            ReferenceEvaluator(transformed).run(
+                None, {**feeds, "condition": np.asarray(condition)}
+            ),
+            references,
+        ):
+            np.testing.assert_array_equal(actual, reference)
+
+
+@pytest.mark.parametrize("chained", [False, True])
+def test_terminal_five_dimensional_target_is_not_an_overlap(chained):
+    """Distinguish an unmatched terminal 5D target from two genuinely overlapping triples."""
+    model, feeds = _make_model("transpose")
+    target = next(tensor for tensor in model.graph.initializer if tensor.name == "target")
+    target.CopyFrom(numpy_helper.from_array(np.asarray([2, 3, 1, 5, 4], np.int64), name="target"))
+    model.graph.output[0].CopyFrom(
+        helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 3, 1, 5, 4])
+    )
+    if chained:
+        model.graph.node.extend(
+            [
+                helper.make_node("Transpose", ["Y"], ["again"], name="again", perm=[0, 2, 1, 4, 3]),
+                helper.make_node("Reshape", ["again", "last_target"], ["Z"], name="last"),
+            ]
+        )
+        model.graph.initializer.append(
+            numpy_helper.from_array(np.asarray([2, 3, 5, 4], np.int64), name="last_target")
+        )
+        model.graph.output[0].CopyFrom(
+            helper.make_tensor_value_info("Z", TensorProto.FLOAT, [2, 3, 5, 4])
+        )
+    onnx.checker.check_model(model, full_check=True)
+    expected = ReferenceEvaluator(model).run(None, feeds)
+    before = model.SerializeToString()
+    if chained:
+        with pytest.raises(ValueError, match="overlap"):
+            _apply_reshape_transpose_reshape(model)
+        assert model.SerializeToString() == before
+    else:
+        transformed = _apply_reshape_transpose_reshape(model)
+        onnx.checker.check_model(transformed, full_check=True)
+        np.testing.assert_array_equal(
+            ReferenceEvaluator(transformed).run(None, feeds)[0], expected[0]
+        )

@@ -26,6 +26,7 @@ from .dla_5d_reshape_to_4d import (
     _is_5d_reshape_candidate,
     _known_non_scalar_control,
 )
+from .dla_graph_cleanup import _subgraph_captures
 from .dla_reorder_nodes import priority_topological_order
 
 __all__ = []
@@ -51,9 +52,17 @@ def _follower(cache, output, op_type):
 
 def _replace(graph, replacements):
     """Apply planned replacements without copying untouched payloads and order late controls."""
+    if not replacements:
+        return
     removed_outputs = {
         output for node in graph.node if id(node) in replacements for output in node.output
     }
+    added_outputs = {
+        output for nodes in replacements.values() for node in nodes for output in node.output
+    }
+    removed_captures = (removed_outputs - added_outputs) & _subgraph_captures(graph)
+    if removed_captures:
+        raise ValueError(f"Cannot rewrite captured tensors: {sorted(removed_captures)}")
     positions = {output: index for index, node in enumerate(graph.node) for output in node.output}
     needs_reorder = any(
         positions.get(name, -1) > index and name not in removed_outputs
@@ -204,10 +213,10 @@ def _reshape_reduce_sum(model, *, quantized):
                 replacements[id(original)] = []
             replacements[id(reshape)] = nodes
             count += 1
+        _replace(graph, replacements)
     except Exception:
         del graph.initializer[initializer_count:]
         raise
-    _replace(graph, replacements)
     return model
 
 
@@ -222,22 +231,22 @@ def _apply_reshape_transpose_reshape(model):
         for first in graph.node:
             if not _is_5d_reshape_candidate(cache, first) or "_transformed" in first.name:
                 continue
-            if id(first) in replacements:
-                raise ValueError(f"{first.name!r}: overlapping reshape patterns")
             transpose = _follower(cache, first.output[0], "Transpose")
             if transpose is None:
                 continue
             last = _follower(cache, transpose.output[0], "Reshape")
             if last is None:
                 continue
+            if id(first) in replacements:
+                raise ValueError(f"{first.name!r}: overlapping reshape patterns")
             removed, added = _build_transpose_replacement_or_raise(
                 model, first, [], transpose, set(cache.init_names), count, cache
             )
             replacements.update({id(node): [] for node in removed})
             replacements[id(first)] = added
             count += 1
+        _replace(graph, replacements)
     except Exception:
         del graph.initializer[initializer_count:]
         raise
-    _replace(graph, replacements)
     return model

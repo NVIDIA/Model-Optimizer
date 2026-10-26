@@ -51,7 +51,6 @@ No DQ nodes                        → graph unchanged, ORT parity
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 
 import numpy as np
 import onnx
@@ -63,8 +62,6 @@ from modelopt.onnx.graph_surgery.dla_transforms import dla_remove_deqlin as _mod
 
 pytest.importorskip("onnxruntime", reason="onnxruntime required for ORT parity checks")
 
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-_SAVED_MODELS_DIR = _REPO_ROOT / "scratch_space" / "remove_deqlin_test_models"
 _OPSET_VERSION = 21
 _MAX_IR_VERSION_FOR_ORT = 10
 
@@ -875,3 +872,77 @@ def test_unknown_matmul_layout_keeps_quantized_weight():
     _apply(model)
     assert model.SerializeToString() == before
     np.testing.assert_array_equal(ReferenceEvaluator(model).run(None, feeds)[0], expected[0])
+
+
+@pytest.mark.parametrize("depth", [1, 2])
+@pytest.mark.parametrize("direct_consumer", [False, True])
+def test_dequantization_preserves_nested_captures(depth, direct_consumer):
+    """Preserve DQ outputs captured by nested control flow with or without direct uses."""
+    shape = [2, 3]
+    branch = helper.make_graph(
+        [helper.make_node("Identity", ["dequantized"], ["branch_output"])],
+        "branch",
+        [],
+        [_vi("branch_output", TensorProto.FLOAT, shape)],
+    )
+    if depth == 2:
+        branch = helper.make_graph(
+            [
+                helper.make_node(
+                    "If",
+                    ["condition"],
+                    ["nested"],
+                    then_branch=branch,
+                    else_branch=copy.deepcopy(branch),
+                )
+            ],
+            "nested_branch",
+            [],
+            [_vi("nested", TensorProto.FLOAT, shape)],
+        )
+    nodes = [
+        helper.make_node("DequantizeLinear", ["data", "scale", "zero"], ["dequantized"], name="dq")
+    ]
+    outputs = [_vi("Y", TensorProto.FLOAT, shape)]
+    if direct_consumer:
+        nodes.append(helper.make_node("Identity", ["dequantized"], ["direct"], name="direct"))
+        outputs.append(_vi("direct", TensorProto.FLOAT, shape))
+    nodes.append(
+        helper.make_node(
+            "If",
+            ["condition"],
+            ["Y"],
+            name="capture",
+            then_branch=branch,
+            else_branch=copy.deepcopy(branch),
+        )
+    )
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "captured_dq",
+            [_vi("condition", TensorProto.BOOL, [])],
+            outputs,
+            initializer=[
+                numpy_helper.from_array(np.arange(6, dtype=np.uint8).reshape(shape), name="data"),
+                numpy_helper.from_array(np.asarray(0.5, np.float32), name="scale"),
+                numpy_helper.from_array(np.asarray(0, np.uint8), name="zero"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+    )
+    _clamp_ir(model)
+    onnx.checker.check_model(model, full_check=True)
+    references = {
+        condition: ReferenceEvaluator(model).run(None, {"condition": np.asarray(condition)})
+        for condition in [False, True]
+    }
+    before = model.SerializeToString()
+    _apply(model)
+    assert model.SerializeToString() == before
+    onnx.checker.check_model(model, full_check=True)
+    for condition, expected in references.items():
+        for actual, reference in zip(
+            ReferenceEvaluator(model).run(None, {"condition": np.asarray(condition)}), expected
+        ):
+            np.testing.assert_array_equal(actual, reference)
