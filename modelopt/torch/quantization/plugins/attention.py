@@ -52,7 +52,9 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
     model_module = inspect.getmodule(attention_cls)
     head = ast.parse(source_code)
 
-    bmm_ops = ("matmul", "bmm", "baddbmm")
+    # No baddbmm: patch() wires args[0] and args[1], which miss its batch1 and batch2 operands
+    # (torch.baddbmm passes the additive input first, and Bloom passes them as keywords)
+    bmm_ops = ("matmul", "bmm")
     sdpa_ops = ("scaled_dot_product_attention",)
 
     def is_bmm(node):
@@ -71,6 +73,12 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
 
     def is_bin_matmul(node):
         return isinstance(node, ast.BinOp) and isinstance(node.op, ast.MatMult)
+
+    def walk_post_order(node):
+        # Source order, children first; expects the q/k score matmul before the matmul consuming it
+        for child in ast.iter_child_nodes(node):
+            yield from walk_post_order(child)
+        yield node
 
     def patch(node, quantizer_names, transpose=False):
         for index, quantizer_name in enumerate(quantizer_names):
@@ -165,7 +173,7 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
     bmm_nodes = []
     sdpa_nodes = []
     bin_matmul_nodes = []
-    for node in ast.walk(head):
+    for node in walk_post_order(head):
         if is_bmm(node):
             bmm_nodes.append(node)
         if is_sdpa(node):
@@ -186,16 +194,16 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
         # after transpose, the quantization will be per-token, i.e.,
         # self.k_bmm_quantizer(key_states.transpose(-1, -2).transpose(-1, -2)).transpose(-1, -2)
         # removing the additional transpose is doable but not trivial
-        patch(bmm_nodes[0], quantizer_names=(None, "v_bmm_quantizer"))
-        patch(bmm_nodes[1], quantizer_names=("q_bmm_quantizer", "k_bmm_quantizer"), transpose=True)
+        patch(bmm_nodes[0], quantizer_names=("q_bmm_quantizer", "k_bmm_quantizer"), transpose=True)
+        patch(bmm_nodes[1], quantizer_names=(None, "v_bmm_quantizer"))
         print("Patching 2 BMM/Matmul operators with quantizers")
     if len(bin_matmul_nodes) == 2:
         patch_binop(
-            bin_matmul_nodes[1],
+            bin_matmul_nodes[0],
             quantizer_names=("q_bmm_quantizer", "k_bmm_quantizer"),
             transpose=True,
         )
-        patch_binop(bin_matmul_nodes[0], quantizer_names=(None, "v_bmm_quantizer"))
+        patch_binop(bin_matmul_nodes[1], quantizer_names=(None, "v_bmm_quantizer"))
         print("Patching 2 @ operators with quantizers")
 
     if len(sdpa_nodes) == 1:
