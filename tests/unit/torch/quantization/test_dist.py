@@ -276,7 +276,7 @@ def _tensor_parallel_sync_helper(rank, size, case):
         linear._is_column_parallel = True
         if case in _TP_UNSYNCED_BLOCK_SIZES:
             linear.input_quantizer.block_sizes = _TP_UNSYNCED_BLOCK_SIZES[case]
-        elif case in _MADE_PER_TENSOR:
+        elif case in (*_MADE_PER_TENSOR, "axis-configured-after-the-forward"):
             linear.input_quantizer.block_sizes = _TP_UNSYNCED_BLOCK_SIZES["per-token-block-sizes"]
         synced = [linear.input_quantizer]
     # A rank left waiting for a peer that skips the sync gives up in seconds on this group.
@@ -293,13 +293,15 @@ def _tensor_parallel_sync_helper(rank, size, case):
             linear.input_quantizer.set_from_attribute_config({"block_sizes": None})
         elif case == "assigned-per-tensor":
             linear.input_quantizer.block_sizes = None
+        elif case == "axis-configured-after-the-forward":  # keeps the per-token block sizes
+            linear.input_quantizer.set_from_attribute_config({"axis": None})
 
     try:
         max_calibrate(model, forward_loop)
     finally:
         dist.destroy_process_group(tp_group)
     for quantizer in synced:
-        if case in _TP_UNSYNCED_BLOCK_SIZES:
+        if case in _TP_UNSYNCED_BLOCK_SIZES or case == "axis-configured-after-the-forward":
             assert (getattr(quantizer, "_amax", None) is not None) == (rank == 0)
         else:
             assert quantizer.amax is not None
@@ -313,8 +315,9 @@ def test_a_rank_without_amax_still_joins_the_tensor_parallel_sync(cpu_dist_worke
     cpu_dist_workers.run(_tensor_parallel_sync_helper, case=case)
 
 
-@pytest.mark.parametrize("case", list(_TP_UNSYNCED_BLOCK_SIZES))
+@pytest.mark.parametrize("case", [*_TP_UNSYNCED_BLOCK_SIZES, "axis-configured-after-the-forward"])
 def test_a_rank_without_amax_skips_the_tensor_parallel_sync_its_peers_skip(cpu_dist_workers, case):
     """Block quantizers are not synced across tensor parallelism, as judged alike by a rank whose
-    forward turned the block sizes into an axis and by one that never ran it."""
+    forward turned the block sizes into an axis and by one that never ran it, also after a config
+    that leaves the block sizes in place."""
     cpu_dist_workers.run(_tensor_parallel_sync_helper, case=case)

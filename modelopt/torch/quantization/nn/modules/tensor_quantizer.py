@@ -164,7 +164,7 @@ class TensorQuantizer(nn.Module):
         "_original_shape",
         "_block_reshape_size",
         "_padding",
-        "_axis_from_block_sizes",
+        "_consumed_block_sizes",
         # Extra flags added by huggingface
         "_is_hf_initialized",
         # Extra flags added by accelerate
@@ -275,6 +275,14 @@ class TensorQuantizer(nn.Module):
             "constant_amax": ("_constant_amax", _constant_amax_setter),
         }
 
+        consumed = getattr(self, "_consumed_block_sizes", None)
+        if consumed is not None and {"axis", "block_sizes"} & set(attribute_cfg.keys()):
+            # A new layout starts from the configured one the forward rewrote, which a rank that
+            # never ran the forward still holds, so every rank ends in the same layout.
+            self._axis, self._block_sizes, self._consumed_block_sizes = None, consumed, None
+            if getattr(self, "_calibrator", None) is not None:
+                self._calibrator._axis = None
+
         for attribute, val in attribute_cfg.items():
             assert attribute in QuantizerAttributeConfig.model_fields, (
                 f"{attribute} is not a valid `TensorQuantizer` attribute"
@@ -282,14 +290,6 @@ class TensorQuantizer(nn.Module):
             _tq_attribute_name, _setter = _custom_setters.get(
                 attribute, (f"_{attribute}", lambda v: v)
             )
-            if attribute in ("axis", "block_sizes"):  # configured, not derived by the forward
-                if getattr(self, "_axis_from_block_sizes", False):
-                    # The derived axis goes with the block sizes it came from: a rank that never
-                    # ran the forward has none.
-                    self._axis = None
-                    if getattr(self, "_calibrator", None) is not None:
-                        self._calibrator._axis = None
-                self._axis_from_block_sizes = False
             setattr(self, _tq_attribute_name, _setter(val))
 
         if isinstance(attribute_cfg, dict) and attribute_cfg == {"enable": False}:
@@ -450,7 +450,7 @@ class TensorQuantizer(nn.Module):
     def block_sizes(self, value):
         self._axis = None
         self._block_sizes = value
-        self._axis_from_block_sizes = False
+        self._consumed_block_sizes = None
 
     @property
     def bias(self):
@@ -1112,12 +1112,12 @@ class TensorQuantizer(nn.Module):
             axis = tuple(k if k >= 0 else k + x.dim() for k in block_sizes if isinstance(k, int))
             self.axis = tuple(i for i in range(x.dim()) if i not in axis) or None
 
-            # remove block_sizes
+            # remove block_sizes, keeping them for the tensor-parallel amax sync and for a later
+            # configuration, so that both treat this quantizer as on a rank that never ran this
+            # forward and still holds them: the axis can read per-tensor (block sizes spanning
+            # every dimension)
             self._block_sizes = None
-            # The tensor-parallel amax sync skips per-channel block sizes. A rank that never ran
-            # this forward still reads them; this one reads this flag, as its axis can read
-            # per-tensor (block sizes spanning every dimension).
-            self._axis_from_block_sizes = True
+            self._consumed_block_sizes = block_sizes
 
     def _sanitize_export_amax(self, amax: torch.Tensor) -> torch.Tensor:
         """Replace zero/NaN amax entries with ``maxbound`` so exported scales stay positive.

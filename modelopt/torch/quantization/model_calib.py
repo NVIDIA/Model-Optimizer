@@ -494,9 +494,9 @@ def max_calibrate(
                 )
             return
         # sync is not needed for block quantization. Judged alike on every rank: a rank whose forward
-        # turned per-channel block sizes into an axis is flagged, as that axis reads per-tensor when
-        # they span every dimension, and a rank that never ran the forward still holds them.
-        if getattr(quantizer, "_axis_from_block_sizes", False):
+        # turned per-channel block sizes into an axis keeps them aside, as that axis reads per-tensor
+        # when they span every dimension, and a rank that never ran the forward still holds them.
+        if getattr(quantizer, "_consumed_block_sizes", None) is not None:
             return
         block_sizes = quantizer.block_sizes
         if block_sizes is not None:
