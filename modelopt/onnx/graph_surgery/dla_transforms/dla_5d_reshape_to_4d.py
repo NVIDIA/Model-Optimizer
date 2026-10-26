@@ -20,8 +20,7 @@
 all subgraph replacements in discovery order.
 
 Reduce followers use merge-(n-1,n) → ``Slice`` x N → optional ``Clip`` / Q→DQ **per branch** →
-per-branch reduce (axes ``[n-1]``, ``keepdims=1``) → ``Concat``, matching
-``scratch_space/verify_reduce_5d_vs_4d_decompose.py``. Reduce axis ``n`` must be ``1..4`` (initializer);
+per-branch reduce (axes ``[n-1]``, ``keepdims=1``) → ``Concat``. Reduce axis ``n`` must be ``1..4`` (initializer);
 axis ``0`` is rejected. ``keepdims=1`` on the original op adds ``Unsqueeze`` at axis ``n``.
 
 Unsupported followers raise ``ValueError`` with ``op_type`` and node ``name``.
@@ -232,7 +231,7 @@ def _duplicate_clip_qdq_chain(
 def _infer_transpose_path_slice_axis(
     cache: GraphCache, input_tensor: str, num_slices: int, *, ctx: str
 ) -> int:
-    """Require the axis-zero layout used by the reference decomposition."""
+    """Require the leading input dimension to match the number of slices."""
     in_shape = cache.get_shape(input_tensor)
     if in_shape is None or not in_shape or in_shape[0] != num_slices:
         raise ValueError(
@@ -242,7 +241,7 @@ def _infer_transpose_path_slice_axis(
 
 
 def _transpose_path_concat_axis_4d(slice_axis: int, transpose_perm: list[int]) -> int:
-    """Concat axis for 4D branch outputs (scratch: axis 0 when perm[0]==0 and input is sliced on axis 0)."""
+    """Concatenate branches along the preserved leading axis."""
     if slice_axis != 0:
         msg = (
             "5D reshape→transpose path: non-zero Slice axis is not supported "
@@ -257,7 +256,7 @@ def _transpose_path_concat_axis_4d(slice_axis: int, transpose_perm: list[int]) -
 def _build_transpose_replacement_or_raise(
     model, reshape_node, mid_a, tr, unique_initializer: set, counter: int, cache: GraphCache
 ) -> tuple[list, list]:
-    """Slice-based decomposition aligned with scratch_space ``transform_reshape_transpose_reshape``.
+    """Build the slice-based transpose decomposition from reshape targets and permutation.
 
     Shapes and permutation come from graph initializers: slice count ``shape1[0]``, 4D reshape ``shape1[1:]``,
     final reshape ``shape2`` (any rank), 4D transpose perm ``perm[1:]-1``. Optional ``Clip`` / Q→DQ middleware is
@@ -455,7 +454,7 @@ def _build_reduce_replacement_or_raise(
     ``Clip`` / Q→DQ middleware is duplicated **per branch** (after each Slice, before each Reduce)
     so that quantisation is applied to each chunk individually, preserving the original semantics.
 
-    Matches ``scratch_space/verify_reduce_5d_vs_4d_decompose.py`` for reduce axis ``n`` in ``{1,2,3,4}``.
+    Supports reduce axis ``n`` in ``{1,2,3,4}``.
     Axis ``0`` is not supported (no observed models); raises ``ValueError``.
     """
     graph = model.graph
@@ -667,7 +666,7 @@ def _apply_5d_reshape_to_4d(model, *, skip_symbolic_shape_inference: bool = Fals
     """Replace matching 5D ``Reshape`` subgraphs, restoring the model if planning fails.
 
     Unless ``skip_symbolic_shape_inference`` is true, runs
-    :func:`~modelopt.onnx.graph_surgery.utils.symbolic_shape_inference.run_ort_symbolic_shape_inference`
+    :func:`~modelopt.onnx.graph_surgery.utils.graph_utils.infer_shapes`
     first so intermediate tensor shapes are available where needed.
 
     Plan disjoint replacements before applying them with :func:`batch_replace_nodes`.

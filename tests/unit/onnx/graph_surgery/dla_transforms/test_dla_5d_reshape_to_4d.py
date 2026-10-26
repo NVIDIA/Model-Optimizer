@@ -293,6 +293,73 @@ def test_overridable_structure_refuses_before_mutation(control, skip_inference):
     assert model.SerializeToString() == before
 
 
+@pytest.mark.parametrize("branch", ["transpose", "reduce"])
+@pytest.mark.parametrize("runtime", ["reference", "ort"])
+def test_single_element_qdq_controls_survive_axis_length_change(branch, runtime):
+    """Execute single-element QDQ controls when lowering changes the default-axis length."""
+    nodes = [
+        helper.make_node("Reshape", ["X", "shape5"], ["reshaped"], name="reshape5"),
+        helper.make_node(
+            "QuantizeLinear", ["reshaped", "scale", "zero"], ["quantized"], name="quantize"
+        ),
+        helper.make_node(
+            "DequantizeLinear", ["quantized", "scale", "zero"], ["dequantized"], name="dequantize"
+        ),
+    ]
+    initializers = [
+        _init("shape5", np.asarray([2, 1, 3, 4, 5], np.int64)),
+        _init("scale", np.asarray([0.25], np.float32)),
+        _init("zero", np.asarray([7], np.uint8)),
+    ]
+    if branch == "transpose":
+        nodes.extend(
+            [
+                helper.make_node(
+                    "Transpose",
+                    ["dequantized"],
+                    ["transposed"],
+                    name="transpose",
+                    perm=[0, 1, 3, 4, 2],
+                ),
+                helper.make_node("Reshape", ["transposed", "shape_out"], ["Y"], name="reshape_out"),
+            ]
+        )
+        initializers.append(_init("shape_out", np.asarray([2, 1, 12, 5], np.int64)))
+        output_shape = [2, 1, 12, 5]
+    else:
+        nodes.append(
+            helper.make_node("ReduceMin", ["dequantized", "axes"], ["Y"], name="reduce", keepdims=0)
+        )
+        initializers.append(_init("axes", np.asarray([2], np.int64)))
+        output_shape = [2, 1, 4, 5]
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "single_element",
+            [helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 1, 3, 20])],
+            [helper.make_tensor_value_info("Y", TensorProto.FLOAT, output_shape)],
+            initializer=initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 19)],
+    )
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"X": np.arange(120, dtype=np.float32).reshape(2, 1, 3, 20) / 16 - 2}
+    transformed = _apply_5d_reshape_to_4d(copy.deepcopy(model), skip_symbolic_shape_inference=True)
+    onnx.checker.check_model(transformed, full_check=True)
+    assert sum(node.op_type == "Slice" for node in transformed.graph.node) == (
+        2 if branch == "transpose" else 1
+    )
+    if runtime == "ort":
+        np.testing.assert_array_equal(
+            _run_ort(transformed, feeds)["Y"], _run_ort(model, feeds)["Y"]
+        )
+    else:
+        np.testing.assert_array_equal(
+            ReferenceEvaluator(transformed).run(None, feeds)[0],
+            ReferenceEvaluator(model).run(None, feeds)[0],
+        )
+
+
 class TestDla5dReshapeTo4dTranspose:
     @pytest.mark.parametrize(
         ("opset", "skip_inference"), [(5, True), (7, False), (9, False), (9, True)]
