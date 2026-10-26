@@ -39,8 +39,7 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuant
 from modelopt.torch.utils import import_plugin, warn_rank_0
 from modelopt.torch.utils.distributed import gather_state_dicts
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
-    copy_hf_ckpt_remote_code,
-    copy_non_safetensor_files_from_ckpt,
+    copy_non_model_files,
     load_multimodal_components,
 )
 
@@ -83,7 +82,6 @@ from .quant_utils import (
 
 with import_plugin("transformers", verbose=False):
     import transformers
-    from transformers import AutoProcessor
 
 
 has_mcore = False
@@ -93,9 +91,11 @@ with import_plugin("megatron"):
     from megatron.core.models.multimodal.llava_model import LLaVAModel
     from megatron.core.parallel_state import (
         get_data_parallel_rank,
+        get_expert_data_parallel_rank,
         get_expert_model_parallel_group,
         get_expert_model_parallel_rank,
         get_expert_model_parallel_world_size,
+        get_expert_tensor_parallel_rank,
         get_pipeline_model_parallel_rank,
         get_pipeline_model_parallel_world_size,
         get_tensor_model_parallel_rank,
@@ -127,6 +127,10 @@ class GPTModelExporter:
             pretrained model hosted inside a model repo on huggingface.co; or
             a *directory* containing model weights saved using
             [`~PreTrainedModel.save_pretrained`], e.g., `./my_model_directory/`.
+            The source's non-model files (tokenizer, processor, generation config, remote code)
+            are copied into the export from a local directory only; for a model ID they are
+            skipped with a warning. Get a local copy first with
+            `modelopt.torch.export.ensure_local_checkpoint` to include them.
         export_extra_modules: If True, export extra modules like medusa_heads or
             eagle_module. Otherwise, only export the base model.
         dtype: The weights data type to export the unquantized layers.
@@ -161,6 +165,8 @@ class GPTModelExporter:
 
         self._state_dict = OrderedDict()
         self._layer_state_dicts = OrderedDict()
+        # Keys of the SequentialMLP experts held by this rank (all ranks' differ at EP>1).
+        self._local_expert_keys: set[str] = set()
         self._hf_pretrained_model_name = pretrained_model_name_or_path
         self._hf_config = transformers.AutoConfig.from_pretrained(
             pretrained_model_name_or_path, trust_remote_code=trust_remote_code
@@ -346,24 +352,24 @@ class GPTModelExporter:
                 raise NotImplementedError(
                     "Megatron GGML unified export currently requires pipeline model parallel size 1"
                 )
-        # SequentialMLP rules index experts by local position, so EP>1 would collide. Agreed across
-        # ranks so that stages without such experts don't block in the collectives below.
+        # Packed local-expert rules hand over all of a rank's experts as one, so EP>1 would collide.
+        # Agreed across ranks so that stages without such experts don't block in the collectives below.
         if (
             torch.distributed.is_initialized()
             and get_expert_model_parallel_world_size() > 1
+            and self.rules.get("use_packed_local_experts", False)
             and self._any_rank(any(hasattr(m, "local_experts") for m in self.model.modules()))
         ):
             raise NotImplementedError(
-                "Export at expert parallel size > 1 needs grouped-GEMM experts; "
-                "export SequentialMLP (--no_moe_grouped_gemm) checkpoints at EP=1."
+                "Export at expert parallel size > 1 does not support packed local experts; "
+                "export at EP=1."
             )
         # One layer-shard writer per pipeline stage: other TP / DP / EP ranks hold the same layers
         # (EP>1 ranks hold no gathered experts at all), and writing them too would race on the same
         # files. Unlike is_writer_rank (one global writer of save_directory metadata), this has no
         # PP term on purpose: each stage owns a disjoint slice of the layer shards.
-        is_stage_layer_writer = (
-            tp_rank == 0 and get_data_parallel_rank() == 0 and get_expert_model_parallel_rank() == 0
-        )
+        ep_rank = get_expert_model_parallel_rank()
+        is_stage_layer_writer = tp_rank == 0 and get_data_parallel_rank() == 0 and ep_rank == 0
 
         # Main export process
         layer_state_dicts = self.layer_state_dicts
@@ -387,47 +393,20 @@ class GPTModelExporter:
 
         if is_last_stage_main_rank:
             if is_writer_rank:
+                self._hf_config.save_pretrained(save_directory)
+                # Everything else the source ships -- tokenizer, processor, generation config,
+                # remote code -- is carried over verbatim rather than regenerated, from local disk
+                # only: a Hub ID's cache holds just what loading needed.
                 if self._hf_pretrained_model_name is not None:
                     if os.path.isdir(self._hf_pretrained_model_name):
-                        copy_non_safetensor_files_from_ckpt(
-                            self._hf_pretrained_model_name, save_directory
-                        )
+                        copy_non_model_files(self._hf_pretrained_model_name, save_directory)
                     else:
-                        copy_hf_ckpt_remote_code(self._hf_pretrained_model_name, save_directory)
-                self._hf_config.save_pretrained(save_directory)
-                try:
-                    generation_config = transformers.GenerationConfig.from_pretrained(
-                        self._hf_pretrained_model_name,
-                        trust_remote_code=self.trust_remote_code,
-                    )
-                    # Pass it through unvalidated: save_pretrained rejects some shipped configs
-                    # (e.g. GLM-5.3-Flash sets top_p without do_sample) on newer transformers.
-                    generation_config.to_json_file(
-                        os.path.join(save_directory, "generation_config.json")
-                    )
-                except OSError:
-                    pass
-                # Hub-ID / None source: fetch tokenizer files via AutoTokenizer.
-                if self._hf_pretrained_model_name is None or not os.path.isdir(
-                    self._hf_pretrained_model_name
-                ):
-                    try:
-                        tokenizer = transformers.AutoTokenizer.from_pretrained(
-                            self._hf_pretrained_model_name,
-                            trust_remote_code=self.trust_remote_code,
+                        warn_rank_0(
+                            f"{self._hf_pretrained_model_name!r} is not a local directory, so its "
+                            "non-model files (tokenizer, processor, remote code, ...) were not "
+                            "copied into the export. Get a local copy first with "
+                            "modelopt.torch.export.ensure_local_checkpoint and pass that directory."
                         )
-                        tokenizer.save_pretrained(save_directory)
-                    except (OSError, TypeError, ValueError, ImportError):
-                        pass
-                try:
-                    # Load and save preprocessor config from the original model
-                    processor = AutoProcessor.from_pretrained(
-                        self._hf_pretrained_model_name, trust_remote_code=self.trust_remote_code
-                    )
-                    if hasattr(processor, "image_processor"):
-                        processor.image_processor.save_pretrained(save_directory)
-                except (OSError, ValueError, ImportError):
-                    pass
 
             # The live MTP export runs EP collectives, so every last-stage main rank joins it; the
             # collective-free copy from the source checkpoint only runs on the writer.
@@ -486,6 +465,10 @@ class GPTModelExporter:
         # Bracket the writer's config.json read-modify-write with barriers so peers
         # never observe a truncated file (also ensures export_dir exists).
         torch.distributed.barrier()
+        if is_writer_rank:
+            # Expert shards left by an earlier export at a larger EP would enter the index.
+            for stale in Path(save_directory).glob("model-*-of-*-ep*.*"):
+                stale.unlink()
         config_json_file = save_directory + "/config.json"
         if is_writer_rank and self._hf_quant_config and os.path.exists(config_json_file):
             with open(config_json_file) as f:
@@ -497,11 +480,30 @@ class GPTModelExporter:
                 json.dump(config_dict, f, indent=4)
         torch.distributed.barrier()
 
+        # SequentialMLP experts are not gathered: each other EP rank writes its own to extra shards.
+        # Expert ownership follows the expert grid (EP x ETP x expert-DP), not the dense TP rank.
+        writes_own_experts = (
+            get_expert_tensor_parallel_rank() == 0
+            and get_expert_data_parallel_rank() == 0
+            and ep_rank > 0
+            and bool(self._local_expert_keys)
+        )
+        name_template = "model-{:05d}-of-{:05d}"
+        if writes_own_experts:
+            # Layers without local experts (e.g. dense ones) would write empty shards.
+            layer_state_dicts = {
+                i: experts
+                for i, sd in layer_state_dicts.items()
+                if (experts := {k: v for k, v in sd.items() if k in self._local_expert_keys})
+            }
+            name_template += f"-ep{ep_rank:03d}"
         save_safetensors_by_layer_index(
-            layer_state_dicts=layer_state_dicts if is_stage_layer_writer else {},
+            layer_state_dicts=layer_state_dicts
+            if is_stage_layer_writer or writes_own_experts
+            else {},
             total_layers=self.model.config.num_layers,
             save_directory=save_directory,
-            name_template="model-{:05d}-of-{:05d}",
+            name_template=name_template,
         )
 
         # Every rank has written its shards; one rank now checks nothing was dropped. The result is
@@ -785,13 +787,18 @@ class GPTModelExporter:
                         )
                 if hasattr(layer.mlp.experts, "local_experts"):
                     if not self.rules.get("use_packed_local_experts", False):
-                        for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
+                        keys_before = set(self._state_dict)
+                        # Global ids: at EP>1 each rank holds a different slice of the experts.
+                        for expert_id, expert in zip(
+                            layer.mlp.local_expert_indices, layer.mlp.experts.local_experts
+                        ):
                             self.rules["local_experts.linear_fc1"](
                                 expert.linear_fc1, layer_id, expert_id, is_mtp=is_mtp
                             )
                             self.rules["local_experts.linear_fc2"](
                                 expert.linear_fc2, layer_id, expert_id, is_mtp=is_mtp
                             )
+                        self._local_expert_keys |= set(self._state_dict) - keys_before
                     else:
                         # For llama 4, in hf unified checkpoint, all local experts share one scale
                         self.rules["local_experts.linear_fc1"](
@@ -2305,6 +2312,10 @@ def export_mcore_gpt_to_hf(
             pretrained model hosted inside a model repo on huggingface.co; or
             a *directory* containing model weights saved using
             [`~PreTrainedModel.save_pretrained`], e.g., `./my_model_directory/`.
+            The source's non-model files (tokenizer, processor, generation config, remote code)
+            are copied into the export from a local directory only; for a model ID they are
+            skipped with a warning. Get a local copy first with
+            `modelopt.torch.export.ensure_local_checkpoint` to include them.
         export_extra_modules: If True, export extra modules like medusa_heads or
             eagle_module. Otherwise, only export the base model.
         dtype: The weights data type to export the unquantized layers.

@@ -59,7 +59,8 @@ onnx = [
     "lief",
     "ml_dtypes",
     "onnx-graphsurgeon>=0.6.1",
-    "onnx~=1.21.0",
+    "onnx~=1.21.0; platform_system != 'Windows'",
+    "onnx~=1.23.2; platform_system == 'Windows'",
     "onnxconverter-common~=1.16.0",
     # Python 3.10 support for ModelOpt ONNX is deprecated and will be removed in a future release.
     # Native Windows ARM64 does not support ModelOpt ONNX on Python 3.10.
@@ -120,6 +121,7 @@ dev-docs = [
     "sphinx-inline-tabs==2025.12.21.14; python_version >= '3.12'",
     "shibuya~=2026.7.0; python_version >= '3.12'",
     "sphinx-togglebutton~=0.4.0; python_version >= '3.12'",
+    "sphinxext-rediraffe~=0.3.0; python_version >= '3.12'",
 ]
 dev-test = [
     "coverage[toml]~=7.14.0", # a1_coverage.pth for subprocess tracking requires this
@@ -370,6 +372,7 @@ timeout_func_only = true
 markers = [
     "integration: Tests that require external services or other non-hermetic dependencies",
     "manual: Only run when --run-manual is given",
+    "nightly: Only run when --run-nightly is given (the scheduled and on-demand CI)",
     "release: Regression tests that should be run before every release",
 ]
 

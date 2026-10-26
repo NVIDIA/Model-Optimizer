@@ -897,6 +897,10 @@ def to_quantized_weight(
             # Clear GPU cache to avoid pontential GPU OOM issues for large models.
             clear_cuda_cache()
             return (weight / weights_scaling_factor.unsqueeze(-1)).to(torch.float8_e4m3fn)
+        # A 0-d scale would not promote a bf16 weight, so the division would round in bf16 instead of
+        # float32 like fake quantization. A 1-d scale promotes in-kernel, without a float32 copy.
+        if weights_scaling_factor.dim() == 0:
+            weights_scaling_factor = weights_scaling_factor.reshape(1)
         return (weight / weights_scaling_factor).to(torch.float8_e4m3fn)
 
     if quantization in [QUANTIZATION_INT8_SQ, QUANTIZATION_INT8_WO]:
@@ -1706,7 +1710,7 @@ def _get_carried_over_module_names(model: nn.Module) -> list[str]:
 
     Prefers ``_modelopt_carried_over_names``, which the export records once it knows what it
     actually wrote -- carried tensors plus the off-index weight files copied verbatim. Those files
-    are never ``unexpected_keys``, so the unplaced list alone would miss GLM-4.7's
+    are never among the unplaced source keys, so the unplaced list alone would miss GLM-4.7's
     ``mtp.safetensors`` and leave its tensors in the export with nothing in ``exclude_modules``.
 
     A state-dict key is ``<module path>.<parameter name>``, so the owning module is the key with
@@ -1760,6 +1764,8 @@ def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
 def get_quant_config(
     model: nn.Module,
     is_modelopt_qlora: bool = False,
+    *,
+    include_kv_cache: bool = True,
 ) -> dict[str, Any]:
     """Generate quantization config for a model.
 
@@ -1769,6 +1775,8 @@ def get_quant_config(
     Args:
         model: The PyTorch model to make config for.
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
+        include_kv_cache: Infer KV-cache metadata from attention quantizers. Disable
+            for diffusion models, whose attention quantizers do not represent a cache.
 
     Returns:
         Dictionary containing the quantization configuration
@@ -1885,7 +1893,7 @@ def get_quant_config(
             for quantizer in (k_quantizer, v_quantizer, output_quantizer)
             if is_kv_boundary and quantizer is not None and quantizer.is_enabled
         ]
-        if enabled_kv_quantizers and is_language_model_module:
+        if include_kv_cache and enabled_kv_quantizers and is_language_model_module:
             module_kv_quant = get_kv_cache_dtype(module)
             if module_kv_quant != QUANTIZATION_NONE:
                 kv_cache_formats.add(module_kv_quant)

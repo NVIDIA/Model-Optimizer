@@ -24,8 +24,6 @@ The 126 candidates are constructed as ``valid_fp8_e4m3_value / 448`` (see
 the per-block scale is the identity, so the kernel can use
 ``scale = candidate * global_amax / 6.0`` without an explicit FP8 cast — making it
 runnable on any CUDA GPU with Triton (no ``tl.float8e4nv`` requirement).
-
-Tile shape (``BLOCKS_PER_PROGRAM``) and ``num_warps`` are autotuned per ``N_BLOCKS``.
 """
 
 import torch
@@ -43,18 +41,13 @@ __all__ = [
 ]
 
 
-# Selected from a (BLOCKS_PER_PROGRAM, num_warps) sweep on B300:
-#   BPP=16,nw=2: 6.06 ms   BPP=32,nw=4: 6.06 ms   BPP=64,nw=8: 5.08 ms
-# The smaller-tile entries cover cases where N_BLOCKS is small enough that BPP=64
-# would underfill the SMs.
-_FP8_SWEEP_AUTOTUNE_CONFIGS = [
-    triton.Config({"BLOCKS_PER_PROGRAM": 16}, num_warps=2),
-    triton.Config({"BLOCKS_PER_PROGRAM": 32}, num_warps=4),
-    triton.Config({"BLOCKS_PER_PROGRAM": 64}, num_warps=8),
-]
+# Fastest in a (BLOCKS_PER_PROGRAM, num_warps) sweep on B300 (BPP=16/32: 6.06 ms, BPP=64: 5.08 ms)
+# and within noise of the others on small shapes. Hard-coded since autotuning compiles every
+# candidate (~10 s each) on first use.
+_FP8_SWEEP_BLOCKS_PER_PROGRAM = 64
+_FP8_SWEEP_NUM_WARPS = 8
 
 
-@triton.autotune(configs=_FP8_SWEEP_AUTOTUNE_CONFIGS, key=["N_BLOCKS"])
 @triton.jit
 def _fp8_scale_sweep_kernel(
     x_ptr,  # [N_BLOCKS * BLOCK_SIZE], any float dtype (loaded as fp32)
@@ -148,7 +141,7 @@ def nvfp4_fp8_scale_sweep(
     candidates = fp8_scale_candidates(x.device).to(dtype=torch.float32)
     global_amax_f32 = global_amax.detach().to(device=x.device, dtype=torch.float32).reshape(1)
 
-    grid = lambda meta: (triton.cdiv(n_blocks, meta["BLOCKS_PER_PROGRAM"]),)
+    grid = (triton.cdiv(n_blocks, _FP8_SWEEP_BLOCKS_PER_PROGRAM),)
     with torch.cuda.device(x.device):
         _fp8_scale_sweep_kernel[grid](
             x_flat,
@@ -158,6 +151,8 @@ def nvfp4_fp8_scale_sweep(
             n_blocks,
             BLOCK_SIZE=block_size,
             NUM_CANDIDATES=int(candidates.numel()),
+            BLOCKS_PER_PROGRAM=_FP8_SWEEP_BLOCKS_PER_PROGRAM,
+            num_warps=_FP8_SWEEP_NUM_WARPS,
         )
     return best_amax
 

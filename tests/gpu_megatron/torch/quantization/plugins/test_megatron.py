@@ -67,12 +67,14 @@ from megatron.core.transformer.moe.router import TopKRouter
 import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
     restore_sharded_modelopt_state,
     save_sharded_modelopt_state,
 )
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
+from modelopt.torch.quantization.ggml.common import PINNED_PAYLOAD_PREFIX
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.plugins.megatron import (
@@ -99,6 +101,7 @@ from modelopt.torch.quantization.qtensor import QTensorWrapper
 from modelopt.torch.quantization.utils import is_quantized_linear
 from modelopt.torch.quantization.utils.calib_utils import GPTQHelper
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+from modelopt.torch.utils.plugins.megatron_generate import megatron_prefill
 
 try:
     from megatron.core.extensions.transformer_engine import TERowParallelLinear
@@ -688,6 +691,7 @@ def _test_fp8_real_quantize_helper(rank, size):
     assert real_quant_mem < cur_mem
 
 
+@skip_flaky_on_blackwell
 def test_fp8_real_quantize(dist_workers):
     dist_workers.run(_test_fp8_real_quantize_helper)
 
@@ -1686,6 +1690,77 @@ def _test_mcore_layerwise_calibration_layers_do_not_mutate_decoder(rank, size):
 
 def test_mcore_layerwise_calibration_layers_do_not_mutate_decoder(dist_workers_size_1):
     dist_workers_size_1.run(_test_mcore_layerwise_calibration_layers_do_not_mutate_decoder)
+
+
+class _VLMWrapper(MegatronModule):
+    """A VLM root that, like Megatron-Bridge's GLM-5.3-Flash model, has no ``decoder`` of its own."""
+
+    def __init__(self, language_model):
+        super().__init__(config=language_model.config)
+        self.language_model = language_model
+
+    def forward(self, *args, **kwargs):
+        # Post-processes the language model's output, as real wrappers do.
+        return self.language_model(*args, **kwargs).float()
+
+
+def _test_layerwise_calibrate_vlm_text_forward_loop(drive_wrapper, rank, size):
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    language_model = _gpt_model_provider(tp_size=1, hidden_size=64)
+    model = _VLMWrapper(language_model)
+    tokens = torch.randint(0, language_model.vocab_size, (2, 16), device="cuda")
+
+    # Text calibration in examples/megatron_bridge/quantize.py drives the inner language model; image-text
+    # calibration drives the wrapper, so both patched forwards are on the stack when the stop is raised.
+    def forward_loop(_model):
+        megatron_prefill(
+            model if drive_wrapper else language_model, tokens, skip_return_logits=True
+        )
+
+    config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    config["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
+    mtq.quantize(model, config, forward_loop)
+
+    calibrated = [m for m in language_model.decoder.modules() if is_quantized_linear(m)]
+    assert calibrated
+    assert all(m.input_quantizer.amax is not None for m in calibrated)
+
+
+@skip_flaky_on_blackwell
+@pytest.mark.parametrize("drive_wrapper", [False, True])
+def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1, drive_wrapper):
+    dist_workers_size_1.run(partial(_test_layerwise_calibrate_vlm_text_forward_loop, drive_wrapper))
+
+
+def _test_ggml_gptq_payload_sharded_state_dict(tmp_path, rank, size):
+    initialize_for_megatron(tensor_model_parallel_size=size, seed=SEED)
+    model_ref = _gpt_model_provider(tp_size=size)
+    model_test = _gpt_model_provider(tp_size=size)
+
+    config = load_recipe("general/ptq/iq2_xs").quantize.model_dump()
+    gptq = next(algo for algo in config["algorithm"] if algo["method"] == "gptq")
+    config["algorithm"] = {**gptq, "layerwise": {"enable": False}}
+    mtq.quantize(model_ref, config, get_forward(model_ref))
+    pinned = {k: v for k, v in model_ref.state_dict().items() if PINNED_PAYLOAD_PREFIX in k}
+    assert pinned, "GPTQ pinned no GGML payload"
+
+    save_distributed_checkpoint(tmp_path, model_ref)
+    save_sharded_modelopt_state([model_ref], tmp_path)
+    restore_sharded_modelopt_state([model_test], tmp_path)
+    model_test = load_distributed_checkpoint(tmp_path, model_test)
+
+    restored = model_test.state_dict()
+    matches = torch.tensor(
+        all(k in restored and torch.equal(v, restored[k]) for k, v in pinned.items()), device="cuda"
+    )
+    # Agree across ranks before asserting, so a mismatch on one rank fails instead of hanging.
+    torch.distributed.all_reduce(matches, op=torch.distributed.ReduceOp.MIN)
+    assert matches.item(), "GPTQ's pinned GGML payloads did not survive the checkpoint"
+
+
+def test_ggml_gptq_payload_sharded_state_dict(dist_workers, tmp_path):
+    """GPTQ's pinned GGML codes are saved, so a reload exports them instead of re-encoding."""
+    dist_workers.run(partial(_test_ggml_gptq_payload_sharded_state_dict, tmp_path))
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])

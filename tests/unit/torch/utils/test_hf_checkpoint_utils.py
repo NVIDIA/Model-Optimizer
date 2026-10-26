@@ -56,18 +56,20 @@ def test_copy_non_safetensor_files_from_ckpt_supports_additional_exclusions(tmp_
     (src_dir / "reasoning_parser.py").write_text("parser")
 
     default_dst = tmp_path / "default"
-    copy_non_safetensor_files_from_ckpt(src_dir, default_dst)
+    with pytest.deprecated_call():
+        copy_non_safetensor_files_from_ckpt(src_dir, default_dst)
     assert not (default_dst / "model.safetensors").exists()
     assert not (default_dst / "model.safetensors.index.json").exists()
     assert (default_dst / "pytorch_model.bin").exists()
     assert (default_dst / "stats.npy").exists()
 
     filtered_dst = tmp_path / "filtered"
-    copy_non_safetensor_files_from_ckpt(
-        src_dir,
-        filtered_dst,
-        exclude_patterns=("*.bin", "*.npy"),
-    )
+    with pytest.deprecated_call():
+        copy_non_safetensor_files_from_ckpt(
+            src_dir,
+            filtered_dst,
+            exclude_patterns=("*.bin", "*.npy"),
+        )
     assert (filtered_dst / "reasoning_parser.py").exists()
     assert not (filtered_dst / "pytorch_model.bin").exists()
     assert not (filtered_dst / "stats.npy").exists()
@@ -87,7 +89,7 @@ def test_copy_non_safetensor_files_from_ckpt_continues_after_copy_failure(tmp_pa
         return original_copy2(source, *args, **kwargs)
 
     monkeypatch.setattr(hf_checkpoint_utils.shutil, "copy2", copy2)
-    with pytest.warns(UserWarning, match="bad.py"):
+    with pytest.deprecated_call(), pytest.warns(UserWarning, match="bad.py"):
         copied_files = copy_non_safetensor_files_from_ckpt(src_dir, tmp_path / "dst")
 
     assert copied_files == ["good.py"]
@@ -815,11 +817,14 @@ def test_ensure_local_checkpoint_returns_a_local_dir_untouched(monkeypatch, tmp_
 
 
 class _FakeHfApi:
-    """``HfApi`` whose ``repo_info`` raises ``error``, or succeeds when it is None."""
+    """``HfApi`` whose ``repo_info`` records the options it is given in ``asked``, then raises
+    ``error``, or succeeds when it is None."""
 
     error: Exception | None = None
+    asked: list
 
-    def repo_info(self, repo_id):
+    def repo_info(self, repo_id, **kwargs):
+        self.asked.append(kwargs)
         if self.error is not None:
             raise self.error
 
@@ -834,51 +839,78 @@ def _fake_hub(monkeypatch, tmp_path, error=None):
         return str(tmp_path)
 
     monkeypatch.setattr(hf_checkpoint_utils, "snapshot_download", fake_snapshot_download)
-    monkeypatch.setattr(hf_checkpoint_utils, "HfApi", type("Api", (_FakeHfApi,), {"error": error}))
+    api = type("Api", (_FakeHfApi,), {"error": error, "asked": []})
+    monkeypatch.setattr(hf_checkpoint_utils, "HfApi", api)
     return calls
+
+
+def _hub_options(tmp_path):
+    """A pinned revision, and the token and cache to fetch it with. They must reach every Hub call,
+    or the default branch's snapshot would be returned for the revision; ``repo_info`` takes all
+    but the cache."""
+    return {"revision": "abc123", "token": "hf_x", "cache_dir": str(tmp_path / "cache")}
 
 
 def test_ensure_local_checkpoint_fetches_a_hub_id_in_full(monkeypatch, tmp_path):
     calls = _fake_hub(monkeypatch, tmp_path)
+    options = _hub_options(tmp_path)
 
-    assert hf_checkpoint_utils.ensure_local_checkpoint("org/model") == ("org/model", str(tmp_path))
-    assert calls == [(("org/model",), {})]
+    result = hf_checkpoint_utils.ensure_local_checkpoint("org/model", **options)
+
+    assert result == ("org/model", str(tmp_path))
+    assert hf_checkpoint_utils.HfApi.asked == [{"revision": "abc123", "token": "hf_x"}]
+    assert calls == [(("org/model",), options)]
 
 
 def test_ensure_local_checkpoint_warns_when_only_the_cache_is_left(monkeypatch, tmp_path):
     """snapshot_download falls back to the cache silently; the fallback must be visible."""
     calls = _fake_hub(monkeypatch, tmp_path, error=ConnectionError("no route to host"))
+    options = _hub_options(tmp_path)
 
     with pytest.warns(UserWarning, match="cached snapshot"):
-        result = hf_checkpoint_utils.ensure_local_checkpoint("org/model")
+        result = hf_checkpoint_utils.ensure_local_checkpoint("org/model", **options)
 
     assert result == ("org/model", str(tmp_path))
-    assert calls == [(("org/model",), {"local_files_only": True})]
+    assert hf_checkpoint_utils.HfApi.asked == [{"revision": "abc123", "token": "hf_x"}]
+    assert calls == [(("org/model",), {"local_files_only": True, **options})]
 
 
-def test_ensure_local_checkpoint_uses_the_cache_quietly_when_offline(monkeypatch, tmp_path):
-    """HF_HUB_OFFLINE is the user's choice: do not ask the Hub, and do not warn on every run."""
+@pytest.mark.parametrize("cache_only", ["HF_HUB_OFFLINE", "local_files_only"])
+def test_ensure_local_checkpoint_uses_the_cache_quietly_when_offline(
+    monkeypatch, tmp_path, cache_only
+):
+    """HF_HUB_OFFLINE or local_files_only=True is the user's choice: do not ask the Hub, and do not
+    warn on every run."""
     calls = _fake_hub(monkeypatch, tmp_path, error=AssertionError("the Hub must not be asked"))
-    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    if cache_only == "HF_HUB_OFFLINE":
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    options = _hub_options(tmp_path)
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        result = hf_checkpoint_utils.ensure_local_checkpoint("org/model")
+        result = hf_checkpoint_utils.ensure_local_checkpoint(
+            "org/model", local_files_only=cache_only == "local_files_only", **options
+        )
 
     assert result == ("org/model", str(tmp_path))
-    assert calls == [(("org/model",), {"local_files_only": True})]
+    assert calls == [(("org/model",), {"local_files_only": True, **options})]
 
 
-def test_ensure_local_checkpoint_offline_and_uncached_raises(monkeypatch, tmp_path):
-    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+@pytest.mark.parametrize("cache_only", ["HF_HUB_OFFLINE", "local_files_only"])
+def test_ensure_local_checkpoint_offline_and_uncached_raises(monkeypatch, tmp_path, cache_only):
+    _fake_hub(monkeypatch, tmp_path, error=AssertionError("the Hub must not be asked"))
+    if cache_only == "HF_HUB_OFFLINE":
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
     def not_cached(*args, **kwargs):
         raise hf_hub_errors.LocalEntryNotFoundError("not in cache")
 
     monkeypatch.setattr(hf_checkpoint_utils, "snapshot_download", not_cached)
 
-    with pytest.raises(RuntimeError, match="HF_HUB_OFFLINE is set"):
-        hf_checkpoint_utils.ensure_local_checkpoint("org/model")
+    with pytest.raises(RuntimeError, match=cache_only):
+        hf_checkpoint_utils.ensure_local_checkpoint(
+            "org/model", local_files_only=cache_only == "local_files_only"
+        )
 
 
 def test_ensure_local_checkpoint_names_the_hub_error_when_nothing_is_cached(monkeypatch, tmp_path):

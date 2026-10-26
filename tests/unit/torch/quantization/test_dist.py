@@ -26,6 +26,9 @@ from modelopt.torch.utils import unwrap_model
 def _test_data_parallel_helper(rank, size):
     model = DistributedDataParallel(SimpleLinear())
     unwrapped_model = unwrap_model(model)
+    # Every pool job starts from the same seed: draw different data per rank, as data
+    # parallelism does, so the ranks' amaxes differ unless calibration syncs them.
+    torch.manual_seed(rank)
     calib_data = [unwrapped_model.get_input() for _ in range(2)]
 
     def forward_loop(model):
@@ -34,11 +37,16 @@ def _test_data_parallel_helper(rank, size):
 
     unwrapped_model = mtq.quantize(unwrapped_model, mtq.INT8_DEFAULT_CFG, forward_loop)
 
+    # Check after every rank has joined every all_reduce: a rank that stopped at a mismatch would
+    # leave its peer waiting in the next one.
+    unsynced = []
     for name, module in unwrapped_model.named_modules():
         if isinstance(module, TensorQuantizer) and "output_quantizer" not in name:
             amax = module.amax.clone()
             dist.all_reduce(amax, op=dist.ReduceOp.MAX)
-            assert torch.allclose(amax, module.amax)
+            if not torch.allclose(amax, module.amax):
+                unsynced.append(name)
+    assert not unsynced, f"rank {rank}: amax not synced across data-parallel ranks: {unsynced}"
 
 
 def test_data_parallel(cpu_dist_workers):

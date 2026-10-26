@@ -93,9 +93,9 @@ The saved modelopt checkpoint is similar in architecture to HF models. It can be
 
 For large models, you can export intermediate hidden states to disk and train only the draft model. This significantly reduces GPU memory requirements, but requires several to tens of terabytes of disk storage depending on dataset size.
 
-### Dumpping Hidden States to Disk
+### Dumping Hidden States to Disk
 
-We support two backends for generating base model hidden states. For better effciency, it is recommended to use TRT-LLM:
+We support two backends for generating base model hidden states. For better efficiency, it is recommended to use TRT-LLM:
 
 ```bash
 python collect_hidden_states/compute_hidden_states_trtllm.py \
@@ -138,38 +138,25 @@ For large base models, you can stream hidden states from a live `vllm serve` ins
 The modes above graft a draft head onto the target. The `external` mode instead
 trains an ordinary pretrained causal LM as the draft: it keeps its own embeddings
 and lm_head, the target is never modified, and the result exports as a plain HF
-checkpoint that TRT-LLM, vLLM and SGLang load with no mode-specific support. The
-draft must index the same vocabulary as the target.
+checkpoint that TRT-LLM, vLLM and SGLang load with no mode-specific support.
 
-Training consumes dumped base hidden states, as in the offline flow above. Pass
-`--no-aux-hidden-states` when dumping: this mode never reads them and they
-dominate the dump size. Streaming feeds the same hidden states from a live
-`vllm serve` and is accepted here, though it has not been exercised for this
-mode. Online training is rejected: it produces no cached base outputs for the
-draft to be scored against.
+Dump the target's top-k deployment policy once, then train against it:
 
 ```bash
+python collect_hidden_states/compute_sparse_policy_hf.py \
+  --model $BASE_MODEL --input-data $CONVERSATIONS --output-dir $POLICY_DIR \
+  --top-k 20 --top-p 0.95 --answer-only-loss
+
 torchrun --nproc_per_node 8 main.py \
   --config ../../modelopt_recipes/general/speculative_decoding/external_draft.yaml \
   model.model_name_or_path=$BASE_MODEL \
   draft_model_name_or_path=$DRAFT_MODEL \
-  data.offline_data_path=$HIDDEN_STATES_DIR \
-  external.external_loss=tvd \
+  data.sparse_data_path=$POLICY_DIR \
   training.output_dir=$OUTPUT_DIR
 ```
 
-`external.external_loss` selects the objective:
-
-| value | what it scores |
-|---|---|
-| `soft_ce` | cross-entropy against the base's soft distribution (the EAGLE offline objective) |
-| `tvd` | total-variation distance between the two full distributions |
-| `tvd_deploy` | the same, with both sides put through the serving filter (`external_top_k`, then `external_top_p`) first, so the loss is the acceptance the deployed pair sees |
-
-Under rejection sampling the acceptance probability is exactly `sum(min(p, q))`,
-so `tvd_deploy` is `1 - acceptance` — the deployment metric itself rather than a
-proxy for it. Report which truncation you trained under, since `top_k` and
-`top_p` settings are not interchangeable.
+See [doc/external_draft.md](doc/external_draft.md) for the recipe parameters, the
+dense hidden-state alternative, the objectives, and the cross-tokenizer vocabulary swap.
 
 ## Model Validation
 
@@ -226,7 +213,7 @@ Please refer to [TRT-LLM Doc: Speculative Decoding](https://nvidia.github.io/Ten
 
 Please refer to [VLLM Doc: Speculative Decoding](https://docs.vllm.ai/en/latest/features/spec_decode/) for detailed usage.
 
-Optionally, you can convert the exported checkpoint to contain target model information, which is accepted by vLLM to simplify depployment:
+Optionally, you can convert the exported checkpoint to contain target model information, which is accepted by vLLM to simplify deployment:
 
 ```bash
 python scripts/convert_to_vllm_ckpt.py --input <exported_ckpt> --verifier <target_model> --output <output_dir>

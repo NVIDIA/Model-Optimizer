@@ -6,21 +6,21 @@ license: Apache-2.0
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant
 ---
 
-## NeMo Evaluator Launcher Assistant
+# NeMo Evaluator Launcher Assistant
 
 Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for canaries and full runs; see [Step 3's serving-handoff check](references/launcher-workflow.md#step-3--configure-deployment) for external endpoints.
 
-### Completed-run analysis
+## Completed-run analysis
 
 For completed runs, skip launch/config; use launching-evals for artifacts/analysis
 and apply [run-validation.md](references/run-validation.md) before scores. Its policy
 overrides blanket uncapping and fixed token/context limits.
 
-### Workspace integration
+## Workspace integration
 
 If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-management.md` and reuse existing workspaces (PTQ → checkpoint smoke test → NEL evaluation; carry compatibility requirements into NEL's deployment config).
 
-### Workflow
+## Workflow
 
 ```text
 - [ ] Step 0: Check workspace (if MODELOPT_WORKSPACE_ROOT set)
@@ -38,7 +38,7 @@ If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-managemen
 
 ---
 
-### nel-next path (Terminal-Bench 2.x, SWE-bench, …) — branch here FIRST
+## nel-next path (Terminal-Bench 2.x, SWE-bench, …) — branch here FIRST
 
 A few **agentic** AA benchmarks do **not** run on the currently validated
 `nemo-evaluator-launcher` 0.2.6 path (Steps 1–9 don't apply). They run on **nel-next**
@@ -57,7 +57,7 @@ Steps 1–9 below are currently validated with 0.2.6 — use them for everything
 
 ---
 
-### MRCR (NeMo Gym `simple_agent`) path — branch here too
+## MRCR (NeMo Gym `simple_agent`) path — branch here too
 
 MRCR **does** run on the currently validated 0.2.6 `nel` launcher (as a `nemo_gym`
 task, not nel-next), so Steps 1–9 apply — but it is mechanically special and
@@ -100,43 +100,46 @@ Read only the sections needed for the current stage; retain the dry-run → cana
 full-run gates. Existing configs must pass Step 3's serving-handoff check before Step 8. Paths in that reference are
 relative to this skill directory.
 
-### Step 1 — Prerequisites
+## Step 1 — Prerequisites
 
 Read [Step 1](references/launcher-workflow.md#step-1--prerequisites).
 
-### Step 2 — Build base config (when not using shortcut)
+## Step 2 — Build base config (when not using shortcut)
 
 Read [Step 2](references/launcher-workflow.md#step-2--build-base-config-when-not-using-shortcut).
 
-### Step 3 — Configure deployment
+## Step 3 — Configure deployment
 
 Read [Step 3](references/launcher-workflow.md#step-3--configure-deployment).
 
-### Step 4 — Fill remaining ??? values
+## Step 4 — Fill remaining ??? values
 
 Read [Step 4](references/launcher-workflow.md#step-4--fill-remaining--values).
 
-### Step 5 — Confirm tasks (iterative)
+## Step 5 — Confirm tasks (iterative)
 
 Read [Step 5](references/launcher-workflow.md#step-5--confirm-tasks-iterative).
 
-### Step 6 — Multi-node
+## Step 6 — Multi-node
 
 Read [Step 6](references/launcher-workflow.md#step-6--multi-node).
 
-### Step 7 — Interceptors
+## Step 7 — Interceptors
 
 Read [Step 7](references/launcher-workflow.md#step-7--interceptors).
 
-### Step 7.5 — Container registry auth (SLURM private images only)
+If the user asks to avoid doom loops (looping reasoning), or a canary under a long
+`max_new_tokens` runs far longer than expected, read [doom_loops.md](references/doom_loops.md).
+
+## Step 7.5 — Container registry auth (SLURM private images only)
 
 Read [Step 7.5](references/launcher-workflow.md#step-75--container-registry-auth-slurm-private-images-only).
 
-### Step 8 — Run evaluation (gated dry-run → canary → full)
+## Step 8 — Run evaluation (gated dry-run → canary → full)
 
 Read [Step 8](references/launcher-workflow.md#step-8--run-evaluation-gated-dry-run--canary--full).
 
-### Step 9 — Verify completed run
+## Step 9 — Verify completed run
 
 Apply [run-validation.md](references/run-validation.md)'s **Bounded Evaluation-Failure
 Policy** and **Timeout and Output-Limit Accounting** before reporting scores. For

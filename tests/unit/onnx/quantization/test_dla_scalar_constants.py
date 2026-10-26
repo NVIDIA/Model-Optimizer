@@ -111,6 +111,10 @@ def test_dla_preserves_scalar_operator_constants(
         else:
             assert producers[weight_dq.input[0]].op_type == "QuantizeLinear"
         assert producers[operation.input[0]].op_type == "DequantizeLinear"
+    elif scalar_shape == []:
+        # Rank-0 constants are now always kept unquantized: TensorRT's ONNX parser
+        # rejects a per-tensor Q/DQ on a 0-D input (convertAxis, nbDims == 0).
+        assert scalar_input in constants, "rank-0 scalar operands must stay constants"
     else:
         assert producers[scalar_input].op_type == "DequantizeLinear"
     options = ort.SessionOptions()

@@ -21,9 +21,10 @@ is grafted onto it: it contributes only per-token hidden states, which are
 projected by the base lm_head to obtain teacher logits.
 
 ``external_loss`` selects the objective: ``soft_ce`` matches the Eagle offline
-objective, ``tvd`` is total-variation distance between the two distributions, and
+objective, ``tvd`` is total-variation distance between the two distributions,
 ``tvd_deploy`` applies the serving filter to both sides first so the loss is the
-acceptance the deployed pair sees.
+acceptance the deployed pair sees, and ``tvd_ce`` adds a cross-entropy ranking
+term to ``tvd``.
 """
 
 import copy
@@ -44,7 +45,7 @@ from .modeling_final_norm import _maybe_apply_base_final_norm
 # On the sparse path the base's truncation is baked into the dump, so both TVD
 # variants are computable there; they differ only in whether the *draft* is put
 # through the serving filter too. soft_ce needs full base logits and is dense-only.
-SPARSE_CAPABLE_LOSSES = ("tvd", "tvd_deploy")
+SPARSE_CAPABLE_LOSSES = ("tvd", "tvd_deploy", "tvd_ce")
 
 __all__ = ["SPARSE_CAPABLE_LOSSES", "HFExternalDraftModel"]
 
@@ -234,7 +235,9 @@ class HFExternalDraftModel(ExternalDraftModel):
         if draft_vocab_size != int(base_vocab_size):
             raise ValueError(
                 "External draft and base model must share a vocabulary: draft "
-                f"vocab_size={draft_vocab_size}, base vocab_size={int(base_vocab_size)}."
+                f"vocab_size={draft_vocab_size}, base vocab_size={int(base_vocab_size)}. "
+                "Set external_vocab_swap=true to re-index the draft onto the base "
+                "vocabulary, which rebuilds its embeddings and lm_head."
             )
 
     def validate_tokenizer_against_base(self, draft_tokenizer, base_tokenizer):
@@ -308,6 +311,14 @@ class HFExternalDraftModel(ExternalDraftModel):
             correct = (teacher_top1 == draft_logits.detach().argmax(dim=-1)) & valid
             return correct.sum().float() / valid.sum().clamp_min(1).float()
 
+    def _mix_ce(self, tvd, draft_logits, target, mask):
+        """``tvd_ce``: add CE on ``target``, since bounded TVD ranks in-support tokens weakly."""
+        ce = torch.nn.functional.cross_entropy(
+            draft_logits.float().flatten(0, 1), target.flatten(), reduction="none"
+        ).view_as(mask)
+        ce = (ce * mask).sum() / (mask.sum() + 1e-5)
+        return self.external_tvd_alpha * tvd + self.external_ce_alpha * ce
+
     def _tvd_sparse(self, draft_logits, topk_tok, topk_prob):
         """Plain TVD against the stored teacher policy, over the whole vocabulary.
 
@@ -345,12 +356,16 @@ class HFExternalDraftModel(ExternalDraftModel):
         tok, prob = topk_tok[:, 1:seq], topk_prob[:, 1:seq]
         mask = loss_mask[:, 1:seq].to(draft_logits.dtype)
         denom = mask.sum() + 1e-5
-        tvd = self._tvd_sparse(draft, tok, prob)
-        loss = (tvd * mask).sum() / denom
+        loss = (self._tvd_sparse(draft, tok, prob) * mask).sum() / denom
+        # A row the dump left empty has no teacher top-1: its argmax is slot 0, i.e.
+        # whatever the zero-fill holds. CE and accuracy both skip those rows.
+        teacher_top1 = tok.gather(-1, prob.argmax(-1, keepdim=True)).squeeze(-1)
+        has_mass = mask * (prob.sum(-1) > 0)
+        if self.external_loss == "tvd_ce":
+            loss = self._mix_ce(loss, draft, teacher_top1, has_mass)
         accuracy = None
         if self.external_report_acc:
-            teacher_top1 = tok.gather(-1, prob.argmax(-1, keepdim=True)).squeeze(-1)
-            accuracy = self._top1_accuracy(teacher_top1, draft, mask)
+            accuracy = self._top1_accuracy(teacher_top1, draft, has_mass)
         return loss, accuracy
 
     def compute_loss(self, draft_logits, base_logits, loss_mask, base_predict_tok=None):
@@ -372,7 +387,7 @@ class HFExternalDraftModel(ExternalDraftModel):
         mask = loss_mask[:, :seq_len].to(draft_logits.dtype)
         denom = mask.sum() + 1e-5
 
-        if self.external_loss in ("tvd", "tvd_deploy"):
+        if self.external_loss in ("tvd", "tvd_deploy", "tvd_ce"):
             if self.external_loss == "tvd_deploy":
                 # Both sides through the serving filter, so the loss is the
                 # acceptance the deployed pair will actually see.
@@ -381,6 +396,8 @@ class HFExternalDraftModel(ExternalDraftModel):
                 p = torch.softmax(base_logits.float(), dim=-1)
             q = self._draft_probs(draft_logits)
             loss = (0.5 * (p - q).abs().sum(-1) * mask).sum() / denom
+            if self.external_loss == "tvd_ce":
+                loss = self._mix_ce(loss, draft_logits, base_logits.argmax(-1), mask)
         else:
             # Identical in form to hf_eagle._eagle_loss so switching modes does not
             # silently change the objective.
