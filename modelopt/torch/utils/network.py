@@ -290,7 +290,7 @@ def standardize_named_model_args(
 
     Returns: A tuple (args_normalized, args_with_default) where
         args_normalized is a dictionary of ordered model args where the key represents a unique
-            serialized string based on the the argument's name in the function signature and the
+            serialized string based on the argument's name in the function signature and the
             value contains the actual argument,
         args_with_default is a set indicating whether the argument was retrieved from the default
             value in the function signature of the model's ``forward()`` method or whether the
@@ -533,7 +533,7 @@ def run_forward_loop(
     Args:
         model: The model with which we run forward.
         data_loader: An iterator with data samples.
-        max_iters: Number of batches to run; by default it is infiinite or until ``data_loader``
+        max_iters: Number of batches to run; by default it is infinite or until ``data_loader``
             is exhausted.
         collect_func: A ``Callable`` that takes a batch of data from the ``data_loader``
               as input and returns the input to ``model.forward()`` such that the return value
@@ -598,7 +598,7 @@ def create_param_grad_clear_hook(param):
     """Create a hook to clear gradients for a parameter.
 
     The hook will be fired after the gradient is accumulated for the parameter.
-    Important: For this to work, ``accum_grad`` should be kept alive as longs as this utility is needed.
+    Important: For this to work, ``accum_grad`` should be kept alive as long as this utility is needed.
     """
     # For methods such as AutoQuantize, involving backward -
     # We want to clear parameter gradients as soon as they are computed to save memory

@@ -35,6 +35,10 @@ from safetensors import safe_open
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_mcore_gpt_to_hf_vllm_fq
+from modelopt.torch.export.plugins.vllm_fakequant_hf import (
+    QUANTIZER_RECIPE_FORMAT,
+    QUANTIZER_RECIPE_VERSION,
+)
 from modelopt.torch.export.plugins.vllm_fakequant_megatron import (
     VllmFqGPTModelExporter,
     gather_mcore_vllm_fq_quantized_state_dict,
@@ -45,7 +49,7 @@ from modelopt.torch.quantization.nn import GroupedQuantizer, SequentialQuantizer
 
 def _assert_exported_quantizers(export_dir, expected_names, amax=1.001, disabled_names=()):
     state = torch.load(export_dir / "quantizer_state.pth", weights_only=True, map_location="cpu")
-    recipe = yaml.safe_load((export_dir / "quant_recipe.yaml").read_text())
+    recipe = yaml.safe_load((export_dir / "quant_recipe.yaml").read_text())["quantizers"]
     assert expected_names <= recipe.keys()
     assert {name + "._amax" for name in expected_names} <= state.keys()
     for name in expected_names:
@@ -182,6 +186,13 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
     (source / "quant_recipe.yaml").write_text(
         yaml.safe_dump({stale_quantizer: {"_disabled": True}})
     )
+    # A pre-quantized source (e.g. FP8) describes weights the BF16 export no longer has.
+    config = json.loads((source / "config.json").read_text())
+    config["quantization_config"] = {"quant_method": "fp8", "weight_block_size": [128, 128]}
+    (source / "config.json").write_text(json.dumps(config))
+    (source / "hf_quant_config.json").write_text(
+        json.dumps({"quantization": {"quant_algo": "FP8"}})
+    )
 
     export_dir = tmp_path / "vllm_export"
     exporter = VllmFqGPTModelExporter(model, source, dtype=torch.bfloat16)
@@ -241,6 +252,7 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
     assert stale_quantizer + "._amax" not in state
     assert stale_quantizer not in recipe
     assert {"model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"} <= weight_map.keys()
+    assert "quantization_config" not in json.loads((export_dir / "config.json").read_text())
 
     model.share_embeddings_and_output_weights = True
     for quantizer in model.output_layer.modules():
@@ -251,7 +263,7 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
     (source / "config.json").write_text(json.dumps(config))
     tied_dir = tmp_path / "tied_export"
     export_mcore_gpt_to_hf_vllm_fq(model, source, export_dir=str(tied_dir))
-    tied_recipe = yaml.safe_load((tied_dir / "quant_recipe.yaml").read_text())
+    tied_recipe = yaml.safe_load((tied_dir / "quant_recipe.yaml").read_text())["quantizers"]
     assert not any(name.startswith("lm_head.") for name in tied_recipe)
     assert json.loads((tied_dir / "config.json").read_text())["tie_word_embeddings"]
 
@@ -526,9 +538,18 @@ def _test_cross_rank_quantizer_merge(tmp_path, rank, size):
                 None, {1: {name + "._amax": tensor}}, tmp_path
             )
         if error is None:
-            assert yaml.safe_load((tmp_path / "quant_recipe.yaml").read_text()) == {name: recipe}
+            assert yaml.safe_load((tmp_path / "quant_recipe.yaml").read_text()) == {
+                "format": QUANTIZER_RECIPE_FORMAT,
+                "version": QUANTIZER_RECIPE_VERSION,
+                "quantizers": {name: recipe},
+            }
             state = torch.load(tmp_path / "quantizer_state.pth", weights_only=True)
             torch.testing.assert_close(state[name + "._amax"], tensor, rtol=0, atol=0)
+
+    # No quantizer on any rank: no sidecars, and those of the export above are removed.
+    gather_mcore_vllm_fq_quantizer_recipe({}, tmp_path)
+    assert not (tmp_path / "quant_recipe.yaml").exists()
+    assert not (tmp_path / "quantizer_state.pth").exists()
 
     failure_dir = tmp_path / "write_failure"
     if rank == 0:
@@ -692,7 +713,7 @@ def _test_mcore_vllm_grouped_export(tmp_path, quant_cfg, device, rank, size):
 
     _assert_grouped_weights(export_dir, expected_weights)
     quantizer_state = torch.load(export_dir / "quantizer_state.pth", weights_only=True)
-    recipe = yaml.safe_load((export_dir / "quant_recipe.yaml").read_text())
+    recipe = yaml.safe_load((export_dir / "quant_recipe.yaml").read_text())["quantizers"]
     assert not any("weight_quantizer" in key for key in quantizer_state)
     assert {key.rsplit(".", 1)[0] for key in quantizer_state} <= recipe.keys()
     assert not any("{}" in key for key in recipe)

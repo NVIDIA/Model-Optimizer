@@ -62,13 +62,21 @@ Reverse rules are derived from the model's conversion mapping via transformers'
 (in-memory-name) behavior rather than emit a silently-wrong checkpoint.
 """
 
+import logging
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
+from pathlib import Path
 from typing import Any
 
 import torch
+from huggingface_hub import try_to_load_from_cache
+from huggingface_hub.errors import HFValidationError
+
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import indexed_weight_map
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "QuantConversionUnsupportedError",
@@ -321,6 +329,7 @@ def apply_reverse_rules(
     split_rules: list[SplitRule],
     rename_rules: list[RenameRule],
     merge_rules: list[_MergeRule] | None = None,
+    source_keys: set[str] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Apply quant-aware reverse conversion: tensor transforms first, then renames.
 
@@ -329,6 +338,10 @@ def apply_reverse_rules(
     ``merge_rules`` is an internal hook for model-derived rules: unlike the public
     rename/split descriptors, each rule retains a live transformers converter for
     scoped matching. Call :func:`revert_weight_conversion_quant_aware` to derive them.
+
+    ``source_keys`` are the tensor names of the checkpoint the model was loaded from.
+    They let a rename that would otherwise invent a name resolve to the spelling the
+    checkpoint actually carries; omitting them applies the rules unchanged.
     """
     out = dict(state_dict)
     for rule in split_rules:
@@ -336,10 +349,10 @@ def apply_reverse_rules(
     for merge_rule in merge_rules or []:
         _apply_merge_rule(out, merge_rule)
 
-    compiled = _compile_rename_rules(rename_rules)
+    rename = _SourceAwareRenamer(rename_rules, source_keys)
     renamed: dict[str, torch.Tensor] = {}
     for key, value in out.items():
-        new_key = _apply_rename_rules(key, compiled)
+        new_key = rename(key)
         if new_key in renamed:
             raise QuantConversionUnsupportedError(f"rename collision on '{new_key}'")
         renamed[new_key] = value
@@ -354,11 +367,13 @@ def revert_weight_conversion_quant_aware(model, state_dict: dict[str, torch.Tens
     when the mapping uses an op that cannot be reversed quant-aware yet, so the
     caller can fall back to the legacy behavior.
     """
-    split_rules, merge_rules, rename_rules, expert_fused_leaves = _build_reverse_rules(model)
+    split_rules, merge_rules, rename_rules, expert_fused_leaves, source_keys = _build_reverse_rules(
+        model
+    )
     if not split_rules and not merge_rules and not rename_rules:
         return state_dict
     _assert_experts_pre_expanded(state_dict, expert_fused_leaves)
-    return apply_reverse_rules(state_dict, split_rules, rename_rules, merge_rules)
+    return apply_reverse_rules(state_dict, split_rules, rename_rules, merge_rules, source_keys)
 
 
 def build_reverse_name_mapper(model, *, tensor_keys: bool = False):
@@ -382,15 +397,15 @@ def build_reverse_name_mapper(model, *, tensor_keys: bool = False):
     :class:`QuantConversionUnsupportedError` when the mapping can't be reversed, so the
     caller can keep the in-memory names for BOTH weights and config (mutually consistent).
     """
-    _, merge_rules, rename_rules, _ = _build_reverse_rules(model)
+    _, merge_rules, rename_rules, _, source_keys = _build_reverse_rules(model)
     if not merge_rules and not rename_rules:
         return None
-    compiled = _compile_rename_rules(rename_rules)
+    rename = _SourceAwareRenamer(rename_rules, source_keys)
 
     def _apply(text: str) -> str:
         for rule in merge_rules:
             text, _ = rule.converter.rename_source_key(text)
-        return _apply_rename_rules(text, compiled)
+        return rename(text)
 
     def _map(name: str) -> str:
         if tensor_keys:
@@ -504,6 +519,160 @@ def _scope_prefixes(rev) -> tuple[str, ...]:
     return tuple(seen)
 
 
+_SAFETENSORS_INDEX = "model.safetensors.index.json"
+_SAFETENSORS_SINGLE = "model.safetensors"
+
+
+def _checkpoint_dir(path: str, revision: str | None = None) -> Path | None:
+    """Local directory holding ``path``'s safetensors checkpoint, or ``None``.
+
+    ``path`` is a :attr:`name_or_path`, so it is either a local directory or a hub id.
+    A hub id is resolved against the local HF cache only -- this never downloads, and
+    an uncached hub id simply yields ``None``.
+
+    ``revision`` pins the lookup to the commit the model was actually loaded from.
+    Without it the cache lookup defaults to ``main``, which for a model loaded from a
+    pinned revision could read a *different* snapshot's names and filter the wrong
+    rules. ``None`` keeps the hub default, which is correct when the revision is
+    unknown because nothing else identifies the snapshot.
+
+    A non-default ``cache_dir`` is *not* covered: ``transformers`` does not record it
+    on the model, so a model loaded from one resolves here against the default cache
+    and most likely finds nothing -- which leaves the guard inert and behavior
+    unchanged, the safe direction.
+    """
+    directory = Path(path)
+    if directory.is_dir():
+        return directory
+    for filename in (_SAFETENSORS_INDEX, _SAFETENSORS_SINGLE):
+        try:
+            cached = try_to_load_from_cache(path, filename, revision=revision)
+        except HFValidationError:  # not a well-formed hub id either
+            return None
+        # Returns the file path on a hit, and a sentinel object (not a str) for a
+        # cached "this file does not exist" result.
+        if isinstance(cached, str):
+            return Path(cached).parent
+    return None
+
+
+def _source_checkpoint_keys(model) -> set[str] | None:
+    """Tensor names of the checkpoint ``model`` was loaded from, or ``None``.
+
+    ``None`` means "unknown" and leaves the reverse conversion exactly as it was: it is
+    returned for a model built from a config, a hub id absent from the local HF cache,
+    or a checkpoint layout this does not recognize.
+    """
+    config = getattr(model, "config", None)
+    path = getattr(model, "name_or_path", None) or getattr(config, "_name_or_path", None)
+    if not path:
+        return None
+    try:
+        # ``transformers`` records the resolved commit on the config; a hub-id lookup
+        # must use it rather than falling back to ``main``.
+        directory = _checkpoint_dir(path, getattr(config, "_commit_hash", None))
+        if directory is None:
+            return None
+        # ``indexed_weight_map`` is the repo's one index reader: ``weight_map`` for a
+        # sharded checkpoint, ``safe_open`` keys for a single file, ``{}`` for neither.
+        # An empty result means "nothing recorded", which is exactly our unknown.
+        return set(indexed_weight_map(directory)) or None
+    except Exception as exc:  # unreadable or malformed checkpoint -> treat as unknown
+        # Deliberately no path and no exception text: SECURITY.md warns that logs may
+        # carry sensitive paths, and the type alone identifies the failure mode.
+        logger.debug("Cannot read source checkpoint keys: %s", type(exc).__name__)
+        return None
+
+
+def _non_idempotent_renames(rules: list[RenameRule], source_keys: set[str] | None) -> set[int]:
+    """Indices of reverse renames that only ever invent names the source lacks.
+
+    A reverse rename maps an in-memory name back to its source-checkpoint name, so it
+    must be a *no-op* on names that are already in source form -- the same invariant
+    :func:`_idempotent_pattern` enforces for prefix rules. A rule that breaks it may be
+    inventing a name rather than restoring one.
+
+    That happens when a model declares a backwards-compatibility *load* rename as a
+    reversible ``WeightRenaming``. Reversing it rewrites the canonical name to a legacy
+    spelling the published checkpoint never used, and a deployment loader keyed on the
+    canonical name then cannot find the tensor.
+
+    A rule is flagged only on positive evidence: it must rewrite at least one source key,
+    and every source key it rewrites must land on a name absent from the checkpoint.
+
+    Flagging is not a verdict. A rule can be *needed* for one namespace and wrong for
+    another -- a mixed-namespace checkpoint whose sparse layers are stored under one
+    container name and whose dense and vision layers are already stored under the
+    in-memory one. :class:`_SourceAwareRenamer` therefore decides per key, and a flagged
+    rule still applies wherever it produces a name the checkpoint actually carries.
+    """
+    if not source_keys:
+        return set()
+    suspect: set[int] = set()
+    for index, rule in enumerate(rules):
+        pattern = re.compile(_idempotent_pattern(rule.pattern, rule.repl))
+        rewrites_a_source_key = False
+        every_result_absent = True
+        for key in source_keys:
+            mapped = _sub_scoped(pattern, rule.repl, key, rule.scope_prefixes)
+            if mapped == key:
+                continue
+            rewrites_a_source_key = True
+            if mapped in source_keys:
+                every_result_absent = False
+                break
+        if rewrites_a_source_key and every_result_absent:
+            suspect.add(index)
+    return suspect
+
+
+class _SourceAwareRenamer:
+    """Apply reverse renames, preferring names the source checkpoint actually carries.
+
+    The reverse of a rename is ambiguous: given a canonical in-memory name, both the
+    canonical and a legacy spelling are valid pre-images, and nothing inside the model
+    breaks the tie. The checkpoint the model was loaded from does, so a key whose
+    rewritten name is absent from it is resolved against the rules that do not invent
+    names (see :func:`_non_idempotent_renames`).
+
+    Deciding per key rather than per rule matters: no rule is ever discarded, so a rule
+    that a mixed-namespace checkpoint needs for one set of layers keeps applying there
+    while the same rule stops rewriting layers already stored in their in-memory form.
+
+    Without source evidence, or when neither candidate names a source tensor, the full
+    rule chain applies unchanged -- the behavior this class replaced.
+    """
+
+    def __init__(self, rename_rules: list[RenameRule], source_keys: set[str] | None):
+        self._full = _compile_rename_rules(rename_rules)
+        self._source_keys = source_keys or set()
+        suspect = _non_idempotent_renames(rename_rules, source_keys)
+        self._reduced = (
+            _compile_rename_rules(
+                [rule for index, rule in enumerate(rename_rules) if index not in suspect]
+            )
+            if suspect
+            else None
+        )
+
+    def _names_a_source_tensor(self, name: str) -> bool:
+        if name in self._source_keys:
+            return True
+        # A tensor the export adds -- a quantizer scale, or a bias the source omits --
+        # has no counterpart in the checkpoint, so it is judged by the weight of the
+        # module it belongs to. That keeps every tensor of one module on the same
+        # decision instead of splitting the module across two namespaces.
+        parent, _, leaf = name.rpartition(".")
+        return bool(leaf) and f"{parent}.weight" in self._source_keys
+
+    def __call__(self, key: str) -> str:
+        renamed = _apply_rename_rules(key, self._full)
+        if self._reduced is None or self._names_a_source_tensor(renamed):
+            return renamed
+        reduced = _apply_rename_rules(key, self._reduced)
+        return reduced if self._names_a_source_tensor(reduced) else renamed
+
+
 def _drop_shadowed_prefix_renames(model, rules: list[RenameRule]) -> list[RenameRule]:
     """Drop child-model reverse renames when the child namespace already exists.
 
@@ -549,13 +718,16 @@ def _drop_shadowed_prefix_renames(model, rules: list[RenameRule]) -> list[Rename
 
 def _build_reverse_rules(
     model,
-) -> tuple[list[SplitRule], list[_MergeRule], list[RenameRule], list[str]]:
+) -> tuple[list[SplitRule], list[_MergeRule], list[RenameRule], list[str], set[str] | None]:
     """Derive reverse rules from the model's transformers conversion mapping.
 
-    Returns tensor-transform rules, rename rules, and fused expert leaves. The last is
-    used to guard against experts that were not pre-expanded. Returns empty lists when
-    no mapping applies (export unchanged). Uses transformers' own
-    ``reverse_transform()`` to get correctly-reversed name patterns, then translates them:
+    Returns tensor-transform rules, rename rules, fused expert leaves, and the key set
+    of the checkpoint the model was loaded from (``None`` when it cannot be read). The
+    expert leaves guard against experts that were not pre-expanded; the key set lets
+    :class:`_SourceAwareRenamer` resolve a rename against the names the checkpoint has.
+    Returns empty lists when no mapping applies (export unchanged). Uses transformers'
+    own ``reverse_transform()`` to get correctly-reversed name patterns, then translates
+    them:
 
     * ``WeightRenaming`` -> :class:`RenameRule` (carries scale siblings for free).
     * Expert ``WeightConverter`` (reverse contains ``SplitModulelist``): ModelOpt's
@@ -580,7 +752,7 @@ def _build_reverse_rules(
         raise QuantConversionUnsupportedError(f"could not read conversion mapping: {exc}") from exc
 
     if not conversions:
-        return [], [], [], []
+        return [], [], [], [], None
 
     try:
         from transformers.core_model_loading import (
@@ -660,7 +832,13 @@ def _build_reverse_rules(
     # substrings and are applied first.
     weight_renamings = _drop_shadowed_prefix_renames(model, weight_renamings)
     rename_rules = leaf_renamings + list(reversed(weight_renamings))
-    return split_rules, merge_rules, rename_rules, expert_fused_leaves
+    return (
+        split_rules,
+        merge_rules,
+        rename_rules,
+        expert_fused_leaves,
+        _source_checkpoint_keys(model),
+    )
 
 
 # ModelOpt's export splits a fused ``gate_up_proj`` into these per-expert linears,

@@ -33,8 +33,8 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.masking_utils import create_causal_mask
 
 from modelopt.torch.quantization.model_calib import (
-    _LocalHessianInputHook,
     _needs_activation_forward_for_max_calib,
+    _WeightInputHook,
 )
 from modelopt.torch.quantization.utils.calib_utils import GPTQHelper
 from modelopt.torch.utils import warn_rank_0
@@ -248,14 +248,13 @@ def prepare_for_calibration(full_model) -> bool:
 
     @wraps(original_forward)
     def forward_with_mtp(*args, **kwargs):
-        # AWQ, GPTQ, and local-Hessian need inputs even with activation quantizers disabled.
+        # AWQ, GPTQ, local-Hessian and imatrix need inputs with activation quantizers disabled.
         # Their wrappers/hooks exist only during calibration, unlike retained debug statistics.
         if not _needs_activation_forward_for_max_calib(mtp) and not any(
             hasattr(module, "_forward_no_awq")
             or hasattr(module, GPTQHelper.CACHE_NAME)
             or any(
-                isinstance(hook, _LocalHessianInputHook)
-                for hook in module._forward_pre_hooks.values()
+                isinstance(hook, _WeightInputHook) for hook in module._forward_pre_hooks.values()
             )
             for module in mtp.modules()
         ):

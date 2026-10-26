@@ -1,0 +1,27 @@
+name: Megatron-Bridge from source
+description: >-
+  Replace the NeMo container's Megatron-Bridge and Megatron-Core sources with a Megatron-Bridge commit and
+  its pinned Megatron-LM, so CI covers features newer than the container. Remove once the container has them.
+
+inputs:
+  commit:
+    description: Megatron-Bridge commit. Keep in sync with examples/megatron_bridge/README.md.
+    default: 1d9caf7324e608aca7181de40be26a6387976210
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euxo pipefail
+        src=$(mktemp -d)
+        git -C "$src" init -q
+        git -C "$src" fetch -q --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git "${{ inputs.commit }}"
+        git -C "$src" checkout -q FETCH_HEAD
+        git -C "$src" submodule update -q --init --depth 1 3rdparty/Megatron-LM
+        # Both are editable installs in the NeMo container, so replacing the sources is enough.
+        for dir in src/megatron/bridge 3rdparty/Megatron-LM/megatron; do
+          rm -rf "/opt/Megatron-Bridge/$dir"
+          cp -r "$src/$dir" "/opt/Megatron-Bridge/$dir"
+        done
+        rm -rf "$src"
