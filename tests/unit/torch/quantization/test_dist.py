@@ -254,6 +254,8 @@ _TP_UNSYNCED_BLOCK_SIZES = {
     "per-token-block-sizes": {-1: None, "type": "dynamic"},
     "every-dim-block-sizes": {-1: None, -2: None},
 }
+# Per-token block sizes made per-tensor after the forward: through the config, or the setter.
+_MADE_PER_TENSOR = ("reconfigured-to-per-tensor", "assigned-per-tensor")
 
 
 def _tensor_parallel_sync_helper(rank, size, case):
@@ -268,8 +270,8 @@ def _tensor_parallel_sync_helper(rank, size, case):
         linear._is_column_parallel = True
         if case in _TP_UNSYNCED_BLOCK_SIZES:
             linear.input_quantizer.block_sizes = _TP_UNSYNCED_BLOCK_SIZES[case]
-        elif case == "reconfigured-to-per-tensor":
-            linear.input_quantizer.block_sizes = _TP_UNSYNCED_BLOCK_SIZES["every-dim-block-sizes"]
+        elif case in _MADE_PER_TENSOR:
+            linear.input_quantizer.block_sizes = _TP_UNSYNCED_BLOCK_SIZES["per-token-block-sizes"]
         synced = [linear.input_quantizer]
     # A rank left waiting for a peer that skips the sync gives up in seconds on this group.
     tp_group = dist.new_group(timeout=timedelta(seconds=10))
@@ -278,9 +280,13 @@ def _tensor_parallel_sync_helper(rank, size, case):
     def forward_loop(m):  # only rank 0 calibrates the synced quantizers
         if rank == 0:
             for quantizer in synced:
-                quantizer(torch.ones(2, 16))
-        if case == "reconfigured-to-per-tensor":  # on every rank, after rank 0's forward
+                # One token, so that a per-token amax is a single value.
+                quantizer(torch.ones(1 if case in _MADE_PER_TENSOR else 2, 16))
+        # On every rank, after rank 0's forward turned the per-token block sizes into axis (0,).
+        if case == "reconfigured-to-per-tensor":
             linear.input_quantizer.set_from_attribute_config({"block_sizes": None})
+        elif case == "assigned-per-tensor":
+            linear.input_quantizer.block_sizes = None
 
     try:
         max_calibrate(model, forward_loop)
@@ -294,10 +300,10 @@ def _tensor_parallel_sync_helper(rank, size, case):
             assert quantizer.amax.item() == 1.0
 
 
-@pytest.mark.parametrize("case", ["column-parallel", "kv-cache", "reconfigured-to-per-tensor"])
+@pytest.mark.parametrize("case", ["column-parallel", "kv-cache", *_MADE_PER_TENSOR])
 def test_a_rank_without_amax_still_joins_the_tensor_parallel_sync(cpu_dist_workers, case):
     """Rather than leave the rank that has one waiting in the sync for it. Also once a quantizer
-    whose forward turned block sizes into an axis is configured per-tensor."""
+    whose forward turned block sizes into an axis is configured, or assigned, per-tensor."""
     cpu_dist_workers.run(_tensor_parallel_sync_helper, case=case)
 
 

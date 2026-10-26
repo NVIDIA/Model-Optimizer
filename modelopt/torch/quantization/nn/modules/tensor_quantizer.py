@@ -282,9 +282,15 @@ class TensorQuantizer(nn.Module):
             _tq_attribute_name, _setter = _custom_setters.get(
                 attribute, (f"_{attribute}", lambda v: v)
             )
-            setattr(self, _tq_attribute_name, _setter(val))
             if attribute in ("axis", "block_sizes"):  # configured, not derived by the forward
+                if getattr(self, "_axis_from_block_sizes", False):
+                    # The derived axis goes with the block sizes it came from: a rank that never
+                    # ran the forward has none.
+                    self._axis = None
+                    if getattr(self, "_calibrator", None) is not None:
+                        self._calibrator._axis = None
                 self._axis_from_block_sizes = False
+            setattr(self, _tq_attribute_name, _setter(val))
 
         if isinstance(attribute_cfg, dict) and attribute_cfg == {"enable": False}:
             self.disable_rotate()
