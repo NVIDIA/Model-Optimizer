@@ -769,6 +769,11 @@ def test_kv_cache_spec_rejects_what_it_cannot_export():
     with pytest.raises(NotImplementedError, match="'INT8' KV cache"):
         get_kv_cache_export_spec(attention)
 
+    affine_fp8 = {**_FP8_KV, "bias": {-2: None, -4: None, "type": "static"}}
+    attention = _kv_attention(affine_fp8, affine_fp8)
+    with pytest.raises(NotImplementedError, match="affine KV caches"):
+        get_kv_cache_export_spec(attention)
+
 
 @pytest.mark.parametrize(
     "weight_spec", [None, weight_export._QuantizedWeightExportSpec("fp8", 0, True)]

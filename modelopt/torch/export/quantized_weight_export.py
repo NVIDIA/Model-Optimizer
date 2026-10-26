@@ -524,6 +524,15 @@ def get_kv_cache_export_spec(attention: nn.Module) -> str | None:
         raise _UnsupportedQuantizedWeightExportFormatError(
             "Functional export requires both or neither of the K and V cache quantizers"
         )
+    # The captured state carries no K/V biases.
+    if any(
+        getattr(quantizer, attr, None) is not None
+        for quantizer in quantizers
+        for attr in ("bias", "bias_value")
+    ):
+        raise _UnsupportedQuantizedWeightExportFormatError(
+            "Functional export does not support affine KV caches"
+        )
     quantization_format = get_kv_cache_dtype(attention)
     if quantization_format not in _KV_CACHE_EXPORT_FORMATS:
         raise _UnsupportedQuantizedWeightExportFormatError(
