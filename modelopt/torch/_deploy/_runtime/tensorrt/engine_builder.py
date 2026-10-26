@@ -204,7 +204,8 @@ def build_engine(
             For more details, please refer to:
             https://docs.nvidia.com/deeplearning/tensorrt/latest/_static/python-api/infer/Core/BuilderConfig.html
         output_dir: Directory to save the engine file and trtexec artifacts.
-            If not provided, a new private temporary directory is used.
+            If not provided, this process's private temporary directory is used (created on first
+            use, not removed at exit).
         verbose: Set trtexec command to verbose or not.
 
     Returns:
@@ -314,7 +315,8 @@ def profile_engine(
                 "maxShapes": {"input": [32,3,244,244]}
             }
         output_dir: Directory to save the engine file and trtexec artifacts.
-            If not provided, a new private temporary directory is used.
+            If not provided, this process's private temporary directory is used (created on first
+            use, not removed at exit).
     Returns:
         Layerwise profiling output as a json string.
         Stdout log produced by trtexec tool.
