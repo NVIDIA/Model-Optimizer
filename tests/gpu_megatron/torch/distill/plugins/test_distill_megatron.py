@@ -471,7 +471,7 @@ def _test_topk_logits_kl_loss_numerics_ghost_token_reference(
 ):
     parallel_state.initialize_model_parallel(tensor_model_parallel_size=size)
     cfg = SimpleNamespace(tensor_model_parallel_size=size)
-    device = torch.device("cuda", rank) if torch.cuda.is_available() else torch.device("cpu")
+    device = torch.device("cuda", rank)
     student, teacher = _make_loss_inputs()
     student = student.detach().to(device).requires_grad_()
     teacher = teacher.to(device)
