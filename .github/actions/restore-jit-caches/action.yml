@@ -1,20 +1,20 @@
-name: Cache extensions
-description: Restore JIT-compiled extensions (CUDA extensions, Triton kernels) cached by an earlier run. Pair with ./.github/actions/save-extensions.
+name: Restore JIT caches
+description: Restore the JIT caches (CUDA extensions, Triton kernels) saved by an earlier run. Pair with ./.github/actions/save-jit-caches.
 
 inputs:
-  cache-key:
-    description: Environment discriminator for the cache key (e.g. GPU arch + container image).
+  env-key:
+    description: Environment discriminator for the cache keys (e.g. GPU arch + lane + container image).
     required: true
 
 outputs:
-  cache-hit:
-    description: Whether the extensions were restored from the exact key.
-    value: ${{ steps.cache.outputs.cache-hit }}
-  cache-key:
-    description: The key to pass to ./.github/actions/save-extensions.
-    value: ${{ steps.cache.outputs.cache-primary-key }}
+  torch-ext-key:
+    description: The torch extensions key to pass to ./.github/actions/save-jit-caches.
+    value: ${{ steps.torch-ext.outputs.cache-primary-key }}
+  torch-ext-hit:
+    description: Whether the torch extensions cache was restored from the exact key.
+    value: ${{ steps.torch-ext.outputs.cache-hit }}
   triton-key:
-    description: The Triton key to pass to ./.github/actions/save-extensions.
+    description: The Triton key to pass to ./.github/actions/save-jit-caches.
     value: ${{ steps.triton.outputs.cache-primary-key }}
   triton-hit:
     description: Whether the Triton cache was restored from the exact key.
@@ -28,17 +28,17 @@ runs:
         echo "TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions" >> "$GITHUB_ENV"
         echo "TRITON_CACHE_DIR=/root/.cache/triton" >> "$GITHUB_ENV"
         echo "TRITON_CACHE_AUTOTUNING=1" >> "$GITHUB_ENV"
-    - id: cache
+    - id: torch-ext
       uses: actions/cache/restore@v6
       with:
         path: /root/.cache/torch_extensions
         # Only the JIT-built sources and their build scripts, so Triton-only edits keep the cache.
-        key: torch-ext-${{ inputs.cache-key }}-${{ hashFiles('modelopt/torch/kernels/quantization/**/*.cpp', 'modelopt/torch/kernels/quantization/**/*.cu',
+        key: torch-ext-${{ inputs.env-key }}-${{ hashFiles('modelopt/torch/kernels/quantization/**/*.cpp', 'modelopt/torch/kernels/quantization/**/*.cu',
           'modelopt/torch/kernels/quantization/**/*.cuh', 'modelopt/torch/kernels/quantization/**/*.h', 'modelopt/torch/kernels/quantization/conv/implicit_gemm_cuda.py',
           'modelopt/torch/quantization/extensions.py', 'modelopt/torch/utils/cpp_extension.py') }}
     # On a cache hit, backdate sources below the cached objects so ninja reuses them (touching
     # the objects instead would desync ninja's .ninja_deps and force a rebuild).
-    - if: steps.cache.outputs.cache-hit == 'true'
+    - if: steps.torch-ext.outputs.cache-hit == 'true'
       shell: bash
       run: find modelopt/torch/kernels/quantization -exec touch -d '2000-01-01' {} +
     - id: week
@@ -51,5 +51,5 @@ runs:
       uses: actions/cache/restore@v6
       with:
         path: /root/.cache/triton
-        key: triton-${{ inputs.cache-key }}-${{ steps.week.outputs.week }}-${{ hashFiles('modelopt/torch/kernels/**/*.py') }}
-        restore-keys: triton-${{ inputs.cache-key }}-
+        key: triton-${{ inputs.env-key }}-${{ steps.week.outputs.week }}-${{ hashFiles('modelopt/torch/kernels/**/*.py') }}
+        restore-keys: triton-${{ inputs.env-key }}-
