@@ -132,7 +132,9 @@ def _classify_5d_reshape_follower(model, reshape_node) -> tuple:
         raise ValueError(msg)
 
 
-def _duplicate_clip_qdq_chain(middleware: list, x_in: str, suffix: str) -> tuple[list, str]:
+def _duplicate_clip_qdq_chain(
+    middleware: list, x_in: str, suffix: str, cache: GraphCache
+) -> tuple[list, str]:
     """Rebuild Clip / Q→DQ sequence on ``x_in`` with fresh tensor names. Returns ``(new_nodes, output_name)``."""
     if not middleware:
         return [], x_in
@@ -143,10 +145,12 @@ def _duplicate_clip_qdq_chain(middleware: list, x_in: str, suffix: str) -> tuple
     while m < len(middleware):
         n = middleware[m]
         if n.op_type == "Clip":
-            new_out = f"_u5d_{suffix}_c{m}_{i}"
+            new_out = cache.unique_name(f"_u5d_{suffix}_c{m}_{i}")
             inputs = [out, *list(n.input[1:])]
             new_nodes.append(
-                helper.make_node("Clip", inputs, [new_out], name=f"{n.name}_u5d_{suffix}_{m}")
+                helper.make_node(
+                    "Clip", inputs, [new_out], name=cache.unique_name(f"{n.name}_u5d_{suffix}_{m}")
+                )
             )
             out = new_out
             m += 1
@@ -156,14 +160,14 @@ def _duplicate_clip_qdq_chain(middleware: list, x_in: str, suffix: str) -> tuple
                 msg = "QuantizeLinear without following DequantizeLinear in middleware chain"
                 raise ValueError(msg)
             q, dq = middleware[m], middleware[m + 1]
-            q_out = f"_u5d_{suffix}_q{m}_{i}"
-            dq_out = f"_u5d_{suffix}_dq{m}_{i}"
+            q_out = cache.unique_name(f"_u5d_{suffix}_q{m}_{i}")
+            dq_out = cache.unique_name(f"_u5d_{suffix}_dq{m}_{i}")
             new_nodes.append(
                 helper.make_node(
                     "QuantizeLinear",
                     [out, *q.input[1:]],
                     [q_out],
-                    name=f"{q.name}_u5d_{suffix}_{m}",
+                    name=cache.unique_name(f"{q.name}_u5d_{suffix}_{m}"),
                     **{a.name: helper.get_attribute_value(a) for a in q.attribute},
                 )
             )
@@ -172,7 +176,7 @@ def _duplicate_clip_qdq_chain(middleware: list, x_in: str, suffix: str) -> tuple
                     "DequantizeLinear",
                     [q_out, *dq.input[1:]],
                     [dq_out],
-                    name=f"{dq.name}_u5d_{suffix}_{m}",
+                    name=cache.unique_name(f"{dq.name}_u5d_{suffix}_{m}"),
                     **{a.name: helper.get_attribute_value(a) for a in dq.attribute},
                 )
             )
@@ -286,7 +290,7 @@ def _build_transpose_replacement_or_raise(
     concat_axis = _transpose_path_concat_axis_4d(slice_axis, transpose_perm)
 
     slice_axes = helper.make_tensor(
-        name=f"u5d_tr_slice_axes_{counter}",
+        name=cache.unique_name(f"u5d_tr_slice_axes_{counter}"),
         data_type=TensorProto.INT64,
         dims=[1],
         vals=[slice_axis],
@@ -296,12 +300,15 @@ def _build_transpose_replacement_or_raise(
     for i in range(num_slices):
         slice_starts.append(
             helper.make_tensor(
-                name=f"u5d_tr_{i}_starts_{counter}", data_type=TensorProto.INT64, dims=[1], vals=[i]
+                name=cache.unique_name(f"u5d_tr_{i}_starts_{counter}"),
+                data_type=TensorProto.INT64,
+                dims=[1],
+                vals=[i],
             )
         )
         slice_ends.append(
             helper.make_tensor(
-                name=f"u5d_tr_{i}_ends_{counter}",
+                name=cache.unique_name(f"u5d_tr_{i}_ends_{counter}"),
                 data_type=TensorProto.INT64,
                 dims=[1],
                 vals=[i + 1],
@@ -310,14 +317,14 @@ def _build_transpose_replacement_or_raise(
     add_unique_initializers(graph, unique_initializer, [slice_axes, *slice_starts, *slice_ends])
 
     reshape_4d_shape = helper.make_tensor(
-        name=f"u5d_tr_r4_{counter}",
+        name=cache.unique_name(f"u5d_tr_r4_{counter}"),
         data_type=TensorProto.INT64,
         dims=[4],
         vals=reshape_4d_vals.tolist(),
     )
     final_rank = int(shape2.size)
     reshape_final_shape = helper.make_tensor(
-        name=f"u5d_tr_r1_{counter}",
+        name=cache.unique_name(f"u5d_tr_r1_{counter}"),
         data_type=TensorProto.INT64,
         dims=[final_rank],
         vals=shape2.tolist(),
@@ -327,61 +334,63 @@ def _build_transpose_replacement_or_raise(
     nodes_to_add: list = []
     slice_outputs: list[str] = []
     for i in range(num_slices):
-        slice_out = f"u5d_tr_slice_{i}_{counter}"
+        slice_out = cache.unique_name(f"u5d_tr_slice_{i}_{counter}")
         nodes_to_add.append(
             helper.make_node(
                 "Slice",
                 [
                     input_tensor,
-                    f"u5d_tr_{i}_starts_{counter}",
-                    f"u5d_tr_{i}_ends_{counter}",
-                    f"u5d_tr_slice_axes_{counter}",
+                    slice_starts[i].name,
+                    slice_ends[i].name,
+                    slice_axes.name,
                 ],
                 [slice_out],
-                name=f"u5d_tr_slice_{i}_{counter}",
+                name=slice_out,
             )
         )
-        reshape_4d_out = f"u5d_tr_r4o_{i}_{counter}"
+        reshape_4d_out = cache.unique_name(f"u5d_tr_r4o_{i}_{counter}")
         nodes_to_add.append(
             helper.make_node(
                 "Reshape",
-                [slice_out, f"u5d_tr_r4_{counter}"],
+                [slice_out, reshape_4d_shape.name],
                 [reshape_4d_out],
-                name=f"u5d_tr_r4n_{i}_{counter}",
+                name=cache.unique_name(f"u5d_tr_r4n_{i}_{counter}"),
             )
         )
-        br_a, t_a = _duplicate_clip_qdq_chain(mid_a, reshape_4d_out, f"tr{counter}_{i}a")
+        br_a, t_a = _duplicate_clip_qdq_chain(mid_a, reshape_4d_out, f"tr{counter}_{i}a", cache)
         nodes_to_add.extend(br_a)
-        transpose_branch_out = f"u5d_tr_t_{i}_{counter}"
+        transpose_branch_out = cache.unique_name(f"u5d_tr_t_{i}_{counter}")
         nodes_to_add.append(
             helper.make_node(
                 "Transpose",
                 [t_a],
                 [transpose_branch_out],
                 perm=new_transpose_perm,
-                name=f"u5d_tr_tn_{i}_{counter}",
+                name=cache.unique_name(f"u5d_tr_tn_{i}_{counter}"),
             )
         )
-        br_b, t_b = _duplicate_clip_qdq_chain(mid_b, transpose_branch_out, f"tr{counter}_{i}b")
+        br_b, t_b = _duplicate_clip_qdq_chain(
+            mid_b, transpose_branch_out, f"tr{counter}_{i}b", cache
+        )
         nodes_to_add.extend(br_b)
         slice_outputs.append(t_b)
 
-    concat_out = f"u5d_tr_concat_{counter}"
+    concat_out = cache.unique_name(f"u5d_tr_concat_{counter}")
     nodes_to_add.append(
         helper.make_node(
             "Concat",
             slice_outputs,
             [concat_out],
             axis=concat_axis,
-            name=f"u5d_tr_concatn_{counter}",
+            name=cache.unique_name(f"u5d_tr_concatn_{counter}"),
         )
     )
     nodes_to_add.append(
         helper.make_node(
             "Reshape",
-            [concat_out, f"u5d_tr_r1_{counter}"],
+            [concat_out, reshape_final_shape.name],
             [output_name],
-            name=f"u5d_tr_final_{counter}",
+            name=cache.unique_name(f"u5d_tr_final_{counter}"),
         )
     )
     to_remove = [reshape_node, *mid_a, tr, *mid_b, r2]
@@ -475,8 +484,8 @@ def _build_reduce_replacement_or_raise(
     reduce_branch_kw = dict(reduce_kw)
     reduce_branch_kw["keepdims"] = 1
 
-    msh_name = f"u5d_rs_msh_{counter}"
-    ax4_name = f"u5d_rs_ax4_{counter}"
+    msh_name = cache.unique_name(f"u5d_rs_msh_{counter}")
+    ax4_name = cache.unique_name(f"u5d_rs_ax4_{counter}")
     merged_shape_ini = helper.make_tensor(
         name=msh_name, data_type=TensorProto.INT64, dims=[4], vals=merged
     )
@@ -491,20 +500,20 @@ def _build_reduce_replacement_or_raise(
         [merged_shape_ini, axes_4d_ini],
     )
 
-    merged_out = f"u5d_rs_m4_{counter}"
+    merged_out = cache.unique_name(f"u5d_rs_m4_{counter}")
     nodes_to_add: list = []
     nodes_to_add.append(
         helper.make_node(
             "Reshape",
             [input_tensor, msh_name],
             [merged_out],
-            name=f"u5d_rs_reshape4_{counter}",
+            name=cache.unique_name(f"u5d_rs_reshape4_{counter}"),
         )
     )
 
     # Replace Split with individual Slice nodes — one per chunk along split_ax.
     # Middleware (Clip / Q→DQ) is applied per-branch after each Slice, before the Reduce.
-    sl_axes_name = f"u5d_rs_slax_{counter}"
+    sl_axes_name = cache.unique_name(f"u5d_rs_slax_{counter}")
     sl_axes_ini = helper.make_tensor(
         name=sl_axes_name, data_type=TensorProto.INT64, dims=[1], vals=[split_ax]
     )
@@ -514,8 +523,8 @@ def _build_reduce_replacement_or_raise(
     for i in range(num_splits):
         start = i * chunk
         end = start + chunk
-        sl_starts_name = f"u5d_rs_slst_{i}_{counter}"
-        sl_ends_name = f"u5d_rs_slen_{i}_{counter}"
+        sl_starts_name = cache.unique_name(f"u5d_rs_slst_{i}_{counter}")
+        sl_ends_name = cache.unique_name(f"u5d_rs_slen_{i}_{counter}")
         sl_starts_ini = helper.make_tensor(
             name=sl_starts_name, data_type=TensorProto.INT64, dims=[1], vals=[start]
         )
@@ -523,34 +532,34 @@ def _build_reduce_replacement_or_raise(
             name=sl_ends_name, data_type=TensorProto.INT64, dims=[1], vals=[end]
         )
         add_unique_initializers(graph, unique_initializer, [sl_starts_ini, sl_ends_ini])
-        sl_out = f"u5d_rs_sp_{i}_{counter}"
+        sl_out = cache.unique_name(f"u5d_rs_sp_{i}_{counter}")
         nodes_to_add.append(
             helper.make_node(
                 "Slice",
                 [merged_out, sl_starts_name, sl_ends_name, sl_axes_name],
                 [sl_out],
-                name=f"u5d_rs_slice_{i}_{counter}",
+                name=cache.unique_name(f"u5d_rs_slice_{i}_{counter}"),
             )
         )
         # Apply per-branch middleware (Clip / Q→DQ) between Slice and Reduce
-        br_nodes, reduce_in = _duplicate_clip_qdq_chain(middle, sl_out, f"rs{counter}_{i}")
+        br_nodes, reduce_in = _duplicate_clip_qdq_chain(middle, sl_out, f"rs{counter}_{i}", cache)
         nodes_to_add.extend(br_nodes)
 
-        rs_out = f"u5d_rs_o_{i}_{counter}"
+        rs_out = cache.unique_name(f"u5d_rs_o_{i}_{counter}")
         nodes_to_add.append(
             helper.make_node(
                 op_type,
                 [reduce_in, ax4_name],
                 [rs_out],
-                name=f"u5d_rs_{op_type}_{i}_{counter}",
+                name=cache.unique_name(f"u5d_rs_{op_type}_{i}_{counter}"),
                 **reduce_branch_kw,
             )
         )
         reduce_outs.append(rs_out)
 
     if original_keepdims:
-        concat_out = f"u5d_rs_cat_{counter}"
-        usq_name = f"u5d_rs_usq_{counter}"
+        concat_out = cache.unique_name(f"u5d_rs_cat_{counter}")
+        usq_name = cache.unique_name(f"u5d_rs_usq_{counter}")
         unsq_ini = helper.make_tensor(
             name=usq_name, data_type=TensorProto.INT64, dims=[1], vals=[n]
         )
@@ -561,7 +570,7 @@ def _build_reduce_replacement_or_raise(
                 reduce_outs,
                 [concat_out],
                 axis=split_ax,
-                name=f"u5d_rs_concat_{counter}",
+                name=cache.unique_name(f"u5d_rs_concat_{counter}"),
             )
         )
         nodes_to_add.append(
@@ -569,7 +578,7 @@ def _build_reduce_replacement_or_raise(
                 "Unsqueeze",
                 [concat_out, usq_name],
                 [output_name],
-                name=f"u5d_rs_unsqueeze_{counter}",
+                name=cache.unique_name(f"u5d_rs_unsqueeze_{counter}"),
             )
         )
     else:
@@ -579,7 +588,7 @@ def _build_reduce_replacement_or_raise(
                 reduce_outs,
                 [output_name],
                 axis=split_ax,
-                name=f"u5d_rs_concat_{counter}",
+                name=cache.unique_name(f"u5d_rs_concat_{counter}"),
             )
         )
 

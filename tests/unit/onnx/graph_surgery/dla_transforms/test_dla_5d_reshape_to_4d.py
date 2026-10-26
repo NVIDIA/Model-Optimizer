@@ -28,6 +28,7 @@ import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+from onnx.reference import ReferenceEvaluator
 
 from modelopt.onnx.graph_surgery.dla_transforms.dla_5d_reshape_to_4d import _apply_5d_reshape_to_4d
 from modelopt.onnx.graph_surgery.utils.graph_utils import infer_shapes
@@ -256,6 +257,83 @@ class TestDla5dReshapeTo4dReduce:
 
 
 class TestDla5dReshapeTo4dTranspose:
+    @pytest.mark.parametrize("path", ["transpose", "reduce"])
+    def test_generated_names_preserve_existing_controls_and_branches(self, path):
+        """Reserve generated names without retargeting existing data or QDQ controls."""
+        transpose = path == "transpose"
+        model = _make_transpose_reshape_model() if transpose else _make_reduce_with_clip_model()
+        model.opset_import[0].version = 21
+        prefix = "tr" if transpose else "rs"
+        if transpose:
+            dims = model.graph.input[0].type.tensor_type.shape.dim
+            dims[0].dim_value, dims[1].dim_value = 2, 12
+            clip = helper.make_node(
+                "Clip", ["T5", "clip_min", "clip_max"], ["clipped"], name="clip"
+            )
+            model.graph.node.insert(1, clip)
+            model.graph.initializer.extend(
+                [
+                    _init("clip_min", np.array(-1, np.float32)),
+                    _init("clip_max", np.array(1, np.float32)),
+                ]
+            )
+        clip_output = model.graph.node[1].output[0]
+        model.graph.node[2].input[0] = "dequantized"
+        scale_name = "u5d_tr_r1_0" if transpose else "u5d_rs_slax_0"
+        suffix = "tr0_0a" if transpose else "rs0_0"
+        zero_name = f"_u5d_{suffix}_q1_1"
+        model.graph.node.insert(
+            2,
+            helper.make_node(
+                "QuantizeLinear", [clip_output, scale_name, zero_name], ["quantized"], name="q"
+            ),
+        )
+        model.graph.node.insert(
+            3,
+            helper.make_node(
+                "DequantizeLinear", ["quantized", scale_name, zero_name], ["dequantized"], name="dq"
+            ),
+        )
+        model.graph.initializer.extend(
+            [
+                _init(scale_name, np.array(0.25, np.float32)),
+                _init(zero_name, np.array(0, np.uint8)),
+            ]
+        )
+        renames = {
+            "X": "u5d_tr_r4_0" if transpose else "u5d_rs_msh_0",
+            "shape5": "u5d_tr_slice_axes_0" if transpose else "u5d_rs_ax4_0",
+            "clip_min": f"_u5d_{suffix}_c0_0",
+        }
+        for value in [*model.graph.input, *model.graph.initializer]:
+            value.name = renames.get(value.name, value.name)
+        for node in model.graph.node:
+            for index, name in enumerate(node.input):
+                node.input[index] = renames.get(name, name)
+        branch = "u5d_tr_r4o_0_0" if transpose else "u5d_rs_sp_0_0"
+        model.graph.node.append(
+            helper.make_node("Identity", [renames["X"]], [branch], name=f"u5d_{prefix}_slice_0_0")
+        )
+        branch_info = copy.deepcopy(model.graph.input[0])
+        branch_info.name = branch
+        model.graph.output.append(branch_info)
+        onnx.checker.check_model(model, full_check=True)
+        controls = {value.name: value.SerializeToString() for value in model.graph.initializer}
+        shape = [dim.dim_value for dim in model.graph.input[0].type.tensor_type.shape.dim]
+        values = np.random.default_rng(9).standard_normal(shape).astype(np.float32)
+        feeds = {renames["X"]: values}
+        expected = ReferenceEvaluator(model).run(None, feeds)
+        rewritten = _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=True)
+        onnx.checker.check_model(rewritten, full_check=True)
+        assert len({init.name for init in rewritten.graph.initializer}) == len(
+            rewritten.graph.initializer
+        )
+        for init in rewritten.graph.initializer:
+            if init.name in controls:
+                assert init.SerializeToString() == controls[init.name]
+        for actual, reference in zip(ReferenceEvaluator(rewritten).run(None, feeds), expected):
+            np.testing.assert_array_equal(actual, reference)
+
     @pytest.mark.parametrize("shape", [[0, -1], [0, 0, 4, -1], [0, 0, 0, -1]])
     def test_final_reshape_zero_dimensions_preserve_values(self, shape):
         """Resolve copied dimensions against the original five-dimensional input."""
