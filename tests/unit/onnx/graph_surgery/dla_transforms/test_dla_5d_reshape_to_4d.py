@@ -256,6 +256,43 @@ class TestDla5dReshapeTo4dReduce:
             _apply_5d_reshape_to_4d(infer_shapes(copy.deepcopy(orig)))
 
 
+@pytest.mark.parametrize("control", ["shape5", "shape_out", "axes_reduce"])
+@pytest.mark.parametrize("skip_inference", [False, True])
+def test_overridable_structure_refuses_before_mutation(control, skip_inference):
+    """Preserve runtime shape and axis overrides rather than baking in initializer defaults."""
+    model = (
+        _make_reduce_min_axis4_model()
+        if control == "axes_reduce"
+        else _make_transpose_reshape_model()
+    )
+    if control != "axes_reduce":
+        dims = model.graph.input[0].type.tensor_type.shape.dim
+        dims[0].dim_value, dims[1].dim_value = 2, 12
+    initializer = next(tensor for tensor in model.graph.initializer if tensor.name == control)
+    model.graph.input.append(
+        helper.make_tensor_value_info(control, TensorProto.INT64, list(initializer.dims))
+    )
+    overrides = {"shape5": [2, 12, 4, 4, 4], "shape_out": [2, 16, 12, 4], "axes_reduce": [3]}
+    if control == "shape_out":
+        for index, dim in enumerate(model.graph.output[0].type.tensor_type.shape.dim):
+            dim.ClearField("dim_value")
+            dim.dim_param = f"output_{index}"
+    onnx.checker.check_model(model, full_check=True)
+    data = np.arange(1536, dtype=np.float32).reshape(
+        [dim.dim_value for dim in model.graph.input[0].type.tensor_type.shape.dim]
+    )
+    reference = ReferenceEvaluator(model)
+    expected = reference.run(
+        None, {"X": data, control: np.asarray(overrides[control], dtype=np.int64)}
+    )[0]
+    default = reference.run(None, {"X": data})[0]
+    assert not np.array_equal(default, expected)
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="initializer"):
+        _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=skip_inference)
+    assert model.SerializeToString() == before
+
+
 class TestDla5dReshapeTo4dTranspose:
     @pytest.mark.parametrize(
         ("opset", "skip_inference"), [(5, True), (7, False), (9, False), (9, True)]

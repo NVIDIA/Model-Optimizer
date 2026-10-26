@@ -296,10 +296,13 @@ def _build_transpose_replacement_or_raise(
         msg = f"{ctx}: final Reshape name contains '_transformed' ({r2.name!r})"
         raise ValueError(msg)
     ini2 = cache.get_init(r2.input[1])
-    if ini2 is None:
-        raise ValueError(f"{ctx}: final Reshape shape {r2.input[1]!r} must be a graph initializer")
+    if ini2 is None or r2.input[1] in cache.graph_input_names:
+        raise ValueError(
+            f"{ctx}: final Reshape shape {r2.input[1]!r} must be a fixed graph initializer"
+        )
     ini1 = cache.get_init(reshape_node.input[1])
-    assert ini1 is not None, f"initializer for node {reshape_node.name} is None"
+    if ini1 is None or reshape_node.input[1] in cache.graph_input_names:
+        raise ValueError(f"{ctx}: Reshape shape must be a fixed graph initializer")
 
     shape1_raw = np.asarray(numpy_helper.to_array(ini1), dtype=np.int64).reshape(-1)
     shape2 = np.asarray(numpy_helper.to_array(ini2), dtype=np.int64).reshape(-1)
@@ -463,8 +466,10 @@ def _build_reduce_replacement_or_raise(
 
     axes_name = red.input[1]
     ini_axes = cache.get_init(axes_name)
-    if ini_axes is None:
-        msg = f"{ctx}: reduce axes {axes_name!r} must be a graph initializer for decomposition"
+    if ini_axes is None or axes_name in cache.graph_input_names:
+        msg = (
+            f"{ctx}: reduce axes {axes_name!r} must be a fixed graph initializer for decomposition"
+        )
         raise ValueError(msg)
     axes_arr = np.asarray(numpy_helper.to_array(ini_axes), dtype=np.int64).reshape(-1)
     if axes_arr.size != 1:
@@ -481,7 +486,8 @@ def _build_reduce_replacement_or_raise(
         raise ValueError(msg)
 
     ini1 = cache.get_init(reshape_node.input[1])
-    assert ini1 is not None, f"initializer for node {reshape_node.name} is None"
+    if ini1 is None or reshape_node.input[1] in cache.graph_input_names:
+        raise ValueError(f"{ctx}: Reshape shape must be a fixed graph initializer")
     shape1_raw = np.asarray(numpy_helper.to_array(ini1), dtype=np.int64).reshape(-1)
     if shape1_raw.size != 5:
         msg = f"{ctx}: first Reshape shape must have length 5, got {shape1_raw.tolist()}"
