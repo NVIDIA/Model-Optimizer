@@ -19,6 +19,7 @@ import os
 import tempfile
 import time
 from collections.abc import Sequence
+from itertools import chain
 
 import onnx
 import onnx_graphsurgeon as gs
@@ -73,7 +74,9 @@ def _find_nodes_to_quantize(
 
     # partitioned_nodes keeps track of nodes that are already part of some partition.
     # Certain nodes of those partitions are quantizable. For example, heads.
-    partitioned_nodes = set(sum(non_quantizable_hard_coded_partitions, []) + nodes_to_exclude)  # noqa: RUF017
+    partitioned_nodes = set(chain.from_iterable(non_quantizable_hard_coded_partitions)) | set(
+        nodes_to_exclude or []
+    )
     cask_fusible_partitions, kgen_partitions = find_fusible_partitions(
         graph,
         partitioned_nodes,

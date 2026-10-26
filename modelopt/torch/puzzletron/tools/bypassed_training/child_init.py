@@ -26,6 +26,7 @@ from collections import ChainMap
 from collections.abc import Iterator, MutableMapping
 from copy import deepcopy
 from functools import partial
+from itertools import chain
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
@@ -311,7 +312,7 @@ def _process_single_layer(
                     layer_idx, parent_block_config.ffn.moe.num_local_experts
                 )
                 keys_to_remove[router_key] = keys.get(router_key)
-                for key in sum(orig_experts_keys.values(), []):
+                for key in chain.from_iterable(orig_experts_keys.values()):
                     keys_to_remove[key] = keys.get(key)
 
                 orig_experts_weights = {
