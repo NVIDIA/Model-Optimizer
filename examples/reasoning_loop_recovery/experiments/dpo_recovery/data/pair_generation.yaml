@@ -1,0 +1,43 @@
+schema_version: 1
+config_kind: experiment_record
+model: Qwen3.6-35B-A3B
+split_file: subtask_split.yaml
+negative_sources:
+- original_qad_evaluations
+- round3_iterative_qad_evaluations
+negative_selection:
+  require_cap_hit: true
+  require_empty_final: true
+  reasoning_repetition_min: 0.5
+  max_per_subtask: 8
+  max_before_witness_filter: 160
+  prefer_source: round3_iterative_qad
+  tie_break: SHA256(original sample path)
+  witness: Third exact whitespace-normalized prose paragraph occurrence
+  paragraph_characters:
+  - 80
+  - 1400
+  cut_after_char: 3000
+  max_prefix_characters: 100000
+  append_eos: false
+preferred_responses:
+  existing_exact_input_candidates: 39
+  new_generation_candidates: 111
+  source_checkpoint: ${ROUND3_NVFP4_CHECKPOINT}
+  instruction_file: prompt7.txt
+  remove_instruction_from_pair_input: true
+  seed_formula: 85000 + numeric pair index
+  max_completion_tokens: 131072
+  max_model_len: 262144
+  temperature: 0.6
+  top_p: 0.95
+  presence_penalty: 0.0
+  reasoning_parser: qwen3
+  enable_thinking: true
+  tensor_parallel_size: 1
+  max_num_seqs: 8
+  max_num_batched_tokens: 8192
+  enable_chunked_prefill: true
+  language_model_only: true
+identity: SHA256(JSON(original messages, sort_keys=True, ensure_ascii=False)); includes prerequisite code
+correctness_required: false

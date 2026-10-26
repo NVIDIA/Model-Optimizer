@@ -1,0 +1,59 @@
+schema_version: 1
+dataset_id: dpo_recovery_115
+data_included_in_repository: false
+public_download_url: null
+files:
+  all_pairs:
+    file: datasets/all_pairs.jsonl
+    pairs: 115
+  training:
+    file: datasets/training.jsonl
+    pairs: 104
+    sha256: 7bb79a3513c26dbda2dfd415e2f1d77f0ed84cb2d59484a73da158bf2e445e08
+  pair_validation:
+    file: datasets/pair_validation.jsonl
+    pairs: 11
+generation_record: pair_generation.yaml
+split_file: subtask_split.yaml
+format: UTF-8 JSONL; serialized input/chosen/rejected strings plus ranked chat completions
+tokenized: false
+chosen_eos: true
+rejected_eos: false
+max_branch_sequence_tokens: 32768
+input_tokens_masked: true
+counts:
+  indexed_training_responses: 2639
+  available_negatives: 249
+  witness_verified_candidates: 150
+  candidate_subtasks: 37
+  kept_pairs: 115
+  subtasks_represented: 35
+  unique_inputs: 86
+  correct_preferred_responses: 18
+  excluded_preferred_repeated_cycle: 23
+  excluded_preferred_unfinished: 9
+  excluded_preferred_high_repetition: 2
+  excluded_overlength: 1
+pair_validation:
+  order: SHA256("dpo-20261024:" + pair_id)
+  size: max(5, floor(N / 10))
+  may_share_inputs_with_training: true
+  purpose: Diagnostic loss; not held-out SciCode evaluation
+audit:
+  checks_passed: true
+  pairs:
+    training: 104
+    pair_validation: 11
+  unique_inputs: 86
+  exact_positive_negative_input_identity: true
+  no_held_out_targets: true
+  negative_loop_witness_verified: true
+  raw_response_content_verified: true
+  sequence_limit_verified: true
+  chosen_eos: true
+  rejected_eos: false
+  limitations:
+  - Pair-validation shares SciCode training subtasks and may share prompt inputs with training; diagnostic
+    loss only.
+  - Positive correctness not required;18of115positives passed SciCode tests.
+  - Truncated rejected prefixes contain the start of repetition, not complete responses.

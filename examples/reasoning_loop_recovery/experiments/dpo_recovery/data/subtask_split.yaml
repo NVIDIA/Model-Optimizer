@@ -1,0 +1,68 @@
+train_subtasks:
+  - '2.1'
+  - '10.1'
+  - '10.5'
+  - '11.4'
+  - '12.2'
+  - '16.2'
+  - '17.2'
+  - '20.2'
+  - '22.1'
+  - '23.3'
+  - '26.1'
+  - '26.2'
+  - '28.2'
+  - '33.2'
+  - '35.3'
+  - '37.1'
+  - '37.2'
+  - '41.1'
+  - '41.3'
+  - '45.2'
+  - '45.3'
+  - '45.4'
+  - '54.1'
+  - '54.2'
+  - '57.5'
+  - '60.5'
+  - '61.2'
+  - '63.4'
+  - '65.2'
+  - '66.1'
+  - '67.2'
+  - '69.5'
+  - '69.7'
+  - '70.6'
+  - '71.3'
+  - '71.5'
+  - '73.2'
+  - '73.3'
+  - '73.5'
+  - '73.6'
+  - '75.3'
+  - '77.6'
+  - '79.4'
+  - '80.7'
+evaluation_subtasks:
+  - '12.3'
+  - '13.8'
+  - '22.2'
+  - '32.2'
+  - '33.3'
+  - '40.2'
+  - '54.3'
+  - '55.1'
+  - '58.5'
+  - '73.8'
+  - '78.3'
+split_seed: 20261018
+unit: subtask
+counts:
+  train: 44
+  evaluation: 11
+parent_problem_count: 38
+rule: Within each parent problem, select held-out subtasks only from affected steps later than every training target in that parent. Use split_seed to choose
+  11 held-out subtasks. A held-out target therefore cannot be an earlier-step input to a training example. Related subtasks may share a parent across the
+  split.
+source_inventory_sha256: 342b02690bbe030f3ee5b176d8bbd8ebc6fbb72abddaefc64290aa865cc56886
+frozen_before_generation: true
