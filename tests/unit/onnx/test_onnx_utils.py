@@ -304,7 +304,7 @@ def test_random_onnx_weights():
     # Removed model weights should be greater than 18 MB
     assert original_model_size - len(onnx_model_wo_weights) > 18e6
 
-    # After assigning random weights, model size should be slightly greater than the the original
+    # After assigning random weights, model size should be slightly greater than the original
     # size due to some extra metadata
     onnx_model_randomized = randomize_weights_onnx_bytes(onnx_model_wo_weights)
     assert len(onnx_model_randomized) > original_model_size

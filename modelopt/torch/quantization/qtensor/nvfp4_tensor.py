@@ -46,6 +46,24 @@ def _cast_per_block_scale_to_fp8(
     return per_block_scale.clamp(min=2**-9, max=E4M3_MAX).to(torch.float8_e4m3fn)
 
 
+def cutlass_fp4_scale_to_modelopt_fp4_scale(
+    cutlass_scale: torch.Tensor, weight_shape: tuple[int, int]
+) -> torch.Tensor:
+    """Undo the cuBLAS/cutlass tiled swizzle of NVFP4 block scales (TensorRT-LLM ``fp4_quantize``).
+
+    The swizzled scale holds 128x4 tiles, each stored as ``[row % 32, row // 32, col]``; this is the
+    inverse of the rearrangement in ``swizzle_nvfp4_scales``. Returns the ``[m, n // 16]`` E4M3
+    scales of an ``[m, n]`` weight with block size 16.
+    """
+    m, n = weight_shape
+    n //= 16
+    row_blocks, col_blocks = -(-m // 128), -(-n // 4)
+    tiles = cutlass_scale.reshape(row_blocks, col_blocks, 32, 4, 4)
+    padded = tiles.permute(0, 3, 2, 1, 4).reshape(row_blocks * 128, col_blocks * 4)
+    # contiguous(): the slice is a strided view, and fp4_dequantize indexes the scale flatly.
+    return padded[:m, :n].contiguous().view(torch.float8_e4m3fn)
+
+
 class NVFP4QTensor(BaseQuantizedTensor):
     """Implements the NVFP4 quantization on tensors for more efficient storage or computation.
 
@@ -294,11 +312,6 @@ class NVFP4QTensor(BaseQuantizedTensor):
             try:
                 import tensorrt_llm  # noqa: F401
 
-                # Make sure this utils is available for dequantize
-                from tensorrt_llm._torch.auto_deploy.utils.quantization_utils import (
-                    cutlass_fp4_scale_to_modelopt_fp4_scale,  # noqa: F401
-                )
-
                 packed_weight, weights_scaling_factor = torch.ops.trtllm.fp4_quantize(
                     input, 1.0 / weights_scaling_factor_2, block_size, False
                 )
@@ -364,18 +377,9 @@ class NVFP4QTensor(BaseQuantizedTensor):
         # Get scales from kwargs
         if kwarg["scale"].dtype == torch.uint8 and kwarg["scale"].ndim == 1:
             # If quantization is done by trtllm, convert cutlass fp4 scale to modelopt fp4 scale
-            try:
-                from tensorrt_llm._torch.auto_deploy.utils.quantization_utils import (
-                    cutlass_fp4_scale_to_modelopt_fp4_scale,
-                )
-
-                kwarg["scale"] = cutlass_fp4_scale_to_modelopt_fp4_scale(
-                    kwarg["scale"], self.metadata["shape"][-2:]
-                )
-            except ImportError as e:
-                raise ImportError(
-                    "This tensor is quantized by trtllm, but tensorrt_llm cannot be imported."
-                ) from e
+            kwarg["scale"] = cutlass_fp4_scale_to_modelopt_fp4_scale(
+                kwarg["scale"], self.metadata["shape"][-2:]
+            )
 
         if fast:
             from modelopt.torch.kernels.quantization.gemm.fp4_kernel import fp4_dequantize

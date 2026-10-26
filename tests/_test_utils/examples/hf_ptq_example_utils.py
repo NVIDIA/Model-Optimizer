@@ -25,7 +25,8 @@ _HF_PTQ_DIR = MODELOPT_ROOT / "examples" / "hf_ptq"
 if str(_HF_PTQ_DIR) not in sys.path:
     sys.path.insert(0, str(_HF_PTQ_DIR))
 
+import convert_ggml_to_int8
 import example_utils
 import nemotron_vl_calib
 
-__all__ = ["example_utils", "nemotron_vl_calib"]
+__all__ = ["convert_ggml_to_int8", "example_utils", "nemotron_vl_calib"]

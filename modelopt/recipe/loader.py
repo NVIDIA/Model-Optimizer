@@ -52,6 +52,7 @@ _REQUIRED_SECTION_PER_RECIPE_TYPE: dict[RecipeType, str] = {
     RecipeType.SPECULATIVE_EAGLE: "eagle",
     RecipeType.SPECULATIVE_DFLASH: "dflash",
     RecipeType.SPECULATIVE_MEDUSA: "medusa",
+    RecipeType.SPECULATIVE_EXTERNAL: "external",
 }
 
 
