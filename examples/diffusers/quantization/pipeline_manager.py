@@ -217,9 +217,9 @@ class PipelineManager:
         distilled_lora_strength = params.pop("distilled_lora_strength", 0.8)
         spatial_upsampler_path = params.pop("spatial_upsampler_path", None)
         gemma_root = params.pop("gemma_root", None)
-        fp8_quantization = params.pop("fp8_quantization", None) or params.pop(
-            "fp8transformer", False
-        )
+        # Pop both aliases: `or` would short-circuit and leave `fp8transformer` in the kwargs.
+        fp8_quantization = params.pop("fp8_quantization", None)
+        fp8_quantization = params.pop("fp8transformer", False) or fp8_quantization
         params.pop("merged_base_safetensor_path", None)
         params.pop("enable_swizzle_layout", None)
         params.pop("padding_strategy", None)
