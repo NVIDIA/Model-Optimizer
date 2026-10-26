@@ -87,7 +87,7 @@ def _clamp_ir_version(model: onnx.ModelProto) -> None:
     model.ir_version = min(model.ir_version, _MAX_IR_VERSION_FOR_ORT)
 
 
-def _make_lstm_model(direction: str) -> onnx.ModelProto:
+def _make_lstm_model(direction: str, batch: int = _N) -> onnx.ModelProto:
     """Single-LSTM graph: X input, W/R/B initializers, Y + Y_h + Y_c outputs."""
     assert direction in ("forward", "reverse", "bidirectional")
     num_dir = 2 if direction == "bidirectional" else 1
@@ -110,11 +110,11 @@ def _make_lstm_model(direction: str) -> onnx.ModelProto:
             direction=direction,
         )
     ]
-    inputs = [_vi("X", TensorProto.FLOAT, [_T, _N, _D_IN])]
+    inputs = [_vi("X", TensorProto.FLOAT, [_T, batch, _D_IN])]
     outputs = [
-        _vi("Y", TensorProto.FLOAT, [_T, num_dir, _N, _H]),
-        _vi("Y_h", TensorProto.FLOAT, [num_dir, _N, _H]),
-        _vi("Y_c", TensorProto.FLOAT, [num_dir, _N, _H]),
+        _vi("Y", TensorProto.FLOAT, [_T, num_dir, batch, _H]),
+        _vi("Y_h", TensorProto.FLOAT, [num_dir, batch, _H]),
+        _vi("Y_c", TensorProto.FLOAT, [num_dir, batch, _H]),
     ]
     graph = helper.make_graph(nodes, f"lstm_{direction}", inputs, outputs, initializer=inits)
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _OPSET_VERSION)])
@@ -188,12 +188,13 @@ def _assert_outputs_match(ref: dict[str, np.ndarray], got: dict[str, np.ndarray]
         np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-4, err_msg=f"{name}: value mismatch")
 
 
+@pytest.mark.parametrize("batch", [1, _N])
 @pytest.mark.parametrize("direction", ["forward", "reverse", "bidirectional"])
-def test_lstm_decompose_ort_cpu_parity(direction: str) -> None:
+def test_lstm_decompose_ort_cpu_parity(direction: str, batch: int) -> None:
     """Decomposed graph matches reference LSTM on CPU EP (cosine ~1, tight allclose)."""
-    model = _make_lstm_model(direction)
+    model = _make_lstm_model(direction, batch)
     rng = np.random.default_rng(7)
-    x = rng.standard_normal((_T, _N, _D_IN)).astype(np.float32)
+    x = rng.standard_normal((_T, batch, _D_IN)).astype(np.float32)
     feeds = {"X": x}
 
     ref = _run_ort(model, feeds)
@@ -528,5 +529,40 @@ def test_unsqueezed_activation_without_value_info_handles_multiple_axes(axes):
     onnx.checker.check_model(model, full_check=True)
     expected = _run_ort(model, feeds)
     transformed = _apply_decompose_lstm(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize(
+    ("role", "index"), [("X", 0), ("W", 1), ("R", 2), ("B", 3), ("initial_h", 5), ("initial_c", 6)]
+)
+def test_runtime_input_transpose_preserves_existing_tensor_names(role, index):
+    """Allocate runtime transpose outputs without redefining an unrelated public tensor."""
+    model = _make_lstm_model("forward")
+    rng = np.random.default_rng(16)
+    feeds = {"X": rng.standard_normal((_T, _N, _D_IN)).astype(np.float32)}
+    if role in {"W", "R", "B"}:
+        tensor = next(tensor for tensor in model.graph.initializer if tensor.name == role)
+        shape = list(tensor.dims)
+        model.graph.input.append(_vi(role, TensorProto.FLOAT, shape))
+        feeds[role] = -numpy_helper.to_array(tensor)
+    elif role in {"initial_h", "initial_c"}:
+        shape = [1, _N, _H]
+        model.graph.input.append(_vi(role, TensorProto.FLOAT, shape))
+        node = model.graph.node[0]
+        while len(node.input) <= index:
+            node.input.append("")
+        node.input[index] = role
+        feeds[role] = rng.standard_normal(shape).astype(np.float32)
+    else:
+        shape = [_T, _N, _D_IN]
+    existing = f"{role}_lstm4d_lstm0_{index}_transposed"
+    model.graph.node.insert(
+        0, helper.make_node("Identity", [role], [existing], name="existing_view")
+    )
+    model.graph.output.append(_vi(existing, TensorProto.FLOAT, shape))
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    transformed = _apply_decompose_lstm(onnx.shape_inference.infer_shapes(copy.deepcopy(model)))
     onnx.checker.check_model(transformed, full_check=True)
     _assert_outputs_match(expected, _run_ort(transformed, feeds))

@@ -408,7 +408,7 @@ def _apply_decompose_lstm(model, *, defer_rank_conversion=False):
             transpose_node = helper.make_node(
                 "Transpose",
                 inputs=[tensor_name],
-                outputs=[tensor_name + "_transposed"],
+                outputs=[cache.unique_name(tensor_name + "_transposed")],
                 name=new_name(tensor_name + "_transpose"),
                 perm=perm,
             )
