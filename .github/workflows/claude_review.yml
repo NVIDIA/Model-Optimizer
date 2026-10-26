@@ -47,7 +47,7 @@ jobs:
           echo "base_ref=$(echo $PR_DATA | jq -r .baseRefName)" >> $GITHUB_OUTPUT
 
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
           ref: ${{ steps.pr-info.outputs.sha }}
@@ -67,7 +67,7 @@ jobs:
             -f content='eyes'
 
       - name: Run Claude Review
-        uses: anthropics/claude-code-action@db77d4d3c98f3f6380e7cd45ffba2342a3dbde3c # v1.0.254
+        uses: anthropics/claude-code-action@e4a6faad497d33dbc7144135c75e41f82f0bf6c0 # v1.0.255
         env:
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
           # NVIDIA inference proxy (LiteLLM-based) rejects two fields
