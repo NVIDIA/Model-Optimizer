@@ -36,7 +36,7 @@ DUMP_DIR="<Directory for output hidden states>"
 MODELOPT_DIR="<Path to Modelopt repo>"
 TEACHER_MODEL="<Path to teacher model>"
 
-if [ ! -d "$DUMP_DIR" ]; then
+if [[ ! -d "$DUMP_DIR" ]]; then
     mkdir -p "$DUMP_DIR"
 fi
 

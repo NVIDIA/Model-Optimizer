@@ -44,7 +44,7 @@ pip install langdetect pytablewriter word2number sacrebleu rouge_score immutable
 ###################################################################################################
 
 # If EAGLE_CKPT points to a training output dir (contains checkpoint-*), resolve the latest one.
-if [ -d "${EAGLE_CKPT}" ] && ls "${EAGLE_CKPT}"/checkpoint-* &>/dev/null; then
+if [[ -d "${EAGLE_CKPT}" ]] && ls "${EAGLE_CKPT}"/checkpoint-* &>/dev/null; then
     LATEST=$(ls -d "${EAGLE_CKPT}"/checkpoint-* | sort -V | tail -1)
     echo "Resolved latest checkpoint: ${LATEST}"
     EAGLE_CKPT="${LATEST}"

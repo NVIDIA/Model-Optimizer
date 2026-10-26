@@ -58,17 +58,17 @@ done
 
 # Validate required arguments
 if [[ -z "$AMAX_PATH" ]]; then
-    echo "Error: --amax_path is required."
+    echo "Error: --amax_path is required." >&2
     usage
 fi
 
 if [[ -z "$FP4_PATH" ]]; then
-    echo "Error: --fp4_output_path is required."
+    echo "Error: --fp4_output_path is required." >&2
     usage
 fi
 
 if [[ -z "$FP8_HF_PATH" ]]; then
-    echo "Error: --fp8_hf_path is required."
+    echo "Error: --fp8_hf_path is required." >&2
     usage
 fi
 

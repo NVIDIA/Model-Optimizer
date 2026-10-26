@@ -41,7 +41,7 @@ set -e
 set -x
 
 # --- Argument Parsing ---
-if [ -z "$1" ]; then
+if [[ -z "$1" ]]; then
   echo "Usage: $0 <model_name> [port] [task]"
   exit 1
 fi

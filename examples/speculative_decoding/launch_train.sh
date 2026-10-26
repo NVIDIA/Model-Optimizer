@@ -31,7 +31,7 @@ NUM_NODES=1
 HEAD_NODE_IP=""
 MACHINE_RANK=""
 EXTRA_ARGS=()
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
   case "$1" in
     --config*)     if [[ "$1" != *=* ]]; then shift; fi; CONFIG_FILE="${1#*=}" ;;
     --num_nodes*)  if [[ "$1" != *=* ]]; then shift; fi; NUM_NODES="${1#*=}" ;;
@@ -42,7 +42,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-if [ -z "$CONFIG_FILE" ]; then
+if [[ -z "$CONFIG_FILE" ]]; then
   >&2 echo "Usage: ./launch_train.sh --config <yaml_file> [--num_nodes N] [--head_node_ip IP] [key=value ...]"
   exit 1
 fi

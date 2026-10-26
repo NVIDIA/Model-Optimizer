@@ -24,7 +24,7 @@ BUILD_MAX_OUTPUT_LEN=${3:-2048}
 PORT=${4:-8000}
 NUM_EXAMPLES=${5:-}  # optional: limit examples per eval (default: full eval)
 
-if [ ! -d "human-eval" ]; then
+if [[ ! -d "human-eval" ]]; then
     git clone https://github.com/openai/human-eval.git
 fi
 
@@ -37,7 +37,7 @@ git -C human-eval checkout -q -f 6d43fb980f9fee3c892a914eda09951f772ad10d
 # reject ("A callable suffix is required"). The target module defines main(), so point at it.
 sed -i 's|human_eval\.evaluate_functional_correctness"|human_eval.evaluate_functional_correctness:main"|' human-eval/setup.py
 
-if [ ! -d "simple-evals" ]; then
+if [[ ! -d "simple-evals" ]]; then
     git clone https://github.com/openai/simple-evals.git
 fi
 
@@ -56,7 +56,7 @@ export OPENAI_API_KEY="local"
 export OPENAI_BASE_URL="http://localhost:$PORT/v1"
 
 examples_flag=""
-if [ -n "$NUM_EXAMPLES" ]; then
+if [[ -n "$NUM_EXAMPLES" ]]; then
     examples_flag="--examples $NUM_EXAMPLES"
 fi
 
