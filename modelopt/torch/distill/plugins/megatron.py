@@ -549,6 +549,11 @@ class TopLogitsKLLoss(LogitsKLLoss):
         kl = q.exp() * (q - p)
         loss = torch.sum(mask * kl, dim=-1)
 
+        if tp_size > 1:
+            # Autograd collectives sum gradients from identical losses on every TP rank.
+            # Average only backward, preserving reported loss and loss-balancer weights.
+            loss = loss.detach() + (loss - loss.detach()) / tp_size
+
         # No need to reduce since all ranks compute same global Top-K
         return self.post_forward(loss, tp_reduce=False)
 

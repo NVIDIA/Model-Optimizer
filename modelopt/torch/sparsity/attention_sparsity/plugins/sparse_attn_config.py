@@ -25,6 +25,7 @@ it installed.
 """
 
 import fnmatch
+import warnings
 
 import modelopt.torch.sparsity.attention_sparsity as mtsa
 
@@ -103,13 +104,32 @@ def _build_calibrated_softmax_skip_config(skip_group: dict) -> dict:
     matters: :func:`match_sparse_config` returns the first matching pattern, so
     the ``ignore`` entries must precede the catch-all ``*attn*`` rule.
     """
+    target_sparse_ratio = _normalize_target_sparse_ratio(skip_group.get("target_sparsity"))
+    validation = skip_group.get("validation")
+    if isinstance(validation, dict):
+        validated_targets = validation.get("target_sparsity", {})
+        if not isinstance(validated_targets, dict):
+            warnings.warn(
+                "Ignoring malformed skip-softmax validation.target_sparsity: expected a "
+                "phase-to-target mapping. Recalibrate to restore validation metadata.",
+                stacklevel=3,
+            )
+            validated_targets = {}
+        for phase, validated_target in validated_targets.items():
+            if phase in target_sparse_ratio and target_sparse_ratio[phase] != validated_target:
+                warnings.warn(
+                    f"Skip-softmax {phase} target {target_sparse_ratio[phase]} differs from "
+                    f"the validated target {validated_target}. Refined coefficients were "
+                    "validated only at the recorded target; recalibrate for this target.",
+                    stacklevel=3,
+                )
     sparse_cfg: dict = {}
     for name in skip_group.get("ignore", []):
         sparse_cfg[f"*{name}*"] = {"enable": False}
     sparse_cfg["*attn*"] = {
         "method": "triton_skip_softmax",
         "threshold_scale_factor": skip_group["threshold_scale_factor"],
-        "target_sparse_ratio": _normalize_target_sparse_ratio(skip_group.get("target_sparsity")),
+        "target_sparse_ratio": target_sparse_ratio,
         "backend": "triton",
         "enable": True,
     }

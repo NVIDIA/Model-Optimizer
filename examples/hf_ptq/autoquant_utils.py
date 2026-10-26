@@ -27,7 +27,8 @@ from torch.utils.data import DataLoader
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
-from modelopt.torch.utils.dataset_utils import create_forward_loop
+from modelopt.torch.quantization.kv_cache_auto_quant import _forward_kl
+from modelopt.torch.utils.dataset_utils import create_forward_loop, model_type_is_enc_dec
 
 __all__ = ["auto_quantize"]
 
@@ -40,6 +41,44 @@ _FSDP2_AUTOQUANT_WARNING = (
     "(distributed calibration, sensitivity scoring, and recipe/checkpoint "
     "synchronization across ranks); use at your own risk."
 )
+
+
+def _get_autoquant_memory_probe(recipe: ModelOptAutoQuantizeRecipe):
+    """Include retained reference logits and KL intermediates in batch-size probing."""
+    stages = (recipe.auto_quantize, recipe.kv_auto_quantize)
+    if not any(stage is not None and stage.auto_quantize_method == "kl_div" for stage in stages):
+        return None
+    has_kv_kl = any(
+        stage is not None
+        and stage.auto_quantize_method == "kl_div"
+        and stage.constraints.cost_model == "kv_cache"
+        for stage in stages
+    )
+
+    def probe(model, inputs):
+        # Encoder-decoder forwards need decoder inputs; retain their generation-based probe.
+        if model_type_is_enc_dec(model):
+            model.generate(inputs)
+            return
+        # Composed searches must still budget for the gradient stage's activations.
+        if torch.is_grad_enabled():
+            model(inputs)
+
+        def get_logits():
+            logits = model(inputs).logits
+            if has_kv_kl:
+                return _select_unpadded_logits(logits, {"attention_mask": torch.ones_like(inputs)})
+            return logits
+
+        with torch.no_grad():
+            logits_ref = get_logits()
+            log_prob_ref = torch.log_softmax(logits_ref.float(), dim=-1)
+            # Keep the previous candidate alive during the next forward, as the scorer does.
+            for _ in range(2):
+                logits_quant = get_logits()
+                _forward_kl(logits_quant, log_prob_ref)
+
+    return probe
 
 
 # Presets safe to mix into an AutoQuantize search *and* write via the unified HF checkpoint

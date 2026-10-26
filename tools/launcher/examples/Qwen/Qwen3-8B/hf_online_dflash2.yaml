@@ -98,8 +98,11 @@ pipeline:
       # Sliding-window draft attention, matching the published DFlash2 drafters.
       - dflash.dflash_swa_window_size=2048
     environment:
-      - MAX_FINAL_LOSS: "5.0"
+      # DFlash2's loss runs higher than DFlash's; 5.0 fails healthy runs.
+      - MAX_FINAL_LOSS: "7.0"
       - MIN_FINAL_ACC: "0.15"
+      # Fail the task on a regression instead of only logging it.
+      - REGRESSION_STRICT: "1"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1

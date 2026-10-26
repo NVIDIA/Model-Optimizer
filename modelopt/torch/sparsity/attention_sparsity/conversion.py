@@ -332,18 +332,7 @@ def restore_sparse_attention_state(model: nn.Module, state_dict: dict[str, Any])
     for name, module in get_named_sparse_attention_modules(model):
         module_name = get_unwrapped_name(name, model)
         if module_name in state_dict:
-            module_state = state_dict[module_name]
-
-            # Restore method and config
-            if "method" in module_state:
-                module._method = module_state["method"]
-            if "method_config" in module_state:
-                # Restore config attributes
-                for key, val in module_state["method_config"].items():
-                    setattr(module, f"_{key}", val)
-
-            # Re-setup with restored config
-            module._setup()
+            module.set_from_modelopt_state(state_dict[module_name])
 
 
 def update_sparse_attention_metadata(
@@ -356,21 +345,10 @@ def update_sparse_attention_metadata(
         config: Configuration used
         metadata: Metadata dict to update
     """
-    sparse_state = {}
-
-    for name, module in get_named_sparse_attention_modules(model):
-        module_name = get_unwrapped_name(name, model)
-
-        # Save the method configuration that was used
-        # _method_config already contains the validated config dict
-        module_state = {
-            "method": module._sparse_method_instance.name,
-            "method_config": module._method_config.copy(),
-        }
-
-        sparse_state[module_name] = module_state
-
-    metadata["sparse_attention_state"] = sparse_state
+    metadata["sparse_attention_state"] = {
+        get_unwrapped_name(name, model): module.get_modelopt_state()
+        for name, module in get_named_sparse_attention_modules(model)
+    }
     metadata["sparse_attention_config"] = (
         config.model_dump() if hasattr(config, "model_dump") else vars(config)
     )
