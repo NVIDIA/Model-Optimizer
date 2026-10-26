@@ -176,6 +176,7 @@ def test_to_chat_handles_all_row_shapes():
     msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
     assert blend_module._to_chat({"messages": msgs}, "messages") == {"messages": msgs}
     assert blend_module._to_chat({"messages": []}, "messages") is None
+    assert blend_module._to_chat({"messages": "hello"}, "messages") is None
     # Nothing would be trained under assistant-only loss; loss_mode full trains the user turn.
     assert blend_module._to_chat({"messages": msgs[:1]}, "messages") is None
     assert blend_module._to_chat({"messages": msgs[:1]}, "messages", loss_mode="full") == {
@@ -206,6 +207,7 @@ def test_to_chat_handles_all_row_shapes():
         "messages": [{"role": "assistant", "content": "def f(): pass"}]
     }
     assert blend_module._to_chat({"text": ""}, "text") is None
+    assert blend_module._to_chat({"text": ["x"]}, "text") is None
     # Markers that parse to no turns: dropped, never trained as assistant text.
     assert blend_module._to_chat({"text": "<extra_id_0>\nraw body\n"}, "text") is None
     # A role without a mapping would cut its turn out of the middle: the whole row is dropped.
@@ -226,7 +228,9 @@ def test_to_chat_handles_all_row_shapes():
         assert blend_module._to_chat({"text": text}, "text") is None, text
 
 
-def test_take_chat_rows_skips_non_text_rows_and_fails_without_enough(tmp_path: Path, monkeypatch):
+def test_take_chat_rows_skips_non_text_rows_and_fails_without_enough(
+    tmp_path: Path, monkeypatch, capsys
+):
     source = _source("a")
     # Media is rejected inside message content and as a top-level key the conversion drops.
     rows = [_chat(0), _image_chat(1), {**_chat(9), "images": ["a.png"]}, _chat(2), _chat(3)]
@@ -238,6 +242,22 @@ def test_take_chat_rows_skips_non_text_rows_and_fails_without_enough(tmp_path: P
     monkeypatch.setattr(blend_module, "_iter_rows", lambda *a: iter(images))
     with pytest.raises(RuntimeError, match=r"only 0/2 usable rows \(gave up after 121 rejected"):
         blend_module._take_chat_rows(source, tmp_path, 2, False, 0, "native", "assistant")
+
+    # Unconvertible rows are skipped, but only the first few are warned about.
+    bad = [{"messages": ["hello"]} for _ in range(20)]
+    monkeypatch.setattr(blend_module, "_iter_rows", lambda *a: iter([*bad, _chat(0)]))
+    capsys.readouterr()
+    assert (
+        len(blend_module._take_chat_rows(source, tmp_path, 1, False, 0, "native", "assistant")) == 1
+    )
+    out = capsys.readouterr().out
+    assert out.count("cannot be converted") == 5
+    assert "1 rows (20 rejected, 20 unconvertible)" in out
+    # A config error is not a bad row: it fails before any row is skipped.
+    monkeypatch.setattr(blend_module, "_iter_rows", lambda *a: iter(bad))
+    no_field = {k: v for k, v in source.items() if k != "content_field"}
+    with pytest.raises(KeyError, match="content_field"):
+        blend_module._take_chat_rows(no_field, tmp_path, 1, False, 0, "native", "assistant")
 
 
 def test_chat_blend_splits_weighted_rows(tmp_path: Path, chat_blend, monkeypatch):
@@ -365,8 +385,10 @@ def test_write_jsonl_is_atomic(tmp_path: Path):
 def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch):
     plain, packed = tmp_path / "a.jsonl", tmp_path / "b.jsonl.gz"
     lines = [json.dumps(_chat(i)) for i in range(20)]
-    # A malformed record is skipped with a warning, as in the tokenizing reader.
-    plain.write_text("\n".join([*lines[:10], '{"messages": [', *lines[10:]]) + "\n", "utf-8")
+    # Malformed records, unparseable or unconvertible, are skipped with a warning as in the
+    # tokenizing reader.
+    bad = ['{"messages": [', '{"messages": ["hello"]}']
+    plain.write_text("\n".join([*lines[:10], *bad, *lines[10:]]) + "\n", "utf-8")
     with gzip.open(packed, "wt", encoding="utf-8") as f:
         f.writelines(json.dumps(_chat(i)) + "\n" for i in range(20, 40))
     paths = {"data/a.jsonl": str(plain), "data/b.jsonl.gz": str(packed)}

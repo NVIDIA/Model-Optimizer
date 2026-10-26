@@ -156,6 +156,23 @@ def test_functional_fp8_export_is_repeatable():
         torch.testing.assert_close(base[name], repeated[name])
 
 
+def test_functional_fp8_export_matches_the_fake_quantized_bf16_weight():
+    torch.manual_seed(0)
+    module = nn.Linear(64, 64, bias=False).to(torch.bfloat16)
+    mtq.quantize(
+        module,
+        copy.deepcopy(mtq.FP8_DEFAULT_CFG),
+        lambda m: m(torch.randn(2, 64, dtype=torch.bfloat16)),
+    )
+    state = capture_quantized_weight_export_state(module)
+
+    exported = export_quantized_weight_tensors(module.weight, state, torch.bfloat16)
+
+    dequantized = exported["weight"].float() * exported["weight_scale"]
+    expected = module.weight_quantizer(module.weight)
+    torch.testing.assert_close(dequantized.to(torch.bfloat16), expected, rtol=0, atol=0)
+
+
 _CAPTURE_FORMAT_CONFIGS = {
     "fp8_pc_pt": {"num_bits": (4, 3), "axis": 0},
     "fp8_pb_wo": {"num_bits": (4, 3), "block_sizes": {-2: 128, -1: 128}},
