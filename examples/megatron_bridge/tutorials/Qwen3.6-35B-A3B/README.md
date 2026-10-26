@@ -1,24 +1,36 @@
 # Qwen3.6-35B-A3B: W4A4 NVFP4 PTQ + QAD + vLLM Deployment
 
-End-to-end W4A4 optimization of [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) demonstrating how to quantize both weights and activations: NVFP4 W4A4 post-training quantization → Quantization-Aware Distillation (QAD) to recover the accuracy it costs → evaluation benchmarking → vLLM deployment. This document covers:
-
-1. **[Data Preparation](#1-data-preparation)** — tokenizing the SFT blend for distillation
-2. **[Quantization](#2-quantization)** — W4A4 NVFP4 PTQ with `examples/megatron_bridge/quantize.py`
-3. **[QAD](#3-quantization-aware-distillation-qad)** — recovering accuracy with `examples/megatron_bridge/distill.py`
-4. **[Export](#4-export)** — converting the quantized Megatron checkpoint to a deployable HF checkpoint
-5. **[Evaluation](#5-evaluation)** — benchmarking with NeMo Evaluator across MMMU-Pro, GPQA Diamond, SciCode, and more, plus AA-Omniscience for knowledge recall and calibration
-6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)** — throughput comparison against BF16 on GB200
-
-It closes with [potential further improvements](#potential-further-improvements): settings we did not test and their potential benefits. Experiments that did not become the recommended recipe — chat-format SFT data with assistant-only loss, self-distilled data, and the SciCode non-termination diagnosis — are in [ABLATIONS.md](ABLATIONS.md).
+End-to-end W4A4 optimization of [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) demonstrating how to quantize both weights and activations: NVFP4 W4A4 post-training quantization → Quantization-Aware Distillation (QAD) to recover the accuracy it costs → evaluation benchmarking → vLLM deployment.
 
 > [!NOTE]
 > This tutorial complements the [Nemotron-3-Nano-30B-A3B tutorial](../NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md), which covers pruning + distillation + FP8 PTQ. Here the starting point is an unpruned model and the technique under test is **W4A4** — aggressive enough that PTQ alone leaves a measurable accuracy gap, which is exactly what QAD exists to close.
+
+## Highlights
+
+- **W4A4 PTQ is close to BF16**: a six-benchmark average of 69.9 vs 70.4, matching the published W4A16 checkpoint (69.8). Only IFBench (−2.6 pp) and MMMU-Pro (−1.2 pp) drop by more than run-to-run noise ([paired per-question deltas](#where-qad-actually-helps)).
+- **QAD (500 iterations, ~735 GB200 GPU-hours) brings IFBench back to BF16** and closes about 40% of the MMMU-Pro gap (same paired comparison), for an average of 70.1.
+- **W4A4 is faster than BF16, W4A16 is not**: up to 1.30× BF16 output throughput in vLLM and faster in 9 of 12 shapes, while weight-only NVFP4 is slower than BF16 in 10 of 12. The checkpoint shrinks from 67 to 22 GiB.
+- **Caveats**: each step makes the model guess more instead of abstaining (AA-Omniscience), most of all QAD, and QAD lengthens SciCode outputs by 91% through non-terminating sub-steps, which `presence_penalty: 1.5` fixes at decode time.
+
+## Contents
+
+1. **[Results](#results)** — accuracy, knowledge recall and calibration, output length, and vLLM throughput
+2. **Steps to Reproduce**
+   1. **[Data Preparation](#1-data-preparation)** — tokenizing the SFT blend for distillation
+   2. **[Quantization](#2-quantization)** — W4A4 NVFP4 PTQ with `examples/megatron_bridge/quantize.py`
+   3. **[QAD](#3-quantization-aware-distillation-qad)** — recovering accuracy with `examples/megatron_bridge/distill.py`
+   4. **[Export](#4-export)** — converting the quantized Megatron checkpoint to a deployable HF checkpoint
+   5. **[Evaluation](#5-evaluation)** — benchmarking with NeMo Evaluator across MMMU-Pro, GPQA Diamond, SciCode, and more, plus AA-Omniscience for knowledge recall and calibration
+   6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)** — throughput comparison against BF16 on GB200
+3. **[Potential further improvements](#potential-further-improvements)** — settings we did not test and their potential benefits
+
+Experiments that did not become the recommended recipe — chat-format SFT data with assistant-only loss, self-distilled data, and the SciCode non-termination diagnosis — are in [ABLATIONS.md](ABLATIONS.md).
 
 ## Results
 
 ![W4A4 NVFP4 accuracy recovery during QAD](figures/qad_learning_curves.png)
 
-<b>Main results</b> — all models evaluated with the same [setup](#5-evaluation). Values are `mean ± sem` across repeats; intermediate QAD checkpoints are in the figure above.
+<b>Main results</b> — all models evaluated with the same [setup](evaluation/README.md). Values are `mean ± sem` across repeats; intermediate QAD checkpoints are in the figure above.
 
 | Model | MMMU-Pro | GPQA Diamond | SciCode (Subtask) | AA-LCR | IFBench | tau2-bench Telecom | Average |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -61,7 +73,7 @@ See [Potential further improvements](#potential-further-improvements) for what w
 
 ### Knowledge recall and calibration
 
-The six benchmarks above barely test recalling facts, which is what weight quantization tends to cost first. [AA-Omniscience](eval_configs/omniscience.yaml) does: 600 questions across domains, each answered 10 times, and a judge grades every answer as correct, partially correct, incorrect or abstained ("I don't know"). Its index is the share correct minus the share incorrect, so a wrong guess costs as much as a right answer earns.
+The six benchmarks above barely test recalling facts, which is what weight quantization tends to cost first. [AA-Omniscience](evaluation/omniscience.yaml) does: 600 questions across domains, each answered 10 times, and a judge grades every answer as correct, partially correct, incorrect or abstained ("I don't know"). Its index is the share correct minus the share incorrect, so a wrong guess costs as much as a right answer earns.
 
 | Model | Correct | Incorrect | Abstained | Omniscience index | Hallucination rate |
 | --- | --- | --- | --- | --- | --- |
@@ -77,6 +89,22 @@ The six benchmarks above barely test recalling facts, which is what weight quant
 - **QAD does most of it early**: the index drops to −31.4 at iteration 50, then partly recovers (−25.1 at 300, −27.5 at 500), the same shape as SciCode's non-terminating sub-steps (see [ABLATIONS.md](ABLATIONS.md#data-format-pre-tokenized-blend-vs-chat-sft-data)).
 
 If abstaining matters for your use case (assistants that should say "I don't know"), evaluate it explicitly: QAD as run here did not preserve it.
+
+### Output length
+
+Accuracy is only half the serving cost — a model that scores the same while emitting more tokens is slower end to end. Mean completion tokens per benchmark (`response_stats.avg_completion_tokens`, same runs as the results table):
+
+| Benchmark | BF16 | W4A16 NVFP4 | W4A4 NVFP4 PTQ | + QAD 500 iters | runs/side |
+| --- | --- | --- | --- | --- | --- |
+| SciCode (Subtask) | 5,348 | +22.9% | +25.5% | **+90.9%** | 8 |
+| IFBench | 12,177 | +7.0% | +9.3% | +17.4% | 8 |
+| AA-LCR | 2,560 | +7.1% | +6.9% | +9.8% | 8 |
+| MMMU-Pro | 9,382 | +3.0% | +6.2% | −3.8% | 8 |
+| GPQA Diamond | 13,561 | +17.1% | +6.6% | −8.5% | 1 |
+
+**4-bit weights lengthen SciCode outputs by ~23-25% on their own** — the published W4A16 checkpoint does it too, so it is not something QAD or W4A4 introduced. **QAD then pushes SciCode to +90.9%**, for an unchanged score (40.2 vs 39.9), while pulling GPQA and MMMU-Pro back toward BF16. The throughput table is measured at fixed output length, so it does not capture this.
+
+The SciCode increase is not verbosity: **3.6% of sub-steps never terminate** (BF16: 0.7%). They hit the 131,072-token cap with no answer and use 45.7% of all completion tokens. **`presence_penalty: 1.5` fixes it at decode time**: capped sub-steps drop from 96 to 2 of 2,704, accuracy stays within noise, and SciCode runs 12-44% faster. [scicode.yaml](evaluation/scicode.yaml) has the line commented out so it reproduces the results table; uncomment it to apply the fix. Do not set it for every benchmark: on GPQA Diamond it cuts generation throughput 4.8× (5,109 to 1,067 tokens/s) for no accuracy change. Details are in [ABLATIONS.md](ABLATIONS.md#scicode-non-termination-diagnosis-and-decode-time-fix).
 
 ### vLLM Throughput (4× GB200, vLLM 0.28.0, TP=4 + EP)
 
@@ -239,105 +267,7 @@ The exported checkpoint is directly deployable with [vLLM](https://github.com/vl
 
 ### 5. Evaluation
 
-One config per benchmark in [eval_configs/](eval_configs/), so each can be launched independently with its own walltime and sampling:
-
-| Benchmark | Config | Temp | Runs | Walltime | Metric name |
-| --- | --- | --- | --- | --- | --- |
-| MMMU-Pro | [mmmu_pro.yaml](eval_configs/mmmu_pro.yaml) | 1.0 | 8 | 2:30 | `mmmu-pro_pass_at_1_symbolic_correct` |
-| GPQA Diamond | [gpqa.yaml](eval_configs/gpqa.yaml) | 1.0 | 1 (avg-of-16) | 4:00 | `gpqa_pass_at_1_avg-of-16_symbolic_correct` |
-| SciCode (Subtask) | [scicode.yaml](eval_configs/scicode.yaml) | **0.6** | 8 | 2:00 | `scicode_pass_at_1_subtask_accuracy` |
-| AA-LCR | [aa_lcr.yaml](eval_configs/aa_lcr.yaml) | 1.0 | 8 | 2:00 | `aalcr_pass_at_1_judge_correct` |
-| IFBench | [ifbench.yaml](eval_configs/ifbench.yaml) | 1.0 | 8 | 1:30 | `ifbench_pass_at_1_average_score` |
-| tau2-bench Telecom | [tau2_telecom.yaml](eval_configs/tau2_telecom.yaml) | 1.0 | 3 | 1:30 | `tau2_bench_telecom_pass_at_1_pass_at_1` |
-| AA-Omniscience<sup>*</sup> | [omniscience.yaml](eval_configs/omniscience.yaml) | 1.0 | 1 (avg-of-10) | 4:00 | `omniscience_pass_at_1_avg-of-10_judge_omni_index` |
-
-<sup>*</sup> Reported separately in [Knowledge recall and calibration](#knowledge-recall-and-calibration), not in the six-benchmark mean.
-
-Sampling follows the [nvidia/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4) card (`T=1.0, top_p=0.95, max_new_tokens=131072`), except SciCode, which the card specifies at `T=0.6`. `parallelism` varies (32 default, 16 for AA-LCR's long contexts and for tau2-bench's multi-turn tool round-trips, 8 for SciCode's long generations) as a throughput knob only. The same configs serve BF16 and NVFP4 unchanged — vLLM reads the FP8 KV-cache setting from the checkpoint's own `quantization_config`.
-
-> [!IMPORTANT]
-> **Three benchmarks need a second model endpoint besides the one under test.** AA-LCR and
-> AA-Omniscience score answers with a judge (`NS_JUDGE_URL` / `LCR_JUDGE_MODEL_ID` or
-> `OMNI_JUDGE_MODEL_ID`); tau2-bench drives a simulated user (`TAU2_ENDPOINT_URL` /
-> `TAU2_USER_MODEL_ID`). All read `INFERENCE_API_KEY`, and none can produce its metric without that
-> endpoint. Point them at `https://` URLs for the final endpoint:
-> the key rides every request, and a redirect can downgrade it to `http` or send it to another
-> origin. tau2-bench additionally needs its own **deployment** —
-> `--enable-auto-tool-choice --tool-call-parser qwen3_coder` and `--max-num-seqs 16` — which is why
-> it cannot share a config with the others (`deployment.command` is global). `qwen3_coder` is what
-> the model card specifies; the template's `<tool_call>` markers resemble `hermes`, which would
-> mis-parse tool calls and silently invalidate the benchmark. Its `top_k` / `presence_penalty` go
-> through tau2's `agent_args` passthrough, which NEL's top-level `params` block does not accept.
-> On an `ns_*` task they go through the adapter's `params_to_add` instead — the other five configs
-> still omit them, deliberately, so they reproduce the table above; see **Output length** below
-> for when `presence_penalty` helps and when it is pure cost.
-
-> [!IMPORTANT]
-> Every task sets `num_repeats: 1`; the repeat counts above come from **launching a config that many times**. N launches give N independent `pass@1` values, which is what `mean ± sem` and the paired tests need — `num_repeats: N` instead yields a single `pass@1[avg-of-N]`. GPQA and AA-Omniscience are the deliberate exceptions; AA-Omniscience's `±` is the sem across its 10 in-run repeats, which differ because each repeat shares one sampling seed across all 600 questions.
-
-> [!IMPORTANT]
-> **Run enough repeats.** These benchmarks are noisy, and 3 was not enough to tell signal from noise in either direction. At 3 repeats, AA-LCR (only 100 questions) showed a 3 pp swing that looked real and **vanished completely** at 8; IFBench's genuine +2.3 pp gain was **invisible** at 3 and only appeared at 8. Three runs also *understates* how noisy a benchmark is, so the measured spread looks tighter than it is.
-
-<details>
-<summary>Evaluation launch steps (click to expand)</summary>
-
-Set `execution.hostname`, `execution.account` and `deployment.checkpoint_path` in the config, or override with `-o <option>=<value>`.
-
-```bash
-pip install "nemo-evaluator-launcher[all]==0.2.6"
-
-# Required by every config:
-export HF_TOKEN=<your_huggingface_token>
-export SLURM_JOB_DIR=<path_to_slurm_job_output_dir>
-
-# Required only by AA-LCR (judge), tau2-bench (user simulator) and AA-Omniscience (judge):
-export INFERENCE_API_KEY=<key_for_those_endpoints>
-export NS_JUDGE_URL=<judge_endpoint_url>
-export LCR_JUDGE_MODEL_ID=<judge_model_id>
-export TAU2_ENDPOINT_URL=<user_simulator_url>
-export TAU2_USER_MODEL_ID=<user_simulator_model>
-# Required only by AA-Omniscience (judge), also via NS_JUDGE_URL and INFERENCE_API_KEY:
-export OMNI_JUDGE_MODEL_ID=<judge_model_id>
-
-# One benchmark. To verify the pipeline first, add
-# `-o ++evaluation.nemo_evaluator_config.config.params.limit_samples=8`
-nemo-evaluator-launcher run --config eval_configs/mmmu_pro.yaml
-
-# The 8 independent runs behind the results table: launch the same config 8 times and pool the
-# per-run pass@1 values. Each launch returns its own invocation id; record them so you can select
-# exactly those runs when pooling (each eval directory also holds a small canary run).
-for i in $(seq 1 8); do
-    nemo-evaluator-launcher run --config eval_configs/mmmu_pro.yaml
-done
-
-# All six benchmarks at their reported repeat counts
-for cfg_runs in mmmu_pro:8 gpqa:1 scicode:8 aa_lcr:8 ifbench:8 tau2_telecom:3; do
-    cfg=${cfg_runs%%:*}; runs=${cfg_runs##*:}
-    for i in $(seq 1 "$runs"); do
-        nemo-evaluator-launcher run --config "eval_configs/${cfg}.yaml"
-    done
-done
-```
-
-</details>
-
-For more details on NeMo Evaluator, see the [GitHub repo](https://github.com/NVIDIA-NeMo/evaluator) and [documentation](https://docs.nvidia.com/nemo/evaluator/latest/).
-
-#### Output length
-
-Accuracy is only half the serving cost — a model that scores the same while emitting more tokens is slower end to end. Mean completion tokens per benchmark (`response_stats.avg_completion_tokens`, same runs as the results table):
-
-| Benchmark | BF16 | W4A16 NVFP4 | W4A4 NVFP4 PTQ | + QAD 500 iters | runs/side |
-| --- | --- | --- | --- | --- | --- |
-| SciCode (Subtask) | 5,348 | +22.9% | +25.5% | **+90.9%** | 8 |
-| IFBench | 12,177 | +7.0% | +9.3% | +17.4% | 8 |
-| AA-LCR | 2,560 | +7.1% | +6.9% | +9.8% | 8 |
-| MMMU-Pro | 9,382 | +3.0% | +6.2% | −3.8% | 8 |
-| GPQA Diamond | 13,561 | +17.1% | +6.6% | −8.5% | 1 |
-
-**4-bit weights lengthen SciCode outputs by ~23-25% on their own** — the published W4A16 checkpoint does it too, so it is not something QAD or W4A4 introduced. **QAD then pushes SciCode to +90.9%**, for an unchanged score (40.2 vs 39.9), while pulling GPQA and MMMU-Pro back toward BF16. The throughput table is measured at fixed output length, so it does not capture this.
-
-The SciCode increase is not verbosity: **3.6% of sub-steps never terminate** (BF16: 0.7%). They hit the 131,072-token cap with no answer and use 45.7% of all completion tokens. **`presence_penalty: 1.5` fixes it at decode time**: capped sub-steps drop from 96 to 2 of 2,704, accuracy stays within noise, and SciCode runs 12-44% faster. [scicode.yaml](eval_configs/scicode.yaml) has the line commented out so it reproduces the results table; uncomment it to apply the fix. Do not set it for every benchmark: on GPQA Diamond it cuts generation throughput 4.8× (5,109 to 1,067 tokens/s) for no accuracy change. Details are in [ABLATIONS.md](ABLATIONS.md#scicode-non-termination-diagnosis-and-decode-time-fix).
+[evaluation/](evaluation/README.md) holds everything needed to reproduce the [results](#results): one [NeMo Evaluator Launcher](https://github.com/NVIDIA-NeMo/evaluator) config per benchmark, the benchmark table with sampling settings and repeat counts, the judge and user-simulator endpoints that AA-LCR, AA-Omniscience and tau2-bench need, and the launch commands.
 
 ---
 
