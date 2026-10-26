@@ -149,7 +149,11 @@ def _duplicate_clip_qdq_chain(
             inputs = [out, *list(n.input[1:])]
             new_nodes.append(
                 helper.make_node(
-                    "Clip", inputs, [new_out], name=cache.unique_name(f"{n.name}_u5d_{suffix}_{m}")
+                    "Clip",
+                    inputs,
+                    [new_out],
+                    name=cache.unique_name(f"{n.name}_u5d_{suffix}_{m}"),
+                    **{a.name: helper.get_attribute_value(a) for a in n.attribute},
                 )
             )
             out = new_out

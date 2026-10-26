@@ -400,12 +400,20 @@ class TestDla5dReshapeTo4dTranspose:
                 _apply_5d_reshape_to_4d(model, skip_symbolic_shape_inference=skip_inference)
             assert model.SerializeToString() == before
 
-    def test_transpose_pipeline_rewritten(self):
+    @pytest.mark.parametrize("legacy_clip", [False, True])
+    def test_transpose_pipeline_rewritten(self, legacy_clip):
         """The supported leading-slice layout preserves values and output shape."""
         orig = _make_transpose_reshape_model()
         dims = orig.graph.input[0].type.tensor_type.shape.dim
         dims[0].dim_value = 2
         dims[1].dim_value = 12
+        if legacy_clip:
+            orig.opset_import[0].version = 10
+            orig.graph.node[1].input[0] = "clipped"
+            orig.graph.node.insert(
+                1, helper.make_node("Clip", ["T5"], ["clipped"], name="clip", min=-0.5, max=0.5)
+            )
+        onnx.checker.check_model(orig, full_check=True)
         values = np.random.default_rng(5).standard_normal((2, 12, 4, 16)).astype(np.float32)
         expected = _run_ort(orig, {"X": values})["Y"]
         rewritten = _apply_5d_reshape_to_4d(infer_shapes(copy.deepcopy(orig)))
