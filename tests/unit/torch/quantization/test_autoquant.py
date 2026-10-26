@@ -948,6 +948,8 @@ def test_pqs_folding(config):
 
 def _test_data_parallel_auto_quantize(rank, size):
     model = SimpleLinear()
+    # Each rank its own batches: only the data-parallel score sync makes their scores agree.
+    torch.manual_seed(rank)
 
     model, search_history = mtq.auto_quantize(
         model,

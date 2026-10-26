@@ -258,6 +258,7 @@ python3 examples/hf_ptq/hf_ptq.py \
 
   Note: `--pyt_ckpt_path` can point to either an HF checkpoint or a ModelOpt-saved checkpoint (e.g., a QAT/QAD checkpoint produced by `examples/llm_qat/train.py`). If the input checkpoint is already quantized, the script will **skip re-quantization** and only export artifacts for vLLM fakequant reload.
 
+- For **Megatron-Bridge** models, export with `export_quantized_megatron_to_hf.py --vllm_fakequant_export` as described in the [Megatron-Bridge example README](../megatron_bridge/README.md#evaluating-a-qad-checkpoint-in-vllm-with-fake-quantization). This generates `quant_recipe.yaml` (versioned, one ModelOpt quantizer state per HF quantizer name) and `quantizer_state.pth` for vLLM fakequant reload.
 - For **MCore** models, export the model with flag `--export-vllm-fq` as described in [Megatron-LM README](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-nvfp4-quantization-qauntization-aware-training-and-model-export). This generates `quant_recipe.yaml` and `quantizer_state.pth` for vLLM fakequant reload.
 
 Step 2: use the exported artifacts when serving:
