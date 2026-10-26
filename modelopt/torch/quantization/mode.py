@@ -38,6 +38,7 @@ from .config import (
     AWQLiteCalibConfig,
     CompressConfig,
     GPTQCalibConfig,
+    ImatrixCalibConfig,
     LocalHessianCalibConfig,
     LSQConfig,
     MaxCalibConfig,
@@ -62,6 +63,7 @@ from .conversion import (
 from .model_calib import (
     awq,
     gptq,
+    imatrix_calibrate,
     layerwise_calibrate,
     local_hessian_calibrate,
     lsq,
@@ -556,6 +558,18 @@ class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
         return GPTQCalibConfig
 
     _calib_func = gptq
+
+
+@CalibrateModeRegistry.register_mode
+class ImatrixModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for imatrix calibration algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return ImatrixCalibConfig
+
+    _calib_func = imatrix_calibrate
 
 
 @CalibrateModeRegistry.register_mode

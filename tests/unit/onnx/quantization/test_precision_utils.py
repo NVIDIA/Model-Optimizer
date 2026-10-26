@@ -118,6 +118,11 @@ def test_export_transform_runs_between_int8_qdq_and_fp8(monkeypatch):
     )
     monkeypatch.setattr(
         export_utils,
+        "remove_scalar_input_qdq",
+        lambda graph: events.append("strip_scalar"),
+    )
+    monkeypatch.setattr(
+        export_utils,
         "fix_zero_point_initializers",
         lambda model: events.append("fix_zero_point"),
     )
@@ -140,7 +145,14 @@ def test_export_transform_runs_between_int8_qdq_and_fp8(monkeypatch):
         model_transform=transform,
     )
 
-    assert events == ["insert_int8", "export", "fix_zero_point", "transform", "convert_fp8"]
+    assert events == [
+        "insert_int8",
+        "strip_scalar",
+        "export",
+        "fix_zero_point",
+        "transform",
+        "convert_fp8",
+    ]
     assert result is fp8_model
     assert source.SerializeToString() == source_bytes
 

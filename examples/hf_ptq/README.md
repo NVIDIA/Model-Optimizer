@@ -363,7 +363,7 @@ weight-only and weight & activation quantization) — the effective number of bi
 
 You may specify an `effective_bits` target such as 5.4 for mixed precision quantization using `NVFP4_DEFAULT_CFG` & `FP8_DEFAULT_CFG`.
 `AutoQuantize` will automatically quantize highly sensitive layers in `FP8_DEFAULT_CFG` while keeping less sensitive layers in `NVFP4_DEFAULT_CFG` (and even skip quantization for any extremely sensitive layers) so that
-the the final mixed precision quantized model has an effective quantized bits of 5.4. This model would give a better accuracy than the model quantized with vanilla `NVFP4_DEFAULT_CFG` configuration since the more aggressive `NVFP4_DEFAULT_CFG` quantization was not applied for the highly sensitive layers.
+the final mixed precision quantized model has an effective quantized bits of 5.4. This model would give a better accuracy than the model quantized with vanilla `NVFP4_DEFAULT_CFG` configuration since the more aggressive `NVFP4_DEFAULT_CFG` quantization was not applied for the highly sensitive layers.
 
 Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize) API for more details):
 
@@ -411,6 +411,14 @@ search-disabled layers, and cost-excluded layers — see
 [`modelopt_recipes/general/auto_quantize/`](../../modelopt_recipes/general/auto_quantize); model-specific
 recipes (carrying architecture-specific disabled layers — e.g. VL vision towers) live under
 `modelopt_recipes/model_type/<model>/auto_quantize/`.
+
+For non-FSDP2 runs with `--batch_size 0`, automatic sizing probes the recipe's scoring workload.
+Gradient recipes retain gradient activations; KL recipes instead retain reference logits and
+FP32 log-probabilities across candidate forwards and KL computation. Composed recipes probe both
+stages. KL batch sizes can therefore differ from the previous gradient-enabled probe, changing
+the number of scoring batches derived from `score_size`. Set `--batch_size` explicitly when
+comparing runs with an identical batching schedule.
+Encoder-decoder models retain generation-based batch-size probing.
 
 [Script](./scripts/huggingface_example.sh)
 
@@ -707,6 +715,20 @@ llm_fp8 = LLM(model="<the exported model path>", quantization="modelopt")
 print(llm_fp8.generate(["What's the age of the earth? "]))
 ```
 
+#### vLLM with GGML recipes (IQ, Q8_0)
+
+vLLM cannot load the GGML checkpoints ModelOpt exports, which are Hugging Face checkpoints holding packed GGML blocks. To serve one on vLLM's integer kernels, expand it into an INT8 weight-only compressed-tensors checkpoint with [convert_ggml_to_int8.py](./convert_ggml_to_int8.py):
+
+```bash
+python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --recipe general/ptq/iq1_s --export_path <ggml_ckpt_path>
+python convert_ggml_to_int8.py <ggml_ckpt_path> <int8_ckpt_path>
+vllm serve <int8_ckpt_path>
+```
+
+Each weight keeps its GGML integer level, and the step of its 16- or 32-weight sub-block becomes the INT8 group scale. The INT8 checkpoint therefore holds the same weights up to rounding the scales to the model dtype, at about half the BF16 weight memory. Its config names each converted layer explicitly, so every other layer loads unquantized. The GGML checkpoint is left unchanged.
+
+vLLM serves group-32 layers (IQ1_S, IQ2_XXS, Q8_0) with Marlin and group-16 layers (IQ1_M, IQ2_XS, IQ2_S) with Humming. On Blackwell GPUs, Marlin is much slower at large batch sizes, so set `VLLM_DISABLED_KERNELS=MarlinLinearKernel` to use Humming for group 32 as well.
+
 #### SGLang
 
 ```python
@@ -758,7 +780,7 @@ with torch.inference_mode():
 
 ### Build the TensorRT-LLM engines
 
-After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build command to build the engines from the exported checkpoints. Please check the [TensorRT-LLM Build API](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/architecture/workflow.md#build-apis) documentation for reference.
+After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build command to build the engines from the exported checkpoints. Please check the [TensorRT-LLM Build API](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/legacy/architecture/workflow.md#build-apis) documentation for reference.
 
 ## Pre-Quantized Checkpoints
 

@@ -115,7 +115,7 @@ Export is automatic: after training, rank 0 exports every `checkpoint-<step>` to
 | Task | Log evidence | Artifact |
 | --- | --- | --- |
 | Hidden-state dump (offline) | vLLM extraction completes over the input data | Dump directory populated |
-| Training | `Training time: N seconds`, then `=== Exporting: <ckpt> → <export_dir> ===` and `=== Regression Check (...) ===` | `<output_dir>/checkpoint-*/trainer_state.json`, `<output_dir>/exported-checkpoint-*` |
+| Training | `Training time: N seconds`, then `=== Exporting: <ckpt> → <export_dir> ===` and `=== Regression Check (...) ===` | `<output_dir>/checkpoint-*/trainer_state.json`, `<output_dir>/exported-checkpoint-*`, `<output_dir>/regression_check.json` |
 | Smoke test | `Auto-detected draft model: ...`, `Server ready after Ns` | Smoke-test log with responses |
 | AR eval | Per-category MT-Bench AR output | AR results |
 | Benchmark | `Average_AL` in the saved results | JSON under `--save_dir` |
@@ -137,9 +137,12 @@ convergence baseline (8×B200, bs=1, seq_len=4096, 5-layer draft, block_size=16,
 samples, 1 epoch ≈ 12,500 steps) is in the YAML header — compare against it when
 judging whether a run under-trained.
 
-Note: `check_regression.py` is invoked with `|| true`, and it only warns when no
-`trainer_state.json` exists. A green Slurm exit is not proof the gate ran — confirm
-the `=== Regression Check ===` block is present in the log.
+Judge the run by `<output_dir>/regression_check.json`: it passed only if `pass` is true
+and `thresholds` is non-empty; no file means the check never ran (training failed).
+`failure_class` is `TRAIN_REGRESSION` (a metric missed its threshold or is NaN/inf) or
+`METRICS_MISSING` (no readable metrics, or an invalid threshold). Only
+`REGRESSION_STRICT=1` (DFlash2 online) fails the task on either; elsewhere a green Slurm
+exit proves nothing. Any value but `0`/`1` fails before training.
 
 **2. Smoke test** — `MIN_ACCEPTANCE_LENGTH` env var (Qwen3-8B online uses 1.4) with
 `NUM_SPEC_TOKENS` speculative tokens.

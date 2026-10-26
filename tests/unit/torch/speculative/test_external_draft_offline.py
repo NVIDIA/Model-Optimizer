@@ -146,6 +146,24 @@ def test_dense_tvd_uses_full_vocabulary_and_the_filter_changes_it():
     assert not torch.allclose(a, b), "the serving filter must change the loss"
 
 
+def test_dense_tvd_ce_is_weighted_tvd_plus_ce_on_the_base_top1():
+    """One reference check pins the CE target, the weights and the dense composition.
+
+    Going through `compute_loss` directly rather than a forward pass: the forward is
+    shared with the other objectives and covered by `test_training_steps_reduce_loss`,
+    while the target choice is what a wrong CE would get silently wrong here.
+    """
+    draft, _ = _external_draft(external_loss="tvd_ce")
+    torch.manual_seed(0)
+    d, b = torch.randn(BATCH, SEQ, VOCAB), torch.randn(BATCH, SEQ, VOCAB)
+    mask = torch.ones(BATCH, SEQ)
+    mixed, _ = draft.compute_loss(d, b, mask)
+    draft.external_loss = "tvd"
+    tvd, _ = draft.compute_loss(d, b, mask)
+    ce = torch.nn.functional.cross_entropy(d.flatten(0, 1), b.argmax(-1).flatten())
+    assert torch.allclose(mixed, 0.9 * tvd + 0.1 * ce, atol=1e-5)
+
+
 def test_prenorm_without_a_norm_raises_rather_than_corrupting():
     """A producer declaring a pre-norm hidden with no norm attached must fail loudly.
 
