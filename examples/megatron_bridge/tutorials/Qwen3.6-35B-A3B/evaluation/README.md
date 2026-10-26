@@ -1,4 +1,4 @@
-# Qwen3.6-35B-A3B evaluation configs
+# Qwen3.6-35B-A3B evaluation
 
 The configs behind the [tutorial's results](../README.md#results), one per benchmark so each can be launched independently with its own walltime and sampling:
 
@@ -62,20 +62,20 @@ export OMNI_JUDGE_MODEL_ID=<judge_model_id>
 
 # One benchmark. To verify the pipeline first, add
 # `-o ++evaluation.nemo_evaluator_config.config.params.limit_samples=8`
-nemo-evaluator-launcher run --config eval_configs/mmmu_pro.yaml
+nemo-evaluator-launcher run --config evaluation/mmmu_pro.yaml
 
 # The 8 independent runs behind the results table: launch the same config 8 times and pool the
 # per-run pass@1 values. Each launch returns its own invocation id; record them so you can select
 # exactly those runs when pooling (each eval directory also holds a small canary run).
 for i in $(seq 1 8); do
-    nemo-evaluator-launcher run --config eval_configs/mmmu_pro.yaml
+    nemo-evaluator-launcher run --config evaluation/mmmu_pro.yaml
 done
 
 # All six benchmarks at their reported repeat counts
 for cfg_runs in mmmu_pro:8 gpqa:1 scicode:8 aa_lcr:8 ifbench:8 tau2_telecom:3; do
     cfg=${cfg_runs%%:*}; runs=${cfg_runs##*:}
     for i in $(seq 1 "$runs"); do
-        nemo-evaluator-launcher run --config "eval_configs/${cfg}.yaml"
+        nemo-evaluator-launcher run --config "evaluation/${cfg}.yaml"
     done
 done
 ```

@@ -24,7 +24,7 @@
 #
 #   pip install "nemo-evaluator-launcher[all]==0.2.6"
 #   export HF_TOKEN=<token>; export SLURM_JOB_DIR=<dir>; export HF_HOME=<cache>
-#   nemo-evaluator-launcher run --config eval_configs/tau2_telecom.yaml
+#   nemo-evaluator-launcher run --config evaluation/tau2_telecom.yaml
 defaults:
   - execution: slurm/default
   - deployment: vllm
