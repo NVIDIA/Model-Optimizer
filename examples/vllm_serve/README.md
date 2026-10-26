@@ -28,6 +28,17 @@ docker build -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.30.0 .
 The Dockerfile defaults to vLLM 0.30.0. Override `VLLM_VERSION` only when
 building for a different tested release.
 
+The image runs as the `vllm` user, which owns `/workspace`. To run it as a different user, point
+`TORCH_EXTENSIONS_DIR` at a directory that user can write, for example a mounted volume. ModelOpt
+then builds its CUDA extensions there on first use instead of loading the precompiled ones from the
+image; without it, ModelOpt warns and falls back to slower eager fake quantization.
+
+```bash
+mkdir -p ext_cache
+docker run --user $(id -u) -v "$PWD/ext_cache:/ext_cache" -e TORCH_EXTENSIONS_DIR=/ext_cache \
+  <your usual docker run options> vllm-modelopt:v0.30.0
+```
+
 For a direct installation from the ModelOpt repository root, install the tested vLLM
 release and the ModelOpt extras used by this example:
 

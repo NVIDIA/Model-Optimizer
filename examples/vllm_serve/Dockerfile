@@ -31,8 +31,8 @@ RUN pip install flash-attn==2.7.4.post1 --no-build-isolation
 ENV TORCH_EXTENSIONS_DIR=/workspace/torch_extensions
 RUN python3 -c "import modelopt.torch.quantization.extensions as ext; ext.precompile()" || true
 
-# Only the vllm user may write here, since this code is loaded into the serving process. The base
-# image's vllm user has GID 0 and no vllm group exists, so chown the user only.
+# Only the vllm user (and root) may write here, since this code is loaded into the serving process.
+# The base image's vllm user has GID 0 and no vllm group exists, so chown the user only.
 RUN chown -R vllm /workspace && chmod -R go-w /workspace
 
 USER vllm
