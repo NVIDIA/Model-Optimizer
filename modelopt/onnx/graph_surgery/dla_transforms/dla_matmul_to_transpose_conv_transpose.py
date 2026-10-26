@@ -121,6 +121,15 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
                 if bias_shape is None or len(bias_shape) != 1:
                     raise ValueError(f"Bias for {candidate.name!r} must have a known 1-D shape")
 
+    def update_weight_metadata(name, shape):
+        """Keep private weight annotations consistent with an in-place layout change."""
+        info = cache.vi_map.get(name)
+        if info is not None:
+            dims = info.type.tensor_type.shape.dim
+            del dims[:]
+            for size in shape:
+                dims.add().dim_value = size
+
     def update_initializers(name, current_node, nodes_to_add, trans_b=False, dq_node=None):
         """Allocate the Conv layout while retaining every shared, public or captured weight view."""
         initializer = cache.get_init(name)
@@ -176,6 +185,10 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
                 add_unique_initializers(graph, unique_initializer, [converted])
             else:
                 initializer.CopyFrom(converted)
+        if not shared:
+            update_weight_metadata(name, shape)
+            if dq_node is not None:
+                update_weight_metadata(dq_node.output[0], shape)
         if shared:
             if dq_node is not None:
                 dq_clone = type(dq_node)()
@@ -226,7 +239,14 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
             or (activation_shape is not None and 0 in activation_shape)
         ):
             ineligible_nodes.append(node)
-        elif check_to_apply_transpose(node, model, tensor_name_dim_map):
+        elif (
+            activation_shape is not None
+            and (
+                len(activation_shape) in (2, 3)
+                or (len(activation_shape) == 4 and activation_shape[0] == 1)
+            )
+            and check_to_apply_transpose(node, model, tensor_name_dim_map)
+        ):
             output_rank = tensor_rank(node.output[0])
             if output_rank is None:
                 output_rank = (
@@ -241,7 +261,8 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
         node
         for node in ineligible_nodes
         if node.op_type == "MatMul"
-        and not any(tensor_rank(name) == 1 for name in node.input[:2])
+        and all(tensor_rank(name) is not None and tensor_rank(name) >= 2 for name in node.input[:2])
+        and tensor_rank(node.output[0]) is not None
         and (not defer_rank_conversion or node.input[1] in cache.graph_input_names)
     ]
     needs_adapters = any(
@@ -313,6 +334,7 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
                             else:
                                 del init.dims[:]
                                 init.dims.extend(new_shape)
+                                update_weight_metadata(init.name, new_shape)
                         break
             else:
                 # Dynamic input: Unsqueeze to 4D

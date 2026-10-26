@@ -83,7 +83,12 @@ def _clamp_ir_version(model: onnx.ModelProto) -> None:
 def _run_ort(model: onnx.ModelProto, feeds: dict) -> dict:
     """Execute all graph outputs with the optional CPU runtime."""
     _clamp_ir_version(model)
-    sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    options = ort.SessionOptions()
+    # Compare graph-surgery semantics before runtime quantization fusions.
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    sess = ort.InferenceSession(
+        model.SerializeToString(), options, providers=["CPUExecutionProvider"]
+    )
     return {o.name: sess.run([o.name], feeds)[0] for o in model.graph.output}
 
 
@@ -121,8 +126,8 @@ def _make_model(nodes, graph_name, inputs, outputs, initializers=None):
             SymbolicShapeInference,  # type: ignore[import-untyped]
         )
 
-        model = SymbolicShapeInference.infer_shapes(model, auto_merge_symbolic_dims=True) or model
-    except Exception:
+        model = SymbolicShapeInference.infer_shapes(model, auto_merge=True) or model
+    except ImportError:
         pass
     onnx.checker.check_model(model)
     return model
@@ -823,3 +828,87 @@ def test_legacy_ir_registers_new_initializer_inputs():
         value.name for value in transformed.graph.input
     }
     _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("layout", ["symbolic_2d", "symbolic_3d", "batch_4d", "rank_5d"])
+@pytest.mark.parametrize("defer", [False, True])
+def test_ineligible_activation_layout_keeps_matmul_semantics(layout, defer):
+    """Route valid dynamic or unsupported Conv activation layouts through matrix fallback."""
+    shape = {
+        "symbolic_2d": [M, N],
+        "symbolic_3d": [B, M, N],
+        "batch_4d": [2, 3, M, N],
+        "rank_5d": [2, 1, 3, M, N],
+    }[layout]
+    metadata = list(shape)
+    if layout.startswith("symbolic"):
+        metadata[0] = "batch"
+    model = _make_model(
+        [helper.make_node("MatMul", ["A", "W"], ["Y"], name="matrix")],
+        "activation_fallback",
+        [_vi("A", TensorProto.FLOAT, metadata)],
+        [_vi("Y", TensorProto.FLOAT, [*metadata[:-1], K])],
+        [_init("W", _RNG.standard_normal((N, K)).astype(np.float32))],
+    )
+    feeds = {"A": _RNG.standard_normal(shape).astype(np.float32)}
+    expected = _run_ort(model, feeds)
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model), defer_rank_conversion=defer)
+    assert any(node.op_type == "MatMul" for node in transformed.graph.node)
+    onnx.checker.check_model(transformed, full_check=True)
+    _assert_outputs_match(expected, _run_ort(transformed, feeds))
+
+
+@pytest.mark.parametrize("defer", [False, True])
+def test_unknown_intermediate_result_rank_is_preserved(defer):
+    """Leave a dynamic matrix operation unchanged when its result rank is absent."""
+    model, feeds = _make_matmul_dynamic_weight()
+    node = next(node for node in model.graph.node if node.op_type == "MatMul")
+    node.output[0] = "product"
+    model.graph.node.append(helper.make_node("Identity", ["product"], ["Y"]))
+    retained = [info for info in model.graph.value_info if info.name != "product"]
+    del model.graph.value_info[:]
+    model.graph.value_info.extend(retained)
+    onnx.checker.check_model(model, full_check=True)
+    expected = _run_ort(model, feeds)
+    before = model.SerializeToString()
+    _apply_matmul_to_conv(model, defer_rank_conversion=defer)
+    onnx.checker.check_model(model, full_check=True)
+    assert model.SerializeToString() == before
+    _assert_outputs_match(expected, _run_ort(model, feeds))
+
+
+def test_test_fixture_inference_supplies_intermediate_metadata():
+    """Exercise the fixture inference rather than silently accepting keyword failures."""
+    model = _make_model(
+        [
+            helper.make_node("Identity", ["X"], ["middle"]),
+            helper.make_node("Identity", ["middle"], ["Y"]),
+        ],
+        "inferred_fixture",
+        [_vi("X", TensorProto.FLOAT, [2, 3])],
+        [_vi("Y", TensorProto.FLOAT, [2, 3])],
+    )
+    assert GraphCache(model.graph).get_shape("middle") == [2, 3]
+
+
+@pytest.mark.parametrize("per_axis", [False, True])
+def test_dq_matrix_rewrite_matches_independent_reference(per_axis):
+    """Check quantized-weight rewrites against independent unfused execution."""
+    model, feeds = _make_matmul_dq_weight()
+    # The reference evaluator implements these INT8 controls starting at opset 19.
+    model.opset_import[0].version = 21
+    if per_axis:
+        for tensor in model.graph.initializer:
+            if tensor.name == "W_scale":
+                tensor.CopyFrom(_init("W_scale", np.linspace(0.01, 0.02, K, dtype=np.float32)))
+            elif tensor.name == "W_zp":
+                tensor.CopyFrom(_init("W_zp", np.zeros(K, np.int8)))
+    expected = ReferenceEvaluator(model).run(None, feeds)[0]
+    transformed = _apply_matmul_to_conv(copy.deepcopy(model))
+    onnx.checker.check_model(transformed, full_check=True)
+    for actual in [
+        ReferenceEvaluator(transformed).run(None, feeds)[0],
+        _run_ort(model, feeds)["Y"],
+        _run_ort(transformed, feeds)["Y"],
+    ]:
+        np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-4)
