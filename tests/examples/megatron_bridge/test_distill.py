@@ -38,7 +38,13 @@ from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_prepr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "examples" / "megatron_bridge"))
 
-from distill import HAS_DIRECT_HF_SFT, _add_document_boundaries, _document_eod_id, _hf_source
+from distill import (
+    HAS_DIRECT_HF_SFT,
+    _add_document_boundaries,
+    _document_eod_id,
+    _freeze_student_params,
+    _hf_source,
+)
 from export_distilled_megatron_to_hf import _get_checkpoint_export_paths
 
 
@@ -227,11 +233,20 @@ def test_distill_llm_sft(tmp_path, num_gpus):
 
 
 @pytest.mark.skipif(not HAS_DIRECT_HF_SFT, reason="Megatron-Bridge lacks DirectHFSFTDatasetConfig")
-@pytest.mark.parametrize("packed", [False, True])
-def test_distill_llm_sft_hf_chat(tmp_path, num_gpus, packed):
+@pytest.mark.parametrize(
+    ("packed", "freeze_flag"),
+    [
+        (False, None),
+        (True, None),
+        (True, "--freeze_router"),
+        (True, "--train_moe_expert_fc_only"),
+    ],
+)
+def test_distill_llm_sft_hf_chat(tmp_path, num_gpus, packed, freeze_flag):
     """--sft_hf_dataset distills on chat jsonl rendered by the model's chat template.
 
-    ``packed`` runs an MoE student with conversations packed per micro-batch and the aux loss off.
+    ``packed`` runs an MoE student with conversations packed per micro-batch and the aux loss off;
+    ``freeze_flag`` additionally freezes the routers or all but the routed-expert FC weights.
     """
     create_dir = create_tiny_qwen3_moe_dir if packed else create_tiny_qwen3_dir
     # The default head_dim=2 leaves only TE's unfused attention, which the 2-GPU sm_120 runner
@@ -263,7 +278,8 @@ def test_distill_llm_sft_hf_chat(tmp_path, num_gpus, packed):
     packing = {"moe_aux_loss_coeff": 0} if packed else {}
     distill_cmd_parts = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--sft"]
-        + (["--sft_in_batch_packing"] if packed else []),
+        + (["--sft_in_batch_packing"] if packed else [])
+        + ([freeze_flag] if freeze_flag else []),
         student_hf_path=teacher_hf_path,
         teacher_hf_path=teacher_hf_path,
         sft_hf_dataset=data_files["train"],
@@ -304,6 +320,81 @@ def test_hf_source_spec(spec, path_or_dataset, split, load_kwargs):
         path_or_dataset,
         split,
         load_kwargs,
+    )
+
+
+class _ToyMoeStudent(torch.nn.Module):
+    """Parameter names follow Megatron-Core's MoE layout; ``final_norm=False`` drops the final norm."""
+
+    def __init__(self, final_norm=True):
+        super().__init__()
+        mlp = torch.nn.ModuleDict(
+            {
+                "router": torch.nn.Linear(2, 2),
+                "experts": torch.nn.ModuleDict({"linear_fc1": torch.nn.Linear(2, 2)}),
+                "shared_experts": torch.nn.Linear(2, 2),
+            }
+        )
+        self.decoder = torch.nn.ModuleDict(
+            {
+                "layers": torch.nn.ModuleDict(
+                    {
+                        "0": torch.nn.ModuleDict(
+                            {"mlp": mlp, "self_attention": torch.nn.Linear(2, 2)}
+                        )
+                    }
+                )
+            }
+        )
+        if final_norm:
+            self.decoder["final_layernorm"] = torch.nn.LayerNorm(2)
+
+
+def _trainable_names(model):
+    return {n for n, p in model.named_parameters() if p.requires_grad}
+
+
+def test_freeze_student_params():
+    model = _ToyMoeStudent()
+    trainable, frozen = _freeze_student_params(
+        model, freeze_router=True, expert_fc_only=False, check_layout=True
+    )
+    names = _trainable_names(model)
+    assert not any(".router." in n for n in names)
+    assert {n for n in names if ".mlp.experts." in n}
+    assert "decoder.layers.0.self_attention.weight" in names
+    assert trainable + frozen == sum(p.numel() for p in model.parameters())
+    assert frozen == 2 * 2 + 2  # the router weight and bias
+
+    model = _ToyMoeStudent()
+    _freeze_student_params(model, freeze_router=False, expert_fc_only=True, check_layout=True)
+    assert _trainable_names(model) == {
+        "decoder.layers.0.mlp.experts.linear_fc1.weight",
+        "decoder.layers.0.mlp.experts.linear_fc1.bias",
+        "decoder.final_layernorm.weight",
+        "decoder.final_layernorm.bias",
+    }
+
+
+def test_freeze_student_params_fails_loudly():
+    with pytest.raises(ValueError, match="no trainable dense parameter"):
+        _freeze_student_params(
+            _ToyMoeStudent(final_norm=False),
+            freeze_router=False,
+            expert_fc_only=True,
+            check_layout=True,
+        )
+    with pytest.raises(ValueError, match="no MoE router"):
+        _freeze_student_params(
+            torch.nn.Linear(2, 2), freeze_router=True, expert_fc_only=False, check_layout=True
+        )
+    with pytest.raises(ValueError, match="no routed-expert"):
+        _freeze_student_params(
+            torch.nn.Linear(2, 2), freeze_router=False, expert_fc_only=True, check_layout=True
+        )
+    # Another pipeline stage may hold none of these parameters, so the layout is not checked there.
+    _freeze_student_params(
+        torch.nn.Linear(2, 2), freeze_router=True, expert_fc_only=False, check_layout=False
     )
 
 

@@ -208,6 +208,12 @@ run over padding, is dropped. Order the rows as pairs that fit together with the
 Megatron-Bridge holds every row in host memory on each rank, so keep `train.jsonl` to the rows
 the run needs.
 
+For an MoE student, `--freeze_router` freezes the routers (and their expert-bias updates), and
+`--train_moe_expert_fc_only` (`--pp_size 1` only) trains only the routed-expert FC weights and the
+final norm, keeping the attention, Mamba, shared-expert, embedding and output layers at their input
+weights. Pass `--moe_aux_loss_coeff 0` with either: the load-balancing loss would otherwise still
+send gradient to earlier layers through the router logits.
+
 With pre-tokenized data, `--document_boundaries` (`--mbs 1`, `--cp_size 1`) restricts attention to
 each EOD-separated document of a window instead of the whole window. Tokenize the data with
 `--append_eod`: the student tokenizer's EOS marks each document's end. Chat-template data has no
