@@ -198,6 +198,7 @@ Changelog
 - Fix Megatron Top-K/Top-P distillation gradients being multiplied by the tensor-parallel size when tensor parallelism is enabled; reported loss values are unchanged.
 - Fix ``fsdp2_aware_weight_update`` masking an error raised during its unshard (e.g. a CUDA OOM) with a spurious ``UnboundLocalError``.
 - Nested ``only_student_forward()`` and ``only_teacher_forward()`` contexts now preserve the enclosing execution mode, including when an inner context is disabled or raises an exception.
+- Fix an illegal memory access in static NVFP4 fake quantization for tensors with more than 2^31 elements, such as stacked MoE expert weights. The kernel is also about 14x faster.
 
 0.47.0 (2026-09-23)
 ^^^^^^^^^^^^^^^^^^^
