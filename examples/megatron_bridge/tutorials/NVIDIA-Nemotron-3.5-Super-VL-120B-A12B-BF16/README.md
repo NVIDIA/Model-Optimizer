@@ -45,7 +45,8 @@ PTQ and export launch with `torchrun`; QAD runs on 8 nodes with the `sbatch` scr
 QAD trains on a weighted blend of 11 text-only chat sources, defined in [`data_blend.yaml`](data_blend.yaml) and computing the loss on assistant tokens only. Set `output_dir` in that file, then write the blend as chat JSONL with the [chat JSONL mode of `prepare_megatron_data_blend`](../../../dataset/MEGATRON_DATA_PREP.md#chat-jsonl-blends-for-assistant-only-loss):
 
 ```bash
-python -m modelopt.torch.utils.plugins.prepare_megatron_data_blend --config data_blend.yaml
+python -m modelopt.torch.utils.plugins.prepare_megatron_data_blend \
+    --config /opt/Model-Optimizer/examples/megatron_bridge/tutorials/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/data_blend.yaml
 ```
 
 This writes `train.jsonl` (35,800 conversations) and `validation.jsonl` (1,000) to `output_dir`. Run it in the container: Megatron-Bridge's text-only chat filter selects the rows.
