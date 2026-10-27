@@ -87,6 +87,10 @@ _RANK_LOCAL_CALIBRATION = (
 def _rank_local_calibrations(algorithm: QuantizeAlgoCfgType) -> list[str]:
     """The rank-local calibrations ``algorithm`` runs, with those it runs for its scales."""
     found = []
+    # Reads the options as the caller spelled them, which is enough while every registered default
+    # syncs over the ranks: max and mse default to distributed_sync=True, nvfp4_act_headroom's
+    # weight_scale_algorithm to max, and lsq calibrates its scales with mse when it names none. A
+    # default that keeps its statistics on the rank has to be refused here too.
     for mode, config in get_modelike_from_algo_cfg(algorithm):
         method = mode.removesuffix("_calibrate")
         if method in _RANK_LOCAL_CALIBRATION:
