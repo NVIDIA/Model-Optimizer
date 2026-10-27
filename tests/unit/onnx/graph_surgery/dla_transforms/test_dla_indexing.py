@@ -330,7 +330,8 @@ def test_reduction_generated_shape_preserves_existing_public_initializer():
 
 
 @pytest.mark.parametrize("collision", [False, True])
-def test_chained_attention_preserves_native_kernel_inputs_and_values(collision):
+@pytest.mark.parametrize("cache_views", [False, True])
+def test_chained_attention_preserves_native_kernel_inputs_and_values(collision, cache_views):
     """Run two real CPU attention kernels across the internal rank adapters."""
     shape = [1, 2, 8]
     nodes = [
@@ -374,7 +375,39 @@ def test_chained_attention_preserves_native_kernel_inputs_and_values(collision):
         model.graph.output.append(
             helper.make_tensor_value_info("middle_axis", TensorProto.INT64, [2])
         )
+    if cache_views:
+        attention = [node for node in model.graph.node if node.op_type == "GroupQueryAttention"]
+        for name in ["past_key", "past_value"]:
+            model.graph.input.append(
+                helper.make_tensor_value_info(name, TensorProto.FLOAT, [1, 1, 2, 8])
+            )
+            feeds[name] = np.arange(16, dtype=np.float32).reshape(1, 1, 2, 8) / 16
+            model.graph.node.insert(0, helper.make_node("Identity", [name], [name + "_internal"]))
+        for node in attention:
+            node.input[3] = "past_key_internal"
+            node.input[4] = "past_value_internal"
+        next(value for value in model.graph.input if value.name == "q").CopyFrom(
+            helper.make_tensor_value_info("q", TensorProto.FLOAT, [1, *shape])
+        )
+        feeds["q"] = feeds["q"].reshape(1, *shape)
+        model.graph.initializer.append(
+            numpy_helper.from_array(np.asarray([0], np.int64), "public_q_axes")
+        )
+        model.graph.node.insert(
+            0, helper.make_node("Squeeze", ["q", "public_q_axes"], ["public_q"])
+        )
+        model.graph.output.append(
+            helper.make_tensor_value_info("public_q", TensorProto.FLOAT, shape)
+        )
+        attention[0].input[0] = "public_q"
+        for name in ["pk1", "pv1"]:
+            model.graph.node.append(helper.make_node("Identity", [name], [name + "_public"]))
+            model.graph.output.append(
+                helper.make_tensor_value_info(name + "_public", TensorProto.FLOAT, [1, 1, 2, 8])
+            )
     expected = _execute(model, feeds)
+    if cache_views:
+        assert expected[-1].shape == expected[-2].shape == (1, 1, 2, 8)
     transformed = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
     for actual, reference in zip(_execute(transformed, feeds), expected):
         np.testing.assert_allclose(actual, reference, rtol=1e-5, atol=1e-6)
