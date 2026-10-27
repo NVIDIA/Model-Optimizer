@@ -206,6 +206,7 @@ def _gather_as_rank(monkeypatch, rank, others):
 
 def test_a_single_process_computes_alone(monkeypatch):
     """Nothing to sync with: no collective."""
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
     for collective in ("broadcast_object_list", "all_gather_object"):
         monkeypatch.setattr(
             torch.distributed, collective, lambda *a, **k: pytest.fail("a collective ran")
