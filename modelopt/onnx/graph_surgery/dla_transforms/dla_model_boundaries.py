@@ -417,7 +417,9 @@ def _apply_non4d_model_outputs(
     graph = model.graph
     cache = GraphCache(graph)
     prepared = (
-        _rank_preparation_proofs(model, cache, prepared_data_ops) if defer_rank_conversion else {}
+        _rank_preparation_proofs(model, cache, prepared_data_ops, restoring_outputs=True)
+        if defer_rank_conversion
+        else {}
     )
     captured = _subgraph_captures(graph)
     boundary_names = cache.graph_input_names | cache.init_names
@@ -446,8 +448,6 @@ def _apply_non4d_model_outputs(
                 for dim in value.type.tensor_type.shape.dim
             ]
         if shape is None or len(shape) >= 4 or value.name in boundary_names:
-            continue
-        if defer_rank_conversion and not prepared[value.name]:
             continue
         producer = cache.get_producer(value.name)
         source = _output_rank_source(cache, producer, local_functions, rank_sources)
@@ -538,6 +538,8 @@ def _apply_non4d_model_outputs(
         if delta < 0:
             raise ValueError(f"Output Squeeze input rank exceeds 4 for {value.name!r}")
         axes = list(range(delta)) + [axis + delta if axis >= 0 else axis for axis in axes]
+        if defer_rank_conversion and not prepared[value.name]:
+            continue
         plans.append((value, shape, existing, axes))
     if plans:
         _require_adapter_opset(model)
