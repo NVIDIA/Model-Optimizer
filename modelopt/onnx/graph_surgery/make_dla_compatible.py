@@ -144,6 +144,12 @@ def _validate_boundary_contract(model, prepared_input_ops, prepared_output_ops):
             raise NotImplementedError("Standalone reductions are not available in this pipeline")
         _require_output_rank_conversion(node, local_functions, prepared_output_ops, cache)
     _apply_non4d_model_inputs(model, prepared_input_ops=prepared_input_ops, validate_only=True)
+    _apply_non4d_model_outputs(
+        model,
+        defer_rank_conversion=True,
+        prepared_output_ops=prepared_output_ops,
+        validate_only=True,
+    )
 
 
 def _transform_make_dla_compatible(

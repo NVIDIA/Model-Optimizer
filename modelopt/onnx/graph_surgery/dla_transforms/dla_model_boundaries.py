@@ -366,7 +366,9 @@ def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=Fal
     return model
 
 
-def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False, prepared_output_ops=()):
+def _apply_non4d_model_outputs(
+    model, *, defer_rank_conversion=False, prepared_output_ops=(), validate_only=False
+):
     """Restore four-dimensional outputs, optionally deferring checks to later rank stages."""
     graph = model.graph
     cache = GraphCache(graph)
@@ -383,6 +385,8 @@ def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False, prepared_o
             continue
         producer = cache.get_producer(value.name)
         source = _output_rank_source(cache, producer, local_functions, rank_sources)
+        if source is None and len(shape) == 1:
+            continue
         if source is not None:
             if _is_standard_node(source, local_functions, {"Gemm", "Shape"}) or _native_conv1d(
                 source, cache
@@ -397,6 +401,15 @@ def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False, prepared_o
             if _is_standard_node(source, local_functions, {"Reshape", "Expand", "Tile"}):
                 if _has_native_symbolic_data(cache, source.input[0], local_functions):
                     continue
+                target = cache.get_shape(source.input[1])
+                if (
+                    source.op_type == "Reshape"
+                    and target is not None
+                    and len(target) == 1
+                    and target[0] < 4
+                    and "Non4DReshape" not in prepared_output_ops
+                ):
+                    raise ValueError("Output rank conversion is unavailable for native Reshape")
         if (
             producer is not None
             and _is_standard_node(producer, local_functions, {"Identity"})
@@ -434,6 +447,8 @@ def _apply_non4d_model_outputs(model, *, defer_rank_conversion=False, prepared_o
         plans.append((value, shape, existing, axes))
     if plans:
         _require_adapter_opset(model)
+    if validate_only:
+        return model
     for value, shape, existing, axes in plans:
         axes_name = None
         if len(shape) > 1 or shape == [1]:

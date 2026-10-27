@@ -1124,6 +1124,59 @@ def test_native_reduction_output_refuses_before_adding_rank_adapters(entrypoint,
     assert model.SerializeToString() == before
 
 
+@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
+@pytest.mark.parametrize("tail", [False, True])
+@pytest.mark.parametrize("entrypoint", ["deferred", "pipeline"])
+def test_native_reshape_output_requires_registered_rank_stage(shape, tail, entrypoint, monkeypatch):
+    """Refuse low-rank Reshape restoration before changing public boundary state."""
+    nodes = [helper.make_node("Reshape", ["x", "target"], ["native" if tail else "y"])]
+    if tail:
+        nodes.append(helper.make_node("Relu", ["native"], ["y"]))
+    model = _make_model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1] * (4 - len(shape)) + shape)],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)],
+        [numpy_helper.from_array(np.asarray(shape, np.int64), "target")],
+    )
+    _checked_run(model, {"x": np.ones([1] * (4 - len(shape)) + shape, np.float32)})
+    before = model.SerializeToString()
+    if entrypoint == "pipeline":
+        pipeline = import_module(_transform_make_dla_compatible.__module__)
+        monkeypatch.setattr(
+            pipeline,
+            "DLA_TRANSFORMS",
+            tuple(
+                (name, callback)
+                for name, callback in pipeline.DLA_TRANSFORMS
+                if name != "Non4DReshape"
+            ),
+        )
+    with pytest.raises(ValueError, match="rank"):
+        if entrypoint == "pipeline":
+            _transform_make_dla_compatible(model, verbose=False)
+        else:
+            _apply_non4d_model_outputs(model, defer_rank_conversion=True)
+    assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize("shape", [[1], [3]])
+@pytest.mark.parametrize("tail", [False, True])
+def test_native_vector_unary_outputs_keep_their_rank(shape, tail):
+    """Leave rank-one unary paths native when boundary inputs are not widened."""
+    nodes = [helper.make_node("Relu", ["x"], ["middle" if tail else "y"])]
+    if tail:
+        nodes.append(helper.make_node("Neg", ["middle"], ["y"]))
+    model = _make_model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, shape)],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)],
+    )
+    feeds = {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(shape)}
+    expected = _checked_run(model, feeds)[0]
+    converted = _transform_make_dla_compatible(model, verbose=False)
+    np.testing.assert_array_equal(_checked_run(converted, feeds)[0], expected)
+
+
 @pytest.mark.parametrize("axes", [[0, 2], [0, -3]])
 def test_output_adapter_refuses_native_rank_five_squeeze_before_mutation(axes):
     """Avoid remapping axes through an unspecified five-dimensional rank collapse."""
