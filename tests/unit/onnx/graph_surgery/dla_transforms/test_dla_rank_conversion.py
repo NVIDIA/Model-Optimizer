@@ -1367,6 +1367,35 @@ def test_rank_one_tile_data_and_repeats_remain_native(initializer, shared, tail)
         np.testing.assert_array_equal(actual, reference)
 
 
+@pytest.mark.parametrize("operation", ["Add", "Sub", "Mul", "Div"])
+@pytest.mark.parametrize("unary", [False, True])
+def test_rank_one_tile_tracks_widened_elementwise_initializer(operation, unary):
+    """Keep Tile repeats consistent with rank widened through an elementwise operand."""
+    nodes = [helper.make_node(operation, ["x", "weight"], ["combined"])]
+    if unary:
+        nodes.append(helper.make_node("Relu", ["combined"], ["activated"]))
+    nodes.append(helper.make_node("Tile", ["activated" if unary else "combined", "repeats"], ["y"]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "widened_tile",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [3])],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [6])],
+            [
+                numpy_helper.from_array(np.array([1, 2, 3], np.float32), "weight"),
+                numpy_helper.from_array(np.array([2], np.int64), "repeats"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    feeds = {"x": np.array([3, 5, 7], np.float32)}
+    expected = _execute(model, feeds)
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    for actual, reference in zip(_execute(converted, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
 @pytest.mark.parametrize("operation", ["Tile", "Expand", "Reshape"])
 def test_unknown_structural_data_rank_refuses_before_mutation(operation):
     """Refuse unresolved intermediate ranks before allocating any control view."""

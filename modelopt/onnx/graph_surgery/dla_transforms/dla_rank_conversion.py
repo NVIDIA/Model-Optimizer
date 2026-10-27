@@ -319,12 +319,32 @@ def _apply_non4d_initializers(model):
     return model
 
 
+def _rank_one_path_widened(cache, name, rank_preserving):
+    """Recognize broadcasting from promoted initializers without crossing rank-setting nodes."""
+    pending, seen = [name], set()
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        tensor = cache.get_init(current)
+        if tensor is not None:
+            if len(tensor.dims) == 4:
+                return True
+            continue
+        producer = cache.get_producer(current)
+        if producer is not None and id(producer) in rank_preserving:
+            pending.extend(producer.input)
+    return False
+
+
 def _pad_shape_inputs(model, op_type, suffix):
     """Preserve native rank-four layouts and plan fixed control padding otherwise."""
     cache = GraphCache(model.graph)
     local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
     native_sources = {}
     runtime_inputs = _runtime_input_names(model)
+    rank_preserving = {id(node) for node in _operator_nodes(model, _RANK_AGNOSTIC_OPS)}
     plans = []
     for node in _operator_nodes(model, {op_type}):
         tensor = cache.get_init(node.input[1])
@@ -335,8 +355,7 @@ def _pad_shape_inputs(model, op_type, suffix):
         if rank is None:
             raise ValueError(f"{node.name!r}: {op_type} input rank must be known")
         if op_type == "Tile" and rank == 1:
-            data = cache.get_init(node.input[0])
-            if data is None or len(data.dims) == 1:
+            if not _rank_one_path_widened(cache, node.input[0], rank_preserving):
                 continue
         if rank < 4 and _has_native_symbolic_data(
             cache, node.input[0], local_functions, native_sources
