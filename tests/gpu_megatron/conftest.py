@@ -24,6 +24,7 @@ from _test_utils.torch.distributed.utils import (
     get_live_pool,
     reset_worker_state,
 )
+from _test_utils.torch.misc import is_blackwell
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from megatron.core.parallel_state import destroy_model_parallel
 
@@ -61,13 +62,8 @@ def _prebuild_quant_cuda_extensions():
     ext.precompile()
 
 
-_IS_BLACKWELL = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 12
 # Errors the nemo:26.08 TE/CUDA 13 stack intermittently raises on Blackwell (sm_120); not modelopt bugs
-_BLACKWELL_CUDA_CRASHES = (
-    "illegal memory access",
-    "CUBLAS_STATUS_INTERNAL_ERROR",
-    "Worker process(es) died",
-)
+_BLACKWELL_CUDA_CRASHES = ("illegal memory access", "CUBLAS_STATUS_INTERNAL_ERROR")
 
 
 def pytest_configure(config):
@@ -85,11 +81,13 @@ def pytest_runtest_makereport(item, call):
     """
     report = yield
     if (
-        _IS_BLACKWELL
-        and report.when == "call"
+        report.when == "call"
         and report.failed
         and item.get_closest_marker("flaky_cuda_crash_on_blackwell")
-        and any(err in report.longreprtext for err in _BLACKWELL_CUDA_CRASHES)
+        and call.excinfo is not None
+        # The message, not report.longreprtext: the traceback source lines can mention these errors
+        and any(err in str(call.excinfo.value) for err in _BLACKWELL_CUDA_CRASHES)
+        and is_blackwell()
     ):
         report.outcome = "skipped"
         report.wasxfail = "known flaky CUDA crash on Blackwell (nemo:26.08 TE/CUDA 13 stack)"

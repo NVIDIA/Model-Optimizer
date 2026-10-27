@@ -42,7 +42,7 @@ from _test_utils.torch.megatron.utils import (
     save_distributed_checkpoint,
     sharded_state_dict_test_helper,
 )
-from _test_utils.torch.misc import set_seed
+from _test_utils.torch.misc import is_blackwell, set_seed
 from _test_utils.torch.quantization.models import RegularQuantModelForTP
 from _test_utils.torch.quantization.quant_utils import get_model_size
 from _test_utils.torch.quantization.quantize_common import (
@@ -614,8 +614,7 @@ def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
         pytest.param(
             320,
             marks=pytest.mark.skipif(
-                torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 12,
-                reason="Flaky CUDA illegal memory access on Blackwell",
+                is_blackwell(), reason="Flaky CUDA illegal memory access on Blackwell"
             ),
         ),
     ],
