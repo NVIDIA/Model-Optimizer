@@ -839,12 +839,8 @@ def _split_local_fused_module(
     fw = sharded_sd[f"{prefix}.{first}"]
     # dp_offset: this rank's dim-0 start WITHIN its DTensor; n_local: experts it owns.
     dp_offset = _dtensor_dim0_offset(fw) if isinstance(fw, DTensor) else 0
-    n_local = (
-        fw.to_local().shape[0]
-        if isinstance(fw, DTensor)
-        else (fw.shape[0] if fw is not None else 0)
-    )
-    group_size = int(fw.shape[0]) if fw is not None else 0
+    n_local = fw.to_local().shape[0] if isinstance(fw, DTensor) else fw.shape[0]
+    group_size = int(fw.shape[0])
     # Add the EP block base only when the tensor is a per-EP-group slice (size < total_experts) or
     # total is unknown (0). When it spans all experts, dp_offset is already global.
     add_ep_base = (
