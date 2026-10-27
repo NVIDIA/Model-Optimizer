@@ -709,6 +709,8 @@ def _distributed_save_hf_checkpoint_impl(
     from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
     from torch.distributed.tensor import DTensor
 
+    from modelopt.torch.utils.distributed import all_reduce
+
     from .model_utils import TiedWeightMap
     from .quant_utils import postprocess_state_dict
 
@@ -809,6 +811,16 @@ def _distributed_save_hf_checkpoint_impl(
     # scales' own device, as the shard transport moves every tensor: the GPU in a GPU run, the CPU
     # under gloo.
     in_keys = sorted(k for k in sharded_sd if k.endswith("_input_scale") and _is_expert_key(k))
+    # Every rank must reduce the same keys: a rank holding none would skip the reduce and leave the
+    # others waiting in it, and lists of different lengths would mismatch its size, neither saying
+    # why. So the ranks agree on the keys first, and a difference fails on every rank, naming it.
+    key_lists = all_reduce("expert input-scale keys", lambda: [in_keys], _in_rank_order)
+    if any(keys != in_keys for keys in key_lists):
+        differ = sorted(set().union(*key_lists) - set(key_lists[0]).intersection(*key_lists))
+        raise RuntimeError(
+            "The ranks hold different expert input scales, so they cannot reduce them to their "
+            f"max; first few held by only some ranks: {differ[:5]}"
+        )
     if in_keys:
         stacked = torch.stack([sharded_sd[k].detach().reshape(()).float() for k in in_keys])
         dist.all_reduce(stacked, op=dist.ReduceOp.MAX)
@@ -864,8 +876,6 @@ def _distributed_save_hf_checkpoint_impl(
     # to agree on the split. They go in AFTER the reverse conversion because they carry their
     # original hub names and were never converted -- reverting them would rename them wrongly. This
     # mirrors the gather path, which merges extra_state_dict into the already-reverted dict.
-    from modelopt.torch.utils.distributed import all_reduce
-
     def check_no_overlap() -> None:
         if rank != 0 or not extra_state_dict:
             return
