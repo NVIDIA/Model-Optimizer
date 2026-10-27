@@ -1,0 +1,63 @@
+schema_version: 1
+config_kind: experiment_record
+benchmark: SciCode (Subtask)
+framework: Custom Python request runner + official SciCode tests
+serving: vLLM OpenAI-compatible chat endpoint
+split_file: ../data/subtask_split.yaml
+comparison:
+  baseline: ${ROUND3_NVFP4_CHECKPOINT}
+  dpo: ${DPO_NVFP4_CHECKPOINT}
+  validated_path: 4
+seeds:
+- 61000
+- 61001
+- 61002
+- 61003
+- 61004
+- 61005
+- 61006
+- 61007
+- 61008
+- 61009
+attempts_per_subtask: 10
+target_responses_per_model: 550
+training_targets: 440
+held_out_targets: 110
+max_completion_tokens: 131072
+max_model_len: 262144
+temperature: 0.6
+top_p: 0.95
+presence_penalty: 0.0
+extra_instruction: null
+enable_thinking: true
+reasoning_parser: qwen3
+tensor_parallel_size: 1
+max_num_batched_tokens: 8192
+enable_chunked_prefill: true
+language_model_only: true
+prerequisites:
+  policy: Each model generates its own preceding steps using the target seed
+  supplied_reference_step_ids:
+  - '13.6'
+  - '62.1'
+  - '76.3'
+  include_in_target_metrics: false
+context_policy: Fail chain if prompt plus output cap exceeds context; never lower output cap
+definitions:
+  cap_hit: finish_reason == 'length' or completion_tokens >= 131072
+  missing_final: Empty parsed final-answer content
+  intersection: cap_hit AND missing_final
+  reasoning_repetition: >-
+    Split reasoning on whitespace into words. Form all overlapping 20-word windows.
+    Score = 1 - (number of unique windows / total windows), or 0 if fewer than 20 words.
+    Windows use exact word strings, with case and punctuation preserved.
+  high_repetition: reasoning_repetition >= 0.5
+  tokens: Reported completion tokens including reasoning
+  correct: Passes official SciCode tests
+  p95: Sorted token counts at ceil(0.95 * N) - 1
+execution:
+  gpus: 4
+  workers_total: 20
+  workers_concurrent: 4
+  sequential_groups: 5
+  resume_completed_attempts: true

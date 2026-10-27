@@ -1,0 +1,99 @@
+schema_version: 1
+snapshot_date: '2026-10-27'
+path: 4
+complete: true
+expected_targets_per_model: 550
+training_pairs: 104
+pair_validation_pairs: 11
+dpo_steps: 13
+evaluation_config: evaluation.yaml
+models:
+  initial_qad:
+    train:
+      n: 440
+      cap_hits: 41
+      correct: 57
+    held_out:
+      n: 110
+      cap_hits: 12
+      correct: 6
+  non_iterative_qad_2181:
+    recovery_training_examples: 2181
+    train:
+      n: 440
+      cap_hits: 25
+      correct: 57
+    held_out:
+      n: 110
+      cap_hits: 6
+      correct: 5
+  round3_iterative_qad:
+    overall:
+      n: 550
+      cap_hits: 17
+      missing_final: 17
+      intersection: 17
+      high_repetition: 21
+      correct: 57
+      mean_tokens: 16018.889090909091
+      median_tokens: 5064.5
+      p95_tokens: 56637
+    train:
+      n: 440
+      cap_hits: 17
+      missing_final: 17
+      intersection: 17
+      high_repetition: 20
+      correct: 53
+      mean_tokens: 17089.563636363637
+      median_tokens: 4978.5
+      p95_tokens: 73128
+    held_out:
+      n: 110
+      cap_hits: 0
+      missing_final: 0
+      intersection: 0
+      high_repetition: 1
+      correct: 4
+      mean_tokens: 11736.190909090908
+      median_tokens: 5782.5
+      p95_tokens: 48050
+    cumulative_recovery_training_examples: 2181
+  round3_iterative_qad_plus_dpo:
+    overall:
+      n: 550
+      cap_hits: 0
+      missing_final: 0
+      correct: 70
+      mean_tokens: 7709.050909090909
+      median_tokens: 3680.0
+      p95_tokens: 33882
+      intersection: 0
+    train:
+      n: 440
+      cap_hits: 0
+      missing_final: 0
+      correct: 65
+      mean_tokens: 7469.604545454546
+      median_tokens: 3527.0
+      p95_tokens: 34762
+      intersection: 0
+    held_out:
+      n: 110
+      cap_hits: 0
+      missing_final: 0
+      correct: 5
+      mean_tokens: 8666.836363636363
+      median_tokens: 4173.0
+      p95_tokens: 28374
+      intersection: 0
+dpo_high_repetition_aggregate: null
+limitations:
+- Selected failure-prone subtasks; not benchmark-wide prevalence
+- Related training and held-out subtasks may share parent problems
+- Ten attempts per target; zero observed failures does not prove zero failure probability
+- Evaluation seeds were previously used for the starting checkpoint; no claim of a wholly new test set
+- Only path 4 has a completed outcome evaluation in this snapshot
+- Pair validation is not held-out SciCode validation
+- Correctness was not required when selecting preferred responses
+comparison_protocol: 55 SciCode subtasks x 10 attempts, seeds 61000-61009, no extra prompt or presence penalty.
