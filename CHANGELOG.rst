@@ -39,6 +39,7 @@ Changelog
 
 - ``export_mcore_gpt_to_hf`` given a Hugging Face Hub model ID no longer writes the tokenizer, processor, generation config or remote-code files. Pass a local directory instead, e.g. from ``modelopt.torch.export.ensure_local_checkpoint``.
 - Diffusion HF exports now omit attention quantizer buffers by default, except for FLUX.1, which retains enabled Q/K/V ``_amax`` keys for runtime compatibility; other consumers of those keys can opt in with ``export_attention_quantizers=True`` (CLI: ``--extra-param export_attention_quantizers=true``). Disabled attention quantizers remain excluded, and diffusion components, including LTX-2, no longer emit KV-cache quantization metadata.
+- ``hf_quant_config.json`` of an INT4 or W4A8 AWQ checkpoint now sets ``pre_quant_scale`` per layer, only for layers that have the tensor. A model whose fused-MoE experts have none (AWQ never applies to them) is now exported as ``MIXED_PRECISION`` with per-layer entries instead of a uniform algorithm.
 
 **Deprecations**
 
@@ -46,6 +47,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix ``hf_quant_config.json`` declaring ``pre_quant_scale: true`` for INT4 and W4A8 layers that have no such tensor (fused-MoE experts, or max-calibrated layers), which made TRT-LLM fail to load the checkpoint (``KeyError: '0.w3.pre_quant_scale'``). AWQ, SmoothQuant and SVDQuant now also warn when they skip quantized fused-MoE experts.
 - Calibrating a Megatron-Core MLA model now gives ``linear_q_down_proj`` and ``linear_kv_down_proj`` one per-tensor input and weight range, as vLLM and TensorRT-LLM fuse them into one GEMM with one scale per tensor. Re-calibrate existing MLA checkpoints to get the shared ranges.
 - ``export_mcore_gpt_to_hf`` and ``capture_kv_cache_export_state`` now write NVFP4 KV-cache ``k_scale`` / ``v_scale`` as amax / 448, like the HF exporter and as vLLM and TensorRT-LLM expect. They wrote amax / (6 * 448), which overflows in the attention kernels. Re-export Megatron checkpoints with an NVFP4 KV cache.
 - Preserve accumulated histogram counts when computing an entropy calibration threshold with NumPy histograms.

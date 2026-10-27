@@ -686,12 +686,14 @@ def process_layer_quant_config(layer_config_dict):
     exclude_modules = []
 
     for k, v in layer_config_dict.items():
-        if "awq_block_size" in k:
+        if "awq_block_size" in k or k.endswith(".pre_quant_scale"):
             continue
 
         # Get layer name for constructing quantized_layers dictionary under per_layer_config
         prefix = ".".join(k.rsplit(".", 1)[:-1])
         awq_key = prefix + ".awq_block_size"
+        # Only promise the tensor for layers that have one (see ``_has_pre_quant_scale``).
+        has_pre_quant_scale = layer_config_dict.get(prefix + ".pre_quant_scale", True)
 
         # Get the corresponding AWQ block size
         block_size_value = layer_config_dict.get(awq_key, 0)
@@ -710,14 +712,14 @@ def process_layer_quant_config(layer_config_dict):
                 "quant_algo": "W4A16_AWQ",
                 "group_size": block_size_value,
                 "has_zero_point": False,
-                "pre_quant_scale": True,
+                "pre_quant_scale": has_pre_quant_scale,
             }
         elif v == "w4a8_awq":
             layer_config = {
                 "quant_algo": "W4A8_AWQ",
                 "group_size": block_size_value,
                 "has_zero_point": False,
-                "pre_quant_scale": True,
+                "pre_quant_scale": has_pre_quant_scale,
             }
         elif v == "int8_wo":
             layer_config = {"quant_algo": "W8A16"}
@@ -1764,6 +1766,19 @@ def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
     return router_names
 
 
+def _has_pre_quant_scale(module: nn.Module, weight_names) -> bool:
+    """Whether the export writes a ``pre_quant_scale`` for ``module``.
+
+    AWQ leaves it on every input quantizer of the module, or fuses it into a sibling and marks the
+    module (loaders accept the missing tensor there). Without AWQ (max calibration, or fused
+    experts that AWQ skips) there is none, even though the INT4 label is ``*_AWQ``.
+    """
+    return getattr(module, "fused_with_prequant", False) or all(
+        hasattr(getattr(module, quantizer_attr_names(wn).input_quantizer, None), "_pre_quant_scale")
+        for wn in weight_names
+    )
+
+
 def get_quant_config(
     model: nn.Module,
     is_modelopt_qlora: bool = False,
@@ -1880,6 +1895,11 @@ def get_quant_config(
             # Construct per layer config dictionary
             layer_config_dict[name + ".quantization"] = quantization_format
             layer_config_dict[name + ".awq_block_size"] = block_size
+            if quantization_format in (
+                QUANTIZATION_INT4_AWQ,
+                QUANTIZATION_W4A8_AWQ,
+            ) and not _has_pre_quant_scale(module, weight_names):
+                layer_config_dict[name + ".pre_quant_scale"] = False
 
         # Find kv cache quant format
         is_language_model_module = (
