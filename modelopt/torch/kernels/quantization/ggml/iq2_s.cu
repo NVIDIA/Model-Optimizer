@@ -74,9 +74,12 @@ static_assert(Format::kPayloadBytes == 82, "IQ2_S blocks are 82 bytes");
 
 } // namespace
 
-at::Tensor iq2_s_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales) {
+at::Tensor iq2_s_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales,
+                           std::optional<at::Tensor> importance) {
   check_scaled_pack_inputs("IQ2_S", input, grid, Format::kEntries, scales);
-  return iq2_encode_blocks<Format>(input, grid, scales);
+  if (importance.has_value())
+    check_importance("IQ2_S", input, *importance);
+  return iq2_encode_blocks<Format>(input, grid, scales, importance);
 }
 
 at::Tensor iq2_s_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype) {

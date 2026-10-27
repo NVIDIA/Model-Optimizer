@@ -52,9 +52,11 @@ from .unified_export_hf import (
     _fuse_shared_input_modules,
     _prepare_moe_inputs,
     _resolve_export_dtype,
+    _source_checkpoint,
     _write_hf_export_config,
     collect_shared_input_modules,
     save_non_weight_artifacts,
+    unplaced_keys_for,
 )
 from .unified_export_hf_streaming import _assert_no_split_rules
 
@@ -98,7 +100,7 @@ def _tied_quantized_modules(model: nn.Module) -> list[str]:
 
     Grouped by name, which survives offload: a ``data_ptr`` grouping sees nothing when the
     weights are on meta and would pass vacuously. Falls back to ``data_ptr`` when the model
-    publishes no map (transformers < 5).
+    publishes no map (e.g. not a ``PreTrainedModel``).
     """
     tied_map = TiedWeightMap(model)
     groups: dict[str, list[str]] = {}
@@ -181,6 +183,7 @@ class LayerwiseExporter:
         self._dtype = dtype
         self._bound = False
         self._finalized = False
+        self._source_key_snapshot: tuple[str, list[str]] | None = None
         self._announced_on: list[nn.Module] = []
         # A VLM calibrates its language model but exports the whole thing, so announce on
         # both: whichever of the two mtq.quantize is handed will find this exporter.
@@ -272,6 +275,11 @@ class LayerwiseExporter:
                 "match the original HF hub checkpoint."
             )
 
+        # Packing removes fused source parameters; account for them while the tree is intact.
+        source = _source_checkpoint(model)
+        if source and Path(source).is_dir():
+            self._source_key_snapshot = (str(source), unplaced_keys_for(model, source))
+
         self._bound = True
 
     def export_layer(
@@ -286,8 +294,8 @@ class LayerwiseExporter:
         a fusing format can rediscover which modules share an input; omit them only when
         nothing fuses.
         """
-        # Local, as in every other export module: the plugin imports transformers.
-        from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+        # Local, as in every other export module: see pack_quantized_weights.
+        from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
 
         assert self._bound, "export_layer() before bind()"
         assert not self._finalized, "export_layer() called after finalize()"

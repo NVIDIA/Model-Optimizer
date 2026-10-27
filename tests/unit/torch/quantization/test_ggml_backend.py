@@ -237,7 +237,6 @@ def test_registry_lists_every_exported_encoder():
 
 
 def test_iq_registry_remains_a_compatible_subset_of_ggml_registry():
-    assert ggml.IQFormat is ggml.GGMLFormat
     assert set(ggml.IQ_FORMAT_REGISTRY) == {
         name for name in GGML_FORMAT_REGISTRY if name.startswith("iq")
     }
@@ -252,6 +251,7 @@ def test_registry_record_is_wired_to_its_own_codec(num_bits, module):
     record = GGML_FORMAT_REGISTRY[num_bits]
     upper = num_bits.upper()
 
+    assert isinstance(record, ggml.GGMLFormat)
     assert record.name == num_bits
     assert record.quantize is getattr(module, f"quantize_{num_bits}")
     assert record.dequantize is getattr(module, f"dequantize_{num_bits}")

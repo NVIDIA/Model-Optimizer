@@ -190,6 +190,9 @@ def fp4_dequantize(
     return output
 
 
+_STATIC_FP4_BLOCKS_PER_PROGRAM = 64
+
+
 @triton.jit
 def static_blockwise_fp4_fake_quant_kernel(
     x_ptr,  # [NUM_FP4_BLOCKS * BLOCK_SIZE]
@@ -197,21 +200,21 @@ def static_blockwise_fp4_fake_quant_kernel(
     scale_ptr,  # [NUM_FP4_BLOCKS]
     NUM_FP4_BLOCKS,
     BLOCK_SIZE: tl.constexpr,
+    BLOCKS_PER_PROGRAM: tl.constexpr,
     OUT_DTYPE: tl.constexpr,
 ):
-    pid = tl.program_id(axis=0)
-    if pid >= NUM_FP4_BLOCKS:
-        return
+    # int64 offsets: stacked MoE weights can exceed 2**31 elements.
+    pid = tl.program_id(axis=0).to(tl.int64)
+    block_idx = pid * BLOCKS_PER_PROGRAM + tl.arange(0, BLOCKS_PER_PROGRAM)
+    block_mask = block_idx < NUM_FP4_BLOCKS
+    idx = block_idx[:, None] * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)[None, :]
 
-    block_offset = pid * BLOCK_SIZE
-    idx = block_offset + tl.arange(0, BLOCK_SIZE)
+    scale = tl.load(scale_ptr + block_idx, mask=block_mask, other=0.0).to(tl.float32)
+    x = tl.load(x_ptr + idx, mask=block_mask[:, None], other=0.0).to(tl.float32)
 
-    scale = tl.load(scale_ptr + pid).to(tl.float32)
-    x = tl.load(x_ptr + idx).to(tl.float32)
+    x_quant = nvfp4_scalar_quant(x, scale[:, None], BLOCK_SIZE)
 
-    x_quant = nvfp4_scalar_quant(x, scale, BLOCK_SIZE)
-
-    tl.store(y_ptr + idx, x_quant.to(OUT_DTYPE))
+    tl.store(y_ptr + idx, x_quant.to(OUT_DTYPE), mask=block_mask[:, None])
 
 
 def compute_fp4_scales(
@@ -301,7 +304,7 @@ def static_blockwise_fp4_fake_quant(
 
     tl_out_dtype = _torch_dtype_to_tl(out_dtype)
 
-    grid = (NUM_FP4_BLOCKS,)
+    grid = (triton.cdiv(NUM_FP4_BLOCKS, _STATIC_FP4_BLOCKS_PER_PROGRAM),)
 
     with torch.cuda.device(x.device):
         static_blockwise_fp4_fake_quant_kernel[grid](
@@ -310,6 +313,7 @@ def static_blockwise_fp4_fake_quant(
             scale_flat,
             NUM_FP4_BLOCKS,
             BLOCK_SIZE,
+            BLOCKS_PER_PROGRAM=_STATIC_FP4_BLOCKS_PER_PROGRAM,
             OUT_DTYPE=tl_out_dtype,
         )
 

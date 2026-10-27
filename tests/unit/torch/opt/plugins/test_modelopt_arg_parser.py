@@ -42,9 +42,9 @@ class _NewWarmupArgs(ModelOptHFArguments):
 
 
 class _OldWarmupArgs(ModelOptHFArguments):
-    """transformers 4.x: an int ``warmup_steps`` plus ``warmup_ratio``."""
+    """transformers < 5.15: a float ``warmup_steps`` plus ``warmup_ratio``."""
 
-    warmup_steps: int = field(default=0)
+    warmup_steps: float = field(default=0)
     warmup_ratio: float = field(default=0.0)
 
 
@@ -53,8 +53,7 @@ class _OldWarmupArgs(ModelOptHFArguments):
     [
         (_NewWarmupArgs, "warmup_ratio: 0.05\n", {"warmup_steps": 0.05}),
         (_NewWarmupArgs, "warmup_steps: 0.05\n", {"warmup_steps": 0.05}),
-        (_OldWarmupArgs, "warmup_steps: 0.05\n", {"warmup_steps": 0, "warmup_ratio": 0.05}),
-        (_OldWarmupArgs, "warmup_steps: 10\n", {"warmup_steps": 10, "warmup_ratio": 0.0}),
+        (_OldWarmupArgs, "warmup_steps: 0.05\n", {"warmup_steps": 0.05, "warmup_ratio": 0.0}),
         (_OldWarmupArgs, "warmup_ratio: 0.05\n", {"warmup_steps": 0, "warmup_ratio": 0.05}),
     ],
 )

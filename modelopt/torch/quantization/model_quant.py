@@ -51,7 +51,7 @@ from .kv_cache_auto_quant import (
 )
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
-from .nn import QuantModule, SequentialQuantizer, TensorQuantizer
+from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized
 
 __all__ = [
@@ -114,8 +114,13 @@ def calibrate(
             def forward_loop(model):
                 return original_forward_loop()  # type: ignore[call-arg]
 
-    # move the model to eval mode
-    is_training = model.training
+    # move the model to eval mode, remembering each module's mode; quantizers, and plain containers of them,
+    # follow the module they quantize instead
+    training_modes = {
+        module: module.training
+        for module in model.modules()
+        if module is model or not _holds_only_quantizers(module)
+    }
     model.eval()
 
     with forward_with_reshard(model):
@@ -133,9 +138,37 @@ def calibrate(
     # TODO: Re-enable when the CUDA error: unspecified launch failure is fixed.
     # clear_cuda_cache()
 
-    model.train(is_training)
+    _restore_training_modes(model, training_modes)
 
     return model
+
+
+def _holds_only_quantizers(module: nn.Module) -> bool:
+    if isinstance(module, AnyQuantizer):
+        return True
+    # A plain container of quantizers, such as the one some plugins create for fused experts.
+    children = list(module.children())
+    return (
+        isinstance(module, (nn.ModuleList, nn.ModuleDict))
+        and bool(children)
+        and all(_holds_only_quantizers(child) for child in children)
+    )
+
+
+def _restore_training_modes(model: nn.Module, training_modes: dict[nn.Module, bool]) -> None:
+    """Give each module back its mode from ``training_modes``; one not in it takes its parent's mode.
+
+    ``model.train()`` runs first, as it always did, so every module's ``train()`` is called; then the modules
+    whose own mode differs get it back, parents first, because ``train()`` also sets every module below.
+    """
+    model.train(training_modes[model])
+    stack = [(child, model.training) for child in model.children()]
+    while stack:
+        module, parent_mode = stack.pop()
+        mode = training_modes.get(module, parent_mode)
+        if module.training != mode:
+            module.train(mode)
+        stack.extend((child, mode) for child in module.children())
 
 
 def postprocess_amax(model: nn.Module, key: str, post_process_fn) -> nn.Module:
@@ -232,20 +265,38 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
     )
 
 
-def _check_indexer_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
-    """Raise when a config enables an indexer quantizer that quantizes no indexer.
+_INDEXER_UNITS = "the configs/ptq/units/indexer_*_nvfp4 recipe units"
+_MOE_COMM_UNITS = "the configs/ptq/units/moe_*_nvfp4 recipe units"
+# Quantizers that only framework plugins add: (class-name patterns of the modules they belong on,
+# what those modules are, where the supported models are listed).
+_PLUGIN_QUANTIZERS = {
+    "indexer_q_quantizer": (("*Indexer",), "sparse-attention indexer", _INDEXER_UNITS),
+    "indexer_k_quantizer": (("*Indexer",), "sparse-attention indexer", _INDEXER_UNITS),
+    "indexer_scorer_kwargs_quantizer": (
+        ("*Indexer",),
+        "sparse-attention indexer",
+        'the "Indexer scorer kernel arguments" section of examples/vllm_serve/README.md',
+    ),
+    "dispatch_quantizer": (("*Experts*", "*FusedMoE"), "MoE experts module", _MOE_COMM_UNITS),
+    "combine_quantizer": (("*Experts*", "*FusedMoE"), "MoE experts module", _MOE_COMM_UNITS),
+}
 
-    ``indexer_q_quantizer`` and ``indexer_k_quantizer`` only exist on indexers that a framework
-    plugin (vLLM, Megatron-Core) converted. When a plugin does not recognize the installed
-    framework's indexer class, or the patterns match none of the indexers, the indexer silently
-    stays unquantized. Intent is read like in :func:`_check_weight_quantization_took_effect`, but
-    only from patterns naming the quantizer, so catch-all patterns do not count. A model without an
-    ``*Indexer`` module (another architecture) is skipped. Under ``torch.distributed`` the check
-    covers the whole model: a pipeline stage may hold none of the indexers a layer-selective recipe
-    selects. All ranks then raise together instead of some waiting in calibration for the others.
+
+def _check_plugin_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
+    """Raise when a config enables a plugin-only quantizer that quantizes nothing.
+
+    The quantizers in ``_PLUGIN_QUANTIZERS`` only exist on modules (sparse-attention indexers, MoE
+    experts) that a framework plugin (vLLM, Megatron-Core) converted. When a plugin does not
+    recognize the installed framework's module class, or the patterns match none of the modules,
+    the tensors silently stay unquantized. Intent is read like in
+    :func:`_check_weight_quantization_took_effect`, but only from patterns naming the quantizer, so
+    catch-all patterns do not count. A model without such a module (another architecture) is
+    skipped. Under ``torch.distributed`` the check covers the whole model: a pipeline stage may hold
+    none of the modules a layer-selective recipe selects. All ranks then raise together instead of
+    some waiting in calibration for the others.
     """
     last_entry_per_pattern = {entry.quantizer_name: entry for entry in config.quant_cfg}
-    for quantizer_name in ("indexer_q_quantizer", "indexer_k_quantizer"):
+    for quantizer_name, (owner_patterns, owner_kind, supported) in _PLUGIN_QUANTIZERS.items():
         if not any(
             entry.enable and quantizer_name in pattern
             for pattern, entry in last_entry_per_pattern.items()
@@ -258,34 +309,34 @@ def _check_indexer_quantization_took_effect(model: nn.Module, config: QuantizeCo
             if isinstance(module, (TensorQuantizer, SequentialQuantizer))
             and name.endswith(quantizer_name)
         ]
-        indexers = {
+        owners = {
             type(module).__name__
             for module in model.modules()
-            if type(module).__name__.endswith("Indexer")
+            if any(fnmatch.fnmatchcase(type(module).__name__, p) for p in owner_patterns)
         }
-        # (unconverted indexer classes, has the quantizer, has an enabled one)
+        # (unconverted owner classes, has the quantizer, has an enabled one)
         local = (
-            [] if quantizers else sorted(indexers),
+            [] if quantizers else sorted(owners),
             bool(quantizers),
             any(quantizer.is_enabled for quantizer in quantizers),
         )
         per_rank: list[Any] = [local]
-        if dist.size() > 1:  # every rank calls quantize() with the same indexer patterns
+        if dist.size() > 1:  # every rank calls quantize() with the same patterns
             per_rank = [None] * dist.size()
             torch.distributed.all_gather_object(per_rank, local)
         unsupported = sorted({name for names, _, _ in per_rank for name in names})
         if unsupported:
             raise RuntimeError(
-                f"The quantization config enables {quantizer_name}, but no sparse-attention "
-                f"indexer of this model ({', '.join(unsupported)}) has one: the ModelOpt indexer "
-                "plugins do not support this model or the installed vLLM / Megatron-Core version "
-                "(supported models: see the configs/ptq/units/indexer_*_nvfp4 recipe units)."
+                f"The quantization config enables {quantizer_name}, but no {owner_kind} of this "
+                f"model ({', '.join(unsupported)}) has one: the ModelOpt plugins do not support "
+                "this model, its runtime backend or the installed vLLM / Megatron-Core version "
+                f"(supported models: see {supported})."
             )
         if any(has for _, has, _ in per_rank) and not any(on for _, _, on in per_rank):
             raise RuntimeError(
-                f"The quantization config enables {quantizer_name}, but no sparse-attention "
-                "indexer has an enabled one: the patterns naming it match none of them, or a "
-                "later config entry disabled it."
+                f"The quantization config enables {quantizer_name}, but no {owner_kind} has an "
+                "enabled one: the patterns naming it match none of them, or a later config entry "
+                "disabled it."
             )
 
 
@@ -395,7 +446,7 @@ def quantize(
         _validate_linear_attention_quantizers(model)
     # Fail before calibration rather than after exporting an unquantized checkpoint.
     _check_weight_quantization_took_effect(model, quantize_config)
-    _check_indexer_quantization_took_effect(model, quantize_config)
+    _check_plugin_quantization_took_effect(model, quantize_config)
     return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
 
 
@@ -1078,6 +1129,9 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
     Any weight-quantizer rotation is folded into the weights and disabled so subsequent
     forwards do not re-rotate the already-folded weights.
     """
+    for module in model.modules():
+        if isinstance(module, QuantModule):
+            module._validate_fold_weight()
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             module.fold_weight(keep_attrs)

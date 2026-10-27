@@ -82,7 +82,7 @@ def calibrate_frequent_vocab(tokenizer, text, target_vocab_size, output_file=Non
 
 
 def get_default_attention_mask_and_position_ids(input_ids: torch.Tensor):
-    """Compute default attention_mask ans position_ids given input_ids."""
+    """Compute default attention_mask and position_ids given input_ids."""
     seq_len = input_ids.shape[-1]
 
     position_ids = torch.arange(seq_len, dtype=torch.long, device=input_ids.device)
@@ -775,7 +775,7 @@ def load_vlm_or_llm(
         model_name_or_path,
         config=model_config if pass_config else None,
         trust_remote_code=trust_remote_code,
-        torch_dtype=dtype,
+        dtype=dtype,
         device_map=device_map,
         **extra,
     )

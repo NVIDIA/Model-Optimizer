@@ -14,12 +14,38 @@
 # limitations under the License.
 
 import pytest
+from _test_utils.examples.diffusers_example_runner import run_example_in_process
+from _test_utils.examples.run_command import set_in_process_runner
 from _test_utils.fs_utils import assert_unmodified_tree
-from _test_utils.torch.diffusers_models import create_tiny_qwen_image_pipeline_dir
+from _test_utils.torch.diffusers_models import (
+    create_tiny_pixart_pipeline_dir,
+    create_tiny_qwen_image_pipeline_dir,
+)
+
+
+@pytest.fixture
+def in_process_examples():
+    """Run example scripts in the pytest process; see ``_test_utils.examples.diffusers_example_runner``.
+
+    Opt-in per test module (``pytestmark``). Per test, not per session: the hook is a module-global
+    in ``run_command`` and must not leak into example suites collected later in the session.
+    """
+    set_in_process_runner(run_example_in_process)
+    try:
+        yield
+    finally:
+        set_in_process_runner(None)
 
 
 @pytest.fixture(scope="session")
 def tiny_qwen_image_path(tmp_path_factory):
     tmp_path = tmp_path_factory.mktemp("qwen_image")
     with assert_unmodified_tree(create_tiny_qwen_image_pipeline_dir(tmp_path)) as path:
+        yield str(path)
+
+
+@pytest.fixture(scope="session")
+def tiny_pixart_path(tmp_path_factory):
+    tmp_path = tmp_path_factory.mktemp("pixart")
+    with assert_unmodified_tree(create_tiny_pixart_pipeline_dir(tmp_path)) as path:
         yield str(path)

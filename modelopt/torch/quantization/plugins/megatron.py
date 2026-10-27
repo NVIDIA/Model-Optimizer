@@ -58,6 +58,7 @@ from modelopt.torch.utils.distributed import ParallelState
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import maybe_promote_nvfp4_static_quantizer
+from ..ggml.common import PINNED_PAYLOAD_PREFIX
 from ..nn import (
     GroupedQuantizer,
     QuantModule,
@@ -371,8 +372,12 @@ def _output_layer_untied(config) -> bool:
         return False
 
 
-# Statement kinds of the upstream GPTModel.sharded_state_dict body patched below.
-_GPT_SSD_STATEMENTS = ["Assign", "Assign", "Assign", "Assert", "Return"]
+# Statement kinds of the upstream GPTModel.sharded_state_dict bodies patched below. Newer
+# megatron-core also accepts an empty tensor placeholder (one more assignment).
+_GPT_SSD_STATEMENTS = (
+    ["Assign", "Assign", "Assign", "Assert", "Return"],
+    ["Assign", "Assign", "Assign", "Assign", "Assert", "Return"],
+)
 
 
 def _output_layer_extra_state_has_data(entry: Any) -> bool:
@@ -401,7 +406,7 @@ def keep_gpt_output_layer_extra_state() -> bool:
     body = func.body if isinstance(func, ast.FunctionDef) else []
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
         body = body[1:]  # docstring
-    if [type(stmt).__name__ for stmt in body] != _GPT_SSD_STATEMENTS:
+    if [type(stmt).__name__ for stmt in body] not in _GPT_SSD_STATEMENTS:
         warn_rank_0(
             "GPTModel.sharded_state_dict is not the version ModelOpt patches; leaving it as is. "
             "If it does not keep a populated output_layer._extra_state, saving a quantized "
@@ -564,7 +569,7 @@ class _MegatronParallelLinear(_ParallelLinear):
                 self._process_quantizer_amax(k, v, quantizer_state_dict)
             elif k == "input_quantizer._pre_quant_scale":
                 self._process_activation_quantizer_pre_quant_scale(k, v, quantizer_state_dict)
-            elif self._parameter_to_keep_in_quantizer_state_dict(k):
+            elif self._parameter_to_keep_in_quantizer_state_dict(k) or PINNED_PAYLOAD_PREFIX in k:
                 quantizer_state_dict[k] = v
             elif "quantizer" in k:
                 warn_rank_0(
@@ -616,7 +621,8 @@ class _MegatronColumnParallelLinear(_MegatronParallelLinear):
                 continue
             if "weight_quantizer." in k:
                 weight_quantizer_axis = self.get_submodule(k.rsplit(".", 1)[0]).axis
-                if weight_quantizer_axis is not None:
+                # GGML payloads are ``[out_features, in_features / block, block_bytes]``.
+                if weight_quantizer_axis is not None or PINNED_PAYLOAD_PREFIX in k:
                     shard_axis_dict[k] = 0
         return shard_axis_dict
 
@@ -654,7 +660,7 @@ class _MegatronRowParallelLinear(_MegatronParallelLinear):
                     weight_quantizer_axis = self.weight_quantizer[0].axis
                 elif "weight_quantizer.1." in k:
                     weight_quantizer_axis = self.weight_quantizer[1].axis
-                if isinstance(weight_quantizer_axis, tuple):
+                if isinstance(weight_quantizer_axis, tuple) or PINNED_PAYLOAD_PREFIX in k:
                     shard_axis_dict[k] = 1
             if k == "input_quantizer._pre_quant_scale":
                 shard_axis_dict[k] = 0
@@ -1190,6 +1196,11 @@ AutoQuantizeGradientSearcher.register_custom_support(
 def get_mcore_layerwise_calibration_layers(
     model: torch.nn.Module,
 ) -> list[torch.nn.Module] | torch.nn.ModuleList | None:
+    # VLM wrappers (e.g. GLM-5.3-Flash) keep the decoder only on their language model.
+    if not hasattr(model, "decoder") and isinstance(
+        getattr(model, "language_model", None), MegatronModule
+    ):
+        model = model.language_model
     if not hasattr(model, "decoder") or not hasattr(model.decoder, "layers"):
         return None
     decoder_layers = model.decoder.layers

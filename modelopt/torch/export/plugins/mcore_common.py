@@ -34,6 +34,7 @@ from .mcore_nemotron import (
     nemotron_h_causal_lm_export,
     nemotron_h_causal_lm_import,
 )
+from .mcore_nemotron_omni import NEMOTRON_H_OMNI_VISION_PREFIXES, nemotron_h_omni_causal_lm_export
 from .mcore_qwen import (
     qwen3_causal_lm_export,
     qwen3_causal_lm_import,
@@ -54,6 +55,7 @@ all_mcore_hf_export_mapping: dict[str, Any] = {
     "Llama4ForConditionalGeneration": llama4_causal_lm_export,
     "NemotronForCausalLM": nemotron_causal_lm_export,
     "NemotronHForCausalLM": nemotron_h_causal_lm_export,
+    "NemotronH_Omni_Reasoning_V3": nemotron_h_omni_causal_lm_export,
     "LlamaForCausalLMEagle": eagle_llama_causal_lm_export,
     "LlamaForCausalLMEagle3": eagle3_llama_causal_lm_export,
     "LlamaForCausalLMEagle3Deep": eagle3_deep_llama_causal_lm_export,
@@ -74,6 +76,7 @@ all_mcore_hf_vision_passthrough_mapping: dict[str, tuple[str, ...]] = {
     "Qwen3VLForConditionalGeneration": QWEN3VL_VISION_PREFIXES,
     "Qwen3_5ForConditionalGeneration": QWEN3_5_VL_VISION_PREFIXES,
     "Qwen3_5MoeForConditionalGeneration": QWEN3_5_VL_VISION_PREFIXES,
+    "NemotronH_Omni_Reasoning_V3": NEMOTRON_H_OMNI_VISION_PREFIXES,
 }
 
 all_mcore_hf_import_mapping: dict[str, Any] = {

@@ -24,7 +24,6 @@ from torch import nn
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, Qwen2RotaryEmbedding
 
 from ....block_config import BlockConfig
-from ....utils.dummy_modules import DummyBlock
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
 from ..llama.llama_model_descriptor import LlamaFFNIntermediateLayerDescriptor
@@ -39,18 +38,6 @@ class Qwen2ModelDescriptor(ModelDescriptor):
     @staticmethod
     def decoder_layer_cls():
         return Qwen2DecoderLayer
-
-    @classmethod
-    def create_dummy_block(cls, original_layer: nn.Module, block_index: int) -> nn.Module:
-        """Create a dummy block that preserves Qwen2-specific attributes like attention_type.
-
-        Qwen2's forward pass accesses decoder_layer.attention_type for attention mask selection.
-        """
-        dummy = DummyBlock(block_index=block_index)
-        # Copy attention_type from original layer (required by Qwen2's forward pass)
-        if hasattr(original_layer, "attention_type"):
-            dummy.attention_type = original_layer.attention_type
-        return dummy
 
     @staticmethod
     def block_config_to_layer_overrides(block_config: BlockConfig):
