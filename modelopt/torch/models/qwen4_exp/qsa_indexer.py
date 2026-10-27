@@ -15,9 +15,9 @@
 
 """Calibration support for Qwen3.8's QSA indexer."""
 
-import types
-
 import torch
+
+from modelopt.torch.utils.network import bind_forward_method
 
 __all__ = ["prepare_for_calibration"]
 
@@ -25,8 +25,7 @@ __all__ = ["prepare_for_calibration"]
 def _forward(self, hidden_states, position_embeddings, attention_mask, past_key_values):
     """Transformers' indexer, short-circuited when every visible key fits the token budget.
 
-    The reference loops in Python over every (sample, query) pair: about 340 s per forward of
-    1,024 x 512 calibration tokens, on each full-attention layer. A query keeps its
+    The reference loops in Python over every (sample, query) pair. A query keeps its
     ``block_topk`` best complete key blocks plus the incomplete tail, so when the keys hold no
     more blocks than that, it keeps every visible token: the selection is the visibility mask the
     indexer was given, which this returns directly.
@@ -66,6 +65,6 @@ def prepare_for_calibration(model) -> bool:
             continue
         found = True
         if not hasattr(module, "_modelopt_reference_forward"):
-            module._modelopt_reference_forward = module.forward
-            module.forward = types.MethodType(_forward, module)
+            # Keeps an Accelerate hook already on the indexer, such as device_map's, around the fast path.
+            bind_forward_method(module, _forward, "_modelopt_reference_forward")
     return found
