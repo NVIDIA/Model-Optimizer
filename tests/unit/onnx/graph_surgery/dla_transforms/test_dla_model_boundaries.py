@@ -1177,6 +1177,34 @@ def test_native_vector_unary_outputs_keep_their_rank(shape, tail):
     np.testing.assert_array_equal(_checked_run(converted, feeds)[0], expected)
 
 
+def test_output_preflight_does_not_copy_for_missing_intermediate_squeeze_metadata(monkeypatch):
+    """Avoid a prerequisite model copy when normal shape inference can prepare Squeeze."""
+    model = _make_model(
+        [
+            helper.make_node("Relu", ["x"], ["hidden"]),
+            helper.make_node("Squeeze", ["hidden"], ["y"]),
+        ],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 1, 2, 3])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 3])],
+    )
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(1, 1, 2, 3)}
+    expected = _checked_run(model, feeds)[0]
+    pipeline = import_module(_transform_make_dla_compatible.__module__)
+    original = pipeline.copy.deepcopy
+    copies = []
+
+    def record_copy(value, *args, **kwargs):
+        """Observe copies of the caller without changing the real fallback behavior."""
+        if value is model:
+            copies.append(True)
+        return original(value, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline.copy, "deepcopy", record_copy)
+    converted = _transform_make_dla_compatible(model, verbose=False)
+    np.testing.assert_array_equal(_checked_run(converted, feeds)[0], expected)
+    assert copies == []
+
+
 @pytest.mark.parametrize("axes", [[0, 2], [0, -3]])
 def test_output_adapter_refuses_native_rank_five_squeeze_before_mutation(axes):
     """Avoid remapping axes through an unspecified five-dimensional rank collapse."""

@@ -369,7 +369,7 @@ def _apply_non4d_model_inputs(model, *, prepared_input_ops=(), validate_only=Fal
 def _apply_non4d_model_outputs(
     model, *, defer_rank_conversion=False, prepared_output_ops=(), validate_only=False
 ):
-    """Restore four-dimensional outputs, optionally deferring checks to later rank stages."""
+    """Restore outputs or only validate producer rank availability before shape inference."""
     graph = model.graph
     cache = GraphCache(graph)
     captured = _subgraph_captures(graph)
@@ -410,6 +410,8 @@ def _apply_non4d_model_outputs(
                     and "Non4DReshape" not in prepared_output_ops
                 ):
                     raise ValueError("Output rank conversion is unavailable for native Reshape")
+        if validate_only:
+            continue
         if (
             producer is not None
             and _is_standard_node(producer, local_functions, {"Identity"})
