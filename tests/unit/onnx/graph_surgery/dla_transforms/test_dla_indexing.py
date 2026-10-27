@@ -34,7 +34,10 @@ from modelopt.onnx.graph_surgery.dla_transforms.dla_model_boundaries import (
     _apply_non4d_model_inputs,
     _apply_non4d_model_outputs,
 )
-from modelopt.onnx.graph_surgery.make_dla_compatible import _transform_make_dla_compatible
+from modelopt.onnx.graph_surgery.make_dla_compatible import (
+    DLA_TRANSFORMS,
+    _transform_make_dla_compatible,
+)
 
 
 @pytest.mark.parametrize("operation", ["Gather", "GatherElements"])
@@ -338,6 +341,162 @@ def test_rank_one_gather_control_paths_remain_native(source, scalar, entrypoint)
     if entrypoint == "stage":
         assert converted.SerializeToString() == before
     np.testing.assert_array_equal(_execute(converted, feeds)[0], expected[0])
+
+
+@pytest.mark.parametrize(
+    ("producer", "shape"),
+    [(name, shape) for name in ("Reshape", "Squeeze", "opaque") for shape in ([2, 3], [2, 3, 4])]
+    + [("Gemm", [2, 3])],
+)
+@pytest.mark.parametrize("unary", [False, True])
+@pytest.mark.parametrize("positive_axis", [False, True])
+def test_gather_refuses_unprepared_internal_data_before_mutation(
+    producer, shape, unary, positive_axis
+):
+    """Reject native internal data before changing an earlier eligible Gather or control."""
+    input_shape = [1] * (4 - len(shape)) + shape
+    inputs = [helper.make_tensor_value_info("x", TensorProto.FLOAT, input_shape)]
+    initializers = [
+        numpy_helper.from_array(np.array([0], np.int64), "indices"),
+        numpy_helper.from_array(np.array([1, 1, 1, -1], np.int64), "output_shape"),
+    ]
+    nodes = [helper.make_node("Gather", ["x", "indices"], ["ready"], axis=3)]
+    functions, extra_opsets = [], []
+    feeds = {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(input_shape)}
+    if producer == "opaque":
+        domain = "opaque.gather"
+        functions.append(
+            helper.make_function(
+                domain,
+                "NativeData",
+                ["a"],
+                ["b"],
+                [
+                    helper.make_node(
+                        "Constant",
+                        [],
+                        ["target"],
+                        value=numpy_helper.from_array(np.asarray(shape, np.int64)),
+                    ),
+                    helper.make_node("Reshape", ["a", "target"], ["b"]),
+                ],
+                [helper.make_opsetid("", 21)],
+            )
+        )
+        extra_opsets.append(helper.make_opsetid(domain, 1))
+        nodes.append(helper.make_node("NativeData", ["x"], ["native"], domain=domain))
+    elif producer == "Gemm":
+        inputs.append(helper.make_tensor_value_info("matrix", TensorProto.FLOAT, shape))
+        feeds["matrix"] = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+        initializers.append(numpy_helper.from_array(np.eye(shape[-1], dtype=np.float32), "weight"))
+        nodes.append(helper.make_node("Gemm", ["matrix", "weight"], ["native"]))
+    else:
+        values = shape if producer == "Reshape" else list(range(4 - len(shape)))
+        initializers.append(numpy_helper.from_array(np.asarray(values, np.int64), "native_control"))
+        nodes.append(helper.make_node(producer, ["x", "native_control"], ["native"]))
+    if unary:
+        nodes.append(helper.make_node("Relu", ["native"], ["activated"]))
+    axis = len(shape) - 1 if positive_axis else -1
+    nodes.extend(
+        [
+            helper.make_node(
+                "Gather", ["activated" if unary else "native", "indices"], ["selected"], axis=axis
+            ),
+            helper.make_node("Reshape", ["selected", "output_shape"], ["y"]),
+        ]
+    )
+    ready_shape = input_shape.copy()
+    ready_shape[-1] = 1
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "native_gather_data",
+            inputs,
+            [
+                helper.make_tensor_value_info("ready", TensorProto.FLOAT, ready_shape),
+                helper.make_tensor_value_info(
+                    "y", TensorProto.FLOAT, [1, 1, 1, int(np.prod(shape[:-1]))]
+                ),
+            ],
+            initializers,
+        ),
+        opset_imports=[helper.make_opsetid("", 21), *extra_opsets],
+        functions=functions,
+        ir_version=9,
+    )
+    model = onnx.shape_inference.infer_shapes(model)
+    _execute(model, feeds)
+    before = model.SerializeToString()
+    with pytest.raises(ValueError, match="rank"):
+        _apply_gather(model)
+    assert model.SerializeToString() == before
+
+
+@pytest.mark.parametrize(
+    ("producer", "shape"),
+    [
+        (op, shape)
+        for op in ["Relu", "fixed", "MatMul", "Squeeze", "Reshape"]
+        for shape in [[5, 4], [2, 5, 4]]
+    ]
+    + [("Gemm", [5, 4])],
+)
+def test_gather_accepts_registered_future_data_rank_preparation(producer, shape):
+    """Execute the complete pipeline when the actual registered stages establish a 4D layout."""
+    if producer == "Reshape" and not any(stage == "Non4DReshape" for stage, _ in DLA_TRANSFORMS):
+        pytest.skip("Reshape rank preparation is introduced by a later slice")
+    if producer == "fixed" and not any(stage == "Non4dInitializers" for stage, _ in DLA_TRANSFORMS):
+        pytest.skip("Initializer rank preparation is introduced by a later slice")
+    values = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+    source_shape = [1] * (4 - len(shape)) + shape if producer in {"Squeeze", "Reshape"} else shape
+    inputs = (
+        []
+        if producer == "fixed"
+        else [helper.make_tensor_value_info("x", TensorProto.FLOAT, source_shape)]
+    )
+    initializers = [numpy_helper.from_array(np.asarray([1, 0], np.int64), "indices")]
+    nodes = []
+    feeds = {} if producer == "fixed" else {"x": values.reshape(source_shape)}
+    if producer == "fixed":
+        initializers.append(numpy_helper.from_array(values, "data"))
+    elif producer in {"MatMul", "Gemm"}:
+        initializers.append(numpy_helper.from_array(np.eye(4, dtype=np.float32), "weight"))
+        nodes.append(helper.make_node(producer, ["x", "weight"], ["data"]))
+    elif producer in {"Squeeze", "Reshape"}:
+        control = (
+            np.arange(4 - len(shape), dtype=np.int64)
+            if producer == "Squeeze"
+            else np.asarray(shape, np.int64)
+        )
+        initializers.append(numpy_helper.from_array(control, "control"))
+        nodes.append(helper.make_node("Relu", ["x"], ["internal"]))
+        nodes.append(helper.make_node(producer, ["internal", "control"], ["data"]))
+    else:
+        nodes.append(helper.make_node(producer, ["x"], ["data"]))
+    nodes.append(helper.make_node("Gather", ["data", "indices"], ["selected"], axis=len(shape) - 2))
+    output_shape = [*shape[:-2], 2, 4]
+    initializers.append(
+        numpy_helper.from_array(
+            np.asarray([1] * (4 - len(shape)) + output_shape, np.int64), "target"
+        )
+    )
+    nodes.append(helper.make_node("Reshape", ["selected", "target"], ["y"]))
+    model = _model(
+        nodes,
+        inputs,
+        [
+            helper.make_tensor_value_info(
+                "y", TensorProto.FLOAT, [1] * (4 - len(shape)) + output_shape
+            )
+        ],
+        initializers,
+    )
+    model = onnx.shape_inference.infer_shapes(model)
+    expected = _execute(model, feeds)
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    onnx.checker.check_model(converted, full_check=True)
+    for actual, reference in zip(_execute(converted, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
 
 
 def _execute(model, feeds):

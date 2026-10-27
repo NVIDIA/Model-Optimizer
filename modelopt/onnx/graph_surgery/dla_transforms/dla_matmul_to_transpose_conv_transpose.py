@@ -59,7 +59,9 @@ from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _subgraph_captures
 
 
-def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=False):
+def _apply_matmul_to_transpose_conv_transpose(
+    model, *, defer_rank_conversion=False, validate_only=False, planned_outputs=None
+):
     """Convert eligible matrices and optionally defer fallback rank promotion."""
     graph = model.graph
     cache = GraphCache(graph)
@@ -280,6 +282,11 @@ def _apply_matmul_to_transpose_conv_transpose(model, *, defer_rank_conversion=Fa
     )
     if needs_adapters and opsets.get("", opsets.get("ai.onnx", 1)) < 13:
         raise ValueError("DLA matrix rank adapters require ONNX opset 13 or newer")
+    if planned_outputs is not None:
+        planned_outputs.update(node.output[0] for node, _, _, _ in eligible_nodes)
+        planned_outputs.update(node.output[0] for node in active_fallback)
+    if validate_only:
+        return model
 
     for node in active_fallback:
         cnt_fb = len(fallback_batch)

@@ -30,6 +30,8 @@ from ..utils.graph_utils import (
 )
 from .dla_constants_to_initializers import _add_legacy_initializer_inputs
 from .dla_graph_cleanup import _RANK_AGNOSTIC_OPS, _subgraph_captures
+from .dla_matmul_to_transpose_conv_transpose import _apply_matmul_to_transpose_conv_transpose
+from .dla_model_boundaries import _has_native_symbolic_data, _native_conv1d
 
 __all__ = []
 
@@ -142,12 +144,153 @@ def _gather_layout_reinterpreted(cache, name, supported, captured):
     return True
 
 
-def _apply_gather(model):
+def _gather_promoted_data(model, cache, prepared_ops):
+    """Prove later leading-4D data layouts from registered rank stages without mutation."""
+    standard = {id(node) for node in _operator_nodes(model, {n.op_type for n in model.graph.node})}
+    if any(op.domain == "com.microsoft" and op.version == 1 for op in model.opset_import):
+        standard.update(
+            id(node)
+            for node in _operator_nodes(
+                model,
+                {"QuantizeLinear", "DequantizeLinear", "Gelu", "GroupQueryAttention"},
+                ("com.microsoft",),
+            )
+        )
+    local_functions = {(fn.domain, fn.name, fn.overload) for fn in model.functions}
+    captured = _subgraph_captures(model.graph)
+    matrices = set()
+    if {"MatMulToTransposeConvTranspose", "RemoveIntermediarySqueezeAndUnsqueeze"} <= set(
+        prepared_ops
+    ):
+        _apply_matmul_to_transpose_conv_transpose(
+            model, defer_rank_conversion=True, validate_only=True, planned_outputs=matrices
+        )
+    expand_ops = {"Add", "Sub", "Mul", "Div", "LSTM"}
+
+    def classify(name):
+        """Return a proven layout or the rank-preserving parents needed to establish it."""
+        shape = cache.get_shape(name)
+        if name in matrices or (shape is not None and len(shape) == 4):
+            return True
+        if name in cache.graph_input_names and shape is not None and len(shape) in (2, 3):
+            return True
+        tensor = cache.get_init(name)
+        if name in cache.graph_input_names and (model.ir_version > 3 or tensor is None):
+            return False
+        if tensor is not None:
+            users = [node for node, _ in cache.get_consumers(name)]
+            if (
+                "Non4dInitializers" not in prepared_ops
+                or name in captured | cache.graph_output_names
+                or any(
+                    id(node) not in standard
+                    or node.op_type in {"Gemm", "Unsqueeze", "GroupQueryAttention"}
+                    or _native_conv1d(node, cache)
+                    for node in users
+                )
+            ):
+                return False
+            operations = {node.op_type for node in users}
+            return (
+                len(tensor.dims) == 3
+                or (
+                    len(tensor.dims) == 2
+                    and bool(operations & (expand_ops | {"Gather", "Where", "Split"}))
+                )
+                or (len(tensor.dims) == 1 and bool(operations & expand_ops))
+            )
+        node = cache.get_producer(name)
+        if node is None or id(node) not in standard:
+            return False
+        if node.op_type == "Reshape":
+            target = cache.get_shape(node.input[1])
+            return target == [4] or (
+                "Reshape" in prepared_ops
+                and target is not None
+                and len(target) == 1
+                and target[0] in (1, 2, 3, 5)
+                and not _has_native_symbolic_data(cache, node.input[0], local_functions)
+            )
+        if node.op_type in {"Flatten", "ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"}:
+            return node.op_type in prepared_ops
+        if node.op_type == "InstanceNormalization":
+            return "FixInstanceNormChannelMismatch" in prepared_ops
+        if node.op_type == "GroupQueryAttention":
+            return "GroupQueryAttention" in prepared_ops
+        if node.op_type == "Conv":
+            kernel = cache.get_shape(node.input[1])
+            return kernel is not None and len(kernel) == 4
+        if node.op_type in {"Squeeze", "Unsqueeze"}:
+            if "RemoveIntermediarySqueezeAndUnsqueeze" not in prepared_ops:
+                return False
+            source = node.input[0]
+            if source in captured or name in captured - cache.graph_output_names:
+                return False
+            if source in cache.graph_input_names:
+                original = cache.get_shape(source)
+                if original is None or len(original) not in (2, 3):
+                    return False
+                if node.op_type == "Squeeze":
+                    return "Gather" not in node.name
+                return shape is not None and (
+                    pad4d(original)[-len(shape) :] == shape or "Reshape" in prepared_ops
+                )
+            return source not in cache.init_names | cache.graph_output_names
+        if node.op_type in {"QuantizeLinear", "DequantizeLinear"}:
+            return (
+                [node.input[0]]
+                if cache.get_shape(node.input[1]) == [] or node.op_type in prepared_ops
+                else False
+            )
+        if node.op_type in {"Softmax", "LogSoftmax", "LayerNormalization"}:
+            axis = _attribute(node, "axis")
+            opset = next(
+                (op.version for op in model.opset_import if op.domain in {"", "ai.onnx"}), 1
+            )
+            value = axis.i if axis is not None else (-1 if opset >= 13 else 1)
+            return (
+                [node.input[0]]
+                if value < 0
+                or node.op_type in prepared_ops
+                or node.input[0] in cache.graph_input_names
+                else False
+            )
+        if node.op_type in _RANK_AGNOSTIC_OPS | {"Gelu"}:
+            return [value for value in node.input if value]
+        if node.op_type == "Gather" or node.op_type in prepared_ops:
+            return [node.input[0]]
+        return False
+
+    resolved, dependencies, active = {}, {}, set()
+    pending = [(node.input[0], False) for node in _operator_nodes(model, {"Gather"})]
+    while pending:
+        name, expanded = pending.pop()
+        if name in resolved:
+            continue
+        if expanded:
+            resolved[name] = any(resolved[parent] for parent in dependencies[name])
+            active.remove(name)
+            continue
+        if name in active:
+            raise ValueError("Cyclic Gather data producers are unsupported")
+        result = classify(name)
+        if isinstance(result, bool):
+            resolved[name] = result
+            continue
+        dependencies[name] = result
+        active.add(name)
+        pending.append((name, True))
+        pending.extend((parent, False) for parent in result)
+    return resolved
+
+
+def _apply_gather(model, *, prepared_data_ops=()):
     """Prepare Gather indices for the subsequent ordered data-rank promotion."""
     graph = model.graph
     cache = GraphCache(graph)
     nodes = []
     squeezed_indices = {}
+    promoted_data = _gather_promoted_data(model, cache, prepared_data_ops)
     selected = [
         node
         for node in _operator_nodes(model, {"Gather"})
@@ -159,12 +302,20 @@ def _apply_gather(model):
     flattened = set()
     index_views = {}
     captured = _subgraph_captures(graph)
+    for candidate in _operator_nodes(model, {"Gather"}):
+        data_shape = cache.get_shape(candidate.input[0])
+        if data_shape is not None and len(data_shape) == 1 and promoted_data[candidate.input[0]]:
+            raise ValueError(
+                f"{candidate.name!r}: native vector Gather data has a later rank promotion"
+            )
     shape_readers = _operator_nodes(model, _RANK_AGNOSTIC_OPS | {"Reshape"})
     shape_reader_ids = {id(node) for node in shape_readers}
     for candidate in selected:
         data_shape = cache.get_shape(candidate.input[0])
         if data_shape is None:
             raise ValueError(f"{candidate.name!r}: Gather requires a static data shape")
+        if len(data_shape) in (2, 3) and not promoted_data[candidate.input[0]]:
+            raise ValueError(f"{candidate.name!r}: Gather data requires rank preparation")
         original = candidate.input[1]
         index_shape = cache.get_shape(original)
         rank = _known_rank(cache, original)
