@@ -20,7 +20,7 @@ import torch
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-import modelopt.torch.sparsity.attention_sparsity as sparse_attn
+import modelopt.torch.sparsity as mts
 from modelopt.torch.sparsity.attention_sparsity import SparseAttentionConfig
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
@@ -75,7 +75,7 @@ class TestTinyLlama:
             },
         )
 
-        sparse_model = sparse_attn.sparsify(model, config)
+        sparse_model = mts.sparsify(model, config)
 
         # Verify sparse attention modules were added
         sparse_count = sum(
@@ -101,7 +101,7 @@ class TestTinyLlama:
             },
         )
 
-        sparse_model = sparse_attn.sparsify(model, config)
+        sparse_model = mts.sparsify(model, config)
 
         # Create prefill input (seq_len > 1)
         test_text = "Once upon a time in a land far away"
@@ -134,7 +134,7 @@ class TestTinyLlama:
             },
         )
 
-        sparse_model = sparse_attn.sparsify(model, config)
+        sparse_model = mts.sparsify(model, config)
 
         # Create decode input (seq_len = 1)
         vocab_size = model.config.vocab_size
@@ -174,7 +174,7 @@ class TestTinyLlama:
             },
         )
 
-        sparse_model = sparse_attn.sparsify(model, sparse_config)
+        sparse_model = mts.sparsify(model, sparse_config)
 
         # Test forward pass with GQA
         input_ids = torch.randint(0, config.vocab_size, (1, 32), device="cuda")

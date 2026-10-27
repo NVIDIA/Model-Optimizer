@@ -322,7 +322,7 @@ class TestVSAAttributeConfig:
 from _test_utils.torch.sparsity.sparse_attention_common import SimpleAttentionModel
 
 import modelopt.torch.opt as mto
-import modelopt.torch.sparsity.attention_sparsity as sparse_attn
+import modelopt.torch.sparsity as mts
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
 VSA_TEST_CFG = {
@@ -344,7 +344,7 @@ class TestVSASparsifyIntegration:
     def test_sparsify_creates_sparse_modules(self):
         """sparsify() with VSA config replaces attention modules."""
         model = SimpleAttentionModel()
-        sparse_model = sparse_attn.sparsify(model, VSA_TEST_CFG)
+        sparse_model = mts.sparsify(model, VSA_TEST_CFG)
 
         sparse_modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
         assert len(sparse_modules) > 0
@@ -352,7 +352,7 @@ class TestVSASparsifyIntegration:
     def test_sparse_module_has_vsa_method(self):
         """Replaced modules are configured with VSA method."""
         model = SimpleAttentionModel()
-        sparse_model = sparse_attn.sparsify(model, VSA_TEST_CFG)
+        sparse_model = mts.sparsify(model, VSA_TEST_CFG)
 
         for module in sparse_model.modules():
             if isinstance(module, SparseAttentionModule):
@@ -364,7 +364,7 @@ class TestVSASparsifyIntegration:
     def test_enable_disable(self):
         """Enable/disable works on VSA sparse modules."""
         model = SimpleAttentionModel()
-        sparse_model = sparse_attn.sparsify(model, VSA_TEST_CFG)
+        sparse_model = mts.sparsify(model, VSA_TEST_CFG)
 
         for module in sparse_model.modules():
             if isinstance(module, SparseAttentionModule):
@@ -377,7 +377,7 @@ class TestVSASparsifyIntegration:
     def test_threshold_info(self):
         """VSA sparse modules report correct threshold info."""
         model = SimpleAttentionModel()
-        sparse_model = sparse_attn.sparsify(model, VSA_TEST_CFG)
+        sparse_model = mts.sparsify(model, VSA_TEST_CFG)
 
         for module in sparse_model.modules():
             if isinstance(module, SparseAttentionModule):
@@ -388,7 +388,7 @@ class TestVSASparsifyIntegration:
     def test_save_restore(self):
         """VSA modelopt_state can be saved and restored."""
         model = SimpleAttentionModel()
-        sparse_model = sparse_attn.sparsify(model, VSA_TEST_CFG)
+        sparse_model = mts.sparsify(model, VSA_TEST_CFG)
 
         state = mto.modelopt_state(sparse_model)
 
@@ -416,7 +416,7 @@ class TestVSASparsifyIntegration:
                 "default": {"enable": False},
             },
         }
-        sparse_model = sparse_attn.sparsify(model, config)
+        sparse_model = mts.sparsify(model, config)
 
         # No modules should have VSA enabled
         for module in sparse_model.modules():
@@ -431,7 +431,7 @@ class TestVSASparsifyIntegration:
         ImportError — proving the interception works.
         """
         model = SimpleAttentionModel()
-        sparse_model = sparse_attn.sparsify(model, VSA_TEST_CFG)
+        sparse_model = mts.sparsify(model, VSA_TEST_CFG)
 
         # Set video_shape so metadata can be computed.
         # seq_len=64, video_shape (4,4,4) -> T*H*W=64

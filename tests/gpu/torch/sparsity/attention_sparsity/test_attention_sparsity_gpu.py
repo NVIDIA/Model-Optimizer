@@ -27,7 +27,7 @@ from _test_utils.torch.sparsity.sparse_attention_common import (
     sparsify_model_and_forward,
 )
 
-import modelopt.torch.sparsity.attention_sparsity as sparse_attn
+import modelopt.torch.sparsity as mts
 
 
 class TestAttentionSparsityGPU:
@@ -86,7 +86,7 @@ class TestAttentionSparsityGPU:
     def test_backward_pass(self):
         """Test that gradients flow correctly through sparse attention."""
         model = SimpleAttentionModel(hidden_size=128, num_heads=4).to(self.device)
-        model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+        model = mts.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
 
         # Enable training mode
         model.train()
@@ -114,7 +114,7 @@ class TestAttentionSparsityGPU:
     def test_various_sequence_lengths(self, seq_len):
         """Test sparse attention with various sequence lengths."""
         model = SimpleAttentionModel(hidden_size=128, num_heads=4).to(self.device)
-        model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+        model = mts.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
 
         x = model.get_input(hidden_size=128, seq_len=seq_len, batch_size=1).to(self.device)
 
@@ -129,7 +129,7 @@ class TestAttentionSparsityGPU:
     def test_various_batch_sizes(self, batch_size):
         """Test sparse attention with various batch sizes."""
         model = SimpleTransformerEncoderLayer(d_model=128, nhead=4).to(self.device)
-        model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+        model = mts.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
 
         x = model.get_input(d_model=128, seq_len=64, batch_size=batch_size).to(self.device)
 

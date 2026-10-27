@@ -34,6 +34,10 @@ Changelog
 - The Megatron unified HF export (``export_mcore_gpt_to_hf``) now copies the source checkpoint's non-model files (tokenizer, processor, remote code, chat templates, ...) into the export unchanged, from local disk only. The ``examples/megatron_bridge`` scripts make a Hugging Face Hub model local first with ``modelopt.torch.export.ensure_local_checkpoint``.
 - Add an end-to-end W4A4 NVFP4 PTQ and QAD tutorial for NVIDIA Nemotron 3.5 Super VL, covering chat-data blend preparation, assistant-only distillation, Hugging Face export and vLLM serving. See `examples/megatron_bridge/tutorials/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16/>`_ for details.
 
+*Sparsity*
+
+- ``mts.sparsify`` now also applies sparse attention: pass a sparse attention config such as ``mts.SKIP_SOFTMAX_CALIB`` in place of the mode, or combine it with weight sparsity as ``[("sparsegpt", {}), ("sparse_attention", cfg)]``. ``mts.export`` now also handles models with sparse attention, which it keeps.
+
 *Misc*
 
 - The ``evaluation`` agent skill can stop looping ("doom loop") reasoning early: ask it to avoid doom loops and it adds vLLM's ``repetition_detection`` request field (vLLM 0.17.0 or later) to every task, ending a request once its output repeats. Use the same setting for baseline and candidate runs.
@@ -48,6 +52,7 @@ Changelog
 **Deprecations**
 
 - ``modelopt.torch.export.copy_non_safetensor_files_from_ckpt`` is deprecated; use ``copy_non_model_files``.
+- ``modelopt.torch.sparsity.attention_sparsity.sparsify`` (``mtsa.sparsify``) is deprecated; use ``mts.sparsify(model, config, forward_loop=forward_loop)``.
 
 **Bug Fixes**
 

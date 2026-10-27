@@ -26,7 +26,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.opt as mto
-import modelopt.torch.sparsity.attention_sparsity as mtsa
+import modelopt.torch.sparsity as mts
 from modelopt.torch.export import ensure_local_checkpoint, export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity.config import (
     SKIP_SOFTMAX_CALIB,
@@ -152,7 +152,7 @@ def main(args):
     args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(args.pyt_ckpt_path)
     print(f"Loading model: {args.local_checkpoint_path}")
 
-    # No need to specify attn_implementation here — mtsa.sparsify() sets it
+    # No need to specify attn_implementation here — mts.sparsify() sets it
     # automatically ("eager" for pytorch backend, "modelopt_triton" for triton).
     model = AutoModelForCausalLM.from_pretrained(
         args.local_checkpoint_path, attn_implementation="eager", dtype="auto", device_map="auto"
@@ -202,7 +202,7 @@ def main(args):
             else str(Path(__file__).parent / "data"),
         )
 
-    model = mtsa.sparsify(model, config=sparse_config)
+    model = mts.sparsify(model, sparse_config)
     print("Sparse attention applied successfully!")
 
     # Generate sample output AFTER sparse attention

@@ -15,6 +15,7 @@
 
 """Main API functions for sparse attention optimization."""
 
+import warnings
 from typing import Any
 
 import torch
@@ -40,6 +41,10 @@ def sparsify(
     forward_loop: ForwardLoop | None = None,
 ) -> torch.nn.Module:
     """Applies sparse attention optimization to the model in-place.
+
+    .. deprecated:: 0.49.0
+        Use :meth:`mts.sparsify(model, config, forward_loop=forward_loop)
+        <modelopt.torch.sparsity.sparsification.sparsify>` instead.
 
     This method performs replacement of attention modules with their sparse counterparts.
 
@@ -152,6 +157,11 @@ def sparsify(
     Returns:
         A pytorch model which has sparse attention applied and optionally calibrated.
     """
+    warnings.warn(
+        "mtsa.sparsify() is deprecated; use modelopt.torch.sparsity.sparsify() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     model = apply_mode(
         model, mode=[("sparse_attention", config)], registry=SparseAttentionModeRegistry
     )

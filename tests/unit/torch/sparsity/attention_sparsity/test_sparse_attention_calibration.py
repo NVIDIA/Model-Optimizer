@@ -26,7 +26,7 @@ import numpy as np
 from _test_utils.torch.sparsity.sparse_attention_common import SimpleAttentionModel
 from pydantic import ValidationError
 
-from modelopt.torch.sparsity.attention_sparsity import sparsify
+from modelopt.torch.sparsity import sparsify
 from modelopt.torch.sparsity.attention_sparsity.calibration import (
     DynamicThresholdCalibrator,
     RulerDatasetBuilder,

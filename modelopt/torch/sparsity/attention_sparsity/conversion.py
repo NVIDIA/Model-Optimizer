@@ -74,7 +74,7 @@ def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) ->
       directly in ``SparseAttentionModule.forward()``, so no ``attn_implementation``
       change is needed.
 
-    This is called automatically during ``mtsa.sparsify()`` so users never need
+    This is called automatically during ``mts.sparsify()`` so users never need
     to manually set ``attn_implementation``.
     """
     sparse_cfg = config.sparse_cfg if hasattr(config, "sparse_cfg") else {}
@@ -358,10 +358,8 @@ def get_sparse_attention_mode_state(
     model: nn.Module,
 ) -> tuple[SparseAttentionConfig, MetadataDict] | None:
     """Return the config and metadata of the latest ``sparse_attention`` mode applied to ``model``."""
-    # A wrapper whose submodule holds the modelopt state has no mode state of its own.
-    if not ModeloptStateManager.is_converted(model) or any(
-        ModeloptStateManager.is_converted(child) for child in model.children()
-    ):
+    # Wrappers and containers of converted models have no mode state of their own.
+    if not hasattr(model, ModeloptStateManager._state_key):
         return None
     mode_states = [
         (config, metadata)
@@ -540,8 +538,9 @@ def disable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Ca
             For example: "*lm_head*", "*layer_0*", etc.
 
     Example:
+        >>> import modelopt.torch.sparsity as mts
         >>> import modelopt.torch.sparsity.attention_sparsity as sparse_attn
-        >>> model = sparse_attn.sparsify(model, config)
+        >>> model = mts.sparsify(model, config)
         >>> # Disable sparse attention for lm_head
         >>> sparse_attn.disable_sparse_attention(model, "*lm_head*")
     """
@@ -567,8 +566,9 @@ def enable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Cal
             For example: "*attention*", "*attn*", etc.
 
     Example:
+        >>> import modelopt.torch.sparsity as mts
         >>> import modelopt.torch.sparsity.attention_sparsity as sparse_attn
-        >>> model = sparse_attn.sparsify(model, config)
+        >>> model = mts.sparsify(model, config)
         >>> # Re-enable sparse attention for all attention modules
         >>> sparse_attn.enable_sparse_attention(model, "*attention*")
     """
