@@ -315,6 +315,31 @@ def _apply_gather(model):
     return model
 
 
+def _native_reshape_data(cache, name, standard, checked):
+    """Prove that an internal Reshape path still has unprepared rank-two or rank-three data."""
+    current, seen = name, set()
+    while current not in checked:
+        if current in seen:
+            raise ValueError("Cyclic data path while checking prepared indexing rank")
+        seen.add(current)
+        producer = cache.get_producer(current)
+        if producer is None or id(producer) not in standard:
+            native = False
+            break
+        if producer.op_type == "Reshape":
+            target = cache.get_shape(producer.input[1])
+            native = target is not None and len(target) == 1 and target[0] in (2, 3)
+            break
+        if len(producer.input) != 1:
+            native = False
+            break
+        current = producer.input[0]
+    else:
+        native = checked[current]
+    checked.update(dict.fromkeys(seen, native))
+    return native
+
+
 def _apply_gather_elements(model):
     """Prepare matching index ranks and preserve native axis and runtime-value contracts."""
     graph = model.graph
@@ -322,6 +347,13 @@ def _apply_gather_elements(model):
     converted_indices = {}
     replacements = {}
     selected_ids = {id(node) for node in _operator_nodes(model, {"GatherElements"})}
+    standard = {id(node) for node in _operator_nodes(model, _RANK_AGNOSTIC_OPS | {"Reshape"})}
+    checked = {}
+    for node in graph.node:
+        if id(node) in selected_ids and _native_reshape_data(
+            cache, node.input[0], standard, checked
+        ):
+            raise ValueError(f"{node.name!r}: GatherElements data requires rank preparation")
     for index, node in enumerate(graph.node):
         if id(node) not in selected_ids:
             continue
@@ -433,7 +465,11 @@ def _apply_standalone_reduce_operations(model):
     nodes = []
     count = 0
     plans = {}
+    standard = {id(node) for node in _operator_nodes(model, _RANK_AGNOSTIC_OPS | {"Reshape"})}
+    checked = {}
     for node in _operator_nodes(model, {"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"}):
+        if _native_reshape_data(cache, node.input[0], standard, checked):
+            raise ValueError(f"{node.name!r}: reduction data requires rank preparation")
         shape = _shape_before_boundary_promotion(cache, node.input[0])
         if not shape:
             keepdims = _attribute(node, "keepdims")

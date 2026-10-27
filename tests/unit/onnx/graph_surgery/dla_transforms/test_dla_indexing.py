@@ -187,6 +187,74 @@ def _model(nodes, inputs, outputs, initializers=(), extra_opsets=()):
     return model
 
 
+@pytest.mark.parametrize(
+    "operation", ["GatherElements", "ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"]
+)
+@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
+@pytest.mark.parametrize("unary", [False, True])
+def test_internal_native_reshape_refuses_before_index_or_reduction_mutation(
+    operation, shape, unary
+):
+    """Refuse unprepared internal data before changing an earlier eligible operation."""
+    source_shape = [1] * (4 - len(shape)) + shape
+    axis = len(shape) - 1 if unary else -1
+    keepdims = int(unary)
+    nodes = [helper.make_node("Reshape", ["x", "target"], ["reshaped"])]
+    if unary:
+        nodes.append(helper.make_node("Relu", ["reshaped"], ["native"]))
+    data = "native" if unary else "reshaped"
+    initializers = [numpy_helper.from_array(np.asarray(shape, np.int64), "target")]
+    outputs = []
+    for name, input_name, input_shape, selected_axis in [
+        ("ready", "x", source_shape, 3),
+        ("native_result", data, shape, axis),
+    ]:
+        control = name + "_control"
+        values = (
+            np.zeros(input_shape, np.int64)
+            if operation == "GatherElements"
+            else np.array([selected_axis], np.int64)
+        )
+        initializers.append(numpy_helper.from_array(values, control))
+        nodes.append(
+            helper.make_node(
+                operation,
+                [input_name, control],
+                [name],
+                name=name,
+                **(
+                    {"axis": selected_axis}
+                    if operation == "GatherElements"
+                    else {"keepdims": keepdims}
+                ),
+            )
+        )
+        output_shape = list(input_shape)
+        if operation != "GatherElements":
+            if keepdims:
+                output_shape[selected_axis] = 1
+            else:
+                output_shape.pop(selected_axis)
+        outputs.append(helper.make_tensor_value_info(name, TensorProto.FLOAT, output_shape))
+    model = _model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, source_shape)],
+        outputs,
+        initializers,
+    )
+    model = onnx.shape_inference.infer_shapes(model)
+    _execute(model, {"x": np.arange(np.prod(shape), dtype=np.float32).reshape(source_shape)})
+    before = model.SerializeToString()
+    callback = (
+        _apply_gather_elements
+        if operation == "GatherElements"
+        else _apply_standalone_reduce_operations
+    )
+    with pytest.raises(ValueError, match="rank"):
+        callback(model)
+    assert model.SerializeToString() == before
+
+
 def _execute(model, feeds):
     """Run CPU graph semantics without backend fusion changing the comparison."""
     onnx.checker.check_model(model, full_check=True)
