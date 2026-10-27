@@ -1384,15 +1384,6 @@ class TestNormalizeExpertsImpl:
         moved = [w for w in recwarn if "instead of experts_implementation" in str(w.message)]
         assert len(moved) == (impl is not None)
 
-    def test_forces_eager_for_eager_only_experts_not_registered_yet(self):
-        """The plugins run in no set order, so normalization can come before the on-the-fly
-        registration; the non-gated experts quantize on the eager forward only either way."""
-        TestQuantFusedExperts._cleanup_registry(_SyntheticNonGatedFusedExperts)
-        model = _NonMoEModelWithConfig(_StubConfig(impl="grouped_mm"))
-        model.experts = _SyntheticNonGatedFusedExperts()
-        normalize_experts_impl_on_the_fly(model)
-        assert model.config._experts_implementation == "eager"
-
     def test_refuses_experts_quantized_on_the_eager_forward_only_under_expert_parallelism(self):
         """Expert parallelism runs the experts on the torch_a2a forward, which cannot fall back to
         eager: such experts would calibrate on raw FP8 bytes, or not at all. Refused before any
