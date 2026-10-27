@@ -278,10 +278,11 @@ def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> N
         weight_quantizers = getattr(module, f"{proj}_weight_quantizers")
         input_quantizer = getattr(module, f"{proj}_input_quantizer", None)
 
-        # Under FSDP2 the fused 3-D weight is a DTensor sharded on dim 0 (the expert axis). Quantize
-        # ONLY this rank's local experts and rewrap the result sharded identically -- indexing the
-        # DTensor (weight[i]) would all-gather the whole fused weight onto every rank, de-sharding
-        # the model and OOMing the GPU at scale. Plain tensor (single process): all experts.
+        # A fused 3-D weight sharded on dim 0 (the expert axis) is a DTensor: quantize ONLY this
+        # rank's local experts and rewrap the result sharded identically -- indexing the DTensor
+        # (weight[i]) would all-gather the whole fused weight onto every rank, de-sharding the model
+        # and OOMing the GPU at scale. A plain tensor (a single process, or FSDP2's unsharded weight
+        # inside a weight window): all experts.
         wdata = weight.data
         is_dt = DTensor is not None and isinstance(wdata, DTensor)
         quantizers_are_global = True

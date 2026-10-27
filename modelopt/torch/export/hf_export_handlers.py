@@ -256,7 +256,10 @@ def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContex
     if ctx.keep_fused_experts and distribution_plan(ctx.model).is_fsdp_dense:
         # FSDP2 owns the fused weights here: fold them inside a weight-update window, which hands
         # FSDP2 the packed weights. Replaced behind its back, they would be overwritten with its
-        # original shards the next time the layer reshards, and exported unquantized.
+        # original shards the next time the layer reshards, and exported unquantized. The window
+        # unshards FSDP2's params, so under FSDP2 alone each rank folds every expert of the unit, one
+        # unit at a time as a forward holds it; expert weights FSDP2 does not shard, as expert
+        # parallelism keeps them, stay sharded over the experts, and each rank folds its own.
         with _fsdp2_weight_window(ctx, module):
             _export_fused_experts_keep_fused(module, ctx.dtype)
     elif ctx.keep_fused_experts:
