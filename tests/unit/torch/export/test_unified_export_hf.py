@@ -17,6 +17,7 @@
 
 import importlib.util
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -593,6 +594,46 @@ def test_export_preserves_linear_attention_runtime_groups(mismatch_within_pair):
         }
 
 
+@pytest.mark.parametrize("partitioned", [True, False])
+def test_shared_layernorm_awq_fusion_respects_runtime_groups(partitioned):
+    model = torch.nn.Sequential()
+    model.add_module("decoder", torch.nn.Sequential())
+    norm = torch.nn.LayerNorm(32)
+    model.decoder.add_module("norm", norm)
+    projections = _LinearAttention()
+    model.decoder.add_module("linear_attn" if partitioned else "attention", projections)
+    with torch.no_grad():
+        norm.weight.copy_(torch.linspace(0.7, 1.3, 32))
+        norm.bias.copy_(torch.linspace(-0.2, 0.2, 32))
+    inputs = torch.randn(1, 8, 32)
+    config = deepcopy(mtq.INT4_AWQ_CFG)
+    config["algorithm"] = "max"
+    for entry in config["quant_cfg"]:
+        if entry.get("quantizer_name") == "*weight_quantizer":
+            entry["cfg"]["block_sizes"][-1] = 16
+    config["quant_cfg"].append({"quantizer_name": "*in_proj_[ab].weight_quantizer", "enable": True})
+    mtq.quantize(model, config, lambda m: m(inputs))
+    scale = torch.linspace(1.0, 2.0, 32)
+    # Fixed AWQ smoothing scales isolate export fusion from the calibration search.
+    for name, module in projections.named_children():
+        module.input_quantizer.pre_quant_scale = scale * (
+            2 if partitioned and name in {"in_proj_a", "in_proj_b"} else 1
+        )
+    weight, bias = norm.weight.detach().clone(), norm.bias.detach().clone()
+    groups, norms = collect_shared_input_modules(
+        model, lambda: model(inputs), collect_layernorms=True
+    )
+
+    fused = _fuse_shared_input_modules(model, groups, norms, fuse_layernorms=True)
+
+    assert sorted(len(group) for group in fused.values()) == ([2, 2] if partitioned else [4])
+    torch.testing.assert_close(norm.weight, weight if partitioned else weight * scale)
+    torch.testing.assert_close(norm.bias, bias if partitioned else bias * scale)
+    for module in projections.children():
+        assert hasattr(module.input_quantizer, "_pre_quant_scale") == partitioned
+        assert getattr(module, "fused_with_prequant", False) == (not partitioned)
+
+
 def test_fuse_prequant_layernorm_skips_modules_without_pre_quant_scale():
     layernorm = torch.nn.LayerNorm(4)
     original_weight = layernorm.weight.detach().clone()
@@ -603,22 +644,6 @@ def test_fuse_prequant_layernorm_skips_modules_without_pre_quant_scale():
     assert torch.allclose(layernorm.weight, original_weight)
     assert not hasattr(modules[0], "fused_with_prequant")
     assert not hasattr(modules[1], "fused_with_prequant")
-
-
-def test_fuse_prequant_layernorm_fuses_and_removes_pre_quant_scale():
-    layernorm = torch.nn.LayerNorm(4)
-    modules = [_linear_with_input_quantizer(), _linear_with_input_quantizer()]
-    pre_quant_scale = torch.tensor([1.0, 2.0, 3.0, 4.0])
-    for module in modules:
-        module.input_quantizer._pre_quant_scale = pre_quant_scale
-
-    fuse_prequant_layernorm(layernorm, modules)
-
-    assert torch.allclose(layernorm.weight, pre_quant_scale)
-    assert torch.allclose(layernorm.bias, torch.zeros_like(pre_quant_scale))
-    for module in modules:
-        assert not hasattr(module.input_quantizer, "_pre_quant_scale")
-        assert module.fused_with_prequant
 
 
 # --- carrying over weights the loader could not place --------------------------------------------
