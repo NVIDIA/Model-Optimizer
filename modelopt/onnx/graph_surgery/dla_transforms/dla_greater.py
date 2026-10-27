@@ -40,6 +40,8 @@ _EXACT_TYPES = frozenset(
     }
 )
 
+_SUPPORTED_TYPES = _EXACT_TYPES | _INT_TYPES
+
 
 def _apply_greater(model: onnx.ModelProto) -> onnx.ModelProto:
     """Convert comparisons whose ordering survives FLOAT operand conversion."""
@@ -56,7 +58,7 @@ def _apply_greater(model: onnx.ModelProto) -> onnx.ModelProto:
             continue
         types = {cache.get_dtype(name) for name in node.input}
         safe = types <= _EXACT_TYPES
-        if types <= _INT_TYPES:
+        if not safe and types <= _SUPPORTED_TYPES:
             for name in node.input:
                 if name not in safe_thresholds:
                     tensor = cache.get_init(name) if name not in runtime else None

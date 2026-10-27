@@ -419,3 +419,27 @@ def test_greater_half_precision_operands_convert_together(fixed):
     _clamp_ir(model)
     expected = _run_ort(copy.deepcopy(model), feeds)
     np.testing.assert_array_equal(_run_ort(_apply(copy.deepcopy(model)), feeds)["y"], expected["y"])
+
+
+def test_greater_finishes_partially_prepared_integer_operands():
+    """Finish a preceding FLOAT data adapter while retaining a small fixed integer threshold."""
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Greater", ["x", "threshold"], ["y"])],
+            "prepared_data_adapter",
+            [_vi("x", TensorProto.INT64, [4])],
+            [_vi("y", TensorProto.BOOL, [4])],
+            [numpy_helper.from_array(np.asarray(1, np.int64), "threshold")],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    _clamp_ir(model)
+    feeds = {"x": np.asarray([-(2**63), 0, 2, 2**63 - 1], np.int64)}
+    expected = _run_ort(copy.deepcopy(model), feeds)
+    prepared = copy.deepcopy(model)
+    prepared.graph.node[0].input[0] = "prepared_float"
+    prepared.graph.node.insert(
+        0, helper.make_node("Cast", ["x"], ["prepared_float"], to=TensorProto.FLOAT)
+    )
+    prepared.graph.value_info.append(_vi("prepared_float", TensorProto.FLOAT, [4]))
+    np.testing.assert_array_equal(_run_ort(_apply(prepared), feeds)["y"], expected["y"])
