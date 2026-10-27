@@ -872,12 +872,16 @@ def test_nogather_export_writes_what_the_single_process_export_writes(
     assert (tmp_path / "export" / sidecar.name).read_text() == sidecar.read_text()
 
 
-def test_nogather_export_rejects_save_modelopt_state(gloo_world_of_one, tmp_path):
-    """The path never runs ``save_pretrained``, which writes that state: refuse, not drop it."""
-    model = _fsdp2_shard(_load(_save(_llama_config(), tmp_path / "src")), gloo_world_of_one)
+def test_nogather_export_saves_modelopt_state(gloo_world_of_one, tmp_path):
+    """As the default FSDP2 export does, it writes the ModelOpt state next to the weights."""
+    model = _load(_save(_llama_config(), tmp_path / "src"))
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randint(0, 63, (2, 8))))
 
-    with pytest.raises(NotImplementedError, match="save_modelopt_state"):
-        _nogather_export(model, tmp_path / "export", save_modelopt_state=True)
+    _nogather_export(
+        _fsdp2_shard(model, gloo_world_of_one), tmp_path / "export", save_modelopt_state=True
+    )
+
+    assert (tmp_path / "export" / "modelopt_state.pth").is_file()
 
 
 def test_nogather_export_names_modules_in_the_quant_config_as_the_weights_do(
