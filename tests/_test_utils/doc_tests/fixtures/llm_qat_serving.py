@@ -46,7 +46,7 @@ def verify_llm_qat_adapter_server(ctx):
             with urllib.request.urlopen(url + "/health", timeout=5) as response:
                 assert response.status == 200
             break
-        except (urllib.error.URLError, TimeoutError):
+        except OSError:
             if time.monotonic() >= deadline:
                 raise TimeoutError("vLLM did not become ready") from None
             time.sleep(1)
