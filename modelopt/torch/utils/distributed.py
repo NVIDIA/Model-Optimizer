@@ -476,7 +476,10 @@ def _decoded(payload: bytes) -> Any:
     compute, of any class, and the peers are this job's own ranks, whose payloads torch's object
     collectives unpickle just as fully.
     """
-    return torch.load(io.BytesIO(payload), weights_only=False)
+    return torch.load(
+        io.BytesIO(payload),
+        weights_only=False,  # this job's own ranks sent the bytes over its process group: no file
+    )
 
 
 def broadcast_from(label: str, fn: Callable[[], _V], rank: int = 0) -> _V:
