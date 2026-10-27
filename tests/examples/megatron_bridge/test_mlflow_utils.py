@@ -528,11 +528,11 @@ def test_the_pointer_is_gated_on_the_save_having_happened(script, saves):
 
 def test_the_distill_script_defers_to_megatron_bridge():
     """Its run is opened here and joined there, and Megatron-Bridge calls sys.exit() from
-    inside train(), so anything placed after distill() never runs."""
+    inside train(), so anything placed after pretrain() never runs."""
     source = _DISTILL_SCRIPT.read_text()
 
     assert "**logger_kwargs(args, DISTILL)," in source
-    assert "try:\n        distill(config)\n    finally:" in source
+    assert "pretrain(config, forward_step_modelopt, callbacks=callbacks)\n    finally:" in source
     # The marker is read before training and handed back, so a resumed run that saved
     # nothing cannot stamp the checkpoint it resumed from.
     assert "saved_before = checkpoint_marker(args, DISTILL)" in source
