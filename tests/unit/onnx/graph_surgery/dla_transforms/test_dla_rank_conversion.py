@@ -1290,6 +1290,72 @@ def test_runtime_slice_extents_retain_promoted_control_layouts(operation):
     np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
 
 
+@pytest.mark.parametrize(
+    "operation", ["Softmax", "LogSoftmax", "LpNormalization", "Transpose", "Slice"]
+)
+def test_runtime_slice_extents_retain_promoted_axes(operation):
+    """Map native axes using known rank when runtime Slice extents remain symbolic."""
+    inputs, attributes = ["middle"], {"axis": 1}
+    if operation == "Transpose":
+        attributes = {"perm": [1, 2, 0]}
+    elif operation == "Slice":
+        inputs += ["starts", "ends", "axes"]
+        attributes = {}
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Slice", ["x", "starts", "ends"], ["middle"]),
+                helper.make_node(operation, inputs, ["y"], **attributes),
+            ],
+            "promoted_slice_axes",
+            [
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3, 4]),
+                helper.make_tensor_value_info("starts", TensorProto.INT64, [2]),
+            ],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, ["A", "B", "C"])],
+            [
+                numpy_helper.from_array(np.array([2, 3], np.int64), "ends"),
+                numpy_helper.from_array(np.array([1, 2], np.int64), "axes"),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    feeds = {
+        "x": np.arange(24, dtype=np.float32).reshape(2, 3, 4) / 16,
+        "starts": np.array([0, 1], np.int64),
+    }
+    expected = _execute(model, feeds)[0]
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_allclose(_execute(converted, feeds)[0], expected, rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.parametrize("initializer", [False, True])
+@pytest.mark.parametrize("tail", [False, True])
+def test_rank_one_tile_data_and_repeats_remain_native(initializer, tail):
+    """Execute rank-one Tile for graph inputs and fixed data without padding repeats."""
+    data = np.array([1, 2, 3], np.float32)
+    nodes = [helper.make_node("Tile", ["x", "repeats"], ["tiled" if tail else "y"])]
+    if tail:
+        nodes.append(helper.make_node("Relu", ["tiled"], ["y"]))
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "native_tile",
+            [] if initializer else [helper.make_tensor_value_info("x", TensorProto.FLOAT, [3])],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [6])],
+            [numpy_helper.from_array(np.array([2], np.int64), "repeats")]
+            + ([numpy_helper.from_array(data, "x")] if initializer else []),
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    feeds = {} if initializer else {"x": data}
+    expected = _execute(model, feeds)[0]
+    converted = _transform_make_dla_compatible(copy.deepcopy(model), verbose=False)
+    np.testing.assert_array_equal(_execute(converted, feeds)[0], expected)
+
+
 @pytest.mark.parametrize("operation", ["Tile", "Expand", "Reshape"])
 def test_unknown_structural_data_rank_refuses_before_mutation(operation):
     """Refuse unresolved intermediate ranks before allocating any control view."""

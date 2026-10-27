@@ -56,7 +56,7 @@ def _promoted_input_shape(cache, name, local_functions, native_sources):
         and rank < 4
         and _has_native_symbolic_data(cache, name, local_functions, native_sources)
     )
-    return shape, native
+    return shape, rank, native
 
 
 def _apply_non4d_slice_axis(model):
@@ -67,10 +67,14 @@ def _apply_non4d_slice_axis(model):
     runtime_inputs = _runtime_input_names(model)
     plans = []
     for node in _operator_nodes(model, {"Slice"}):
-        shape, native = _promoted_input_shape(cache, node.input[0], local_functions, native_sources)
+        shape, rank, native = _promoted_input_shape(
+            cache, node.input[0], local_functions, native_sources
+        )
         if native:
             continue
-        if shape is None or len(shape) not in (2, 3):
+        if rank is None:
+            raise ValueError(f"{node.name!r}: Slice input rank must be known")
+        if rank not in (2, 3):
             continue
         if len(node.input) < 4 or not node.input[3]:
             starts_shape = cache.get_shape(node.input[1])
@@ -78,7 +82,7 @@ def _apply_non4d_slice_axis(model):
                 raise ValueError(
                     f"{node.name!r}: implicit Slice axes require a known starts length"
                 )
-            values = np.arange(math.prod(starts_shape), dtype=np.int64) + 4 - len(shape)
+            values = np.arange(math.prod(starts_shape), dtype=np.int64) + 4 - rank
             plans.append((node, node.input[1], values))
             continue
         axes = cache.get_init(node.input[3])
@@ -86,7 +90,7 @@ def _apply_non4d_slice_axis(model):
             raise ValueError(f"{node.name!r}: Slice axes must be fixed")
         values = numpy_helper.to_array(axes).reshape(-1)
         if values.size and np.any(values >= 0):
-            plans.append((node, axes.name, np.where(values >= 0, values + 4 - len(shape), values)))
+            plans.append((node, axes.name, np.where(values >= 0, values + 4 - rank, values)))
     views = {}
     for node, name, values in plans:
         key = (name, tuple(values))
@@ -224,6 +228,7 @@ def _apply_non4d_initializers(model):
     protected.update(
         name for node in model.graph.node if id(node) not in selected for name in node.input
     )
+    protected.update(name for node in supported if node.op_type == "Gemm" for name in node.input)
     used = (
         {name for node in supported for name in node.input}
         if any(tensor.name in protected for tensor in model.graph.initializer)
@@ -232,9 +237,9 @@ def _apply_non4d_initializers(model):
     for node in supported:
         if node.op_type in {"Div", "Sub", "Mul", "Add", "LSTM"}:
             expand.update(node.input)
-        if node.op_type == "MatMul":
+        if node.op_type in {"MatMul", "Gemm"}:
             skip.update(node.input)
-        if node.op_type in {"Gemm", "Where", "Gather", "Split"}:
+        if node.op_type in {"Where", "Gather", "Split"}:
             front.update(node.input)
         if node.op_type in {"Unsqueeze", "GroupQueryAttention"}:
             avoid.update(node.input)
@@ -302,6 +307,8 @@ def _pad_shape_inputs(model, op_type, suffix):
             continue
         if rank is None:
             raise ValueError(f"{node.name!r}: {op_type} input rank must be known")
+        if op_type == "Tile" and rank == 1:
+            continue
         if rank < 4 and _has_native_symbolic_data(
             cache, node.input[0], local_functions, native_sources
         ):
@@ -362,12 +369,14 @@ def _apply_non4d_transpose(model):
     reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
     for node in _operator_nodes(model, {"Transpose"}):
         perm = _attribute(node, "perm")
-        shape, native = _promoted_input_shape(cache, node.input[0], local_functions, native_sources)
+        shape, rank, native = _promoted_input_shape(
+            cache, node.input[0], local_functions, native_sources
+        )
         if native:
             continue
-        if perm is None and shape is None:
+        if perm is None and rank is None:
             raise ValueError(f"{node.name!r}: default Transpose requires a known input rank")
-        values = list(perm.ints) if perm is not None else list(reversed(range(len(shape))))
+        values = list(perm.ints) if perm is not None else list(reversed(range(rank)))
         if len(values) in (2, 3):
             delta = 4 - len(values)
             values = list(range(delta)) + [v + delta for v in values]
@@ -415,14 +424,18 @@ def _apply_non4d_lpnorm(model):
     plans = []
     for node in _operator_nodes(model, {"LpNormalization"}):
         axis = _attribute(node, "axis")
-        shape, native = _promoted_input_shape(cache, node.input[0], local_functions, native_sources)
+        shape, rank, native = _promoted_input_shape(
+            cache, node.input[0], local_functions, native_sources
+        )
         if native:
             continue
+        if rank is None or (rank == 5 and shape is None):
+            raise ValueError(f"{node.name!r}: LpNormalization input layout must be known")
         value = axis.i if axis is not None else -1
         if shape and len(shape) == 5:
             value = _specialized_collapsed_axis(cache, node, shape, value, reshapes)
-        elif value >= 0 and shape and len(shape) in (2, 3):
-            value = -1 if value == len(shape) - 1 else value + 4 - len(shape)
+        elif value >= 0 and rank in (2, 3):
+            value = -1 if value == rank - 1 else value + 4 - rank
         plans.append((node, axis, value))
     for node, axis, value in plans:
         if axis is None:
@@ -480,7 +493,9 @@ def _apply_argmax(model):
     plans = {}
     reshapes = {id(node) for node in _operator_nodes(model, {"Reshape"})}
     for node in _operator_nodes(model, {"ArgMax"}):
-        shape, native = _promoted_input_shape(cache, node.input[0], local_functions, native_sources)
+        shape, rank, native = _promoted_input_shape(
+            cache, node.input[0], local_functions, native_sources
+        )
         if native:
             continue
         if not shape or any(dim <= 0 for dim in shape):
@@ -551,22 +566,27 @@ def _apply_update_axis(model):
     versions = {op.domain: op.version for op in model.opset_import}
     for node in selected:
         axis = _attribute(node, "axis")
-        shape, native = (
+        shape, rank, native = (
             _promoted_input_shape(cache, node.input[0], local_functions, native_sources)
             if node.input
-            else (None, False)
+            else (None, None, False)
         )
         if native:
             continue
         if (
+            node.op_type in update
+            and "axis_updated" not in node.name
+            and (rank is None or (rank == 5 and shape is None))
+        ):
+            raise ValueError(f"{node.name!r}: {node.op_type} input layout must be known")
+        if (
             axis is None
             and node.op_type in update
             and node.domain in {"", "ai.onnx"}
-            and shape
             and (
-                len(shape) == 5
+                rank == 5
                 or (
-                    len(shape) in (2, 3)
+                    rank in (2, 3)
                     and (node.op_type not in quantizers or cache.get_shape(node.input[1]) != [])
                 )
             )
@@ -589,7 +609,6 @@ def _apply_update_axis(model):
             raise ValueError(f"{node.op_type} is unsupported for DLA axis transformation")
         if "axis_updated" in node.name:
             continue
-        rank = len(shape) if shape else 0
         original = value
         if shape and rank == 5:
             removed_axes = _collapsed_reshape_axes(cache, node.input[0], shape, reshapes)
@@ -601,7 +620,7 @@ def _apply_update_axis(model):
             value = native_axis - int(native_axis > removed_axes[0])
             if original < 0:
                 value -= 4
-        elif value >= 0:
+        elif value >= 0 and rank is not None:
             value += {2: 2, 3: 1}.get(rank, 0)
         if value != original:
             plans.append((node, axis, value))
