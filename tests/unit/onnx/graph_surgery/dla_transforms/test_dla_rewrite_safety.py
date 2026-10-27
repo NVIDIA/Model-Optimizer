@@ -280,8 +280,8 @@ def test_not_preserves_nonbinary_and_shared_boolean_uses():
 
 
 @pytest.mark.parametrize("change", ["alpha", "bias"])
-def test_unsupported_gemm_refuses_before_mutation(change):
-    """Refuse unsupported Gemm layouts without changing the caller."""
+def test_ineligible_gemm_retains_executable_native_contract(change):
+    """Keep valid Gemm attributes and broadcasting unchanged when Conv conversion is ineligible."""
     attrs = {"alpha": 2.0} if change == "alpha" else {}
     bias = np.ones((2, 3) if change == "bias" else (3,), dtype=np.float32)
     model = _model(
@@ -290,10 +290,14 @@ def test_unsupported_gemm_refuses_before_mutation(change):
         [_vi("y")],
         [nh.from_array(np.eye(3, dtype=np.float32), "w"), nh.from_array(bias, "b")],
     )
+    onnx.checker.check_model(model, full_check=True)
+    feeds = {"x": np.arange(6, dtype=np.float32).reshape(2, 3)}
+    expected = ReferenceEvaluator(model).run(None, feeds)
     before = model.SerializeToString()
-    with pytest.raises(ValueError):
-        _apply_matmul_to_transpose_conv_transpose(model)
+    _apply_matmul_to_transpose_conv_transpose(model)
     assert model.SerializeToString() == before
+    for actual, reference in zip(ReferenceEvaluator(model).run(None, feeds), expected):
+        np.testing.assert_array_equal(actual, reference)
 
 
 @pytest.mark.parametrize("deferred", [False, True])
