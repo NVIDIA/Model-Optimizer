@@ -434,6 +434,17 @@ def test_a_load_refuses_what_it_cannot_load(
     assert auto_class.calls == []
 
 
+def test_a_handed_plan_is_checked_before_the_checkpoint_is_fetched(run_as, monkeypatch, tmp_path):
+    """Making the checkpoint local can mean downloading it: a plan the load refuses fails first."""
+    run_as(2)
+    monkeypatch.setattr(
+        model_load_utils, "ensure_local_checkpoint", lambda *a, **k: pytest.fail("fetched it")
+    )
+
+    with pytest.raises(ValueError, match="is for 4 ranks"):
+        load_pretrained(str(tmp_path), distribution=DistributionPlan(4))
+
+
 @pytest.mark.parametrize("quantized", [False, True])
 def test_a_single_process_fsdp2_load_sets_up_its_group_of_one(
     monkeypatch, serve, loaders, tmp_path, quantized

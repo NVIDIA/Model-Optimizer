@@ -626,15 +626,6 @@ def load_pretrained(
             f"This process is one of a {os.environ['WORLD_SIZE']}-rank launch whose process group "
             "is not set up; set it up first, with distributed_run()."
         )
-    hub_options = {
-        k: kwargs.pop(k) for k in ("token", "cache_dir", "local_files_only") if k in kwargs
-    }
-    revision = {"revision": kwargs.pop("revision")} if "revision" in kwargs else {}
-    _, ckpt_path = ensure_local_checkpoint(ckpt_path, **revision, **hub_options)
-    subfolder = kwargs.pop("subfolder", None)
-    if subfolder:
-        ckpt_path = os.path.join(ckpt_path, subfolder)
-    trust_remote_code = kwargs.get("trust_remote_code", False)
     config = kwargs.get("config")
     config = config if isinstance(config, PretrainedConfig) else None
     if config is not None and "hf_config" in kwargs:
@@ -651,17 +642,27 @@ def load_pretrained(
     # Every rank takes rank 0's distribution, a plan or none, so every rank runs the same load and
     # its collectives: a rank going by its own could wait in collectives the others never join, and
     # ranks loading different plans would build mismatched meshes. Rank 0 checks it before it sends,
-    # so one it refuses raises on every rank instead of leaving them in the broadcast.
+    # so one it refuses raises on every rank instead of leaving them in the broadcast, and before
+    # the checkpoint is fetched.
     plan = dist.broadcast_from("distribution", handed)
+    if plan is None and "hf_config" in kwargs:
+        # The load builds from hf_config as given, so the plan must be the one it came with, not
+        # one decided here from another config.
+        raise TypeError(
+            "hf_config is the config resolve_distribution_plan returned with a plan: pass that "
+            "plan as distribution=, or pass config= to have the plan decided from your config."
+        )
+    hub_options = {
+        k: kwargs.pop(k) for k in ("token", "cache_dir", "local_files_only") if k in kwargs
+    }
+    revision = {"revision": kwargs.pop("revision")} if "revision" in kwargs else {}
+    _, ckpt_path = ensure_local_checkpoint(ckpt_path, **revision, **hub_options)
+    subfolder = kwargs.pop("subfolder", None)
+    if subfolder:
+        ckpt_path = os.path.join(ckpt_path, subfolder)
+    trust_remote_code = kwargs.get("trust_remote_code", False)
     hf_config = kwargs.get("hf_config")
     if plan is None:
-        if "hf_config" in kwargs:
-            # The load builds from hf_config as given, so the plan must be the one it came with,
-            # not one decided here from another config.
-            raise TypeError(
-                "hf_config is the config resolve_distribution_plan returned with a plan: pass that "
-                "plan as distribution=, or pass config= to have the plan decided from your config."
-            )
         plan, hf_config = resolve_distribution_plan(
             ckpt_path,
             config=config,
