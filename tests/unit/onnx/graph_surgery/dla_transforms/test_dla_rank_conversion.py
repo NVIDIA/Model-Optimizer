@@ -18,6 +18,7 @@
 import copy
 
 import numpy as np
+import onnx
 import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
@@ -28,6 +29,7 @@ from modelopt.onnx.graph_surgery.dla_transforms.dla_model_boundaries import (
 )
 from modelopt.onnx.graph_surgery.dla_transforms.dla_rank_conversion import (
     _apply_non4d_expand,
+    _apply_non4d_initializers,
     _apply_non4d_reshape,
     _apply_non4d_tile,
     _apply_non4d_transpose,
@@ -78,3 +80,37 @@ def test_rank_conversion_preserves_operator_values(operation):
         transformed.SerializeToString(), options, providers=["CPUExecutionProvider"]
     ).run(None, {"x": data})
     np.testing.assert_array_equal(actual[0], expected[0])
+
+
+@pytest.mark.parametrize("shape", [[4], [3, 4], [2, 3, 4]])
+def test_initializer_rank_conversion_preserves_overridable_defaults(shape):
+    """Preserve a runtime input's rank and default payload while preparing fixed weights."""
+    default = np.ones(shape, dtype=np.float32)
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Add", ["x", "weight"], ["y"])],
+            "runtime_default",
+            [
+                helper.make_tensor_value_info(name, TensorProto.FLOAT, shape)
+                for name in ("x", "weight")
+            ],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)],
+            [numpy_helper.from_array(default, "weight")],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    transformed = _apply_non4d_initializers(copy.deepcopy(model))
+    assert transformed.graph.initializer[0] == model.graph.initializer[0]
+    onnx.checker.check_model(transformed, full_check=True)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    original = ort.InferenceSession(
+        model.SerializeToString(), options, providers=["CPUExecutionProvider"]
+    )
+    converted = ort.InferenceSession(
+        transformed.SerializeToString(), options, providers=["CPUExecutionProvider"]
+    )
+    data = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+    for feeds in ({"x": data}, {"x": data, "weight": -default}):
+        np.testing.assert_array_equal(converted.run(None, feeds)[0], original.run(None, feeds)[0])

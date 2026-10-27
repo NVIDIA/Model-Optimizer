@@ -37,6 +37,7 @@ __all__ = []
 
 
 def _apply_non4d_slice_axis(model):
+    """Remap fixed Slice axes before their data rank is promoted."""
     cache = GraphCache(model.graph)
     for node in model.graph.node:
         if node.op_type != "Slice" or len(node.input) < 4:
@@ -58,6 +59,7 @@ def _apply_non4d_slice_axis(model):
 
 
 def _apply_non4d_reshape(model):
+    """Prepare fixed Reshape targets for the deferred four-dimensional layout."""
     cache = GraphCache(model.graph)
     replacements = {}
     for node in model.graph.node:
@@ -92,6 +94,7 @@ def _apply_non4d_reshape(model):
 
 
 def _apply_non4d_initializers(model):
+    """Promote fixed weight layouts while preserving runtime input defaults."""
     expand, skip, front, avoid = set(), set(), set(), set()
     for node in model.graph.node:
         if node.op_type in {"Div", "Sub", "Mul", "Add", "LSTM"}:
@@ -103,6 +106,7 @@ def _apply_non4d_initializers(model):
         if node.op_type in {"Unsqueeze", "GroupQueryAttention"}:
             avoid.update(node.input)
     updates = []
+    avoid.update(value.name for value in model.graph.input)
     expand_or_front = expand | front
     for tensor in model.graph.initializer:
         if tensor.name in avoid:
@@ -124,14 +128,17 @@ def _apply_non4d_initializers(model):
 
 
 def _apply_non4d_expand(model):
+    """Prepare fixed Expand targets for four-dimensional data."""
     return _pad_shape_inputs(model, "Expand", "_expand_shape")
 
 
 def _apply_non4d_tile(model):
+    """Prepare fixed Tile repeats for four-dimensional data."""
     return _pad_shape_inputs(model, "Tile", "_tile_shape")
 
 
 def _pad_shape_inputs(model, op_type, suffix):
+    """Pad fixed structural controls for the requested rank stage."""
     cache = GraphCache(model.graph)
     for node in model.graph.node:
         if node.op_type != op_type or len(node.input) < 2:
@@ -154,6 +161,7 @@ def _pad_shape_inputs(model, op_type, suffix):
 
 
 def _apply_non4d_transpose(model):
+    """Remap transpose permutations around added or removed unary axes."""
     cache = GraphCache(model.graph)
     for node in model.graph.node:
         if node.op_type != "Transpose":
@@ -179,6 +187,7 @@ def _apply_non4d_transpose(model):
 
 
 def _apply_non4d_lpnorm(model):
+    """Preserve normalization axes across leading-dimension promotion."""
     cache = GraphCache(model.graph)
     for node in model.graph.node:
         if node.op_type == "LpNormalization":
@@ -193,6 +202,7 @@ def _apply_non4d_lpnorm(model):
 
 
 def _apply_flatten(model):
+    """Replace Flatten with its four-dimensional equivalent shape."""
     graph = model.graph
     cache = GraphCache(graph)
     for node in graph.node:
@@ -221,6 +231,7 @@ def _apply_flatten(model):
 
 
 def _apply_argmax(model):
+    """Preserve ArgMax axes and restore its declared output layout."""
     cache = GraphCache(model.graph)
     nodes = []
     for node in model.graph.node:
@@ -267,6 +278,7 @@ def _apply_argmax(model):
 
 
 def _apply_update_axis(model):
+    """Remap supported operation axes from their native input ranks."""
     update = {
         "LogSoftmax",
         "Softmax",
