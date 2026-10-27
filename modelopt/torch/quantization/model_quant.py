@@ -143,6 +143,24 @@ def calibrate(
             def forward_loop(model):
                 return original_forward_loop()  # type: ignore[call-arg]
 
+    # Whether the algorithm actually invoked the loop. `max_calibrate` may skip it
+    # (`skip_forward_without_activation_calib`) when no enabled quantizer needs activation
+    # statistics, and a post-calibration check that assumed it ran would fire on every
+    # weight-only calibration.
+    forward_loop_ran = False
+    if forward_loop is not None:
+        _requested_forward_loop = forward_loop
+
+        def forward_loop(model):
+            nonlocal forward_loop_ran
+            forward_loop_ran = True
+            return _requested_forward_loop(model)
+
+        # The fused-experts interception check below judges this calibration's forwards alone.
+        for module in model.modules():
+            if hasattr(module, "_intercept_count"):
+                module._intercept_count = module._forward_count = 0
+
     # move the model to eval mode, remembering each module's mode; quantizers, and plain containers of them,
     # follow the module they quantize instead
     training_modes = {
@@ -168,6 +186,18 @@ def calibrate(
     # clear_cuda_cache()
 
     _restore_training_modes(model, training_modes)
+
+    if forward_loop_ran:
+        # A fused-experts module whose forward ran past both interception hooks collected
+        # nothing. Surface it here rather than let the export emit weight-derived fallback scales
+        # under a warning that blames the size of the calibration set. Raised once the model is
+        # back in its mode, for a caller that catches it to calibrate again.
+        try:
+            from .plugins.huggingface import assert_fused_experts_intercepted
+        except ImportError:
+            pass  # no transformers -> no HF fused-experts modules to check
+        else:
+            assert_fused_experts_intercepted(model)
 
     return model
 

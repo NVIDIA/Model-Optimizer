@@ -2860,7 +2860,7 @@ def test_native_fp8_experts_reject_packed_weight_updates(cfg, algorithm):
 
 
 # ---------------------------------------------------------------------------
-# A class with its own wrapper keeps eager
+# A class with its own wrapper keeps eager; the interception check spares unreached experts
 # ---------------------------------------------------------------------------
 def test_gpt_oss_calibrates_down_proj_input_on_the_eager_forward():
     """GPT-OSS's own wrapper quantizes down_proj's input by intercepting the eager forward's
@@ -2886,6 +2886,92 @@ def test_gpt_oss_calibrates_down_proj_input_on_the_eager_forward():
 
     assert model.config._experts_implementation == "eager"
     assert model.model.layers[0].mlp.experts.down_proj_input_quantizer.amax is not None
+
+
+_INT8_EXPERTS_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*proj_input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        {"quantizer_name": "*proj_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+    ],
+    "algorithm": "max",
+}
+
+
+class _TextAndVisionMoEModel(nn.Module):
+    """Two MoE blocks, as Ernie-4.5-VL has: text-only calibration never reaches the vision one."""
+
+    def __init__(self):
+        super().__init__()
+        self.text_moe = _SyntheticSparseMoeBlock()
+        self.vision_moe = _SyntheticSparseMoeBlock()
+
+    def forward(self, x):
+        return self.text_moe(x)
+
+
+class _BypassingExperts(_SyntheticFusedExperts):
+    """A forward that, while ``bypass``, reaches neither ``F.linear`` nor ``_grouped_linear``."""
+
+    bypass = True
+
+    def forward(self, hidden_states, top_k_index, top_k_weights):
+        if self.bypass:
+            return torch.zeros_like(hidden_states)
+        return super().forward(hidden_states, top_k_index, top_k_weights)
+
+
+class TestFusedExpertsInterceptionCheck:
+    def test_experts_no_calibration_token_reached_are_not_an_error(self):
+        model = _TextAndVisionMoEModel()
+        TestFusedExpertsCalibration._cleanup_registry(_SyntheticFusedExperts)
+        try:
+            mtq.quantize(model, _INT8_EXPERTS_CFG, lambda m: m(torch.randn(2, 4, HIDDEN_DIM)))
+        finally:
+            TestFusedExpertsCalibration._cleanup_registry(_SyntheticFusedExperts)
+
+        assert model.text_moe.experts.gate_up_proj_input_quantizer.amax is not None
+        assert model.vision_moe.experts.gate_up_proj_input_quantizer.amax is None
+
+    def test_experts_called_with_no_rows_are_not_an_error(self):
+        """A forward handed no tokens makes no projection call on the eager path, which is not a
+        bypassed backend: a modality's experts called on its empty token subset, say."""
+        model = _TinyMoEModel()
+        TestFusedExpertsCalibration._cleanup_registry(_SyntheticFusedExperts)
+
+        def forward_loop(m):
+            no_rows = torch.zeros(0, HIDDEN_DIM)
+            m.moe.experts(no_rows, torch.zeros(0, TOP_K, dtype=torch.long), torch.zeros(0, TOP_K))
+
+        try:
+            mtq.quantize(model, _INT8_EXPERTS_CFG, forward_loop)
+        finally:
+            TestFusedExpertsCalibration._cleanup_registry(_SyntheticFusedExperts)
+
+    @pytest.mark.parametrize("reached_before", [False, True], ids=["first-pass", "later-pass"])
+    def test_experts_whose_forward_ran_past_both_hooks_still_fail_loudly(self, reached_before):
+        """Also when an earlier calibration reached them: each judges its own forwards. The model
+        comes back in the mode it went in, for a caller that catches the error."""
+        model = _TinyMoEModel()
+        model.moe.experts = _BypassingExperts()
+
+        def forward_loop(m):
+            m(torch.randn(2, 4, HIDDEN_DIM))
+
+        try:
+            if reached_before:
+                model.moe.experts.bypass = False
+                mtq.quantize(model, _INT8_EXPERTS_CFG, forward_loop)
+                model.moe.experts.bypass = True
+            model.train()
+            with pytest.raises(RuntimeError, match="collected nothing"):
+                if reached_before:
+                    mtq.calibrate(model, "max", forward_loop)
+                else:
+                    mtq.quantize(model, _INT8_EXPERTS_CFG, forward_loop)
+            assert model.training
+        finally:
+            TestFusedExpertsCalibration._cleanup_registry(_BypassingExperts)
 
 
 # ---------------------------------------------------------------------------

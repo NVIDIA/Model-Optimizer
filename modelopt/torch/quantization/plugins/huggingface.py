@@ -901,6 +901,14 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         # Cumulative tokens-per-expert offsets of the current grouped_mm forward,
         # stashed so local-Hessian capture can split the expert-sorted batch.
         self._register_temp_attribute("_grouped_offs", None)
+        # How many times an interception hook fired for this module. Still zero after a
+        # calibration forward means the active experts backend reached neither `F.linear` nor
+        # `_grouped_linear`, so no quantizer ever saw data -- `assert_fused_experts_intercepted`
+        # turns that into an error instead of an export full of fallback scales.
+        self._register_temp_attribute("_intercept_count", 0)
+        # How many times this module's forward ran: an experts module that no calibration token
+        # reached (e.g. vision experts under text-only calibration) has nothing to intercept.
+        self._register_temp_attribute("_forward_count", 0)
 
     @property
     def _running_grouped_mm(self) -> bool:
@@ -988,6 +996,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         # in strict alternation: first the up/gate_up projection, then down_proj.
         # forward() resets the toggle before each call to super().forward().
         def _quantized_linear(input, weight, bias=None):
+            self._intercept_count += 1
             # The eager path: no expert-sorted batch for a capture hook to split.
             self._grouped_offs = None
             if self._down_proj_linear:
@@ -1029,6 +1038,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
                         'grouped_mm forward ran. Load the model with experts_implementation="eager", '
                         "and without expert parallelism, whose forward runs it too."
                     )
+                self._intercept_count += 1
                 # The batch holds every expert's rows, so no expert for the eager loop's index to name.
                 # The offsets, recorded before quantizing input, let a capture hook on the input
                 # quantizer split the expert-sorted batch back per expert.
@@ -1077,6 +1087,11 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
 
     def forward(self, *args, **kwargs):
         self._down_proj_linear = False
+        hidden_states = args[0] if args else kwargs.get("hidden_states")
+        # A forward with no rows makes no projection call (the eager path loops over the experts
+        # some token reached), so only one with rows is work the interception check expects.
+        if hidden_states is None or hidden_states.numel():
+            self._forward_count += 1
         self._stacked_weights = {}
         try:
             return super().forward(*args, **kwargs)
@@ -1717,6 +1732,68 @@ def normalize_experts_impl_on_the_fly(model):
             cfg._experts_implementation = "eager"
         elif cfg._experts_implementation not in supported_impls:
             cfg._experts_implementation = "grouped_mm"
+
+
+def assert_fused_experts_intercepted(model):
+    """Raise if a quantized fused-experts module was never reached by an interception hook.
+
+    :class:`_QuantFusedExperts` collects statistics by intercepting the calls the experts
+    forward makes -- ``F.linear`` per expert on the eager path, ``_grouped_linear`` once per
+    projection on the grouped_mm path. A backend that uses neither bypasses both hooks
+    *silently*: no quantizer is invoked, no amax is collected, and the export then falls back
+    to weight-derived scales while warning about calibration size -- which points at the
+    dataset when the fault is in the dispatch.
+
+    The mismatch is structural. :func:`register_fused_experts_on_the_fly` claims a module on
+    the *shape* of its parameters, but the hooks depend on the *behavior* of a forward that
+    nothing enforces, and "eager" is not a shared implementation -- it is whatever the model
+    author wrote. :func:`normalize_experts_impl_on_the_fly` can redirect a class that carries
+    ``@use_experts_implementation``, but a class without it ignores
+    ``config._experts_implementation`` entirely, so no config change can rescue it. Checking
+    the hit count is a direct test of the thing actually depended on.
+
+    Only modules whose forward ran and that have at least one enabled quantizer are reported:
+    an experts module no calibration token reached (vision experts under text-only calibration)
+    falls back to weight-derived scales as before, and one the recipe leaves unquantized loses
+    nothing by not being intercepted.
+    """
+    missed = []
+    for name, module in model.named_modules():
+        if not isinstance(module, _QuantFusedExperts):
+            continue
+        # A missing attribute (rather than 0) means it was already cleaned up -- say nothing.
+        if getattr(module, "_intercept_count", None) != 0 or not getattr(
+            module, "_forward_count", 0
+        ):
+            continue
+
+        first = module._first_proj_attr
+        quantizers = []
+        for attr in (f"{first}_weight_quantizers", "down_proj_weight_quantizers"):
+            quantizers.extend(getattr(module, attr, None) or [])
+        for attr in (f"{first}_input_quantizer", "down_proj_input_quantizer"):
+            quantizer = getattr(module, attr, None)
+            if quantizer is not None:
+                quantizers.append(quantizer)
+        if not any(getattr(q, "is_enabled", False) for q in quantizers):
+            continue
+
+        impl = getattr(getattr(module, "config", None), "_experts_implementation", None)
+        missed.append(f"  {name} ({type(module).__name__}, experts_implementation={impl!r})")
+
+    if not missed:
+        return
+
+    raise RuntimeError(
+        "Fused-experts calibration collected nothing: the forward of the module(s) below reached "
+        "neither `F.linear` nor `_grouped_linear`, so not one of their quantizers was invoked and "
+        "every expert would be exported with a weight-derived fallback scale.\n"
+        + "\n".join(missed)
+        + "\n\nTheir forward ran, but the active experts backend bypasses both hooks -- "
+        "`batched_mm`, `sonicmoe`, or a hand-written `bmm`/`matmul` forward on a class without "
+        "`@use_experts_implementation`, which `normalize_experts_impl_on_the_fly` cannot "
+        "redirect. Check the module's `forward` and `config._experts_implementation`."
+    )
 
 
 def _is_supported_hf_model(model):
